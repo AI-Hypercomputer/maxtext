@@ -18,33 +18,34 @@
 
 import functools
 import inspect
-import warnings
 from typing import Any
+import warnings
 
-import jax
-import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
-from maxtext.layers import nnx_wrappers
+import jax
 from jax.ad_checkpoint import checkpoint_name
+import jax.numpy as jnp
 from jax.sharding import Mesh
-
 from maxtext.common.common_types import (
+    Config,
+    DecoderBlockType,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
-    Config,
-    DecoderBlockType,
     MultimodalInput,
     ShardMode,
 )
 from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
+from maxtext.layers import nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.pipeline import create_nnx_pipeline
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
+    deepseek4,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
     gemma,
@@ -66,10 +67,8 @@ from maxtext.models import (
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
-from maxtext.utils import max_logging, max_utils, maxtext_utils, sharding
-from maxtext.utils.maxtext_utils_nnx import nnx_ensure_scan_leading_axis
+from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 from maxtext.utils.sharding import create_sharding
-from maxtext.layers.pipeline import create_nnx_pipeline
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -993,6 +992,8 @@ class NNXDecoder(nnx.Module):
     use_kv = kv_caches_stacked is not None
 
     def layer_fn(carry, scanned_vars):
+      # Ensure metadata rank matches the sliced values
+      scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, "layers")
 
       # Unpack the sliced variables for THIS layer
       if use_kv:
@@ -1065,16 +1066,21 @@ class NNXDecoder(nnx.Module):
       # inference with vLLM, parameters do not change and we don't need intermediates.
       return current_carry, layers, None
     else:
-      params = nnx_ensure_scan_leading_axis(params, length)
-      state = nnx_ensure_scan_leading_axis(state, length)
+      params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
+      state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
 
       final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
       returned_kv_stacked = None
 
-    if scan_axis != 0:
-      new_params, new_rest = scanned_state.split(nnx.Param, ...)
-      new_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), new_params)
-      scanned_state = nnx.merge_state(new_params, new_rest)
+      # Ensure metadata rank matches the stacked values
+      scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, "layers", 0)
+
+      if scan_axis != 0:
+        new_params, new_rest = scanned_state.split(nnx.Param, ...)
+        new_params = maxtext_utils_nnx.nnx_sync_moveaxis(new_params, 0, scan_axis)
+        scanned_state = nnx.merge_state(new_params, new_rest)
+
+      returned_kv_stacked = None
 
     if dynamic_graph_init:
       # If graph changed, we need to merge with the new graphdef.
@@ -1115,6 +1121,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
+        DecoderBlockType.DEEPSEEK4: get_scannable(deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock),
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
         DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
@@ -1337,6 +1344,8 @@ class NNXDecoder(nnx.Module):
             "llama4-17b-16e",
             "llama4-17b-128e",
             "qwen3-omni-30b-a3b",
+            "qwen3-vl-2b",
+            "qwen3-vl-4b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
         }:
@@ -1350,7 +1359,7 @@ class NNXDecoder(nnx.Module):
           raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
       if video_embeddings is not None and cfg.use_multimodal:
-        if cfg.model_name in {"qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"}:
+        if cfg.model_name in {"qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"}:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=video_embeddings,
@@ -1641,6 +1650,19 @@ class NNXDecoder(nnx.Module):
             model_mode,
             logical_partition_spec=logical_partition_spec,
         )
+      elif self.is_gemma4:
+        y = self._apply_gemma4_scanned_blocks(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            bidirectional_mask,
+            previous_chunk,
+            slot,
+            kv_caches=kv_caches,
+            attention_metadata=attention_metadata,
+        )
       else:
         # Standard pipeline run (non-DeepSeek, incl. Gemma4 — matches Linen decoders.py).
         # Gemma4 routes through the pipeline here; _apply_gemma4_scanned_blocks is
@@ -1885,12 +1907,12 @@ class NNXDecoder(nnx.Module):
     # for efficiency, as the main model is frozen and the LM loss is not needed.
     elif (
         cfg.use_indexer and cfg.indexer_loss_scaling_factor > 0.0 and not cfg.indexer_sparse_training
-    ) and self.model_mode == MODEL_MODE_TRAIN:
+    ) and model_mode == MODEL_MODE_TRAIN:
       logits = None
 
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
-    elif cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+    elif cfg.num_vocab_tiling > 1 and model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow(nnx.Intermediate, "hidden_states", hidden_state)
 
@@ -1909,6 +1931,8 @@ class NNXDecoder(nnx.Module):
       bidirectional_mask,
       previous_chunk,
       slot,
+      kv_caches=None,
+      attention_metadata=None,
   ):
     """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
 
@@ -1920,10 +1944,20 @@ class NNXDecoder(nnx.Module):
 
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
     layer_kwargs = {"bidirectional_mask": bidirectional_mask}
+    if attention_metadata is not None:
+      layer_kwargs["attention_metadata"] = attention_metadata
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      y, self.layers, _ = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
+      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(
+          kv_caches, scan_length, attention_pattern_length, stack=False
+      )
+      y, self.layers, _ = self._apply_layers_sequentially(
+          self.layers, y, *layer_args, length=scan_length, kv_caches_stacked=grouped_kv_caches, **layer_kwargs
+      )
+      maxtext_utils.update_kv_caches_after_scan(
+          kv_caches, grouped_kv_caches, scan_length, attention_pattern_length, stacked=False
+      )
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
@@ -1931,22 +1965,37 @@ class NNXDecoder(nnx.Module):
       policy = self.get_remat_policy()
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
-      def pure_gemma_fn(graphdef, state_in, y_in):
+      remainder_kv = None
+      if kv_caches is not None:
+        start_idx = scan_length * attention_pattern_length
+        remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+
+      def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
         merged_layer = nnx.merge(graphdef, state_in)
-        out_y, _ = merged_layer(
-            y_in,
-            *layer_args,
-            previous_chunk=previous_chunk,
-            slot=slot,
-            **layer_kwargs,
-        )
-        return out_y, nnx.state(merged_layer)
+        call_kwargs = dict(layer_kwargs)
+        if kv_in is not None:
+          call_kwargs["kv_cache"] = kv_in
+        call_kwargs["previous_chunk"] = previous_chunk
+        call_kwargs["slot"] = slot
+        out_res = merged_layer(y_in, *layer_args, **call_kwargs)
+        if isinstance(out_res, tuple):
+          out_y = out_res[0]
+          out_kv = out_res[1] if len(out_res) > 1 else None
+        else:
+          out_y = out_res
+          out_kv = None
+        return out_y, out_kv, nnx.state(merged_layer)
 
       checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
 
       graphdef, state = nnx.split(self.layers_remainder)
-      y, new_state = checkpointed_gemma_fn(graphdef, state, y)
+      y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
       nnx.update(self.layers_remainder, new_state)
+
+      if kv_caches is not None and updated_remainder_kv is not None:
+        start_idx = scan_length * attention_pattern_length
+        for offset, updated_item in enumerate(updated_remainder_kv):
+          kv_caches[start_idx + offset] = updated_item
 
     return y
 
@@ -1960,6 +2009,8 @@ class NNXDecoder(nnx.Module):
       bidirectional_mask,
       previous_chunk,
       slot,
+      kv_caches=None,
+      attention_metadata=None,
   ):
     """Applies Gemma4 scanned decoder blocks, handling main scan and remainders."""
 
@@ -1971,10 +2022,20 @@ class NNXDecoder(nnx.Module):
 
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
     layer_kwargs = {"bidirectional_mask": bidirectional_mask, "slot": slot, "previous_chunk": previous_chunk}
+    if attention_metadata is not None:
+      layer_kwargs["attention_metadata"] = attention_metadata
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      y, self.layers, _ = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
+      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(
+          kv_caches, scan_length, attention_pattern_length, stack=False
+      )
+      y, self.layers, _ = self._apply_layers_sequentially(
+          self.layers, y, *layer_args, length=scan_length, kv_caches_stacked=grouped_kv_caches, **layer_kwargs
+      )
+      maxtext_utils.update_kv_caches_after_scan(
+          kv_caches, grouped_kv_caches, scan_length, attention_pattern_length, stacked=False
+      )
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
@@ -1982,20 +2043,37 @@ class NNXDecoder(nnx.Module):
       policy = self.get_remat_policy()
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
-      def pure_gemma_fn(graphdef, state_in, y_in):
+      remainder_kv = None
+      if kv_caches is not None:
+        start_idx = scan_length * attention_pattern_length
+        remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+
+      def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
         merged_layer = nnx.merge(graphdef, state_in)
-        out_y, _ = merged_layer(
-            y_in,
-            *layer_args,
-            **layer_kwargs,
-        )
-        return out_y, nnx.state(merged_layer)
+        call_kwargs = dict(layer_kwargs)
+        if kv_in is not None:
+          call_kwargs["kv_cache"] = kv_in
+        call_kwargs["previous_chunk"] = previous_chunk
+        call_kwargs["slot"] = slot
+        out_res = merged_layer(y_in, *layer_args, **call_kwargs)
+        if isinstance(out_res, tuple):
+          out_y = out_res[0]
+          out_kv = out_res[1] if len(out_res) > 1 else None
+        else:
+          out_y = out_res
+          out_kv = None
+        return out_y, out_kv, nnx.state(merged_layer)
 
       checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
 
       graphdef, state = nnx.split(self.layers_remainder)
-      y, new_state = checkpointed_gemma_fn(graphdef, state, y)
+      y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
       nnx.update(self.layers_remainder, new_state)
+
+      if kv_caches is not None and updated_remainder_kv is not None:
+        start_idx = scan_length * attention_pattern_length
+        for offset, updated_item in enumerate(updated_remainder_kv):
+          kv_caches[start_idx + offset] = updated_item
 
     return y
 

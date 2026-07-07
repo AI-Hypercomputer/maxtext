@@ -14,6 +14,7 @@
 
 """Input pipeline using Grain."""
 
+import math
 import glob
 from pathlib import Path
 import functools
@@ -179,35 +180,36 @@ def get_datasets(
           elastic=elastic,
       )
       return dataset
-  elif data_file_type == "tfrecord":
+  elif data_file_type in ("tfrecord", "parquet"):
     data_files = find_data_files(data_file_pattern)
+    file_slice, files_per_host, row_shard = input_pipeline_utils.compute_file_sharding(
+        len(data_files), dataloading_host_index, dataloading_host_count
+    )
+    if len(data_files) < dataloading_host_count:
+      max_logging.warning(
+          f"Data shard count ({len(data_files)}) < host count ({dataloading_host_count}). "
+          f"Each shard will be read by at most {math.ceil(dataloading_host_count / len(data_files))} hosts. "
+          f"Concurrent reading by multiple hosts may cause slow down."
+      )
+    if grain_worker_count > files_per_host:
+      raise ValueError(
+          f"grain_worker_count ({grain_worker_count}) exceeds the number of {data_file_type} files "
+          f"per host ({files_per_host}). "
+          f"Lower grain_worker_count to at most {files_per_host}."
+      )
     dataset = grain.MapDataset.source(data_files)
     if shuffle:
       dataset = dataset.shuffle(seed=shuffle_seed)
     dataset = dataset.repeat(num_epoch)
-    dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
-    dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
-    files_per_host = max(len(data_files) // dataloading_host_count, 1)
+    dataset = dataset[file_slice]
+    if data_file_type == "tfrecord":
+      dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
+    else:
+      dataset = dataset.map(grain.experimental.ParquetIterDataset)
     cycle_length = min(files_per_host, grain_num_threads)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
-    if shuffle:
-      dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=shuffle_buffer_size, seed=shuffle_seed)
-    return dataset
-  elif data_file_type == "parquet":
-    data_files = find_data_files(data_file_pattern)
-    dataset = grain.MapDataset.source(data_files)
-    if shuffle:
-      dataset = dataset.shuffle(seed=shuffle_seed)
-    dataset = dataset.repeat(num_epoch)
-    dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
-    assert grain_worker_count <= len(dataset), (
-        f"grain worker count is currently {grain_worker_count}, exceeding the max allowable value {len(dataset)} "
-        f"(file shard count of a data loading host) for your dataset. "
-        f"Please lower grain_worker_count or increase file shard count."
-    )
-    dataset = dataset.map(grain.experimental.ParquetIterDataset)
-    cycle_length = min(len(dataset) // num_epoch, grain_num_threads)
-    dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
+    if row_shard is not None:
+      dataset = input_pipeline_utils.IndexShardIterDataset(dataset, host_index=row_shard[0], host_count=row_shard[1])
     if shuffle:
       dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=shuffle_buffer_size, seed=shuffle_seed)
     return dataset
@@ -489,7 +491,7 @@ def make_grain_train_iterator(
         for x in train_dataloader_list
     ]
 
-  # Default non-colocated, non-expansion path
+  # Default non-colocated, expansion_factor_real_data >=1 path
   shard_index = process_indices.index(jax.process_index())
   shard_count = len(process_indices)
   train_ds = get_ds_fn(

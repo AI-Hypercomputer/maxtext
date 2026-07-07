@@ -366,7 +366,14 @@ class Indexer(nnx.Module):
       indexer_score += attention_mask
 
     # TopK selection based on index score
-    _, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # topk_indices [b, t, k]
+    if self.config.indexer_use_approx_top_k:
+      _, topk_indices = jax.lax.approx_max_k(
+          indexer_score,
+          k=self.indexer_topk,
+          recall_target=self.config.indexer_approx_top_k_recall,
+      )
+    else:
+      _, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # topk_indices [b, t, k]
 
     # Create Sparse Index Mask: 0 and large negatives
     indexer_mask = self.generate_mask(topk_indices, k.shape[1])  # [b, t, s]

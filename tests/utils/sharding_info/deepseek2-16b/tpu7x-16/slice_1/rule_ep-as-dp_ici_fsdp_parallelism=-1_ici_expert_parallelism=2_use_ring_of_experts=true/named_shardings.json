@@ -3,19 +3,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -25,19 +21,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -51,27 +43,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -85,27 +69,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -119,29 +95,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp_transpose",
       null,
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ]
+      "fsdp"
     ],
     "shape": [
       10944,
@@ -153,19 +121,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -181,19 +145,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -209,19 +169,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -237,19 +193,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -258,8 +210,7 @@
       null,
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -273,26 +224,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ],
       null,
       null,
@@ -309,28 +255,24 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      null,
-      null,
       [
-        "fsdp_transpose",
-        "expert"
-      ]
+        "fsdp",
+        "fsdp_transpose"
+      ],
+      null,
+      null
     ],
     "shape": [
       2048,
@@ -342,19 +284,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -374,27 +312,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       [
         "fsdp",
-        "fsdp_transpose",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ],
       null
     ],
@@ -407,26 +339,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context"
-      ],
+      "fsdp",
       null,
       null
     ],
@@ -440,28 +365,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "expert",
       null,
-      [
-        "fsdp",
-        "context"
-      ],
+      "fsdp",
       "fsdp_transpose"
     ],
     "shape": [
@@ -475,28 +393,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "expert",
       null,
-      [
-        "fsdp",
-        "context"
-      ],
+      "fsdp",
       "fsdp_transpose"
     ],
     "shape": [
@@ -510,29 +421,22 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "expert",
       null,
       "fsdp_transpose",
-      [
-        "fsdp",
-        "context"
-      ]
+      "fsdp"
     ],
     "shape": [
       64,
@@ -545,27 +449,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -579,27 +475,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -613,29 +501,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp_transpose",
       null,
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ]
+      "fsdp"
     ],
     "shape": [
       2816,
@@ -647,19 +527,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -675,19 +551,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -703,19 +575,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -731,19 +599,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -752,8 +616,7 @@
       null,
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -767,26 +630,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ],
       null,
       null,
@@ -803,28 +661,24 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      null,
-      null,
       [
-        "fsdp_transpose",
-        "expert"
-      ]
+        "fsdp",
+        "fsdp_transpose"
+      ],
+      null,
+      null
     ],
     "shape": [
       2048,
@@ -836,19 +690,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -868,28 +718,22 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       [
         "fsdp",
-        "fsdp_transpose",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -901,19 +745,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -923,19 +763,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -949,27 +785,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -983,27 +811,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -1017,29 +837,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp_transpose",
       null,
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ]
+      "fsdp"
     ],
     "shape": [
       10944,
@@ -1051,19 +863,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1079,19 +887,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1107,19 +911,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1135,19 +935,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1156,8 +952,7 @@
       null,
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -1171,26 +966,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ],
       null,
       null,
@@ -1207,28 +997,24 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      null,
-      null,
       [
-        "fsdp_transpose",
-        "expert"
-      ]
+        "fsdp",
+        "fsdp_transpose"
+      ],
+      null,
+      null
     ],
     "shape": [
       2048,
@@ -1240,19 +1026,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1272,27 +1054,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       [
         "fsdp",
-        "fsdp_transpose",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ],
       null
     ],
@@ -1305,26 +1081,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context"
-      ],
+      "fsdp",
       null,
       null
     ],
@@ -1338,28 +1107,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "expert",
       null,
-      [
-        "fsdp",
-        "context"
-      ],
+      "fsdp",
       "fsdp_transpose"
     ],
     "shape": [
@@ -1373,28 +1135,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "expert",
       null,
-      [
-        "fsdp",
-        "context"
-      ],
+      "fsdp",
       "fsdp_transpose"
     ],
     "shape": [
@@ -1408,29 +1163,22 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "expert",
       null,
       "fsdp_transpose",
-      [
-        "fsdp",
-        "context"
-      ]
+      "fsdp"
     ],
     "shape": [
       64,
@@ -1443,27 +1191,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -1477,27 +1217,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -1511,29 +1243,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp_transpose",
       null,
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ]
+      "fsdp"
     ],
     "shape": [
       2816,
@@ -1545,19 +1269,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1573,19 +1293,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1601,19 +1317,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1629,19 +1341,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1650,8 +1358,7 @@
       null,
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -1665,26 +1372,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ],
       null,
       null,
@@ -1701,28 +1403,24 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      null,
-      null,
       [
-        "fsdp_transpose",
-        "expert"
-      ]
+        "fsdp",
+        "fsdp_transpose"
+      ],
+      null,
+      null
     ],
     "shape": [
       2048,
@@ -1734,19 +1432,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1766,28 +1460,22 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       [
         "fsdp",
-        "fsdp_transpose",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -1799,19 +1487,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1825,27 +1509,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -1859,27 +1535,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -1893,29 +1561,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp_transpose",
       null,
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ]
+      "fsdp"
     ],
     "shape": [
       10944,
@@ -1927,19 +1587,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1955,19 +1611,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1983,19 +1635,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2011,19 +1659,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2032,8 +1676,7 @@
       null,
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -2047,26 +1690,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ],
       null,
       null,
@@ -2083,28 +1721,24 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      null,
-      null,
       [
-        "fsdp_transpose",
-        "expert"
-      ]
+        "fsdp",
+        "fsdp_transpose"
+      ],
+      null,
+      null
     ],
     "shape": [
       2048,
@@ -2116,19 +1750,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2148,27 +1778,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       [
         "fsdp",
-        "fsdp_transpose",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ],
       null
     ],
@@ -2181,26 +1805,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context"
-      ],
+      "fsdp",
       null,
       null
     ],
@@ -2214,28 +1831,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "expert",
       null,
-      [
-        "fsdp",
-        "context"
-      ],
+      "fsdp",
       "fsdp_transpose"
     ],
     "shape": [
@@ -2249,28 +1859,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "expert",
       null,
-      [
-        "fsdp",
-        "context"
-      ],
+      "fsdp",
       "fsdp_transpose"
     ],
     "shape": [
@@ -2284,29 +1887,22 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "expert",
       null,
       "fsdp_transpose",
-      [
-        "fsdp",
-        "context"
-      ]
+      "fsdp"
     ],
     "shape": [
       64,
@@ -2319,27 +1915,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -2353,27 +1941,19 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ],
+      "fsdp",
       null,
       "fsdp_transpose"
     ],
@@ -2387,29 +1967,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp_transpose",
       null,
-      [
-        "fsdp",
-        "context",
-        "expert"
-      ]
+      "fsdp"
     ],
     "shape": [
       2816,
@@ -2421,19 +1993,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2449,19 +2017,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2477,19 +2041,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2505,19 +2065,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2526,8 +2082,7 @@
       null,
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -2541,26 +2096,21 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       [
         "fsdp",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ],
       null,
       null,
@@ -2577,28 +2127,24 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
-      null,
-      null,
       [
-        "fsdp_transpose",
-        "expert"
-      ]
+        "fsdp",
+        "fsdp_transpose"
+      ],
+      null,
+      null
     ],
     "shape": [
       2048,
@@ -2610,19 +2156,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2642,28 +2184,22 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       [
         "fsdp",
-        "fsdp_transpose",
-        "context",
-        "expert"
+        "fsdp_transpose"
       ]
     ],
     "shape": [
@@ -2675,19 +2211,15 @@
     "mesh": {
       "axis_names": [
         "data",
-        "stage",
         "fsdp",
         "fsdp_transpose",
-        "context",
         "expert"
       ],
       "shape": {
         "data": 1,
-        "stage": 1,
-        "fsdp": 4,
-        "fsdp_transpose": 2,
-        "context": 1,
-        "expert": 1
+        "fsdp": 8,
+        "fsdp_transpose": 1,
+        "expert": 2
       }
     },
     "partition_spec": [],

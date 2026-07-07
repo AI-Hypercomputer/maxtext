@@ -15,24 +15,20 @@
 """Tests for the common Max Utils"""
 import os
 import sys
-import unittest
 import time
-import pytest
-
-
+import unittest
+from unittest import mock
+from flax import linen as nn
+from flax import nnx
 import jax
 from jax import numpy as jnp
 from jax import random
-
-from flax import linen as nn
-
-import optax
-
 from maxtext.configs import pyconfig
 from maxtext.utils import max_utils
 from maxtext.utils.train_utils import setup_train_loop
 from tests.utils.test_helpers import get_test_config_path
-from unittest import mock
+import optax
+import pytest
 
 
 class MaxUtilsSummaryStats(unittest.TestCase):
@@ -181,8 +177,16 @@ class UnscanTest(unittest.TestCase):
     num_layers = config.base_num_decoder_layers
 
     # Make a copy to unscan, leaving the original state intact.
-    params_to_unscan = jax.tree_util.tree_map(lambda x: x, state.params)
-    sharding_to_unscan = jax.tree_util.tree_map(lambda x: x, sharding.params)
+    if hasattr(state, "model"):
+      _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
+      params_to_unscan = {"params": params_state.to_pure_dict()}
+    else:
+      params_to_unscan = jax.tree_util.tree_map(lambda x: x, state.params)
+    if hasattr(sharding, "model"):
+      _, sharding_params, _ = nnx.split(sharding.model, nnx.Param, ...)
+      sharding_to_unscan = {"params": sharding_params.to_pure_dict()}
+    else:
+      sharding_to_unscan = jax.tree_util.tree_map(lambda x: x, sharding.params)
 
     # Time the unscan operation.
     start_time = time.time()
@@ -210,8 +214,18 @@ class UnscanTest(unittest.TestCase):
     self.assertEqual(unstacked_shape, expected_shape)
 
     # Check that the original state is unchanged.
-    self.assertIn("layers", state.params["params"]["decoder"])
-    self.assertNotIn("layers_0", state.params["params"]["decoder"])
+
+    if hasattr(state, "model"):
+      _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
+      state_decoder_params = params_state.to_pure_dict()["decoder"]
+      self.assertIn("layers", state_decoder_params)
+    else:
+      self.assertIn("layers", state.params["params"]["decoder"])
+
+    if hasattr(state, "model"):
+      self.assertNotIn("layers_0", state_decoder_params)
+    else:
+      self.assertNotIn("layers_0", state.params["params"]["decoder"])
 
 
 class TestGpuDistributedInitialization(unittest.TestCase):
@@ -387,6 +401,7 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
         "multi_tier_checkpointing_backup_interval_minutes": 5,
         "run_name": "test_run",
         "mtc_data_parallelism": 1,
+        "num_slices": 2,
         "enable_checkpointing": True,
         "compile_topology_num_slices": -1,
     }
@@ -458,6 +473,23 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
         run_name=self._base_keys()["run_name"],
         jax_initialization_timeout_seconds=self._base_keys()["jax_distributed_initialization_timeout"],
         data_parallelism=self._base_keys()["mtc_data_parallelism"],
+        num_slices=self._base_keys()["num_slices"],
+    )
+
+  @mock.patch("maxtext.utils.max_utils.initialize_multi_tier_checkpointing")
+  @mock.patch("jax.distributed.initialize")
+  def test_single_controller_multi_tier_checkpointing_uses_colocated_python(self, mock_init, mock_mtc):
+    raw_keys = self._base_keys(enable_single_controller=True, enable_multi_tier_checkpointing=True)
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_init.assert_not_called()
+    mock_mtc.assert_called_once_with(
+        local_checkpoint_directory=self._base_keys()["local_checkpoint_directory"],
+        backup_interval_minutes=self._base_keys()["multi_tier_checkpointing_backup_interval_minutes"],
+        run_name=self._base_keys()["run_name"],
+        jax_initialization_timeout_seconds=self._base_keys()["jax_distributed_initialization_timeout"],
+        data_parallelism=self._base_keys()["mtc_data_parallelism"],
+        num_slices=self._base_keys()["num_slices"],
+        use_colocated_python=True,
     )
 
   @mock.patch("jax.distributed.initialize")

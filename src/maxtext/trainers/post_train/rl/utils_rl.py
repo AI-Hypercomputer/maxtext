@@ -484,12 +484,53 @@ def check_numbers(
 
 
 def extract_answer(response: str, tmvp_config: Any) -> str:
-  """Function to extract the answer from the text based on the tmvp_config format."""
-  answer_fallback = get_answer_fallback_regex(tmvp_config)
-  # Find the *last* occurrence of the answer tag (most likely the final answer).
-  fallback_matches = answer_fallback.findall(response)
-  extracted_response = fallback_matches[-1].strip() if fallback_matches else FALLBACK_ANSWER
-  return extracted_response
+  """Extract the final numeric answer from the model's response.
+
+  Strategy (priority order):
+    1. Narrow the search scope to the LAST
+       `{solution_start_token}...{solution_end_token}` block (default
+       `<answer>...</answer>`) if present; otherwise use the full response.
+    2. Inside the search scope, find the last `\\boxed{N}` via a brace-
+       balanced scan (handles nested braces in LaTeX). Fall back to a
+       permissive `\\boxed{N}` regex if no balanced match is found.
+    3. If no boxed expression is found, fall back to the same configured
+       solution-tag regex over the full response, for recipes that emit the
+       answer as plain text rather than `\\boxed{N}`.
+
+  Step 1 + 2 are required for modern reasoning models (Qwen3, DeepSeek-R1,
+  etc.) that emit `<think>...</think>\\boxed{N}` or `<answer>\\boxed{N}</answer>`
+  framing. Without `\\boxed` extraction the legacy regex returns the raw
+  `\\boxed{N}` string and math_verify cannot match it against a bare numeric
+  gold. Step 3 keeps the function backward-compatible with recipes that
+  emit plain-text answers inside the configured solution tags.
+
+  The solution tags have a single source of truth: both the scoping (step 1)
+  and the plain-text fallback (step 3) reuse `get_answer_fallback_regex`,
+  built from `tmvp_config.solution_start_token` / `solution_end_token`.
+  """
+  answer_tag_regex = get_answer_fallback_regex(tmvp_config)
+  answer_matches = answer_tag_regex.findall(response)
+  content = answer_matches[-1] if answer_matches else response
+  boxed_matches: list[str] = []
+  stack: list[int] = []
+  for i, ch in enumerate(content):
+    if ch == "{":
+      stack.append(i)
+    elif ch == "}":
+      if not stack:
+        continue
+      op = stack.pop()
+      if content[:op].endswith(r"\boxed"):
+        boxed_matches.append(content[op + 1 : i].strip())
+  if boxed_matches:
+    return boxed_matches[-1]
+  m = re.search(r"\\boxed\s*\{?\s*([a-zA-Z0-9\.,\-]+)\s*\}?", content)
+  if m:
+    return m.group(1).strip()
+  fallback_matches = answer_tag_regex.findall(response)
+  if fallback_matches:
+    return fallback_matches[-1].strip()
+  return FALLBACK_ANSWER
 
 
 def extract_hash_answer(text: str) -> str | None:

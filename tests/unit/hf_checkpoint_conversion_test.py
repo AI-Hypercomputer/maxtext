@@ -12,14 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for kernels """
+"""Tests for kernels"""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 import numpy as np
 from maxtext.utils.max_utils import permute_to_match_maxtext_rope, unpermute_from_match_maxtext_rope
 from maxtext.checkpoint_conversion import to_huggingface as to_hf
 from maxtext.checkpoint_conversion.to_huggingface import (
+    _apply_yarn_rope_config,
     _get_lora_delta,
     _transform_weights_to_adapter,
     _transform_weights_to_full_model,
@@ -27,6 +29,10 @@ from maxtext.checkpoint_conversion.to_huggingface import (
 from maxtext.checkpoint_conversion.to_maxtext import (
     convert_hf_lora_key_to_maxtext,
     _process_and_stack_weights,
+)
+from maxtext.checkpoint_conversion.utils.utils import (
+    _recursive_update,
+    load_orbax_checkpoint,
 )
 
 
@@ -60,6 +66,37 @@ class HFCheckpointConversionTest(unittest.TestCase):
 
     if not np.array_equal(wq2, wq4):
       print("Test failed: wq2 does not match wq4")
+
+  def test_apply_yarn_rope_config_preserves_existing_hf_fields(self):
+    hf_config = SimpleNamespace(
+        rope_theta=10_000,
+        rope_scaling={
+            "beta_fast": 32.0,
+            "beta_slow": 1.0,
+            "factor": 40.0,
+            "mscale": 0.707,
+            "mscale_all_dim": 0.707,
+            "original_max_position_embeddings": 4096,
+            "rope_theta": 10_000,
+            "type": "yarn",
+        },
+    )
+    max_config = SimpleNamespace(
+        beta_fast=32,
+        beta_slow=1,
+        rope_factor=40,
+        original_max_position_embeddings=4096,
+        rope_max_timescale=10_000,
+        rope_truncate=True,
+    )
+
+    _apply_yarn_rope_config(hf_config, max_config)
+
+    self.assertEqual(hf_config.rope_theta, 10_000)
+    self.assertEqual(hf_config.rope_scaling["type"], "yarn")
+    self.assertEqual(hf_config.rope_scaling["mscale"], 0.707)
+    self.assertEqual(hf_config.rope_scaling["mscale_all_dim"], 0.707)
+    self.assertTrue(hf_config.rope_scaling["truncate"])
 
 
 class MaxTextToHFLoRAConversionTest(unittest.TestCase):
@@ -105,6 +142,48 @@ class MaxTextToHFLoRAConversionTest(unittest.TestCase):
     self.assertEqual(weights["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"].shape, (20, 4))
     self.assertIn("q_proj", modules)
 
+    # 1. Scanned standard linear Case A (3D): [num_layers, input_dim, rank] & [num_layers, rank, output_dim]
+    param_map_scanned_a = {
+        "params-decoder-scanned_blocks-mlp-wi_0-kernel": [
+            "model.layers.0.mlp.gate_proj.weight",
+            "model.layers.1.mlp.gate_proj.weight",
+        ]
+    }
+    # num_layers = 2, input_dim = 10, rank = 4, output_dim = 20
+    data_a_scanned_a = np.ones((2, 10, 4), dtype=np.float32) * 0.5
+    data_b_scanned_a = np.ones((2, 4, 20), dtype=np.float32) * 0.5
+    lora_dict_scanned_a = {
+        "params-decoder-scanned_blocks-mlp-wi_0-kernel_lora_a": data_a_scanned_a,
+        "params-decoder-scanned_blocks-mlp-wi_0-kernel_lora_b": data_b_scanned_a,
+    }
+    weights_sa, _ = _transform_weights_to_adapter(param_map_scanned_a, lora_dict_scanned_a)
+    self.assertIn("base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight", weights_sa)
+    self.assertIn("base_model.model.model.layers.0.mlp.gate_proj.lora_B.weight", weights_sa)
+    # Since layer dimension is axis 0, layer 0 is data_a_scanned_a[0, :, :], which has shape (10, 4), transpose -> (4, 10)
+    self.assertEqual(weights_sa["base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight"].shape, (4, 10))
+    self.assertEqual(weights_sa["base_model.model.model.layers.0.mlp.gate_proj.lora_B.weight"].shape, (20, 4))
+
+    # 2. Scanned standard linear Case B (3D): [input_dim, num_layers, rank] & [rank, num_layers, output_dim]
+    param_map_scanned_b = {
+        "params-decoder-scanned_blocks-mlp-wo-kernel": [
+            "model.layers.0.mlp.down_proj.weight",
+            "model.layers.1.mlp.down_proj.weight",
+        ]
+    }
+    # num_layers = 2, input_dim = 10, rank = 4, output_dim = 20
+    data_a_scanned_b = np.ones((10, 2, 4), dtype=np.float32) * 0.5
+    data_b_scanned_b = np.ones((4, 2, 20), dtype=np.float32) * 0.5
+    lora_dict_scanned_b = {
+        "params-decoder-scanned_blocks-mlp-wo-kernel_lora_a": data_a_scanned_b,
+        "params-decoder-scanned_blocks-mlp-wo-kernel_lora_b": data_b_scanned_b,
+    }
+    weights_sb, _ = _transform_weights_to_adapter(param_map_scanned_b, lora_dict_scanned_b)
+    self.assertIn("base_model.model.model.layers.0.mlp.down_proj.lora_A.weight", weights_sb)
+    self.assertIn("base_model.model.model.layers.0.mlp.down_proj.lora_B.weight", weights_sb)
+    # Since layer dimension is axis 1, layer 0 is data_a_scanned_b[:, 0, :], which has shape (10, 4), transpose -> (4, 10)
+    self.assertEqual(weights_sb["base_model.model.model.layers.0.mlp.down_proj.lora_A.weight"].shape, (4, 10))
+    self.assertEqual(weights_sb["base_model.model.model.layers.0.mlp.down_proj.lora_B.weight"].shape, (20, 4))
+
   def test_transform_weights_to_full_model_merged(self):
     config = MagicMock()
     config.lora.lora_alpha = 32.0
@@ -124,6 +203,49 @@ class MaxTextToHFLoRAConversionTest(unittest.TestCase):
 
     self.assertIn("model.layers.0.self_attn.q_proj.weight", weights)
     self.assertTrue(np.allclose(weights["model.layers.0.self_attn.q_proj.weight"], self.expected_merged_val))
+
+  def test_get_lora_delta_scanned_and_unscanned_variants(self):
+    cases = [
+        # (name, key, shape_a, shape_b, expected_shape, expected_val)
+        ("2d_linear", "params-decoder-layers-layers_0-mlp-wi_0-kernel", (10, 4), (4, 20), (10, 20), 2.0),
+        (
+            "3d_unscanned_attn",
+            "params-decoder-layers-layers_0-self_attention-query-kernel",
+            (10, 2, 4),
+            (4, 2, 20),
+            (10, 2, 20),
+            2.0,
+        ),
+        (
+            "3d_scanned_linear_a",
+            "params-decoder-scanned_blocks-mlp-wi_0-kernel",
+            (3, 10, 4),
+            (3, 4, 20),
+            (3, 10, 20),
+            2.0,
+        ),
+        ("3d_scanned_linear_b", "params-decoder-scanned_blocks-mlp-wo-kernel", (10, 3, 4), (4, 3, 20), (10, 3, 20), 2.0),
+        (
+            "4d_scanned_attn",
+            "params-decoder-scanned_blocks-self_attention-query-kernel",
+            (3, 10, 2, 4),
+            (3, 4, 2, 20),
+            (3, 10, 2, 20),
+            2.0,
+        ),
+        ("edge_case_a", "params-decoder-scanned_blocks-mlp-wi_0-kernel", (3, 3, 3), (3, 3, 20), (3, 3, 20), 1.5),
+        ("edge_case_b", "params-decoder-scanned_blocks-mlp-wo-kernel", (3, 3, 3), (3, 3, 20), (3, 3, 20), 1.5),
+    ]
+
+    for name, key, shape_a, shape_b, expected_shape, expected_val in cases:
+      with self.subTest(name=name):
+        state_dict = {
+            f"{key}_lora_a": np.ones(shape_a, dtype=np.float32) * 0.5,
+            f"{key}_lora_b": np.ones(shape_b, dtype=np.float32) * 0.5,
+        }
+        delta = _get_lora_delta(key, state_dict, 2.0)
+        self.assertEqual(delta.shape, expected_shape)
+        self.assertTrue(np.allclose(delta, expected_val))
 
 
 class HFToMaxTextLoRAConversionTest(unittest.TestCase):
@@ -245,6 +367,7 @@ class ParamKeyPartsFromPathTest(unittest.TestCase):
             "hidden_size_per_layer_input=128",
             "vocab_size_per_layer_input=256",
             "vocab_size=256",
+            "skip_jax_distributed_system=True",
         ],
         override_model_config=True,
     )
@@ -253,6 +376,180 @@ class ParamKeyPartsFromPathTest(unittest.TestCase):
     self.assertIsNotNone(model_info)
     self.assertIsNotNone(treedef)
     self.assertTrue(any("decoder" in k for k in model_info))
+
+
+class CheckpointMergingTest(unittest.TestCase):
+  """Tests the recursive_update and load_orbax_checkpoint functions to ensure we don't overwrite weights."""
+
+  def test_recursive_update(self):
+
+    base = {
+        "params": {
+            "decoder": {
+                "layers": {
+                    "kernel": np.ones((4, 4)),
+                }
+            }
+        }
+    }
+    lora = {
+        "params": {
+            "decoder": {
+                "layers": {
+                    "kernel_lora_a": np.ones((4, 2)),
+                    "kernel_lora_b": np.ones((2, 4)),
+                }
+            }
+        }
+    }
+
+    merged = {}
+    _recursive_update(merged, base)
+    _recursive_update(merged, lora)
+
+    # Verify that both base and lora weights are present and not overwritten
+    self.assertIn("kernel", merged["params"]["decoder"]["layers"])
+    self.assertIn("kernel_lora_a", merged["params"]["decoder"]["layers"])
+    self.assertIn("kernel_lora_b", merged["params"]["decoder"]["layers"])
+    np.testing.assert_array_equal(merged["params"]["decoder"]["layers"]["kernel"], np.ones((4, 4)))
+    np.testing.assert_array_equal(merged["params"]["decoder"]["layers"]["kernel_lora_a"], np.ones((4, 2)))
+    np.testing.assert_array_equal(merged["params"]["decoder"]["layers"]["kernel_lora_b"], np.ones((2, 4)))
+
+  @unittest.mock.patch("maxtext.checkpoint_conversion.utils.utils.ocp.Checkpointer")
+  @unittest.mock.patch("maxtext.checkpoint_conversion.utils.utils.epath.Path")
+  @unittest.mock.patch("maxtext.checkpoint_conversion.utils.utils.jax.devices")
+  def test_load_orbax_checkpoint_recursive_merge(self, mock_jax_devices, _mock_path, mock_checkpointer_cls):
+
+    # Mock jax devices
+    mock_jax_devices.return_value = [MagicMock()]
+
+    # Mock Orbax Checkpointer and its restore results
+    mock_ckptr = MagicMock()
+    mock_checkpointer_cls.return_value = mock_ckptr
+
+    # Base checkpoint metadata and content
+    base_metadata = MagicMock()
+    base_metadata.item_metadata.tree = {"params": {"decoder": {"layers": {"kernel": MagicMock(shape=(4, 4))}}}}
+    base_restore_content = {"params": {"decoder": {"layers": {"kernel": np.ones((4, 4))}}}}
+
+    # LoRA checkpoint metadata and content
+    lora_metadata = MagicMock()
+    lora_metadata.item_metadata.tree = {
+        "params": {
+            "decoder": {
+                "layers": {
+                    "kernel_lora_a": MagicMock(shape=(4, 2)),
+                    "kernel_lora_b": MagicMock(shape=(2, 4)),
+                }
+            }
+        }
+    }
+    lora_restore_content = {
+        "params": {
+            "decoder": {
+                "layers": {
+                    "kernel_lora_a": np.ones((4, 2)),
+                    "kernel_lora_b": np.ones((2, 4)),
+                }
+            }
+        }
+    }
+
+    # Mock metadata and restore calls
+    mock_ckptr.metadata.side_effect = [base_metadata, lora_metadata]
+    mock_ckptr.restore.side_effect = [base_restore_content, lora_restore_content]
+
+    # Create dummy config
+    config = MagicMock()
+    config.checkpoint_storage_concurrent_gb = 8
+    config.checkpoint_storage_use_ocdbt = True
+    config.checkpoint_storage_use_zarr3 = True
+    config.load_parameters_path = "gs://base-bucket/checkpoints"
+    config.lora.lora_restore_path = "gs://lora-bucket/checkpoints"
+
+    # Load and merge
+    merged = load_orbax_checkpoint(config)
+
+    # Assert checkpointer was called twice and restored both
+    self.assertEqual(mock_ckptr.restore.call_count, 2)
+
+    # Verify that the keys are recursively merged correctly!
+    self.assertIn("kernel", merged["params"]["decoder"]["layers"])
+    self.assertIn("kernel_lora_a", merged["params"]["decoder"]["layers"])
+    self.assertIn("kernel_lora_b", merged["params"]["decoder"]["layers"])
+
+
+class Gemma3And4CheckpointConversionTest(unittest.TestCase):
+  """Explicitly tests Gemma 3 and Gemma 4 formats for base, adapter-only, and merged weight transformations."""
+
+  def test_gemma3_base_and_adapter_conversion(self):
+    # Gemma 3 configuration simulation
+    # Scanned layers weight shapes
+    # Query weight: [layers, input_dim, heads, head_dim]
+    # For Gemma 3: 4D tensor for attention query
+    key = "params-decoder-scanned_blocks-self_attention-query-kernel"
+    a_key = key + "_lora_a"
+    b_key = key + "_lora_b"
+
+    # 4D scanned attention shapes: [num_layers, input_dim, heads, rank]
+    # num_layers = 2, input_dim = 16, heads = 2, rank = 4, output_dim = 16
+    data_a = np.ones((2, 16, 2, 4), dtype=np.float32) * 0.5
+    data_b = np.ones((2, 4, 2, 16), dtype=np.float32) * 0.5
+
+    param_map = {
+        key: [
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.1.self_attn.q_proj.weight",
+        ]
+    }
+    lora_dict = {a_key: data_a, b_key: data_b}
+
+    # 1. Test Adapter-only transformation
+    weights, _ = _transform_weights_to_adapter(param_map, lora_dict)
+    self.assertIn("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight", weights)
+    self.assertIn("base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight", weights)
+    self.assertIn("base_model.model.model.layers.1.self_attn.q_proj.lora_A.weight", weights)
+    self.assertIn("base_model.model.model.layers.1.self_attn.q_proj.lora_B.weight", weights)
+
+    # 2. Test Delta contraction / Merged transformation math
+    delta = _get_lora_delta(key, lora_dict, lora_scaling=2.0)
+    # Expected delta shape matches original query weight shape: [2, 16, 2, 16]
+    self.assertEqual(delta.shape, (2, 16, 2, 16))
+    # Math: einsum("lipr,lrpo->lipo", A, B) * 2.0
+    # For each slice: matmul(0.5, 0.5) * rank * scaling = 0.25 * 4 * 2.0 = 2.0
+    self.assertTrue(np.allclose(delta, 2.0))
+
+  def test_gemma4_base_and_adapter_conversion(self):
+    # Gemma 4 configuration simulation
+    # Scanned layers standard linear weight shapes (e.g. gate_proj, up_proj)
+    # 3D scanned linear shape Case A: [num_layers, input_dim, rank] & [num_layers, rank, output_dim]
+    key = "params-decoder-scanned_blocks-mlp-wi_0-kernel"
+    a_key = key + "_lora_a"
+    b_key = key + "_lora_b"
+
+    # num_layers = 2, input_dim = 16, rank = 4, output_dim = 32
+    data_a = np.ones((2, 16, 4), dtype=np.float32) * 0.5
+    data_b = np.ones((2, 4, 32), dtype=np.float32) * 0.5
+
+    param_map = {
+        key: [
+            "model.layers.0.mlp.gate_proj.weight",
+            "model.layers.1.mlp.gate_proj.weight",
+        ]
+    }
+    lora_dict = {a_key: data_a, b_key: data_b}
+
+    # 1. Test Adapter-only transformation
+    weights, _ = _transform_weights_to_adapter(param_map, lora_dict)
+    self.assertIn("base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight", weights)
+    self.assertIn("base_model.model.model.layers.0.mlp.gate_proj.lora_B.weight", weights)
+
+    # 2. Test Delta contraction / Merged transformation math
+    delta = _get_lora_delta(key, lora_dict, lora_scaling=2.0)
+    # Expected delta shape matches original gate weight shape: [2, 16, 32]
+    self.assertEqual(delta.shape, (2, 16, 32))
+    # Math: einsum("lir,lro->lio", A, B) * 2.0 -> 0.25 * 4 * 2.0 = 2.0
+    self.assertTrue(np.allclose(delta, 2.0))
 
 
 if __name__ == "__main__":

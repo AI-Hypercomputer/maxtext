@@ -41,6 +41,7 @@ from maxtext.layers.normalizations import rms_norm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
+    deepseek4,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
     gemma,
@@ -467,6 +468,10 @@ class Decoder(nn.Module):
             deepseek.DeepSeekDenseLayerToLinen,
             deepseek.DeepSeekMoELayerToLinen,
         ]
+      case DecoderBlockType.DEEPSEEK4:
+        return (
+            [deepseek4.DeepSeek4ScannableBlockToLinen] if self.config.scan_layers else [deepseek4.DeepSeek4LayerToLinen]
+        )
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -632,6 +637,7 @@ class Decoder(nn.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -722,6 +728,8 @@ class Decoder(nn.Module):
             "llama4-17b-16e",
             "llama4-17b-128e",
             "qwen3-omni-30b-a3b",
+            "qwen3-vl-2b",
+            "qwen3-vl-4b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
         ]:
@@ -736,7 +744,7 @@ class Decoder(nn.Module):
           raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
       if video_embeddings is not None and cfg.use_multimodal:
-        if cfg.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+        if cfg.model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=video_embeddings,
@@ -1048,6 +1056,8 @@ class Decoder(nn.Module):
               bidirectional_mask_value,
               previous_chunk,
               slot,
+              kv_caches=kv_caches,
+              attention_metadata=attention_metadata,
           )
         elif cfg.decoder_block == DecoderBlockType.GEMMA4:
           bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
@@ -1060,6 +1070,19 @@ class Decoder(nn.Module):
               bidirectional_mask_value,
               previous_chunk,
               slot,
+              kv_caches=kv_caches,
+              attention_metadata=attention_metadata,
+          )
+        elif cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+          y = self._apply_deepseek4_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              previous_chunk,
+              slot,
+              decoder_input_tokens,
           )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
@@ -1195,8 +1218,10 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
               layer_kwargs = {"layer_idx": lyr}
+            if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+              layer_call_kwargs["decoder_input_tokens"] = decoder_input_tokens
             kv_cache = None
             if kv_caches is not None:
               # For all decoder blocks (including QWEN3_NEXT/QWEN3_5 with vLLM flat-list
@@ -1282,6 +1307,8 @@ class Decoder(nn.Module):
       bidirectional_mask,
       previous_chunk,
       slot,
+      kv_caches=None,
+      attention_metadata=None,
   ):
     """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
 
@@ -1295,27 +1322,43 @@ class Decoder(nn.Module):
     policy = self.get_remat_policy()
     RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlockToLinen], policy)[0]
 
-    layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
     layer_kwargs = {"num_of_layers": attention_pattern_length}
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      broadcast_args = (
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
+      kv_cache_scanned = maxtext_utils.prepare_kv_caches_for_scan(
+          kv_caches, scan_length, attention_pattern_length, stack=True
       )
-      y, _ = self.scan_decoder_layers(
+
+      broadcast_args_spec = [
+          (decoder_segment_ids, nn.broadcast),
+          (decoder_positions, nn.broadcast),
+          (deterministic, nn.broadcast),
+          (model_mode, nn.broadcast),
+          (slot, nn.broadcast),
+          (None, nn.broadcast),  # page_state
+          (previous_chunk, nn.broadcast),
+          (bidirectional_mask, nn.broadcast),
+          (kv_cache_scanned, 0 if kv_caches is not None else nn.broadcast),
+          (attention_metadata, nn.broadcast),
+      ]
+      broadcast_args = tuple(arg for arg, _ in broadcast_args_spec)
+      in_axes_tuple = tuple(axis for _, axis in broadcast_args_spec)
+
+      y, returned_kv_cache = self.scan_decoder_layers(
           cfg,
           RemattedGemma3Block,
           scan_length,
           "layers",
           mesh,
-          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          in_axes_tuple=in_axes_tuple,
           model_mode=self.model_mode,
           **layer_kwargs,
-      )(y, *broadcast_args, **layer_call_kwargs)
+      )(y, *broadcast_args)
+
+      maxtext_utils.update_kv_caches_after_scan(
+          kv_caches, returned_kv_cache, scan_length, attention_pattern_length, stacked=True
+      )
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
@@ -1325,7 +1368,13 @@ class Decoder(nn.Module):
       layer = RemattedGemma3Block(
           config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
       )  # pytype: disable=wrong-keyword-args
-      y, _ = layer(
+
+      remainder_kv = None
+      if kv_caches is not None:
+        start_idx = scan_length * attention_pattern_length
+        remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+
+      y_and_kv = layer(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -1333,8 +1382,23 @@ class Decoder(nn.Module):
           model_mode,
           previous_chunk=previous_chunk,
           slot=slot,
-          **layer_call_kwargs,
+          bidirectional_mask=bidirectional_mask,
+          kv_cache=remainder_kv,
+          attention_metadata=attention_metadata,
       )
+
+      if isinstance(y_and_kv, tuple):
+        y = y_and_kv[0]
+        updated_remainder_kv = y_and_kv[1]
+      else:
+        y = y_and_kv
+        updated_remainder_kv = None
+
+      if kv_caches is not None and updated_remainder_kv is not None:
+        start_idx = scan_length * attention_pattern_length
+        for offset, updated_item in enumerate(updated_remainder_kv):
+          kv_caches[start_idx + offset] = updated_item
+
     return y
 
   def _apply_gemma4_scanned_blocks(
@@ -1347,6 +1411,8 @@ class Decoder(nn.Module):
       bidirectional_mask,
       previous_chunk,
       slot,
+      kv_caches=None,
+      attention_metadata=None,
   ):
     """Applies Gemma4 scanned decoder blocks, handling main scan and remainders."""
 
@@ -1358,29 +1424,181 @@ class Decoder(nn.Module):
     num_full_blocks = cfg.num_decoder_layers // block_pattern_len
     remainder_layers = cfg.num_decoder_layers % block_pattern_len
 
+    if num_full_blocks > 0:
+      ScannableBlockToLinen = gemma4.Gemma4ScannableBlockToLinen
+      policy = self.get_remat_policy()
+      RemattedGemma4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
+
+      kv_cache_scanned = maxtext_utils.prepare_kv_caches_for_scan(
+          kv_caches, num_full_blocks, block_pattern_len, stack=True
+      )
+
+      broadcast_args_spec = [
+          (decoder_segment_ids, nn.broadcast),
+          (decoder_positions, nn.broadcast),
+          (deterministic, nn.broadcast),
+          (model_mode, nn.broadcast),
+          (slot, nn.broadcast),
+          (None, nn.broadcast),  # page_state
+          (previous_chunk, nn.broadcast),
+          (bidirectional_mask, nn.broadcast),
+          (kv_cache_scanned, 0 if kv_caches is not None else nn.broadcast),
+          (attention_metadata, nn.broadcast),
+      ]
+      broadcast_args = tuple(arg for arg, _ in broadcast_args_spec)
+      in_axes_tuple = tuple(axis for _, axis in broadcast_args_spec)
+
+      # For a fully scanned block, apply it inside a nn.scan over the calculated number of full blocks
+      y, returned_kv_cache = nn.scan(
+          RemattedGemma4Block,
+          variable_axes={
+              "params": cfg.param_scan_axis,
+              "cache": 0,
+              "intermediates": 0,
+              "aqt": 0,
+              "_overwrite_with_gradient": 0,
+          },
+          split_rngs={"params": True, "dropout": cfg.enable_dropout},
+          in_axes=in_axes_tuple,
+          length=num_full_blocks,
+          metadata_params={
+              nn.PARTITION_NAME: "layers",
+              "abstract_init": False,
+          },
+      )(
+          config=cfg,
+          mesh=mesh,
+          quant=self.quant,
+          model_mode=model_mode,
+          num_of_layers=block_pattern_len,
+          name="scanned_blocks",
+      )(
+          y, *broadcast_args
+      )
+
+      maxtext_utils.update_kv_caches_after_scan(
+          kv_caches, returned_kv_cache, num_full_blocks, block_pattern_len, stacked=True
+      )
+
+    # Process any remaining layers that don't fit into a full scanned block
+    for layer_id in range(cfg.num_decoder_layers - remainder_layers, cfg.num_decoder_layers):
+      attention_type = gemma4.get_attention_type(layer_id)
+      layer = gemma4.Gemma4DecoderLayerToLinen(
+          config=cfg,
+          mesh=mesh,
+          model_mode=model_mode,
+          quant=self.quant,
+          attention_type=attention_type,
+          layer_idx=layer_id,
+      )
+      kv_cache = kv_caches[layer_id] if kv_caches is not None else None
+
+      # inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode,
+      # previous_chunk, page_state, slot, bidirectional_mask, kv_cache, attention_metadata
+      remainder_args = (
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk,
+          None,  # page_state
+          slot,
+          bidirectional_mask,
+          kv_cache,
+          attention_metadata,
+      )
+
+      y_and_kv = layer(y, *remainder_args)
+      if isinstance(y_and_kv, tuple):
+        y = y_and_kv[0]
+        new_kv = y_and_kv[1]
+      else:
+        y = y_and_kv
+        new_kv = None
+
+      if kv_caches is not None and new_kv is not None:
+        kv_caches[layer_id] = new_kv
+
+    return y
+
+  def _apply_deepseek4_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      slot,
+      decoder_input_tokens,
+  ):
+    """Applies DeepSeek V4 scanned decoder blocks.
+
+    DeepSeek V4 has some number of prefix layers (defined by `first_num_hash_layers`)
+    that use static Hash Routing. The remaining layers alternate `compress_ratio=128` (HCA)
+    and `compress_ratio=4` (CSA) and are evaluated in a single `nn.scan` block.
+
+    For DeepSeek4-Flash (43 hidden layers total):
+    - 3 Prefix layers (Indices 0, 1, 2)
+    - 40 Scanned layers: 20 perfectly repeating chunks of [128, 4]
+    """
+
+    cfg = self.config
+    mesh = self.mesh
+
     broadcast_args = (
         decoder_segment_ids,
         decoder_positions,
         deterministic,
         model_mode,
+        slot,
+        previous_chunk,
     )
 
-    # Pass slot/previous_chunk/bidirectional_mask by keyword only (via layer_call_kwargs),
-    # never positionally in broadcast_args: Gemma4DecoderLayer and Gemma4ScannableBlock
-    # declare slot and previous_chunk in swapped order, so positional passing misroutes them.
     layer_call_kwargs = {
-        "slot": slot,
         "previous_chunk": previous_chunk,
-        "bidirectional_mask": bidirectional_mask,
+        "slot": slot,
+        "decoder_input_tokens": decoder_input_tokens,
     }
 
+    # 1. Prefix Unrolling
+    # Prefix layers are unrolled (unscanned) for two architectural reasons:
+    #   1. Heterogeneous Attention: JAX nn.scan requires identical computation graphs, but the first few layers
+    #      use different attention configurations (e.g., DeepSeek-V4 uses compress_ratios [0, 0, 4] for layers 0, 1, 2).
+    #   2. Static Hash Routing: The first `first_num_hash_layers` (which is 3 for DeepSeek-V4) use deterministic
+    #      token-to-expert Hash Routing instead of learned top-k routing.
+    # Therefore, these prefix layers are instantiated individually before we scan the remaining uniform blocks.
+    num_hash_layers = cfg.first_num_hash_layers
+    for layer_idx in range(num_hash_layers):
+      prefix_layer = deepseek4.DeepSeek4LayerToLinen(
+          config=cfg,
+          mesh=mesh,
+          name=f"layers_{layer_idx}",
+          quant=self.quant,
+          model_mode=self.model_mode,
+          layer_idx=layer_idx,
+      )
+      y, _ = prefix_layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          **layer_call_kwargs,
+      )
+
+    # 2. Chunked Scanning
+    # The remaining layers perfectly alternate HCA (128) and CSA (4).
+    num_remaining_layers = cfg.num_decoder_layers - num_hash_layers
+    num_full_blocks = num_remaining_layers // 2
+
     if num_full_blocks > 0:
-      ScannableBlockToLinen = gemma4.Gemma4ScannableBlockToLinen
+      ScannableBlockToLinen = deepseek4.DeepSeek4ScannableBlockToLinen
       policy = self.get_remat_policy()
-      RemattedGemma4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
-      # For a fully scanned block, apply it inside a nn.scan over the calculated number of full blocks
+      RemattedDeepSeek4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
+
       y, _ = nn.scan(
-          RemattedGemma4Block,
+          RemattedDeepSeek4Block,
           variable_axes={
               "params": cfg.param_scan_axis,
               "cache": 0,
@@ -1395,31 +1613,7 @@ class Decoder(nn.Module):
               nn.PARTITION_NAME: "layers",
               "abstract_init": False,
           },
-      )(
-          config=cfg,
-          mesh=mesh,
-          quant=self.quant,
-          model_mode=model_mode,
-          num_of_layers=block_pattern_len,
-          name="scanned_blocks",
-      )(
-          y, *broadcast_args, **layer_call_kwargs
-      )
-
-    # Process any remaining layers that don't fit into a full scanned block
-    for layer_id in range(cfg.num_decoder_layers - remainder_layers, cfg.num_decoder_layers):
-      attention_type = gemma4.get_attention_type(layer_id)
-      layer = gemma4.Gemma4DecoderLayerToLinen(
-          config=cfg,
-          mesh=mesh,
-          model_mode=model_mode,
-          quant=self.quant,
-          attention_type=attention_type,
-          layer_idx=layer_id,
-      )
-      y = layer(y, *broadcast_args, **layer_call_kwargs)
-      if cfg.scan_layers:
-        y = y[0]
+      )(config=cfg, mesh=mesh, quant=self.quant, model_mode=model_mode, name="scanned_blocks",)(y, *broadcast_args)
 
     return y
 

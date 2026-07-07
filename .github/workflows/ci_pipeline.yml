@@ -20,6 +20,15 @@ name: MaxText Package Tests
 on:
   pull_request:
   workflow_call:
+    inputs:
+      maxtext_sha:
+        description: 'The specific MaxText commit SHA.'
+        required: true
+        type: string
+    outputs:
+      tests_result:
+        description: 'The result of all_tests_passed and all_notebooks_passed jobs.'
+        value: ${{ (jobs.all_tests_passed.result == 'success' && jobs.all_notebooks_passed.result == 'success') && 'success' || 'failure' }}
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours
@@ -48,6 +57,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.maxtext_sha || github.sha }}
       - name: Check for Code Changes
         id: check
         run: |
@@ -127,6 +137,7 @@ jobs:
       device_type: tpu
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
+      maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   maxtext_jupyter_notebooks:
     needs: build_and_upload_maxtext_package
@@ -152,6 +163,21 @@ jobs:
       fail-fast: false
       matrix:
         flavor: [tpu-unit, tpu-integration, tpu-post-training-unit]
+    with:
+      flavor: ${{ matrix.flavor }}
+      base_image: maxtext-unit-test-tpu:py312
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+
+  tpu7x-tests:
+    name: TPU7X tests
+    needs: [build_and_upload_maxtext_package]
+    if: needs.analyze_code_changes.outputs.run_tests == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [tpu7x-unit, tpu7x-integration, tpu7x-post-training-unit]
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
@@ -188,12 +214,31 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
+  setup-pathways-parameters:
+    name: Setup Pathways Parameters
+    runs-on: ubuntu-latest
+    outputs:
+      total_workers: ${{ steps.set-params.outputs.total_workers }}
+      worker_groups: ${{ steps.set-params.outputs.worker_groups }}
+    steps:
+      - id: set-params
+        name: Set Pathways Worker Parameters
+        run: |
+          # TPU worker constants
+          TPU_UNIT_TOTAL_WORKERS=2
+          TPU_UNIT_WORKER_GROUPS='[1, 2]'
+
+          echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
+          echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
+
   maxtext_tpu_pathways_unit_tests:
-    needs: build_and_upload_maxtext_package
+    needs: [build_and_upload_maxtext_package, setup-pathways-parameters]
     if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
+        matrix:
+          group: ${{ fromJSON(needs.setup-pathways-parameters.outputs.worker_groups) }}
     with:
       device_type: tpu
       device_name: v6e-4
@@ -206,9 +251,12 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      total_workers: ${{ needs.setup-pathways-parameters.outputs.total_workers }}
+      worker_group: ${{ matrix.group }}
 
   maxtext_tpu_pathways_integration_tests:
     needs: build_and_upload_maxtext_package
+    if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -293,7 +341,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [tpu-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests]
+    needs: [tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -307,7 +355,7 @@ jobs:
 
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
-    needs: [tpu-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, notify_failure]
+    needs: [tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, notify_failure]
     if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:

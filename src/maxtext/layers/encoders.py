@@ -80,6 +80,16 @@ class VisionEncoder(nnx.Module):
       )
       setattr(self, projector_name, qwen3_5_vision.Qwen3_5MoeVisionProjector(config=self.config, rngs=self.rngs))
       return encoder_name, projector_name
+    elif self.config.model_name in ["qwen3-vl-4b", "qwen3-vl-2b"]:
+      from maxtext.models import qwen3_vl_vision  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "Qwen3VLVisionEncoder_0"
+      projector_name = "Qwen3VLVisionProjector_0"
+      setattr(
+          self, encoder_name, qwen3_vl_vision.Qwen3VLVisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
+      )
+      setattr(self, projector_name, qwen3_vl_vision.Qwen3VLVisionProjector(config=self.config, rngs=self.rngs))
+      return encoder_name, projector_name
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 

@@ -40,11 +40,12 @@ class TrainStateNNX(nnx.Module):
     self.model = model
     self.optimizer = optimizer
 
-  def apply_gradients(self, grads: Any):
+  def apply_gradients(self, grads: Any, **kwargs):
     """Mimics the Linen apply_gradients function.
 
     Updates the optimizer state, applies updates to parameters, and increments
-    the step counter. Only updates `self.model`.
+    the step counter. Only updates `self.model`. Extra kwargs (e.g. loss/grad_norm
+    for the skip-step-on-spikes optimizer) are forwarded to the optax update.
     """
     if self.optimizer is None:
       raise RuntimeError(
@@ -52,7 +53,7 @@ class TrainStateNNX(nnx.Module):
           " an optimizer. This usually happens when the state was created for"
           " inference only."
       )
-    self.optimizer.update(self.model, grads)
+    self.optimizer.update(self.model, grads, **kwargs)
 
 
 # On-disk checkpoint format.

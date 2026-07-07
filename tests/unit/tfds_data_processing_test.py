@@ -33,6 +33,7 @@ from maxtext.input_pipeline import input_pipeline_interface
 from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
 
+@pytest.mark.cpu_only
 class TfdsDataProcessingTest(unittest.TestCase):
 
   def setUp(self):

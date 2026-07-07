@@ -862,6 +862,10 @@ def maybe_quantize_model(model, config):
             dummy_segment_ids,
             enable_dropout=False,
         )
+        # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
+        # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
+        # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
+        nnx.pop(model, nnx.Intermediate)
       else:
         model = qwix.quantize_model(model, quantization_provider)
   return model
@@ -1012,19 +1016,29 @@ class TransformerEngineQuantization(Quantization):
     """
 
     import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
-    fp8_recipe = self._recipe
+    default_recipe = self._recipe
 
     class TEWrapper(transformer_engine.jax.flax.module.TransformerEngineBase):
       """Wrapper module for TransformerEngine quantization."""
 
-      def generate_quantizer_set(self, postfix: str = ""):
+      def generate_quantizer_set(
+          self,
+          postfix: str = "",
+          variable_collection: str | None = None,
+          quantization_checkpoint_name: str | None = None,
+          fp8_recipe: recipe.Recipe | None = default_recipe,
+          n_groups: int | None = None,
+      ):
+        """Route quantizer-set generation through the OVERWRITE_WITH_GRADIENT collection."""
         OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
             postfix=postfix,
             variable_collection=OVERWRITE_WITH_GRADIENT,
             quantization_checkpoint_name="quantization",
             fp8_recipe=fp8_recipe,
+            n_groups=n_groups,
         )
 
       @nn.compact

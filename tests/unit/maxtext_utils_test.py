@@ -14,36 +14,37 @@
 
 """Tests for the common MaxText utilities"""
 
-import functools
 from collections.abc import Callable
+from dataclasses import dataclass, field
+import functools
 from typing import Any, Sequence
 import unittest
-import pytest
 from unittest.mock import MagicMock, Mock, patch
-from dataclasses import dataclass, field
-import numpy as np
-import optax
-
 from flax import linen as nn
 from flax import nnx
 from flax.core.scope import FrozenVariableDict
 from flax.training import train_state
 import jax
 from jax import random, vmap
+from jax.experimental import mesh_utils
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
-from jax.experimental import mesh_utils
-from maxtext.configs import pyconfig
+from maxtext.common import train_state_nnx
 from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
+from maxtext.configs import pyconfig
 from maxtext.inference import inference_utils
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+import optax
+import pytest
 
 Transformer = models.transformer_as_linen
 
@@ -351,32 +352,47 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
     else:
       self.model = models.transformer_as_linen(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
     if self.config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+
+      def create_train_state_fn():
+        nnx_model = self._create_model_partial()
+        return train_state_nnx.TrainStateNNX(nnx_model, None)
+
+      init_state_fn = create_train_state_fn
     else:
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
     state, _ = maxtext_utils.setup_decode_state(self.config, self.mesh, None, init_state_fn)
-    self.assertEqual(state.tx, None)
-    self.assertEqual(state.opt_state, {})
+    if self.config.pure_nnx:
+      self.assertNotIn("optimizer", state)
+    else:
+      self.assertEqual(state.tx, None)
+      self.assertEqual(state.opt_state, {})
 
   def test_setup_initial_state(self):
     rng = random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
     if self.config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+
+      def create_train_state_fn():
+        nnx_model = self._create_model_partial()
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+      init_state_fn = create_train_state_fn
     else:
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
     state, _, _, _ = maxtext_utils.setup_initial_state(None, self.config, self.mesh, None, init_state_fn)
-    self.assertEqual(state.tx, tx)
-    self.assertNotEqual(state.opt_state, {})
+    if self.config.pure_nnx:
+      self.assertIsNotNone(state.optimizer)
+    else:
+      self.assertEqual(state.tx, tx)
+      self.assertNotEqual(state.opt_state, {})
 
 
 class MaxUtilsPpAsDp(unittest.TestCase):
@@ -933,7 +949,21 @@ class TestMeshUtils(unittest.TestCase):
 
   def setUp(self):
     # Setup a dummy device array for the mock to return
-    self.devices_array = np.array(jax.devices())
+    devices = jax.devices()
+    if len(devices) < 2:
+      mock_devices = []
+      for i in range(2):
+        d = MagicMock(spec=jax.Device)
+        d.id = i
+        d.device_kind = "cpu"
+        d.platform = "cpu"
+        # make it hashable
+        d.__hash__ = lambda self, idx=i: idx
+        d.__eq__ = lambda self, other, idx=i: isinstance(other, MagicMock) and other.id == idx
+        mock_devices.append(d)
+      self.devices_array = np.array(mock_devices)
+    else:
+      self.devices_array = np.array(devices)
 
   @patch("maxtext.utils.maxtext_utils.create_device_mesh")
   def test_get_mesh_explicit_mode(self, mock_create_device_mesh):
@@ -1359,16 +1389,36 @@ class TestSetupTrainingState(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX path not covered by this test.")
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
+    else:
+      self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_training_state_returns_train_state(self):
     rng = jax.random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
+    if self.config.pure_nnx:
+
+      def create_train_state_fn():
+        nnx_model = self._create_model_partial()
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+      init_state_fn = create_train_state_fn
+    else:
+      init_state_fn = functools.partial(
+          maxtext_utils.init_initial_state,
+          self.model,
+          tx,
+          self.config,
+          True,
+          rng,
+      )
     state, _, _, _ = maxtext_utils.setup_training_state(None, self.config, self.mesh, None, init_state_fn)
-    self.assertEqual(state.tx, tx)
-    self.assertNotEqual(state.opt_state, {})
+    if self.config.pure_nnx:
+      self.assertIsNotNone(state.optimizer)
+    else:
+      self.assertEqual(state.tx, tx)
+      self.assertNotEqual(state.opt_state, {})
 
 
 class TestGetLogicalAnnotations(unittest.TestCase):
@@ -1380,14 +1430,34 @@ class TestGetLogicalAnnotations(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX path not covered by this test.")
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
+    else:
+      self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     self.rng = jax.random.PRNGKey(0)
     self.tx = optax.adam(learning_rate=0.001)
 
   def test_returns_partition_spec_tree(self):
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, self.tx, self.config, True, self.rng)
-    annotations = maxtext_utils.get_logical_annotations(self.config, self.mesh, init_state_fn)
+    if self.config.pure_nnx:
+
+      def create_train_state_fn():
+        nnx_model = self._create_model_partial()
+        optimizer = nnx.Optimizer(nnx_model, self.tx, wrt=nnx.Param)
+        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+      init_state_fn = create_train_state_fn
+      annotations = maxtext_utils_nnx.get_partition_spec_nnx(
+          maxtext_utils.get_abstract_state(self.config, self.mesh, init_state_fn, True)[2]
+      )
+    else:
+      init_state_fn = functools.partial(
+          maxtext_utils.init_initial_state,
+          self.model,
+          self.tx,
+          self.config,
+          True,
+          self.rng,
+      )
+      annotations = maxtext_utils.get_logical_annotations(self.config, self.mesh, init_state_fn)
     # Result should be a pytree with PartitionSpec leaves
     leaves = jax.tree_util.tree_leaves(annotations)
     self.assertGreater(len(leaves), 0)
@@ -1523,7 +1593,7 @@ class TestNNXAbstractState(unittest.TestCase):
     optimizer_memory_host_offload: bool = False
     parameter_memory_host_offload: bool = False
     param_scan_axis: int = 0
-    logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]]])
+    logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]], ["model", ["model"]]])
 
   class MockTrainState(nnx.Module):
     """Simulates a TrainState with params and optimizer state."""
@@ -1542,6 +1612,13 @@ class TestNNXAbstractState(unittest.TestCase):
     devices = jax.local_devices()
     self.mesh = Mesh(mesh_utils.create_device_mesh((len(devices), 1)), axis_names=("model", "data"))
     self.config = self.MockConfig()
+    # Stub remove_size_one_mesh_axis so that resolved specs are returned unreduced,
+    # allowing verification of naming resolution without being stripped by size-one mesh dims.
+    self._old_remove_size_one_mesh_axis = sharding.remove_size_one_mesh_axis
+    sharding.remove_size_one_mesh_axis = lambda spec, mesh: spec
+
+  def tearDown(self):
+    sharding.remove_size_one_mesh_axis = self._old_remove_size_one_mesh_axis
 
   def nnx_init_trainstate_wrapper(self):
     """Wrapper to initialize the mock NNX model."""
@@ -1613,82 +1690,42 @@ class TestNNXAbstractState(unittest.TestCase):
       maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, None)
 
 
-class TestGetNnxNamedShardingWithScanAxis(unittest.TestCase):
-  """Unit tests for get_nnx_named_sharding_with_scan_axis covering every branch.
+class TestKVCacheScanHelpers(unittest.TestCase):
+  """Tests for KV cache scan helper functions."""
 
-  The helper resolves a NamedSharding for each NNX Variable and — unlike
-  flax.nnx.spmd.get_var_pspec — also inserts the `nnx.PARTITION_NAME` axis at
-  `param_scan_axis` when scanned-layers metadata is present.
-  """
+  def test_prepare_kv_caches_for_scan_valid(self):
+    kv_caches = [jnp.array([1.0]), jnp.array([2.0]), jnp.array([3.0]), jnp.array([4.0])]
+    # scan_length = 2, block_len = 2
+    grouped = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length=2, block_len=2, stack=False)
+    self.assertEqual(len(grouped), 2)
+    self.assertEqual(grouped[0], (kv_caches[0], kv_caches[1]))
+    self.assertEqual(grouped[1], (kv_caches[2], kv_caches[3]))
 
-  def setUp(self):
-    # Mesh needs to contain every axis name the tests reference in partition specs.
-    self.mesh = Mesh(np.array(jax.local_devices()[:1]).reshape(1, 1), ("fsdp", "layers"))
+  def test_prepare_kv_caches_for_scan_invalid_type(self):
+    kv_caches_tuple = (jnp.array([1.0]), jnp.array([2.0]))
+    with self.assertRaises(TypeError):
+      maxtext_utils.prepare_kv_caches_for_scan(kv_caches_tuple, scan_length=1, block_len=2)
 
-  def _build_state(self, **variables):
-    """Wrap a dict of {key: nnx.Variable} in an nnx.State for tree traversal."""
-    return nnx.State(variables)
+    kv_caches_array = jnp.array([1.0, 2.0])
+    with self.assertRaises(TypeError):
+      maxtext_utils.prepare_kv_caches_for_scan(kv_caches_array, scan_length=1, block_len=2)
 
-  def _run(self, state):
-    return maxtext_utils.get_nnx_named_sharding_with_scan_axis(state, self.mesh)
+  def test_update_kv_caches_after_scan_valid(self):
+    kv_caches = [jnp.array([1.0]), jnp.array([2.0]), jnp.array([3.0]), jnp.array([4.0])]
+    returned_kv_cache = [(jnp.array([10.0]), jnp.array([20.0])), (jnp.array([30.0]), jnp.array([40.0]))]
 
-  def test_scan_axis_inserted_at_param_scan_axis(self):
-    """When PARTITION_NAME is present, the partition name is inserted at `param_scan_axis`."""
-    with jax.set_mesh(self.mesh):
-      v = nnx.Param(
-          jnp.zeros((3, 4, 8)),
-          out_sharding=(None, "fsdp"),
-          **{nnx.PARTITION_NAME: "layers", "param_scan_axis": 1},
-      )
-    out = self._run(self._build_state(w=v))
-    result_sharding = out["w"].get_value()
-    self.assertIsInstance(result_sharding, NamedSharding)
-    # 'layers' must be inserted at position 1 (param_scan_axis=1).
-    self.assertEqual(result_sharding.spec, PartitionSpec(None, "layers", "fsdp"))
+    maxtext_utils.update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length=2, block_len=2, stacked=False)
 
-  def test_scan_axis_not_inserted_when_already_present(self):
-    """Guard against double-insertion when partition_name is already in out_sharding."""
-    with jax.set_mesh(self.mesh):
-      v = nnx.Param(
-          jnp.zeros((2, 2, 2)),
-          out_sharding=("layers", None, "fsdp"),
-          **{nnx.PARTITION_NAME: "layers", "param_scan_axis": 0},
-      )
-    out = self._run(self._build_state(w=v))
-    result_sharding = out["w"].get_value()
-    # 'layers' must appear exactly once — the same PartitionSpec we started with.
-    self.assertEqual(result_sharding.spec, PartitionSpec("layers", None, "fsdp"))
+    self.assertTrue(jnp.array_equal(kv_caches[0], jnp.array([10.0])))
+    self.assertTrue(jnp.array_equal(kv_caches[1], jnp.array([20.0])))
+    self.assertTrue(jnp.array_equal(kv_caches[2], jnp.array([30.0])))
+    self.assertTrue(jnp.array_equal(kv_caches[3], jnp.array([40.0])))
 
-  def test_masked_node_preserved_as_is(self):
-    """Values without a .shape attribute (e.g., optax.MaskedNode) are returned unchanged."""
-    masked = nnx.Variable(optax.MaskedNode())
-    state = self._build_state(masked=masked)
-    out = self._run(state)
-    # The leaf must be the original Variable, not a NamedSharding wrapper.
-    self.assertIs(out["masked"], masked)
-
-  def test_empty_out_sharding_yields_empty_pspec(self):
-    """A Variable without any sharding metadata should resolve to PartitionSpec()."""
-    with jax.set_mesh(self.mesh):
-      # No out_sharding/sharding_names/sharding metadata → falsy → PartitionSpec()
-      v = nnx.Param(jnp.zeros((4,)))
-    out = self._run(self._build_state(w=v))
-    result_sharding = out["w"].get_value()
-    self.assertIsInstance(result_sharding, NamedSharding)
-    self.assertEqual(result_sharding.spec, PartitionSpec())
-
-  def test_string_out_sharding_is_wrapped_into_tuple(self):
-    """A single-string out_sharding value should still produce a valid PartitionSpec."""
-    with jax.set_mesh(self.mesh):
-      v = nnx.Param(
-          jnp.zeros((4,)),
-          out_sharding="fsdp",
-          **{nnx.PARTITION_NAME: "layers", "param_scan_axis": 0},
-      )
-    out = self._run(self._build_state(w=v))
-    result_sharding = out["w"].get_value()
-    # The single string 'fsdp' is turned into a list, and 'layers' is prepended.
-    self.assertEqual(result_sharding.spec, PartitionSpec("layers", "fsdp"))
+  def test_update_kv_caches_after_scan_invalid_type(self):
+    kv_caches_tuple = (jnp.array([1.0]), jnp.array([2.0]))
+    returned_kv_cache = [(jnp.array([10.0]), jnp.array([20.0]))]
+    with self.assertRaises(TypeError):
+      maxtext_utils.update_kv_caches_after_scan(kv_caches_tuple, returned_kv_cache, scan_length=1, block_len=2)
 
 
 if __name__ == "__main__":

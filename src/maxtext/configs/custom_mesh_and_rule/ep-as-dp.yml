@@ -12,50 +12,55 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# When scaling to a large number of devices with limited model dimensions,
-# introducing an additional FSDP axis prevents sharding limits and improves
-# GMM efficiency. This rule demonstrates using both `fsdp` and `fsdp_transpose`
-# to enable efficient training across O(1000) chips.
+# This rule uses data, FSDP, FSDP_transpose and expert. Expert axis acts as
+# data parallelism in components except core MoE part (between EP all2all).
 
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'expert']
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'expert']]
-context_sharding: 'context'
+mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert']
+data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert']]
 logical_axis_rules: [
                       # ==========================================
                       # Vocabulary Embedding
                       # ==========================================
                       # Vocab Activations
-                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'expert']],
+                      ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_vocab', []],
                       # Vocab Weights
                       ['vocab', []],
-                      ['embed_vocab', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
+                      ['embed_vocab', ['fsdp', 'fsdp_transpose']],
                       # ==========================================
                       # Attention
                       # ==========================================
                       # Attention Activations
                       ['activation_batch_attn', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_heads', []],
+                      ['activation_kv_heads', []],
                       ['activation_length_attn', ['context']],
                       ['activation_q_length', ['context']],
+                      ['activation_kv_length', []],
+                      ['activation_embed_attn', ['tensor', 'tensor_transpose']],
+                      ['activation_kv', []],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_kv_head_dim', []],
                       # Attention Weights
                       ['q_lora', ['fsdp']],
-                      ["q_lora_up_proj", ['fsdp_transpose', 'expert']],
+                      ["q_lora_up_proj", []],
                       ['kv_lora', ['fsdp']],
-                      ["kv_lora_up_proj", ['fsdp_transpose', 'expert']],
+                      ["kv_lora_up_proj", []],
                       # ==========================================
                       # Mixture of Experts (MoE)
                       # ==========================================
                       # MoE Activations
-                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose']],
-                      ['activation_length_moe', ['context']],
-                      ['activation_norm_length_moe', ['context']],
+                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_length_moe', []],
+                      ['activation_norm_length_moe', []],
+                      ['activation_embed_moe', []],
                       ['activation_mlp_moe', []],
                       ['activation_exp', ['expert']],
                       # MoE Weights
                       ['exp', 'expert'],
                       ['mlp_moe', ['fsdp_transpose']],
-                      ['embed_moe', ['fsdp', 'context']],
+                      ['embed_moe', ['fsdp']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
@@ -63,13 +68,16 @@ logical_axis_rules: [
                       ['activation_mlp', []],
                       # Note activation batch and length also get used in vocab
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_length', ['context']],
-                      ['activation_norm_length', ['context']],
+                      ['activation_length', []],
+                      ['activation_norm_length', []],
                       ['activation_embed', []],
-                      ['activation_stage', 'stage'],
+                      ['activation_stage', []],
                       # General Weights
                       ['mlp', ['fsdp_transpose']],
-                      ['embed', ['fsdp', 'context', 'expert']],
-                      ['norm', []],
-                      ['layers', 'stage'],
+                      ['embed', ['fsdp', 'fsdp_transpose']],
+                      ['embed', ['fsdp']],
+                      # ==========================================
+                      # Deprecated / Scheduled for Removal
+                      # ==========================================
+                      ['exp_with_fsdp', 'fsdp'],
                   ]

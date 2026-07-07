@@ -39,6 +39,13 @@ Run large-scale JAX jobs on TPUs using Pathways. Supports batch and headless (in
 
 Run tests and local development without Google Cloud dependencies (no `gcloud`, GCS, or Vertex AI required).
 :::
+
+:::{grid-item-card} ♻️ Elastic training (demo)
+:link: run_maxtext/run_maxtext_elastic_training
+:link-type: doc
+
+Demonstrate fault-tolerant training with Pathways on GKE: lose a TPU slice mid-run and recover in-process from the last checkpoint, no job restart.
+:::
 ::::
 
 ```{toctree}
@@ -51,4 +58,5 @@ run_maxtext/run_maxtext_single_host_gpu.md
 run_maxtext/run_maxtext_via_xpk.md
 run_maxtext/run_maxtext_via_pathways.md
 run_maxtext/decoupled_mode.md
+run_maxtext/run_maxtext_elastic_training.md
 ```

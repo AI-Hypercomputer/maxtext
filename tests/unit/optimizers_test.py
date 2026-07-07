@@ -581,13 +581,13 @@ class TestMuonLogic(unittest.TestCase):
     result = muon_utils.get_muon_weight_dimension_numbers(model, config)
 
     # Verify standard weight path: ('layer1', 'kernel') -> default (0,)
-    self.assertEqual(result.layer1.kernel.value, mdn((0,), (-1,)))
+    self.assertEqual(result.layer1.kernel, mdn((0,), (-1,)))
 
     # Verify MoE weight path: ('MoeBlock_0', 'wi_0', 'kernel') -> (-2,)
-    self.assertEqual(result.MoeBlock_0.wi_0.kernel.value, mdn((-2,), (-1,)))
+    self.assertEqual(result.MoeBlock_0.wi_0.kernel, mdn((-2,), (-1,)))
 
     # Verify exclusion (scalar/scale)
-    self.assertIsNone(result.scale.value)
+    self.assertIsNone(result.scale)
 
   def test_verbose_output_nnx(self):
     """Covers lines 128 and 135-154: _print_structure_debug via verbose=True with NNX model."""
@@ -617,9 +617,9 @@ class TestMuonLogic(unittest.TestCase):
     result = muon_utils.get_muon_weight_dimension_numbers(model, config)
 
     # Check attention query: [0] -> [-2, -1]
-    self.assertEqual(result.self_attention.query.kernel.value, mdn((0,), (-2, -1)))
+    self.assertEqual(result.self_attention.query.kernel, mdn((0,), (-2, -1)))
     # Check attention out: [0, -2] -> [-1]
-    self.assertEqual(result.self_attention.out.kernel.value, mdn((0, -2), (-1,)))
+    self.assertEqual(result.self_attention.out.kernel, mdn((0, -2), (-1,)))
 
 
 if __name__ == "__main__":

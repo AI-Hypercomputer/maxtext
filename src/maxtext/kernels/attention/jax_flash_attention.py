@@ -159,10 +159,10 @@ def flash_attention_block_masked(
             (batch_size, num_kv_heads, q_groups, block_q, block_kv),
         )
 
-        s_i_j = jnp.where(broadcasted_mask, s_i_j, mask_value)
         if cap is not None:
           s_i_j = jnp.tanh(s_i_j / cap)
           s_i_j = s_i_j * cap
+        s_i_j = jnp.where(broadcasted_mask, s_i_j, mask_value)
         m_i_j = s_i_j.max(axis=-1)
         p_i_j = jnp.exp(s_i_j - m_i_j[..., None])
         l_i_j = p_i_j.sum(axis=-1)

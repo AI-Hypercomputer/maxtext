@@ -13,10 +13,15 @@
 # limitations under the License.
 
 """Tests for Qwix LoRA utils in lora_utils.py"""
+import re
 import sys
+import tempfile
 import unittest
 from unittest import mock
+
+from etils import epath
 import jax
+import jax.numpy as jnp
 import optax
 import pytest
 from flax import nnx
@@ -25,10 +30,13 @@ from flax import nnx
 pytestmark = [pytest.mark.post_training]
 
 # Now safe to do top-level imports
+from maxtext.common import checkpointing
 from tunix.sft import peft_trainer
 from maxtext.utils import lora_utils
 from maxtext.utils import model_creation_utils
 from maxtext.configs import pyconfig
+from maxtext.utils import maxtext_utils
+from jax.sharding import Mesh
 from tests.utils.test_helpers import get_test_config_path
 
 # ---------------------------------------------------------------------------
@@ -56,11 +64,12 @@ _BASE_CONFIG = {
 
 def _make_config(**overrides):
   """Return a MaxTextConfig object suitable for unit tests."""
+  config_dict = _BASE_CONFIG.copy()
+  config_dict.update(overrides)
   # Use initialize_pydantic to get nested models as objects (attribute access)
   return pyconfig.initialize_pydantic(
       [sys.argv[0], get_test_config_path()],
-      **_BASE_CONFIG,
-      **overrides,
+      **config_dict,
   )
 
 
@@ -80,6 +89,14 @@ class LoraUtilsTest(unittest.TestCase):
     self.assertEqual(
         path,
         "decoder/layers/(?:[0-9]+/)?.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
+    )
+
+    mock_config.model_name = "gemma4-9b"
+    path = lora_utils._get_lora_module_path(mock_config)
+    self.assertEqual(
+        path,
+        "decoder/((scanned_blocks|layers_remainder)/)?layers.*/.*"
+        "(self_attention/(query|key|value|out)|mlp/.*(wi_0|wi_1|wo|shared_experts/(wi_0|wi_1|wo)))",
     )
 
     mock_config.model_name = "unknown_model"
@@ -104,10 +121,19 @@ class LoraUtilsTest(unittest.TestCase):
     mock_config.lora.lora_module_path = "custom/path"
     mock_config.lora.lora_rank = 8
     mock_config.lora.lora_alpha = 16.0
+    mock_config.lora.lora_weight_qtype = "int8"
+    mock_config.lora.lora_tile_size = 32
 
     with mock.patch("qwix.LoraProvider") as mock_provider:
       lora_utils._build_lora_provider(mock_config)
-      mock_provider.assert_called_once_with(module_path="custom/path", rank=8, alpha=16.0, dropout=0.0)
+      mock_provider.assert_called_once_with(
+          module_path="custom/path",
+          rank=8,
+          alpha=16.0,
+          dropout=0.0,
+          weight_qtype="int8",
+          tile_size=32,
+      )
 
   def test_prepare_dummy_inputs(self):
     """Test preparation of dummy inputs for LoRA verification."""
@@ -115,26 +141,41 @@ class LoraUtilsTest(unittest.TestCase):
     self.assertEqual(tokens.shape, (1, 1))
     self.assertEqual(positions.shape, (1, 1))
 
-  def test_verify_lora_parameters_enabled(self):
-    """Test verification of LoRA parameters when enabled."""
-    mock_model = mock.MagicMock()
-    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
-
-    # Note: we use our local is_lora_enabled now
-    with mock.patch("maxtext.utils.lora_utils.is_lora_enabled", return_value=True):
-      # Should not raise
-      lora_utils._verify_lora_parameters(mock_model, mock_config)
-
-  def test_verify_lora_parameters_not_enabled_no_match(self):
-    """Test verification fails when LoRA parameters are expected but not found."""
+  def test_verify_lora_parameters_success(self):
+    """Test verification of LoRA parameters with matches and enabled LoRA."""
     mock_model = mock.MagicMock()
     mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
     mock_config.lora = mock.MagicMock()
-    mock_config.model_name = "llama"
+    mock_config.lora.lora_module_path = ".*mlp/wi_0.*"
+
+    mock_param = nnx.LoRAParam(0.0)
+    mock_graph_entries = [
+        (("decoder", "layers", 0, "mlp", "wi_0", "lora_a"), mock_param),
+    ]
+
+    with (
+        mock.patch("maxtext.utils.lora_utils.nnx.iter_graph", return_value=mock_graph_entries),
+        mock.patch("maxtext.utils.lora_utils.is_lora_enabled", return_value=True),
+        mock.patch("maxtext.utils.max_logging.log") as mock_log,
+    ):
+      lora_utils._verify_lora_parameters(mock_model, mock_config)
+
+      # Should log the successful match pattern summary
+      log_calls = [call[0][0] for call in mock_log.call_args_list]
+      self.assertTrue(any("successfully matched" in msg for msg in log_calls))
+      self.assertTrue(any("Sample matched submodules" in msg for msg in log_calls))
+
+  def test_verify_lora_parameters_not_enabled_no_match(self):
+    """Test verification fails with ValueError when no modules match at all."""
+    mock_model = mock.MagicMock()
+    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
+    mock_config.lora = mock.MagicMock()
     mock_config.lora.lora_module_path = "non_existent"
 
-    with mock.patch("maxtext.utils.lora_utils.is_lora_enabled", return_value=False):
-      mock_model.iter_modules.return_value = []
+    with (
+        mock.patch("flax.nnx.iter_modules", return_value=[]),
+        mock.patch("maxtext.utils.lora_utils.is_lora_enabled", return_value=False),
+    ):
       with self.assertRaisesRegex(ValueError, "no LoRA parameters found"):
         lora_utils._verify_lora_parameters(mock_model, mock_config)
 
@@ -158,8 +199,14 @@ class LoraUtilsTest(unittest.TestCase):
     # If we skip Qwix, it should stay False.
     self.assertFalse(lora_utils.is_lora_enabled(result))
 
-  def _run_apply_lora_test(self, scan_layers: bool):
-    """Helper to run LoRA application test with/without scanned layers."""
+  def _run_apply_lora_test(
+      self,
+      scan_layers: bool,
+      weight_qtype=None,
+      tile_size=None,
+      mock_multihost: bool = False,
+  ):
+    """Helper to run LoRA application test with/without scanned layers and optional QLoRA."""
     # Passing nested dict as 'lora' kwarg to _make_config
     cfg = _make_config(
         lora={
@@ -167,18 +214,27 @@ class LoraUtilsTest(unittest.TestCase):
             "lora_rank": 4,
             "lora_alpha": 8.0,
             "lora_module_path": ".*mlp/wi_.*",
+            "lora_weight_qtype": weight_qtype,
+            "lora_tile_size": tile_size,
         },
         scan_layers=scan_layers,
     )
 
     # Create a real small model using standard creation utils
-    model, _ = model_creation_utils.from_pretrained(cfg, mesh=None, model_mode=model_creation_utils.MODEL_MODE_TRAIN)
+    model, mesh = model_creation_utils.from_pretrained(cfg, mesh=None, model_mode=model_creation_utils.MODEL_MODE_TRAIN)
 
     # Verify model is NOT lora enabled initially
     self.assertFalse(lora_utils.is_lora_enabled(model))
 
-    # Apply LoRA
-    lora_model = lora_utils.apply_lora_to_model(model, model.mesh, cfg)
+    if mock_multihost:
+      devices_array = maxtext_utils.create_device_mesh(cfg)
+      dummy_mesh = Mesh(devices_array, cfg.mesh_axes)
+
+      # Just verify that apply_lora_to_model runs successfully with the dummy mesh
+      lora_model = lora_utils.apply_lora_to_model(model, dummy_mesh, cfg)
+    else:
+      # Apply LoRA
+      lora_model = lora_utils.apply_lora_to_model(model, mesh, cfg)
 
     # Verify we can find LoRAParam in the state
     _, state = nnx.split(lora_model)
@@ -200,31 +256,44 @@ class LoraUtilsTest(unittest.TestCase):
     self.assertGreater(len(jax.tree_util.tree_leaves(opt_state)), 0)
 
   def test_apply_lora_to_model_scan_layers_false(self):
-    """Test applying LoRA to model with scan_layers=False."""
+    """Test applying standard LoRA to model with scan_layers=False."""
     self._run_apply_lora_test(scan_layers=False)
 
   def test_apply_lora_to_model_scan_layers_true(self):
-    """Test applying LoRA to model with scan_layers=True."""
+    """Test applying standard LoRA to model with scan_layers=True."""
     self._run_apply_lora_test(scan_layers=True)
+
+  def test_apply_qlora_to_model_scan_layers_false(self):
+    """Test applying QLoRA to model with scan_layers=False."""
+    self._run_apply_lora_test(scan_layers=False, weight_qtype="int8", tile_size=32)
+
+  def test_apply_qlora_to_model_scan_layers_true(self):
+    """Test applying QLoRA to model with scan_layers=True."""
+    self._run_apply_lora_test(scan_layers=True, weight_qtype="int8", tile_size=32)
+
+  def test_apply_lora_multihost_mock(self):
+    """Test applying LoRA with a dummy mesh to trigger the multi-host reshard callback."""
+    self._run_apply_lora_test(scan_layers=False, mock_multihost=True)
 
   def test_restore_lora_from_path(self):
     """Test restoration of LoRA parameters from a path."""
     cfg = _make_config(
-        lora={"enable_lora": True, "lora_restore_path": "some/path", "lora_rank": 4, "lora_alpha": 8.0},
+        lora={
+            "enable_lora": True,
+            "lora_restore_path": "some/path",
+            "lora_rank": 4,
+            "lora_alpha": 8.0,
+        },
         scan_layers=False,
     )
     model, _ = model_creation_utils.from_pretrained(cfg, mesh=None, model_mode=model_creation_utils.MODEL_MODE_TRAIN)
     model = lora_utils.apply_lora_to_model(model, None, cfg)
 
-    trainer = mock.MagicMock()
-    trainer.model = model
-    trainer.train_steps = 0
-
     restored_state = nnx.state(model, nnx.LoRAParam)
 
     with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=restored_state) as mock_restore:
       with mock.patch("flax.nnx.update") as mock_update:
-        lora_utils.restore_lora_from_path(trainer, cfg)
+        lora_utils.restore_lora_from_path(model, cfg)
         mock_restore.assert_called_once()
         args, kwargs = mock_restore.call_args
         self.assertEqual(args[0], "some/path")
@@ -234,6 +303,191 @@ class LoraUtilsTest(unittest.TestCase):
         elif "args" in kwargs and hasattr(kwargs["args"], "partial_restore"):
           self.assertTrue(kwargs["args"].partial_restore)
         mock_update.assert_called_once()
+
+  def test_sync_lora_metadata_default_syncs(self):
+    """Test that default lora rank/alpha are successfully synced from checkpoint metadata."""
+    cfg = _make_config(
+        lora={
+            "enable_lora": True,
+            "lora_restore_path": "dummy/path",
+            "lora_rank": 0,
+            "lora_alpha": 0.0,
+        }
+    )
+    mock_metadata = mock.MagicMock()
+    mock_metadata.custom_metadata = {"lora": {"lora_rank": 32, "lora_alpha": 64.0}}
+
+    with mock.patch("orbax.checkpoint.StandardCheckpointer.metadata", return_value=mock_metadata):
+      lora_utils.sync_lora_metadata(cfg)
+      self.assertEqual(cfg.lora.lora_rank, 32)
+      self.assertEqual(cfg.lora.lora_alpha, 64.0)
+
+  def test_sync_lora_metadata_matching_passes(self):
+    """Test that matching non-default parameters pass without errors."""
+    cfg = _make_config(
+        lora={
+            "enable_lora": True,
+            "lora_restore_path": "dummy/path",
+            "lora_rank": 32,
+            "lora_alpha": 64.0,
+        }
+    )
+    mock_metadata = mock.MagicMock()
+    mock_metadata.custom_metadata = {"lora": {"lora_rank": 32, "lora_alpha": 64.0}}
+
+    with mock.patch("orbax.checkpoint.StandardCheckpointer.metadata", return_value=mock_metadata):
+      # Should not raise ValueError
+      lora_utils.sync_lora_metadata(cfg)
+      self.assertEqual(cfg.lora.lora_rank, 32)
+      self.assertEqual(cfg.lora.lora_alpha, 64.0)
+
+  def test_sync_lora_metadata_rank_mismatch_fails(self):
+    """Test that configured rank mismatching checkpoint metadata rank raises ValueError."""
+    cfg = _make_config(
+        lora={
+            "enable_lora": True,
+            "lora_restore_path": "dummy/path",
+            "lora_rank": 8,
+            "lora_alpha": 64.0,
+        }
+    )
+    mock_metadata = mock.MagicMock()
+    mock_metadata.custom_metadata = {"lora": {"lora_rank": 32, "lora_alpha": 64.0}}
+
+    with mock.patch("orbax.checkpoint.StandardCheckpointer.metadata", return_value=mock_metadata):
+      with self.assertRaisesRegex(ValueError, "Configured lora_rank .* does not match"):
+        lora_utils.sync_lora_metadata(cfg)
+
+  def test_sync_lora_metadata_alpha_mismatch_fails(self):
+    """Test that configured alpha mismatching checkpoint metadata alpha raises ValueError."""
+    cfg = _make_config(
+        lora={
+            "enable_lora": True,
+            "lora_restore_path": "dummy/path",
+            "lora_rank": 32,
+            "lora_alpha": 16.0,
+        }
+    )
+    mock_metadata = mock.MagicMock()
+    mock_metadata.custom_metadata = {"lora": {"lora_rank": 32, "lora_alpha": 64.0}}
+
+    with mock.patch("orbax.checkpoint.StandardCheckpointer.metadata", return_value=mock_metadata):
+      with self.assertRaisesRegex(ValueError, "Configured lora_alpha .* does not match"):
+        lora_utils.sync_lora_metadata(cfg)
+
+  def test_save_checkpoint_passes_metadata(self):
+    """Test that save_checkpoint correctly generates and passes custom lora metadata to CheckpointManager."""
+    cfg = _make_config(
+        lora={"enable_lora": True, "lora_rank": 8, "lora_alpha": 16.0},
+        enable_checkpointing=True,
+    )
+    mock_manager = mock.MagicMock()
+    mock_state = mock.MagicMock()
+
+    with mock.patch("jax.block_until_ready"):
+      checkpointing.save_checkpoint(mock_manager, step=10, state=mock_state, config=cfg)
+      mock_manager.save.assert_called_once()
+      _, kwargs = mock_manager.save.call_args
+      self.assertIn("custom_metadata", kwargs)
+      self.assertEqual(kwargs["custom_metadata"]["lora"], cfg.lora.model_dump())
+
+  def test_save_and_restore_metadata_integration(self):
+    """Integration test checking that Orbax CheckpointManager writes and reads custom LoRA metadata."""
+
+    cfg_save = _make_config(
+        lora={"enable_lora": True, "lora_rank": 8, "lora_alpha": 16.0},
+        enable_checkpointing=True,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      manager = checkpointing.create_orbax_checkpoint_manager(
+          tmpdir,
+          enable_checkpointing=True,
+          use_async=False,
+          save_interval_steps=1,
+          use_ocdbt=False,
+          use_zarr3=False,
+      )
+
+      # Use save_checkpoint wrapper with a simple state
+      dummy_state = {"weight": jnp.array([1.0, 2.0])}
+      checkpointing.save_checkpoint(manager, step=0, state=dummy_state, config=cfg_save)
+      manager.wait_until_finished()
+
+      # Now verify that the saved checkpoint contains metadata on disk
+      checkpoint_dir = epath.Path(tmpdir) / "0"
+      self.assertTrue((checkpoint_dir / "_CHECKPOINT_METADATA").exists())
+
+      # Restore using sync_lora_metadata on a config with default rank/alpha
+      cfg_restore = _make_config(
+          lora={
+              "enable_lora": True,
+              "lora_restore_path": str(checkpoint_dir),
+              "lora_rank": 0,
+              "lora_alpha": 0.0,
+          }
+      )
+      lora_utils.sync_lora_metadata(cfg_restore)
+
+      # Verify values were successfully synced back
+      self.assertEqual(cfg_restore.lora.lora_rank, 8)
+      self.assertEqual(cfg_restore.lora.lora_alpha, 16.0)
+
+  def test_gemma4_lora_path_matching(self):
+    """Test that the Gemma4 LoRA regex correctly matches all expected parameter paths."""
+    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
+    mock_config.lora = mock.MagicMock()
+    mock_config.lora.lora_module_path = ""
+    mock_config.model_name = "gemma4-9b"
+
+    path_regex = lora_utils._get_lora_module_path(mock_config)
+    compiled = re.compile(path_regex)
+
+    # Expected matching paths:
+    matching_paths = [
+        # Scan layers = True, Dense/MoE attention
+        "decoder/scanned_blocks/layers/self_attention/query/kernel",
+        "decoder/scanned_blocks/layers/self_attention/key/kernel",
+        "decoder/scanned_blocks/layers/self_attention/value/kernel",
+        "decoder/scanned_blocks/layers/self_attention/out/kernel",
+        # Scan layers = True, Dense MLP
+        "decoder/scanned_blocks/layers/mlp/wi_0/kernel",
+        "decoder/scanned_blocks/layers/mlp/wi_1/kernel",
+        "decoder/scanned_blocks/layers/mlp/wo/kernel",
+        # Scan layers = True, MoE MLP
+        "decoder/scanned_blocks/layers/mlp/shared_experts/wi_0/kernel",
+        "decoder/scanned_blocks/layers/mlp/shared_experts/wi_1/kernel",
+        "decoder/scanned_blocks/layers/mlp/shared_experts/wo/kernel",
+        # Scan layers = False, Dense/MoE attention
+        "decoder/layers_remainder/layers/0/self_attention/query/kernel",
+        "decoder/layers_remainder/layers/0/self_attention/key/kernel",
+        "decoder/layers_remainder/layers/0/self_attention/value/kernel",
+        "decoder/layers_remainder/layers/0/self_attention/out/kernel",
+        # Scan layers = False, Dense MLP
+        "decoder/layers_remainder/layers/0/mlp/wi_0/kernel",
+        "decoder/layers_remainder/layers/0/mlp/wi_1/kernel",
+        "decoder/layers_remainder/layers/0/mlp/wo/kernel",
+        # Scan layers = False, MoE MLP
+        "decoder/layers_remainder/layers/0/mlp/shared_experts/wi_0/kernel",
+        "decoder/layers_remainder/layers/0/mlp/shared_experts/wi_1/kernel",
+        "decoder/layers_remainder/layers/0/mlp/shared_experts/wo/kernel",
+    ]
+
+    for path in matching_paths:
+      self.assertTrue(compiled.search(path), f"Failed to match valid path: {path}")
+
+    # Expected non-matching paths (e.g. layernorm, embedding):
+    non_matching_paths = [
+        "decoder/scanned_blocks/layers/pre_self_attention_norm/scale",
+        "decoder/scanned_blocks/layers/post_self_attention_norm/scale",
+        "decoder/layers_remainder/layers/0/pre_self_attention_norm/scale",
+        "decoder/layers_remainder/layers/0/post_self_attention_norm/scale",
+        "decoder/final_norm/scale",
+        "token_embedder/embedding",
+    ]
+
+    for path in non_matching_paths:
+      self.assertFalse(compiled.search(path), f"Incorrectly matched invalid path: {path}")
 
 
 if __name__ == "__main__":

@@ -15,12 +15,15 @@
 # pylint: disable=bare-except, consider-using-generator
 """Utils that are only interesting for training in MaxText."""
 
+import subprocess
+import jax
 import functools
+import orbax.checkpoint.pathways as ocp_pathways
 from functools import partial
 
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
-import jax
+
 from maxtext.common import checkpointing
 from maxtext.common import train_state_nnx
 from maxtext.common.common_types import ReorderStrategy
@@ -53,6 +56,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.local_checkpoint_directory,
         config.local_checkpoint_period,
         mesh,
+        config.colocated_python_checkpointing,
     )
   elif config.enable_emergency_checkpoint:
     abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
@@ -93,6 +97,17 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
+    )
+
+  # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
+  if checkpoint_manager is not None and config.enable_single_controller and config.colocated_python_checkpointing:
+    max_logging.log("Registering colocated python array handler")
+    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+    )
+    ocp_pathways.register_type_handlers(
+        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
+        checkpointing_impl=checkpointing_impl,
     )
 
   return checkpoint_manager
@@ -214,6 +229,7 @@ def setup_train_loop(config, recorder, devices=None):
     is_training = True
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     if config.pure_nnx:
       # Create abstract NNX model.
       _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
@@ -241,30 +257,40 @@ def setup_train_loop(config, recorder, devices=None):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     # Validate context parallelism with packing configuration
-    if config.context_parallel_size > 1 and config.packing:
+    context_parallel_strategy = config.context_parallel_strategy.lower()
+    if context_parallel_size > 1 and config.packing:
       if config.dataset_type == "synthetic":
         raise ValueError(
             "Context parallelism with sequence packing is not supported with synthetic data. "
             "Please disable sequence packing (set packing=False)."
         )
-      if config.context_parallel_strategy != "ring":
+      if context_parallel_strategy not in ("all_gather", "ring"):
         raise ValueError(
-            "Context parallelism with 'all_gather' strategy cannot be used with sequence packing. "
-            "Please use 'ring' strategy instead."
+            "Context parallelism with sequence packing supports context_parallel_strategy='all_gather' or 'ring'."
         )
+      if (
+          config.hardware in ("gpu", "gpu_multiprocess")
+          and config.attention == "cudnn_flash_te"
+          and not (context_parallel_strategy == "ring" and config.context_parallel_load_balance)
+      ):
+        raise ValueError("Packing is only supported for load balanced ring attention with context parallelism for GPU.")
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
     with jax.set_mesh(mesh):
-      if config.context_parallel_size > 1 and config.context_parallel_load_balance:
+      if context_parallel_size > 1 and config.context_parallel_load_balance:
 
         # Determine load balancing reorder strategy based on whether packing is enabled
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
-          reorder_strategy = ReorderStrategy.STRIPED if config.packing else ReorderStrategy.DUAL_CHUNK_SWAP
+          reorder_strategy = (
+              ReorderStrategy.STRIPED
+              if config.packing and context_parallel_strategy == "ring"
+              else ReorderStrategy.DUAL_CHUNK_SWAP
+          )
         else:
           reorder_strategy = config.context_parallel_reorder_strategy
 
         reorder_fn = maxtext_utils.get_reorder_callable(
-            config.context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
+            context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
         )
         data_iterator = map(reorder_fn, data_iterator)
         if eval_data_iterator:
@@ -295,12 +321,23 @@ def setup_train_loop(config, recorder, devices=None):
         state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
 
         # create state_mesh_shardings for the DilocoState
+        step_mesh = (
+            state_mesh_shardings.optimizer.step.mesh
+            if config.pure_nnx
+            else state_mesh_shardings.step.mesh
+        )
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
         state_mesh_shardings = diloco.DiLoCoTrainState(
             inner_state_shardings,
-            state_mesh_shardings.params,
+            # Match the outer params' pure-dict structure (build_diloco_state stores
+            # outer_params via to_pure_dict), so the sharding tree matches the state tree.
+            state_mesh_shardings_params.to_pure_dict()
+            if config.pure_nnx
+            else state_mesh_shardings_params,
             outer_opt_state_sharding,
-            jax.sharding.NamedSharding(mesh=state_mesh_shardings.step.mesh, spec=jax.sharding.PartitionSpec()),
+            jax.sharding.NamedSharding(
+                mesh=step_mesh, spec=jax.sharding.PartitionSpec()
+            ),
         )
 
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
@@ -322,8 +359,14 @@ def setup_train_loop(config, recorder, devices=None):
       maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
   if config.pure_nnx:
-    train_state = nnx.merge(state_graphdef, state)
-    model = train_state.model
+    if config.enable_diloco:
+      # Don't merge the DiLoCoTrainState into the plain-model graphdef. The inner
+      # train step needs that graphdef as jit_model; the wrapper passes through as state.
+      train_state = state
+      model = state_graphdef
+    else:
+      train_state = nnx.merge(state_graphdef, state)
+      model = train_state.model
   else:
     train_state = state
 
@@ -378,3 +421,53 @@ def validate_completed_steps(completed_steps: int, config_steps: int):
         f"Did you mean to continue training past step {completed_steps} (you should set steps > {completed_steps}) "
         f"or to not load the checkpoint (use enable_checkpointing=False?)"
     )
+
+
+def maybe_apply_dcn_throttling(config):
+  """Applies programmatic traffic control (tc) bandwidth limit if configured."""
+  if not config.dcn_bandwidth_limit:
+    return
+
+  interface = config.dcn_bandwidth_interface
+
+  # Always clean up any existing traffic control rule on the interface first.
+  try:
+    subprocess.run(
+        ["tc", "qdisc", "del", "dev", interface, "root"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.error(f"Failed to clean up existing traffic control on {interface}: {e}")
+
+  rate = config.dcn_bandwidth_limit
+  burst = config.dcn_bandwidth_burst
+  latency = config.dcn_bandwidth_latency
+
+  max_logging.log(f"Applying tc egress limit of {rate} (burst: {burst}, latency: {latency}) on {interface}...")
+  try:
+    cmd = ["tc", "qdisc", "add", "dev", interface, "root", "tbf", "rate", rate, "burst", burst, "latency", latency]
+    subprocess.run(cmd, check=True)
+    max_logging.log("DCN Bandwidth throttling applied successfully.")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.error(f"Failed to apply DCN bandwidth throttling: {e}")
+
+
+def maybe_cleanup_dcn_throttling(config):
+  """Cleans up traffic control (tc) rules."""
+  if not config.dcn_bandwidth_limit:
+    return
+
+  interface = config.dcn_bandwidth_interface
+  max_logging.log(f"Cleaning up tc egress limit on {interface}...")
+  try:
+    subprocess.run(
+        ["tc", "qdisc", "del", "dev", interface, "root"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    max_logging.log("DCN Bandwidth throttling cleaned up successfully.")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.error(f"Failed to clean up DCN bandwidth throttling: {e}")

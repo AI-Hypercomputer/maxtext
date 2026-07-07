@@ -25,6 +25,7 @@ from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.sharding import AxisType, Mesh
 from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
@@ -47,6 +48,7 @@ from maxtext.layers.attention_op import (
 )
 from maxtext.layers.attentions import Attention
 from maxtext.layers import embeddings
+from maxtext.kernels.attention import jax_flash_attention
 from maxtext.configs import pyconfig
 from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
 import numpy as np
@@ -54,6 +56,59 @@ import pytest
 
 from tests.utils import attention_test_util
 from tests.utils.test_helpers import get_test_config_path
+
+
+class JaxFlashAttentionTest(unittest.TestCase):
+  """Tests for JAX flash attention."""
+
+  def test_flash_attention_block_masked_soft_cap(self):
+    cap = 1.0
+    mask_value = -1.0e9
+    query = jnp.array([[[[10.0], [10.0]]]], dtype=jnp.float32)
+    key = jnp.array([[[[10.0], [0.0]]]], dtype=jnp.float32)
+    value = jnp.array([[[[1.0], [3.0]]]], dtype=jnp.float32)
+    mask = jnp.array([[True, True], [True, False]])
+
+    output = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=2,
+        block_q=1,
+        mask=mask,
+        mask_value=mask_value,
+        cap=cap,
+    )
+
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.tanh(logits / cap) * cap
+    logits = jnp.where(mask[None, None, :, :], logits, mask_value)
+    expected = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+class SplashLocalMaskTest(unittest.TestCase):
+  """Tests for Splash local masks."""
+
+  def test_local_window_matches_dense_mask(self):
+    seq_len = 8
+    window_size = 3
+    mask = splash_attention_mask.CausalMask((seq_len, seq_len)) & splash_attention_mask.LocalMask(
+        (seq_len, seq_len),
+        window_size=(window_size - 1, window_size),
+        offset=0,
+    )
+    q_sequence = np.arange(seq_len)[:, None]
+    kv_sequence = np.arange(seq_len)[None, :]
+    expected_mask = (kv_sequence <= q_sequence) & (kv_sequence > q_sequence - window_size)
+
+    np.testing.assert_array_equal(mask[:, :], expected_mask)
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -271,6 +326,29 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       # pylint: disable=protected-access
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
+
+
+class LoadBalancedMaskTest(unittest.TestCase):
+  """Tests for load-balanced Splash masks."""
+
+  def test_load_balanced_local_window(self):
+    seq_len = 8
+    window_size = 3
+    q_sequence = np.asarray([0, 1, 6, 7, 2, 3, 4, 5])
+    kv_sequence = np.arange(seq_len)
+    causal_mask = attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=2)
+    local_mask = attention_op.LoadBalancedLocalMask(
+        shape=(seq_len, seq_len),
+        window_size=(window_size - 1, window_size),
+        offset=0,
+        cp_size=2,
+    )
+
+    expected_mask = (kv_sequence[None, :] <= q_sequence[:, None]) & (
+        kv_sequence[None, :] > q_sequence[:, None] - window_size
+    )
+
+    np.testing.assert_array_equal((causal_mask & local_mask)[:, :], expected_mask)
 
 
 class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
@@ -863,6 +941,82 @@ class AttentionTest(parameterized.TestCase):
         msg="Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
         f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
         f" ici_expert_parallelism={ici_expert_parallelism}.",
+    )
+
+  @parameterized.named_parameters(
+      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
+      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
+  )
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_packed_all_gather_context_parallel(self, context_parallel_load_balance):
+    """Test equivalence between packed dot_product and packed flash attention + all-gather context parallelism."""
+    lnx = jax.random.normal(
+        self.rng,
+        shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
+        dtype=self.dtype,
+    )
+    tokens_per_segment = self.max_target_length // 4
+    segment_ids = jnp.repeat(jnp.arange(1, 5, dtype=jnp.int32), tokens_per_segment)
+    positions = jnp.tile(jnp.arange(tokens_per_segment, dtype=jnp.int32), 4)
+    decoder_segment_ids = jnp.broadcast_to(segment_ids, (self.global_batch_size, self.max_target_length))
+    decoder_positions = jnp.broadcast_to(positions, (self.global_batch_size, self.max_target_length))
+    mha_generic_output, _ = self._attention_as_mha_generic(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    generic_state = nnx.state(self._attention_as_mha_generic)
+
+    cfg_cp = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **self.config_arguments,
+        ici_context_parallelism=4,
+        context_parallel_strategy="all_gather",
+        context_parallel_load_balance=context_parallel_load_balance,
+        packing=True,
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    attention_as_mha_flash_cp = Attention(
+        config=cfg_cp,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=mesh_cp,
+        attention_kernel="flash",
+        dtype=self.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=self.nnx_rng,
+    )
+    nnx.update(attention_as_mha_flash_cp, generic_state)
+
+    mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
+        cfg_cp,
+        mesh_cp,
+        attention_as_mha_flash_cp,
+        lnx,
+        decoder_segment_ids,
+        decoder_positions,
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(
+            jax.device_get(mha_generic_output),
+            jax.device_get(mha_generic_flash_cp_output),
+            rtol=1e-01,
+            atol=1e-01,
+            equal_nan=False,
+        ),
+        msg="Logits from packed generic dot product and packed flash attention + all-gather context parallelism "
+        f"are not close. context_parallel_load_balance={context_parallel_load_balance}.",
     )
 
   @pytest.mark.tpu_only
@@ -1801,6 +1955,62 @@ class MLATest(attention_test_util.MLATestBase):
     )
 
     np.testing.assert_allclose(loss, 0.0, atol=1e-5)
+
+  def test_indexer_with_approx_top_k(self):
+    """Verify indexer runs with both approx and exact top-k."""
+    for use_approx in [False, True]:
+      with self.subTest(indexer_use_approx_top_k=use_approx):
+        mla_config_args = self.config_arguments.copy()
+        mla_config_args["use_indexer"] = True
+        mla_config_args["indexer_use_approx_top_k"] = use_approx
+        mla_config_args["indexer_topk"] = 4  # Force indexer to run instead of returning early
+        mla_config_args["attention"] = "dot_product"
+
+        cfg, mla = self.init_mla(mla_config_args, rope_type="default")
+
+        lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
+
+        # Run forward pass which triggers indexer
+        out, _ = mla(
+            lnx,
+            lnx,
+            decoder_segment_ids=decoder_segment_ids,
+            inputs_positions=decoder_positions,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+        self.assertIsNotNone(out)
+
+  def test_approx_top_k_recall(self):
+    """Verify that approx_max_k meets the specified recall target compared to exact top_k."""
+    jax_rng = jax.random.PRNGKey(0)
+
+    # We need a large enough N to make the approximation meaningful.
+    # Use shape [batch=4, queries=16, N=1024]
+    batch, queries, N = 4, 16, 1024
+    K = 64
+    recall_target = 0.95
+
+    # Generate random scores
+    scores = jax.random.normal(jax_rng, (batch, queries, N))
+
+    # 1. Run exact Top-K
+    _, true_indices = jax.lax.top_k(scores, k=K)  # [batch, queries, K]
+
+    # 2. Run approx Top-K
+    _, approx_indices = jax.lax.approx_max_k(scores, k=K, recall_target=recall_target)  # [batch, queries, K]
+
+    # 3. Calculate Recall
+    # Broadcast compare true_indices [B, Q, K, 1] and approx_indices [B, Q, 1, K]
+    matches = (true_indices[..., None] == approx_indices[..., None, :]).any(axis=-1)  # [B, Q, K]
+    num_matches = matches.sum(axis=-1)  # [B, Q]
+    actual_recalls = num_matches / K  # [B, Q]
+    mean_recall = jnp.mean(actual_recalls)
+
+    print(f"\nApprox Top-K Recall Target: {recall_target}, Actual Mean Recall: {mean_recall:.4f}")
+
+    # Assert that the actual recall is equal or exceeds the target.
+    self.assertGreaterEqual(mean_recall, recall_target)
 
   def test_indexer_gradients(self):
     # Test that gradients do NOT flow back to inputs

@@ -37,11 +37,11 @@ from maxtext.utils.globals import EPS
 # Custom Variable types for MTP intermediate outputs
 # These will be automatically converted to Linen mutable collections by ToLinen wrapper
 # The class names become collection names directly (no case conversion)
-class mtp_losses(nnx.Variable):  # pylint: disable=invalid-name
+class mtp_losses(nnx.Intermediate):  # pylint: disable=invalid-name
   """Variable type for storing MTP loss components -> 'mtp_losses' collection."""
 
 
-class mtp_acceptance(nnx.Variable):  # pylint: disable=invalid-name
+class mtp_acceptance(nnx.Intermediate):  # pylint: disable=invalid-name
   """Variable type for storing MTP acceptance predictions -> 'mtp_acceptance' collection."""
 
 

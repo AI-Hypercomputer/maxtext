@@ -497,13 +497,13 @@ class Llama4DecoderLayer(nnx.Module):
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow("intermediates", "moe_lb_loss", load_balance_loss)
+      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
 
     if cfg.record_internal_nn_metrics:
-      self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
-      self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
+      self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
+      self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
+          nnx.Intermediate,
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
@@ -642,7 +642,7 @@ class Llama4VisionEncoderLayer(nnx.Module):
         num_kv_heads=self.config.num_attention_heads_for_vit,
         head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
         max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
-        attention_kernel="dot_product",
+        attention_kernel=self.config.attention_for_vit,
         inputs_q_shape=self.hidden_states_shape,
         inputs_kv_shape=self.hidden_states_shape,
         float32_qk_product=self.config.float32_qk_product,

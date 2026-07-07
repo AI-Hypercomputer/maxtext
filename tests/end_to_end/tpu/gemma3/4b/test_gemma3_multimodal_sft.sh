@@ -66,13 +66,14 @@ python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}/checkpoints/4/items \
     per_device_batch_size=1 \
-    run_name=${run_id}} \
+    run_name=${run_id} \
     max_prefill_predict_length=272 \
     max_target_length=300 \
     steps=1 \
     async_checkpointing=false \
     scan_layers=false \
     use_multimodal=true \
+    tokenizer_type=huggingface \
     prompt=\'Describe\ image\ \<start_of_image\>\' \
     image_path=\'tests/assets/test_image.jpg\' \
     attention=\'dot_product\'

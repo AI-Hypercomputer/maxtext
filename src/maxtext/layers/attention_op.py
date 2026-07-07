@@ -79,19 +79,6 @@ from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
-# Used to pass in splash attention block sizes from config.
-global_block_q = 0
-global_block_kv = 0
-global_block_kv_compute = 0
-global_block_q_dkv = 0
-global_block_kv_dkv = 0
-global_block_kv_dkv_compute = 0
-global_block_q_dq = 0
-global_block_kv_dq = 0
-global_use_fused_bwd_kernel = False
-global_q_layout = ""
-global_k_layout = ""
-global_v_layout = ""
 
 dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
@@ -492,6 +479,40 @@ class AttentionOp(nnx.Module):
     self.quant = quant
     self.kv_quant = kv_quant
     self.attention_type = attention_type
+    # Block sizes are only used by TPU splash attention kernels. Exclude non-splash kernels
+    if self.attention_kernel not in ("dot_product", "paged", "vllm_rpa", "cudnn_flash_te", "cudnn_flash_jax"):
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        self.block_q = self.config.local_sa_block_q
+        self.block_kv = self.config.local_sa_block_kv
+        self.block_kv_compute = self.config.local_sa_block_kv_compute
+        self.block_q_dkv = self.config.local_sa_block_q_dkv
+        self.block_kv_dkv = self.config.local_sa_block_kv_dkv
+        self.block_kv_dkv_compute = self.config.local_sa_block_kv_dkv_compute
+        self.block_q_dq = self.config.local_sa_block_q_dq
+        self.block_kv_dq = self.config.local_sa_block_kv_dq
+        self.use_fused_bwd_kernel = self.config.local_sa_use_fused_bwd_kernel
+        self.q_layout = self.config.local_sa_q_layout
+        self.k_layout = self.config.local_sa_k_layout
+        self.v_layout = self.config.local_sa_v_layout
+        self.use_splash_scheduler = self.config.local_use_splash_scheduler
+        self.fuse_reciprocal = self.config.local_sa_fuse_reciprocal
+        self.use_base2_exp = self.config.local_sa_use_base2_exp
+      else:
+        self.block_q = self.config.sa_block_q
+        self.block_kv = self.config.sa_block_kv
+        self.block_kv_compute = self.config.sa_block_kv_compute
+        self.block_q_dkv = self.config.sa_block_q_dkv
+        self.block_kv_dkv = self.config.sa_block_kv_dkv
+        self.block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
+        self.block_q_dq = self.config.sa_block_q_dq
+        self.block_kv_dq = self.config.sa_block_kv_dq
+        self.use_fused_bwd_kernel = self.config.sa_use_fused_bwd_kernel
+        self.q_layout = self.config.sa_q_layout
+        self.k_layout = self.config.sa_k_layout
+        self.v_layout = self.config.sa_v_layout
+        self.use_splash_scheduler = self.config.use_splash_scheduler
+        self.fuse_reciprocal = self.config.sa_fuse_reciprocal
+        self.use_base2_exp = self.config.sa_use_base2_exp
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.chunk_attn_window_size = chunk_attn_window_size
@@ -1168,7 +1189,7 @@ class AttentionOp(nnx.Module):
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
-    cp_size = self.config.context_parallel_size
+    cp_size = self.mesh.shape.get(self.config.context_sharding, 1)
     load_balanced_context_parallel = self.config.context_parallel_load_balance
 
     # Transpose to ('batch', 'heads', 'length', 'kv')
@@ -1187,22 +1208,6 @@ class AttentionOp(nnx.Module):
     axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
     indexer_mask_axis_names = self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH, KV_LENGTH))
 
-    global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
-    global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
-    global global_q_layout, global_k_layout, global_v_layout
-    global_block_q = self.config.sa_block_q
-    global_block_kv = self.config.sa_block_kv
-    global_block_kv_compute = self.config.sa_block_kv_compute
-    global_block_q_dkv = self.config.sa_block_q_dkv
-    global_block_kv_dkv = self.config.sa_block_kv_dkv
-    global_block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
-    global_block_q_dq = self.config.sa_block_q_dq
-    global_block_kv_dq = self.config.sa_block_kv_dq
-    global_use_fused_bwd_kernel = self.config.sa_use_fused_bwd_kernel
-    global_q_layout = self.config.sa_q_layout
-    global_k_layout = self.config.sa_k_layout
-    global_v_layout = self.config.sa_v_layout
-
     devices_in_data_fsdp = self.mesh.shape.get("data", 1) * self.mesh.shape.get("fsdp", 1)
     assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
         "Batch dimension should be shardable among the devices in data and fsdp"
@@ -1214,17 +1219,19 @@ class AttentionOp(nnx.Module):
     def create_sa_config(config, query, key, attn_logits_soft_cap):
       if config.use_tokamax_splash:
         sa_config = tokamax_splash_kernel.SplashConfig(
-            block_q=min(global_block_q, query.shape[2]),
-            block_kv=min(global_block_kv, key.shape[2]),
-            block_kv_compute=min(global_block_kv_compute, key.shape[2]),
-            block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+            block_q=min(self.block_q, query.shape[2]),
+            block_kv=min(self.block_kv, key.shape[2]),
+            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
+            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(self.block_kv_dkv_compute, key.shape[2]),
             use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
-            q_layout=tokamax_splash_kernel.QKVLayout[global_q_layout],
-            k_layout=tokamax_splash_kernel.QKVLayout[global_k_layout],
-            v_layout=tokamax_splash_kernel.QKVLayout[global_v_layout],
+            q_layout=tokamax_splash_kernel.QKVLayout[self.q_layout],
+            k_layout=tokamax_splash_kernel.QKVLayout[self.k_layout],
+            v_layout=tokamax_splash_kernel.QKVLayout[self.v_layout],
             attn_logits_soft_cap=attn_logits_soft_cap,
+            fuse_reciprocal=self.fuse_reciprocal,
+            use_base2_exp=self.use_base2_exp,
             residual_checkpoint_name="context",
             fwd_cost_estimate=pl.CostEstimate(
                 flops=config.cost_estimate_flops_fwd,
@@ -1241,22 +1248,22 @@ class AttentionOp(nnx.Module):
             if config.cost_estimate_flops_bwd >= 0
             else None,
             dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
-            use_experimental_scheduler=config.use_splash_scheduler,
+            use_experimental_scheduler=self.use_splash_scheduler,
         )
       else:
         sa_config = splash_attention_kernel.BlockSizes(
-            block_q=min(global_block_q, query.shape[2]),
-            block_kv=min(global_block_kv, key.shape[2]),
-            block_kv_compute=min(global_block_kv_compute, key.shape[2]),
-            block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-            block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
-            block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
-            use_fused_bwd_kernel=global_use_fused_bwd_kernel,
-            q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
-            k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
-            v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+            block_q=min(self.block_q, query.shape[2]),
+            block_kv=min(self.block_kv, key.shape[2]),
+            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
+            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(self.block_kv_dkv_compute, key.shape[2]),
+            block_q_dq=None if self.use_fused_bwd_kernel else min(self.block_q_dq, query.shape[2]),
+            block_kv_dq=None if self.use_fused_bwd_kernel else min(self.block_kv_dq, query.shape[2]),
+            use_fused_bwd_kernel=self.use_fused_bwd_kernel,
+            q_layout=splash_attention_kernel.QKVLayout[self.q_layout],
+            k_layout=splash_attention_kernel.QKVLayout[self.k_layout],
+            v_layout=splash_attention_kernel.QKVLayout[self.v_layout],
         )
       return sa_config
 
@@ -1268,20 +1275,28 @@ class AttentionOp(nnx.Module):
     else:
       mask = mask_module.CausalMask(shape=mask_shape)
 
-    # Create LoadBalancedCausalMask if cp and load_balancing
-    if cp_size > 1 and load_balanced_context_parallel:
+    use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
+    if use_load_balanced_cp and self.attention_type != AttentionType.FULL:
       mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
 
-    # TODO: figure out local_sliding attention + load_balancing, default is global
     # Apply local masking if local sliding attention is enabled.
     if self.attention_type == AttentionType.LOCAL_SLIDING:
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
-      mask &= mask_module.LocalMask(
-          shape=(query.shape[2], key.shape[2]),
-          window_size=(self.sliding_window_size, self.sliding_window_size),
-          offset=0,
-      )
+      local_window_size = (self.sliding_window_size - 1, self.sliding_window_size)
+      if use_load_balanced_cp:
+        mask &= LoadBalancedLocalMask(
+            shape=(query.shape[2], key.shape[2]),
+            window_size=local_window_size,
+            offset=0,
+            cp_size=cp_size,
+        )
+      else:
+        mask &= mask_module.LocalMask(
+            shape=(query.shape[2], key.shape[2]),
+            window_size=local_window_size,
+            offset=0,
+        )
     elif self.attention_type == AttentionType.CHUNK:
       if self.chunk_attn_window_size is None:
         raise ValueError("chunk_attn_window_size must be set for chunk attention type")
@@ -1489,10 +1504,11 @@ class AttentionOp(nnx.Module):
             key,
             value,
             decoder_segment_ids_tuple,
-            block_kv=self.config.sa_block_kv,
-            block_q=self.config.sa_block_q,
+            block_kv=self.block_kv,
+            block_q=self.block_q,
             mask=materialized_mask,
             mask_value=DEFAULT_MASK_VALUE,
+            cap=attn_logits_soft_cap,
         )
         if record_max_logits:
           # The native JAX splash attention implementation does not currently expose the softmax statistics
@@ -2156,6 +2172,12 @@ class AttentionOp(nnx.Module):
       return prefill_unnormalized_output / prefill_exponentials_sum
 
 
+def _load_balanced_q_sequence(shape: tuple[int, int], cp_size: int):
+  """Reorders query positions the same way as load-balanced input tokens."""
+  arr = np.arange(shape[0])
+  return max_utils.reorder_mask_load_balancing(arr, cp_size, 0)
+
+
 # pylint: disable=protected-access
 class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
@@ -2186,12 +2208,6 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
       else:
         return q_ids + self.offset >= kv_ids
 
-    arr = np.arange(shape[0])
-    # we reorder the mask to be load balanced following the same approach as
-    # used to reorder the input tokens
-    out = max_utils.reorder_mask_load_balancing(arr[None, :, None, None], cp_size, 1)
-    q_sequence = out[0, :, 0, 0]
-
     mask_function = causal_mask_function
 
     super().__init__(
@@ -2199,7 +2215,7 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
         mask_function=mask_function,
         shard_count=shard_count,
     )
-    self.q_sequence = q_sequence
+    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)
 
   def __eq__(self, other: object):
     if not isinstance(other, type(self)):
@@ -2216,3 +2232,25 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
+
+
+class LoadBalancedLocalMask(splash_attention_mask.LocalMask):
+  """Lazy local mask with load-balanced query positions."""
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      window_size: tuple[int | None, int | None],
+      offset: int,
+      shard_count: int = 1,
+      cp_size: int = -1,
+  ):
+    super().__init__(
+        shape=shape,
+        window_size=window_size,
+        offset=offset,
+        shard_count=shard_count,
+    )
+    # LocalMask uses shard_count for mask-shard validation. cp_size is the
+    # context-parallel size used for the load-balanced query order.
+    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)

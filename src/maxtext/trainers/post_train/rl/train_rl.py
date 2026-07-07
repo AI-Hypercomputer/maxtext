@@ -46,7 +46,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 from __future__ import annotations
 import contextlib
 from functools import wraps
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import datasets
 import grain
@@ -339,7 +339,7 @@ def prepare_datasets(
   dataset_size = int(trainer_config.num_batches * trainer_config.batch_size * trainer_config.train_fraction)
   train_dataset = train_dataset[:dataset_size]
   train_dataset = train_dataset.repeat(trainer_config.num_epoch)
-  train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
+  train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size, drop_remainder=True)
 
   if trainer_config.num_test_batches > 0:
     # eval_batch_size = -1 (default) → use trainer_config.batch_size (legacy
@@ -358,9 +358,34 @@ def prepare_datasets(
     test_dataset = test_dataset[
         trainer_config.test_batch_start_index : trainer_config.num_test_batches * eval_batch_size_for_eval
     ]
-    test_dataset = test_dataset.to_iter_dataset().batch(eval_batch_size_for_eval)
+    test_dataset = test_dataset.to_iter_dataset().batch(eval_batch_size_for_eval, drop_remainder=True)
 
   return train_dataset, test_dataset
+
+
+def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
+  """Build the reward-function stack for the RL trainer.
+
+  `reward_functions_path` is a filesystem path to a Python file and
+  `reward_functions` is a comma-separated list of function names to import from
+  it. When both are set, the built-in stack is REPLACED entirely by the
+  user-provided callables (so users have full control over their reward stack).
+  Otherwise the default
+  (`match_format_exactly`, `match_format_approximately`, `check_numbers`) stack
+  is used. Every reward function is wrapped via `make_reward_fn`.
+  """
+  custom_rewards_path = getattr(trainer_config, "reward_functions_path", "") or ""
+  custom_rewards_names = getattr(trainer_config, "reward_functions", "") or ""
+  if custom_rewards_path and custom_rewards_names:
+    names = [n.strip() for n in custom_rewards_names.split(",") if n.strip()]
+    reward_fns = [make_reward_fn(utils_rl.load_custom_callable(custom_rewards_path, n)) for n in names]
+    max_logging.log(f"reward_fns: using {len(reward_fns)} custom reward function(s) {names} from {custom_rewards_path}")
+    return reward_fns
+  return [
+      make_reward_fn(utils_rl.match_format_exactly),
+      make_reward_fn(utils_rl.match_format_approximately),
+      make_reward_fn(utils_rl.check_numbers),
+  ]
 
 
 def create_rl_components(
@@ -526,11 +551,11 @@ def create_rl_components(
 
     return _reward_fn
 
-  reward_fns = [  # type: ignore
-      make_reward_fn(utils_rl.match_format_exactly),
-      make_reward_fn(utils_rl.match_format_approximately),
-      make_reward_fn(utils_rl.check_numbers),
-  ]
+  # Optional user-provided reward functions: when `reward_functions_path` and
+  # `reward_functions` are both set the built-in stack is replaced entirely by
+  # the user-provided callables. Each function must accept `prompts`,
+  # `completions`, `tmvp_config`, and `**kwargs` and return a list of floats.
+  reward_fns = build_reward_fns(trainer_config, make_reward_fn)
 
   # Create RL trainer
   max_logging.log("Setting up RL trainer...")

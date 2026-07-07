@@ -19,41 +19,36 @@ import functools
 import os
 from typing import Sequence
 
-from flax import nnx, linen as nn
-from flax.core.spmd import composite_rules, from_sharding_rules, get_logical_axis_rules
+from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
 from flax.training.train_state import TrainState
-
-import numpy as np
-
 import jax
-import jax.numpy as jnp
-from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
-
-import optax
-import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
-
-from maxtext.configs import pyconfig
+import jax.numpy as jnp
+from jax.sharding import AxisType, Mesh, NamedSharding
+from maxtext.common import checkpointing
 from maxtext.common.common_types import (
     AttentionType,
     DecoderBlockType,
-    MODEL_MODE_PREFILL,
     MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
     ReorderStrategy,
     ShardMode,
 )
+from maxtext.configs import pyconfig
 from maxtext.configs import types
-from maxtext.common import checkpointing
 from maxtext.multimodal import processor as mm_processor
+from maxtext.utils import elastic_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
-from maxtext.utils import sharding
-from maxtext.utils import elastic_utils
 from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import sharding
+import numpy as np
+import optax
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -1496,6 +1491,7 @@ def setup_initial_state(
         checkpoint_conversion_fn=config.checkpoint_conversion_fn,
         source_checkpoint_layout=config.source_checkpoint_layout,
         expansion_factor_real_data=config.expansion_factor_real_data,
+        maxtext_config=config,
     )
 
     if restored:
@@ -1612,88 +1608,6 @@ def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   )
 
 
-def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx.State:
-  """Compute NamedSharding for each NNX variable, correctly handling the scan (stacked layers) axis.
-
-  Unlike flax.nnx.spmd.get_var_pspec (used inside nnx.get_abstract_model), this function also
-  inserts the partition_name axis at the correct scan_axis position for parameters created by
-  _create_scanned_layers. Without this, scanned parameters get a 2D partition spec applied to a
-  3D tensor, placing sharding on the stacked-layers dimension instead of the embedding dimension.
-
-  Args:
-    abs_var_state: NNX abstract variable state from nnx.split(nnx.eval_shape(...)).
-    mesh: JAX physical mesh.
-
-  Returns:
-    Same tree structure as abs_var_state but each Variable's value replaced with NamedSharding.
-  """
-
-  def _make_named_sharding(v):
-    val = v.get_value()
-    if not hasattr(val, "shape"):
-      # `val` is either truly leafless (e.g. optax MaskedNode) or a composite
-      # pytree of tensors (e.g. AQT QTensor on serve-mode quantized variables —
-      # a `qvalue` int8 array + a list of `scale` bf16 arrays). For the latter
-      # we must emit a parallel tree of NamedSharding leaves so the downstream
-      # `jax.tree.map(lambda a, s: ShapeDtypeStruct(..., sharding=s), abs, names)`
-      # finds a real Sharding at every position. Replicated sharding is a safe
-      # default — AQT serve-mode QTensors are normally small (per-channel scale
-      # factors and packed int8 weights) and don't need axis-aware sharding.
-      if jax.tree_util.tree_leaves(val):
-        replicated = NamedSharding(mesh, PartitionSpec())
-        return v.replace(jax.tree.map(lambda _: replicated, val))
-      return v
-    metadata = v.get_metadata()
-    out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
-    if not out_sharding:
-      pspec = PartitionSpec()
-    else:
-      # Insert the scan axis for parameters created by _create_scanned_layers.
-      # _add_scan_metadata stores the axis name in nnx.PARTITION_NAME and the
-      # axis index in "param_scan_axis". flax.nnx.spmd.get_var_pspec ignores these.
-      if nnx.PARTITION_NAME in metadata:
-        partition_name = metadata[nnx.PARTITION_NAME]
-        # Always use param_scan_axis from metadata. OptVariable (optimizer state) inherits
-        # param_scan_axis=1 from the model Param via to_opt_state(), so we must not hardcode
-        # scan_axis=0 for non-Param types. stacked_rest non-Param variables have
-        # param_scan_axis=0 set explicitly by _add_scan_metadata, so this is always correct.
-        scan_axis = metadata.get("param_scan_axis", 0)
-        out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
-        # Guard against double-insertion: Flax 0.12.6 _remap_sharding_metadata renames
-        # 'sharding' -> 'out_sharding', so _add_scan_metadata may have already inserted
-        # the scan axis. Only insert if not already present.
-        if partition_name not in out_sharding:
-          out_sharding.insert(scan_axis, partition_name)
-        out_sharding = tuple(out_sharding)
-      # Convert logical axis names to physical mesh axes using current context rules.
-      context_rules = get_logical_axis_rules()
-      local_rules = metadata.get("sharding_rules", ())
-      if context_rules or local_rules:
-        rules = composite_rules(context_rules, local_rules)
-        raw_sharding = from_sharding_rules(out_sharding, rules)
-        mesh_axis_names = mesh.axis_names if mesh is not None else ()
-
-        # from_sharding_rules leaves a logical name with no matching rule unchanged, so a
-        # name missing from logical_axis_rules (e.g. concat_embed on the MTP kernel)
-        # reaches NamedSharding and is rejected as an unknown mesh axis. Map any such
-        # leftover name to None (replicated), matching Linen, whose logical_to_mesh_axes
-        # replicates unmatched names.
-        def _sanitize(x):
-          if isinstance(x, list):
-            x = tuple(x)
-          if x is None or (isinstance(x, str) and x in mesh_axis_names) or isinstance(x, tuple):
-            return x
-          return None
-
-        sanitized_sharding = [_sanitize(x) for x in raw_sharding]
-        pspec = PartitionSpec(*sanitized_sharding)
-      else:
-        pspec = PartitionSpec(*out_sharding)
-    return v.replace(NamedSharding(mesh, pspec))
-
-  return jax.tree.map(_make_named_sharding, abs_var_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
-
-
 def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=True):
   """Calculates the abstract sharded state and memory placement for an NNX TrainState.
 
@@ -1724,26 +1638,25 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     # Use nnx.eval_shape + nnx.split instead of nnx.get_abstract_model, so we can apply
-    # get_nnx_named_sharding_with_scan_axis which correctly inserts the stacked-layers
+    # nnx_construct_named_sharding which correctly inserts the stacked-layers
     # axis into the partition spec. nnx.get_abstract_model uses get_var_pspec internally
     # which ignores nnx.PARTITION_NAME / param_scan_axis metadata set by _create_scanned_layers,
     # causing the 2D partition spec to be misapplied to the 3D stacked parameter tensor.
     # Do NOT wrap nnx.eval_shape in jax.set_mesh: Flax 0.12.6's _to_variable calls
     # var.shape for every variable when a global mesh is active, but masked optimizer
     # state variables (e.g. from trainable_parameters_mask) have value=MaskedNode()
-    # which has no .shape and would raise AttributeError.  We handle sharding
-    # ourselves via get_nnx_named_sharding_with_scan_axis, so auto-assignment is not
-    # needed here.
+    # which has no .shape and would raise AttributeError. We handle sharding
+    # ourselves via nnx_construct_named_sharding, so auto-assignment is not needed here.
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
-    named_sharding_state = get_nnx_named_sharding_with_scan_axis(abs_var_state, mesh)
+    named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,
         named_sharding_state,
     )
 
-  state_mesh_shardings = maxtext_utils_nnx.get_named_sharding_nnx(abstract_state)
+  state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(abstract_state)
 
   if is_training and config.shard_optimizer_over_data:
     # Add data to sharding for optimizer state
@@ -1849,10 +1762,10 @@ def _nnx_cache_partition_specs(abstract_model, config, mesh):
   way it does for the Linen helpers below.
   """
   _, cache_state, _ = nnx.split(abstract_model, nnx.Cache, ...)
-  # get_nnx_named_sharding_with_scan_axis reads logical axis rules from the
+  # nnx_construct_named_sharding reads logical axis rules from the
   # active flax partitioning context, so wrap.
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    named_state = get_nnx_named_sharding_with_scan_axis(cache_state, mesh)
+    named_state = sharding.nnx_construct_named_sharding(cache_state, mesh)
   return jax.tree.map(lambda s: s.spec, named_state.to_pure_dict())
 
 
@@ -2154,3 +2067,43 @@ def get_mesh_from_config(
     axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
 
   return Mesh(devices_array, config.mesh_axes, axis_types=axis_types)
+
+
+def prepare_kv_caches_for_scan(kv_caches, scan_length, block_len, stack=False):
+  """Groups the flat list of KV caches into block-sized tuples and optionally stacks them."""
+  if kv_caches is None:
+    return None
+
+  if not isinstance(kv_caches, list):
+    raise TypeError(f"kv_caches must be a list, got {type(kv_caches)}")
+
+  grouped = [tuple(kv_caches[i * block_len : (i + 1) * block_len]) for i in range(scan_length)]
+
+  if stack:
+    # Stack the list of tuples into a tuple of stacked PyTrees along a new leading axis
+    return jax.tree_util.tree_map(lambda *args: jnp.stack(args, axis=0), *grouped)
+  else:
+    return grouped
+
+
+def update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length, block_len, stacked=False):
+  """Updates the original flat list of KV caches from the scanned outputs."""
+  if kv_caches is None or returned_kv_cache is None:
+    return
+
+  if not isinstance(kv_caches, list):
+    raise TypeError(f"kv_caches must be a list, got {type(kv_caches)}")
+
+  if stacked:
+    # Unstack the returned tuple of stacked PyTrees back into a list of tuples
+    unstacked = [jax.tree_util.tree_map(lambda x, i=i: x[i], returned_kv_cache) for i in range(scan_length)]
+    for i in range(scan_length):
+      start_idx = i * block_len
+      for offset, updated_item in enumerate(unstacked[i]):
+        kv_caches[start_idx + offset] = updated_item
+  else:
+    # returned_kv_cache is already a list of tuples
+    for i in range(scan_length):
+      start_idx = i * block_len
+      for offset, updated_item in enumerate(returned_kv_cache[i]):
+        kv_caches[start_idx + offset] = updated_item

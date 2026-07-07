@@ -35,6 +35,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import elastic_utils
 from collections import defaultdict
 
 mldiag, _ = mldiagnostics_modules()
@@ -63,23 +64,23 @@ def _prepare_metrics_for_json(metrics, step, run_name):
 
 
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
-  """Adds the activation metrics to the metrics dict"""
+  """Adds the activation metrics to the metrics dict.
 
-  if config.scan_layers:
-    metrics_dict = intermediate_outputs["intermediates"]["decoder"]["decoder"]
-
+  Collects each metric by path suffix rather than a hardcoded path, so it works for
+  both the Linen ("intermediates"-prefixed) and NNX (model-rooted) layouts and for
+  both scanned (one stacked leaf) and unscanned (one leaf per layer) decoders.
+  """
+  for label, key in (
+      ("activ_fraction_zero", "activation_fraction_zero"),
+      ("activ_mean", "activation_mean"),
+      ("activ_stdev", "activation_stdev"),
+  ):
+    vals = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, key)
+    if not vals:
+      continue
+    per_layer = jax.numpy.concatenate(vals)
     for layer_num in range(config.num_decoder_layers):
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict["activation_fraction_zero"][
-          0
-      ][layer_num]
-      output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = metrics_dict["activation_mean"][0][layer_num]
-      output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = metrics_dict["activation_stdev"][0][layer_num]
-  else:
-    for layer_num in range(config.num_decoder_layers):
-      layer = intermediate_outputs["intermediates"]["decoder"][f"layers_{layer_num}"]
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = layer["activation_fraction_zero"][0]
-      output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = layer["activation_mean"][0]
-      output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = layer["activation_stdev"][0]
+      output_metrics["scalar"][f"{label}/layer_{layer_num:03d}"] = per_layer[layer_num]
 
 
 class MetadataKey(enum.Enum):
@@ -169,6 +170,12 @@ class MetricLogger:
               f"seconds: {scalars['perf/step_time_seconds']:.3f}",
           ]
       )
+      if elastic_utils.elastic_enabled(self.config):
+        log_parts.extend(
+            [
+                f"live slice count: {len(elastic_utils.live_slice_indices(self.config))}",
+            ]
+        )
 
     # Add performance metrics only if strictly NOT in rampup phase
     # TODO(b/452468482): Enable performance metric (TFLOPs, Tokens/s) tracking during batch size rampup.

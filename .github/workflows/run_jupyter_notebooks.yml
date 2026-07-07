@@ -109,10 +109,9 @@ jobs:
           # Run Hugging Face authentication
           hf auth login --token "$HF_TOKEN"
 
-          for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
+          for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/*.ipynb; do
             filename=$(basename "$notebook")
-            # TODO: Update runnner to v6e-8 as RL with LLama3.1-8b doesn't fit on v6e-4
-            if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" ]]; then
+            if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" || "$filename" == "demo_decoding.ipynb" ]]; then
               echo "Skipping $filename"
               continue
             fi
@@ -123,6 +122,11 @@ jobs:
             echo "------------------------------------------------------"
 
             $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
+
+            # Clean up any checkpoint directories created by the notebook to avoid filling up disk space
+            echo "Post-notebook disk cleanup for $filename ..."
+            rm -rf "$MAXTEXT_PKG_DIR"/*_output
+            rm -rf "$HOME/.cache/huggingface/hub"
           done
       - name: Upload Outputs
         if: always()

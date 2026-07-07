@@ -16,8 +16,11 @@
 
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import MagicMock
 
+from maxtext.utils import train_utils
 from maxtext.utils.train_utils import (
     validate_train_config,
     create_training_optimizer,
@@ -192,6 +195,53 @@ class TestCreateTrainingOptimizer(unittest.TestCase):
     _, tx = create_training_optimizer(config, model=None)
     self.assertIsNotNone(tx)
     self.assertTrue(hasattr(tx, "init"))
+
+
+class TestCreateCheckpointManager(unittest.TestCase):
+  """Tests for create_checkpoint_manager."""
+
+  def test_single_controller_mtc_registers_colocated_python_handlers(self):
+    config = SimpleNamespace(
+        enable_multi_tier_checkpointing=True,
+        enable_checkpoint_cloud_logger=False,
+        run_name="test_run",
+        local_checkpoint_directory="/tmp/mtc",
+        local_checkpoint_period=10,
+        colocated_python_checkpointing=True,
+        enable_single_controller=True,
+        enable_single_replica_ckpt_restoring=True,
+    )
+    mesh = object()
+    checkpoint_manager = object()
+    checkpointing_impl = object()
+
+    with (
+        mock.patch.object(
+            train_utils.checkpointing,
+            "create_orbax_emergency_replicator_checkpoint_manager",
+            return_value=checkpoint_manager,
+        ) as create_manager,
+        mock.patch.object(
+            train_utils.ocp_pathways.CheckpointingImpl,
+            "from_options",
+            return_value=checkpointing_impl,
+        ) as from_options,
+        mock.patch.object(train_utils.ocp_pathways, "register_type_handlers") as register_type_handlers,
+    ):
+      result = train_utils.create_checkpoint_manager(config, mesh, init_state_fn=object())
+
+    self.assertIs(result, checkpoint_manager)
+    create_manager.assert_called_once_with(
+        config.local_checkpoint_directory,
+        config.local_checkpoint_period,
+        mesh,
+        config.colocated_python_checkpointing,
+    )
+    from_options.assert_called_once_with(use_colocated_python=True)
+    register_type_handlers.assert_called_once_with(
+        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
+        checkpointing_impl=checkpointing_impl,
+    )
 
 
 class TestValidateCompletedSteps(unittest.TestCase):

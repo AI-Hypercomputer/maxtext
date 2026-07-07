@@ -129,6 +129,7 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   video_values: None | np.ndarray = None
   video_grid_thw: None | np.ndarray = None
   video_second_per_grid: None | np.ndarray = None
+  video_mask: None | np.ndarray = None
   # Audio attributes.
   num_audios: int = 0
   audio_values: None | np.ndarray = None
@@ -136,8 +137,75 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   audio_lengths: None | np.ndarray = None
 
 
+def maybe_pad_video_values_to_max_grid(
+    video_values: np.ndarray,
+    video_grid_thw: np.ndarray,
+    config,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+  """Pad Qwen3-Omni video pixels to configured static grid limits when enabled.
+
+  Args:
+    video_values: Video pixels of shape (batch, channels, T*tps, H*patch, W*patch).
+    video_grid_thw: Actual video grid with shape (1, 3), in Qwen grid units.
+    config: Config carrying video_max_grid_t/h/w and ViT patch sizes.
+
+  Returns:
+    Tuple of:
+    - padded video pixels, or the input when no max grid is configured
+    - input grid_thw
+    - pixel-level mask of shape (batch, 1, max_T*tps, max_H*patch, max_W*patch), or None
+  """
+  max_grid = (
+      getattr(config, "video_max_grid_t", None),
+      getattr(config, "video_max_grid_h", None),
+      getattr(config, "video_max_grid_w", None),
+  )
+  if all(dim is None for dim in max_grid):
+    return video_values, video_grid_thw, None
+  if any(dim is None for dim in max_grid):
+    raise ValueError("video_max_grid_t, video_max_grid_h, and video_max_grid_w must be set together.")
+  if video_values.ndim != 5:
+    raise ValueError(f"video_values must have shape (batch, channels, time, height, width), got {video_values.shape}.")
+
+  max_t, max_h, max_w = (int(dim) for dim in max_grid)
+  actual_t, actual_h, actual_w = (int(dim) for dim in video_grid_thw[0])
+  if actual_t > max_t or actual_h > max_h or actual_w > max_w:
+    raise ValueError(
+        f"video grid {video_grid_thw[0].tolist()} exceeds max grid {(max_t, max_h, max_w)}. "
+        "Scale or resize the video before padding."
+    )
+
+  temporal_patch_size = config.temporal_patch_size_for_vit
+  patch_size = config.patch_size_for_vit
+  valid_t_px = actual_t * temporal_patch_size
+  valid_h_px = actual_h * patch_size
+  valid_w_px = actual_w * patch_size
+  max_t_px = max_t * temporal_patch_size
+  max_h_px = max_h * patch_size
+  max_w_px = max_w * patch_size
+
+  padded_video_values = np.zeros(
+      (video_values.shape[0], video_values.shape[1], max_t_px, max_h_px, max_w_px),
+      dtype=video_values.dtype,
+  )
+  padded_video_values[:, :, :valid_t_px, :valid_h_px, :valid_w_px] = video_values[
+      :, :, :valid_t_px, :valid_h_px, :valid_w_px
+  ]
+
+  video_mask = np.zeros((video_values.shape[0], 1, max_t_px, max_h_px, max_w_px), dtype=np.int32)
+  video_mask[:, :, :valid_t_px, :valid_h_px, :valid_w_px] = 1
+
+  return padded_video_values, video_grid_thw, video_mask
+
+
 def smart_resize(
-    height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 14 * 14 * 4 * 1280
+    height: int,
+    width: int,
+    factor: int = 28,
+    min_pixels: int = 56 * 56,
+    max_pixels: int = 14 * 14 * 4 * 1280,
+    max_h_pixels: int | None = None,
+    max_w_pixels: int | None = None,
 ):
   """Rescales the image so that the following conditions are met:
 
@@ -146,6 +214,10 @@ def smart_resize(
   2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
 
   3. The aspect ratio of the image is maintained as closely as possible.
+
+  4. (Optional) Neither dimension exceeds max_h_pixels / max_w_pixels. When either
+     cap is exceeded, both dimensions are scaled down proportionally and re-aligned
+     to 'factor'.
 
   """
   if max(height, width) / min(height, width) > MAX_RATIO:
@@ -162,6 +234,13 @@ def smart_resize(
     beta = math.sqrt(min_pixels / (height * width))
     h_bar = math.ceil(height * beta / factor) * factor
     w_bar = math.ceil(width * beta / factor) * factor
+  # Apply per-dimension pixel caps, scaling down proportionally if either is exceeded.
+  if (max_h_pixels is not None and h_bar > max_h_pixels) or (max_w_pixels is not None and w_bar > max_w_pixels):
+    cap_h = max_h_pixels if max_h_pixels is not None else h_bar
+    cap_w = max_w_pixels if max_w_pixels is not None else w_bar
+    scale = min(cap_h / h_bar, cap_w / w_bar)
+    h_bar = min(max(factor, round(h_bar * scale / factor) * factor), (cap_h // factor) * factor)
+    w_bar = min(max(factor, round(w_bar * scale / factor) * factor), (cap_w // factor) * factor)
   return h_bar, w_bar
 
 
@@ -399,6 +478,10 @@ def preprocess_video(video, config):
 
   nframes, channel, height, width = video.shape
   max_pixels = max(min(VIDEO_MAX_PIXELS, VIDEO_TOTAL_PIXELS / nframes * FRAME_FACTOR), int(VIDEO_MIN_PIXELS * 1.05))
+  max_grid_h = getattr(config, "video_max_grid_h", None)
+  max_grid_w = getattr(config, "video_max_grid_w", None)
+  max_h_pixels = int(max_grid_h) * patch_size if max_grid_h is not None else None
+  max_w_pixels = int(max_grid_w) * patch_size if max_grid_w is not None else None
   resized_height_1, resized_width_1 = smart_resize(
       height,
       width,
@@ -426,6 +509,8 @@ def preprocess_video(video, config):
       factor=patch_size * merge_size,
       min_pixels=VIDEO_MIN_PIXELS,
       max_pixels=VIDEO_MAX_PIXELS,
+      max_h_pixels=max_h_pixels,
+      max_w_pixels=max_w_pixels,
   )
 
   # Second resize - process each channel separately to preserve float values
@@ -589,8 +674,10 @@ def preprocess_mm_data_qwen3_omni(config):
             config.patch_size_for_vit * video_grid_thw[0, 2],
         ),
     )
+    video_values, video_grid_thw, video_mask = maybe_pad_video_values_to_max_grid(video_values, video_grid_thw, config)
     processor_outputs.video_values = video_values
     processor_outputs.video_grid_thw = video_grid_thw
+    processor_outputs.video_mask = video_mask
     processor_outputs.video_second_per_grid = np.asarray([config.temporal_patch_size_for_vit], dtype=np.float32)
     processor_outputs.num_videos = 1  # Only one video for now.
 
@@ -716,7 +803,7 @@ def add_extra_tokens_for_qwen3_omni(tokens, config, processor_output):
         new_tokens.append(qwen_tokens.audio_pad)
         audio_data_idx += 1
 
-      new_tokens.append(qwen_tokens.audio_pad)
+      new_tokens.append(qwen_tokens.audio_end)
       new_tokens.append(qwen_tokens.vision_end)
 
       video_idx += 1
