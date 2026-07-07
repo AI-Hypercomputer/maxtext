@@ -34,112 +34,26 @@ from tunix.generate import mappings
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
 
-from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
-from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
-
+from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO_CONVERSION_RULES
 
 def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
   """Instantiate the converter for a MaxText model name."""
+  # Convert model_name to the key used in _MODEL_TO_CONVERSION_RULES
   if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b"}:
-    return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
+    key = "qwen3_moe"
   elif model_name in {"qwen3.5-35b-a3b"}:
-    return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
+    key = "qwen3.5_moe"
+  else:
+    key = model_name
+
+  if key in _MODEL_TO_CONVERSION_RULES:
+    return WeightConverter(rules=_MODEL_TO_CONVERSION_RULES[key])
 
   raise ValueError(f"No MaxText->vLLM converter registered for model {model_name!r}.")
 
 
-class MaxTextVllmSampler(VllmSampler):
-  """VllmSampler that delegates weight updates to a MaxText to vLLM converter.
-
-  When a converter is supplied, update_params bypasses transfer_state_with_mappings
-  entirely and instead runs converter.convert() followed by a direct device_put
-  into the vLLM model-runner state dict.  If no converter is supplied the base-class
-  behaviour is preserved, so this class is safe to use as a drop-in replacement.
-  """
-
-  def __init__(
-      self,
-      tokenizer: Any,
-      config: VllmConfig,
-      converter: Any = None,
-  ):
-    super().__init__(tokenizer=tokenizer, config=config)
-    self._converter = converter
-
-  def update_params(
-      self,
-      updated_weights,
-      filter_types: Optional[Tuple[Any, ...]] = None,
-  ):
-    """Update the vLLM runner weights from a MaxText state tree."""
-    if self._converter is None:
-      super().update_params(updated_weights, filter_types)
-      return None
-
-    del filter_types
-
-    # delete kv_cache
-    if self.llm is not None:
-      self.llm.reset_prefix_cache()
-      self.llm.collective_rpc("delete_kv_cache")  # will free hbm
-    elif self._driver is not None:
-      self._driver.llm_engine.reset_prefix_cache()
-      self._driver.llm_engine.collective_rpc("delete_kv_cache")
-
-    # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
-    gc.collect()
-    jax.effects_barrier()
-
-    logging.info("MaxTextVllmSampler.update_params: starting converter.convert()...")
-    vllm_state = self._converter.convert(updated_weights)
-    jax.block_until_ready(vllm_state)
-
-    logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
-    model_runner_state = self.transformer_state
-
-    logging.info("Weight sync: using pathwaysutils experimental_reshard")
-
-    keys = list(vllm_state.keys())
-    start_time = time.time()
-    for i, key in enumerate(keys):
-      weight = vllm_state.pop(key)  # free immediately to avoid accumulating all weights in RAM
-      weight_array = (
-          weight.value if hasattr(weight, "value") else weight
-      )  # handle both jnp arrays and ShardedDeviceArrays
-      weight_shape_matches = weight_array.shape == model_runner_state[key].shape
-      assert (
-          weight_shape_matches
-      ), f"Shape mismatch for {key}: converter produced {weight_array.shape}, expected {model_runner_state[key].shape}"
-      # logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
-      target_sharding = model_runner_state[key].sharding
-      model_runner_state[key] = _experimental_reshard.reshard(
-          weight_array,
-          target_sharding,
-          donate=True,
-          may_alias=None,
-          cache_resharding_plans=True,
-      )
-      del weight, weight_array  # release TPU buffer before pushing back to device
-      # Periodically flush async ops and GC to prevent host RAM accumulation.
-      if i % 16 == 15:
-        jax.effects_barrier()
-        gc.collect()
-    jax.effects_barrier()
-    gc.collect()
-    end_time = time.time()
-    logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
-
-    # reinitialize kv_cache
-    if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
-    elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
-
-    return None
-
-
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
-  """VllmRollout that uses MaxTextVllmSampler for weight synchronisation.
+  """VllmRollout that uses VllmSampler with WeightConverter for weight synchronisation.
 
   The extra `maxtext_config` argument is forwarded to the model-specific converter
   together with `mesh`.  All other arguments mirror VllmRollout.__init__.
@@ -182,7 +96,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         model=rollout_actor,
         backend="vllm_jax",
     )
-    self._sampler = MaxTextVllmSampler(
+    self._sampler = VllmSampler(
         tokenizer=tokenizer,
         config=VllmConfig(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
             mesh=mesh,
