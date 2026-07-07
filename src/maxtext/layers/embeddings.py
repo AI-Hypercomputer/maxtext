@@ -1522,24 +1522,39 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
       )
     self.num_grid_per_side = int(self.num_position_embeddings**0.5)
 
-  def _interpolate_single(self, t: int, h: int, w: int) -> tuple[Array, Array]:
-    """Compute bilinear interpolation indices and weights for a single image/video.
+  def __call__(
+      self,
+      actual_t: Array,
+      actual_h: Array,
+      actual_w: Array,
+      num_frames: int,
+      height: int,
+      width: int,
+  ) -> Array:
+    """Interpolate positional embeddings for given dynamic grid dimensions.
 
     Args:
-      t: Number of temporal frames
-      h: Target height in patches
-      w: Target width in patches
+      actual_t: Actual number of temporal frames (batch,)
+      actual_h: Actual height in patches (batch,)
+      actual_w: Actual width in patches (batch,)
+      num_frames: Max number of temporal frames (static)
+      height: Max height in patches (static)
+      width: Max width in patches (static)
 
     Returns:
-      Tuple of (indices, weights) where:
-        - indices: [4, h*w] indices into pos_embed for 4 corners
-        - weights: [4, h*w] bilinear weights for 4 corners
+      Interpolated positional embeddings of shape [batch, num_frames * height * width, hidden_size]
     """
+    batch_size = actual_t.shape[0]
     N = self.num_grid_per_side
 
     # Create interpolation coordinates
-    h_idxs = jnp.linspace(0, N - 1, h)
-    w_idxs = jnp.linspace(0, N - 1, w)
+    h_arange = jnp.arange(height)[None, :]
+    actual_h_col = actual_h[:, None]
+    h_idxs = jnp.minimum(h_arange, actual_h_col - 1) * (N - 1) / jnp.maximum(actual_h_col - 1, 1)
+
+    w_arange = jnp.arange(width)[None, :]
+    actual_w_col = actual_w[:, None]
+    w_idxs = jnp.minimum(w_arange, actual_w_col - 1) * (N - 1) / jnp.maximum(actual_w_col - 1, 1)
 
     # Floor and ceiling indices
     h_idxs_floor = jnp.floor(h_idxs).astype(jnp.int32)
@@ -1551,74 +1566,53 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
     dh = h_idxs - h_idxs_floor
     dw = w_idxs - w_idxs_floor
 
-    # Compute flat indices for 2D grid
-    base_h = h_idxs_floor * N
-    base_h_ceil = h_idxs_ceil * N
+    # Construct the 4 corner indices on the N*N grid
+    floor_h_grid = h_idxs_floor[:, :, None] * N
+    ceil_h_grid = h_idxs_ceil[:, :, None] * N
+    floor_w_grid = w_idxs_floor[:, None, :]
+    ceil_w_grid = w_idxs_ceil[:, None, :]
 
-    # 4 corner indices: (floor_h, floor_w), (floor_h, ceil_w), (ceil_h, floor_w), (ceil_h, ceil_w)
-    indices = jnp.stack(
-        [
-            (base_h[:, None] + w_idxs_floor[None, :]).reshape(-1),
-            (base_h[:, None] + w_idxs_ceil[None, :]).reshape(-1),
-            (base_h_ceil[:, None] + w_idxs_floor[None, :]).reshape(-1),
-            (base_h_ceil[:, None] + w_idxs_ceil[None, :]).reshape(-1),
-        ],
-        axis=0,
-    )  # [4, h*w]
+    idx_00 = floor_h_grid + floor_w_grid
+    idx_01 = floor_h_grid + ceil_w_grid
+    idx_10 = ceil_h_grid + floor_w_grid
+    idx_11 = ceil_h_grid + ceil_w_grid
+
+    # indices shape: (batch, 4, H, W)
+    indices = jnp.stack([idx_00, idx_01, idx_10, idx_11], axis=1)
 
     # Bilinear weights
-    weights = jnp.stack(
-        [
-            ((1 - dh)[:, None] * (1 - dw)[None, :]).reshape(-1),
-            ((1 - dh)[:, None] * dw[None, :]).reshape(-1),
-            (dh[:, None] * (1 - dw)[None, :]).reshape(-1),
-            (dh[:, None] * dw[None, :]).reshape(-1),
-        ],
-        axis=0,
-    )  # [4, h*w]
+    dh_grid = dh[:, :, None]
+    dw_grid = dw[:, None, :]
 
-    return indices, weights
+    w_00 = (1 - dh_grid) * (1 - dw_grid)
+    w_01 = (1 - dh_grid) * dw_grid
+    w_10 = dh_grid * (1 - dw_grid)
+    w_11 = dh_grid * dw_grid
 
-  def __call__(self, num_frames: int, height: int, width: int) -> Array:
-    """Interpolate positional embeddings for given static grid dimensions.
-
-    Args:
-      num_frames: Number of temporal frames (static)
-      height: Height in patches (static)
-      width: Width in patches (static)
-
-    Returns:
-      Interpolated positional embeddings of shape [num_frames * height * width, hidden_size]
-    """
-    # Get interpolation indices and weights
-    indices, weights = self._interpolate_single(num_frames, height, width)  # [4, h*w], [4, h*w]
+    # weights shape: (batch, 4, H, W)
+    weights = jnp.stack([w_00, w_01, w_10, w_11], axis=1)
 
     # Lookup embeddings for all 4 corners
-    corner_embeds = self.pos_embed.value[indices]  # [4, h*w, hidden_size]
+    corner_embeds = self.pos_embed.value[indices]  # [batch, 4, h, w, hidden_size]
 
     # Apply bilinear weights and sum
-    weighted_embeds = corner_embeds * weights[:, :, None]  # [4, h*w, hidden_size]
-    interpolated = jnp.sum(weighted_embeds, axis=0)  # [h*w, hidden_size]
+    weighted_embeds = corner_embeds * weights[:, :, :, :, None]  # [batch, 4, h, w, hidden_size]
+    interpolated = jnp.sum(weighted_embeds, axis=1)  # [batch, h, w, hidden_size]
 
     # Repeat for temporal frames
-    if num_frames > 1:
-      interpolated = jnp.tile(interpolated, (num_frames, 1))  # [t*h*w, hidden_size]
+    interpolated = jnp.expand_dims(interpolated, axis=1)
+    interpolated = jnp.tile(interpolated, (1, num_frames, 1, 1, 1))
 
     # Apply spatial merge permutation
-    # Reshape to [t, h, w, hidden_size] then permute for block-based processing
     merge_size = self.spatial_merge_size
     merged_h = height // merge_size
     merged_w = width // merge_size
 
-    # Reshape: [t*h*w, hidden_size] -> [t, h, w, hidden_size]
-    interpolated = interpolated.reshape(num_frames, height, width, self.hidden_size)
-
-    # Permute for spatial merging: [t, merged_h, merge_size, merged_w, merge_size, hidden_size]
-    interpolated = interpolated.reshape(num_frames, merged_h, merge_size, merged_w, merge_size, self.hidden_size)
-    # -> [t, merged_h, merged_w, merge_size, merge_size, hidden_size]
-    interpolated = jnp.transpose(interpolated, (0, 1, 3, 2, 4, 5))
-    # Flatten back to [t*merged_h*merged_w*merge_size*merge_size, hidden_size]
-    interpolated = interpolated.reshape(-1, self.hidden_size)
+    interpolated = interpolated.reshape(
+        batch_size, num_frames, merged_h, merge_size, merged_w, merge_size, self.hidden_size
+    )
+    interpolated = jnp.transpose(interpolated, (0, 1, 2, 4, 3, 5, 6))
+    interpolated = interpolated.reshape(batch_size, -1, self.hidden_size)
 
     if self.cast_as_fprop_dtype:
       interpolated = interpolated.astype(self.fprop_dtype)

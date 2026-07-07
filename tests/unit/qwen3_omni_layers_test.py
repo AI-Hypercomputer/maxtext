@@ -401,27 +401,49 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
     patch_size = self.config.patch_size_for_vit
     in_channels = self.config.num_channels_for_vit
 
-    raw_shape = (
-        batch_size,
-        in_channels,
-        raw_grid[0] * temporal_patch_size,
-        raw_grid[1] * patch_size,
-        raw_grid[2] * patch_size,
-    )
-    raw_hidden_states, _ = create_random_jax_torch(*raw_shape)
     raw_grid_thw = np.asarray([raw_grid], dtype=np.int32)
+    grid_t, grid_h, grid_w = raw_grid[0], raw_grid[1], raw_grid[2]
+
+    # Generate random flat patch sequence (patch-contiguous)
+    flat_shape = (grid_t * grid_h * grid_w, in_channels * temporal_patch_size * patch_size * patch_size)
+    # Use numpy random to match the test style
+    raw_video_processed = np.random.normal(size=flat_shape).astype(np.float32)
+
+    # Reshape to pixel-level grid (preserves patch-contiguity in memory)
+    raw_hidden_states = np.reshape(
+        raw_video_processed,
+        (batch_size, in_channels, grid_t * temporal_patch_size, grid_h * patch_size, grid_w * patch_size)
+    )
 
     padded_hidden_states, padded_grid_thw, video_mask = maybe_pad_video_values_to_max_grid(
-        np.asarray(raw_hidden_states),
+        raw_video_processed,
         raw_grid_thw,
         config_video_pad,
     )
 
-    raw_output, raw_attention_mask = self.jax_model(raw_hidden_states)
+    # Reshape inputs to patch-level (-1, C, tps, ps, ps) as the encoder would
+    raw_hidden_states_reshaped = raw_hidden_states.reshape(
+        -1,
+        in_channels,
+        temporal_patch_size,
+        patch_size,
+        patch_size,
+    )
+    raw_output, raw_attention_mask = self.jax_model(raw_hidden_states_reshaped)
+    raw_output = raw_output.reshape(batch_size, -1, self.config.hidden_size_for_vit)
+
+    padded_hidden_states_reshaped = jnp.asarray(padded_hidden_states).reshape(
+        -1,
+        in_channels,
+        temporal_patch_size,
+        patch_size,
+        patch_size,
+    )
     padded_output, attention_mask = self.jax_model(
-        jnp.asarray(padded_hidden_states),
+        padded_hidden_states_reshaped,
         video_mask=jnp.asarray(video_mask),
     )
+    padded_output = padded_output.reshape(batch_size, -1, self.config.hidden_size_for_vit)
 
     self.assertIsNone(raw_attention_mask)
     np.testing.assert_array_equal(padded_grid_thw, raw_grid_thw)
@@ -461,18 +483,8 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
     self.assertAlmostEqual(video_grid_thw[0, 2] / video_grid_thw[0, 1], dummy_video_wide_ratio, delta=0.5)
 
     # Verify maybe_pad_video_values_to_max_grid succeeds without ValueError.
-    video_values = np.reshape(
-        video_processed,
-        (
-            1,
-            cfg.num_channels_for_vit,
-            cfg.temporal_patch_size_for_vit * video_grid_thw[0, 0],
-            cfg.patch_size_for_vit * video_grid_thw[0, 1],
-            cfg.patch_size_for_vit * video_grid_thw[0, 2],
-        ),
-    )
     padded_values, padded_grid, _ = maybe_pad_video_values_to_max_grid(
-        video_values,
+        video_processed,
         video_grid_thw,
         cfg,
     )
@@ -615,7 +627,10 @@ class TestQwen3OmniMoeVisionPosEmbedInterpolate(BaseVisionTestCase):
     grid_thw_np = np.array([[num_frames, height, width]], dtype=np.int64)
     grid_thw_torch = torch.from_numpy(grid_thw_np)
 
-    pos_embed_jax = self.jax_model(num_frames, height, width)
+    actual_t = jnp.array([num_frames], dtype=jnp.int32)
+    actual_h = jnp.array([height], dtype=jnp.int32)
+    actual_w = jnp.array([width], dtype=jnp.int32)
+    pos_embed_jax = self.jax_model(actual_t, actual_h, actual_w, num_frames, height, width)[0]
     pos_embed_torch = self.torch_encoder.fast_pos_embed_interpolate(grid_thw_torch)
 
     assert_all_close_jax_torch(pos_embed_jax, pos_embed_torch, rtol=1e-2, atol=1e-2)
@@ -795,6 +810,7 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
         video_path=self.video_path,
         use_audio_in_video=True,
         max_prefill_predict_length=2048,
+        max_target_length=2560,
     )
 
   def test_preprocess_mm_data(self):

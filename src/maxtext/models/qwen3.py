@@ -1941,6 +1941,7 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
       num_frames: int,
       height: int,
       width: int,
+      decoder_segment_ids: Array | None = None,
       deterministic: bool = True,
   ) -> Array:
     """
@@ -1949,6 +1950,7 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
         num_frames: Number of temporal frames (static)
         height: Height in patches (static)
         width: Width in patches (static)
+        decoder_segment_ids: Optional padding mask
         deterministic: Whether to use deterministic mode (disable dropout)
 
     Returns:
@@ -1963,6 +1965,7 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
     output, _ = self.attn(
         inputs_q=hidden_states,
         inputs_kv=hidden_states,
+        decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         rope_kwargs=rope_kwargs,
     )
@@ -2016,18 +2019,26 @@ class Qwen3OmniMoeVisionBlock(nnx.Module):
       num_frames: int,
       height: int,
       width: int,
+      decoder_segment_ids: Array | None = None,
   ) -> Array:
     """
     Args:
         x: Input tensor of shape (batch, T*H*W, hidden_size)
         num_frames: Number of temporal frames (static)
-        height: Height in patches (static)i
+        height: Height in patches (static)
         width: Width in patches (static)
+        decoder_segment_ids: Optional padding mask
 
     Returns:
         Output tensor of shape (batch, T*H*W, hidden_size)
     """
-    x = x + self.attn(self.ln1(x), num_frames=num_frames, height=height, width=width)
+    x = x + self.attn(
+        self.ln1(x),
+        num_frames=num_frames,
+        height=height,
+        width=width,
+        decoder_segment_ids=decoder_segment_ids,
+    )
     y = self.ln2(x)
     y = self.mlp(y)
     y = jax.nn.gelu(y)
@@ -2088,11 +2099,13 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
   def __call__(
       self,
       hidden_states: Array,
+      input_masks: Array | None = None,
       deterministic: bool = True,
   ):
     """
     Args:
         hidden_states: Input visual tokens of shape (batch, in_channels, T*patch_size, H*patch_size, W*patch_size)
+        input_masks: Optional input mask of shape (batch, 1, T*patch_size, H*patch_size, W*patch_size)
         deterministic: Whether to use deterministic mode
 
     Returns:
@@ -2112,18 +2125,33 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         self.config.patch_size_for_vit,
     )
 
+    if input_masks is not None:
+      t_patch = self.config.temporal_patch_size_for_vit
+      s_patch = self.config.patch_size_for_vit
+      patch_mask = input_masks[:, 0, ::t_patch, ::s_patch, ::s_patch]
+      actual_t = jnp.sum(patch_mask[:, :, 0, 0], axis=1)
+      actual_h = jnp.sum(patch_mask[:, 0, :, 0], axis=1)
+      actual_w = jnp.sum(patch_mask[:, 0, 0, :], axis=1)
+    else:
+      patch_mask = None
+      actual_t = jnp.full((batch_size,), num_frames, dtype=jnp.int32)
+      actual_h = jnp.full((batch_size,), height, dtype=jnp.int32)
+      actual_w = jnp.full((batch_size,), width, dtype=jnp.int32)
+
     x, _ = self.patch_embed(hidden_states)
     x = x.reshape(batch_size, -1, self.config.hidden_size_for_vit)
-    pos = self.pos_embed_interpolate(num_frames, height, width)
-
-    pos = pos[jnp.newaxis, :, :]
+    pos = self.pos_embed_interpolate(actual_t, actual_h, actual_w, num_frames, height, width)
     x = x + pos
+
+    flat_patch_mask = None
+    if patch_mask is not None:
+      flat_patch_mask = patch_mask.reshape(batch_size, -1)
 
     h_traj = []
     for i in range(self.depth):
       block_name = f"blocks_{i}"
       blk = getattr(self, block_name)
-      x = blk(x, num_frames=num_frames, height=height, width=width)
+      x = blk(x, num_frames=num_frames, height=height, width=width, decoder_segment_ids=flat_patch_mask)
       h_traj.append(x)
 
     deep_feats = []

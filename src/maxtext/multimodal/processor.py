@@ -234,6 +234,19 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
   return bidirectional_mask_vision
 
 
+def downsample_video_mask_to_tokens(config, pixel_mask):
+  """Downsample a pixel-level video mask to a model-specific video token mask."""
+  if pixel_mask is None:
+    return None
+  if config.model_name.startswith("qwen3"):
+    from maxtext.multimodal.processor_qwen3_omni import (  # pylint: disable=import-outside-toplevel
+        downsample_video_mask_to_tokens as qwen3_downsample_video_mask_to_tokens,
+    )
+
+    return qwen3_downsample_video_mask_to_tokens(config, pixel_mask)
+  return None
+
+
 def get_bidirectional_mask_audio(config, decoder_input_tokens):
   """Get the bidirectional mask for specific models."""
   bidirectional_mask_audio = None

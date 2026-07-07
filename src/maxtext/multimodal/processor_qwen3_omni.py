@@ -137,43 +137,93 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   audio_lengths: None | np.ndarray = None
 
 
+def downsample_video_mask_to_tokens(config, pixel_mask: jax.Array | None) -> jax.Array | None:
+  """Downsample a pixel-level video mask to a post-merge video token mask."""
+  if pixel_mask is None:
+    return None
+
+  patch_mask = pixel_mask[
+      :,
+      0,
+      :: config.temporal_patch_size_for_vit,
+      :: config.patch_size_for_vit,
+      :: config.patch_size_for_vit,
+  ]
+  merged_mask = patch_mask[:, :, :: config.spatial_merge_size_for_vit, :: config.spatial_merge_size_for_vit]
+  return merged_mask.reshape(pixel_mask.shape[0], -1)
+
+
 def maybe_pad_video_values_to_max_grid(
-    video_values: np.ndarray,
+    video_processed: np.ndarray,
     video_grid_thw: np.ndarray,
     config,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-  """Pad Qwen3-Omni video pixels to configured static grid limits when enabled.
+  """Pad Qwen3-Omni video flat patches to configured static grid limits when enabled.
 
   Args:
-    video_values: Video pixels of shape (batch, channels, T*tps, H*patch, W*patch).
+    video_processed: Flat video patches of shape (T*H*W, C*tps*ps*ps).
     video_grid_thw: Actual video grid with shape (1, 3), in Qwen grid units.
     config: Config carrying video_max_grid_t/h/w and ViT patch sizes.
 
   Returns:
     Tuple of:
-    - padded video pixels, or the input when no max grid is configured
+    - padded video pixels of shape (1, C, max_T*tps, max_H*patch, max_W*patch)
     - input grid_thw
-    - pixel-level mask of shape (batch, 1, max_T*tps, max_H*patch, max_W*patch), or None
+    - pixel-level mask of shape (1, 1, max_T*tps, max_H*patch, max_W*patch), or None
   """
+  actual_t, actual_h, actual_w = (int(dim) for dim in video_grid_thw[0])
+  expected_patches = actual_t * actual_h * actual_w
+  expected_patch_dim = config.num_channels_for_vit * config.temporal_patch_size_for_vit * config.patch_size_for_vit**2
+  if video_processed.shape != (expected_patches, expected_patch_dim):
+    raise ValueError(
+        "video_processed must have shape "
+        f"{(expected_patches, expected_patch_dim)} for grid {video_grid_thw[0].tolist()}, got {video_processed.shape}."
+    )
+
   max_grid = (
       getattr(config, "video_max_grid_t", None),
       getattr(config, "video_max_grid_h", None),
       getattr(config, "video_max_grid_w", None),
   )
   if all(dim is None for dim in max_grid):
+    video_values = np.reshape(
+        video_processed,
+        (
+            1,
+            config.num_channels_for_vit,
+            config.temporal_patch_size_for_vit * actual_t,
+            config.patch_size_for_vit * actual_h,
+            config.patch_size_for_vit * actual_w,
+        ),
+    )
     return video_values, video_grid_thw, None
+
   if any(dim is None for dim in max_grid):
     raise ValueError("video_max_grid_t, video_max_grid_h, and video_max_grid_w must be set together.")
-  if video_values.ndim != 5:
-    raise ValueError(f"video_values must have shape (batch, channels, time, height, width), got {video_values.shape}.")
 
-  max_t, max_h, max_w = (int(dim) for dim in max_grid)  # pyrefly: ignore[bad-argument-type]
-  actual_t, actual_h, actual_w = (int(dim) for dim in video_grid_thw[0])
+  max_t, max_h, max_w = (int(dim) for dim in max_grid)
   if actual_t > max_t or actual_h > max_h or actual_w > max_w:
     raise ValueError(
         f"video grid {video_grid_thw[0].tolist()} exceeds max grid {(max_t, max_h, max_w)}. "
         "Scale or resize the video before padding."
     )
+
+  video_patches = np.reshape(video_processed, (actual_t, actual_h, actual_w, expected_patch_dim))
+
+  padded_patches = np.zeros((max_t, max_h, max_w, expected_patch_dim), dtype=video_processed.dtype)
+  padded_patches[:actual_t, :actual_h, :actual_w, :] = video_patches
+  padded_flat = np.reshape(padded_patches, (max_t * max_h * max_w, expected_patch_dim))
+
+  padded_video_values = np.reshape(
+      padded_flat,
+      (
+          1,
+          config.num_channels_for_vit,
+          config.temporal_patch_size_for_vit * max_t,
+          config.patch_size_for_vit * max_h,
+          config.patch_size_for_vit * max_w,
+      ),
+  )
 
   temporal_patch_size = config.temporal_patch_size_for_vit
   patch_size = config.patch_size_for_vit
@@ -184,15 +234,7 @@ def maybe_pad_video_values_to_max_grid(
   max_h_px = max_h * patch_size
   max_w_px = max_w * patch_size
 
-  padded_video_values = np.zeros(
-      (video_values.shape[0], video_values.shape[1], max_t_px, max_h_px, max_w_px),
-      dtype=video_values.dtype,
-  )
-  padded_video_values[:, :, :valid_t_px, :valid_h_px, :valid_w_px] = video_values[
-      :, :, :valid_t_px, :valid_h_px, :valid_w_px
-  ]
-
-  video_mask = np.zeros((video_values.shape[0], 1, max_t_px, max_h_px, max_w_px), dtype=np.int32)
+  video_mask = np.zeros((1, 1, max_t_px, max_h_px, max_w_px), dtype=np.int32)
   video_mask[:, :, :valid_t_px, :valid_h_px, :valid_w_px] = 1
 
   return padded_video_values, video_grid_thw, video_mask
@@ -665,17 +707,7 @@ def preprocess_mm_data_qwen3_omni(config):
   if config.video_path:
     video_array, _ = _read_video_decord(config.video_path)
     video_processed, video_grid_thw = preprocess_video(video_array, config)
-    video_values = np.reshape(
-        video_processed,
-        (
-            1,
-            config.num_channels_for_vit,
-            config.temporal_patch_size_for_vit * video_grid_thw[0, 0],
-            config.patch_size_for_vit * video_grid_thw[0, 1],
-            config.patch_size_for_vit * video_grid_thw[0, 2],
-        ),
-    )
-    video_values, video_grid_thw, video_mask = maybe_pad_video_values_to_max_grid(video_values, video_grid_thw, config)
+    video_values, video_grid_thw, video_mask = maybe_pad_video_values_to_max_grid(video_processed, video_grid_thw, config)
     processor_outputs.video_values = video_values
     processor_outputs.video_grid_thw = video_grid_thw
     processor_outputs.video_mask = video_mask

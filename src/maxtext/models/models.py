@@ -171,8 +171,8 @@ class TransformerLinenPure(nn.Module):
       )
 
     if self.config.use_multimodal and encoder_videos is not None:
-      video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
-          input_images=encoder_videos, deterministic=not enable_dropout
+      video_embeddings, deepstack_visual_embeds = self.vision_encoder(
+          input_images=encoder_videos, input_masks=encoder_video_masks, deterministic=not enable_dropout
       )
       bidirectional_mask_video = mm_processor.get_bidirectional_mask_vision(
           self.config, decoder_input_tokens, is_video=True
@@ -188,11 +188,12 @@ class TransformerLinenPure(nn.Module):
 
     multimodal_input = None
     if image_embeddings is not None or video_embeddings is not None or audio_embeddings is not None:
+      token_video_mask = mm_processor.downsample_video_mask_to_tokens(self.config, encoder_video_masks)
       multimodal_input = MultimodalInput(
           image_embeddings=image_embeddings,
           image_masks=encoder_image_masks,
-          video_embeddings=video_embeddings,
-          video_masks=encoder_video_masks,
+          video_embeddings=jnp.expand_dims(video_embeddings, axis=-2) if video_embeddings is not None else None,
+          video_masks=token_video_mask,
           audio_embeddings=audio_embeddings,
           audio_masks=audio_masks,
           bidirectional_mask=bidirectional_mask_image,
@@ -499,7 +500,7 @@ class Transformer(nnx.Module):
 
     if self.config.use_multimodal and encoder_videos is not None:
       video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
-          input_images=encoder_videos, deterministic=not enable_dropout
+          input_images=encoder_videos, input_masks=encoder_video_masks, deterministic=not enable_dropout
       )
       bidirectional_mask_video = mm_processor.get_bidirectional_mask_vision(
           self.config, decoder_input_tokens, is_video=True
@@ -515,11 +516,12 @@ class Transformer(nnx.Module):
 
     multimodal_input = None
     if image_embeddings is not None or video_embeddings is not None or audio_embeddings is not None:
+      token_video_mask = mm_processor.downsample_video_mask_to_tokens(self.config, encoder_video_masks)
       multimodal_input = MultimodalInput(
           image_embeddings=image_embeddings,
           image_masks=encoder_image_masks,
-          video_embeddings=video_embeddings,
-          video_masks=encoder_video_masks,
+          video_embeddings=jnp.expand_dims(video_embeddings, axis=-2) if video_embeddings is not None else None,
+          video_masks=token_video_mask,
           audio_embeddings=audio_embeddings,
           audio_masks=audio_masks,
           bidirectional_mask=bidirectional_mask_image,
