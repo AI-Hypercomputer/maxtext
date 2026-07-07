@@ -52,26 +52,21 @@ class WeightConverter(abc.ABC):
 
         for rule in self.rules:
             if isinstance(rule, WeightRenaming):
-                # We need to compile the regex but also we need to handle simple string replacements
-                # The prompt doesn't specify if source_pattern is purely a regex. 
-                # "maps a single source regex pattern to a target pattern"
+                # Compile the regex and handle simple string replacements
                 source_pattern = re.compile(rule.source_pattern)
                 for src_key, src_val in flat_src.items():
                     if source_pattern.search(src_key):
-                        # The user's target pattern might just be a string.
                         target_key = source_pattern.sub(rule.target_pattern, src_key)
                         dst_dict[target_key] = src_val
             elif isinstance(rule, WeightConverterRule):
-                # For multiple source patterns, we need to extract variables to group them
-                # Since the user used r"layers\.\d+\.attention\.wq\.kernel", they probably expect 
-                # us to match the digits and use them in target_pattern=r"layers.{}.attention.qkv_proj.weight".
-                # Let's extract all \d+ from the keys that match the source patterns
+                # Used r"layers\.\d+\.attention\.wq\.kernel"
+                # matched to target_pattern=r"layers.{}.attention.qkv_proj.weight".
                 import collections
                 matched_groups = collections.defaultdict(list)
                 
                 source_regexes = [re.compile(p) for p in rule.source_patterns]
                 
-                # We'll search for all keys matching each source pattern
+                # Search for all keys matching each source pattern
                 for i, pattern in enumerate(source_regexes):
                     for src_key, src_val in flat_src.items():
                         m = pattern.search(src_key)

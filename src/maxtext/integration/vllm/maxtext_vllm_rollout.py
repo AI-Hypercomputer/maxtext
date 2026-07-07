@@ -53,10 +53,7 @@ def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mes
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
-  """VllmRollout that uses VllmSampler with WeightConverter for weight synchronisation.
-
-  The extra `maxtext_config` argument is forwarded to the model-specific converter
-  together with `mesh`.  All other arguments mirror VllmRollout.__init__.
+  """VllmRollout that uses VllmSampler with WeightConverter for weight sync.
 
   Usage (direct):
       rollout = MaxTextVllmRollout(
