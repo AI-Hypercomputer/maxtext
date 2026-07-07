@@ -497,7 +497,17 @@ class NNXDecoder(nnx.Module):
 
     return out
 
-  def _apply_layers_sequentially(self, layers, x_in, *args, length: int, kv_caches_stacked=None, **kwargs):
+  def _apply_layers_sequentially(
+      self,
+      layers,
+      x_in,
+      *args,
+      length: int,
+      kv_caches_stacked=None,
+      skip_block_remat: bool = False,
+      unroll: int = 1,
+      **kwargs,
+  ):
     """Runs the layer stack using nnx.scan.
 
     Args:
@@ -508,6 +518,11 @@ class NNXDecoder(nnx.Module):
       kv_caches_stacked: Optional pytree whose leaves have shape [num_layers, ...].
         When provided, the i-th slice is passed as `kv_cache=` to layer i and the
         updated caches are returned as a third element of the tuple.
+      skip_block_remat: When True, do not wrap the scanned body in jax.checkpoint.
+        Used when the scanned module already applies its own (finer-grained,
+        e.g. per-layer) remat internally, to avoid double rematerialization.
+      unroll: Number of scan iterations to unroll into straight-line code
+        (forwarded to jax.lax.scan). unroll >= length fully unrolls the loop.
       **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
 
     Returns:
@@ -581,7 +596,12 @@ class NNXDecoder(nnx.Module):
         return new_carry, (new_current_state, updated_kv)
       return new_carry, new_current_state
 
-    layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
+    if skip_block_remat:
+      # The scanned module applies its own remat internally; wrapping the whole
+      # body again would double-remat and recompute the entire block.
+      layer_fn_wrapped = layer_fn
+    else:
+      layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
 
     if use_kv:
       # If kv_caches is provided (e.g., from vLLM), we CANNOT use jax.lax.scan
@@ -628,7 +648,7 @@ class NNXDecoder(nnx.Module):
         final_carry = carry
         scanned_state = jax.tree.map(lambda *xs: jnp.stack(list(xs)), *per_layer_states)
       else:
-        final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
+        final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state), unroll=unroll)
       returned_kv_stacked = None
 
     if scan_axis != 0:
@@ -1327,10 +1347,21 @@ class NNXDecoder(nnx.Module):
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
     layer_kwargs = {"bidirectional_mask": bidirectional_mask}
 
-    # Apply the main scan over the full blocks
+    # Apply the main scan over the full blocks. Gemma4ScannableBlock applies
+    # per-layer remat internally (local scan + global layer), so skip the
+    # block-level remat here to avoid double rematerialization. Unrolling the
+    # block loop (one iteration per repeated block) lets XLA pipeline/free block
+    # activations across iterations (memory + overlap knob).
+    block_unroll = max(1, cfg.base_num_decoder_layers // cfg.inhomogeneous_layer_cycle_interval)
     if scan_length > 0:
       y, self.scanned_blocks, _ = self._apply_layers_sequentially(
-          self.scanned_blocks, y, *layer_args, length=scan_length, **layer_kwargs
+          self.scanned_blocks,
+          y,
+          *layer_args,
+          length=scan_length,
+          skip_block_remat=True,
+          unroll=block_unroll,
+          **layer_kwargs,
       )
 
     # Apply any remaining layers that did not fit into a full scanned block

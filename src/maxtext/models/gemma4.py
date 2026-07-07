@@ -582,8 +582,22 @@ class Gemma4ScannableBlock(nnx.Module):
         new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
         return new_carry, nnx.state(layer)
 
+      # Remat the global layer symmetrically with the local layers. The global
+      # layer runs full-sequence (not sliding-window) attention, so it holds the
+      # largest activation residual in the block; leaving it un-rematted would
+      # keep those activations live across all scanned blocks.
+      if self.config.remat_policy != "none":
+        prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
+        scan_body_g_for_scan = jax.checkpoint(
+            scan_body_g,
+            policy=self.remat_policy_fn,
+            prevent_cse=prevent_cse,
+        )
+      else:
+        scan_body_g_for_scan = scan_body_g
+
       with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
-        y, scanned_state_g = jax.lax.scan(scan_body_g, y, state_g)
+        y, scanned_state_g = jax.lax.scan(scan_body_g_for_scan, y, state_g)
 
       # Remove the dummy dimension
       scanned_state_g = jax.tree.map(lambda x: jnp.squeeze(x, 0), scanned_state_g)
