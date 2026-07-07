@@ -73,24 +73,24 @@ def eager_attention_forward(
 
 
 def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
+  """Rotates half the hidden dims of the input."""
+  x1 = x[..., : x.shape[-1] // 2]
+  x2 = x[..., x.shape[-1] // 2 :]
+  return torch.cat((-x2, x1), dim=-1)
 
 
 def apply_rotary_pos_emb(q, k, cos, sin):
-    """Pytorch impl for applying RoPE to query and key tensors."""
-    cos = cos.unsqueeze(1)
-    sin = sin.unsqueeze(1)
-    rotary_dim = cos.shape[-1]
-    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
-    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
-    q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
-    k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
-    q_embed = torch.cat([q_embed, q_pass], dim=-1)
-    k_embed = torch.cat([k_embed, k_pass], dim=-1)
-    return q_embed, k_embed
+  """Pytorch impl for applying RoPE to query and key tensors."""
+  cos = cos.unsqueeze(1)
+  sin = sin.unsqueeze(1)
+  rotary_dim = cos.shape[-1]
+  q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+  k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+  q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+  k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+  q_embed = torch.cat([q_embed, q_pass], dim=-1)
+  k_embed = torch.cat([k_embed, k_pass], dim=-1)
+  return q_embed, k_embed
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:

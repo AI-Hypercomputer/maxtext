@@ -264,72 +264,72 @@ class LoadDynamicTest(parameterized.TestCase):
 
 
 class SourceCheckpointLoadingTest(parameterized.TestCase):
-    """Tests for the `load_state_if_possible` function with safetensors_dynamic layout."""
+  """Tests for the `load_state_if_possible` function with safetensors_dynamic layout."""
 
-    def setUp(self):
-        super().setUp()
-        self.mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("x",))
-        self.sharding = NamedSharding(self.mesh, PartitionSpec())
+  def setUp(self):
+    super().setUp()
+    self.mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("x",))
+    self.sharding = NamedSharding(self.mesh, PartitionSpec())
 
-        self.tmp_dir = epath.Path(self.create_tempdir().full_path)
-        self.safetensors_ckpt_dir = self.tmp_dir / "hf_safetensors"
-        self.safetensors_ckpt_dir.mkdir(parents=True, exist_ok=True)
-        self.safetensors_ckpt_path = self.safetensors_ckpt_dir / "model.safetensors"
+    self.tmp_dir = epath.Path(self.create_tempdir().full_path)
+    self.safetensors_ckpt_dir = self.tmp_dir / "hf_safetensors"
+    self.safetensors_ckpt_dir.mkdir(parents=True, exist_ok=True)
+    self.safetensors_ckpt_path = self.safetensors_ckpt_dir / "model.safetensors"
 
-    def test_load_safetensors_dynamic_single_key(self):
-        if os.getenv("JAX_PLATFORMS") == "proxy":
-            self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
-        # Save a single key (embedding weight) to a safetensors file
-        dummy_weight = np.arange(1024, dtype=np.float32).reshape(256, 4)
-        safetensors.numpy.save_file(
-            {"model.embed_tokens.weight": dummy_weight}, str(self.safetensors_ckpt_path)
-        )
+  def test_load_safetensors_dynamic_single_key(self):
+    if os.getenv("JAX_PLATFORMS") == "proxy":
+      self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
+    # Save a single key (embedding weight) to a safetensors file
+    dummy_weight = np.arange(1024, dtype=np.float32).reshape(256, 4)
+    safetensors.numpy.save_file(
+        {"model.embed_tokens.weight": dummy_weight}, str(self.safetensors_ckpt_path)
+    )
 
-        # Setup mock config
-        class MockConfig:
+    # Setup mock config
+    class MockConfig:
 
-            def __init__(self):
-                self.model_name = "llama3.1-8b"
-                self.base_output_directory = "gs://dummy-bucket"
-                self.scan_layers = True
-                self.param_scan_axis = 0
-                self.hf_access_token = None
+      def __init__(self):
+        self.model_name = "llama3.1-8b"
+        self.base_output_directory = "gs://dummy-bucket"
+        self.scan_layers = True
+        self.param_scan_axis = 0
+        self.hf_access_token = None
 
-        config = MockConfig()
+    config = MockConfig()
 
-        # Target abstract state matching llama2 embeddings shape
-        target_state = {
-            "params": {
-                "token_embedder": {
-                    "embedding": jax.ShapeDtypeStruct(
-                        shape=(256, 4), dtype=np.float32, sharding=self.sharding
-                    )
-                }
+    # Target abstract state matching llama2 embeddings shape
+    target_state = {
+        "params": {
+            "token_embedder": {
+                "embedding": jax.ShapeDtypeStruct(
+                    shape=(256, 4), dtype=np.float32, sharding=self.sharding
+                )
             }
         }
-        abstract_state = train_state.TrainState.create(
-            apply_fn=lambda x: x, params=target_state["params"], tx=optax.identity()
-        )
+    }
+    abstract_state = train_state.TrainState.create(
+        apply_fn=lambda x: x, params=target_state["params"], tx=optax.identity()
+    )
 
-        # Load using checkpointing framework dynamically
-        loaded_data, loaded_vars = checkpointing.load_state_if_possible(
-            checkpoint_manager=None,
-            data_iterator=None,
-            load_parameters_from_path=str(self.safetensors_ckpt_dir),
-            load_full_state_from_path="",
-            checkpoint_storage_concurrent_gb=1,
-            abstract_unboxed_pre_state=abstract_state,
-            enable_orbax_v1=True,
-            source_checkpoint_layout="safetensors_dynamic",
-            maxtext_config=config,
-        )
+    # Load using checkpointing framework dynamically
+    loaded_data, loaded_vars = checkpointing.load_state_if_possible(
+        checkpoint_manager=None,
+        data_iterator=None,
+        load_parameters_from_path=str(self.safetensors_ckpt_dir),
+        load_full_state_from_path="",
+        checkpoint_storage_concurrent_gb=1,
+        abstract_unboxed_pre_state=abstract_state,
+        enable_orbax_v1=True,
+        source_checkpoint_layout="safetensors_dynamic",
+        maxtext_config=config,
+    )
 
-        self.assertIsNone(loaded_data)
-        self.assertIsNotNone(loaded_vars)
+    self.assertIsNone(loaded_data)
+    self.assertIsNotNone(loaded_vars)
 
-        # Assert values match
-        loaded_weight = loaded_vars["params"]["token_embedder"]["embedding"]
-        np.testing.assert_allclose(loaded_weight, dummy_weight)
+    # Assert values match
+    loaded_weight = loaded_vars["params"]["token_embedder"]["embedding"]
+    np.testing.assert_allclose(loaded_weight, dummy_weight)
 
 
 class CheckpointMetadataTest(parameterized.TestCase):
