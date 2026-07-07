@@ -24,7 +24,6 @@ from etils import epath
 from flax import nnx
 from flax.training import train_state
 import jax
-import jax.numpy as jnp
 from maxtext.utils.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
 from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
@@ -170,50 +169,6 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   process_count: Optional[int] = None
 
 
-def _default_for_sds(sds):
-  """Returns a deterministic value matching `sds` shape/dtype/sharding.
-
-  Used to fill NNX-only state (rngs/dropout) that the Linen on-disk layout never
-  carried. Materializes under jit with the target out_shardings so it works on
-  multi-host meshes (device_put can't place a global sharding whose devices
-  aren't
-  all addressable from this process).
-  """
-  if not (hasattr(sds, "dtype") and hasattr(sds, "shape")):
-    return sds
-
-  def _make():
-    if "key" in str(sds.dtype):
-      base = jax.random.key(0)
-      return base if sds.shape == () else jax.random.split(base, int(np.prod(sds.shape))).reshape(sds.shape)
-    return jnp.zeros(sds.shape, dtype=sds.dtype)
-
-  sharding = getattr(sds, "sharding", None)
-  if sharding is None:
-    return _make()
-  return jax.jit(_make, out_shardings=sharding)()
-
-
-def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
-  """Fills `abstract_pure` with values from `partial_concrete` (by path), defaulting the rest.
-
-  Paths present in `partial_concrete` take the restored value; paths absent from
-  it
-  (NNX-only state the Linen checkpoint never had) get `_default_for_sds`.
-  """
-  if isinstance(abstract_pure, dict):
-    return {
-        k: _populate_pure_dict_from_partial(
-            v,
-            partial_concrete.get(k) if isinstance(partial_concrete, dict) else None,
-        )
-        for k, v in abstract_pure.items()
-    }
-  if partial_concrete is not None and not isinstance(partial_concrete, dict):
-    return partial_concrete
-  return _default_for_sds(abstract_pure)
-
-
 def _load_linen_checkpoint_into_nnx(
     path,
     abstract_nnx_state,
@@ -241,7 +196,7 @@ def _load_linen_checkpoint_into_nnx(
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
   partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+  return train_state_nnx.populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
 
 
 def _restore_emergency_linen_checkpoint_into_nnx(
@@ -262,19 +217,7 @@ def _restore_emergency_linen_checkpoint_into_nnx(
   )
   restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
   partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
-
-
-def _rebuild_nnx_with_values(abstract_nnx_state, concrete_weights):
-  """Fills each Variable in `abstract_nnx_state` with the matching restored array."""
-  leaves, treedef = jax.tree_util.tree_flatten(abstract_nnx_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
-  concrete = jax.tree_util.tree_leaves(concrete_weights)
-  if len(leaves) != len(concrete):
-    raise ValueError(
-        f"Params load leaf-count mismatch: {len(leaves)} abstract Variables vs" f" {len(concrete)} restored."
-    )
-  new_leaves = [v.replace(value=a) if isinstance(v, nnx.Variable) else a for v, a in zip(leaves, concrete)]
-  return jax.tree_util.tree_unflatten(treedef, new_leaves)
+  return train_state_nnx.populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
 
 
 def _load_linen_params_into_nnx(
@@ -306,7 +249,7 @@ def _load_linen_params_into_nnx(
       epath.Path(path),
       args=ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True),
   )
-  return _rebuild_nnx_with_values(nnx_params_abstract, restored["params"]["params"])
+  return train_state_nnx.rebuild_nnx_with_values(nnx_params_abstract, restored["params"]["params"])
 
 
 def _load_full_state_from_path(
