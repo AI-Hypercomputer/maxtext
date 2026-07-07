@@ -1,12 +1,28 @@
 """Automated Checkpoint Validation Agent for MaxText."""
 
+import maxtext
 import subprocess
 import json
 import os
 import argparse
 # pylint: disable=no-name-in-module
-from maxtext import max_logging as logger
+from maxtext.utils import max_logging as logger
 
+
+def sanitize_gcs_path(path):
+  """Cleans up Google Cloud Storage browser URLs into valid gs:// paths."""
+  path = path.split("?")[0]
+  prefixes_to_replace = [
+      "https://pantheon.corp.google.com/storage/browser/",
+      "https://console.cloud.google.com/storage/browser/",
+  ]
+  for prefix in prefixes_to_replace:
+    if path.startswith(prefix):
+      path = "gs://" + path[len(prefix):]
+      break
+
+
+  return path
 
 def validate_checkpoint(json_config_path):
   """Validate MaxText checkpoint using JSON configuration file."""
@@ -31,7 +47,7 @@ def validate_checkpoint(json_config_path):
   # extract the mandatory fields from the json config
   run_name = user_config["run_name"]
   internal_model_name = user_config["maxtext_model_name"]
-  checkpoint_path = user_config["checkpoint_gcs_path"]
+  checkpoint_path = sanitize_gcs_path(user_config["checkpoint_gcs_path"])
   overrides = user_config.get("maxtext_overrides", {})
 
   # raise error if user doesn't provide required fields
@@ -67,8 +83,11 @@ def validate_checkpoint(json_config_path):
       command.append(f"{flag_name}={flag_value}")
       logger.info(f"  -> {flag_name}={flag_value}")
 
-  # run subprocess
-  result = subprocess.run(command, text=True, capture_output=True, check=False)
+  # find the absolute path to the root of the repository
+  maxtext_module_dir = os.path.dirname(maxtext.__file__)
+  repo_root = os.path.abspath(os.path.join(maxtext_module_dir, "../../"))
+  # run subprocess (from the top level repo directory)
+  result = subprocess.run(command, text=True, capture_output=True, check=False, cwd=repo_root)
 
   # generate report
   report = {
@@ -80,7 +99,7 @@ def validate_checkpoint(json_config_path):
   }
 
   # build and save report
-  report_dir = os.path.join(os.path.dirname(__file__), "reports")
+  report_dir = os.path.join(os.getcwd(), "reports")
   os.makedirs(report_dir, exist_ok=True)
   output_path = os.path.join(report_dir, f"report_{run_name}.json")
 
