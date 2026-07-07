@@ -126,12 +126,23 @@ jobs:
             echo "run_notebooks=false" >> $GITHUB_OUTPUT
           fi
 
+  code_quality_check:
+    uses: ./.github/workflows/code_quality.yml
+    with:
+      maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
+
+  docs_build_check:
+    uses: ./.github/workflows/check_docs_build.yml
+    with:
+      maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
+
   build_and_upload_maxtext_package:
-    needs: analyze_code_changes
-    # Run if either tests or notebooks need to run
+    needs: [analyze_code_changes, code_quality_check, docs_build_check]
+    # Run if either tests or notebooks need to run; on PRs, gate on code quality + docs passing
     if: |
-      needs.analyze_code_changes.outputs.run_tests == 'true' ||
-      needs.analyze_code_changes.outputs.run_notebooks == 'true'
+      always() &&
+      (needs.analyze_code_changes.outputs.run_tests == 'true' || needs.analyze_code_changes.outputs.run_notebooks == 'true') &&
+      (github.event_name != 'pull_request' || (needs.code_quality_check.result == 'success' && needs.docs_build_check.result == 'success'))
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
@@ -154,10 +165,29 @@ jobs:
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+  gate_test_run:
+    name: Gate and Formalize Parameters
+    needs: [analyze_code_changes, build_and_upload_maxtext_package]
+    if: |
+      always() &&
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      total_workers: ${{ steps.set-params.outputs.total_workers }}
+      worker_groups: ${{ steps.set-params.outputs.worker_groups }}
+    steps:
+      - id: set-params
+        name: Formalize Test Suite Parameters
+        run: |
+          TPU_UNIT_TOTAL_WORKERS=2
+          TPU_UNIT_WORKER_GROUPS='[1, 2]'
+          echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
+          echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
+
   tpu-tests:
     name: ${{ matrix.flavor || 'TPU' }} tests
-    needs: [build_and_upload_maxtext_package]
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    needs: [build_and_upload_maxtext_package, gate_test_run]
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -171,8 +201,8 @@ jobs:
 
   tpu7x-tests:
     name: TPU7X tests
-    needs: [build_and_upload_maxtext_package]
-    if: needs.analyze_code_changes.outputs.run_tests == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: [build_and_upload_maxtext_package, gate_test_run]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -186,8 +216,7 @@ jobs:
 
   gpu-tests:
     name: ${{ matrix.flavor || 'GPU' }} tests
-    needs: [build_and_upload_maxtext_package]
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    needs: [build_and_upload_maxtext_package, gate_test_run]
     strategy:
       fail-fast: false
       matrix:
@@ -201,8 +230,7 @@ jobs:
 
   cpu-tests:
     name: ${{ matrix.flavor || 'CPU' }} tests
-    needs: [build_and_upload_maxtext_package]
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    needs: [build_and_upload_maxtext_package, gate_test_run]
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -214,31 +242,13 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
-  setup-pathways-parameters:
-    name: Setup Pathways Parameters
-    runs-on: ubuntu-latest
-    outputs:
-      total_workers: ${{ steps.set-params.outputs.total_workers }}
-      worker_groups: ${{ steps.set-params.outputs.worker_groups }}
-    steps:
-      - id: set-params
-        name: Set Pathways Worker Parameters
-        run: |
-          # TPU worker constants
-          TPU_UNIT_TOTAL_WORKERS=2
-          TPU_UNIT_WORKER_GROUPS='[1, 2]'
-
-          echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
-          echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
-
   maxtext_tpu_pathways_unit_tests:
-    needs: [build_and_upload_maxtext_package, setup-pathways-parameters]
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    needs: [build_and_upload_maxtext_package, gate_test_run]
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
         matrix:
-          group: ${{ fromJSON(needs.setup-pathways-parameters.outputs.worker_groups) }}
+          group: ${{ fromJSON(needs.gate_test_run.outputs.worker_groups || '[1, 2]') }}
     with:
       device_type: tpu
       device_name: v6e-4
@@ -251,12 +261,11 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
-      total_workers: ${{ needs.setup-pathways-parameters.outputs.total_workers }}
+      total_workers: ${{ needs.gate_test_run.outputs.total_workers || '2' }}
       worker_group: ${{ matrix.group }}
 
   maxtext_tpu_pathways_integration_tests:
-    needs: build_and_upload_maxtext_package
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    needs: [build_and_upload_maxtext_package, gate_test_run]
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -275,20 +284,19 @@ jobs:
 
   all_tests_passed:
     name: All Required Tests Passed
-    needs: [tpu-tests, gpu-tests, cpu-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests]
+    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check test results
         run: |
-          if [ "${NEEDS_ANALYZE_CHANGES_OUTPUTS_RUN_TESTS}" == "false" ]; then
-            echo "Tests were skipped"
-            exit 0
-          fi
-
-          # Otherwise, check that build and all tests passed or were skipped
+          # Check that build and all tests passed or were skipped
           echo "Build result: ${NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT}"
+          echo "Code Quality result: ${NEEDS_CODE_QUALITY_CHECK_RESULT}"
+          echo "Docs Build result: ${NEEDS_DOCS_BUILD_CHECK_RESULT}"
+          echo "Gate result: ${NEEDS_GATE_TEST_RUN_RESULT}"
           echo "TPU Tests (Matrix) result: ${NEEDS_TPU_TESTS_RESULT}"
+          echo "TPU7X Tests (Matrix) result: ${NEEDS_TPU7X_TESTS_RESULT}"
           echo "GPU Tests (Matrix) result: ${NEEDS_GPU_TESTS_RESULT}"
           echo "CPU Tests (Matrix) result: ${NEEDS_CPU_TESTS_RESULT}"
           echo "Pathways Unit result: ${NEEDS_MAXTEXT_TPU_PATHWAYS_UNIT_TESTS_RESULT}"
@@ -302,10 +310,13 @@ jobs:
 
           echo "All required tests passed successfully"
         env:
-          NEEDS_ANALYZE_CODE_CHANGES_OUTPUTS_RUN_TESTS: ${{ needs.analyze_code_changes.outputs.run_tests }}
           NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
+          NEEDS_CODE_QUALITY_CHECK_RESULT: ${{ needs.code_quality_check.result }}
+          NEEDS_DOCS_BUILD_CHECK_RESULT: ${{ needs.docs_build_check.result }}
+          NEEDS_GATE_TEST_RUN_RESULT: ${{ needs.gate_test_run.result }}
           NEEDS_CPU_TESTS_RESULT: ${{ needs.cpu-tests.result }}
           NEEDS_TPU_TESTS_RESULT: ${{ needs.tpu-tests.result }}
+          NEEDS_TPU7X_TESTS_RESULT: ${{ needs.tpu7x-tests.result }}
           NEEDS_GPU_TESTS_RESULT: ${{ needs.gpu-tests.result }}
           NEEDS_MAXTEXT_TPU_PATHWAYS_UNIT_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_unit_tests.result }}
           NEEDS_MAXTEXT_TPU_PATHWAYS_INTEGRATION_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}
@@ -341,7 +352,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests]
+    needs: [gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -355,7 +366,7 @@ jobs:
 
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
-    needs: [tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, notify_failure]
+    needs: [gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
     if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:
