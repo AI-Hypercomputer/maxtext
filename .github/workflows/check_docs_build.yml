@@ -17,12 +17,11 @@
 name: Check the Documentation Build
 
 on:
-  pull_request:
-    types: [opened, synchronize]
   workflow_call:
     inputs:
       maxtext_sha:
-        required: true
+        description: 'The specific MaxText commit SHA.'
+        required: false
         type: string
   workflow_dispatch:
 
@@ -38,7 +37,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-          ref: ${{ inputs.maxtext_sha }}
+          ref: ${{ inputs.maxtext_sha || github.sha }}
 
       - name: Check if only documentation changed
         id: check
