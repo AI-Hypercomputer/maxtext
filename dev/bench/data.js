@@ -22,41 +22,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "[TPU] File: test-results-tpu-1.xml",
-            "value": 1344.356,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-4.xml",
-            "value": 1038.92,
-            "unit": "sec"
-          },
-          {
-            "name": "[TPU] File: test-results-tpu-2.xml",
-            "value": 243.941,
-            "unit": "sec"
-          },
-          {
-            "name": "[CUDA12] File: test-results-cuda12-1.xml",
-            "value": 1193.384,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-3.xml",
-            "value": 272.544,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-2.xml",
-            "value": 173.63,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-1.xml",
-            "value": 177.393,
-            "unit": "sec"
-          },
-          {
             "name": "Total TPU Tests Duration",
             "value": 1588.297,
             "unit": "sec"
@@ -92,41 +57,6 @@ window.BENCHMARK_DATA = {
         "tool": "customSmallerIsBetter",
         "benches": [
           {
-            "name": "[TPU] File: test-results-tpu-1.xml",
-            "value": 1356.58,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-4.xml",
-            "value": 1069.585,
-            "unit": "sec"
-          },
-          {
-            "name": "[TPU] File: test-results-tpu-2.xml",
-            "value": 246.341,
-            "unit": "sec"
-          },
-          {
-            "name": "[CUDA12] File: test-results-cuda12-1.xml",
-            "value": 1192.812,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-3.xml",
-            "value": 262.184,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-2.xml",
-            "value": 167.654,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-1.xml",
-            "value": 183.82,
-            "unit": "sec"
-          },
-          {
             "name": "Total TPU Tests Duration",
             "value": 1602.9209999999998,
             "unit": "sec"
@@ -161,41 +91,6 @@ window.BENCHMARK_DATA = {
         "date": 1783046351374,
         "tool": "customSmallerIsBetter",
         "benches": [
-          {
-            "name": "[TPU] File: test-results-tpu-1.xml",
-            "value": 1348.38,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-4.xml",
-            "value": 2523.7775,
-            "unit": "sec"
-          },
-          {
-            "name": "[TPU] File: test-results-tpu-2.xml",
-            "value": 243.064,
-            "unit": "sec"
-          },
-          {
-            "name": "[CUDA12] File: test-results-cuda12-1.xml",
-            "value": 1191.327,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-3.xml",
-            "value": 585.0975,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-2.xml",
-            "value": 366.72249999999997,
-            "unit": "sec"
-          },
-          {
-            "name": "[CPU] File: test-results-cpu-1.xml",
-            "value": 452.88,
-            "unit": "sec"
-          },
           {
             "name": "Total TPU Tests Duration",
             "value": 1591.4440000000002,
