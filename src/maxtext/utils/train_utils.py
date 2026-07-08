@@ -304,7 +304,7 @@ def setup_train_loop(config, recorder, devices=None):
     # Create data_loader AFTER reordering wrapper is applied
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
-    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+    state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
     if config.pure_nnx:

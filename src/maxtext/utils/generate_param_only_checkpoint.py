@@ -167,7 +167,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
     init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
 
-  state, state_mesh_notations, state_mesh_shardings, _ = maxtext_utils.setup_training_state(
+  state, state_mesh_notations, state_mesh_shardings, _, _ = maxtext_utils.setup_training_state(
       None, config, mesh, checkpoint_manager, init_state_fn
   )
   if config.pure_nnx:
@@ -400,13 +400,9 @@ def generate_decode_checkpoint(config):
   training_state, training_state_annotations = _read_train_checkpoint(config, checkpoint_manager, mesh)
   if config.pure_nnx:
     # NNX state is a flat nnx.State; opt_state lives under the optimizer sub-state.
-    assert (
-        training_state.optimizer.opt_state
-    ), "missing opt_state in training checkpoint"
+    assert training_state.optimizer.opt_state, "missing opt_state in training checkpoint"
   else:
-    assert (
-        training_state.opt_state != {}
-    ), "missing opt_state in training checkpoint"
+    assert training_state.opt_state != {}, "missing opt_state in training checkpoint"
 
   _possibly_unroll_params(config, training_state, training_state_annotations, mesh)
 
