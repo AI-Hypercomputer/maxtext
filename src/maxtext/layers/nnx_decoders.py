@@ -1909,7 +1909,7 @@ class NNXDecoder(nnx.Module):
           else:
             kv_cache = None
 
-          input_tokens = decoder_input_tokens if cfg.engram_layers else None
+          input_tokens = decoder_input_tokens if (cfg.engram_layers or cfg.decoder_block == DecoderBlockType.DEEPSEEK4) else None
           if input_tokens is not None:
             layer_kwargs["decoder_input_tokens"] = input_tokens
 
