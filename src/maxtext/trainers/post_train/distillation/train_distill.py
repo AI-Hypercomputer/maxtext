@@ -150,10 +150,16 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         enable_dropout=config.enable_dropout,
         decoder_target_tokens=kwargs.get("decoder_target_tokens", None),
         decoder_target_mask=kwargs.get("decoder_target_mask", None),
+        # Pass injected teacher's attention inputs down to the model
+        injected_attention_inputs=kwargs.get("injected_attention_inputs", None),
     )
     out_projection_activations = None
     if config.distill_beta > 0.0:
       out_projection_activations = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
+
+    attention_inputs = None
+    if config.blockwise_distill:
+      attention_inputs = maxtext_utils.get_intermediate_value(model, "attention_inputs", clear=True)
 
     moe_lb_loss = None
     if config.num_experts > 1 and config.load_balance_loss_weight > 0.0:
@@ -163,7 +169,10 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         moe_lb_loss = jnp.mean(jnp.concatenate(total_moe_lb_losses))
 
     retval = distillation_utils.DistillationForwardOutput(
-        logits=logits, out_projection_activations=out_projection_activations, moe_lb_loss=moe_lb_loss
+        logits=logits,
+        out_projection_activations=out_projection_activations,
+        moe_lb_loss=moe_lb_loss,
+        attention_inputs=attention_inputs,
     )
     return retval
 
@@ -314,16 +323,23 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     def loss_wrapper_pure(diff_params, rest):
       local_student = nnx.merge(student_graphdef, diff_params, rest, copy=True)
-      student_output = self.strategy.student_forward_fn(
-          model=local_student,
-          input_tokens=batch["input_tokens"],
-          positions=batch["positions"],
-          attention_mask=batch.get("attention_mask"),
-          decoder_segment_ids=batch.get("decoder_segment_ids"),
-          decoder_target_tokens=batch.get("targets", None),
-          decoder_target_mask=batch.get("targets_segmentation", None),
-          cache=None,
-      )
+      student_kwargs = {
+          "model": local_student,
+          "input_tokens": batch["input_tokens"],
+          "positions": batch["positions"],
+          "attention_mask": batch.get("attention_mask"),
+          "decoder_segment_ids": batch.get("decoder_segment_ids"),
+          "decoder_target_tokens": batch.get("targets", None),
+          "decoder_target_mask": batch.get("targets_segmentation", None),
+          "cache": None,
+      }
+      if (
+          isinstance(teacher_output, distillation_utils.DistillationForwardOutput)
+          and teacher_output.attention_inputs is not None
+      ):
+        student_kwargs["injected_attention_inputs"] = teacher_output.attention_inputs
+
+      student_output = self.strategy.student_forward_fn(**student_kwargs)
       labels = self.strategy.create_labels(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
       loss, aux = self.strategy.compute_loss(student_output, teacher_output, labels, step=current_step)
       # Capture updated non-param state (e.g. RNG counters) from local_student.
@@ -613,6 +629,7 @@ def build_training_components(
       beta_end=student_config.distill_beta_end,
       beta_schedule=student_config.distill_beta_schedule,
       max_steps=student_config.steps,
+      blockwise_distill=teacher_config.blockwise_distill,
   )
 
   # Prepare optimizer

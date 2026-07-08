@@ -148,6 +148,7 @@ class LlamaDecoderLayer(nnx.Module):
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
+      injected_attention_inputs: jax.Array | None = None,
   ):
     cfg = self.config
 
@@ -166,10 +167,14 @@ class LlamaDecoderLayer(nnx.Module):
     lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=lnx_sharding)
     lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
 
+    # Override attention module inputs if teacher activations are injected
+    attn_q = injected_attention_inputs if injected_attention_inputs is not None else lnx
+    attn_kv = injected_attention_inputs if injected_attention_inputs is not None else lnx
+
     # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        lnx,
+        attn_q,
+        attn_kv,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
