@@ -3857,9 +3857,191 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   return mapping
 
 
+def PARAM2MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates a parameter mapping from MaxText to HuggingFace Param2 MoE weight paths."""
+  num_main_layers = config["num_hidden_layers"]
+  first_num_dense_layers = config["first_k_dense_replace"]
+  num_experts = config.get("num_experts", 0)
+
+  # Mapping for non-layer-specific weights
+  mapping = {
+      "params-token_embedder-embedding": "model.word_embeddings.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+  # Attention keys are shared by both dense and MoE
+  attention_keys = {
+      "pre_self_attention_layer_norm-scale": "input_layernorm.weight",
+      "post_self_attention_layer_norm-scale": "post_attention_layernorm.weight",
+      "self_attention-query-kernel": "attention.query_key_value.weight",
+      "self_attention-key-kernel": "attention.query_key_value.weight",
+      "self_attention-value-kernel": "attention.query_key_value.weight",
+      "self_attention-out-kernel": "attention.dense.weight",
+      "self_attention-query_norm-scale": "attention.query_layernorm.weight",
+      "self_attention-key_norm-scale": "attention.key_layernorm.weight",
+  }
+  # Dense Layers
+  dense_layer_keys = attention_keys | {
+      "mlp-wi_0-kernel": "mlp.gate_proj.weight",
+      "mlp-wi_1-kernel": "mlp.up_proj.weight",
+      "mlp-wo-kernel": "mlp.down_proj.weight",
+  }
+  # MoE Layers
+  moe_layer_keys = attention_keys | {
+      "MoeBlock_0-shared_experts-wi_0-kernel": "mlp.shared_experts.gate_proj.weight",
+      "MoeBlock_0-shared_experts-wi_1-kernel": "mlp.shared_experts.up_proj.weight",
+      "MoeBlock_0-shared_experts-wo-kernel": "mlp.shared_experts.down_proj.weight",
+      "MoeBlock_0-MoeBlock_0-gate-kernel": "mlp.gate.weight",
+      "MoeBlock_0-MoeBlock_0-gate-bias": "mlp.gate.expert_bias",
+  }
+  # MoE Experts (nested list mapping: [[e0_l0, e0_l1..], [e1_l0, e1_l1..]..])
+  moe_expert_keys = {
+      "MoeBlock_0-MoeBlock_0-wi_0": "gate_proj.weight",
+      "MoeBlock_0-MoeBlock_0-wi_1": "up_proj.weight",
+      "MoeBlock_0-MoeBlock_0-wo": "down_proj.weight",
+  }
+
+  # scan
+  if scan_layers:
+    for maxtext_key, hf_key in dense_layer_keys.items():
+      mapping[f"params-decoder-dense_layers-{maxtext_key}"] = [
+          f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers)
+      ]
+
+    for maxtext_key, hf_key in moe_layer_keys.items():
+      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [
+          f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)
+      ]
+
+    for maxtext_key, hf_key in moe_expert_keys.items():
+      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [
+          [f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)]
+          for e in range(num_experts)
+      ]
+  # unscan
+  else:
+    for i in range(first_num_dense_layers):
+      for maxtext_key, hf_key in dense_layer_keys.items():
+        mapping[f"params-decoder-dense_layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+
+    for i in range(first_num_dense_layers, num_main_layers):
+      moe_layer_idx = i - first_num_dense_layers
+
+      for maxtext_key, hf_key in moe_layer_keys.items():
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+
+      for maxtext_key, hf_key in moe_expert_keys.items():
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [
+            f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
+        ]
+  return mapping
+
+
+def PARAM2MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Param2 MoE."""
+
+  def reshape_kernel(input_tensor, target_shape):
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  num_heads = config.get("num_attention_heads", 32)
+  num_kv_heads = config.get("num_key_value_heads", 8)
+  head_dim = config.get("head_dim", 64)
+
+  q_size = num_heads * head_dim
+  k_size = num_kv_heads * head_dim
+  v_size = num_kv_heads * head_dim
+
+  def query_hook(input_tensor, target_shape):
+    q_tensor = input_tensor[0:q_size, :]
+    if saving_to_hf:
+      raise NotImplementedError("Saving to HF is not implemented for Param2MoE QKV split")
+    else:
+      return q_tensor.T.reshape(target_shape)
+
+  def key_hook(input_tensor, target_shape):
+    k_tensor = input_tensor[q_size : q_size + k_size, :]
+    if saving_to_hf:
+      raise NotImplementedError()
+    else:
+      return k_tensor.T.reshape(target_shape)
+
+  def value_hook(input_tensor, target_shape):
+    v_tensor = input_tensor[q_size + k_size : q_size + k_size + v_size, :]
+    if saving_to_hf:
+      raise NotImplementedError()
+    else:
+      return v_tensor.T.reshape(target_shape)
+
+  num_main_layers = config["num_hidden_layers"]
+  first_num_dense_layers = config["first_k_dense_replace"]
+
+  mapping = {
+      "params-decoder-logits_dense-kernel": reshape_kernel,
+  }
+
+  attention_need_reshape = {
+      "self_attention-out-kernel",
+  }
+
+  dense_need_reshape = attention_need_reshape | {
+      "mlp-wi_0-kernel",
+      "mlp-wi_1-kernel",
+      "mlp-wo-kernel",
+  }
+
+  moe_need_reshape = attention_need_reshape | {
+      "MoeBlock_0-shared_experts-wi_0-kernel",
+      "MoeBlock_0-shared_experts-wi_1-kernel",
+      "MoeBlock_0-shared_experts-wo-kernel",
+      "MoeBlock_0-MoeBlock_0-gate-kernel",
+      "MoeBlock_0-MoeBlock_0-wi_0",
+      "MoeBlock_0-MoeBlock_0-wi_1",
+      "MoeBlock_0-MoeBlock_0-wo",
+  }
+
+  # scan
+  if scan_layers:
+    for key in dense_need_reshape:
+      mapping[f"params-decoder-dense_layers-{key}"] = reshape_kernel
+    for key in moe_need_reshape:
+      mapping[f"params-decoder-moe_layers-{key}"] = reshape_kernel
+
+    mapping["params-decoder-dense_layers-self_attention-query-kernel"] = query_hook
+    mapping["params-decoder-dense_layers-self_attention-key-kernel"] = key_hook
+    mapping["params-decoder-dense_layers-self_attention-value-kernel"] = value_hook
+
+    mapping["params-decoder-moe_layers-self_attention-query-kernel"] = query_hook
+    mapping["params-decoder-moe_layers-self_attention-key-kernel"] = key_hook
+    mapping["params-decoder-moe_layers-self_attention-value-kernel"] = value_hook
+  # unscan
+  else:
+    for i in range(first_num_dense_layers):
+      for key in dense_need_reshape:
+        mapping[f"params-decoder-dense_layers_{i}-{key}"] = reshape_kernel
+      mapping[f"params-decoder-dense_layers_{i}-self_attention-query-kernel"] = query_hook
+      mapping[f"params-decoder-dense_layers_{i}-self_attention-key-kernel"] = key_hook
+      mapping[f"params-decoder-dense_layers_{i}-self_attention-value-kernel"] = value_hook
+    for i in range(first_num_dense_layers, num_main_layers):
+      moe_layer_idx = i - first_num_dense_layers
+      for key in moe_need_reshape:
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{key}"] = reshape_kernel
+      mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-query-kernel"] = query_hook
+      mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-key-kernel"] = key_hook
+      mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-value-kernel"] = value_hook
+
+  return mapping
+
+
 # {maxtext model name: {maxtext weight name: hf weight name}}
 PARAM_MAPPING = {
+
+    "param2moe": PARAM2MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
+
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -3911,7 +4093,9 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "param2moe": PARAM2MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,

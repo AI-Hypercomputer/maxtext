@@ -694,10 +694,11 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.PARAM2MOE):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
+
   elif config.decoder_block == DecoderBlockType.LLAMA4:
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
@@ -950,7 +951,9 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
         DecoderBlockType.GEMMA4,
+        DecoderBlockType.PARAM2MOE,
     ):
+
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
     elif config.decoder_block == DecoderBlockType.QWEN3_CUSTOM_MOE:

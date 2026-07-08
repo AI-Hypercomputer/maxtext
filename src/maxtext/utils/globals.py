@@ -89,9 +89,11 @@ HF_IDS = {
     "olmo3-7b": "allenai/Olmo-3-7B-Instruct",
     "olmo3-7b-pt": "allenai/Olmo-3-1025-7B",
     "olmo3-32b": "allenai/Olmo-3-32B-Think",
+    "param2moe": "bharatgenai/Param2-17B-A2.4B-Thinking",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
     "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
 }
+
 
 __all__ = [
     "DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE",

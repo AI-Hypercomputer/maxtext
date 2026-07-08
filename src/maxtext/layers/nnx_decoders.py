@@ -65,7 +65,9 @@ from maxtext.models import (
     qwen3_5,
     qwen3_custom,
     simple_layer,
+    param2moe,
 )
+
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 from maxtext.utils.sharding import create_sharding
@@ -428,7 +430,9 @@ class NNXDecoder(nnx.Module):
 
     self.scanned_layers = None
     self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
+    self.is_param2moe = self.config.decoder_block == DecoderBlockType.PARAM2MOE
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
+
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
 
@@ -454,10 +458,11 @@ class NNXDecoder(nnx.Module):
   def _init_pipeline_layers(self, decoder_block_classes, rngs, mesh):
     """Initializes decoder layers with pipeline parallelism."""
     config = self.config
-    assert not (config.engram_layers and self.is_deepseek), (
-        "engram_layers + DeepSeek + pipeline_parallelism is not supported. "
+    assert not (config.engram_layers and (self.is_deepseek or self.is_param2moe)), (
+        "engram_layers + MoE + pipeline_parallelism is not supported. "
         "engram interleaving is currently only implemented in the non-pipeline path."
     )
+
 
     def build_pipeline_stage_layers(rngs):
       return self._get_pipeline_stage_module(decoder_block_classes, rngs)
@@ -526,7 +531,7 @@ class NNXDecoder(nnx.Module):
 
   def _init_scanned_layers(self, decoder_block_classes, rngs, mesh):
     """Initializes decoder layers with scanning (non-pipeline)."""
-    if self.is_deepseek:
+    if self.is_deepseek or self.is_param2moe:
       self._init_scanned_deepseek(decoder_block_classes, rngs)
     elif self.is_gemma3:
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
@@ -534,6 +539,7 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
+
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
     """Initializes scanned DeepSeek layers with optional Engram support."""
@@ -696,10 +702,11 @@ class NNXDecoder(nnx.Module):
     """Initializes decoder layers sequentially (no scanning)."""
     self.layers = nnx.List([])
 
-    if self.is_deepseek:
+    if self.is_deepseek or self.is_param2moe:
       self._init_sequential_deepseek(decoder_block_classes, rngs)
     else:
       self._init_sequential_generic(decoder_block_classes, rngs)
+
 
   def _init_sequential_deepseek(self, decoder_block_classes, rngs):
     """Initializes sequential DeepSeek dense and MoE layers."""
@@ -1127,7 +1134,9 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
+        DecoderBlockType.PARAM2MOE: [param2moe.Param2MoEDenseLayer, param2moe.Param2MoELayer],
     }
+
 
     if cfg.decoder_block not in layer_map:
       raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
@@ -1265,7 +1274,9 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.PARAM2MOE,
         DecoderBlockType.GEMMA,
+
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.GEMMA4,
@@ -1715,11 +1726,12 @@ class NNXDecoder(nnx.Module):
             slot=slot,
         )
       elif cfg.scan_layers:
-        if self.is_deepseek:
+        if self.is_deepseek or self.is_param2moe:
           layer_kwargs = {
               "previous_chunk": previous_chunk,
               "slot": slot,
           }
+
 
           if cfg.engram_layers:
             common_kwargs = {

@@ -61,7 +61,9 @@ from maxtext.models import (
     qwen3_custom,
     qwen3_5,
     simple_layer,
+    param2moe,
 )
+
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils import max_logging
@@ -468,6 +470,12 @@ class Decoder(nn.Module):
             deepseek.DeepSeekDenseLayerToLinen,
             deepseek.DeepSeekMoELayerToLinen,
         ]
+      case DecoderBlockType.PARAM2MOE:
+        return [
+            param2moe.Param2MoEDenseLayerToLinen,
+            param2moe.Param2MoELayerToLinen,
+        ]
+
       case DecoderBlockType.DEEPSEEK4:
         return (
             [deepseek4.DeepSeek4ScannableBlockToLinen] if self.config.scan_layers else [deepseek4.DeepSeek4LayerToLinen]
@@ -541,9 +549,11 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer],
+        DecoderBlockType.PARAM2MOE: [param2moe.Param2MoEDenseLayer, param2moe.Param2MoELayer],
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
     }
+
 
     if cfg.decoder_block not in layer_map:
       raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
@@ -638,7 +648,9 @@ class Decoder(nn.Module):
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.PARAM2MOE,
         DecoderBlockType.GEMMA,
+
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.GEMMA4,
@@ -945,8 +957,9 @@ class Decoder(nn.Module):
             )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
+        if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.PARAM2MOE):
+          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using DeepSeek or Param2 MoE."
+
           layer_call_kwargs = {
               "previous_chunk": previous_chunk,
               "slot": slot,
@@ -1146,8 +1159,9 @@ class Decoder(nn.Module):
                 **layer_kwargs,
             )(y, *current_broadcast_args)
       else:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
+        if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.PARAM2MOE):
+          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using DeepSeek or Param2 MoE."
+
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
 

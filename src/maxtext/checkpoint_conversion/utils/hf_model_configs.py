@@ -1698,10 +1698,63 @@ qwen3_vl_2b_dict = {
 }
 qwen3_vl_2b_config = PTConfig(**qwen3_vl_2b_dict)
 
+param2moe_dict = {
+    "architectures": ["Param2MoEForCausalLM"],
+    "attention_dropout": 0.0,
+    "embedding_dropout": 0.0,
+    "eos_token_id": 3,
+    "first_k_dense_replace": 1,
+    "head_dim": 64,
+    "hidden_act": "silu",
+    "hidden_size": 2048,
+    "initializer_range": 0.02,
+    "intermediate_size": 9216,
+    "max_position_embeddings": 4096,
+    "max_window_layers": 20,
+    "moe_intermediate_size": 2048,
+    "moe_router_enable_expert_bias": True,
+    "moe_shared_expert_intermediate_size": 4096,
+    "mtp_loss_scaling_factor": 0,
+    "n_group": 1,
+    "norm_topk_prob": True,
+    "num_attention_heads": 32,
+    "num_experts": 64,
+    "num_experts_per_tok": 6,
+    "num_hidden_layers": 21,
+    "num_key_value_heads": 8,
+    "num_nextn_predict_layers": 0,
+    "num_shared_experts": 2,
+    "output_dropout": 0.0,
+    "output_router_logits": False,
+    "pad_token_id": 0,
+    "partial_rotary_factor": 1.0,
+    "rms_norm_eps": 1e-06,
+    "rope_parameters": {
+        "partial_rotary_factor": 1.0,
+        "rope_theta": 1000000.0,
+        "rope_type": "default",
+    },
+    "rope_theta": 1000000.0,
+    "routed_scaling_factor": 2.5,
+    "score_function": "sigmoid",
+    "tie_word_embeddings": True,
+    "topk_group": 1,
+    "use_bias": False,
+    "use_cache": True,
+    "use_qk_norm": True,
+    "use_qkv_bias": False,
+    "use_rmsnorm": True,
+    "vocab_size": 128008,
+    "model_type": "param2moe",
+}
+param2moe_config = PTConfig(**param2moe_dict)
+
 
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
+    "param2moe": param2moe_config,
     "gemma2-2b": gemma2_2b_config,
+
     "gemma2-9b": gemma2_9b_config,
     "gemma2-27b": gemma2_27b_config,
     "gemma3-4b": gemma3_4b_config,
