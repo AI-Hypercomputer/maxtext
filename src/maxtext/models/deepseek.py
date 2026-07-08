@@ -27,6 +27,7 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import Config
 from maxtext.common.common_types import HyperConnectionType, MODEL_MODE_PREFILL, DecoderBlockType
 from maxtext.layers import attention_mla
+from maxtext.layers.attentions import Attention
 from maxtext.layers import initializers
 from maxtext.layers import linears
 from maxtext.layers import mhc
@@ -140,37 +141,58 @@ class DeepSeekGenericLayer(nnx.Module):
 
     # DeepSeek V4 natively overrides this block with CompressedAttention.
     if self.config.decoder_block != DecoderBlockType.DEEPSEEK4:
-      self.self_attention = attention_mla.MLA(
-          config=self.config,
-          num_query_heads=self.config.num_query_heads,
-          num_kv_heads=self.config.num_kv_heads,
-          head_dim=self.config.head_dim,
-          max_target_length=self.config.max_target_length,
-          max_prefill_predict_length=self.config.max_prefill_predict_length,
-          attention_kernel=self.config.attention,
-          attention_type=self.config.attention_type,
-          inputs_q_shape=self.dummy_inputs_shape,
-          inputs_kv_shape=self.dummy_inputs_shape,
-          mesh=mesh,
-          dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
-          dropout_rate=self.config.dropout_rate,
-          name="self_attention",
-          quant=quant,
-          kv_quant=quantizations.configure_kv_quant(self.config),
-          q_lora_rank=self.config.q_lora_rank,
-          kv_lora_rank=self.config.kv_lora_rank,
-          qk_nope_head_dim=self.config.qk_nope_head_dim,
-          qk_rope_head_dim=self.config.qk_rope_head_dim,
-          v_head_dim=self.config.v_head_dim,
-          max_position_embeddings=self.config.max_position_embeddings,
-          original_max_position_embeddings=self.config.original_max_position_embeddings,
-          mscale=self.config.mscale,
-          rope_factor=self.config.rope_factor,
-          model_mode=model_mode,
-          rngs=rngs,
-          attn_logits_soft_cap=self.config.attn_logits_soft_cap,
-      )
+      if getattr(self.config, "use_mla", True):
+        self.self_attention = attention_mla.MLA(
+            config=self.config,
+            num_query_heads=self.config.num_query_heads,
+            num_kv_heads=self.config.num_kv_heads,
+            head_dim=self.config.head_dim,
+            max_target_length=self.config.max_target_length,
+            max_prefill_predict_length=self.config.max_prefill_predict_length,
+            attention_kernel=self.config.attention,
+            attention_type=self.config.attention_type,
+            inputs_q_shape=self.dummy_inputs_shape,
+            inputs_kv_shape=self.dummy_inputs_shape,
+            mesh=mesh,
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            dropout_rate=self.config.dropout_rate,
+            name="self_attention",
+            quant=quant,
+            kv_quant=quantizations.configure_kv_quant(self.config),
+            q_lora_rank=self.config.q_lora_rank,
+            kv_lora_rank=self.config.kv_lora_rank,
+            qk_nope_head_dim=self.config.qk_nope_head_dim,
+            qk_rope_head_dim=self.config.qk_rope_head_dim,
+            v_head_dim=self.config.v_head_dim,
+            max_position_embeddings=self.config.max_position_embeddings,
+            original_max_position_embeddings=self.config.original_max_position_embeddings,
+            mscale=self.config.mscale,
+            rope_factor=self.config.rope_factor,
+            model_mode=model_mode,
+            rngs=rngs,
+            attn_logits_soft_cap=self.config.attn_logits_soft_cap,
+        )
+      else:
+        self.self_attention = Attention(
+            config=self.config,
+            num_query_heads=self.config.num_query_heads,
+            num_kv_heads=self.config.num_kv_heads,
+            head_dim=self.config.head_dim,
+            max_target_length=self.config.max_target_length,
+            max_prefill_predict_length=self.config.max_prefill_predict_length,
+            attention_kernel=self.config.attention,
+            inputs_q_shape=self.dummy_inputs_shape,
+            inputs_kv_shape=self.dummy_inputs_shape,
+            mesh=mesh,
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            dropout_rate=self.config.dropout_rate,
+            quant=quant,
+            kv_quant=quantizations.configure_kv_quant(self.config),
+            model_mode=model_mode,
+            rngs=rngs,
+        )
 
     self.dropout = Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
     if self.is_mhc_enabled:
@@ -210,6 +232,7 @@ class DeepSeekGenericLayer(nnx.Module):
       decoder_segment_ids,
       decoder_positions,
       deterministic,
+      model_mode,
       previous_chunk=None,
       slot: None | int = None,
   ):
@@ -220,7 +243,7 @@ class DeepSeekGenericLayer(nnx.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
-        model_mode=self.model_mode,
+        model_mode=model_mode,
         out_sharding=self.out_sharding,
         previous_chunk=previous_chunk,
         slot=slot,
@@ -269,6 +292,7 @@ class DeepSeekGenericLayer(nnx.Module):
       decoder_segment_ids,
       decoder_positions,
       deterministic,
+      model_mode,
       previous_chunk=None,
       slot: None | int = None,
   ):
@@ -282,7 +306,7 @@ class DeepSeekGenericLayer(nnx.Module):
           decoder_segment_ids=decoder_segment_ids,
           inputs_positions=decoder_positions,
           deterministic=deterministic,
-          model_mode=self.model_mode,
+          model_mode=model_mode,
           out_sharding=self.out_sharding,
           previous_chunk=previous_chunk,
           slot=slot,
@@ -294,6 +318,7 @@ class DeepSeekGenericLayer(nnx.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
+          model_mode,
           previous_chunk,
           slot,
       )
@@ -367,6 +392,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
+        model_mode,
         previous_chunk,
         slot,
     )
@@ -580,6 +606,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
+        model_mode,
         previous_chunk,
         slot,
     )

@@ -450,7 +450,7 @@ def ragged_gather_reduce(
   them via summation.
 
   The typical use case of this kernel is unpermute + local-reduction in the
-  MOE after GMM. Compared to maxtext.src.maxtext.kernels.gather_reduce_sc,
+  MOE after GMM. Compared to maxtext.kernels.gather_reduce_sc,
   this kernel provides better performance if large sparsity exists in
   `valid_rows_mask`. For example, expert_parallelism =8, 16 etc.
 

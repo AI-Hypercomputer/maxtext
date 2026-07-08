@@ -163,7 +163,10 @@ def merge_mm_embeddings(
 
     # Expand the tile-level mask to a token-level mask to match the embeddings.
     # A mask of shape (B, N*T) becomes (B, N*T*K) by repeating each element K times.
-    flat_token_masks_processed = jnp.repeat(flat_tile_masks, repeats=num_toks_per_token, axis=1)
+    if flat_tile_masks.shape[1] == flat_multimodal_embeddings.shape[1]:
+      flat_token_masks_processed = flat_tile_masks
+    else:
+      flat_token_masks_processed = jnp.repeat(flat_tile_masks, repeats=num_toks_per_token, axis=1)
 
   # Vmap the inner merge function over the batch dimension
   return jax.vmap(
@@ -183,7 +186,7 @@ def _merge_mm_embeddings_inner(
   if token_mask is not None:
     # This logic packs valid multimodal tokens to the front of the array.
     # It correctly handles cases where some multimodal tokens are just padding.
-    sort_indices = jnp.argsort(-token_mask)  # Sorts descending, putting 1s first
+    sort_indices = jnp.argsort(token_mask, descending=True)  # Sorts descending, putting 1s first
     multimodal_embeddings = multimodal_embeddings[sort_indices]
 
   # Find positions in the text sequence to place the multimodal embeddings.

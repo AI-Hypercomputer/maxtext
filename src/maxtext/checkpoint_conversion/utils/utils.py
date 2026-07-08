@@ -1042,7 +1042,13 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
     return extract_linen_weights(actual_weights_dict)
 
 
-def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | None = None, dtype: str = "auto"):
+def load_hf_dict_from_transformers(
+    model_id: str,
+    token: str,
+    revision: str | None = None,
+    dtype: str = "auto",
+    trust_remote_code: bool = False,
+):
   """Loads the HuggingFace model based on model_id (Eager mode only), used in to_maxtext"""
 
   # 1. Handle special cases requiring specific model classes
@@ -1062,7 +1068,13 @@ def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | No
   last_exception = None
   for model_class in model_classes:
     try:
-      hf_model = model_class.from_pretrained(model_id, token=token, revision=revision, dtype=dtype)
+      hf_model = model_class.from_pretrained(
+          model_id,
+          token=token,
+          revision=revision,
+          dtype=dtype,
+          trust_remote_code=trust_remote_code,
+      )
       break
     except (ValueError, OSError, RuntimeError, ImportError) as e:
       max_logging.log(f"Failed to load using {model_class.__name__}: {e!r}")

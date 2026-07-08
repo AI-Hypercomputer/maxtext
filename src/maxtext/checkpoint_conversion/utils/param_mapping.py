@@ -1638,6 +1638,13 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       "self_attention-indexer-wk-kernel": "self_attn.indexer.wk.weight",
       "self_attention-indexer-wq_b-kernel": "self_attn.indexer.wq_b.weight",
   }
+  if not config.get("use_mla", True):
+    attention_keys.update(
+        {
+            "self_attention-key-kernel": "self_attn.k_proj.weight",
+            "self_attention-value-kernel": "self_attn.v_proj.weight",
+        }
+    )
   # Dense Layers
   dense_layer_keys = attention_keys | {
       "mlp-wi_0-kernel": "mlp.gate_proj.weight",
@@ -1681,16 +1688,15 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   else:
     for i in range(first_num_dense_layers):
       for maxtext_key, hf_key in dense_layer_keys.items():
-        mapping[f"params-decoder-dense_layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+        mapping[f"params-decoder-dense_layer_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
 
     for i in range(first_num_dense_layers, num_main_layers):
-      moe_layer_idx = i - first_num_dense_layers
-
+      # We use the global layer index 'i' because NNX uses 'layers_{i}' due to lexicographical ordering in NNX flattening.
       for maxtext_key, hf_key in moe_layer_keys.items():
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+        mapping[f"params-decoder-layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
 
       for maxtext_key, hf_key in moe_expert_keys.items():
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [
+        mapping[f"params-decoder-layers_{i}-{maxtext_key}"] = [
             f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
         ]
   return mapping
@@ -1707,12 +1713,25 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     else:
       return input_tensor.T.reshape(target_shape)
 
+  def scale_query_kernel(input_tensor, target_shape):
+    """Converts between HF's runtime attention scale and MaxText's folded q scale."""
+    del target_shape
+    head_dim = config.get("head_dim", getattr(maxtext_config, "head_dim", None))
+    if head_dim is None:
+      raise ValueError("DeepSeek q-projection conversion requires head_dim in config or maxtext_config.")
+    depth_scale = np.dtype("float32").type(np.sqrt(head_dim))
+    factor = depth_scale if saving_to_hf else np.dtype("float32").type(1.0 / depth_scale)
+    return (input_tensor.astype(np.float32) * factor).astype(input_tensor.dtype)
+
   num_main_layers = config["num_hidden_layers"]
   first_num_dense_layers = config["first_k_dense_replace"]
 
   mapping = {
       "params-decoder-logits_dense-kernel": reshape_kernel,
   }
+
+  use_mla = config.get("use_mla", True)
+  query_hook_chain = [reshape_kernel, scale_query_kernel]
 
   attention_need_reshape = {
       "self_attention-wkv_a-kernel",  # transpose
@@ -1728,6 +1747,15 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       "self_attention-indexer-wk-kernel",  # transpose
       "self_attention-indexer-wq_b-kernel",
   }
+
+  if not use_mla:
+    attention_need_reshape.add("self_attention-key-kernel")
+    attention_need_reshape.add("self_attention-value-kernel")
+
+  def hook_for_key(key):
+    if not use_mla and key == "self_attention-query-kernel":
+      return query_hook_chain
+    return reshape_kernel
 
   dense_need_reshape = attention_need_reshape | {
       "mlp-wi_0-kernel",  # transpose
@@ -1748,18 +1776,17 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   # scan
   if scan_layers:
     for key in dense_need_reshape:
-      mapping[f"params-decoder-dense_layers-{key}"] = reshape_kernel
+      mapping[f"params-decoder-dense_layers-{key}"] = hook_for_key(key)
     for key in moe_need_reshape:
-      mapping[f"params-decoder-moe_layers-{key}"] = reshape_kernel
+      mapping[f"params-decoder-moe_layers-{key}"] = hook_for_key(key)
   # unscan
   else:
     for i in range(first_num_dense_layers):
       for key in dense_need_reshape:
-        mapping[f"params-decoder-dense_layers_{i}-{key}"] = reshape_kernel
+        mapping[f"params-decoder-dense_layer_{i}-{key}"] = hook_for_key(key)
     for i in range(first_num_dense_layers, num_main_layers):
-      moe_layer_idx = i - first_num_dense_layers
       for key in moe_need_reshape:
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{key}"] = reshape_kernel
+        mapping[f"params-decoder-layers_{i}-{key}"] = hook_for_key(key)
 
   return mapping
 
@@ -3857,6 +3884,165 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   return mapping
 
 
+def DEEPSEEK_OCR_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates a parameter mapping from MaxText to HuggingFace DeepSeek-OCR-2."""
+  tcfg = config.get("text_config", config)
+  vcfg = config.get("vision_config", {})
+
+  sam_depth = 12
+  connector_depth = vcfg.get("encoder_config", {}).get("num_hidden_layers", vcfg.get("qwen2_0_5b", {}).get("layers", 24))
+
+  mapping = {
+      # Projector
+      "params-vision_encoder-MlpProjector_0-linear-kernel": "model.projector.layers.weight",
+      "params-vision_encoder-MlpProjector_0-linear-bias": "model.projector.layers.bias",
+      "params-vision_encoder-MlpProjector_0-view_seperator": "model.view_seperator",
+      # Vision Tower - SAM Pos & Patch Embed
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-patch_embed-kernel": "model.sam_model.patch_embed.proj.weight",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-patch_embed-bias": "model.sam_model.patch_embed.proj.bias",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-pos_embed": "model.sam_model.pos_embed",
+      # Vision Tower - SAM Neck
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-neck_conv1-kernel": "model.sam_model.neck.0.weight",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-neck_ln1-scale": "model.sam_model.neck.1.weight",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-neck_ln1-bias": "model.sam_model.neck.1.bias",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-neck_conv2-kernel": "model.sam_model.neck.2.weight",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-neck_ln2-scale": "model.sam_model.neck.3.weight",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-neck_ln2-bias": "model.sam_model.neck.3.bias",
+      # Vision Tower - SAM Net2 & Net3
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-net_2-kernel": "model.sam_model.net_2.weight",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-net_3-kernel": "model.sam_model.net_3.weight",
+      # Vision Tower - Qwen2 Connector Queries & Norm
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-qwen2_model-query_768-embedding": "model.qwen2_model.query_768.weight",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-qwen2_model-query_1024-embedding": "model.qwen2_model.query_1024.weight",
+      "params-vision_encoder-DeepseekOCR2VisionEncoder_0-qwen2_model-norm-scale": "model.qwen2_model.model.model.norm.weight",
+  }
+
+  # SAM Blocks
+  sam_params = [
+      ("norm1-scale", "norm1.weight"),
+      ("norm1-bias", "norm1.bias"),
+      ("norm2-scale", "norm2.weight"),
+      ("norm2-bias", "norm2.bias"),
+      ("attn-qkv-kernel", "attn.qkv.weight"),
+      ("attn-qkv-bias", "attn.qkv.bias"),
+      ("attn-proj-kernel", "attn.proj.weight"),
+      ("attn-proj-bias", "attn.proj.bias"),
+      ("attn-rel_pos_h", "attn.rel_pos_h"),
+      ("attn-rel_pos_w", "attn.rel_pos_w"),
+      ("lin1-kernel", "mlp.lin1.weight"),
+      ("lin1-bias", "mlp.lin1.bias"),
+      ("lin2-kernel", "mlp.lin2.weight"),
+      ("lin2-bias", "mlp.lin2.bias"),
+  ]
+  for i in range(sam_depth):
+    for mx, hf in sam_params:
+      key = f"params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-block_{i}-{mx}"
+      mapping[key] = f"model.sam_model.blocks.{i}.{hf}"
+
+  # Qwen2 Connector Layers
+  connector_params = [
+      ("pre_self_attention_layer_norm-scale", "input_layernorm.weight"),
+      ("post_self_attention_layer_norm-scale", "post_attention_layernorm.weight"),
+      ("self_attention-query-kernel", "self_attn.q_proj.weight"),
+      ("self_attention-query-bias", "self_attn.q_proj.bias"),
+      ("self_attention-key-kernel", "self_attn.k_proj.weight"),
+      ("self_attention-key-bias", "self_attn.k_proj.bias"),
+      ("self_attention-value-kernel", "self_attn.v_proj.weight"),
+      ("self_attention-value-bias", "self_attn.v_proj.bias"),
+      ("self_attention-out-kernel", "self_attn.o_proj.weight"),
+      ("mlp-wi_0-kernel", "mlp.gate_proj.weight"),
+      ("mlp-wi_1-kernel", "mlp.up_proj.weight"),
+      ("mlp-wo-kernel", "mlp.down_proj.weight"),
+  ]
+  for i in range(connector_depth):
+    for mx, hf in connector_params:
+      key = f"params-vision_encoder-DeepseekOCR2VisionEncoder_0-qwen2_model-layer_{i}-{mx}"
+      mapping[key] = f"model.qwen2_model.model.model.layers.{i}.{hf}"
+
+  # Get text mapping
+  text_mapping = DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(tcfg, maxtext_config, scan_layers)
+
+  # Adjust text mapping paths
+  for maxtext_key, hf_key in text_mapping.items():
+    mapping[maxtext_key] = hf_key
+
+  return mapping
+
+
+def DEEPSEEK_OCR_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for DeepSeek-OCR-2."""
+  hooks = {}
+
+  tcfg = config.get("text_config", config)
+  vcfg = config.get("vision_config", {})
+
+  connector_layers = vcfg.get("encoder_config", {}).get("num_hidden_layers", vcfg.get("qwen2_0_5b", {}).get("layers", 24))
+  sam_layers = 12
+
+  def reshape_kernel(x, target_shape):
+    if saving_to_hf:
+      flipped = np.flip(np.array(target_shape))
+      return x.reshape(flipped).T
+    else:
+      return x.T.reshape(target_shape)
+
+  def reshape_bias(x, target_shape=None):
+    return x.reshape(target_shape)
+
+  def vision_patch(x, target_shape):
+    if saving_to_hf:
+      return x.transpose(3, 2, 0, 1)
+    else:
+      return x.transpose(2, 3, 1, 0)
+
+  # Projector
+  hooks["params-vision_encoder-MlpProjector_0-linear-kernel"] = reshape_kernel
+  hooks["params-vision_encoder-MlpProjector_0-linear-bias"] = reshape_bias
+  hooks["params-vision_encoder-MlpProjector_0-view_seperator"] = reshape_bias
+
+  # SAM Patch Embed
+  hooks["params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-patch_embed-kernel"] = vision_patch
+  hooks["params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-patch_embed-bias"] = reshape_bias
+
+  # SAM Blocks
+  for i in range(sam_layers):
+    base = f"params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-block_{i}-"
+    hooks[base + "attn-qkv-kernel"] = reshape_kernel
+    hooks[base + "attn-qkv-bias"] = reshape_bias
+    hooks[base + "attn-proj-kernel"] = reshape_kernel
+    hooks[base + "attn-proj-bias"] = reshape_bias
+    hooks[base + "lin1-kernel"] = reshape_kernel
+    hooks[base + "lin1-bias"] = reshape_bias
+    hooks[base + "lin2-kernel"] = reshape_kernel
+    hooks[base + "lin2-bias"] = reshape_bias
+
+  # SAM Neck
+  hooks["params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-neck_conv1-kernel"] = vision_patch
+  hooks["params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-neck_conv2-kernel"] = vision_patch
+  hooks["params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-net_2-kernel"] = vision_patch
+  hooks["params-vision_encoder-DeepseekOCR2VisionEncoder_0-sam_model-net_3-kernel"] = vision_patch
+
+  # Qwen2 Connector Layers
+  for i in range(connector_layers):
+    base = f"params-vision_encoder-DeepseekOCR2VisionEncoder_0-qwen2_model-layer_{i}-"
+    hooks[base + "self_attention-query-kernel"] = reshape_kernel
+    hooks[base + "self_attention-query-bias"] = reshape_bias
+    hooks[base + "self_attention-key-kernel"] = reshape_kernel
+    hooks[base + "self_attention-key-bias"] = reshape_bias
+    hooks[base + "self_attention-value-kernel"] = reshape_kernel
+    hooks[base + "self_attention-value-bias"] = reshape_bias
+    hooks[base + "self_attention-out-kernel"] = reshape_kernel
+    hooks[base + "mlp-wi_0-kernel"] = reshape_kernel
+    hooks[base + "mlp-wi_1-kernel"] = reshape_kernel
+    hooks[base + "mlp-wo-kernel"] = reshape_kernel
+
+  # Get text hooks
+  text_hooks = DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(tcfg, maxtext_config, scan_layers, saving_to_hf)
+  hooks.update(text_hooks)
+
+  return hooks
+
+
 # {maxtext model name: {maxtext weight name: hf weight name}}
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -3896,6 +4082,7 @@ PARAM_MAPPING = {
     "deepseek2-16b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek_ocr_2": DEEPSEEK_OCR_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -3948,6 +4135,7 @@ HOOK_FNS = {
     "deepseek2-16b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek_ocr_2": DEEPSEEK_OCR_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,

@@ -1698,6 +1698,44 @@ qwen3_vl_2b_dict = {
 }
 qwen3_vl_2b_config = PTConfig(**qwen3_vl_2b_dict)
 
+deepseek_ocr_2_dict = {
+    "architectures": ["DeepseekOCR2ForCausalLM"],
+    "model_type": "DeepseekOCR2",
+    "hidden_size": 1280,
+    "num_hidden_layers": 12,
+    "num_attention_heads": 10,
+    "num_key_value_heads": 10,
+    "use_mla": False,
+    "attention_type": "global",
+    "n_routed_experts": 64,
+    "n_shared_experts": 2,
+    "num_experts_per_tok": 6,
+    "moe_intermediate_size": 896,
+    "first_k_dense_replace": 1,
+    "vocab_size": 129280,
+    "rms_norm_eps": 1e-06,
+    "rope_theta": 10000.0,
+    "vision_config": {
+        "image_size": 1024,
+        "model_name": "deepencoderv2",
+        "sam_vit_b": {
+            "width": 768,
+            "layers": 12,
+            "heads": 12,
+            "global_attn_indexes": [2, 5, 8, 11],
+        },
+        "qwen2_0_5b": {
+            "dim": 896,
+            "layers": 24,
+            "heads": 14,
+            "kv_heads": 2,
+            "intermediate_size": 4864,
+        },
+    },
+    "projector_config": {"input_dim": 896, "n_embed": 1280, "projector_type": "linear"},
+}
+deepseek_ocr_2_config = PTConfig(**deepseek_ocr_2_dict)
+
 
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
@@ -1736,6 +1774,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
     "deepseek2-16b": deepseek2_16b_config,
+    "deepseek_ocr_2": deepseek_ocr_2_config,
     "deepseek3-671b": deepseek3_671b_config,
     "deepseek3.2-671b": deepseek32_671b_config,
     "gpt-oss-20b": gpt_oss_20b_config,

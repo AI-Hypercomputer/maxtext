@@ -48,6 +48,11 @@ def preprocess_mm_data(config):
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     processor_outputs = preprocess_mm_data_qwen3_omni(config)
+  elif config.model_name in ["deepseek_ocr_2"]:
+    from maxtext.multimodal.processor_deepseek_ocr import preprocess_mm_data_deepseek_ocr  # pylint: disable=import-outside-toplevel
+
+    images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
+    processor_outputs = preprocess_mm_data_deepseek_ocr(images)
   else:
     raise ValueError(f"Model {config.model_name} not supported for multimodal preprocessing.")
 
@@ -72,6 +77,10 @@ def preprocess_image_for_training(image, config):
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_qwen3_omni_for_training(image, config)
+  elif config.model_name in ["deepseek_ocr_2"]:
+    from maxtext.multimodal.processor_deepseek_ocr import preprocess_mm_data_deepseek_ocr  # pylint: disable=import-outside-toplevel
+
+    return preprocess_mm_data_deepseek_ocr(image)
   else:
     raise ValueError(f"Model {config.model_name} not supported for image preprocessing.")
 
@@ -94,6 +103,10 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_qwen3_omni import get_mm_offsets_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return get_mm_offsets_qwen3_omni(config, processor_output)
+  elif config.model_name in ["deepseek_ocr_2"]:
+    from maxtext.multimodal.processor_deepseek_ocr import get_image_offsets_deepseek_ocr  # pylint: disable=import-outside-toplevel
+
+    return get_image_offsets_deepseek_ocr(processor_output)
   else:
     return 0
 
@@ -122,6 +135,10 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
         video_placeholder=video_placeholder,
         num_videos=num_videos,
     )
+  elif model_name in ["deepseek_ocr_2"]:
+    from maxtext.multimodal.processor_deepseek_ocr import reformat_prompt_deepseek_ocr  # pylint: disable=import-outside-toplevel
+
+    return reformat_prompt_deepseek_ocr(prompt, image_placeholder, num_images)
   else:
     return prompt
 
@@ -162,6 +179,10 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
+  elif config.model_name in ["deepseek_ocr_2"]:
+    from maxtext.multimodal.processor_deepseek_ocr import add_extra_tokens_for_images_deepseek_ocr  # pylint: disable=import-outside-toplevel
+
+    return add_extra_tokens_for_images_deepseek_ocr(tokens, processor_output)
   else:
     raise ValueError(f"Model {config.model_name} does not support multimodal inference.")
 
@@ -185,6 +206,10 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     from maxtext.multimodal.processor_qwen3_omni import get_dummy_image_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
+  elif model_name in ["deepseek_ocr_2"]:
+    from maxtext.multimodal.processor_deepseek_ocr import get_dummy_image_shape_for_init_deepseek_ocr  # pylint: disable=import-outside-toplevel
+
+    image_shape = get_dummy_image_shape_for_init_deepseek_ocr(batch_size, num_image_per_sequence)
   return image_shape
 
 
@@ -231,6 +256,10 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
       bidirectional_mask_vision = decoder_input_tokens == tokens.video_pad
     else:
       bidirectional_mask_vision = decoder_input_tokens == tokens.image_pad
+  elif config.model_name in ["deepseek_ocr_2"]:
+    from maxtext.multimodal.processor_deepseek_ocr import DEEPSEEK_OCR_IMAGE_TOKEN_ID  # pylint: disable=import-outside-toplevel
+
+    bidirectional_mask_vision = decoder_input_tokens == DEEPSEEK_OCR_IMAGE_TOKEN_ID
   return bidirectional_mask_vision
 
 

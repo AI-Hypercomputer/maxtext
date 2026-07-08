@@ -20,7 +20,9 @@ import functools
 import os.path
 import uuid
 import warnings
+import logging
 
+import numpy as np
 from jax.experimental.layout import Format
 from jax.sharding import PartitionSpec as P
 import jax
@@ -64,6 +66,76 @@ Prefix = Any
 PackedPrefix = Any
 Params = Any
 PRNGKeyType = Any
+
+
+def _pad_tokens(tokens, bos_id, pad_id, is_bos=True, prefill_lengths=None, max_prefill_length=None):
+  """Pads HF tokenizer output using the same contract as JetStream token_utils.pad_tokens."""
+  if prefill_lengths is None:
+    prefill_lengths = [64, 128, 256, 512, 1024, 2048, 4096]
+  if max_prefill_length is not None:
+    prefill_lengths = [length for length in prefill_lengths if length < max_prefill_length] + [max_prefill_length]
+  if is_bos:
+    if bos_id is None:
+      raise ValueError("Cannot add BOS because the Hugging Face tokenizer has no bos_token_id.")
+    tokens = np.concatenate([np.array([bos_id]), tokens], axis=-1)
+  true_length = tokens.shape[-1]
+  padded_length = min((length for length in prefill_lengths if length >= true_length), default=prefill_lengths[-1])
+  padding = padded_length - true_length
+  if padding < 0:
+    logging.warning("Provided sequence longer than available.")
+    padded_tokens = tokens[-padded_length:]
+  else:
+    if pad_id is None:
+      raise ValueError("Cannot pad because the Hugging Face tokenizer has no pad_token_id.")
+    padded_tokens = np.pad(tokens, (0, padding), constant_values=(pad_id,))
+  return jnp.array(padded_tokens), true_length
+
+
+class MaxTextHuggingFaceTokenizer:
+  """Local HF tokenizer adapter that avoids JetStream's interactive remote-code prompt."""
+
+  def __init__(self, metadata: Any, trust_remote_code: bool):
+    from transformers import AutoTokenizer  # pylint: disable=import-outside-toplevel
+
+    self.tokenizer = AutoTokenizer.from_pretrained(
+        metadata.path,
+        token=metadata.access_token,
+        trust_remote_code=trust_remote_code,
+    )
+    self.metadata = metadata
+
+  def encode(self, s: str, **kwargs):
+    is_bos = kwargs.pop("is_bos", True)
+    prefill_lengths = kwargs.pop("prefill_lengths", None)
+    max_prefill_length = kwargs.pop("max_prefill_length", None)
+    if getattr(self.metadata, "use_chat_template", False):
+      tokens = self.tokenizer.apply_chat_template(
+          [{"role": "user", "content": s}],
+          add_generation_prompt=True,
+          return_tensors="np",
+      ).squeeze()
+      if is_bos:
+        logging.warning("Overriding is_bos to False because use_chat_template is set to True.")
+      is_bos = False
+    else:
+      tokens = self.tokenizer.encode(s, add_special_tokens=False, return_tensors="np").squeeze()
+    tokens = np.atleast_1d(tokens)
+    return _pad_tokens(tokens, self.bos_id, self.pad_id, is_bos, prefill_lengths, max_prefill_length)
+
+  def decode(self, token_ids: list[int]) -> str:
+    return self.tokenizer.decode(token_ids, skip_special_tokens=True)
+
+  @property
+  def pad_id(self):
+    return self.tokenizer.pad_token_id
+
+  @property
+  def eos_id(self):
+    return self.tokenizer.eos_token_id
+
+  @property
+  def bos_id(self):
+    return self.tokenizer.bos_token_id
 
 
 # TODO(yuyanpeng): Should import ExistingPrefix from jetstream.engine.engine_api
@@ -758,6 +830,10 @@ class MaxEngine(_BaseEngine):
         images = images[jnp.newaxis, jnp.newaxis, ...]
         image_masks = image_masks[jnp.newaxis, jnp.newaxis, ...] if image_masks is not None else None
       elif images.ndim == 4:
+        # add batch dimension
+        images = images[jnp.newaxis, ...]
+        image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
+      elif images.ndim == 5:
         # add batch dimension
         images = images[jnp.newaxis, ...]
         image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
@@ -1840,7 +1916,7 @@ class MaxEngine(_BaseEngine):
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:
       return token_utils.SentencePieceTokenizer(metadata)
     elif metadata.tokenizer_type == TokenizerType.huggingface:
-      tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
+      tokenizer_model = MaxTextHuggingFaceTokenizer(metadata, trust_remote_code=self.config.hf_trust_remote_code)
       if tokenizer_model.tokenizer.pad_token_id is None:
         if tokenizer_model.tokenizer.unk_token_id is not None:
           tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id
