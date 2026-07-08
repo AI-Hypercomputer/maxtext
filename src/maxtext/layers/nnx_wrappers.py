@@ -673,6 +673,7 @@ def to_linen_class(
       nnx_module_augment_fn=nnx_module_augment_fn,
       **other_kwargs,
   ):
+    print(f"DEBUG: to_linen_class __init__: name={name}, other_kwargs={other_kwargs}")
     linen_kwargs = {}
     if not isinstance(parent, _Missing):
       linen_kwargs["parent"] = parent
