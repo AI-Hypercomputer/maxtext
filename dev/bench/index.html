@@ -177,7 +177,7 @@
 
             const color = toolColors[dataset.length > 0 ? dataset[0].tool : '_'];
             const data = {
-              labels: dataset.map(d => d.commit.id.slice(0, 7)),
+              labels: dataset.map(d => new Date(d.commit.timestamp).toISOString().slice(0, 10) + ' (' + d.commit.id.slice(0, 7) + ')'),
               datasets: [
                 {
                   label: name,
@@ -193,7 +193,7 @@
                   {
                     scaleLabel: {
                       display: true,
-                      labelString: 'commit',
+                      labelString: 'date (commit)',
                     },
                   }
                 ],
