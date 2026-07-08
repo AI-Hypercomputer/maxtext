@@ -502,7 +502,6 @@ def create_rl_components(
               "include_stop_str_in_output": trainer_config.stop_strings is not None,
           },
           rollout_vllm_server_mode_submission_threshold=trainer_config.rl.rollout_vllm_server_mode_submission_threshold,
-          use_rollout_logps=trainer_config.rl.use_rollout_logps,
           return_logprobs=trainer_config.rl.return_logprobs
           if trainer_config.rl.return_logprobs is not None
           else trainer_config.rl.use_agentic_rollout,
@@ -518,8 +517,22 @@ def create_rl_components(
       from tunix.perf import export as perf_export  # pylint: disable=import-outside-toplevel
       from tunix.perf import metrics as perf_metrics  # pylint: disable=import-outside-toplevel
 
+      try:
+        from tunix.perf.experimental import export as exp_perf_export  # pylint: disable=import-outside-toplevel
+      except ImportError:
+        exp_perf_export = None
+
       perf_config = perf_metrics.PerfMetricsConfig()
       perf_config.custom_export_fn = perf_export.PerfMetricsExport.create_metrics_export_fn(cluster_config)
+      if exp_perf_export is not None:
+        trace_dir = os.path.join(
+            trainer_config.tensorboard_dir or trainer_config.base_output_directory, "perfetto_traces"
+        )
+        perf_config.custom_export_fn_v2 = exp_perf_export.PerfMetricsExport.from_cluster_config(
+            cluster_config=cluster_config,
+            trace_dir=trace_dir,
+        ).export_metrics
+        max_logging.log(f"Enabled Tunix V2 Perfetto tracing to GCS path: {trace_dir}")
       rl_cluster_kwargs["perf_config"] = perf_config
     except ImportError:
       max_logging.log(
@@ -573,7 +586,6 @@ def create_rl_components(
         system_prompt=trainer_config.rl.system_prompt,
         degenerate_group_masking=trainer_config.rl.degenerate_group_masking,
         epsilon_high=trainer_config.rl.epsilon_high,
-        return_logprobs=trainer_config.rl.return_logprobs if trainer_config.rl.return_logprobs is not None else True,
         use_rollout_logps=trainer_config.rl.use_rollout_logps,
     )
     # Instantiate the custom MaxText chat parser

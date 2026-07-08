@@ -2040,6 +2040,18 @@ class RL(BaseModel):
           "If None, no chunking is applied, which may lead to OOM errors if tensors are too large."
       ),
   )
+  use_rollout_logps: bool = Field(
+      True,
+      description="Whether to use rollout log-probabilities in AgenticGRPOLearner and RolloutConfig.",
+  )
+  return_logprobs: Optional[bool] = Field(
+      None,
+      description="Whether to return logprobs from rollout engine and in AgenticGRPOLearner.",
+  )
+  rollout_vllm_server_mode_submission_threshold: int = Field(
+      0,
+      description="Threshold for request submissions in vLLM server mode.",
+  )
 
 
 class RLDataset(BaseModel):
