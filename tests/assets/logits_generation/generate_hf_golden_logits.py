@@ -102,7 +102,7 @@ def save_golden_logits(
 
   model = model_class.from_pretrained(
       hf_model_path,
-      dtype=torch_dtype,
+      torch_dtype=torch_dtype,
       trust_remote_code=trust_remote_code,
   )
 
@@ -144,7 +144,13 @@ def save_golden_logits(
 
     # 2. Run inference
     with torch.no_grad():
-      outputs = model(**inputs)
+      autocast_context = (
+          torch.autocast(device_type="cpu", dtype=torch.bfloat16)
+          if hf_load_dtype == "bfloat16"
+          else torch.autocast(device_type="cpu", enabled=False)
+      )
+      with autocast_context:
+        outputs = model(**inputs)
       logits = outputs.logits.cpu().to(torch.float32).numpy()
 
     # 3. Populate final data dictionary with tensors from inputs and logits

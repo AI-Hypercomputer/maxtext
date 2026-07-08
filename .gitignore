@@ -156,3 +156,8 @@ gha-creds-*.json
 # vscode workspace
 maxtext.code-workspace
 maxtext_output/
+
+_agents/
+.gitignore
+GEMINI.md
+scripts/
