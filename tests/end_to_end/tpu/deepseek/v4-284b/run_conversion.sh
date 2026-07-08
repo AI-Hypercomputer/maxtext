@@ -8,5 +8,6 @@ echo "Starting conversion..."
     base_output_directory=gs://snehalv-data/deepseek4-conversion-pr/scanned/ \
     scan_layers=true \
     skip_jax_distributed_system=true \
+    --lazy_load_tensors=False \
     --hf_model_path=tests/end_to_end/tpu/deepseek/v4-284b/hf_tiny_model > conversion.log 2>&1
 echo "Finished with exit code: $?"
