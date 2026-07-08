@@ -396,7 +396,7 @@ def get_maxtext_model_info(config):
   # preprocess state
   maxtext_abstract_dict = {}
   for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
-    mt_param_key = "params-" + "-".join(param_key_parts_from_path(path_tuple))
+    mt_param_key = "-".join(param_key_parts_from_path(path_tuple))
     if isinstance(abstract_leaf_value, nn.LogicallyPartitioned):
       mt_target_shape = abstract_leaf_value.value.shape
     else:
