@@ -586,6 +586,17 @@ def get_optimizer(tmvp_config: Any, max_train_steps: int) -> optax.GradientTrans
   schedule_steps = getattr(tmvp_config, "learning_rate_schedule_steps", -1)
   if schedule_steps is None or schedule_steps <= 0:
     schedule_steps = max_train_steps
+  elif schedule_steps != max_train_steps:
+    max_logging.log(
+        "WARNING: RL learning_rate_schedule_steps is set to "
+        f"{schedule_steps}, but the computed RL training length is "
+        f"{max_train_steps} optimizer updates. This may be intentional for a "
+        "fixed LR schedule horizon; otherwise set both steps and "
+        "learning_rate_schedule_steps to -1 so RL falls back to "
+        "max_train_steps. With warmup_steps_fraction="
+        f"{tmvp_config.warmup_steps_fraction}, warmup will last "
+        f"{int(tmvp_config.warmup_steps_fraction * schedule_steps)} steps."
+    )
   schedule = optax.schedules.warmup_cosine_decay_schedule(
       init_value=0.0,
       peak_value=tmvp_config.learning_rate,
