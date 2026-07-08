@@ -12,18 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Ragged gather reduce kernel implementation from tpu-inference."""
-# Source from experimental/users/kyuyeunk/vllm/kernels/sparse_core/ragged_gather_reduce.py
+"""Ragged gather reduce kernel implementation from tpu-inference matching v2."""
 
+import dataclasses
 import functools
-import math
+from typing import Any
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as jnp
 from packaging.version import Version
-
 
 # JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
 # versions renamed them to `out_type`/`scratch_types`.
@@ -44,9 +43,76 @@ else:
   }
 
 
+@dataclasses.dataclass(frozen=True)
+class _Config:
+  """Configuration parameters for the SparseCore gather-reduce kernel."""
+
+  num_row_partitions: int
+  num_column_partitions: int
+  reduce_group_size: int
+  col_size: int
+  col_chunk_size: int
+  num_row_subchunks: int
+  num_simd_lanes: int
+  topk_dtype: Any
+  in_dtype: Any
+  core_axis_name: str
+  subcore_axis_name: str
+
+  @property
+  def row_chunk_size(self) -> int:
+    """Number of rows handled per row-pipeline block."""
+    return self.num_simd_lanes * self.num_row_subchunks
+
+  @property
+  def row_shift(self) -> int:
+    """log2 of how many source rows pack into one uint32 gather element.
+
+    The SparseCore indirect DMA requires 32-bit elements: bfloat16 packs two
+    source rows per uint32 (shift 1), float32 is 1:1 (shift 0).
+    """
+    input_packing = 32 // jax.dtypes.itemsize_bits(self.in_dtype)
+    return input_packing.bit_length() - 1
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class _Inputs:
+  num_src_rows_per_row_partition: Any
+  x: Any
+  indices: Any
+  topk_weights: Any
+  sorted_by_validity: Any
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class _Scratch:
+  """VMEM and SMEM scratch buffers used by the SparseCore kernel."""
+
+  num_rows_per_row_partition_vmem: Any
+  prev_iter_last_row_vmem: Any
+  prev_dst_row_smem: Any
+  sorted_by_validity_vmem: Any
+  src_indices_vmem: Any
+  dst_indices_vmem: Any
+  tw_f32_vmem: Any
+  dma_src_row_vmem: Any
+  dma_dst_row_vmem: Any
+  prev_dst_val_vmem: Any
+  out_vmem: Any
+  sem: Any
+
+  def __len__(self) -> int:
+    return len(dataclasses.fields(self))
+
+  def __getitem__(self, index: Any):
+    return getattr(self, dataclasses.fields(self)[index].name)
+
+
 # ceil up to the nearest multiple of b.
 def _align_to(a, b):
-  return ((a + b - 1) // b) * b
+  return pl.cdiv(a, b) * b
 
 
 def get_cost_estimate(
@@ -111,321 +177,367 @@ def _fallback_implementation(
     valid_rows_mask: jax.Array,
     reduce_group_size: int,
 ) -> jax.Array:
-  """Fallback to JAX implementation."""
+  """Reference JAX implementation used when SparseCore is unavailable."""
   out = x[indices] * topk_weights[:, None].astype(jnp.float32)
   out = jnp.where(valid_rows_mask[:, None], out, 0)
   out = out.reshape(-1, reduce_group_size, out.shape[-1])
-  out = jnp.sum(out, axis=1).astype(x.dtype)
+  out = jnp.sum(out, axis=1).astype(x.dtype)  # Keep input dtype
   return out
 
 
-def main_kernel(
-    # Inputs.
-    num_rows_per_row_partition_ref: jax.Ref,
-    in_hbm_ref: jax.Ref,
-    src_indices_hbm_ref: jax.Ref,
-    dst_indices_hbm_ref: jax.Ref,
-    topk_weights_hbm_ref: jax.Ref,
-    # Outputs.
-    out_hbm_ref: jax.Ref,
-    # Scratch.
-    num_rows_per_row_partition_vmem_ref: jax.Ref,
-    out_vmem_ref: jax.Ref,
-    prev_iter_last_row_vmem_ref: jax.Ref,
-    src_indices_vmem_ref: jax.Ref,
-    dst_indices_vmem_ref: jax.Ref,
-    topk_weights_vmem_ref: jax.Ref,
-    sem_ref: jax.Ref,
-    *,
-    core_axis_name: str,
-    subcore_axis_name: str,
-    num_row_partitions: int,
-    num_column_partitions: int,
-):
-  """Main Pallas kernel for ragged gather and reduction on SparseCore."""
-  tpu_info = pltpu.get_tpu_info()
-  sc_info = tpu_info.sparse_core
-  assert sc_info is not None
-  num_simd_lanes = sc_info.num_lanes
-  num_lanes = tpu_info.num_lanes
-  col_size = out_vmem_ref.shape[-1]
-  num_cores = jax.lax.axis_size((core_axis_name, subcore_axis_name))
+def _calculate_num_column_partitions(hidden_size: int, num_cores: int, num_lanes: int) -> int:
+  """Calculates the number of column partitions."""
+  preferred_num_stages = 4
+  num_column_partitions = 1
+  while (
+      num_cores % (num_column_partitions * 2) == 0
+      and hidden_size % (num_lanes * num_column_partitions * 2) == 0
+      and hidden_size // (num_column_partitions * 2 * num_lanes) >= preferred_num_stages
+      and num_column_partitions < 4  # Cap column partitions to prevent spmem OOM
+  ):
+    num_column_partitions *= 2
+  return num_column_partitions
 
-  recv_sem = sem_ref.at[0]
-  send_sem = sem_ref.at[1]
 
-  @functools.partial(
-      pltpu.emit_pipeline,
-      grid=(num_cores,),
-      core_axis_name=(core_axis_name, subcore_axis_name),
-      dimension_semantics=(pltpu.PARALLEL,),
-  )
-  def inner_kernel():
-    core_id = pl.program_id(0)
-    row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
-    row_partition_id = core_id // num_column_partitions
-    col_partition_id = core_id % num_column_partitions
+def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
+  """Picks the column chunk size the inner pipeline gathers at a time."""
+  generation = pltpu.get_tpu_info().generation
+  print(f"DEBUG_COL_CHUNK START: {col_size=}, {num_simd_lanes=}, {generation=}")
 
-    # Read total number of valid source rows for the current row partition.
-    dma = pltpu.make_async_copy(
-        num_rows_per_row_partition_ref.at[pl.ds(0, num_simd_lanes)],
-        num_rows_per_row_partition_vmem_ref,
-        recv_sem,
-    )
-    dma.start()
-    dma.wait()
-    num_rows_current_row_partition = jnp.array(0, jnp.int32)
-    num_rows_per_row_partition = num_rows_per_row_partition_vmem_ref[...]
-    for i in range(num_row_partitions):
-      num_rows_current_row_partition = jnp.where(
-          row_partition_id == i,
-          num_rows_per_row_partition[i],
-          num_rows_current_row_partition,
-      )
+  match generation:
+    case 6:
+      target_bytes = int(256 * 1024 * 0.95)
+    case 7:
+      target_bytes = int(512 * 1024 * 0.95)
+    case _:
+      target_bytes = int(128 * 1024 * 0.95)
 
-    row_tile_size = num_simd_lanes
-    num_row_tiles = pl.cdiv(num_rows_current_row_partition, row_tile_size)
-    row_start = row_partition_id * row_partition_size
-    col_start = col_partition_id * col_size
+  # SparseCore physically pads all Spmem tile allocations to a height of 1024.
+  # We must use the physical tile height (1024) instead of the logical SIMD lanes (16)
+  # to calculate the true memory footprint and prevent Spmem OOM.
+  physical_tile_height = 1024
+  bytes_per_col = physical_tile_height * 4 * 2
 
-    @pl.loop(0, num_row_tiles)
-    def row_loop(row_block_id):
-      row_tile_start = row_start + row_block_id * num_simd_lanes
-      # The destination row from the last source row in the previous row tile,
-      # retrieve it before DMA the new data into `dst_indices_vmem_ref`.
-      prev_dst_row_hbm = jnp.where(row_block_id == 0, -1, dst_indices_vmem_ref[...][num_simd_lanes - 1])
-      dma_list = []
-      dma_list.append(
-          pltpu.make_async_copy(
-              src_indices_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              src_indices_vmem_ref,
-              recv_sem,
-          )
-      )
-      dma_list.append(
-          pltpu.make_async_copy(
-              dst_indices_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              dst_indices_vmem_ref,
-              recv_sem,
-          )
-      )
-      dma_list.append(
-          pltpu.make_async_copy(
-              topk_weights_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              topk_weights_vmem_ref,
-              recv_sem,
-          )
-      )
-      jax.tree.map(lambda x: x.start(), dma_list)
-      jax.tree.map(lambda x: x.wait(), dma_list)
+  tile_width = 128
+  max_safe_col = (target_bytes // bytes_per_col // tile_width) * tile_width
 
-      # HBM to VMEM transfer.
-      src_indices = src_indices_vmem_ref[...]
-      dst_indices = dst_indices_vmem_ref[...]
-      topk_weights = topk_weights_vmem_ref[...]
-
-      in_dtype = in_hbm_ref.dtype
-      input_dtype_bits = jax.dtypes.itemsize_bits(in_dtype)
-      input_packing = 32 // input_dtype_bits
-
-      in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
-
-      for col_vmem_start in range(0, col_size, num_lanes):
-        col_hbm_start = col_start + col_vmem_start
-        for row_vmem in range(num_simd_lanes):
-          row_hbm = src_indices[row_vmem] // input_packing
-          # Since we have changed layout from (8, 128) to (1, 128), continuous
-          # memory address does not yield desired values anymore. Therefore,
-          # we break up a dmas into multiple num_lanes sized requests.
-          pltpu.make_async_copy(
-              in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, num_lanes)],
-              out_vmem_ref.at[row_vmem, pl.ds(col_vmem_start, num_lanes)],
-              recv_sem,
-          ).start()
-
-      # VMEM to HBM transfer.
-      # Use dynamic loop to minimize register spills.
-      @pl.loop(0, col_size, step=num_lanes, init_carry=(prev_dst_row_hbm,))
-      @jax.named_scope("dma_write_loop")
-      def dma_write_loop(col_vmem_start, carry):
-        col_hbm_start = col_start + col_vmem_start
-
-        for _ in range(num_simd_lanes):
-          pltpu.make_async_copy(
-              in_32b_hbm_ref.at[0, :num_lanes],
-              out_vmem_ref.at[0, :num_lanes],
-              recv_sem,
-          ).wait()
-
-        for col_compute_offset in range(0, num_lanes, num_simd_lanes):
-          col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
-
-          previous_accumulated_data = None
-          for row_src in range(num_simd_lanes):
-            row_src_pack = src_indices[row_src] % input_packing
-
-            # Load data from vmem.
-            data = out_vmem_ref[row_src, col_slice]
-
-            # Extract data and cast to float32.
-            if in_dtype == jnp.bfloat16:
-              data = jnp.bitwise_left_shift(data, jnp.where(row_src_pack == 0, 16, 0))
-              # Mask out the lower 16 bits. -65536 is 0xffff0000
-              data = jnp.bitwise_and(data, -65536)
-              data = jax.lax.bitcast_convert_type(data, jnp.float32)
-            elif in_dtype == jnp.float32:
-              data = jax.lax.bitcast_convert_type(data, jnp.float32)
-            else:
-              raise ValueError(
-                  f"Dtype {in_dtype} is not yet supported for ragged data extraction. Supported dtypes: bfloat16, float32."
-              )
-            # Accumulate at float32 precision
-            data = data * topk_weights[row_src]
-
-            dst_row_hbm = dst_indices[row_src]
-            if row_src == 0:
-              # carry[0] is the last dst_row_hbm from the previous row_tile.
-              prev_row_hbm = carry[0]
-              previous_accumulated_data = jax.lax.bitcast_convert_type(
-                  prev_iter_last_row_vmem_ref[0, col_slice], jnp.float32
-              )
-            else:
-              prev_row_hbm = dst_indices[row_src - 1]
-              assert previous_accumulated_data is not None
-
-            # We guarantee source rows that contribute to the same destination
-            # row are adjacent to each other in the order of being processed.
-            # If the current src row contributes to the same destination row as
-            # the previous src row, we accumulate the data with the previously
-            # accumulated data.
-            accumulated_data = jnp.where(
-                dst_row_hbm == prev_row_hbm,
-                previous_accumulated_data + data,
-                data,
-            )
-            previous_accumulated_data = accumulated_data
-            data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
-            out_vmem_ref[row_src, col_slice] = data_to_write
-
-            # We write the last row (within a row tile)'s accumulated data to
-            # the prev_iter_last_row_vmem_ref. If the first src row in the next
-            # row_tile contributes to the same destination row as the last src
-            # row in the current row_tile, the latest accumulated data in
-            # prev_iter_last_row_vmem_ref will get used.
-            if row_src == num_simd_lanes - 1:
-              prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
-
-        # Start dma write.
-        # When there are multiple sources rows in the current row_tile that
-        # contribute to the same destination row, the accumulated data is
-        # stored in the last row's idx in `out_vmem_ref`.
-        # Logically, we could skip all the source rows that are not the last
-        # for each destination row, but we want to avoid using `pl.when` for
-        # efficiency. We just repeat the write of latest accumulated data
-        # multiple times.
-        # `src_row_idx_in_vmem` tracks the right idx in vmem for each hbm write.
-        src_row_idx_in_vmem = []
-        row_valid_vec = []
-        for row_vmem_idx in reversed(range(num_simd_lanes)):
-          row_valid = row_block_id * num_simd_lanes + row_vmem_idx < num_rows_current_row_partition
-          row_valid_vec.append(row_valid)
-          if row_vmem_idx == num_simd_lanes - 1:
-            src_row_idx_in_vmem.append(row_vmem_idx)
-          else:
-            next_row_valid = row_valid_vec[-2]
-            src_row_idx_in_vmem.append(
-                jnp.where(
-                    jnp.logical_and(
-                        next_row_valid,
-                        (dst_indices[row_vmem_idx] == dst_indices[row_vmem_idx + 1]),
-                    ),
-                    src_row_idx_in_vmem[-1],
-                    row_vmem_idx,
-                )
-            )
-        src_row_idx_in_vmem.reverse()
-        row_valid_vec.reverse()
-
-        # There must be at least one valid row to write in the current row_tile.
-        # When num valid writes is not a multiple of row_tile_size, we repeat
-        # the last valid write to avoid valid data in hbm being overwritten
-        # (and to avoid using `pl.when`).
-        last_valid_src_row_vmem = -1
-        last_valid_dst_row_hbm = -1
-        for i, (src_row_idx_in_vmem, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
-          src_row_vmem = jnp.where(row_valid, src_row_idx_in_vmem, last_valid_src_row_vmem)
-          dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
-          pltpu.make_async_copy(
-              out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
-              out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
-              send_sem,
-          ).start()
-          last_valid_src_row_vmem = src_row_vmem
-          last_valid_dst_row_hbm = dst_row_hbm
-
-        return carry
-
-      # Wait for dma write to finish.
-      for _ in range(0, col_size, num_lanes):
-        for _ in range(num_simd_lanes):
-          pltpu.make_async_copy(
-              out_vmem_ref.at[0, :num_lanes],
-              out_32b_hbm_ref.at[0, :num_lanes],
-              send_sem,
-          ).wait()
-
-  inner_kernel()
+  start_col = (min(col_size, max_safe_col) // tile_width) * tile_width
+  print(f"DEBUG_COL_CHUNK END: {target_bytes=}, {bytes_per_col=}, {max_safe_col=}, {start_col=}")
+  for chunk in range(start_col, tile_width - 1, -tile_width):
+    if col_size % chunk == 0:
+      return chunk
+  return tile_width
 
 
 def _preprocess(
-    indices: jax.Array,
-    topk_weights: jax.Array,
     valid_rows_mask: jax.Array,
     reduce_group_size: int,
     num_row_partitions: int,
     num_simd_lanes: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-  """Preprocesses indices for ragged gather reduce."""
-  assert indices.ndim == 1, "Ragged scatter only supports 1d indices."
+    row_chunk_size: int,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Sorts valid source rows to the front of each row partition."""
+  row_partition_size = valid_rows_mask.shape[0] // num_row_partitions
+  valid_rows_mask_2d = valid_rows_mask.reshape(num_row_partitions, -1)
 
-  row_partition_size = indices.shape[0] // num_row_partitions
-  valid_rows_mask = valid_rows_mask.reshape(num_row_partitions, -1)
+  sorted_by_validity = jnp.argsort(~valid_rows_mask_2d, descending=False, stable=True, axis=-1)
+  sorted_by_validity += jnp.arange(num_row_partitions)[:, None] * row_partition_size
 
-  # Move all the valid source rows to the beginning of each row partition.
-  sorted_by_validity = jnp.argsort(~valid_rows_mask, descending=False, stable=True, axis=-1)
-  sorted_by_validity += (
-      jnp.broadcast_to(
-          jnp.arange(num_row_partitions)[:, None],
-          (num_row_partitions, row_partition_size),
-      )
-      * row_partition_size
-  )
+  pad_to = _align_to(row_partition_size, row_chunk_size)
+  if pad_to > row_partition_size:
+    sorted_by_validity = jnp.pad(
+        sorted_by_validity,
+        ((0, 0), (0, pad_to - row_partition_size)),
+        constant_values=0,
+    )
   sorted_by_validity = sorted_by_validity.reshape(-1)
 
-  src_indices = indices[sorted_by_validity]
-  # `reduce_group_size` source rows are mapped (and reduced) to the same output
-  # row.
-  dst_indices = sorted_by_validity // reduce_group_size
-  topk_weights = topk_weights[sorted_by_validity]
-  topk_weights = topk_weights.astype(jnp.float32)
-
-  num_src_rows_per_row_partition = jnp.sum(valid_rows_mask, axis=-1)
-  assert num_row_partitions <= num_simd_lanes
   num_src_rows_per_row_partition = jnp.pad(
-      num_src_rows_per_row_partition.astype(jnp.int32),
-      (0, num_simd_lanes - num_row_partitions),
+      jnp.sum(valid_rows_mask_2d, axis=-1).astype(jnp.int32),
+      (0, max(0, num_simd_lanes - num_row_partitions)),
   )
-  # If there is no valid source row in a reduce group, we set the mask to
-  # False, so that the output for that group is set to zero.
   mask = jnp.any(valid_rows_mask.reshape(-1, reduce_group_size), axis=-1)
-
   return (
-      src_indices,
-      dst_indices,
-      topk_weights,
+      sorted_by_validity.astype(jnp.int32),
       num_src_rows_per_row_partition,
       mask,
+  )
+
+
+def _pack_scalars_to_vector(scalar_list: list[jax.Array], num_simd_lanes: int) -> jax.Array:
+  """Builds a lane vector from per-lane scalars."""
+  idx_vec = jnp.arange(num_simd_lanes)
+  vec = jnp.zeros((num_simd_lanes,), jnp.int32)
+  for i in range(num_simd_lanes):
+    vec += (idx_vec == i).astype(jnp.int32) * scalar_list[i]
+  return vec
+
+
+def _row_gather_spec(
+    sorted_by_validity_vmem: jax.Ref,
+    sub: int,
+    *,
+    num_simd_lanes: int,
+    row_chunk_size: int,
+) -> pl.BlockSpec:
+  """Indirect BlockSpec gathering sub-chunk sub's rows of a 1-D input."""
+  return pl.BlockSpec(
+      (pl.Indirect(num_simd_lanes),),
+      lambda i, s=sub: (sorted_by_validity_vmem[pl.ds(i * row_chunk_size + s * num_simd_lanes, num_simd_lanes)],),
+  )
+
+
+def main_kernel(
+    inputs: _Inputs,
+    out_hbm_ref: jax.Ref,
+    scratch: _Scratch,
+    *,
+    cfg: _Config,
+):
+  """Main SparseCore kernel."""
+  num_simd_lanes = cfg.num_simd_lanes
+  col_chunk_size = cfg.col_chunk_size
+  num_row_subchunks = cfg.num_row_subchunks
+  row_chunk_size = cfg.row_chunk_size
+
+  num_col_chunks = cfg.col_size // col_chunk_size
+
+  core_id = jax.lax.axis_index((cfg.core_axis_name, cfg.subcore_axis_name))
+  row_partition_id = core_id // cfg.num_column_partitions
+  col_partition_id = core_id % cfg.num_column_partitions
+
+  row_partition_size_padded = inputs.sorted_by_validity.shape[0] // cfg.num_row_partitions
+  row_start_padded = row_partition_id * row_partition_size_padded
+  col_start = col_partition_id * cfg.col_size
+
+  recv_sem = scratch.sem.at[0]
+  num_rows_dma = pltpu.make_async_copy(
+      inputs.num_src_rows_per_row_partition.at[pl.ds(0, num_simd_lanes)],
+      scratch.num_rows_per_row_partition_vmem,
+      recv_sem,
+  )
+  sorted_dma = pltpu.make_async_copy(
+      inputs.sorted_by_validity.at[pl.ds(row_start_padded, row_partition_size_padded)],
+      scratch.sorted_by_validity_vmem,
+      recv_sem,
+  )
+  num_rows_dma.start()
+  sorted_dma.start()
+  num_rows_dma.wait()
+  sorted_dma.wait()
+
+  num_rows_per_row_partition = scratch.num_rows_per_row_partition_vmem[...]
+  num_rows_current_row_partition = jnp.array(0, jnp.int32)
+  for i in range(cfg.num_row_partitions):
+    num_rows_current_row_partition = jnp.where(
+        row_partition_id == i,
+        num_rows_per_row_partition[i],
+        num_rows_current_row_partition,
+    )
+  num_row_blocks = pl.cdiv(num_rows_current_row_partition, row_chunk_size)
+
+  in_32b_hbm_ref = inputs.x.bitcast(jnp.uint32)
+  scratch.prev_dst_row_smem[0] = -1
+
+  row_pipeline_in_specs = (
+      tuple(
+          _row_gather_spec(
+              scratch.sorted_by_validity_vmem,
+              sub,
+              num_simd_lanes=num_simd_lanes,
+              row_chunk_size=row_chunk_size,
+          )
+          for sub in range(num_row_subchunks)
+      )
+      * 2
+  )
+
+  @functools.partial(
+      pltpu.emit_pipeline,
+      grid=(num_row_blocks,),
+      in_specs=row_pipeline_in_specs,
+      out_specs=(),
+  )
+  def row_pipeline(*args):
+    src_indices_refs = args[:num_row_subchunks]
+    topk_weights_refs = args[num_row_subchunks : 2 * num_row_subchunks]
+    (
+        src_indices_vmem_sc,
+        dst_indices_vmem_sc,
+        tw_f32_vmem_sc,
+        dma_src_row_vmem_sc,
+        dma_dst_row_vmem_sc,
+        prev_dst_val_vmem_sc,
+        out_vmem_sc,
+        sem_sc,
+    ) = args[
+        -8:
+    ]  # pylint: disable=unbalanced-tuple-unpacking
+
+    row_block_id = pl.program_id(0)
+
+    dst_indices_list = [
+        scratch.sorted_by_validity_vmem[
+            pl.ds(
+                row_block_id * row_chunk_size + s * num_simd_lanes,
+                num_simd_lanes,
+            )
+        ]
+        // cfg.reduce_group_size
+        for s in range(num_row_subchunks)
+    ]
+
+    for s in range(num_row_subchunks):
+      sub = pl.ds(s * num_simd_lanes, num_simd_lanes)
+      src_indices_vmem_sc[sub] = src_indices_refs[s][...]
+      dst_indices_vmem_sc[sub] = dst_indices_list[s]
+
+      tw = topk_weights_refs[s][...]
+      if cfg.topk_dtype == jnp.bfloat16:
+        tw_f32 = plsc.bitcast(jnp.bitwise_left_shift(tw, 16), jnp.float32)
+      else:
+        tw_f32 = plsc.bitcast(tw, jnp.float32)
+      tw_f32_vmem_sc[sub] = tw_f32
+
+    for s in range(num_row_subchunks):
+      if s == 0:
+        prev_dst = scratch.prev_dst_row_smem[0]
+      else:
+        prev_dst = dst_indices_list[s - 1][num_simd_lanes - 1]
+      prev_dst_val_vmem_sc[pl.ds(s * num_simd_lanes, num_simd_lanes)] = jnp.broadcast_to(prev_dst, (num_simd_lanes,))
+
+    def get_dst_idx(global_idx):
+      return dst_indices_list[global_idx // num_simd_lanes][global_idx % num_simd_lanes]
+
+    src_row_idx_in_vmem = []
+    row_valid_vec = []
+    for row_vmem_idx in reversed(range(row_chunk_size)):
+      global_row_idx = row_block_id * row_chunk_size + row_vmem_idx
+      row_valid_vec.append(global_row_idx < num_rows_current_row_partition)
+      if row_vmem_idx == row_chunk_size - 1:
+        src_row_idx_in_vmem.append(row_vmem_idx)
+      else:
+        same_group_as_next = jnp.logical_and(
+            row_valid_vec[-2],
+            get_dst_idx(row_vmem_idx) == get_dst_idx(row_vmem_idx + 1),
+        ).astype(jnp.int32)
+        src_row_idx_in_vmem.append(same_group_as_next * src_row_idx_in_vmem[-1] + (1 - same_group_as_next) * row_vmem_idx)
+    src_row_idx_in_vmem.reverse()
+    row_valid_vec.reverse()
+
+    garbage_dst = out_hbm_ref.shape[0] - 1
+    dma_src_rows = []
+    dma_dst_rows = []
+    for s in range(num_row_subchunks):
+      sub_src = []
+      sub_dst = []
+      for i in range(num_simd_lanes):
+        global_idx = s * num_simd_lanes + i
+        merge_target = src_row_idx_in_vmem[global_idx]
+        is_final_write = jnp.logical_and(
+            row_valid_vec[global_idx],
+            merge_target < (s + 1) * num_simd_lanes,
+        )
+        sub_src.append(jnp.where(is_final_write, merge_target % num_simd_lanes, 0))
+        sub_dst.append(jnp.where(is_final_write, dst_indices_list[s][i], garbage_dst))
+      dma_src_rows.append(sub_src)
+      dma_dst_rows.append(sub_dst)
+
+    for s in range(num_row_subchunks):
+      sub = pl.ds(s * num_simd_lanes, num_simd_lanes)
+      dma_src_row_vmem_sc[sub] = _pack_scalars_to_vector(dma_src_rows[s], num_simd_lanes)
+      dma_dst_row_vmem_sc[sub] = _pack_scalars_to_vector(dma_dst_rows[s], num_simd_lanes)
+
+    @functools.partial(
+        pltpu.emit_pipeline,
+        grid=(num_row_subchunks, num_col_chunks),
+        in_specs=pl.BlockSpec(
+            (pl.Indirect(num_simd_lanes), col_chunk_size),
+            lambda s, c: (
+                jnp.bitwise_right_shift(
+                    src_indices_vmem_sc[pl.ds(s * num_simd_lanes, num_simd_lanes)],
+                    cfg.row_shift,
+                ),
+                col_start // col_chunk_size + c,
+            ),
+        ),
+        out_specs=(),
+    )
+    def col_pipeline(gather_ref, sem_inner):
+      s = pl.program_id(0)
+      c = pl.program_id(1)
+      col_hbm_start = col_start + c * col_chunk_size
+      send_sem = sem_inner.at[1]
+
+      row_slice = pl.ds(s * num_simd_lanes, num_simd_lanes)
+      tw_slice = tw_f32_vmem_sc[row_slice]
+      dst_slice = dst_indices_vmem_sc[row_slice]
+      src_idx_slice = src_indices_vmem_sc[row_slice]
+      prev_dst_vals_vec = prev_dst_val_vmem_sc[row_slice]
+
+      def col_loop(col_compute_offset):
+        col_slice = pl.ds(col_compute_offset, num_simd_lanes)
+        previous_accumulated_data = scratch.prev_iter_last_row_vmem[c, col_slice]
+
+        for row_src in range(num_simd_lanes):
+          val_u32 = gather_ref[row_src, col_slice]
+          if cfg.in_dtype == jnp.bfloat16:
+            shift = jnp.where(jnp.bitwise_and(src_idx_slice[row_src], 1) == 0, 16, 0)
+            shifted = jnp.bitwise_and(jnp.left_shift(val_u32, shift), jnp.uint32(0xFFFF0000))
+            data_f32 = plsc.bitcast(shifted, jnp.float32)
+          else:
+            data_f32 = plsc.bitcast(val_u32, jnp.float32)
+          data_f32 *= tw_slice[row_src]
+
+          dst_row_hbm = dst_slice[row_src]
+          if row_src == 0:
+            prev_dst = prev_dst_vals_vec[0]
+          else:
+            prev_dst = dst_slice[row_src - 1]
+          accumulated_data = jnp.where(
+              dst_row_hbm == prev_dst,
+              previous_accumulated_data + data_f32,
+              data_f32,
+          )
+          previous_accumulated_data = accumulated_data
+
+          out_vmem_sc[row_src, col_slice] = accumulated_data
+          if row_src == num_simd_lanes - 1:
+            scratch.prev_iter_last_row_vmem[c, col_slice] = accumulated_data
+
+      plsc.parallel_loop(0, col_chunk_size, step=num_simd_lanes)(col_loop)
+
+      dma_src_row_slice = dma_src_row_vmem_sc[row_slice]
+      dma_dst_row_slice = dma_dst_row_vmem_sc[row_slice]
+      copies = []
+      for i in range(num_simd_lanes):
+        copy = pltpu.make_async_copy(
+            out_vmem_sc.at[dma_src_row_slice[i], pl.ds(0, col_chunk_size)],
+            out_hbm_ref.at[dma_dst_row_slice[i], pl.ds(col_hbm_start, col_chunk_size)],
+            send_sem,
+        )
+        copy.start()
+        copies.append(copy)
+      for copy in copies:
+        copy.wait()
+
+    # pylint: disable=no-value-for-parameter
+    col_pipeline(in_32b_hbm_ref, scratches=(sem_sc,))
+    scratch.prev_dst_row_smem[0] = dst_indices_list[-1][num_simd_lanes - 1]
+
+  row_pipeline(
+      *([inputs.indices] * num_row_subchunks),
+      *([inputs.topk_weights] * num_row_subchunks),
+      scratches=(
+          scratch.src_indices_vmem,
+          scratch.dst_indices_vmem,
+          scratch.tw_f32_vmem,
+          scratch.dma_src_row_vmem,
+          scratch.dma_dst_row_vmem,
+          scratch.prev_dst_val_vmem,
+          scratch.out_vmem,
+          scratch.sem,
+      ),
   )
 
 
@@ -442,104 +554,76 @@ def ragged_gather_reduce(
     flops_override: int = -1,
     bytes_accessed_override: int = -1,
 ) -> jax.Array:
-  """Gathers `x` according to `indices`, applies weights and masks, and reduces.
-
-  This function performs a gathered lookup from `x` using `indices`, scales the
-  obtained rows by `topk_weights`, masks out any rows where `valid_rows_mask` is
-  False, and then groups every `reduce_group_size` rows together and reduces
-  them via summation.
-
-  The typical use case of this kernel is unpermute + local-reduction in the
-  MOE after GMM. Compared to maxtext.src.maxtext.kernels.gather_reduce_sc,
-  this kernel provides better performance if large sparsity exists in
-  `valid_rows_mask`. For example, expert_parallelism =8, 16 etc.
+  """Gathers x by indices, weights and masks, then reduces by group.
 
   Args:
-    x: A 2D JAX array of input features with shape `(input_size, hidden_size)`.
-    indices: A 1D JAX array of indices to gather with shape `(input_size,)`.
-    topk_weights: A 1D JAX array of weights to scale the gathered rows with
-      shape `(input_size,)`.
-    valid_rows_mask: A 1D boolean JAX array indicating which gathered rows are
-      valid, with shape `(input_size,)`.
-    reduce_group_size: An integer representing the number of consecutive rows to
-      reduce (sum) together.
-    enforce_fallback: Static bool flag. When ``True``, unconditionally use the
-      JAX reference implementation instead of the SparseCore kernel.
-      When ``False`` (default), use the SparseCore kernel and raise any error.
+    x: 2-D input features, (num_rows, hidden_size).
+    indices: 1-D gather indices, (input_size,).
+    topk_weights: 1-D per-row weights, (input_size,).
+    valid_rows_mask: 1-D bool mask of valid gathered rows, (input_size,).
+    reduce_group_size: number of consecutive rows summed into one output row.
+    enforce_fallback: Static bool flag. When True, unconditionally use the JAX
+      reference implementation instead of the SparseCore kernel.
 
   Returns:
-    A 2D JAX array of reduced data with shape
-    `(input_size // reduce_group_size, hidden_size)`.
+    Reduced output, (input_size // reduce_group_size, hidden_size).
   """
-
-  assert x.ndim == 2, "ragged_gather_reduce only supports 2d inputs."
-  assert indices.ndim == 1, "ragged_gather_reduce only supports 1d indices."
-  assert topk_weights.ndim == 1, "ragged_gather_reduce only supports 1d topk_weights."
-  assert valid_rows_mask.ndim == 1, "ragged_gather_reduce only supports 1d valid_rows_mask."
-
   sc_info = pltpu.get_tpu_info().sparse_core
   if sc_info is None or enforce_fallback:
-    # Sparse core is not available or fallback is enforced. Use JAX reference.
     return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
 
-  # Heuristic threshold on whether to fallback for small inputs.
-  dtype = x.dtype
-  dtype_bytes = jax.dtypes.itemsize_bits(dtype) // 8
+  dtype_bytes = jax.dtypes.itemsize_bits(x.dtype) // 8
 
   hidden_size = x.shape[-1]
   input_size = indices.size
   num_simd_lanes = sc_info.num_lanes
+  num_lanes = pltpu.get_tpu_info().num_lanes
   num_cores = sc_info.num_cores * sc_info.num_subcores
 
-  # This kernel partitions the output's columns into `num_column_partitions`
-  # and partition the output's rows into `num_row_partitions` and run each
-  # {row_partition} x {column_partition} combination on a separate SC subcore
-  # for parallelism. With such work partitioning, we guarantee that there
-  # won't be write collision (from different subcores) to any output row X
-  # column.
-  #
-  # Each column partition should be multiple of 128 (number of lanes) due to
-  # DMA requirements. Unless requiring padding on the column dimension, larger
-  # column partitions (thus smaller row partitions given fixed num_cores) is
-  # more preferable because large row partition may lead to imbalanced load
-  # (valid_rows_mask may have more rows in some partitions than others).
-  # Most LLM's hidden size is multiple of 1024, `num_column_partitions=8`
-  # should work well in practice without requiring padding on the column size.
-  num_column_partitions = 8
-  assert num_cores % num_column_partitions == 0
-  num_rows_partitions = num_cores // num_column_partitions
+  num_column_partitions = _calculate_num_column_partitions(hidden_size, num_cores, num_lanes)
+  num_row_partitions = num_cores // num_column_partitions
+
+  # Force at least 16 row partitions to shrink sorted_by_validity_vmem and save Spmem,
+  # but ensure we don't exceed num_simd_lanes or num_cores.
+  if num_row_partitions < 16 <= num_cores:
+    target_row_parts = min(16, num_simd_lanes)
+    if num_cores % target_row_parts == 0:
+      num_row_partitions = target_row_parts
+      num_column_partitions = num_cores // num_row_partitions
+
+  assert num_row_partitions <= num_simd_lanes, f"{num_row_partitions=} must be <= {num_simd_lanes=}"
+  base_block_size = num_simd_lanes * num_row_partitions
+  num_row_subchunks = max(
+      1,
+      min(
+          4,
+          pl.cdiv(input_size, base_block_size),
+      ),
+  )
+  row_chunk_size = num_simd_lanes * num_row_subchunks
 
   aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
   col_size = aligned_hidden_size // num_column_partitions
-  row_tile_size = num_simd_lanes
-  padded_input_size = _align_to(
-      input_size,
-      math.lcm(num_rows_partitions * row_tile_size, reduce_group_size),
-  )
-  pad_input_size = padded_input_size - input_size
+  col_chunk_size = _calculate_col_chunk_size(col_size, num_simd_lanes)
 
-  x = jnp.pad(
-      x,
-      ((0, pad_input_size), (0, aligned_hidden_size - hidden_size)),
-      constant_values=0,
-  )
-  indices = jnp.pad(indices, (0, pad_input_size), constant_values=0)
-  topk_weights = jnp.pad(topk_weights, (0, pad_input_size), constant_values=0)
-  valid_rows_mask = jnp.pad(valid_rows_mask, (0, pad_input_size), constant_values=False)
+  if topk_weights.dtype == jnp.bfloat16:
+    topk_weights_u32 = jax.lax.bitcast_convert_type(topk_weights, jnp.uint16).astype(jnp.uint32)
+  else:
+    topk_weights_u32 = jax.lax.bitcast_convert_type(topk_weights, jnp.uint32)
 
-  (
-      src_indices,
-      dst_indices,
-      topk_weights,
-      num_src_rows_per_row_partition,
-      mask,
-  ) = _preprocess(
-      indices,
-      topk_weights,
+  padded_input_size = _align_to(input_size, num_row_partitions * reduce_group_size)
+  valid_rows_mask = jnp.pad(
+      valid_rows_mask,
+      (0, padded_input_size - input_size),
+      constant_values=False,
+  )
+
+  sorted_by_validity, num_src_rows_per_row_partition, mask = _preprocess(
       valid_rows_mask,
       reduce_group_size,
-      num_rows_partitions,
+      num_row_partitions,
       num_simd_lanes,
+      row_chunk_size,
   )
 
   vector_mesh = plsc.VectorSubcoreMesh(
@@ -548,19 +632,47 @@ def ragged_gather_reduce(
       core_axis_name="core",
       subcore_axis_name="subcore",
   )
-  # Each output row from `main_kernel` will be of type float32, and then
-  # casted to the input dtype when doing the filter operation.
+
+  cfg = _Config(
+      num_row_partitions=num_row_partitions,
+      num_column_partitions=num_column_partitions,
+      reduce_group_size=reduce_group_size,
+      col_size=col_size,
+      col_chunk_size=col_chunk_size,
+      num_row_subchunks=num_row_subchunks,
+      num_simd_lanes=num_simd_lanes,
+      topk_dtype=topk_weights.dtype,
+      in_dtype=x.dtype,
+      core_axis_name=vector_mesh.core_axis_name,
+      subcore_axis_name=vector_mesh.subcore_axis_name,
+  )
+
+  # Launch the SparseCore kernel using public pl.kernel
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
-      functools.partial(
-          main_kernel,
-          core_axis_name=vector_mesh.core_axis_name,
-          subcore_axis_name=vector_mesh.subcore_axis_name,
-          num_row_partitions=num_rows_partitions,
-          num_column_partitions=num_column_partitions,
-      ),
-      compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
-          **_COMPILER_PARAMS,
-      ),
+      functools.partial(main_kernel, cfg=cfg),
+      **{
+          _OUT_KW: jax.ShapeDtypeStruct(
+              (padded_input_size // reduce_group_size + 1, aligned_hidden_size),
+              jnp.float32,
+          ),
+          _SCRATCH_KW: (
+              _Scratch(
+                  num_rows_per_row_partition_vmem=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+                  prev_iter_last_row_vmem=pltpu.VMEM((col_size // col_chunk_size, col_chunk_size), jnp.float32),
+                  prev_dst_row_smem=pltpu.SMEM((1,), jnp.int32),
+                  sorted_by_validity_vmem=pltpu.VMEM((sorted_by_validity.size // num_row_partitions,), jnp.int32),
+                  src_indices_vmem=pltpu.VMEM((row_chunk_size,), jnp.int32),
+                  dst_indices_vmem=pltpu.VMEM((row_chunk_size,), jnp.int32),
+                  tw_f32_vmem=pltpu.VMEM((row_chunk_size,), jnp.float32),
+                  dma_src_row_vmem=pltpu.VMEM((row_chunk_size,), jnp.int32),
+                  dma_dst_row_vmem=pltpu.VMEM((row_chunk_size,), jnp.int32),
+                  prev_dst_val_vmem=pltpu.VMEM((row_chunk_size,), jnp.int32),
+                  out_vmem=pltpu.VMEM((num_simd_lanes, col_chunk_size), jnp.float32),
+                  sem=pltpu.SemaphoreType.DMA((2,)),
+              ),
+          ),
+      },
+      compiler_params=pltpu.CompilerParams(**_COMPILER_PARAMS),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,
           aligned_hidden_size=aligned_hidden_size,
@@ -570,28 +682,18 @@ def ragged_gather_reduce(
           bytes_accessed_override=bytes_accessed_override,
       ),
       mesh=vector_mesh,
-      name="sc_ragged_gather_reduce",
-      **{
-          _OUT_KW: jax.ShapeDtypeStruct(
-              (padded_input_size // reduce_group_size, aligned_hidden_size),
-              jnp.float32,
-          ),
-          _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
-              num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
-              src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
-              sem_ref=pltpu.SemaphoreType.DMA((2,)),
-          ),
-      },
-  )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
+      name="sc_ragged_gather_reduce_v2",
+  )(
+      _Inputs(
+          num_src_rows_per_row_partition=num_src_rows_per_row_partition,
+          x=x,
+          indices=indices,
+          topk_weights=topk_weights_u32,
+          sorted_by_validity=sorted_by_validity,
+      ),
+  )
 
-  # If there is no valid source row in a reduce group, set that group's output
-  # to zero.
-  return jnp.where(
-      mask[:, None],
-      out.astype(x.dtype),
-      jnp.zeros_like(out, dtype=x.dtype),
-  )[: (input_size // reduce_group_size), :hidden_size]
+  # Post-process the output (drop padding, zero empty groups, cast).
+  out = out[: input_size // reduce_group_size, :hidden_size]
+  out = out * mask[: input_size // reduce_group_size, None].astype(out.dtype)
+  return out.astype(x.dtype)
