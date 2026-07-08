@@ -123,8 +123,15 @@ def _run_optimal_decompose_fwd(a, n_block_size, block_size):
   return x, x  # Save x as residual for the backward pass
 
 
-def _run_optimal_decompose_bwd(res, g):
-  """Backward pass for `run_optimal_decompose`."""
+def _run_optimal_decompose_bwd(n_block_size, block_size, res, g):
+  """Backward pass for `run_optimal_decompose`.
+
+  Args:
+      n_block_size: Non-differentiable param from forward pass.
+      block_size: Non-differentiable param from forward pass.
+      res: The residuals from the forward pass, which is the computed inverse `x`.
+      g: The gradient of the output `x` (i.e., `d(A^{-1})`).
+  """
   x = res
   # d(A^{-1}) = -x^T @ dA @ x^T
   x_t = x.swapaxes(-1, -2)
@@ -212,7 +219,7 @@ def gdn_scan_kernel_tpu(
 # 2. Pallas Kernel Implementation (Backward Pass Logic)
 # ==============================================================================
 def gdn_backward_kernel_tpu(
-    w_ref, u_ref, q_ref, k_ref, v_ref, g_ref, h_init_ref,
+    w_ref, u_ref, q_ref, k_ref, v_ref, g_ref, beta_ref, h_init_ref,
     grad_o_ref, grad_h_final_ref,
     grad_w_ref, grad_u_ref, grad_q_ref, grad_k_ref, grad_v_ref, grad_g_ref, grad_beta_ref, grad_h_init_ref,
     h_buffer_ref,
@@ -630,11 +637,31 @@ def pallas_chunk_gated_delta_rule(
   a_matrix = identity - s_matrix
 
   # Call the custom VJP-wrapped Pallas Kernel
-  matrix_a = run_optimal_decompose(
-      a_matrix,
-      n_block_size=8,
-      block_size=16
-  )
+  if mesh is not None:
+    # Extract mesh axis names for partitioning
+    axis_names = mesh.axis_names
+    batch_axes = [ax for ax in ('data', 'fsdp', 'fsdp_transpose', 'expert') if ax in axis_names]
+    batch_spec = tuple(batch_axes) if batch_axes else None
+    head_axes = [ax for ax in ('tensor', 'model') if ax in axis_names]
+    head_spec = tuple(head_axes) if head_axes else None
+
+    # a_matrix shape: (batch_size, num_chunks, num_heads, chunk_size, chunk_size)
+    a_matrix_spec = P(batch_spec, None, head_spec, None, None)
+
+    sharded_decompose = shard_map(
+        functools.partial(run_optimal_decompose, n_block_size=8, block_size=16),
+        mesh=mesh,
+        in_specs=a_matrix_spec,
+        out_specs=a_matrix_spec,
+        check_rep=False,
+    )
+    matrix_a = sharded_decompose(a_matrix)
+  else:
+    matrix_a = run_optimal_decompose(
+        a_matrix,
+        n_block_size=8,
+        block_size=16
+    )
 
   v_beta = v_c * beta_c[..., None]
   u_chunks = jnp.matmul(

@@ -774,6 +774,7 @@ class TrainCompile(parameterized.TestCase):
             "model_name=qwen3-next-80b-a3b",
             "per_device_batch_size=1",
             "max_target_length=1024",
+            "use_gdn_kernel=True",
         )
     )
 
