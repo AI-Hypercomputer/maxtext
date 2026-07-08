@@ -27,6 +27,7 @@ debug:
   rl: false # RL-specific debugging
 
 normalization_layer_epsilon: 1.e-05 # epsilon value for rmsnorm, layernorm.
+dry_run: false # if true, don't actually run the training loop, just initialize and exit.
 
 ################################## CHECKPOINTING ##################################
 # Checkpointing makes the following choices in the following order, starting with (1):
