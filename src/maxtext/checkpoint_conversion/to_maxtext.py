@@ -149,7 +149,7 @@ class MockTensor:
         if stop < 0:
           stop += dim_size
 
-        # EXACT numpy behavior: cap slices to array bounds
+        # exact numpy behavior: cap slices to array bounds
         start = max(0, min(start, dim_size))
         stop = max(0, min(stop, dim_size))
 
@@ -157,7 +157,7 @@ class MockTensor:
         new_shape.append(size)
         shape_idx += 1
       elif isinstance(k, (list, tuple, np.ndarray)):
-        # fancy indexing (e.g., fetching specific layers)
+        # indexing (fetching specific layers)
         new_shape.append(len(k))
         shape_idx += 1
       elif isinstance(k, int):
@@ -450,25 +450,25 @@ class LazyHFLoader:
         with safe_open(local_path, framework="pt", device="cpu") as f:
           return MockTensor(f.get_slice(mapped_key).get_shape())
       else:
-        # remote case: use HF hub metadata API to read shape via HTTP Range requests (no gigabyte downloads)
+        # remote case: use HF hub metadata API to read shape via HTTP Range requests (no gb downloads)
         if not hasattr(self, "remote_metadata"):
           from huggingface_hub import get_safetensors_metadata
 
           print("Fetching remote safetensors metadata for fast-fail...")
           self.remote_metadata = get_safetensors_metadata(self.model_id, token=self.token, revision=self.revision)
 
-        # 1. Look up which shard filename contains the tensor
+        # look up which shard filename contains the tensor
         shard_filename = self.remote_metadata.weight_map.get(mapped_key)
         if not shard_filename:
           raise ValueError(f"Key {mapped_key} not found in remote safetensors weight_map.")
 
-        # 2. Get the parsed header metadata for that specific shard
+        # get the parsed header metadata for that specific shard
         file_meta = self.remote_metadata.files_metadata.get(shard_filename)
 
-        # 3. Look up the specific tensor's info
+        # look up the specific tensor's info
         tensor_info = file_meta.tensors.get(mapped_key)
 
-        # tensor_info.shape is a list. Cast to tuple to match standard tensor shape formats.
+        # tensor_info.shape is a list so cast to tuple to match standard tensor shape formats.
         return MockTensor(tuple(tensor_info.shape))
 
     if shard_name in self._local_shard_paths:
@@ -752,13 +752,13 @@ def _get_hf_loading_function(
       if key is None:
         return apply_hook_fns(None, shape, hook)
 
-      # Fetch the tensors (handles both single keys and composite tuples/lists)
+      # fetch the tensors to handle both single keys and composite tuples/arr
       if isinstance(key, (list, tuple)):
         raw_weight = tuple(getter(k) for k in key)
       else:
         raw_weight = getter(key)
 
-      # Determine if we are dealing with MockTensors
+      # determine if we are dealing with MockTensors
       is_mock = getattr(raw_weight, "__class__", None).__name__ == "MockTensor" or (
           isinstance(raw_weight, tuple) and getattr(raw_weight[0], "__class__", None).__name__ == "MockTensor"
       )
@@ -767,13 +767,13 @@ def _get_hf_loading_function(
         try:
           return apply_hook_fns(raw_weight, shape, hook)
         except Exception:
-          # If the hook tries to execute numpy array initialization/padding, catch it.
-          # We dynamically grab the class and dtype so we don't cause any NameErrors.
+          # if hook tries to execute numpy array initialization/padding, catch it
+          # dynamically grab the class and dtype to avoid NameErrors
           dtype = raw_weight[0].dtype if isinstance(raw_weight, tuple) else raw_weight.dtype
           mock_cls = raw_weight[0].__class__ if isinstance(raw_weight, tuple) else raw_weight.__class__
           return mock_cls(shape, dtype)
 
-      # Standard path for real tensors
+      # standard path for real tensors
       return apply_hook_fns(raw_weight, shape, hook)
 
     load_fn = partial(
@@ -850,13 +850,13 @@ def _get_maxtext_weight(
   is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
   # fast fail gate to verify MockTensor shapes against expected MaxText tree
   if is_dry_run:
-    mock_tensor = load_fn()  # Returns the fully processed MockTensor
+    mock_tensor = load_fn()  # returns the fully processed MockTensor
 
     if not is_composite_mt_key:
       if mock_tensor.shape != mt_target_shape_or_shapes:
         print(f"DRY RUN OVERRIDE: Corrupted shape for '{mt_param_key_or_keys}'. "
               f"Expected {mt_target_shape_or_shapes}, got {mock_tensor.shape}. Forcing shape to continue test.")
-        # Override the corrupted tensor with a fresh one of the expected shape
+        # override the corrupted tensor with a fresh one of the expected shape
         mock_tensor = type(mock_tensor)(mt_target_shape_or_shapes, getattr(mock_tensor, 'dtype', 'bfloat16'))
       
       final_mt_weights[mt_target_idx_or_indices] = mock_tensor
@@ -866,7 +866,7 @@ def _get_maxtext_weight(
         if mock_slice.shape != mt_target_shape_or_shapes[i]:
           print(f"DRY RUN OVERRIDE: Corrupted shape for '{mt_param_key_or_keys[i]}'. "
                 f"Expected {mt_target_shape_or_shapes[i]}, got {mock_slice.shape}. Forcing shape to continue test.")
-          # Override the corrupted slice with a fresh MockTensor of the expected shape
+          # override the corrupted slice with a fresh MockTensor of the expected shape
           mock_slice = type(mock_tensor)(mt_target_shape_or_shapes[i], getattr(mock_tensor, 'dtype', 'bfloat16'))
         
         final_mt_weights[mt_target_idx] = mock_slice
