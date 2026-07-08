@@ -43,13 +43,12 @@ def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mes
     key = "qwen3_moe"
   elif model_name in {"qwen3.5-35b-a3b"}:
     key = "qwen3.5_moe"
+  elif model_name.startswith("qwen3-"):
+    key = "qwen3"
   else:
     key = model_name
 
-  if key in _MODEL_TO_CONVERSION_RULES:
-    return WeightConverter(rules=_MODEL_TO_CONVERSION_RULES[key])
-
-  raise ValueError(f"No MaxText->vLLM converter registered for model {model_name!r}.")
+  return WeightConverter(rules=_MODEL_TO_CONVERSION_RULES.get(key, []))
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
@@ -109,7 +108,6 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             engine_kwargs={
                 "max_model_len": cache_config_or_size,
                 "model": rollout_config.rollout_vllm_model_version,
-                "swap_space": rollout_config.rollout_vllm_swap_space_size_gb,
                 # Async scheduling causes KeyError in dp_scheduler on slow models
                 # (30B+) where inference latency exceeds the scheduler's window.
                 "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
