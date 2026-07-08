@@ -526,7 +526,9 @@ class NNXDecoder(nnx.Module):
 
   def _init_scanned_layers(self, decoder_block_classes, rngs, mesh):
     """Initializes decoder layers with scanning (non-pipeline)."""
-    if self.is_deepseek:
+    if self.config.decoder_block == DecoderBlockType.DEEPSEEK4:
+      self._init_scanned_deepseek4(rngs)
+    elif self.is_deepseek:
       self._init_scanned_deepseek(decoder_block_classes, rngs)
     elif self.is_gemma3:
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
@@ -534,6 +536,32 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
+
+  def _init_scanned_deepseek4(self, rngs):
+    """Initializes scanned DeepSeek-V4 layers (prefix + scanned blocks)."""
+    config = self.config
+    num_hash_layers = config.first_num_hash_layers
+    self.layers = nnx.List([])
+
+    # 1. Prefix layers
+    for lyr in range(num_hash_layers):
+      self._create_and_register_layer(
+          deepseek4.DeepSeek4DecoderLayer,
+          rngs,
+          "layers",
+          lyr,
+      )
+
+    # 2. Scanned blocks
+    num_remaining_layers = config.num_decoder_layers - num_hash_layers
+    num_full_blocks = num_remaining_layers // 2
+    if num_full_blocks > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          deepseek4.DeepSeek4ScannableBlock,
+          length=num_full_blocks,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+      )
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
     """Initializes scanned DeepSeek layers with optional Engram support."""
@@ -1801,6 +1829,28 @@ class NNXDecoder(nnx.Module):
               previous_chunk,
               slot,
           )
+        elif cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+          ds_layer_kwargs = {
+              **layer_kwargs,
+              "previous_chunk": previous_chunk,
+              "slot": slot,
+              "decoder_input_tokens": decoder_input_tokens,
+          }
+          for lyr in range(cfg.first_num_hash_layers):
+            layer = getattr(self, f"layers_{lyr}")
+            out = layer(y, *layer_args, **ds_layer_kwargs)
+            y = out[0] if isinstance(out, tuple) else out
+
+          num_remaining_layers = cfg.num_decoder_layers - cfg.first_num_hash_layers
+          num_full_blocks = num_remaining_layers // 2
+          if num_full_blocks > 0:
+            y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+                self.scanned_blocks,
+                y,
+                *layer_args,
+                length=num_full_blocks,
+                **ds_layer_kwargs,
+            )
         else:
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
           if kv_caches is not None:
