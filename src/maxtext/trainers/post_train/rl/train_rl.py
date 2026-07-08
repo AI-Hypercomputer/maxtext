@@ -501,9 +501,11 @@ def create_rl_components(
               "detokenize": trainer_config.stop_strings is not None,
               "include_stop_str_in_output": trainer_config.stop_strings is not None,
           },
-          # AgenticGRPOLearner requires log-probabilities from the rollout engine
-          # to support off-policy filtering and multi-iteration training.
-          **({"return_logprobs": True} if trainer_config.rl.use_agentic_rollout else {}),
+          rollout_vllm_server_mode_submission_threshold=trainer_config.rl.rollout_vllm_server_mode_submission_threshold,
+          use_rollout_logps=trainer_config.rl.use_rollout_logps,
+          return_logprobs=trainer_config.rl.return_logprobs
+          if trainer_config.rl.return_logprobs is not None
+          else trainer_config.rl.use_agentic_rollout,
           **get_rollout_kwargs_for_parallelism(sampler_config, len(sampler_devices)),
       ),
   )
@@ -571,6 +573,8 @@ def create_rl_components(
         system_prompt=trainer_config.rl.system_prompt,
         degenerate_group_masking=trainer_config.rl.degenerate_group_masking,
         epsilon_high=trainer_config.rl.epsilon_high,
+        return_logprobs=trainer_config.rl.return_logprobs if trainer_config.rl.return_logprobs is not None else True,
+        use_rollout_logps=trainer_config.rl.use_rollout_logps,
     )
     # Instantiate the custom MaxText chat parser
     template_config = load_data_template_from_file(trainer_config.chat_template_path)
