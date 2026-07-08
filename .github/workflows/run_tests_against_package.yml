@@ -74,6 +74,11 @@ on:
         required: false
         type: boolean
         default: false
+      install_torch_cpu:
+        description: 'Install CPU-only torch for layer-wise reference tests'
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -120,8 +125,14 @@ jobs:
           else
             install_tpu_pre_train_extra_deps
           fi
+          if [ "${INPUTS_INSTALL_TORCH_CPU}" == "true" ]; then
+            python3 -m pip install --quiet torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu --no-deps
+            python3 -c "import torch; print(f'torch {torch.__version__}')"
+          fi
           python3 --version
           python3 -m pip freeze
+        env:
+          INPUTS_INSTALL_TORCH_CPU: ${{ inputs.install_torch_cpu }}
       - name: Copy test assets files
         if: ${{ !inputs.maxtext_installed }}
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
