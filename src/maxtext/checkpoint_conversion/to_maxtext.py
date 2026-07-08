@@ -242,12 +242,13 @@ class LazyHFLoader:
     # Handle single-file models (shard map key might be None or we just know the filename)
     mapped_key = self.map_fn(key)
     shard_name = self.shard_map.get(mapped_key)
-    if shard_name is None and None in self.shard_map:
-      shard_name = self.shard_map[None]
-    elif shard_name is None:
+    if shard_name is None:
       # Fallback to unmapped key if mapped is not found
       shard_name = self.shard_map.get(key)
       if shard_name is not None:
+        mapped_key = key
+      elif None in self.shard_map:
+        shard_name = self.shard_map[None]
         mapped_key = key
       else:
         raise ValueError(f"Key {key} (mapped to {mapped_key}) not found in HF checkpoint index.")
