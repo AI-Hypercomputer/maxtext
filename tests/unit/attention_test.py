@@ -350,12 +350,104 @@ class LoadBalancedMaskTest(unittest.TestCase):
 
     np.testing.assert_array_equal((causal_mask & local_mask)[:, :], expected_mask)
 
+  def test_load_balanced_chunk_window(self):
+    seq_len = 8
+    chunk_size = 2
+    q_sequence = np.asarray([0, 1, 6, 7, 2, 3, 4, 5])
+    kv_sequence = np.arange(seq_len)
+    causal_mask = attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=2)
+    chunk_mask = attention_op.LoadBalancedChunkedCausalMask(
+        shape=(seq_len, seq_len),
+        chunk_size=chunk_size,
+        cp_size=2,
+    )
+
+    expected_mask = (kv_sequence[None, :] <= q_sequence[:, None]) & (
+        q_sequence[:, None] // chunk_size == kv_sequence[None, :] // chunk_size
+    )
+
+    np.testing.assert_array_equal((causal_mask & chunk_mask)[:, :], expected_mask)
+
+  def test_dot_product_local_mask_uses_segment_positions(self):
+    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
+    mesh = types.SimpleNamespace(shape={"context": 4})
+    seq_len = 16
+    sliding_window_size = 4
+    positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
+    query = jnp.zeros((1, seq_len, 1, 128))
+    key = jnp.zeros((1, seq_len, 1, 128))
+    decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=seq_len,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.LOCAL_SLIDING,
+        sliding_window_size=sliding_window_size,
+    )
+
+    mask = op.generate_attention_mask(
+        query,
+        key,
+        decoder_segment_ids,
+        MODEL_MODE_TRAIN,
+        segment_positions=positions,
+    )
+
+    expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
+    for r, q_pos in enumerate(np.asarray(positions[0])):
+      for c, kv_pos in enumerate(np.asarray(positions[0])):
+        if q_pos - sliding_window_size < kv_pos <= q_pos:
+          expected_mask[r, c] = True
+
+    np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected_mask)
+
+  def test_dot_product_chunk_mask_uses_segment_positions(self):
+    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
+    mesh = types.SimpleNamespace(shape={"context": 4})
+    seq_len = 16
+    chunk_size = 4
+    positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
+    query = jnp.zeros((1, seq_len, 1, 128))
+    key = jnp.zeros((1, seq_len, 1, 128))
+    decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=seq_len,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.CHUNK,
+        chunk_attn_window_size=chunk_size,
+    )
+
+    mask = op.generate_attention_mask(
+        query,
+        key,
+        decoder_segment_ids,
+        MODEL_MODE_TRAIN,
+        segment_positions=positions,
+    )
+
+    expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
+    for r, q_pos in enumerate(np.asarray(positions[0])):
+      for c, kv_pos in enumerate(np.asarray(positions[0])):
+        if q_pos >= kv_pos and q_pos // chunk_size == kv_pos // chunk_size:
+          expected_mask[r, c] = True
+
+    np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected_mask)
+
 
 class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
   """Tests packed Transformer Engine attention metadata handling."""
 
-  def _call_packed_attention(self, sequence_descriptor):
-    """Runs packed TE attention with fake Transformer Engine modules."""
+  def _call_te_attention(
+      self, sequence_descriptor, config=None, mesh=None, attention_type=AttentionType.GLOBAL, chunk_attn_window_size=None
+  ):
+    """Runs TE attention with fake Transformer Engine modules."""
     sequence_descriptor.calls = []
 
     class FakeWrappedAttention:
@@ -382,17 +474,19 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
         "transformer_engine.jax.attention": attention_module,
     }
 
-    config = types.SimpleNamespace(
-        context_sharding="context",
-        context_parallel_strategy="ring",
-        context_parallel_load_balance=False,
-        packing=True,
-        dataset_type="grain",
-        max_segments_per_seq=4,
-        head_dim=2,
-        attention_kernel="cudnn_flash_te",
-    )
-    mesh = types.SimpleNamespace(shape={"context": 1})
+    if config is None:
+      config = types.SimpleNamespace(
+          context_sharding="context",
+          context_parallel_strategy="ring",
+          context_parallel_load_balance=False,
+          packing=True,
+          dataset_type="grain",
+          max_segments_per_seq=4,
+          head_dim=2,
+          attention_kernel="cudnn_flash_te",
+      )
+    if mesh is None:
+      mesh = types.SimpleNamespace(shape={"context": 1})
     attention = AttentionOp(
         config=config,
         mesh=mesh,
@@ -401,6 +495,8 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
         num_query_heads=2,
         num_kv_heads=2,
         dtype=jnp.float32,
+        attention_type=attention_type,
+        chunk_attn_window_size=chunk_attn_window_size,
     )
     query = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
     key = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
@@ -433,7 +529,7 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
           raise TypeError("older Transformer Engine does not accept THD metadata")
         return kwargs
 
-    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+    output, descriptor_calls = self._call_te_attention(SequenceDescriptor)
 
     self.assertEqual(len(descriptor_calls), 2)
     for call in descriptor_calls:
@@ -442,13 +538,37 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
     self.assertIs(output, descriptor_calls[0])
 
     SequenceDescriptor.reject_thd_kwargs = True
-    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+    output, descriptor_calls = self._call_te_attention(SequenceDescriptor)
     self.assertEqual(len(descriptor_calls), 4)
     self.assertIn("is_thd", descriptor_calls[0])
     self.assertNotIn("is_thd", descriptor_calls[1])
     self.assertIn("is_thd", descriptor_calls[2])
     self.assertNotIn("is_thd", descriptor_calls[3])
     self.assertIs(output, descriptor_calls[1])
+
+  def test_context_parallel_chunk_attention_rejected(self):
+    class SequenceDescriptor:
+      pass
+
+    config = types.SimpleNamespace(
+        context_sharding="context",
+        context_parallel_strategy="all_gather",
+        context_parallel_load_balance=False,
+        packing=False,
+        dataset_type="synthetic",
+        max_segments_per_seq=1,
+        head_dim=2,
+        attention_kernel="cudnn_flash_te",
+    )
+    mesh = types.SimpleNamespace(shape={"context": 2})
+    with self.assertRaisesRegex(ValueError, "Chunk attention"):
+      self._call_te_attention(
+          SequenceDescriptor,
+          config=config,
+          mesh=mesh,
+          attention_type=AttentionType.CHUNK,
+          chunk_attn_window_size=2,
+      )
 
 
 class AttentionTest(parameterized.TestCase):
