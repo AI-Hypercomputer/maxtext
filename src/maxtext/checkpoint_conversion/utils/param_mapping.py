@@ -3866,7 +3866,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
   mapping = {
       "params-token_embedder-embedding": "model.embed_tokens.weight",
       "params-decoder-decoder_norm-scale": "model.norm.weight",
-      "params-decoder-logits_dense-kernel": "lm_head.weight",
+      "params-decoder-logits_dense-kernel": "head.weight",
       "params-decoder-hc_head-hc_fn": "model.hc_head.hc_fn",
       "params-decoder-hc_head-hc_base": "model.hc_head.hc_base",
       "params-decoder-hc_head-hc_scale": "model.hc_head.hc_scale",
@@ -3939,11 +3939,9 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
           f"{mt_layer_path}-mlp-shared_experts-wo-kernel": get_hf_key("mlp.shared_experts.down_proj.weight"),
           
           # Stacked Experts
-          (
-              f"{mt_layer_path}-mlp-MoeBlock_0-wi_0",
-              f"{mt_layer_path}-mlp-MoeBlock_0-wi_1",
-          ): get_hf_key("mlp.experts.gate_up_proj"),
-          f"{mt_layer_path}-mlp-MoeBlock_0-wo": get_hf_key("mlp.experts.down_proj"),
+          f"{mt_layer_path}-mlp-MoeBlock_0-wi_0": get_hf_expert_keys("w1.weight"),
+          f"{mt_layer_path}-mlp-MoeBlock_0-wi_1": get_hf_expert_keys("w3.weight"),
+          f"{mt_layer_path}-mlp-MoeBlock_0-wo": get_hf_expert_keys("w2.weight"),
       }
       
       if (is_list and hf_layer_indices[0] >= 3) or (not is_list and hf_layer_indices >= 3):
@@ -4003,36 +4001,6 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   def identity(input_tensor, target_shape=None):
     return input_tensor
 
-  def transpose_expert(input_tensor, target_shape=None):
-    # HF: (experts, out, in) <-> MT: (experts, in, out)
-    if saving_to_hf:
-      return input_tensor.transpose(0, 2, 1)
-    else:
-      return input_tensor.transpose(0, 2, 1)
-
-  def process_wi_0_wi_1(input_tensor, target_shape=None):
-    """
-    Handles `composite_mt_key`: maxtext (wi_0, wi_1) <-> hf (gate_up_proj)
-    - if saving_to_hf: (wi_0, wi_1) -> gate_up_proj
-      - input_tensor is a tuple of two tensors, tensor ORDER must be same as key order
-      - return a single tensor
-    - otherwise: gate_up_proj -> (wi_0, wi_1)
-      - input_tensor is a single tensor
-      - return two tensors stacked at LAST index -1, tensor ORDER must be same as key order
-    """
-    if saving_to_hf:
-      # 1. MaxText -> HF (Fusing)
-      wi_0, wi_1 = input_tensor
-      gate_up = np.concatenate([wi_0, wi_1], axis=-1)
-      return gate_up.swapaxes(-1, -2)
-    else:
-      # 2. HF -> MaxText (Splitting)
-      # input_tensor is the massive HF gate_up_proj. Shape: (..., out, in)
-      gate, up = np.split(input_tensor, 2, axis=-2)
-      gate = gate.swapaxes(-1, -2)
-      up = up.swapaxes(-1, -2)
-      return np.stack([gate, up], axis=-1)
-
   # Reshaping functions for wq_b, wkv, o_a_proj
   def reshape_transpose_wq_b(input_tensor, target_shape=None):
       # HF: [n_heads * q_head_dim, kv_lora_rank]
@@ -4083,11 +4051,6 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   
   # Base mapping logic from original file
   for key, hf_key in DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers).items():
-      if isinstance(key, tuple):
-          if "-MoeBlock_0-wi_0" in key[0]:
-              mapping[key] = process_wi_0_wi_1
-          continue
-
       if hf_key is None:
           mapping[key] = ones_norm
       elif "token_embedder-embedding" in key:
@@ -4114,8 +4077,6 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
           mapping[key] = transpose
       elif "hc_head-hc_base" in key or "hc_head-hc_scale" in key:
           mapping[key] = identity
-      elif "-MoeBlock_0-wo" in key:
-          mapping[key] = transpose_expert
       elif type(hf_key) == list:
           mapping[key] = transpose if not saving_to_hf else transpose_stack
       elif "-kernel" in key or "-embedding" in key or "-sinks" in key:

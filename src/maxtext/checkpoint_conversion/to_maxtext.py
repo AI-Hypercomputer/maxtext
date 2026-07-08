@@ -242,13 +242,12 @@ class LazyHFLoader:
     # Handle single-file models (shard map key might be None or we just know the filename)
     mapped_key = self.map_fn(key)
     shard_name = self.shard_map.get(mapped_key)
-    if shard_name is None:
+    if shard_name is None and None in self.shard_map:
+      shard_name = self.shard_map[None]
+    elif shard_name is None:
       # Fallback to unmapped key if mapped is not found
       shard_name = self.shard_map.get(key)
       if shard_name is not None:
-        mapped_key = key
-      elif None in self.shard_map:
-        shard_name = self.shard_map[None]
         mapped_key = key
       else:
         raise ValueError(f"Key {key} (mapped to {mapped_key}) not found in HF checkpoint index.")
@@ -479,20 +478,9 @@ def _build_single_axis_stacked_tensor(
   """
   tensors_to_stack = []
 
-  is_scanned = False
-  if isinstance(mt_param_name, tuple):
-    is_scanned = any("scanned_blocks" in name for name in mt_param_name)
-  elif isinstance(mt_param_name, str):
-    is_scanned = "scanned_blocks" in mt_param_name
-
-  if config.scan_layers and is_scanned:
-    # If it's a scanned MoE layer (has MoeBlock expert weights), stack layers along axis 1
-    # because axis 0 is the experts axis.
-    names = mt_param_name if isinstance(mt_param_name, tuple) else (mt_param_name,)
-    if any("MoeBlock_0-wi" in name or "MoeBlock_0-wo" in name for name in names):
-      axis_to_stack = 1
-    else:
-      axis_to_stack = config.param_scan_axis
+  if config.scan_layers and "scanned_blocks" in mt_param_name:
+    # If it's a standard scanned layer, we use the configured param_scan_axis.
+    axis_to_stack = config.param_scan_axis
   else:
     # Otherwise, if an unscanned MoE layer (or scan_layers is False), we stack along the expert axis (0).
     axis_to_stack = 0
