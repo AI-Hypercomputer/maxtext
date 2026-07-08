@@ -550,6 +550,7 @@ class NNXDecoder(nnx.Module):
           rngs,
           "layers",
           lyr,
+          layer_idx=lyr,
       )
 
     # 2. Scanned blocks
