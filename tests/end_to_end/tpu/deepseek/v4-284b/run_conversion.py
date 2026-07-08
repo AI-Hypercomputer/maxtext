@@ -10,7 +10,7 @@ def main():
 
   
   cmd = [
-      "/home/snehalv_google_com/venv-maxtext/bin/python",
+      "/home/snehalv_google_com/maxtext/maxtext_venv/bin/python",
       "src/maxtext/checkpoint_conversion/to_maxtext.py",
       "src/maxtext/configs/base.yml",
       "model_name=deepseek4-tiny",

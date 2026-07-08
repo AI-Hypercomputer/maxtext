@@ -2,7 +2,7 @@
 cd /home/snehalv_google_com/maxtext
 export PYTHONPATH=$PWD/src
 echo "Starting conversion..."
-/home/snehalv_google_com/venv-maxtext/bin/python src/maxtext/checkpoint_conversion/to_maxtext.py \
+/home/snehalv_google_com/maxtext/maxtext_venv/bin/python src/maxtext/checkpoint_conversion/to_maxtext.py \
     src/maxtext/configs/base.yml \
     model_name=deepseek4-tiny \
     base_output_directory=gs://snehalv-data/deepseek4-conversion-pr/scanned/ \
