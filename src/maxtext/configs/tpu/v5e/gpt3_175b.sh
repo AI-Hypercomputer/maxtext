@@ -3,11 +3,10 @@
 #
 # Command Flags:
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
-# DATASET_PATH (Required, unless dataset_path is already set in base.yml)
 # RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
 #
 # Example to invoke this script:
-# bash src/maxtext/configs/tpu/v5e/gpt3_175b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
+# bash src/maxtext/configs/tpu/v5e/gpt3_175b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>"
 #
 # Example to AOT compile:
 # bash src/maxtext/configs/tpu/v5e/gpt3_175b.sh EXECUTABLE=train_compile M_COMPILE_TOPOLOGY=v5e-256 M_COMPILE_TOPOLOGY_NUM_SLICES=8
