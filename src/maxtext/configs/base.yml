@@ -1230,7 +1230,7 @@ enable_nnx: true
 pure_nnx_decoder: true
 pure_nnx: true
 
-################################## Qwen3-Next Specific Configs ##################################
+################################## Qwen3-Next & Qwen3.5 Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
 gdn_conv_kernel_dim: 4
 # Head dimension for the key/query in the Gated Delta Net
@@ -1247,6 +1247,8 @@ gdn_chunk_size: 64
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
+# Flag whether to use the pallas kernel for Gated Delta Rule in maxtext/kernels/attention
+use_gdn_kernel: False
 
 # Use tokamax library for gmm kernel implementation
 use_tokamax_gmm: false
