@@ -974,7 +974,13 @@ class HardwareAndMesh(BaseModel):
   )
   shard_mode: ShardMode = Field("auto", description="can be either auto or explicit")
   inhomogeneous_layer_cycle_interval: int = Field(1, description="The interval of repeated inhomogeneous layer patterns.")
-  scan_layers: bool = Field(True, description="Whether to use jax.lax.scan over layers.")
+  scan_layers: bool = Field(
+      True,
+      description=(
+          "Whether to use jax.lax.scan over layers (stacked/unstacked checkpoint). "
+          "When resuming from a checkpoint, this flag is auto-determined from metadata."
+      ),
+  )
   param_scan_axis: int = Field(1, description="Axis to scan over for parameters.")
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
   context_parallel_strategy: str = Field(

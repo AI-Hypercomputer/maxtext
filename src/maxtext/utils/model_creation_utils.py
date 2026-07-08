@@ -791,6 +791,44 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
   return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
 
 
+def verify_and_sync_scan_layers(config):
+  """Verify and sync scan_layers based on checkpoint metadata."""
+  if not config.load_parameters_path:
+    return config
+
+  custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
+  saved_scan_layers = custom_metadata.get("scan_layers")
+  if not isinstance(saved_scan_layers, bool):
+    return config
+
+  if saved_scan_layers == config.scan_layers:
+    return config
+
+  # Extract the Pydantic config (or use direct config if already a Pydantic model)
+  pydantic_config = getattr(config, "_pydantic_config", config)
+  model_fields_set = getattr(pydantic_config, "model_fields_set", None)
+
+  # If model metadata tracking isn't supported, fall back to matching check (True)
+  is_explicit = "scan_layers" in model_fields_set if model_fields_set is not None else True
+
+  if is_explicit:
+    if saved_scan_layers != config.scan_layers:
+      raise ValueError(
+          f"Configuration mismatch: Your run specifies scan_layers={config.scan_layers}, "
+          f"but the checkpoint was saved with scan_layers={saved_scan_layers}."
+      )
+  else:
+    max_logging.log(f"Setting scan_layers={saved_scan_layers} loaded from checkpoint metadata.")
+    new_pydantic_config = pydantic_config.model_copy(update={"scan_layers": saved_scan_layers})
+    # Wrap back in HyperParameters if the original config was wrapped
+    if getattr(config, "_pydantic_config", None) is not None:
+      config = pyconfig.HyperParameters(new_pydantic_config)
+    else:
+      config = new_pydantic_config
+
+  return config
+
+
 def from_pretrained(
     config,
     mesh=None,
@@ -869,15 +907,8 @@ def from_pretrained(
         }
     )
     config = pyconfig.HyperParameters(new_config)
-  # Proactive verification of scan_layers from checkpoint metadata
-  if config.load_parameters_path:
-    custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
-    saved_scan_layers = custom_metadata.get("scan_layers")
-    if isinstance(saved_scan_layers, bool) and saved_scan_layers != config.scan_layers:
-      raise ValueError(
-          f"Configuration mismatch: Your run specifies scan_layers={config.scan_layers}, "
-          f"but the checkpoint was saved with scan_layers={saved_scan_layers}."
-      )
+
+  config = verify_and_sync_scan_layers(config)
 
   if config.pure_nnx:
     _create_model, abstract_model = create_nnx_abstract_model(
