@@ -17,7 +17,7 @@ export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where
 export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-auto-nap2}" # Name of your Ironwood cluster
 export ZONE="${ZONE:-us-central1-c}" # Zone where your Ironwood cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
-export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:post-training-2026-06-23}" # Base Docker image
+export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:profile}" # Base Docker image
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="${TPU_TYPE:-tpu7x-128}"
 export WORKLOAD_NAME="mohit-rl-qwen3-$RANDOM"
@@ -99,7 +99,7 @@ model_name=qwen3-0.6b \
 tokenizer_path=Qwen/Qwen3-0.6B \
 run_name=$WORKLOAD_NAME \
 checkpoint_storage_use_ocdbt=False \
-async_scheduling=True \
+async_scheduling=False \
 base_output_directory=$BASE_OUTPUT_DIRECTORY \
 chips_per_vm=8 \
 num_batches=20 \
@@ -123,8 +123,8 @@ learning_rate=1e-6 \
 batch_size=480 \
 train_micro_batch_size=8 \
 rollout_micro_batch_size=480 \
-rollout_data_parallelism=16 \
-rollout_tensor_parallelism=4 \
+rollout_data_parallelism=32 \
+rollout_tensor_parallelism=2 \
 enable_dp_attention=false \
 hbm_utilization_vllm=0.6 \
 max_num_seqs=480 \
@@ -137,7 +137,7 @@ max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
 rollout_vllm_init_with_random_weights=True \
-vllm_additional_config='{\"enable_continue_decode\": true}'"
+vllm_additional_config='{\"enable_continue_decode\": true, \"max_decode_steps\": 128}'"
 # vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 # vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
@@ -195,8 +195,8 @@ echo "Detected GKE TPU Nodepool: ${GKE_NODEPOOL}"
 echo "Applying Warden webhook bypass patch to generated_manifest.yaml..."
 python3 scripts/patch_manifest.py generated_manifest.yaml "" "" "${WORKLOAD_NAME}" ""
 
-# echo "Patching queue to user-queue-4x4x4..."
-# sed -i 's/multislice-queue/user-queue-4x4x4/g' generated_manifest.yaml
+echo "Patching queue to user-queue-4x4x4..."
+sed -i 's/multislice-queue/user-queue-4x4x4/g' generated_manifest.yaml
 
 echo "Deploying the patched workload manifest..."
 /usr/bin/kubectl apply -f generated_manifest.yaml

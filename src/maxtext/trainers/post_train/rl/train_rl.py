@@ -404,7 +404,8 @@ def create_rl_components(
 
   # Setup metrics logging
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=trainer_config.tensorboard_dir, flush_every_n_steps=trainer_config.log_period
+      log_dir=os.path.join(trainer_config.tensorboard_dir, "sampler") if trainer_config.tensorboard_dir else "",
+      flush_every_n_steps=trainer_config.log_period,
   )
 
   profiler_options = None
