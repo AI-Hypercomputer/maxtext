@@ -299,7 +299,7 @@ def setup_train_loop(config, recorder, devices=None):
     # Create data_loader AFTER reordering wrapper is applied
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
-    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+    state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
     if config.pure_nnx:
@@ -321,11 +321,7 @@ def setup_train_loop(config, recorder, devices=None):
         state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
 
         # create state_mesh_shardings for the DilocoState
-        step_mesh = (
-            state_mesh_shardings.optimizer.step.mesh
-            if config.pure_nnx
-            else state_mesh_shardings.step.mesh
-        )
+        step_mesh = state_mesh_shardings.optimizer.step.mesh if config.pure_nnx else state_mesh_shardings.step.mesh
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
         state_mesh_shardings = diloco.DiLoCoTrainState(
             inner_state_shardings,
