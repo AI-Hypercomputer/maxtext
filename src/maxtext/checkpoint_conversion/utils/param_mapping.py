@@ -3958,7 +3958,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-gate_proj-kernel": get_hf_key("self_attn.compressor.indexer.gate_proj.weight"),
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-kv_proj-kernel": get_hf_key("self_attn.compressor.indexer.kv_proj.weight"),
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-q_proj-kernel": get_hf_key("self_attn.compressor.indexer.q_b_proj.weight"),
-                  f"{mt_layer_path}-self_attention-csa_compressor-indexer-weights_proj-kernel": get_hf_key("self_attn.compressor.indexer.weights_proj.weight"),
+                  f"{mt_layer_path}-self_attention-csa_compressor-indexer-weights_proj-kernel": get_hf_key("self_attn.compressor.indexer.scorer.weights_proj.weight"),
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-position_bias": get_hf_key("self_attn.compressor.indexer.position_bias"),
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-kv_norm-scale": get_hf_key("self_attn.compressor.indexer.kv_norm.weight"),
               })
