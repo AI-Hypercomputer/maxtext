@@ -434,8 +434,12 @@ class MaxEngine(_BaseEngine):
       # overwrite with the AR-mode graphdef from `from_pretrained` — the
       # PREFILL/AR attention ops have different cache variable shapes, and a
       # mismatch trips the `assert prefill_kv_cache` check inside attention_op.
-      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        concrete_model = self._create_model_fn()
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        _, full_abs = nnx.split(self.model)
+        full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
+        concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
+            self.model, self._create_model_fn, mesh=self._mesh, named_sharding=full_sharding
+        )
       graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       # Overlay loaded non-Param/non-Cache leaves (e.g. AQT qrhs.frozen) onto
       # the PREFILL-mode rest_state. The PREFILL concrete_model already has
@@ -1819,7 +1823,7 @@ class MaxEngine(_BaseEngine):
       return TokenizerParameters(
           path=self.config.tokenizer_path,
           tokenizer_type=tokenizer_type_val,
-          access_token=self.config.hf_access_token,
+          access_token=self.config.hf_access_token or None,
           use_chat_template=self.config.use_chat_template,
           extra_ids=0,
       )

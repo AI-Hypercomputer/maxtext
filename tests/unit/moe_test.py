@@ -283,6 +283,111 @@ class DeepSeekRoutingTest(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(expected_updates, actual_updates, rtol=1e-05, atol=1e-05, equal_nan=False))
 
 
+class Param2MoERoutingTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="param2moe_routing_test",
+        enable_checkpointing=False,
+        model_name="param2moe",
+        decoder_block="param2moe",
+        override_model_config=True,
+        dtype="float32",
+        weight_dtype="float32",
+        max_target_length=2,
+        max_prefill_predict_length=1,
+        per_device_batch_size=1,
+        base_emb_dim=8,
+        base_mlp_dim=16,
+        base_moe_mlp_dim=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        shared_experts=1,
+        first_num_dense_layers=1,
+        routed_score_func="sigmoid",
+        routed_bias=True,
+        routed_scaling_factor=2.5,
+        norm_topk_prob=False,
+        sparse_matmul=True,
+    )
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.model = moe.RoutedMoE(
+        config=self.cfg,
+        num_experts=self.cfg.num_experts,
+        num_experts_per_tok=self.cfg.num_experts_per_tok,
+        mesh=Mesh(devices_array, self.cfg.mesh_axes),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=self.cfg.dtype,
+        weight_dtype=self.cfg.weight_dtype,
+        rngs=nnx.Rngs(params=0),
+    )
+
+  def test_param2_router_matches_huggingface_bias_selection_and_pre_bias_weights(self):
+    # HF Param2MoEGate selects experts from sigmoid(logits) + expert_bias, then
+    # gathers weights from the pre-bias sigmoid scores and applies routed scaling.
+    pre_bias_scores = jnp.array(
+        [
+            [
+                [0.40, 0.39, 0.20, 0.10],
+                [0.05, 0.60, 0.55, 0.54],
+            ]
+        ],
+        dtype=jnp.float32,
+    )
+    expert_bias = jnp.array([0.00, -0.20, 0.35, 0.00], dtype=jnp.float32)
+    gate_scores = pre_bias_scores + expert_bias
+
+    expected_indices = jnp.array([[[2, 0], [2, 3]]])
+    expected_weights = jnp.take_along_axis(pre_bias_scores, expected_indices, axis=-1)
+    expected_weights = expected_weights / (expected_weights.sum(axis=-1, keepdims=True) + 1e-20)
+    expected_weights = expected_weights * self.cfg.routed_scaling_factor
+
+    actual_weights, actual_indices = self.model.get_topk(gate_scores, pre_bias_scores)
+
+    self.assertTrue(jax.numpy.array_equal(expected_indices, actual_indices))
+    self.assertTrue(jax.numpy.allclose(expected_weights, actual_weights, rtol=1e-6, atol=1e-6))
+
+  def test_param2_norm_topk_prob_would_cancel_huggingface_scaling(self):
+    pre_bias_scores = jnp.array([[[0.40, 0.39, 0.20, 0.10]]], dtype=jnp.float32)
+    gate_scores = pre_bias_scores
+    actual_weights, _ = self.model.get_topk(gate_scores, pre_bias_scores)
+
+    self.assertTrue(
+        jax.numpy.allclose(
+            actual_weights.sum(axis=-1),
+            jnp.full((1, 1), self.cfg.routed_scaling_factor, dtype=jnp.float32),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+    )
+
+  def test_param2_config_creates_router_expert_bias(self):
+    self.assertIsNotNone(self.model.gate.bias)
+    self.assertEqual(self.model.gate.bias.value.shape, (self.cfg.num_experts,))
+
+  def test_param2_model_config_matches_huggingface_router_contract(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="param2moe_model_config_test",
+        model_name="param2moe",
+        enable_checkpointing=False,
+        per_device_batch_size=1,
+        max_target_length=2,
+        max_prefill_predict_length=1,
+    )
+
+    self.assertTrue(cfg.routed_bias)
+    self.assertFalse(cfg.norm_topk_prob)
+    self.assertEqual(cfg.routed_score_func, "sigmoid")
+    self.assertEqual(cfg.routed_scaling_factor, 2.5)
+    self.assertFalse(cfg.normalize_embedding_logits)
+    self.assertTrue(cfg.float32_gate_logits)
+    self.assertEqual(cfg.query_pre_attn_scalar, 0.125)
+
+
 class MoeLoopBlock(nnx.Module):
   """Reference implementation from https://github.com/mistralai/mistral-inference.
   This is not included anymore in our repo, due to a limitation of for-loop implementation in sharding.

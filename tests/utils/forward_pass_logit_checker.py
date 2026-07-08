@@ -58,6 +58,37 @@ from maxtext.utils import lora_utils
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+# Compatibility shim for transformers v5.0+ where is_torch_fx_available was removed
+import transformers.utils.import_utils as import_utils
+if not hasattr(import_utils, 'is_torch_fx_available'):
+  def is_torch_fx_available():
+    return False
+  setattr(import_utils, 'is_torch_fx_available', is_torch_fx_available)
+
+# Compatibility shim for transformers v5.0+ where 'default' was removed from ROPE_INIT_FUNCTIONS
+import transformers.modeling_rope_utils as modeling_rope_utils
+if 'default' not in modeling_rope_utils.ROPE_INIT_FUNCTIONS:
+  def default_rope_init(config, device):
+    base = getattr(config, "rope_theta", 10000.0)
+    partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+    dim = int(head_dim * partial_rotary_factor)
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim))
+    return inv_freq, 1.0
+  modeling_rope_utils.ROPE_INIT_FUNCTIONS['default'] = default_rope_init
+
+# Compatibility shim for transformers v5.0+ where _tied_weights_keys must be a dict
+from transformers.modeling_utils import PreTrainedModel
+original_init = PreTrainedModel.__init__
+def patched_init(self, *args, **kwargs):
+  original_init(self, *args, **kwargs)
+  if hasattr(self, '_tied_weights_keys') and isinstance(self._tied_weights_keys, list):
+    class_name = self.__class__.__name__
+    if class_name == "Param2MoEForCausalLM":
+      self._tied_weights_keys = {"lm_head.weight": "model.word_embeddings.weight"}
+PreTrainedModel.__init__ = patched_init
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
@@ -478,7 +509,8 @@ def main(config, test_args):  # pylint: disable=W0621
       else:
         maxtext_state, _ = model_creation_utils.setup_decode_state_from_nnx(maxtext_model, config, rng1, mesh)
 
-    prompts = ["I love to", "Today is a", "What is the"]
+    prompts = ["Paris is the"]
+    # prompts = ["I love to", "Today is a", "What is the"]
     all_data_to_save = []
     for input_text in prompts:
       max_logging.log(f"\n--- Prompt: {input_text} ---")

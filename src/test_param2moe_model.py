@@ -13,7 +13,9 @@ def test_param2moe():
       [
           sys.argv[0],
           "src/maxtext/configs/base.yml",
+          "model_name=param2moe",
           "decoder_block=param2moe",
+          "override_model_config=True",
           "base_num_decoder_layers=3",
           "first_num_dense_layers=1",
           "num_experts=4",
@@ -33,6 +35,8 @@ def test_param2moe():
           "run_name=test_param2moe",
           "enable_checkpointing=False",
           "attention=dot_product",
+          "megablox=False",
+          "sparse_matmul=False",
       ]
   )
 

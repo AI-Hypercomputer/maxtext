@@ -599,6 +599,7 @@ class Attention(BaseModel):
   )
   attention_sink: bool = Field(False, description="If True, enables attention sinks.")
   float32_qk_product: bool = Field(False, description="In dot-product attention, cast query-key product to fp32.")
+  query_pre_attn_scalar: float | None = Field(None, description="Optional scalar applied to query before attention.")
   float32_logits: bool = Field(
       False,
       description="In dot-product attention, cast logits to fp32 before softmax.",
