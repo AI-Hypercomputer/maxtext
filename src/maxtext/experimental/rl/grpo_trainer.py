@@ -72,7 +72,7 @@ from maxtext.common.goodput import goodput as _goodput_module
 GoodputRecorder = _goodput_module.GoodputRecorder
 
 import maxtext as mt
-from maxtext.configs import pyconfig
+from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import EPS
 from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.common import checkpointing, profiler
@@ -1277,7 +1277,7 @@ def main(argv: Sequence[str]) -> None:
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
   configs_argv = max_utils.parse_custom_args(argv)
-  config = pyconfig.initialize(configs_argv[0])
+  config = pyconfig.initialize(configs_argv[0], config_class=types.RLTrainerConfig)
   if not config.use_grpo:
     raise ValueError("Please set the value of use_grpo to True")
   if config.inference_rollouts < 1 or config.inference_rollouts > config.steps:
@@ -1294,7 +1294,7 @@ def main(argv: Sequence[str]) -> None:
         f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} "
         f"with {jax.device_count()} devices"
     )
-  config_inference = pyconfig.initialize(configs_argv[1])
+  config_inference = pyconfig.initialize(configs_argv[1], config_class=types.RLTrainerConfig)
 
   if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")

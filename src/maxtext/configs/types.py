@@ -2193,20 +2193,6 @@ class RLDataset(BaseModel):
           "When set, replaces the built-in dataset processor for custom datasets."
       ),
   )
-  reward_functions_path: str = Field(
-      "",
-      description=(
-          "Optional path to a user Python file containing custom reward functions. "
-          "Used with `reward_functions` to fully replace the built-in reward stack."
-      ),
-  )
-  reward_functions: str = Field(
-      "",
-      description=(
-          "Comma-separated names of reward functions to import from `reward_functions_path`. "
-          "Each function signature: (prompts, completions, tmvp_config, **kwargs) -> list[float]."
-      ),
-  )
 
 
 class RLEvaluation(BaseModel):
@@ -2232,7 +2218,7 @@ class RLEvaluation(BaseModel):
   )
 
 
-class Reward(BaseModel):
+class RLReward(BaseModel):
   """Configuration for the reward/penalty model in RL."""
 
   reward_exact_answer: float = Field(5.0, description="Reward for an exact answer match.")
@@ -2252,9 +2238,23 @@ class Reward(BaseModel):
       None,
       description=("Max worker processes for the math_verify pool. None ⇒ " "min(batch_size, cpu_count())."),
   )
+  reward_functions_path: str = Field(
+      "",
+      description=(
+          "Optional path to a user Python file containing custom reward functions. "
+          "Used with `reward_functions` to fully replace the built-in reward stack."
+      ),
+  )
+  reward_functions: str = Field(
+      "",
+      description=(
+          "Comma-separated names of reward functions to import from `reward_functions_path`. "
+          "Each function signature: (prompts, completions, tmvp_config, **kwargs) -> list[float]."
+      ),
+  )
 
 
-class SpecialTokens(BaseModel):
+class RLSpecialTokens(BaseModel):
   """Special tokens used for formatting prompts and responses in RL."""
 
   reasoning_start_token: str = Field("<reasoning>", description="Token to mark the beginning of a reasoning section.")
@@ -2466,14 +2466,6 @@ class MaxTextConfig(
     Muon,
     FineTuning,
     Distillation,
-    # Reinforcement Learning
-    RLHardware,
-    VLLM,
-    RL,
-    RLDataset,
-    RLEvaluation,
-    Reward,
-    SpecialTokens,
     # Positional Embeddings
     PositionalEmbedding,
     Rope,
@@ -2523,10 +2515,6 @@ class MaxTextConfig(
   dpo: DPO = Field(
       default_factory=DPO,
       description="Configuration for DPO and ORPO alignment algorithms.",
-  )
-  rl: RL = Field(
-      default_factory=RL,
-      description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
   )
   lora: LoRA = Field(
       default_factory=LoRA,
@@ -3364,11 +3352,6 @@ class MaxTextConfig(
 
     if self.eval_interval > 0 >= self.eval_steps and self.generate_padding_batch_eval:
       raise ValueError("`eval_steps` must be > 0 when `generate_padding_batch_eval` is True.")
-    if self.rl.loss_algo == "grpo":
-      self.use_grpo = True
-    else:
-      self.use_grpo = False
-
     if self.use_batch_split_schedule:
       if self.quantization and not self.quantization == "fp8_full":
         raise ValueError("Batch split quantization only supports `quantization=fp8_full`")
@@ -3510,3 +3493,105 @@ class MaxTextConfig(
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
     return self
+
+
+class RLTrainerConfig(
+    RunInfo,
+    HardwareAndMesh,
+    DataTypes,
+    ModelArchitecture,
+    RL,
+    RLDataset,
+    RLEvaluation,
+    RLHardware,
+    RLReward,
+    RLSpecialTokens,
+):
+  """
+  Trainer configuration object for Reinforcement Learning in MaxText.
+  """
+
+  rl: RL = Field(
+      default_factory=RL,
+      description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
+  )
+
+  dataset: RLDataset = Field(
+      default_factory=RLDataset,
+      description="Configuration for RL datasets.",
+  )
+
+  evaluation: RLEvaluation = Field(
+      default_factory=RLEvaluation,
+      description="Configuration for RL evaluation.",
+  )
+
+  hardware: RLHardware = Field(
+      default_factory=RLHardware,
+      description="Configuration for RL hardware.",
+  )
+
+  reward: RLReward = Field(
+      default_factory=RLReward,
+      description="Configuration for RL rewards.",
+  )
+
+  # special tokens for RL
+  #special_tokens: RLSpecialTokens = Field(
+  #    default_factory=RLSpecialTokens,
+  #    description="Configuration for RL special tokens.",
+  #)
+
+
+  @model_validator(mode="after")
+  def validate_rl_trainer_keys(self) -> "RLTrainerConfig":
+    print("validate_rl_trainer_keys is called.....")
+    # RL algorithm validations
+    if getattr(self.rl, "num_iterations", 1) < 1:
+      raise ValueError("`rl.num_iterations` must be >= 1.")
+
+    # Slice configuration consistency
+    if not (
+        (self.hardware.num_trainer_slices == -1 and self.hardware.num_samplers_slices == -1)
+        or (self.hardware.num_trainer_slices > 0 and self.hardware.num_samplers_slices > 0)
+    ):
+      raise ValueError("`num_trainer_slices` and `num_samplers_slices` must be both -1 or both positive.")
+
+    # Rollout parallelism positive value checks
+    for name, val in [
+        ("rollout_tensor_parallelism", self.hardware.rollout_tensor_parallelism),
+        ("rollout_data_parallelism", self.hardware.rollout_data_parallelism),
+        ("rollout_expert_parallelism", self.hardware.rollout_expert_parallelism),
+    ]:
+      if val != -1 and val <= 0:
+        raise ValueError(f"`{name}` must be -1 or > 0, got {val}.")
+
+    # Hardware bounds
+    if not 0.0 < self.hardware.trainer_devices_fraction <= 1.0 or not 0.0 < self.hardware.sampler_devices_fraction <= 1.0:
+      raise ValueError("`trainer_devices_fraction` and `sampler_devices_fraction` must be in (0.0, 1.0].")
+
+    return self
+
+
+class RLSamplerConfig(
+    VLLM,
+):
+  """Configuration object for Reinforcement Learning in MaxText."""
+
+  vllm: VLLM = Field(
+      default_factory=VLLM,
+      description="Configuration for rollouts.",
+  )
+
+  @model_validator(mode="after")
+  def validate_rl_sampler_keys(self) -> "RLSamplerConfig":
+    # Hardware & vLLM bounds
+    if not 0.0 < self.vllm.hbm_utilization_vllm <= 1.0:
+      raise ValueError("`hbm_utilization_vllm` must be in (0.0, 1.0].")
+    if self.vllm.kv_cache_buffer <= 0:
+      raise ValueError("`kv_cache_buffer` must be > 0.")
+    if self.vllm.swap_space_vllm_gb < 0:
+      raise ValueError("`swap_space_vllm_gb` must be >= 0.")
+
+    return self
+

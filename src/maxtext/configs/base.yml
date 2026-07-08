@@ -1258,14 +1258,6 @@ use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
 use_jax_splash: false
 
-# vLLM Adapter Configurations
-# Path to the HuggingFace-style config directory for the adapter (e.g. src/maxtext/integration/vllm/maxtext_vllm_adapter)
-vllm_hf_config_path: ""
-# A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
-# This can be used to override specific settings without modifying the original config file.
-vllm_hf_overrides: {}
-# JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
-vllm_additional_config: {}
 # When use_jax_splash=true, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
 

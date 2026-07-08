@@ -22,7 +22,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.configs import pyconfig
+from maxtext.configs import pyconfig, types
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, grpo_loss_fn_nnx
 from maxtext.experimental.rl.grpo_utils import compute_log_probs, compute_log_probs_nnx
@@ -47,6 +47,7 @@ class GRPOTest(unittest.TestCase):
     super().setUp()
     self.cfg = pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo.yml")],
+        config_class=types.RLTrainerConfig,
         run_name="grpo_test",
         model_name="llama3.1-8b",
         enable_checkpointing=True,

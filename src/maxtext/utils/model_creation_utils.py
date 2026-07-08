@@ -36,7 +36,7 @@ from functools import partial
 import os
 import subprocess
 import sys
-from typing import Callable, overload
+from typing import Any, Callable, overload
 from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
@@ -47,7 +47,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
-from maxtext.configs import pyconfig
+from maxtext.configs import pyconfig, types
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.layers import quantizations
 from maxtext.models import models
@@ -650,17 +650,29 @@ def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=
     return model
 
 
-def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None = None, **extra_kwargs):
+def setup_configs_and_devices(
+    argv: list[str] | None = None,
+    kwargs: dict | None = None,
+    config_class: type[Any] = types.RLTrainerConfig,
+    **extra_kwargs,
+):
   """Setup device allocation and configs for training and inference.
   This API is particularly useful for Reinforcement Learning where we might split the available
   devices into separate mesh for trainer and sampler
   """
   if argv is None:
     argv = [""]
+  print("Calling setup_configs_and_devices with argv:", argv)
+  print("Calling setup_configs_and_devices with kwargs:", kwargs)
+  print("Calling setup_configs_and_devices with extra_kwargs:", extra_kwargs)
 
   combined_kwargs = dict(kwargs) if kwargs else {}
   combined_kwargs.update(extra_kwargs)
-  config = pyconfig.initialize_pydantic(argv, **combined_kwargs)
+  print("Combined kwargs for config initialization:", combined_kwargs)
+  config = pyconfig.initialize_pydantic(argv, config_class=config_class, **combined_kwargs)
+  print("Initialized config:", config)
+  print("Check optimizer_memory_host_offload: ", config.optimizer_memory_host_offload)
+  print("Check num_vocab_tiling: ", config.num_vocab_tiling)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running on a single slice")

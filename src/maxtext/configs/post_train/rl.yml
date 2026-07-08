@@ -15,8 +15,6 @@
 # RL Configuration
 # This config consolidates common parameters for RL training across different model sizes
 
-base_config: "../base.yml"
-
 # ====== Hardware =====
 trainer_devices_fraction: 0.5
 sampler_devices_fraction: 0.5
@@ -190,7 +188,6 @@ checkpoint_period: 50
 max_num_checkpoints_to_keep: 10
 
 # ====== Reward ======
-
 reward_exact_answer: 1.0
 reward_white_space_format_match: 1.0
 reward_exact_format_match: 0.1

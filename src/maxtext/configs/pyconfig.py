@@ -238,10 +238,11 @@ def _coerce_to_list(value: Any) -> list[str] | Any:
   return value
 
 
-def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
+def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = types.MaxTextConfig) -> dict[str, Any]:
   """Prepares the raw dictionary for Pydantic model instantiation."""
   pydantic_kwargs = {}
-  valid_fields = types.MaxTextConfig.model_fields.keys()
+  valid_fields = config_class.model_fields.keys()
+  print(f"valid_fields: {valid_fields}")
 
   for key, value in raw_keys.items():
     if key not in valid_fields:
@@ -315,9 +316,7 @@ class HyperParameters:
     final_dict["dtype"] = jnp.dtype(final_dict["dtype"])
     final_dict["grad_dtype"] = jnp.dtype(final_dict["grad_dtype"])
     final_dict["weight_dtype"] = jnp.dtype(final_dict["weight_dtype"])
-    final_dict["mu_dtype"] = (
-        final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
-    )
+    final_dict["mu_dtype"] = final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
 
     final_dict["logical_axis_rules"] = _lists_to_tuples(final_dict["logical_axis_rules"])
     final_dict["data_sharding"] = _lists_to_tuples(final_dict["data_sharding"])
@@ -379,10 +378,10 @@ def _handle_config_exception(e: Exception):
     raise e
 
 
-def initialize(argv: list[str] | None = None, **kwargs) -> HyperParameters:
+def initialize(argv: list[str] | None = None, *, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
   try:
-    pydantic_config = _initialize_pydantic(argv, **kwargs)
+    pydantic_config = _initialize_pydantic(argv, config_class=config_class, **kwargs)
     config = HyperParameters(pydantic_config)
     return config
   except Exception as e:  # pylint: disable=broad-exception-caught
@@ -392,13 +391,13 @@ def initialize(argv: list[str] | None = None, **kwargs) -> HyperParameters:
     raise e
 
 
-def initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfig:
+def initialize_pydantic(argv: list[str] | None = None, *, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> Any:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and overrides.
 
-  Returns the pydantic MaxTextConfig class.
+  Returns the pydantic config class.
   """
   try:
-    return _initialize_pydantic(argv, **kwargs)
+    return _initialize_pydantic(argv, config_class=config_class, **kwargs)
   except Exception as e:  # pylint: disable=broad-exception-caught
     if isinstance(e, (SystemExit, KeyboardInterrupt)):
       raise e
@@ -406,9 +405,9 @@ def initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfi
     raise e
 
 
-def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfig:
+def _initialize_pydantic(argv: list[str] | None = None, *, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> Any:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
-  Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
+  Returns pydantic config class whereas `initialize` returns the og `HyperParameters`
   """
   # 1. Load base and inherited configs from file(s)
   config_path, cli_args = _resolve_or_infer_config(argv, **kwargs)
@@ -531,7 +530,7 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
       except (ValueError, KeyError) as e:
         raise ValueError(f"Couldn't parse value from ENV '{new_proposal}' for key '{k}'") from e
 
-  pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict)
+  pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict, config_class=config_class)
 
   if pydantic_kwargs.get("use_tokamax_splash") and pydantic_kwargs.get("use_jax_splash"):
     raise ValueError("At most one of `use_tokamax_splash` and `use_jax_splash` can be set to True.")
@@ -544,16 +543,14 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
     max_utils.maybe_initialize_jax_distributed_system(pydantic_kwargs)
   if pydantic_kwargs.get("jax_cache_dir"):
     if pydantic_kwargs.get("dump_hlo"):
-      max_logging.warning(
-          "JAX compilation cache is disabled because dump_hlo is True. HLO dumping requires recompilation."
-      )
+      max_logging.warning("JAX compilation cache is disabled because dump_hlo is True. HLO dumping requires recompilation.")
     else:
       from jax.experimental.compilation_cache import compilation_cache  # pylint: disable=import-outside-toplevel
 
       compilation_cache.set_cache_dir(os.path.expanduser(pydantic_kwargs["jax_cache_dir"]))
 
-  pydantic_config = types.MaxTextConfig(**pydantic_kwargs)
-  explicit_keys = set((cli_keys | kwargs_keys | env_keys) & frozenset(types.MaxTextConfig.model_fields.keys()))
+  pydantic_config = config_class(**pydantic_kwargs)
+  explicit_keys = set((cli_keys | kwargs_keys | env_keys) & frozenset(config_class.model_fields.keys()))
   object.__setattr__(pydantic_config, "__pydantic_fields_set__", explicit_keys)
   config = HyperParameters(pydantic_config)
 

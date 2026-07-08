@@ -36,7 +36,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 import jsonlines
 import maxtext as mt
-from maxtext.configs import pyconfig
+from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from flax import nnx
@@ -159,6 +159,7 @@ class GrpoTrainerTest(unittest.TestCase):
             None,
             os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"),
         ],
+        config_class=types.RLTrainerConfig,
         run_name="unit_test_grpo_trainer",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama3.1-tokenizer"),
         enable_checkpointing=False,
@@ -169,6 +170,7 @@ class GrpoTrainerTest(unittest.TestCase):
             None,
             os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"),
         ],
+        config_class=types.RLTrainerConfig,
         run_name="unit_test_grpo_trainer_inference",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama3.1-tokenizer"),
         enable_checkpointing=False,
@@ -307,6 +309,7 @@ class ReshardingTest(unittest.TestCase):
             sys.argv[0],
             os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", config_file),
         ],
+        config_class=types.RLTrainerConfig,
         **init_kwargs,
     )
     return config

@@ -204,6 +204,31 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_rl_config_namespace_separation(self):
+    """Test that RL flags are rejected by MaxTextConfig but accepted by RLTrainerConfig."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "grpo_beta=0.1",
+    ]
+    with self.assertRaises(ValueError):
+      pyconfig.initialize_pydantic(argv)
+
+    rl_config = pyconfig.initialize_pydantic(argv, config_class=types.RLTrainerConfig)
+    self.assertEqual(rl_config.grpo_beta, 0.1)
+
+  def test_rl_trainer_config_loss_algo_derivation(self):
+    """Test that RLTrainerConfig derives use_grpo from loss_algo."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "loss_algo=grpo",
+    ]
+    rl_config = pyconfig.initialize_pydantic(argv, config_class=types.RLTrainerConfig)
+    self.assertTrue(rl_config.use_grpo)
+
 
 if __name__ == "__main__":
   absltest.main()
