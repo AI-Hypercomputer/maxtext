@@ -92,7 +92,6 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
 
     if compress_ratio is None:
       compress_ratio = config.compress_ratios[layer_idx]
-    print(f"DEBUG: DeepSeek4DecoderLayer init: layer_idx={layer_idx}, compress_ratio={compress_ratio}")
 
     self.self_attention = attention_compressed.CompressedAttention(
         config=self.config,
