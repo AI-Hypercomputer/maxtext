@@ -215,7 +215,7 @@ class DecoderLayer(nn.Module):
           logical_axis_names,
       )
 
-    if cfg.record_internal_nn_metrics:
+    if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(

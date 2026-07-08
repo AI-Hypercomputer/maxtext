@@ -33,7 +33,7 @@ from maxtext.common.common_types import AttentionType, DecoderBlockType, Reorder
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
-from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
 from maxtext.utils import accelerator_to_spec_map
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
@@ -315,6 +315,11 @@ class RunInfo(BaseModel):
 class Checkpointing(BaseModel):
   """Core configuration for checkpointing and run restoration."""
 
+  convert_checkpoint_if_possible: bool = Field(
+      False,
+      description="Whether to convert checkpoint on the fly if not provided via\
+        load_parameters_path or base_output_directory",
+  )
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
   hf_lora_adapter_path: PathStr = Field(
@@ -539,7 +544,7 @@ class MTP(BaseModel):
   )
 
 
-class Logits(BaseModel):
+class LogitsAndLoss(BaseModel):
   """Configuration for the final logits computation."""
 
   logits_via_embedding: bool = Field(False, description="If True, tie the embedding and unembedding matrices.")
@@ -554,6 +559,10 @@ class Logits(BaseModel):
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
   )
   z_loss_multiplier: float = Field(0.0, description="The multiplier for the z-loss (e.g., 1e-4). 0.0 to disable.")
+  num_vocab_tiling: int = Field(
+      1,
+      description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
+  )
 
 
 class Attention(BaseModel):
@@ -1272,10 +1281,6 @@ class Tokenizer(BaseModel):
       True,
       description="If False, use chunking for long sequences instead of truncation.",
   )
-  num_vocab_tiling: int = Field(
-      1,
-      description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
-  )
 
 
 class DatasetGeneral(BaseModel):
@@ -1969,10 +1974,6 @@ class Metrics(BaseModel):
   record_internal_nn_metrics: int = Field(0, description="Record internal neural network metrics.")
   prometheus_port: int = Field(0, description="Port for Prometheus metrics server. 0 disables it.")
   enable_checkpoint_cloud_logger: bool = Field(False, description="Enables structured logging for checkpointing.")
-  enable_tunix_perf_metrics: bool = Field(
-      False,
-      description="Whether to enable Tunix-managed metrics measurement. The metrics will be uploaded to tensorboard.",
-  )
   enable_wandb: bool = Field(False, description="Enable Weights & Biases logging.")
   wandb_project_name: str = Field("maxtext", description="Weights & Biases project name.")
   wandb_run_name: str = Field("", description="Weights & Biases run name. If empty, a default name is generated.")
@@ -2159,17 +2160,11 @@ class AudioEncoder(BaseModel):
   max_sample_len_for_audio: int = Field(10000, description="Maximum sample length for audio input.")
 
 
-class Debug(BaseModel):
-  """Configuration for debugging options."""
+class RLCluster(BaseModel):
+  """Cluster configurations specific to RL training."""
 
-  rl: bool = Field(False, description="RL-specific debugging")
-
-
-class RLHardware(BaseModel):
-  """Hardware settings specific to RL training."""
-
-  trainer_devices_fraction: float = Field(0.5, description="Fraction of devices to use for the trainer.")
-  sampler_devices_fraction: float = Field(0.5, description="Fraction of devices to use for the sampler.")
+  trainer_devices_fraction: float = Field(0.5, gt=0.0, le=1.0, description="Fraction of devices to use for the trainer.")
+  sampler_devices_fraction: float = Field(0.5, gt=0.0, le=1.0, description="Fraction of devices to use for the sampler.")
   chips_per_vm: int = Field(4, description="Number of accelerator chips per VM.")
   use_pathways: bool = Field(True, description="Whether to use Pathways for multihost orchestration.")
   num_trainer_slices: int = Field(-1, description="Number of slices for the trainer.")
@@ -2199,9 +2194,9 @@ class RLHardware(BaseModel):
 class VLLM(BaseModel):
   """vLLM-specific configuration for rollouts."""
 
-  kv_cache_buffer: int = Field(256, description="Buffer for KV cache.")
-  hbm_utilization_vllm: float = Field(0.72, description="Target HBM utilization for vLLM.")
-  swap_space_vllm_gb: int = Field(2, description="Swap space in GB for vLLM.")
+  kv_cache_buffer: int = Field(256, gt=0, description="Buffer for KV cache.")
+  hbm_utilization_vllm: float = Field(0.72, gt=0.0, le=1.0, description="Target HBM utilization for vLLM.")
+  swap_space_vllm_gb: int = Field(2, ge=0, description="Swap space in GB for vLLM.")
   enable_dp_attention: bool = Field(False, description="Enable the attn_dp mesh axis in vLLM.")
   enable_expert_parallel: bool = Field(False, description="Enable expert parallelism in vLLM.")
   async_scheduling: bool = Field(False, description="Enable asynchronous scheduling in vLLM.")
@@ -2233,7 +2228,7 @@ class RL(BaseModel):
   """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
   num_generations: int = Field(2, description="Number of responses to generate per prompt (G in GRPO paper).")
-  num_iterations: int = Field(1, description="Number of iterations per batch (μ in GRPO paper).")
+  num_iterations: int = Field(1, ge=1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
   loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
@@ -2273,12 +2268,20 @@ class RL(BaseModel):
 class RLDataset(BaseModel):
   """Dataset settings for RL training."""
 
+  dataset_name: str = Field("openai/gsm8k", description="Name of the training dataset.")
+  eval_dataset_name: str = Field("openai/gsm8k", description="Name of the evaluation dataset.")
+  train_split: str = Field("train", description="Dataset split for training.")
+  eval_split: str = Field("test", description="Dataset split for evaluation.")
+  hf_subset: None | str = Field(None, description="Subset name of the Hugging Face dataset.")
+  hf_train_files: None | str = Field(None, description="Files for the HF training split.")
+  hf_eval_files: None | str = Field(None, description="Files for the HF evaluation split.")
+  data_shuffle_seed: int = Field(42, description="Seed for shuffling the dataset.")
   batch_size: int = Field(1, description="Global batch size for the dataset loader in RL.")
-  num_batches: int = Field(4, description="Number of batches for RL training.")
+  num_batches: int = Field(4, ge=1, description="Number of batches for RL training.")
   num_test_batches: int = Field(5, description="Number of batches for RL evaluation.")
   eval_batch_size: int = Field(-1, description="Batch size for RL evaluation.")
   test_batch_start_index: int = Field(0, description="Start index for the test dataset")
-  train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
+  train_fraction: float = Field(1.0, gt=0.0, le=1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
   rollout_micro_batch_size: int = Field(-1, description="Micro batch size for rollout.")
   dataset_processor_path: str = Field(
@@ -2286,20 +2289,6 @@ class RLDataset(BaseModel):
       description=(
           "Optional path to a user-provided Python file with a `process_data` function. "
           "When set, replaces the built-in dataset processor for custom datasets."
-      ),
-  )
-  reward_functions_path: str = Field(
-      "",
-      description=(
-          "Optional path to a user Python file containing custom reward functions. "
-          "Used with `reward_functions` to fully replace the built-in reward stack."
-      ),
-  )
-  reward_functions: str = Field(
-      "",
-      description=(
-          "Comma-separated names of reward functions to import from `reward_functions_path`. "
-          "Each function signature: (prompts, completions, tmvp_config, **kwargs) -> list[float]."
       ),
   )
 
@@ -2327,7 +2316,7 @@ class RLEvaluation(BaseModel):
   )
 
 
-class Reward(BaseModel):
+class RLReward(BaseModel):
   """Configuration for the reward/penalty model in RL."""
 
   reward_exact_answer: float = Field(5.0, description="Reward for an exact answer match.")
@@ -2347,9 +2336,23 @@ class Reward(BaseModel):
       None,
       description=("Max worker processes for the math_verify pool. None ⇒ " "min(batch_size, cpu_count())."),
   )
+  reward_functions_path: str = Field(
+      "",
+      description=(
+          "Optional path to a user Python file containing custom reward functions. "
+          "Used with `reward_functions` to fully replace the built-in reward stack."
+      ),
+  )
+  reward_functions: str = Field(
+      "",
+      description=(
+          "Comma-separated names of reward functions to import from `reward_functions_path`. "
+          "Each function signature: (prompts, completions, tmvp_config, **kwargs) -> list[float]."
+      ),
+  )
 
 
-class SpecialTokens(BaseModel):
+class RLSpecialTokens(BaseModel):
   """Special tokens used for formatting prompts and responses in RL."""
 
   reasoning_start_token: str = Field("<reasoning>", description="Token to mark the beginning of a reasoning section.")
@@ -2458,11 +2461,6 @@ class DerivedValues(BaseModel):
       None,
       description="The full path to the checkpoint directory, derived from `run_name`.",
   )
-  convert_checkpoint_if_possible: bool = Field(
-      False,
-      description="Whether to convert checkpoint on the fly if not provided via\
-        load_parameters_path or base_output_directory",
-  )
   metrics_dir: None | str = Field(
       None,
       description="The full path to the metrics directory, derived from `run_name`.",
@@ -2531,7 +2529,7 @@ class MaxTextConfig(
     ModelArchitecture,
     Engram,
     MTP,
-    Logits,
+    LogitsAndLoss,
     # Attention Mechanisms
     Attention,
     MlaAttention,
@@ -2561,14 +2559,7 @@ class MaxTextConfig(
     Muon,
     FineTuning,
     Distillation,
-    # Reinforcement Learning
-    RLHardware,
     VLLM,
-    RL,
-    RLDataset,
-    RLEvaluation,
-    Reward,
-    SpecialTokens,
     # Positional Embeddings
     PositionalEmbedding,
     Rope,
@@ -2614,14 +2605,9 @@ class MaxTextConfig(
   Every field is explicitly defined to prevent misconfigurations (`extra='forbid'`).
   """
 
-  debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
   dpo: DPO = Field(
       default_factory=DPO,
       description="Configuration for DPO and ORPO alignment algorithms.",
-  )
-  rl: RL = Field(
-      default_factory=RL,
-      description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
   )
   lora: LoRA = Field(
       default_factory=LoRA,
@@ -3524,11 +3510,6 @@ class MaxTextConfig(
 
     if self.eval_interval > 0 >= self.eval_steps and self.generate_padding_batch_eval:
       raise ValueError("`eval_steps` must be > 0 when `generate_padding_batch_eval` is True.")
-    if self.rl.loss_algo == "grpo":
-      self.use_grpo = True
-    else:
-      self.use_grpo = False
-
     if self.use_batch_split_schedule:
       if self.quantization and not self.quantization == "fp8_full":
         raise ValueError("Batch split quantization only supports `quantization=fp8_full`")
@@ -3689,4 +3670,269 @@ class MaxTextConfig(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
+    return self
+
+
+class RLConfig(
+    LogitsAndLoss,
+    RematAndOffload,
+    Attention,
+    PositionalEmbedding,
+    LayoutAndSharding,
+    InferenceLayout,
+    InferenceGeneral,
+    Decoding,
+    Rope,
+    IciParallelism,
+    DcnParallelism,
+    HardwareAndMesh,
+    ModelArchitecture,
+    MoBa,
+    # Mixture of Experts
+    MoEGeneral,
+    MoEKernels,
+    # General MaxText Configs
+    RunInfo,
+    Checkpointing,
+    OrbaxStorage,
+    DataTypes,
+    Tokenizer,
+    AdamW,
+    Optimizer,
+    Quantization,
+    # Debugging and Profiling
+    DevelopmentAndDebugging,
+    Profiling,
+    # For compatibility with trainer in post_train/rl
+    RL,
+    RLCluster,
+    RLDataset,
+    RLEvaluation,
+    RLReward,
+    RLSpecialTokens,
+    VLLM,
+):
+  """
+  Configuration for Reinforcement Learning in MaxText.
+  """
+
+  num_epoch: int = Field(1, ge=1, description="Number of epochs to train for.")
+  eval_interval: int = Field(
+      -1,
+      description="Run evaluation every N training steps. -1 disables interval-based evaluation.",
+  )
+  enable_dropout: bool = Field(True, description="Enables dropout in the model.")
+  dropout_rate: float = Field(0.0, ge=0.0, le=1.0, description="The dropout rate.")
+  init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
+  log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush to Tensorboard.")
+  hf_access_token: None | str = Field(None, description="Hugging Face API access token.")
+  enable_tunix_perf_metrics: bool = Field(
+      False,
+      description="Whether to enable Tunix-managed metrics measurement. The metrics will be uploaded to tensorboard.",
+  )
+  max_target_length: int = Field(2048, description="Maximum sequence length for the model.")
+  max_prefill_predict_length: int = Field(64, description="Maximum length for the prefill stage in decoding.")
+
+  debug: bool = Field(False, description="Enable debug mode for RL.")
+
+  cluster: RLCluster = Field(
+      default_factory=RLCluster,
+      description="Configuration for RL cluster.",
+  )
+
+  rl: RL = Field(
+      default_factory=RL,
+      description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
+  )
+
+  dataset: RLDataset = Field(
+      default_factory=RLDataset,
+      description="Configuration for RL datasets.",
+  )
+
+  reward: RLReward = Field(
+      default_factory=RLReward,
+      description="Configuration for RL rewards.",
+  )
+
+  special_tokens: RLSpecialTokens = Field(
+      default_factory=RLSpecialTokens,
+      description="Configuration for RL special tokens.",
+  )
+
+  evaluation: RLEvaluation = Field(
+      default_factory=RLEvaluation,
+      description="Configuration for RL evaluation.",
+  )
+
+  vllm: VLLM = Field(
+      default_factory=VLLM,
+      description="Configuration for rollouts.",
+  )
+
+  @model_validator(mode="before")
+  @classmethod
+  def map_flat_fields_to_nested_models(cls, data: Any) -> Any:
+    """Route flat top-level overrides into their matching nested model fields.
+
+    Runs as a pydantic "before" validator so that flat keys in YAML configs or
+    CLI overrides can populate a field of the same name inside a nested model
+    without callers having to nest the override themselves.
+
+    Args:
+      data: The raw input to the model, as passed to pydantic's constructor.
+        Only dicts are processed; anything else is returned unchanged.
+
+    Returns:
+      `data`, mutated in place so nested model dicts are pre-populated with
+      the matching flat overrides. s
+    """
+    if not isinstance(data, dict):
+      return data
+
+    # Loop over every field declared in RLConfig
+    for field_name, field_info in cls.model_fields.items():
+      annotation = getattr(field_info, "annotation", None)
+
+      # If the field is a nested Pydantic model
+      if hasattr(annotation, "model_fields"):
+        nested_dict = data.setdefault(field_name, {})
+        if not isinstance(nested_dict, dict):
+          nested_dict = {}
+          data[field_name] = nested_dict
+
+        # Check if any parameter of the nested model was passed as a flat key in `data`
+        for inner_key in annotation.model_fields.keys():
+          if inner_key in data:
+            nested_dict[inner_key] = data[inner_key]
+
+    return data
+
+  @model_validator(mode="after")
+  def set_derived_values_and_validate(self) -> "RLConfig":
+    """Validate required RL config fields and fill in values derived from them.
+
+    Runs as a post-init model validator: checks constraints and computes fields
+    that depend on other fields so callers don't have to derive them by hand.
+
+    Returns:
+      This RLConfig instance, with derived fields populated in place.
+
+    Raises:
+      ValueError: If a required field is missing or a cross-field constraint
+        is violated.
+    """
+    # Validate that model_name is set.
+    model_name = getattr(self, "model_name", None)
+    if model_name is None:
+      raise ValueError("model_name is not set. Please pass model_name in your command.")
+
+    # Set tokenizer_path based on model_name if not explicitly provided.
+    tokenizer_path = getattr(self, "tokenizer_path", None)
+    if tokenizer_path is None:
+      if model_name in HF_IDS:
+        self.tokenizer_path = HF_IDS[model_name]
+        self.tokenizer_type = TokenizerType.HUGGINGFACE
+      else:
+        raise ValueError(
+            "model_name not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
+          Please pass tokenizer_path in your command."
+        )
+
+    if self.optimizer_memory_host_offload:
+      raise ValueError(
+          "optimizer_memory_host_offload=True is not supported on the post-training "
+          "RL path because the underlying Tunix RLCluster/Trainer does not "
+          "support host offloading of the optimizer state."
+      )
+
+    if self.num_vocab_tiling > 1:
+      raise ValueError(
+          f"Vocab Tiling is not supported with RL. "
+          f"num_vocab_tiling was configured to {self.num_vocab_tiling}, but it must be 1 when running train_rl."
+      )
+
+    # Set checkpoint_dir based on run_name and base_output_directory.
+    if self.run_name and self.base_output_directory:
+      checkpoint_dir = os.path.join(self.base_output_directory, self.run_name, "checkpoints", "")
+    else:
+      checkpoint_dir = os.path.join(os.path.abspath("maxtext_output"), "checkpoints", "")
+    object.__setattr__(self, "checkpoint_dir", checkpoint_dir)
+
+    # Set tensorboard_dir based on run_name and base_output_directory.
+    if self.run_name and self.base_output_directory:
+      tensorboard_dir = os.path.join(self.base_output_directory, self.run_name, "tensorboard", "")
+    else:
+      tensorboard_dir = os.path.join(os.path.abspath("maxtext_output"), "tensorboard", "")
+    object.__setattr__(self, "tensorboard_dir", tensorboard_dir)
+
+    # Slice configuration
+    if not (
+        (self.cluster.num_trainer_slices == -1 and self.cluster.num_samplers_slices == -1)
+        or (self.cluster.num_trainer_slices > 0 and self.cluster.num_samplers_slices > 0)
+    ):
+      raise ValueError("`num_trainer_slices` and `num_samplers_slices` must be both -1 or both positive.")
+    self.num_slices = 1 if self.cluster.num_trainer_slices == -1 else -1
+
+    # Set train_steps based on the number of batches, iterations, train fraction, and epochs.
+    object.__setattr__(
+        self,
+        "train_steps",
+        int(self.dataset.num_batches * self.rl.num_iterations * self.dataset.train_fraction * self.num_epoch),
+    )
+
+    # Set learning_rate_schedule_steps based on train_steps if not explicitly provided.
+    if self.learning_rate_schedule_steps == -1:
+      self.learning_rate_schedule_steps = self.train_steps
+
+    # Rollout parallelism checks
+    for name, val in [
+        ("rollout_tensor_parallelism", self.cluster.rollout_tensor_parallelism),
+        ("rollout_data_parallelism", self.cluster.rollout_data_parallelism),
+        ("rollout_expert_parallelism", self.cluster.rollout_expert_parallelism),
+    ]:
+      if val != -1 and val <= 0:
+        raise ValueError(f"`{name}` must be -1 or > 0, got {val}.")
+
+    # Dynamically inject model dimensions.
+    emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(self.global_parameter_scale)
+    object.__setattr__(self, "emb_dim", int((2**emb_scale) * self.base_emb_dim))
+    object.__setattr__(self, "num_query_heads", int((2**num_head_scale) * self.base_num_query_heads))
+    object.__setattr__(self, "num_kv_heads", int((2**num_head_scale) * self.base_num_kv_heads))
+    object.__setattr__(self, "mlp_dim", int((2**mlp_dim_scale) * self.base_mlp_dim))
+    object.__setattr__(self, "moe_mlp_dim", int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0)))
+    object.__setattr__(self, "num_decoder_layers", int((2**layer_scale) * self.base_num_decoder_layers))
+
+    # Mirror into internal MaxText fields for backward compatibility.
+    train_micro_batch_size = getattr(self.dataset, "train_micro_batch_size", -1)
+    batch_size = getattr(self.dataset, "batch_size", 1)
+    if train_micro_batch_size <= 0:
+      train_micro_batch_size = batch_size
+    object.__setattr__(self, "micro_batch_size_to_train_on", train_micro_batch_size)
+
+    if self.remat_policy == "custom":
+      tensors = [
+          "decoder_layer_input",
+          "context",
+          "mlpwi",
+          "moe_mlpwi_0",
+          "moe_mlpwi_1",
+          "moe_mlpwo",
+          "mlpwi_0",
+          "mlpwi_1",
+          "mlpwo",
+          "query_proj",
+          "key_proj",
+          "value_proj",
+          "query_wa_proj",
+          "kv_wa_proj",
+          "mla_kv",
+          "mla_q",
+          "qkv_proj",
+          "attention_out",
+          "out_proj",
+      ]
+      object.__setattr__(self, "tensors_on_device", [t for t in tensors if getattr(self, t) == "device"])
+      object.__setattr__(self, "tensors_to_offload", [t for t in tensors if getattr(self, t) == "offload"])
+
     return self

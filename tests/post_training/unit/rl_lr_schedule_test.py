@@ -44,7 +44,7 @@ import unittest
 
 import pytest
 
-from maxtext.configs import pyconfig
+from maxtext.configs import pyconfig, types
 from maxtext.trainers.post_train.rl import utils_rl
 from tests.utils.test_helpers import get_test_config_path
 
@@ -56,7 +56,6 @@ pytestmark = [pytest.mark.post_training]
 # model shape is irrelevant here (get_optimizer only reads scalar config
 # fields); these just let initialize_pydantic validate quickly.
 _MODEL_OVERRIDES = {
-    "per_device_batch_size": 1.0,
     "enable_checkpointing": False,
     "base_num_decoder_layers": 1,
     "attention": "dot_product",
@@ -75,27 +74,19 @@ _MODEL_OVERRIDES = {
 
 
 def _make_config(**overrides):
-  """Build a real MaxTextConfig (runs the Pydantic validator) for RL.
+  """Build a real RLConfig (runs the Pydantic validator) for RL.
 
   Using initialize_pydantic (not a SimpleNamespace) is the whole point: it is
   what promotes learning_rate_schedule_steps == -1 to `steps`.
   """
   return pyconfig.initialize_pydantic(
-      [sys.argv[0], get_test_config_path()],
+      [sys.argv[0], get_test_config_path("post_train/rl.yml")],
+      config_class=types.RLConfig,
       run_name="rl_lr_schedule_test",
+      tokenizer_path="meta-llama/Llama-2-7b",
       **_MODEL_OVERRIDES,
       **overrides,
   )
-
-
-def _max_train_steps(config):
-  """Mirror of train_rl.get_max_train_steps.
-
-  Inlined rather than imported because importing train_rl pulls the heavy RL
-  training stack (tunix/vLLM). The formula itself is part of the contract under
-  test, so a drift here is a meaningful signal.
-  """
-  return int(config.num_batches * config.rl.num_iterations * config.train_fraction * config.num_epoch)
 
 
 def _effective_lr_at_step(opt, step):
@@ -134,15 +125,10 @@ class RLLearningRateScheduleTest(unittest.TestCase):
         num_batches=500,
         num_epoch=1,
         train_fraction=1.0,
-        steps=150_001,  # base.yml default (a pretraining-sized number)
         learning_rate_schedule_steps=-1,  # "user did not set it" (base.yml default)
     )
-    max_train_steps = _max_train_steps(config)
-    # Sanity: we are in the regime where the bug shows (run << base `steps`).
-    self.assertLess(max_train_steps, config.steps)
-
-    opt = utils_rl.get_optimizer(config, max_train_steps)
-    warmup_end = int(config.warmup_steps_fraction * max_train_steps)
+    opt = utils_rl.get_optimizer(config)
+    warmup_end = int(config.warmup_steps_fraction * config.train_steps)
     lr = _effective_lr_at_step(opt, warmup_end + 5)
     # Correct: lr ~= peak.  Buggy (#4029): lr ~= peak * warmup_end / 15000,
     # i.e. < 1% of peak.  A 0.5*peak threshold cleanly separates the two.
@@ -152,7 +138,7 @@ class RLLearningRateScheduleTest(unittest.TestCase):
         msg=(
             f"LR reached only {lr:.2e} by step {warmup_end + 5} (peak={peak:.2e}). "
             "Warmup was sized to base.yml `steps`, not max_train_steps "
-            f"(={max_train_steps}). learning_rate_schedule_steps in effect="
+            f"(={config.train_steps}). learning_rate_schedule_steps in effect="
             f"{config.learning_rate_schedule_steps}."
         ),
     )
@@ -176,9 +162,8 @@ class RLLearningRateScheduleTest(unittest.TestCase):
         train_fraction=1.0,
         learning_rate_schedule_steps=schedule_len,  # explicitly set by the user
     )
-    max_train_steps = _max_train_steps(config)
 
-    opt = utils_rl.get_optimizer(config, max_train_steps)
+    opt = utils_rl.get_optimizer(config)
     # The warmup length must follow the explicit schedule (0.1 * 1000 = 100),
     # independent of max_train_steps. Probe at fixed steps so the assertion does
     # not depend on num_iterations: early in a 1000-step warmup the LR is still
@@ -197,9 +182,9 @@ class RLLearningRateScheduleTest(unittest.TestCase):
     fallback is dead code in a real run. (Passes today; documents the seam
     that makes test_default_rl_config_warms_up_within_run fail.)
     """
-    config = _make_config(steps=150_001, learning_rate_schedule_steps=-1)
+    config = _make_config(learning_rate_schedule_steps=-1)
     self.assertNotEqual(config.learning_rate_schedule_steps, -1)
-    self.assertEqual(config.learning_rate_schedule_steps, config.steps)
+    self.assertEqual(config.learning_rate_schedule_steps, config.train_steps)
 
 
 if __name__ == "__main__":

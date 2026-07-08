@@ -499,7 +499,7 @@ class Llama4DecoderLayer(nnx.Module):
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
 
-    if cfg.record_internal_nn_metrics:
+    if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
       self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(

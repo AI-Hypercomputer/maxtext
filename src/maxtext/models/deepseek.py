@@ -250,7 +250,7 @@ class DeepSeekGenericLayer(nnx.Module):
     if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
       self.sow(nnx.Intermediate, "moe_bias_updates", moe_bias_updates)
 
-    if self.config.record_internal_nn_metrics:
+    if getattr(self.config, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
       self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(

@@ -212,7 +212,7 @@ class NNXDecoderLayer(nnx.Module):
     layer_output = next_layer_addition_dropped_out + inputs
     layer_output = _maybe_shard_with_logical(layer_output, logical_axis_names)
 
-    if cfg.record_internal_nn_metrics:
+    if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
       self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(
@@ -441,12 +441,12 @@ class NNXDecoder(nnx.Module):
     if self.is_gemma4_small:
       # Gemma4 E2B/E4B: per-layer-index KV-share donor threading and a distinct attention_type
       # per layer are not expressible inside nn.scan; pipeline parallelism is also unsupported.
-      if config.using_pipeline_parallelism or config.scan_layers:
+      if getattr(config, "using_pipeline_parallelism", False) or getattr(config, "scan_layers", False):
         raise ValueError("gemma4_small (Gemma4 E2B/E4B) does not support pipeline parallelism or scan_layers.")
       self._init_gemma4_small_layers(rngs)
-    elif config.using_pipeline_parallelism:
+    elif getattr(config, "using_pipeline_parallelism", False):
       self._init_pipeline_layers(decoder_block_classes, rngs, mesh)
-    elif config.scan_layers:
+    elif getattr(config, "scan_layers", False):
       self._init_scanned_layers(decoder_block_classes, rngs, mesh)
     else:
       self._init_sequential_layers(decoder_block_classes, rngs)
@@ -1510,10 +1510,12 @@ class NNXDecoder(nnx.Module):
         multimodal_input=multimodal_input,
     )
 
-    mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
-    if cfg.mhc_expansion_rate > 1:
-      # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
-      y = mhc_expand(y)
+    mhc_reduce = None
+    if hasattr(cfg, "mhc_expansion_rate"):
+      mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
+      if cfg.mhc_expansion_rate > 1:
+        # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
+        y = mhc_expand(y)
 
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
 
@@ -1536,7 +1538,7 @@ class NNXDecoder(nnx.Module):
     if attention_metadata is not None:
       layer_kwargs["attention_metadata"] = attention_metadata
 
-    if cfg.using_pipeline_parallelism:
+    if getattr(cfg, "using_pipeline_parallelism", False):
       logical_partition_spec = (
           self.pipeline_module.get_weight_sharding()
           if (cfg.pipeline_fsdp_ag_once or cfg.pipeline_fsdp_ag_per_repeat)
@@ -1826,7 +1828,7 @@ class NNXDecoder(nnx.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    if cfg.mhc_expansion_rate > 1:
+    if getattr(cfg, "mhc_expansion_rate", 1) > 1:
       # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
       hidden_state = mhc_reduce(y)
     else:
@@ -1839,7 +1841,9 @@ class NNXDecoder(nnx.Module):
     # When in the Indexer Dense Warm-up stage, skip the expensive output head projection
     # for efficiency, as the main model is frozen and the LM loss is not needed.
     elif (
-        cfg.use_indexer and cfg.indexer_loss_scaling_factor > 0.0 and not cfg.indexer_sparse_training
+        getattr(cfg, "use_indexer", False)
+        and getattr(cfg, "indexer_loss_scaling_factor", 0.0) > 0.0
+        and not getattr(cfg, "indexer_sparse_training", False)
     ) and model_mode == MODEL_MODE_TRAIN:
       logits = None
 
