@@ -331,11 +331,11 @@ def setup_train_loop(config, recorder, devices=None):
             inner_state_shardings,
             # Match the outer params' pure-dict structure (build_diloco_state stores
             # outer_params via to_pure_dict), so the sharding tree matches the state tree.
-            state_mesh_shardings_params.to_pure_dict()
+            state_mesh_shardings_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
             if config.pure_nnx
             else state_mesh_shardings_params,
             outer_opt_state_sharding,
-            jax.sharding.NamedSharding(
+            jax.sharding.NamedSharding(  # pyrefly: ignore[bad-argument-type]
                 mesh=step_mesh, spec=jax.sharding.PartitionSpec()
             ),
         )
@@ -355,7 +355,7 @@ def setup_train_loop(config, recorder, devices=None):
         logical_annotations = maxtext_utils.get_logical_annotations(config, mesh, init_state_fn)
         logical_annotations_params = logical_annotations.params
 
-      max_utils.print_non_trivial_mesh_axis(model.mesh)
+      max_utils.print_non_trivial_mesh_axis(model.mesh)  # pyrefly: ignore[missing-attribute]
       maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
   if config.pure_nnx:
@@ -363,9 +363,9 @@ def setup_train_loop(config, recorder, devices=None):
       # Don't merge the DiLoCoTrainState into the plain-model graphdef. The inner
       # train step needs that graphdef as jit_model; the wrapper passes through as state.
       train_state = state
-      model = state_graphdef
+      model = state_graphdef  # pyrefly: ignore[unbound-name]
     else:
-      train_state = nnx.merge(state_graphdef, state)
+      train_state = nnx.merge(state_graphdef, state)  # pyrefly: ignore[unbound-name]
       model = train_state.model
   else:
     train_state = state
