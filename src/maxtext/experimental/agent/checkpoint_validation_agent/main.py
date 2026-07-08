@@ -18,11 +18,11 @@ def sanitize_gcs_path(path):
   ]
   for prefix in prefixes_to_replace:
     if path.startswith(prefix):
-      path = "gs://" + path[len(prefix):]
+      path = "gs://" + path[len(prefix) :]
       break
 
-
   return path
+
 
 def validate_checkpoint(json_config_path):
   """Validate MaxText checkpoint using JSON configuration file."""
