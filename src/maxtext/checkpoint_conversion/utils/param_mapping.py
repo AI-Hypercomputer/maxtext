@@ -3866,7 +3866,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
   mapping = {
       "params-token_embedder-embedding": "model.embed_tokens.weight",
       "params-decoder-decoder_norm-scale": "model.norm.weight",
-      "params-decoder-logits_dense-kernel": "head.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
       "params-decoder-hc_head-hc_fn": "model.hc_head.hc_fn",
       "params-decoder-hc_head-hc_base": "model.hc_head.hc_base",
       "params-decoder-hc_head-hc_scale": "model.hc_head.hc_scale",
