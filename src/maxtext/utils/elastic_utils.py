@@ -16,6 +16,7 @@
 
 import functools
 from collections import Counter
+from types import SimpleNamespace
 
 import jax
 from maxtext.utils import gcs_utils
@@ -226,3 +227,34 @@ def maybe_elastic_scale_up(config, checkpoint_manager):
       checkpoint_manager.wait_until_finished()
     max_logging.log("Checkpoint save completed. Interrupting")
     raise manager.ScaleUpSignalError()
+
+
+def single_controller_mtc_init_kwargs(raw_keys):
+  """Returns topology kwargs for single-controller MTC initialization."""
+  kwargs = {
+      "data_parallelism": raw_keys["mtc_data_parallelism"],
+      "num_slices": raw_keys["num_slices"],
+  }
+  if not raw_keys.get("elastic_enabled", False):
+    return kwargs
+
+  config = SimpleNamespace(**raw_keys)
+  if not should_use_elastic(config):
+    return kwargs
+
+  active_devices = tuple(live_devices(config))
+  active_slice_indices = {getattr(device, "slice_index", 0) for device in active_devices if device is not None}
+  if not active_devices or not active_slice_indices:
+    raise ValueError("Elastic single-controller MTC initialization found no active devices.")
+
+  kwargs["devices"] = active_devices
+  kwargs["num_slices"] = len(active_slice_indices)
+  if not kwargs["data_parallelism"]:
+    kwargs["data_parallelism"] = kwargs["num_slices"]
+  max_logging.log(
+      "Using active elastic devices for single-controller MTC initialization: "
+      f"active_num_slices={kwargs['num_slices']}, "
+      f"active_device_count={len(active_devices)}, "
+      f"configured_num_slices={raw_keys['num_slices']}."
+  )
+  return kwargs
