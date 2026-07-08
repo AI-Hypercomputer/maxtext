@@ -251,7 +251,7 @@ def setup_train_loop(config, recorder, devices=None):
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
     if checkpoint_manager is not None:
-      checkpoint_step = checkpoint_manager.latest_step()
+      checkpoint_step = checkpointing.latest_step(checkpoint_manager)
       if checkpoint_step is not None:
         validate_completed_steps(checkpoint_step + 1, config.steps)
 
