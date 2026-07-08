@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This script launches a Reinforcement Learning (RL) training workload for the
-# Qwen3-30B-A3B model on a GKE cluster using XPK.
+# gemma4-e2b model on a GKE cluster using XPK.
 
 set -e
 
@@ -92,8 +92,8 @@ JAX_PLATFORMS=proxy,cpu \
 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
 ENABLE_PATHWAYS_PERSISTENCE=1 \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
-model_name=qwen3-30b-a3b-base \
-tokenizer_path=Qwen/Qwen3-30B-A3B-Base \
+model_name=gemma4-e2b \
+tokenizer_path=google/gemma-4-E2B \
 run_name=$WORKLOAD_NAME \
 async_scheduling=True \
 base_output_directory=$BASE_OUTPUT_DIRECTORY \
@@ -125,7 +125,7 @@ enable_dp_attention=True \
 hbm_utilization_vllm=0.75 \
 max_num_seqs=256 \
 max_num_batched_tokens=8192 \
-scan_layers=True \
+scan_layers=False \
 allow_split_physical_axes=True \
 enable_tunix_perf_metrics=True \
 checkpoint_period=2 \
@@ -136,7 +136,7 @@ profiler=xplane \
 skip_first_n_steps_for_profiler=5 \
 profiler_steps=2 \
 vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
-vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-30b-a3b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
+vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"gemma4-e2b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\"}}'"
 
 # Workload Creation
 xpk workload create-pathways \

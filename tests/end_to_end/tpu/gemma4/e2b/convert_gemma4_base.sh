@@ -19,7 +19,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # After downloading checkpoints, copy them to GCS bucket at $MODEL_BUCKET
 export MODEL_BUCKET='gs://maxtext-gemma/gemma4'
-export HF_MODEL='path/to/your/hf/gemma-4-E2B'
+export HF_MODEL='google/gemma-4-E2B'
 
 # HF -> MaxText conversion:
 python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
@@ -28,7 +28,9 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MA
     --hf_model_path=${HF_MODEL} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/converted/${idx} \
     use_multimodal=false \
-    scan_layers=${USE_SCAN_LAYERS}
+    scan_layers=${USE_SCAN_LAYERS} \
+    checkpoint_storage_use_ocdbt=false \
+    checkpoint_storage_use_zarr3=false
 
 export MAXTEXT_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/converted/${idx}/0/items
 
