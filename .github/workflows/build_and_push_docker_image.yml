@@ -42,6 +42,10 @@ on:
         required: false
         type: boolean
         default: false
+      run_tests:
+        required: false
+        type: boolean
+        default: true
     outputs:
       build_result:
         description: 'The result of build_and_push job.'
@@ -184,7 +188,7 @@ jobs:
   run_ci_tests:
     name: Run Unit and Integration Tests
     needs: [pre_build_check, build_and_push]
-    if: needs.pre_build_check.outputs.should_run == 'true' && inputs.include_test_assets == true
+    if: needs.pre_build_check.outputs.should_run == 'true' && inputs.include_test_assets == true && inputs.run_tests == true
     uses: ./.github/workflows/run_ci_tests.yml
     with:
       image_name: ${{ inputs.image_name }}
