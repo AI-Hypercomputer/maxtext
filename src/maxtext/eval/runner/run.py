@@ -16,11 +16,12 @@
 
 Dispatches to the appropriate runner based on --runner:
 
-  eval       Custom dataset runner. Requires --config.
-  lm_eval    lm-evaluation-harness runner.
-  evalchemy  evalchemy runner.
+  eval          Custom dataset runner. Requires --config.
+  lm_eval       lm-evaluation-harness runner.
+  evalchemy     evalchemy runner.
+  simple_evals  OpenAI simple-evals runner (grader-free evals).
 
-Both lm_eval and evalchemy dispatch to harness_runner.py.
+lm_eval and evalchemy dispatch to harness_runner.py; simple_evals uses simple_evals_runner.py.
 
 Usage::
 
@@ -77,7 +78,7 @@ def main() -> None:
   pre_parser.add_argument(
       "--runner",
       required=True,
-      choices=["eval", "lm_eval", "evalchemy"],
+      choices=["eval", "lm_eval", "evalchemy", "simple_evals"],
       help="Which evaluation runner to use.",
   )
   pre_args, remaining = pre_parser.parse_known_args()
@@ -90,6 +91,10 @@ def main() -> None:
     _main()
   elif pre_args.runner == "lm_eval":
     from maxtext.eval.runner.harness_runner import main as _main  # pylint: disable=import-outside-toplevel
+
+    _main()
+  elif pre_args.runner == "simple_evals":
+    from maxtext.eval.runner.simple_evals_runner import main as _main  # pylint: disable=import-outside-toplevel
 
     _main()
   else:  # evalchemy

@@ -32,6 +32,8 @@ _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.0
 _COMPLETIONS_PATH = "/v1/completions"
 _REQUEST_TIMEOUT_S = 600
+_DEFAULT_MAX_RETRIES = 3
+_RETRY_BACKOFF_S = 5.0
 
 
 @dataclass
@@ -61,6 +63,7 @@ async def generate_batch_async(
     temperature: float = _DEFAULT_TEMPERATURE,
     concurrency: int = _DEFAULT_CONCURRENCY,
     request_timeout: int = _REQUEST_TIMEOUT_S,
+    max_retries: int = _DEFAULT_MAX_RETRIES,
 ) -> list[GenerationResult]:
   """Send all prompts concurrently and return results in prompt order.
 
@@ -72,6 +75,8 @@ async def generate_batch_async(
     temperature: Sampling temperature.
     concurrency: Maximum number of in-flight requests at once.
     request_timeout: Per-request wall-clock timeout in seconds.
+    max_retries: Retries on timeout/connection error before giving up
+      (0 = single attempt, no retry).
 
   Returns:
     List of GenerationResult in the same order as prompts.
@@ -91,24 +96,35 @@ async def generate_batch_async(
     }
     async with semaphore:
       t0 = time.monotonic()
-      try:
-        async with session.post(api_url, json=payload) as resp:
-          if resp.status != 200:
-            body = await resp.text()
-            return GenerationResult(error=f"HTTP {resp.status}: {body[:200]}")
-          data = await resp.json()
-      except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-        return GenerationResult(error=str(exc))
-      latency = time.monotonic() - t0
+      last_error = ""
+      for attempt in range(max_retries + 1):
+        try:
+          async with session.post(api_url, json=payload) as resp:
+            if resp.status != 200:
+              body = await resp.text()
+              last_error = f"HTTP {resp.status}: {body[:200]}"
+            else:
+              data = await resp.json()
+              latency = time.monotonic() - t0
+              choice = data["choices"][0]
+              usage = data.get("usage", {})
+              return GenerationResult(
+                  text=choice.get("text", ""),
+                  prompt_tokens=usage.get("prompt_tokens", 0),
+                  completion_tokens=usage.get("completion_tokens", 0),
+                  latency_s=latency,
+              )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+          last_error = str(exc)
 
-    choice = data["choices"][0]
-    usage = data.get("usage", {})
-    return GenerationResult(
-        text=choice.get("text", ""),
-        prompt_tokens=usage.get("prompt_tokens", 0),
-        completion_tokens=usage.get("completion_tokens", 0),
-        latency_s=latency,
-    )
+        if attempt < max_retries:
+          logger.warning(
+              "Request failed (attempt %d/%d): %s. Retrying.", attempt + 1, max_retries + 1, last_error
+          )
+          await asyncio.sleep(_RETRY_BACKOFF_S * (attempt + 1))
+
+      latency = time.monotonic() - t0
+      return GenerationResult(error=last_error, latency_s=latency)
 
   async with aiohttp.ClientSession(timeout=timeout) as session:
     return list(await asyncio.gather(*[_generate_one(session, p) for p in prompts]))
@@ -122,6 +138,7 @@ def generate_batch(
     temperature: float = _DEFAULT_TEMPERATURE,
     concurrency: int = _DEFAULT_CONCURRENCY,
     request_timeout: int = _REQUEST_TIMEOUT_S,
+    max_retries: int = _DEFAULT_MAX_RETRIES,
 ) -> list[GenerationResult]:
   """Synchronous wrapper around generate_batch_async."""
   return asyncio.run(
@@ -133,5 +150,6 @@ def generate_batch(
           temperature=temperature,
           concurrency=concurrency,
           request_timeout=request_timeout,
+          max_retries=max_retries,
       )
   )

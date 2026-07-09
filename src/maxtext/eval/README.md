@@ -7,7 +7,7 @@ A vLLM-native evaluation framework for MaxText models supporting harness-based e
 All runners share a single entry point:
 
 ```bash
-python -m maxtext.eval.runner.run --runner <eval|lm_eval|evalchemy> [flags]
+python -m maxtext.eval.runner.run --runner <eval|lm_eval|evalchemy|simple_evals> [flags]
 ```
 
 ### Custom dataset (MLPerf OpenOrca, ROUGE scoring, Other)
@@ -77,6 +77,49 @@ python -m maxtext.eval.runner.run \
   --tensor_parallel_size 4 \
   --hf_token $HF_TOKEN
 ```
+
+### Simple Evals (OpenAI simple-evals)
+
+Runs OpenAI's [simple-evals](https://github.com/openai/simple-evals) benchmarks
+against the vLLM server's OpenAI-compatible `/v1/chat/completions` endpoint.
+
+Requires: `pip install openai jinja2 numpy pandas scipy requests tqdm`
+
+Phase 1 supports grader-free evals only: `mmlu`, `gpqa`, `gsm8k`, `drop`, `mgsm`,
+`aime2024`, `aime2025`. Grader-dependent evals (math, simpleqa, browsecomp,
+healthbench) need an LLM grader endpoint and are not yet supported.
+
+`mmlu`, `gpqa`, `drop`, `mgsm` are vendored verbatim from
+[openai/simple-evals](https://github.com/openai/simple-evals); `gsm8k` and
+`aime2024`/`aime2025` are not part of upstream simple-evals and are
+MaxText-authored (`maxtext.eval.native_evals`) following the same
+grader-free Eval conventions. `mgsm` runs English-only here (`--tasks mgsm`
+evaluates MGSM-en, not the full 11-language suite).
+
+```bash
+python -m maxtext.eval.runner.run \
+  --runner simple_evals \
+  --checkpoint_path gs://<bucket>/checkpoints/0/items \
+  --model_name llama3.1-8b \
+  --hf_path meta-llama/Llama-3.1-8B-Instruct \
+  --tasks mmlu gpqa gsm8k drop mgsm aime2024 aime2025 \
+  --base_output_directory gs://<bucket>/ \
+  --run_name simple_evals_run \
+  --max_model_len 8192 \
+  --tensor_parallel_size 4 \
+  --num_samples 50 \
+  --hf_token $HF_TOKEN
+```
+
+Simple-evals specific flags:
+
+| Flag | Description |
+|---|---|
+| `--tasks` | Space-separated task names (`mmlu`, `gpqa`, `gsm8k`, `drop`, `mgsm`, `aime2024`, `aime2025`). |
+| `--num_samples` | Limit examples per task (None = full dataset). |
+| `--n_repeats` | Repeats per example (gpqa and aime2024/aime2025 only; forced to 1 when `--num_samples` is set). |
+| `--max_tokens` | Max tokens per generation (default: 2048). |
+| `--temperature` | Sampling temperature (default: 0.0). |
 
 ## Common Flags
 

@@ -159,17 +159,20 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
           lm_model_type,
           server.base_url,
       )
-      simple_eval_kwargs: dict = {
-          "model": lm_model_type,
-          "model_args": model_args,
-          "tasks": tasks,
-          "num_fewshot": num_fewshot,
-          "limit": num_samples,
-          "log_samples": False,
-      }
+      simple_eval_kwargs: dict = dict(
+          model=lm_model_type,
+          model_args=model_args,
+          tasks=tasks,
+          num_fewshot=num_fewshot,
+          limit=num_samples,
+          log_samples=False,
+      )
       if apply_chat_template:
         simple_eval_kwargs["apply_chat_template"] = True
       if fewshot_as_multiturn:
+        # Format few-shot examples as separate chat turns rather than
+        # concatenating them as one long context. Required when apply_chat_template
+        # is True and num_fewshot > 0 to avoid a malformed single-turn prompt.
         simple_eval_kwargs["fewshot_as_multiturn"] = True
       if gen_kwargs:
         simple_eval_kwargs["gen_kwargs"] = gen_kwargs
