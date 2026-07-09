@@ -3412,6 +3412,9 @@ class MaxTextConfig(
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
 
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.mtp_num_layers > 0:
+      raise ValueError("DeepSeek4 decoder block currently does not support MTP layers.")
+
     if self.num_kv_shared_layers > 0:
       if self.fused_qkv:
         raise ValueError("`num_kv_shared_layers > 0` is not compatible with `fused_qkv`.")
