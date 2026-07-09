@@ -35,6 +35,14 @@ class Cast(Operation):
     def __init__(self, dtype): self.dtype = dtype
     def __call__(self, tensors): return tensors[0].astype(self.dtype)
 
+class FlattenSpatial(Operation):
+    # Flattens the last two dimensions (num_heads, head_dim) into a single dimension per tensor
+    def __call__(self, tensors):
+        out = []
+        for t in tensors:
+            out.append(t.reshape(*t.shape[:-2], -1))
+        return out
+
 class PadAxes(Operation):
     def __init__(self, pad_specs): self.pad_specs = pad_specs
     def __call__(self, tensors): return jnp.pad(tensors[0], self.pad_specs)
@@ -175,7 +183,28 @@ class WeightConverter(abc.ABC):
                         target_key = rule.target_pattern.format(*digits)
                         dst_dict[target_key] = result
 
-        dst_pytree = traverse_util.unflatten_dict(dst_dict, sep='.')
+        target_tuple_map = {}
+        if target_state is not None:
+            def to_pure_node(node):
+                if hasattr(node, 'to_pure_dict'): node = node.to_pure_dict()
+                if isinstance(node, dict): return {k: to_pure_node(v) for k, v in node.items()}
+                if hasattr(node, 'value'): return node.value
+                return node
+            
+            tgt_flat = traverse_util.flatten_dict(to_pure_node(target_state))
+            for true_tuple in tgt_flat.keys():
+                key_str = '.'.join(str(k) for k in true_tuple)
+                target_tuple_map[key_str] = true_tuple
+
+        dst_dict_tuples = {}
+        for k_str, val in dst_dict.items():
+            if k_str in target_tuple_map:
+                dst_dict_tuples[target_tuple_map[k_str]] = val
+            else:
+                # If not mapped by target state, just split the string stringly
+                dst_dict_tuples[tuple(k_str.split('.'))] = val
+                
+        dst_pytree = traverse_util.unflatten_dict(dst_dict_tuples)
         return dst_pytree
 
 # ==========================================
@@ -188,22 +217,22 @@ _MODEL_TO_CONVERSION_RULES = {
         WeightRenaming(r"logits_dense\.kernel", "lm_head.weight"),
         WeightRenaming(r"decoder\.layers_(\d+)\.pre_self_attention_layer_norm\.scale", r"model.layers.\1.input_layernorm.weight"),
         WeightRenaming(r"decoder\.layers_(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
-        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.query_proj\.kernel", r"model.layers.\1.self_attn.q_proj.weight"),
-        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.key_proj\.kernel", r"model.layers.\1.self_attn.k_proj.weight"),
-        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.value_proj\.kernel", r"model.layers.\1.self_attn.v_proj.weight"),
-        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.out_proj\.kernel", r"model.layers.\1.self_attn.o_proj.weight"),
-        WeightRenaming(r"decoder\.layers_(\d+)\.mlp\.wi_0\.kernel", r"model.layers.\1.mlp.gate_proj.weight"),
-        WeightRenaming(r"decoder\.layers_(\d+)\.mlp\.wi_1\.kernel", r"model.layers.\1.mlp.up_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.out\.kernel", r"model.layers.\1.self_attn.o_proj.weight"),
         WeightRenaming(r"decoder\.layers_(\d+)\.mlp\.wo\.kernel", r"model.layers.\1.mlp.down_proj.weight"),
         WeightRenaming(r"decoder\.layers\.(\d+)\.pre_self_attention_layer_norm\.scale", r"model.layers.\1.input_layernorm.weight"),
         WeightRenaming(r"decoder\.layers\.(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
-        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.query_proj\.kernel", r"model.layers.\1.self_attn.q_proj.weight"),
-        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.key_proj\.kernel", r"model.layers.\1.self_attn.k_proj.weight"),
-        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.value_proj\.kernel", r"model.layers.\1.self_attn.v_proj.weight"),
-        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.out_proj\.kernel", r"model.layers.\1.self_attn.o_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.out\.kernel", r"model.layers.\1.self_attn.o_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.mlp\.wo\.kernel", r"model.layers.\1.mlp.down_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"model.layers.\1.self_attn.q_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"model.layers.\1.self_attn.k_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.value\.kernel", r"model.layers.\1.self_attn.v_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.query\.kernel", r"model.layers.\1.self_attn.q_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.key\.kernel", r"model.layers.\1.self_attn.k_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.value\.kernel", r"model.layers.\1.self_attn.v_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.mlp\.wi_0\.kernel", r"model.layers.\1.mlp.gate_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.mlp\.wi_1\.kernel", r"model.layers.\1.mlp.up_proj.weight"),
         WeightRenaming(r"decoder\.layers\.(\d+)\.mlp\.wi_0\.kernel", r"model.layers.\1.mlp.gate_proj.weight"),
         WeightRenaming(r"decoder\.layers\.(\d+)\.mlp\.wi_1\.kernel", r"model.layers.\1.mlp.up_proj.weight"),
-        WeightRenaming(r"decoder\.layers\.(\d+)\.mlp\.wo\.kernel", r"model.layers.\1.mlp.down_proj.weight"),
     ],
 }
 
