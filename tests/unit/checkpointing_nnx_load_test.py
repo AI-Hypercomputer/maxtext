@@ -91,6 +91,7 @@ class TestLoadStateIfPossibleNNX(unittest.TestCase):
         _abstract_dropout_state(),
         lambda leaf: ocp.type_handlers.ArrayRestoreArgs(global_shape=leaf.shape, dtype=leaf.dtype),
     )
+    restored = restored.to_pure_dict()
 
     # The restore target the manager was handed carries nnx_aux, so emergency checkpoints persist it.
     restore_target = checkpoint_manager.restore.call_args.kwargs["args"].state.item
@@ -269,33 +270,13 @@ class TestToCheckpointDict(unittest.TestCase):
     self.assertNotIn("nnx_aux", train_state_nnx.to_checkpoint_dict(state))
 
 
-class TestDeepMerge(unittest.TestCase):
-  """checkpointing._deep_merge overlays leaves onto a base dict."""
-
-  def test_overlay_wins_and_bases_survive(self):
-    base = {"model": {"linear": {"kernel": 1}, "rngs": {"count": 0}}}
-    overlay = {"model": {"rngs": {"count": 99}}}
-    merged = checkpointing._deep_merge(base, overlay)  # pylint: disable=protected-access
-    self.assertEqual(merged["model"]["linear"]["kernel"], 1)  # untouched
-    self.assertEqual(merged["model"]["rngs"]["count"], 99)  # overlaid
-
-  def test_does_not_mutate_inputs(self):
-    base = {"a": {"b": 1}}
-    checkpointing._deep_merge(base, {"a": {"c": 2}})  # pylint: disable=protected-access
-    self.assertEqual(base, {"a": {"b": 1}})
-
-  def test_non_dict_leaves_prefer_overlay(self):
-    """Leaf vs leaf: overlay wins, but a None overlay keeps the base."""
-    self.assertEqual(checkpointing._deep_merge(1, 2), 2)  # pylint: disable=protected-access
-    self.assertEqual(checkpointing._deep_merge(1, None), 1)  # pylint: disable=protected-access
-
-  def test_adds_keys_absent_from_base(self):
-    merged = checkpointing._deep_merge({"a": 1}, {"b": 2})  # pylint: disable=protected-access
-    self.assertEqual(merged, {"a": 1, "b": 2})
-
-
 class TestLinenItemsToNnx(unittest.TestCase):
   """checkpointing._linen_items_to_nnx reshapes restored items into the NNX-layout overlay."""
+
+  def _to_nnx(self, restored):
+    """Reshape `restored` against the `_ModelDropout` abstract, as the restore paths do."""
+    state = checkpointing._linen_items_to_nnx(restored, _abstract_dropout_state())  # pylint: disable=protected-access
+    return state.to_pure_dict()
 
   def test_materialized_aux_is_kept(self):
     restored = {
@@ -303,9 +284,22 @@ class TestLinenItemsToNnx(unittest.TestCase):
         "step": jnp.asarray(3, jnp.int32),
         "nnx_aux": {"model": {"dropout": {"rngs": {"count": jnp.asarray(42, jnp.uint32)}}}},
     }
-    out = checkpointing._linen_items_to_nnx(restored)  # pylint: disable=protected-access
+    out = self._to_nnx(restored)
     self.assertEqual(int(out["model"]["dropout"]["rngs"]["count"]), 42)  # from the checkpoint
     self.assertTrue(jnp.array_equal(out["model"]["linear"]["kernel"], jnp.ones((2, 1))))
+
+  def test_weights_and_aux_are_unioned_not_clobbered(self):
+    """Weights and nnx_aux both nest under `model/` -- merging must keep both, at the leaf level."""
+    restored = {
+        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
+        "step": jnp.asarray(3, jnp.int32),
+        "nnx_aux": {"model": {"dropout": {"rngs": {"count": jnp.asarray(7, jnp.uint32)}}}},
+    }
+    out = self._to_nnx(restored)
+    self.assertIn("linear", out["model"])  # weights survived the aux merge
+    self.assertIn("dropout", out["model"])  # aux survived the weights merge
+    self.assertTrue(jnp.array_equal(out["model"]["linear"]["kernel"], jnp.ones((2, 1))))
+    self.assertEqual(int(out["model"]["dropout"]["rngs"]["count"]), 7)
 
   def test_unmaterialized_leaf_kept_as_placeholder(self):
     """A leaf the checkpoint didn't carry stays a ShapeDtypeStruct; the caller fills it from init."""
@@ -314,18 +308,19 @@ class TestLinenItemsToNnx(unittest.TestCase):
         "step": jnp.asarray(3, jnp.int32),
         "nnx_aux": {"model": {"dropout": {"rngs": {"count": jax.ShapeDtypeStruct((), jnp.uint32)}}}},
     }
-    out = checkpointing._linen_items_to_nnx(restored)  # pylint: disable=protected-access
+    out = self._to_nnx(restored)
     self.assertIsInstance(out["model"]["dropout"]["rngs"]["count"], jax.ShapeDtypeStruct)  # placeholder, not defaulted
+    self.assertIsInstance(out["model"]["linear"]["bias"], jax.ShapeDtypeStruct)  # absent weight -> placeholder
     self.assertTrue(jnp.array_equal(out["model"]["linear"]["kernel"], jnp.ones((2, 1))))
 
-  def test_no_aux_key_omits_rng(self):
-    """No nnx_aux on disk -> the overlay simply has no rng subtree (init supplies it later)."""
+  def test_no_aux_key_leaves_rng_as_placeholder(self):
+    """No nnx_aux on disk -> the rng leaves stay placeholders (init supplies them later)."""
     restored = {
         "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
         "step": jnp.asarray(3, jnp.int32),
     }
-    out = checkpointing._linen_items_to_nnx(restored)  # pylint: disable=protected-access
-    self.assertNotIn("dropout", out["model"])
+    out = self._to_nnx(restored)
+    self.assertIsInstance(out["model"]["dropout"]["rngs"]["count"], jax.ShapeDtypeStruct)
 
 
 class TestMissingWeightPolicy(unittest.TestCase):

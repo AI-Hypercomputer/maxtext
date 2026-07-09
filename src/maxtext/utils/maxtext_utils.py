@@ -1522,15 +1522,13 @@ def setup_initial_state(
             ),
         )
         # data_iterator state is updated in place during restore.
+        # The restore already overlaid the checkpoint onto a copy of the abstract, so a leaf it
+        # didn't carry is still an unmaterialized placeholder. Fill those from the fresh init: a
+        # present leaf comes from the checkpoint, an absent one keeps its init value.
         overlay = restored if is_emergency else restored["items"]
-        # Overlay the checkpoint onto the abstract, then fill the leaves it didn't carry from the
-        # fresh init: a present leaf comes from the checkpoint, an absent one keeps its init value.
-        # The overlay was reshaped against this abstract's own layout, so it never carries a key the
-        # abstract lacks (which replace_by_pure_dict would reject).
-        nnx.replace_by_pure_dict(unboxed_abstract_state, overlay)
         merged = jax.tree.map(
             lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
-            unboxed_abstract_state.to_pure_dict(),
+            overlay.to_pure_dict(),
             state.to_pure_dict(),
             is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
         )

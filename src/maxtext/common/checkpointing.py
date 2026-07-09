@@ -169,16 +169,6 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   process_count: Optional[int] = None
 
 
-def _deep_merge(base, overlay):
-  """Recursively merges `overlay` into `base`, returning a new dict. Overlay wins on leaves."""
-  if not (isinstance(base, dict) and isinstance(overlay, dict)):
-    return overlay if overlay is not None else base
-  out = dict(base)
-  for k, v in overlay.items():
-    out[k] = _deep_merge(base.get(k), v) if k in base else v
-  return out
-
-
 def _missing_param_policy(config):
   """Reads how to handle weights present in the model but absent from the checkpoint."""
   return getattr(config, "checkpoint_missing_param_policy", "warn") if config is not None else "warn"
@@ -232,22 +222,29 @@ def _enforce_missing_weight_policy(want, have, missing_param_policy="warn"):
     raise ValueError(detail)
 
 
-def _linen_items_to_nnx(restored_linen):
-  """Reshapes a restored Linen-layout `items` dict into the NNX-layout overlay.
+def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
+  """Reshapes a restored Linen-layout `items` dict into an NNX state.
 
-  Combines the weights + optimizer (reshaped from the Linen layout) with the
-  rngs/dropout/batch stats from `items/nnx_aux`. Leaves the checkpoint didn't carry
-  come back as unmaterialized `ShapeDtypeStruct`; the caller overlays this onto the
-  abstract state and fills those leaves from a fresh init.
+  The inverse of `to_checkpoint_dict`: the checkpoint's two disjoint pieces -- weights +
+  optimizer (Linen layout) and rngs/dropout/batch stats (`items/nnx_aux`) -- are loaded into
+  the matching pieces of an `nnx.split_state` of the abstract, then recombined with
+  `nnx.merge_state`. `nnx.split_state` copies, so the caller's abstract is untouched. Leaves
+  the checkpoint didn't carry stay unmaterialized `ShapeDtypeStruct`s; the caller fills them
+  from a fresh init.
   """
-  overlay = train_state_nnx.from_linen_checkpoint_dict(restored_linen)
+  params, rng_state, batch_stats, rest = nnx.split_state(abstract_nnx_state, nnx.Param, nnx.RngState, nnx.BatchStat, ...)
+  weights = train_state_nnx.from_linen_checkpoint_dict(restored_linen)
+  if "model" in weights:
+    nnx.replace_by_pure_dict(params, {"model": weights["model"]})
+  if "optimizer" in weights:
+    nnx.replace_by_pure_dict(rest, {"optimizer": weights["optimizer"]})
+
+  aux_state = nnx.merge_state(rng_state, batch_stats)
   aux = restored_linen.get("nnx_aux")
   if aux:
-    # `overlay` (weights + optimizer) and `aux` (rngs/dropout/batch stats) are disjoint pieces of the
-    # same checkpoint, both under `model/` at different leaves. A recursive union is the simplest way
-    # to combine them -- a shallow update would drop the `model` weights for aux's rngs-only subtree.
-    overlay = _deep_merge(overlay, aux)
-  return overlay
+    nnx.replace_by_pure_dict(aux_state, aux)
+
+  return nnx.merge_state(params, aux_state, rest)
 
 
 def _load_linen_checkpoint_into_nnx(
@@ -279,7 +276,7 @@ def _load_linen_checkpoint_into_nnx(
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
   _enforce_missing_weight_policy(*_expected_and_restored_params(abstract_nnx_state, restored), missing_param_policy)
-  return _linen_items_to_nnx(restored)
+  return _linen_items_to_nnx(restored, abstract_nnx_state)
 
 
 def _restore_emergency_linen_checkpoint_into_nnx(
@@ -306,7 +303,7 @@ def _restore_emergency_linen_checkpoint_into_nnx(
   )
   restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
   _enforce_missing_weight_policy(*_expected_and_restored_params(abstract_nnx_state, restored), missing_param_policy)
-  return _linen_items_to_nnx(restored)
+  return _linen_items_to_nnx(restored, abstract_nnx_state)
 
 
 def _rebuild_nnx_with_values(abstract_nnx_state, concrete_weights):
@@ -866,7 +863,7 @@ def load_state_if_possible(
             *_expected_and_restored_params(abstract_unboxed_pre_state, restored["items"]),
             _missing_param_policy(maxtext_config),
         )
-        restored_nnx = _linen_items_to_nnx(restored["items"])
+        restored_nnx = _linen_items_to_nnx(restored["items"], abstract_unboxed_pre_state)
         return ({"items": restored_nnx}, None)
 
       if isinstance(abstract_unboxed_pre_state, nnx.State) and isinstance(

@@ -130,7 +130,7 @@ class TestMissingParamRoundTrip(unittest.TestCase):
         dataset_type="tfds",
         maxtext_config=_config(policy),
     )
-    return full["items"]
+    return full["items"].to_pure_dict()
 
   def test_missing_weight_raises_naming_the_path(self):
     manager = self._save_model()

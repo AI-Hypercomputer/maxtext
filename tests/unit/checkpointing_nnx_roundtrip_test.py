@@ -161,7 +161,7 @@ class TestNNXCheckpointRoundTrip(unittest.TestCase):
     return nnx.state(train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, _TX, wrt=nnx.Param)))
 
   def _restore(self, manager, model_cls):
-    """The trainer's restore: overlay the checkpoint onto the abstract, then fill from a fresh init."""
+    """The trainer's restore: fill the leaves the checkpoint didn't carry from a fresh init."""
     full, _ = checkpointing.load_state_if_possible(
         manager,
         data_iterator=None,
@@ -172,12 +172,10 @@ class TestNNXCheckpointRoundTrip(unittest.TestCase):
         dataset_type="tfds",
         maxtext_config=_config(),
     )
-    abstract = _abstract_state(model_cls)
-    nnx.replace_by_pure_dict(abstract, full["items"])  # checkpoint values in; absent leaves stay placeholders
     init = self._init_state(model_cls)
     merged = jax.tree.map(
         lambda ckpt, i: i if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
-        abstract.to_pure_dict(),
+        full["items"].to_pure_dict(),  # checkpoint values, with placeholders where it carried nothing
         init.to_pure_dict(),
         is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
     )
@@ -333,7 +331,7 @@ class TestNNXCheckpointRoundTrip(unittest.TestCase):
         enable_orbax_v1=False,
         maxtext_config=_config(),
     )
-    restored = full["items"]
+    restored = full["items"].to_pure_dict()
     self.assertEqual(int(restored["model"]["dropout"]["rngs"]["count"]), orig_count)
     self.assertEqual(int(restored["optimizer"]["step"]), 1)
 
