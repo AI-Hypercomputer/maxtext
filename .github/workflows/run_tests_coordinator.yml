@@ -223,6 +223,7 @@ jobs:
             || '--privileged' }}
 
       # Metadata
+      flavor: ${{ inputs.flavor }}
       base_image: ${{ inputs.base_image }}
       is_scheduled_run: ${{ inputs.is_scheduled_run }}
       maxtext_installed: ${{ inputs.maxtext_installed }}
