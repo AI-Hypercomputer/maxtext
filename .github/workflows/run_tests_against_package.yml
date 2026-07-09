@@ -158,6 +158,13 @@ jobs:
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
+          elif [[ "${INPUTS_FLAVOR}" =~ ^tpu7x- ]]; then
+            # Run only newly added/modified tests on TPU7X during Pull Requests (b/530220873)
+            if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
+              FINAL_PYTEST_MARKER="newly_added"
+            else
+              FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and newly_added"
+            fi
           else
             if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
               FINAL_PYTEST_MARKER="not scheduled_only or newly_added"
@@ -207,6 +214,7 @@ jobs:
           if [ "${INPUTS_IS_UPDATE_HLO}" == "true" ]; then
             python3 tests/utils/update_hlo_references.py
           else
+            set +e
             $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
               -v \
               -m "${FINAL_PYTEST_MARKER}" \
@@ -214,9 +222,17 @@ jobs:
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS}
+            PYTEST_EXIT_CODE=$?
+            set -e
+            if [ $PYTEST_EXIT_CODE -eq 5 ]; then
+              echo "No tests collected matching marker '${FINAL_PYTEST_MARKER}'. Passing cleanly."
+            elif [ $PYTEST_EXIT_CODE -ne 0 ]; then
+              exit $PYTEST_EXIT_CODE
+            fi
           fi
 
         env:
+          INPUTS_FLAVOR: ${{ inputs.flavor }}
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
