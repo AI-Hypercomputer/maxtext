@@ -370,14 +370,38 @@ def sft_preprocessing_pipeline(
         )
     )
 
-  dataset = dataset.map(
-      input_pipeline_utils.SFTPromptMasking(
-          text_column_name=data_columns[0],
-          completion_only=config.sft_train_on_completion_only,
-          max_target_length=config.max_target_length,
-          unk_id=pad_id,
-      )
-  )
+  long_handling = getattr(config, "sft_long_example_handling", "truncate")
+  if long_handling == "window":
+    assert (
+        config.sft_train_on_completion_only
+    ), "sft_long_example_handling='window' requires sft_train_on_completion_only=True"
+    # Split examples longer than max_target_length into windows (one-to-many) instead of
+    # head-truncating them, so the turn terminator (<end_of_turn>) always enters the loss.
+    windows = input_pipeline_utils.SFTPromptMaskingWindows(
+        text_column_name=data_columns[0],
+        completion_only=config.sft_train_on_completion_only,
+        max_target_length=config.max_target_length,
+        unk_id=pad_id,
+        overlap=config.sft_window_overlap,
+        context_cap=config.sft_window_context_cap,
+        max_fan_out=config.sft_window_max_fan_out,
+    )
+    # grain applies a FlatMapTransform via IterDataset.apply() in newer releases and via the
+    # FlatMapIterDataset constructor in older ones (<=0.2.12). Support both so this works
+    # regardless of the grain version pinned in the runner image.
+    if hasattr(dataset, "apply"):
+      dataset = dataset.apply(windows)
+    else:
+      dataset = grain.experimental.FlatMapIterDataset(dataset, windows)
+  else:
+    dataset = dataset.map(
+        input_pipeline_utils.SFTPromptMasking(
+            text_column_name=data_columns[0],
+            completion_only=config.sft_train_on_completion_only,
+            max_target_length=config.max_target_length,
+            unk_id=pad_id,
+        )
+    )
   data_columns = ("inputs", "targets")
 
   batch_size = data_processing_utils.get_local_batch_size(config)

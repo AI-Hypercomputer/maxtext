@@ -720,6 +720,27 @@ use_dpo: false
 use_sft: false
 # sft_train_on_completion_only=false trains on both prompt and completion tokens; trains only on completion tokens otherwise
 sft_train_on_completion_only: false
+# How to handle SFT examples longer than max_target_length (grain SFT pipeline):
+#   'truncate' (default) - head-truncate to max_target_length. NOTE: this drops the tail of long
+#                examples, including the turn terminator (e.g. <end_of_turn>), from BOTH inputs and
+#                targets, so the stop token never enters the loss for long examples and the model is
+#                trained on a stop-less completion prefix (learns to never stop on long generations).
+#   'window'   - split a long example into multiple <=max_target_length records via a prompt-pinned
+#                sliding window: the conversation-prefix-so-far is replayed as masked (context-only)
+#                tokens in front of each window, the completion is tiled across windows with DISJOINT
+#                loss (every completion token trained exactly once), and the final window retains the
+#                turn terminator. Requires sft_train_on_completion_only=True. Examples that already fit
+#                yield a single record identical to 'truncate'.
+sft_long_example_handling: 'truncate'
+# For sft_long_example_handling='window': completion tokens carried over as masked context between
+# consecutive windows (local continuity across the split). Clamped to <= max_target_length // 8.
+sft_window_overlap: 256
+# For 'window': max tokens of conversation-prefix context pinned (masked) in front of each window.
+# -1 = auto (max_target_length // 2). Bounds per-example fan-out for very long prompts.
+sft_window_context_cap: -1
+# For 'window': hard cap on records emitted per example (runaway guard). Loss tokens beyond the cap
+# are dropped and logged.
+sft_window_max_fan_out: 32
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
