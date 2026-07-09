@@ -41,10 +41,11 @@ from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
 import flax.linen as nn
+from huggingface_hub import get_token
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.checkpointing import handle_checkpoint_mismatch
+from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
@@ -790,6 +791,44 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
   return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
 
 
+def verify_and_sync_scan_layers(config):
+  """Verify and sync scan_layers based on checkpoint metadata."""
+  if not config.load_parameters_path:
+    return config
+
+  custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
+  saved_scan_layers = custom_metadata.get("scan_layers")
+  if not isinstance(saved_scan_layers, bool):
+    return config
+
+  if saved_scan_layers == config.scan_layers:
+    return config
+
+  # Extract the Pydantic config (or use direct config if already a Pydantic model)
+  pydantic_config = getattr(config, "_pydantic_config", config)
+  model_fields_set = getattr(pydantic_config, "model_fields_set", None)
+
+  # If model metadata tracking isn't supported, fall back to matching check (True)
+  is_explicit = "scan_layers" in model_fields_set if model_fields_set is not None else True
+
+  if is_explicit:
+    if saved_scan_layers != config.scan_layers:
+      raise ValueError(
+          f"Configuration mismatch: Your run specifies scan_layers={config.scan_layers}, "
+          f"but the checkpoint was saved with scan_layers={saved_scan_layers}."
+      )
+  else:
+    max_logging.log(f"Setting scan_layers={saved_scan_layers} loaded from checkpoint metadata.")
+    new_pydantic_config = pydantic_config.model_copy(update={"scan_layers": saved_scan_layers})
+    # Wrap back in HyperParameters if the original config was wrapped
+    if getattr(config, "_pydantic_config", None) is not None:
+      config = pyconfig.HyperParameters(new_pydantic_config)
+    else:
+      config = new_pydantic_config
+
+  return config
+
+
 def from_pretrained(
     config,
     mesh=None,
@@ -811,8 +850,12 @@ def from_pretrained(
   if config.convert_checkpoint_if_possible and not config.load_parameters_path:
     if not (epath.Path(config.base_output_directory) / "0" / "items").exists():
       # Try to convert checkpoint on the fly
-      if not config.hf_access_token:
-        raise ValueError("hf_access_token must be provided when not providing a pre-existing checkpoint")
+      hf_access_token = config.hf_access_token or get_token()
+      if not hf_access_token:
+        raise ValueError(
+            "hf_access_token must be provided (or authenticate via"
+            " huggingface-cli) when not providing a pre-existing checkpoint"
+        )
 
       # Only process 0 performs the conversion; other processes wait at the barrier below.
       # Otherwise every host would race to download from HF and concurrently write the same
@@ -830,8 +873,8 @@ def from_pretrained(
         conversion_env = os.environ.copy()
         conversion_env["JAX_PLATFORMS"] = "cpu"
         # conversion_env["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
-        if config.hf_access_token:
-          conversion_env["HF_TOKEN"] = config.hf_access_token
+        if hf_access_token:
+          conversion_env["HF_TOKEN"] = hf_access_token
 
         to_maxtext_cmd = [
             sys.executable,
@@ -865,6 +908,8 @@ def from_pretrained(
     )
     config = pyconfig.HyperParameters(new_config)
 
+  config = verify_and_sync_scan_layers(config)
+
   if config.pure_nnx:
     _create_model, abstract_model = create_nnx_abstract_model(
         config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
@@ -894,260 +939,259 @@ def from_pretrained(
 
   with mesh:
     if config.load_parameters_path:
-      with handle_checkpoint_mismatch("load parameters", config.load_parameters_path):
-        ckptr = ocp.Checkpointer(
-            ocp.PyTreeCheckpointHandler(
-                restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
-                save_concurrent_gb=config.checkpoint_storage_concurrent_gb,
-                use_ocdbt=config.checkpoint_storage_use_ocdbt,
-                use_zarr3=config.checkpoint_storage_use_zarr3,
-            )
+      ckptr = ocp.Checkpointer(
+          ocp.PyTreeCheckpointHandler(
+              restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+              save_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+              use_ocdbt=config.checkpoint_storage_use_ocdbt,
+              use_zarr3=config.checkpoint_storage_use_zarr3,
+          )
+      )
+
+      # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
+      # Rather than passing the entire abstract state, which could unnecessarily restore opt_state and
+      # waste memory, we instead restore the params field of the checkpoint (which itself may be a dictionary
+      #  containing a key named 'params').
+
+      # Get the structure of checkpoint in `config.load_parameters_path`
+      metadata = ckptr.metadata(config.load_parameters_path)
+      if metadata is None or metadata.item_metadata is None:
+        max_logging.log(
+            f"ERROR: No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
+            "Please check your load_parameters_path, the path may be missing, empty, "
+            "or point to a parent directory rather than the checkpoint step directory "
+        )
+        raise ValueError(
+            f"No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
+            "Please check your load_parameters_path."
         )
 
-        # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
-        # Rather than passing the entire abstract state, which could unnecessarily restore opt_state and
-        # waste memory, we instead restore the params field of the checkpoint (which itself may be a dictionary
-        #  containing a key named 'params').
-
-        # Get the structure of checkpoint in `config.load_parameters_path`
-        metadata = ckptr.metadata(config.load_parameters_path)
-        if metadata is None or metadata.item_metadata is None:
-          max_logging.log(
-              f"ERROR: No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
-              "Please check your load_parameters_path, the path may be missing, empty, "
-              "or point to a parent directory rather than the checkpoint step directory "
-          )
-          raise ValueError(
-              f"No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
-              "Please check your load_parameters_path."
-          )
-
-        def _adjust_target_for_moe_fusion(target, meta_tree, is_nnx):
-          if not hasattr(target, "items") or not hasattr(meta_tree, "items"):
-            return target
-          new_target = {}
-          for k, v in target.items():
-            if k == "wi" and "wi" not in meta_tree and "wi_0" in meta_tree and "wi_1" in meta_tree:
-              if not is_nnx:
-                arr = v
-                half_dim = arr.shape[-1] // 2
-                new_target["wi_0"] = jax.ShapeDtypeStruct(
-                    shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
-                )
-                new_target["wi_1"] = jax.ShapeDtypeStruct(
-                    shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
-                )
-              else:
-                arr = v["value"]
-                half_dim = arr.shape[-1] // 2
-                new_target["wi_0"] = {
-                    "value": jax.ShapeDtypeStruct(
-                        shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
-                    )
-                }
-                new_target["wi_1"] = {
-                    "value": jax.ShapeDtypeStruct(
-                        shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
-                    )
-                }
+      def _adjust_target_for_moe_fusion(target, meta_tree, is_nnx):
+        if not hasattr(target, "items") or not hasattr(meta_tree, "items"):
+          return target
+        new_target = {}
+        for k, v in target.items():
+          if k == "wi" and "wi" not in meta_tree and "wi_0" in meta_tree and "wi_1" in meta_tree:
+            if not is_nnx:
+              arr = v
+              half_dim = arr.shape[-1] // 2
+              new_target["wi_0"] = jax.ShapeDtypeStruct(
+                  shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+              )
+              new_target["wi_1"] = jax.ShapeDtypeStruct(
+                  shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+              )
             else:
-              new_target[k] = _adjust_target_for_moe_fusion(v, meta_tree.get(k, {}), is_nnx)
-
-          return new_target
-
-        is_nnx_checkpoint = True
-        if (
-            "params" in metadata.item_metadata.tree.keys()
-            and "params" in metadata.item_metadata.tree.get("params", {}).keys()
-        ):
-          # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
-          is_nnx_checkpoint = False
-          target_for_restore = jax.tree.map(
-              lambda v: v[...],
-              sharded_state,
-              is_leaf=lambda n: isinstance(n, nnx.Variable),
-          )
-
-          target_for_restore = _adjust_target_for_moe_fusion(
-              target_for_restore, metadata.item_metadata.tree["params"]["params"], False
-          )
-
-          item_to_restore = {"params": {"params": target_for_restore}}
-          base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
-          restore_args = {
-              "params": {
-                  "params": _fix_restore_args_for_shape_mismatch(
-                      base_restore_args,
-                      metadata.item_metadata.tree["params"]["params"],
-                      mesh,
+              arr = v["value"]
+              half_dim = arr.shape[-1] // 2
+              new_target["wi_0"] = {
+                  "value": jax.ShapeDtypeStruct(
+                      shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
                   )
               }
-          }
-        else:
-          # NNX checkpoint: {'decoder': {'value': ...}}, or NNX-RL with extra 'base' nesting.
-          # Restore only nnx.Param — RNG variable shapes may differ between checkpoint and model,
-          # and pure-dict checkpoints written by `layerwise_quantization._load_and_quantize_nnx`
-          # don't carry RNG/dropout state at all (they only persist nnx.Param leaves, including
-          # AQT serve-mode `qrhs.frozen` which is a Param subclass).
-          def _build_value_target(v):
-            # `v[...]` (a.k.a. `v.get_value(index=...)`) descends into the inner
-            # value with `value[Ellipsis]`. AQT serve-mode `qrhs.frozen` variables
-            # wrap a QTensor whose `__getitem__` calls `qvalue[idx]` on a
-            # `LogicallyPartitioned` wrapper — that fails. For QTensor (and any
-            # composite pytree value), use the unwrapped value directly so the
-            # restore target preserves the QTensor's qvalue/scale sub-structure.
-            inner = v.get_value() if hasattr(v, "get_value") else v[...]
-            if hasattr(inner, "shape"):
-              return {"value": v[...]}
-            # AQT QTensor: qvalue/scale leaves come back wrapped in flax
-            # `Partitioned` (a logical-axis sharding box). The on-disk save in
-            # `_load_and_quantize_nnx` flushes the QTensor as plain arrays —
-            # paths look like `qrhs.frozen.value.qvalue` / `...scale.0`. If we
-            # leave Partitioned in place, jax.tree adds an extra `.value` key
-            # under each leaf (`qrhs.frozen.value.qvalue.value`) and orbax
-            # silently fills with zeros because that path doesn't exist on
-            # disk. Strip Partitioned wrappers so the target tree matches.
-            inner = jax.tree.map(
-                lambda x: x.value if isinstance(x, Partitioned) else x,
-                inner,
-                is_leaf=lambda x: isinstance(x, Partitioned),
-            )
-            return {"value": inner}
-
-          # Keep persisted weight-like leaves: `nnx.Param` plus AQT serve-mode
-          # `qrhs.frozen` (a separate `aqt` Variable type, NOT a Param subclass).
-          # Excluded: `nnx.RngState` (regenerated per load, shapes can drift) and
-          # `nnx.Cache` (PREFILL/AR scratch, not persisted). Pure-dict checkpoints
-          # written by `layerwise_quantization._load_and_quantize_nnx` carry both
-          # Param kernels and `aqt`-typed `qrhs.frozen` quantized payloads.
-          if hasattr(sharded_state, "filter"):
-            param_state = sharded_state.filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache)))
+              new_target["wi_1"] = {
+                  "value": jax.ShapeDtypeStruct(
+                      shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                  )
+              }
           else:
-            param_state = sharded_state
-          target_for_restore = jax.tree.map(
-              _build_value_target,
-              param_state,
-              is_leaf=lambda n: isinstance(n, nnx.Variable),
-          )
-          has_base_key = "base" in metadata.item_metadata.tree
-          meta_tree_for_params = metadata.item_metadata.tree.get("base", metadata.item_metadata.tree)
-          target_for_restore = _adjust_target_for_moe_fusion(target_for_restore, meta_tree_for_params, True)
-          item_to_restore = {"base": target_for_restore} if has_base_key else target_for_restore
-          restore_args = _fix_restore_args_for_shape_mismatch(
-              ocp.checkpoint_utils.construct_restore_args(target_for_restore), meta_tree_for_params, mesh
-          )
-          restore_args = {"base": restore_args} if has_base_key else restore_args
+            new_target[k] = _adjust_target_for_moe_fusion(v, meta_tree.get(k, {}), is_nnx)
 
-        # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
-        # Skip nnx.Cache variables — they hold runtime state (e.g. GDN conv/recurrent state) that is
-        # not present in the checkpoint and must remain valid after the restore.
-        def _free_device_memory(node):
-          if isinstance(node, nnx.Variable) and not isinstance(node, (nnx.RngState, nnx.Cache)):
-            inner = node.get_value() if hasattr(node, "get_value") else node[...]
-            # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
-            # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
-            # arrays too; the single-leaf case is a 1-element tree.
-            for leaf in jax.tree_util.tree_leaves(inner):
-              if isinstance(leaf, jax.Array) and not leaf.is_deleted():
-                leaf.delete()
-          elif isinstance(node, jax.Array) and not node.is_deleted():
-            node.delete()
+        return new_target
 
-          return node
-
-        jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
-
-        restored = ckptr.restore(
-            epath.Path(config.load_parameters_path),
-            item=item_to_restore,
-            transforms={},
-            restore_args=restore_args,
+      is_nnx_checkpoint = True
+      if (
+          "params" in metadata.item_metadata.tree.keys()
+          and "params" in metadata.item_metadata.tree.get("params", {}).keys()
+      ):
+        # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
+        is_nnx_checkpoint = False
+        target_for_restore = jax.tree.map(
+            lambda v: v[...],
+            sharded_state,
+            is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
 
-        if is_nnx_checkpoint:
-          restored_root = restored["base"] if has_base_key else restored
-          checkpoint = jax.tree.map(
-              lambda v: v["value"],
-              restored_root,
-              is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+        target_for_restore = _adjust_target_for_moe_fusion(
+            target_for_restore, metadata.item_metadata.tree["params"]["params"], False
+        )
+
+        item_to_restore = {"params": {"params": target_for_restore}}
+        base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+        restore_args = {
+            "params": {
+                "params": _fix_restore_args_for_shape_mismatch(
+                    base_restore_args,
+                    metadata.item_metadata.tree["params"]["params"],
+                    mesh,
+                )
+            }
+        }
+      else:
+        # NNX checkpoint: {'decoder': {'value': ...}}, or NNX-RL with extra 'base' nesting.
+        # Restore only nnx.Param — RNG variable shapes may differ between checkpoint and model,
+        # and pure-dict checkpoints written by `layerwise_quantization._load_and_quantize_nnx`
+        # don't carry RNG/dropout state at all (they only persist nnx.Param leaves, including
+        # AQT serve-mode `qrhs.frozen` which is a Param subclass).
+        def _build_value_target(v):
+          # `v[...]` (a.k.a. `v.get_value(index=...)`) descends into the inner
+          # value with `value[Ellipsis]`. AQT serve-mode `qrhs.frozen` variables
+          # wrap a QTensor whose `__getitem__` calls `qvalue[idx]` on a
+          # `LogicallyPartitioned` wrapper — that fails. For QTensor (and any
+          # composite pytree value), use the unwrapped value directly so the
+          # restore target preserves the QTensor's qvalue/scale sub-structure.
+          inner = v.get_value() if hasattr(v, "get_value") else v[...]
+          if hasattr(inner, "shape"):
+            return {"value": v[...]}
+          # AQT QTensor: qvalue/scale leaves come back wrapped in flax
+          # `Partitioned` (a logical-axis sharding box). The on-disk save in
+          # `_load_and_quantize_nnx` flushes the QTensor as plain arrays —
+          # paths look like `qrhs.frozen.value.qvalue` / `...scale.0`. If we
+          # leave Partitioned in place, jax.tree adds an extra `.value` key
+          # under each leaf (`qrhs.frozen.value.qvalue.value`) and orbax
+          # silently fills with zeros because that path doesn't exist on
+          # disk. Strip Partitioned wrappers so the target tree matches.
+          inner = jax.tree.map(
+              lambda x: x.value if isinstance(x, Partitioned) else x,
+              inner,
+              is_leaf=lambda x: isinstance(x, Partitioned),
           )
+          return {"value": inner}
+
+        # Keep persisted weight-like leaves: `nnx.Param` plus AQT serve-mode
+        # `qrhs.frozen` (a separate `aqt` Variable type, NOT a Param subclass).
+        # Excluded: `nnx.RngState` (regenerated per load, shapes can drift) and
+        # `nnx.Cache` (PREFILL/AR scratch, not persisted). Pure-dict checkpoints
+        # written by `layerwise_quantization._load_and_quantize_nnx` carry both
+        # Param kernels and `aqt`-typed `qrhs.frozen` quantized payloads.
+        if hasattr(sharded_state, "filter"):
+          param_state = sharded_state.filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache)))
         else:
-          checkpoint = restored["params"]["params"]
+          param_state = sharded_state
+        target_for_restore = jax.tree.map(
+            _build_value_target,
+            param_state,
+            is_leaf=lambda n: isinstance(n, nnx.Variable),
+        )
+        has_base_key = "base" in metadata.item_metadata.tree
+        meta_tree_for_params = metadata.item_metadata.tree.get("base", metadata.item_metadata.tree)
+        target_for_restore = _adjust_target_for_moe_fusion(target_for_restore, meta_tree_for_params, True)
+        item_to_restore = {"base": target_for_restore} if has_base_key else target_for_restore
+        restore_args = _fix_restore_args_for_shape_mismatch(
+            ocp.checkpoint_utils.construct_restore_args(target_for_restore), meta_tree_for_params, mesh
+        )
+        restore_args = {"base": restore_args} if has_base_key else restore_args
 
-        if checkpoint:
-          # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
-          # `v[...]` fails on Variables wrapping QTensors. Use `get_value()` to
-          # access the inner value directly without index-style descent.
-          def _unwrap_for_align(v):
-            return v.get_value() if hasattr(v, "get_value") else v[...]
+      # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
+      # Skip nnx.Cache variables — they hold runtime state (e.g. GDN conv/recurrent state) that is
+      # not present in the checkpoint and must remain valid after the restore.
+      def _free_device_memory(node):
+        if isinstance(node, nnx.Variable) and not isinstance(node, (nnx.RngState, nnx.Cache)):
+          inner = node.get_value() if hasattr(node, "get_value") else node[...]
+          # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
+          # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
+          # arrays too; the single-leaf case is a 1-element tree.
+          for leaf in jax.tree_util.tree_leaves(inner):
+            if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+              leaf.delete()
+        elif isinstance(node, jax.Array) and not node.is_deleted():
+          node.delete()
 
-          model_arrays = jax.tree.map(
-              _unwrap_for_align,
-              sharded_state,
-              is_leaf=lambda n: isinstance(n, nnx.Variable),
-          )
-          # ``specs`` (nnx.get_partition_spec(abstract_state) at the top of from_pretrained)
-          # is the source of truth for logical axis names — it's the input to
-          # nn.logical_to_mesh_sharding.  Each leaf is a PartitionSpec whose entries are
-          # logical axis names (or None / nested tuples).  Reuse it for repeat/zero-pad
-          # dispatch in _align_checkpoint_to_model_shapes.
-          # nnx.get_partition_spec returns Variables wrapping PartitionSpecs at the leaves;
-          # unwrap to raw PartitionSpecs so _normalize_logical_axes can read them.
-          logical_axes_tree = jax.tree.map(
-              lambda v: v.get_value(),
-              specs,
-              is_leaf=lambda n: isinstance(n, nnx.Variable),
-          )
+        return node
 
-          def to_dict(tree):
-            if hasattr(tree, "items"):
-              return {k: to_dict(v) for k, v in tree.items()}
-            return tree
+      jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
-          model_arrays = to_dict(model_arrays)
-          checkpoint = to_dict(checkpoint)
-          logical_axes_tree = to_dict(logical_axes_tree)
+      restored = ckptr.restore(
+          epath.Path(config.load_parameters_path),
+          item=item_to_restore,
+          transforms={},
+          restore_args=restore_args,
+      )
 
-          checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
-          # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
-          # This prevents the replicated intermediate copies from persisting until function return.
-          del restored
+      if is_nnx_checkpoint:
+        restored_root = restored["base"] if has_base_key else restored
+        checkpoint = jax.tree.map(
+            lambda v: v["value"],
+            restored_root,
+            is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+        )
+      else:
+        checkpoint = restored["params"]["params"]
 
-          def _filter_to_model_keys(ckpt, model):
-            """Recursively keep only keys present in model, dropping checkpoint-only fields (e.g. to_nnx__rngs)."""
-            if not hasattr(ckpt, "items") or not hasattr(model, "items"):
-              return ckpt
-            return {k: _filter_to_model_keys(ckpt[k], model[k]) for k in model if k in ckpt}
+      if checkpoint:
+        # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
+        # `v[...]` fails on Variables wrapping QTensors. Use `get_value()` to
+        # access the inner value directly without index-style descent.
+        def _unwrap_for_align(v):
+          return v.get_value() if hasattr(v, "get_value") else v[...]
 
-          checkpoint = _filter_to_model_keys(checkpoint, model_arrays)
+        model_arrays = jax.tree.map(
+            _unwrap_for_align,
+            sharded_state,
+            is_leaf=lambda n: isinstance(n, nnx.Variable),
+        )
+        # ``specs`` (nnx.get_partition_spec(abstract_state) at the top of from_pretrained)
+        # is the source of truth for logical axis names — it's the input to
+        # nn.logical_to_mesh_sharding.  Each leaf is a PartitionSpec whose entries are
+        # logical axis names (or None / nested tuples).  Reuse it for repeat/zero-pad
+        # dispatch in _align_checkpoint_to_model_shapes.
+        # nnx.get_partition_spec returns Variables wrapping PartitionSpecs at the leaves;
+        # unwrap to raw PartitionSpecs so _normalize_logical_axes can read them.
+        logical_axes_tree = jax.tree.map(
+            lambda v: v.get_value(),
+            specs,
+            is_leaf=lambda n: isinstance(n, nnx.Variable),
+        )
 
-          def _walk_align(ckpt, model_arr, axes):
-            if isinstance(ckpt, dict):
-              return {
-                  k: _walk_align(
-                      v,
-                      model_arr[k],
-                      axes.get(k) if isinstance(axes, dict) else None,
-                  )
-                  for k, v in ckpt.items()
-              }
-            # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree of
-            # qvalue+scale arrays), not a single jax.Array. Shape alignment
-            # only makes sense for full-precision kernels — quantized payloads
-            # are saved in the exact shape the model expects, so pass through.
-            if not isinstance(ckpt, (jax.Array, jax.ShapeDtypeStruct, np.ndarray)):
-              return ckpt
-            return _align_checkpoint_to_model_shapes(ckpt, model_arr, axes)
+        def to_dict(tree):
+          if hasattr(tree, "items"):
+            return {k: to_dict(v) for k, v in tree.items()}
+          return tree
 
-          checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
-          nnx.update(model, checkpoint)
-        else:
-          raise ValueError(
-              f"Checkpoint restore from '{config.load_parameters_path}' yielded no parameters. "
-              "This usually means the checkpoint format is incompatible with the model configuration "
-              "(e.g. a scanned checkpoint loaded with scan_layers=False, or vice versa). "
-              "Please ensure the checkpoint format matches the scan_layers setting."
-          )
+        model_arrays = to_dict(model_arrays)
+        checkpoint = to_dict(checkpoint)
+        logical_axes_tree = to_dict(logical_axes_tree)
+
+        checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
+        # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
+        # This prevents the replicated intermediate copies from persisting until function return.
+        del restored
+
+        def _filter_to_model_keys(ckpt, model):
+          """Recursively keep only keys present in model, dropping checkpoint-only fields (e.g. to_nnx__rngs)."""
+          if not hasattr(ckpt, "items") or not hasattr(model, "items"):
+            return ckpt
+          return {k: _filter_to_model_keys(ckpt[k], model[k]) for k in model if k in ckpt}
+
+        checkpoint = _filter_to_model_keys(checkpoint, model_arrays)
+
+        def _walk_align(ckpt, model_arr, axes):
+          if isinstance(ckpt, dict):
+            return {
+                k: _walk_align(
+                    v,
+                    model_arr[k],
+                    axes.get(k) if isinstance(axes, dict) else None,
+                )
+                for k, v in ckpt.items()
+            }
+          # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree of
+          # qvalue+scale arrays), not a single jax.Array. Shape alignment
+          # only makes sense for full-precision kernels — quantized payloads
+          # are saved in the exact shape the model expects, so pass through.
+          if not isinstance(ckpt, (jax.Array, jax.ShapeDtypeStruct, np.ndarray)):
+            return ckpt
+          return _align_checkpoint_to_model_shapes(ckpt, model_arr, axes)
+
+        checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
+        nnx.update(model, checkpoint)
+      else:
+        raise ValueError(
+            f"Checkpoint restore from '{config.load_parameters_path}' yielded no parameters. "
+            "This usually means the checkpoint format is incompatible with the model configuration "
+            "(e.g. a scanned checkpoint loaded with scan_layers=False, or vice versa). "
+            "Please ensure the checkpoint format matches the scan_layers setting."
+        )
 
     if wrap_with_tunix_adapter:
       with mesh:

@@ -164,7 +164,7 @@ def create_nnx_sharded_model(
     named_sharding = nnx_extract_named_sharding(abstract_state)
 
   if mesh is None:
-    mesh = abstract_model.mesh
+    mesh = abstract_model.mesh  # pyrefly: ignore[missing-attribute]
 
   # JIT a function that creates the model state with proper sharding from the start.
   # By providing out_shardings, we instruct JAX to produce sharded output directly,

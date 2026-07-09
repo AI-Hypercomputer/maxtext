@@ -508,7 +508,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
       log_t_p_T_sparse = jax.nn.log_softmax(t_logits / temperature, axis=-1)
 
       # 2. Gather Student unnormalized logits at the Teacher's exact Top-K indices
-      s_logits_sparse = jnp.take_along_axis(s_logits, teacher_output.top_k_indices, axis=-1)
+      s_logits_sparse = jnp.take_along_axis(s_logits, teacher_output.top_k_indices, axis=-1)  # pyrefly: ignore[bad-argument-type]
 
       # 3. Normalize Student probabilities only over the exact same Top-K subset
       log_s_T_sparse = jax.nn.log_softmax(s_logits_sparse / temperature, axis=-1)
@@ -558,7 +558,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
       s_features_sliced = s_features_sliced.astype(jnp.float32)
       t_features_sliced = t_features_sliced.astype(jnp.float32)
 
-      feature_loss = beta_feature * self.feature_loss_fn(s_features_sliced, t_features_sliced, mask)
+      feature_loss = beta_feature * self.feature_loss_fn(s_features_sliced, t_features_sliced, mask)  # pyrefly: ignore[not-callable]
 
     total_loss = base_logit_loss + feature_loss
 
@@ -744,7 +744,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
         grain_iters_to_save.append((local_iter, process_index, process_count_total))
 
       # Use GrainCheckpointSave wrapper
-      cp_save_args["iter"] = GrainCheckpointSave(item=grain_iters_to_save)
+      cp_save_args["iter"] = GrainCheckpointSave(item=grain_iters_to_save)  # pyrefly: ignore[bad-assignment]
 
     return self._checkpoint_manager.save(
         step,
@@ -753,7 +753,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
         force=force,
     )
 
-  def maybe_restore(
+  def maybe_restore(  # pyrefly: ignore[bad-override]
       self,
       model: Any,
       optimizer: Any = None,
@@ -772,7 +772,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
     target_model = getattr(model, "student_model", model)
 
     step, _ = super().maybe_restore(
-        model=target_model,
+        model=target_model,  # pyrefly: ignore[bad-argument-type]
         optimizer=optimizer,
         restore_only_lora_params=restore_only_lora_params,
     )

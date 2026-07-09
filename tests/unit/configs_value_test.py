@@ -15,21 +15,19 @@
 """Tests for the new pydantic-based configuration system."""
 
 import os
-import unittest
-from unittest.mock import patch, MagicMock
+import unittest.mock
 
+from absl.testing import absltest
+from maxtext.configs import pyconfig
+from maxtext.configs import types
+from maxtext.utils import globals as maxtext_globals
 import pydantic
 
-from maxtext.configs import pyconfig
-from maxtext.configs.pyconfig import initialize_pydantic
-from maxtext.configs import types
-from maxtext.utils.globals import MAXTEXT_REPO_ROOT
-
-# Path to the base.yml config. This assumes that `pytest` is run from the project root.
-_BASE_CONFIG_PATH = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
+# Path to the base.yml config.
+_BASE_CONFIG_PATH = os.path.join(maxtext_globals.MAXTEXT_CONFIGS_DIR, "base.yml")
 
 
-class ConfigTest(unittest.TestCase):
+class ConfigTest(absltest.TestCase):
   """Tests for the new pydantic-based configuration system."""
 
   def test_basic_config_loading(self):
@@ -77,8 +75,8 @@ class ConfigTest(unittest.TestCase):
         "gradient_accumulation_steps=2",
     ]
     # Mock jax.devices() to be deterministic
-    mock_devices = [MagicMock(slice_index=0) for _ in range(8)]
-    with patch("jax.devices", return_value=mock_devices):
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
       config = pyconfig.initialize(argv)
 
     # global_parameter_scale=4 -> emb_scale=1, num_head_scale=1, mlp_dim_scale=1, layer_scale=0
@@ -112,9 +110,10 @@ class ConfigTest(unittest.TestCase):
         "hardware=tpu",
         "packing=False",
         "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
     ]
-    mock_devices = [MagicMock(slice_index=0) for _ in range(8)]
-    with patch("jax.devices", return_value=mock_devices):
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
       config = pyconfig.initialize(argv)
 
     self.assertEqual(config.context_parallel_strategy, "ring")
@@ -136,6 +135,7 @@ class ConfigTest(unittest.TestCase):
         "hardware=tpu",
         "packing=False",
         "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
     ]
     cases = [
         (["ici_context_parallelism=1"], ["ici_context_parallelism=2"], "context_parallel_size > 1"),
@@ -161,23 +161,45 @@ class ConfigTest(unittest.TestCase):
         (["use_qk_clip=True"], [], "QK-Clip"),
         (["dropout_rate=0.1"], [], "dropout"),
     ]
-    mock_devices = [MagicMock(slice_index=0) for _ in range(8)]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
     for bad_args, args_to_remove, expected_regex in cases:
       with self.subTest(bad_args=bad_args):
         argv = [arg for arg in base_args if arg not in args_to_remove]
         argv.extend(bad_args)
-        with patch("jax.devices", return_value=mock_devices):
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
           with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
             pyconfig.initialize(argv)
 
-  @patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
+  def test_load_balanced_chunk_context_parallel_config(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "attention_type=chunk",
+        "chunk_attn_window_size=256",
+        "context_parallel_load_balance=True",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.attention_type, "chunk")
+    self.assertTrue(config.context_parallel_load_balance)
+
+  @unittest.mock.patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_env_override(self):
     """Tests that environment variables override YAML values."""
     argv = ["", _BASE_CONFIG_PATH, "run_name=test"]
     config = pyconfig.initialize(argv)
     self.assertEqual(config.steps, 123)
 
-  @patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
+  @unittest.mock.patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_cli_overrides_env_is_disallowed(self):
     """Tests that CLI arguments overriding environment variables fails."""
     argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=456"]
@@ -201,7 +223,7 @@ class ConfigTest(unittest.TestCase):
   def test_initialize_pydantic_bad_keys(self):
     """Test that `pydantic.ValidationError` is raised on keys not in MaxTextConfig"""
     with self.assertRaises(ValueError):
-      initialize_pydantic(
+      pyconfig.initialize_pydantic(
           [
               "",
               _BASE_CONFIG_PATH,
@@ -244,6 +266,18 @@ class ConfigTest(unittest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_safetensors_dynamic_disallows_single_controller(self):
+    """Tests that source_checkpoint_layout=safetensors_dynamic disallows enable_single_controller=True."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "source_checkpoint_layout=safetensors_dynamic",
+        "enable_single_controller=true",
+    ]
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv)
+
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

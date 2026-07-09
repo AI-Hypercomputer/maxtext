@@ -24,7 +24,6 @@ from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 
-from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.kernels.attention import tokamax_ring_attention
 
 
@@ -40,9 +39,6 @@ class TokamaxRingAttentionTest(absltest.TestCase):
 
     self.assertEqual(mask.shape, (16, 16))
     self.assertEqual(mask.q_sequence.tolist(), list(range(16)))
-
-  def test_runtime_validation_accepts_global_attention_type(self):
-    tokamax_ring_attention.validate_tokamax_ring_runtime(model_mode=MODEL_MODE_TRAIN)
 
   def test_validate_ring_mesh_axis_requires_key_value_sequence_sharding(self):
     mesh = types.SimpleNamespace(shape={"context": 4})

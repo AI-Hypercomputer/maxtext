@@ -31,9 +31,6 @@ repos:
           - '--disable=R0401,R0917,W0201,W0613'
           - "--ignore-patterns='.pytype,.*pyi$'"
           - '--ignore-paths=src/maxtext/input_pipeline/protos'
-          - 'benchmarks'
-          - 'src'
-          - 'tests'
 
   #  - repo: https://github.com/google/pytype
   #    rev: 2024.10.11
@@ -48,7 +45,7 @@ repos:
     rev: 24.10.1
     hooks:
       - id: pyink
-        exclude: src/maxtext/input_pipeline/protos/|src/maxtext/kernels/tokamax_splash_attention/(base|ring_attention_kernel|splash_attention_kernel|splash_attention_mask|splash_attention_mask_info)\.py
+        exclude: src/maxtext/input_pipeline/protos/
         args:
           - '--pyink-indentation=2'
           - '--line-length=122'

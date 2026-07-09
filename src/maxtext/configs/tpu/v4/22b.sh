@@ -18,11 +18,10 @@ echo "Running 22b.sh"
 #
 # Command Flags:
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
-# DATASET_PATH (Required, unless dataset_path is already set in base.yml)
 # RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
 #
 # Example to invoke this script for training:
-# bash src/maxtext/configs/tpu/v4/22b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
+# bash src/maxtext/configs/tpu/v4/22b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>"
 #
 # Example to AOT compile:
 # bash src/maxtext/configs/tpu/v4/22b.sh EXECUTABLE=train_compile M_COMPILE_TOPOLOGY=v4-128 M_COMPILE_TOPOLOGY_NUM_SLICES=2
@@ -58,4 +57,4 @@ export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true TPU_MEGACORE=MEGACOR
 python3 -m maxtext.trainers.pre_train.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml\
     ici_fsdp_parallelism=64 steps=10 per_device_batch_size=13 profiler=xplane remat_policy=full attention=flash num_vocab_tiling=8\
     base_emb_dim=6144 base_num_kv_heads=24 base_num_query_heads=24 base_mlp_dim=24576 base_num_decoder_layers=48\
-    base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH 
+    base_output_directory=$OUTPUT_PATH dataset_type=synthetic

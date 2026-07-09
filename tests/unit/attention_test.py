@@ -23,6 +23,7 @@ from unittest import mock
 
 from absl.testing import parameterized
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
@@ -48,6 +49,7 @@ from maxtext.layers.attention_op import (
 )
 from maxtext.layers.attentions import Attention
 from maxtext.layers import embeddings
+from maxtext.kernels.attention import jax_flash_attention
 from maxtext.configs import pyconfig
 from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
 import numpy as np
@@ -55,6 +57,41 @@ import pytest
 
 from tests.utils import attention_test_util
 from tests.utils.test_helpers import get_test_config_path
+
+
+class JaxFlashAttentionTest(unittest.TestCase):
+  """Tests for JAX flash attention."""
+
+  def test_flash_attention_block_masked_soft_cap(self):
+    cap = 1.0
+    mask_value = -1.0e9
+    query = jnp.array([[[[10.0], [10.0]]]], dtype=jnp.float32)
+    key = jnp.array([[[[10.0], [0.0]]]], dtype=jnp.float32)
+    value = jnp.array([[[[1.0], [3.0]]]], dtype=jnp.float32)
+    mask = jnp.array([[True, True], [True, False]])
+
+    output = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=2,
+        block_q=1,
+        mask=mask,
+        mask_value=mask_value,
+        cap=cap,
+    )
+
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.tanh(logits / cap) * cap
+    logits = jnp.where(mask[None, None, :, :], logits, mask_value)
+    expected = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected),
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
 
 class SplashLocalMaskTest(unittest.TestCase):
@@ -292,11 +329,126 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+class LoadBalancedMaskTest(unittest.TestCase):
+  """Tests for load-balanced Splash masks."""
+
+  def test_load_balanced_local_window(self):
+    seq_len = 8
+    window_size = 3
+    q_sequence = np.asarray([0, 1, 6, 7, 2, 3, 4, 5])
+    kv_sequence = np.arange(seq_len)
+    causal_mask = attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=2)
+    local_mask = attention_op.LoadBalancedLocalMask(
+        shape=(seq_len, seq_len),
+        window_size=(window_size - 1, window_size),
+        offset=0,
+        cp_size=2,
+    )
+
+    expected_mask = (kv_sequence[None, :] <= q_sequence[:, None]) & (
+        kv_sequence[None, :] > q_sequence[:, None] - window_size
+    )
+
+    np.testing.assert_array_equal((causal_mask & local_mask)[:, :], expected_mask)
+
+  def test_load_balanced_chunk_window(self):
+    seq_len = 8
+    chunk_size = 2
+    q_sequence = np.asarray([0, 1, 6, 7, 2, 3, 4, 5])
+    kv_sequence = np.arange(seq_len)
+    causal_mask = attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=2)
+    chunk_mask = attention_op.LoadBalancedChunkedCausalMask(
+        shape=(seq_len, seq_len),
+        chunk_size=chunk_size,
+        cp_size=2,
+    )
+
+    expected_mask = (kv_sequence[None, :] <= q_sequence[:, None]) & (
+        q_sequence[:, None] // chunk_size == kv_sequence[None, :] // chunk_size
+    )
+
+    np.testing.assert_array_equal((causal_mask & chunk_mask)[:, :], expected_mask)
+
+  def test_dot_product_local_mask_uses_segment_positions(self):
+    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
+    mesh = types.SimpleNamespace(shape={"context": 4})
+    seq_len = 16
+    sliding_window_size = 4
+    positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
+    query = jnp.zeros((1, seq_len, 1, 128))
+    key = jnp.zeros((1, seq_len, 1, 128))
+    decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=seq_len,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.LOCAL_SLIDING,
+        sliding_window_size=sliding_window_size,
+    )
+
+    mask = op.generate_attention_mask(
+        query,
+        key,
+        decoder_segment_ids,
+        MODEL_MODE_TRAIN,
+        segment_positions=positions,
+    )
+
+    expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
+    for r, q_pos in enumerate(np.asarray(positions[0])):
+      for c, kv_pos in enumerate(np.asarray(positions[0])):
+        if q_pos - sliding_window_size < kv_pos <= q_pos:
+          expected_mask[r, c] = True
+
+    np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected_mask)
+
+  def test_dot_product_chunk_mask_uses_segment_positions(self):
+    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
+    mesh = types.SimpleNamespace(shape={"context": 4})
+    seq_len = 16
+    chunk_size = 4
+    positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
+    query = jnp.zeros((1, seq_len, 1, 128))
+    key = jnp.zeros((1, seq_len, 1, 128))
+    decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=seq_len,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.CHUNK,
+        chunk_attn_window_size=chunk_size,
+    )
+
+    mask = op.generate_attention_mask(
+        query,
+        key,
+        decoder_segment_ids,
+        MODEL_MODE_TRAIN,
+        segment_positions=positions,
+    )
+
+    expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
+    for r, q_pos in enumerate(np.asarray(positions[0])):
+      for c, kv_pos in enumerate(np.asarray(positions[0])):
+        if q_pos >= kv_pos and q_pos // chunk_size == kv_pos // chunk_size:
+          expected_mask[r, c] = True
+
+    np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected_mask)
+
+
 class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
   """Tests packed Transformer Engine attention metadata handling."""
 
-  def _call_packed_attention(self, sequence_descriptor):
-    """Runs packed TE attention with fake Transformer Engine modules."""
+  def _call_te_attention(
+      self, sequence_descriptor, config=None, mesh=None, attention_type=AttentionType.GLOBAL, chunk_attn_window_size=None
+  ):
+    """Runs TE attention with fake Transformer Engine modules."""
     sequence_descriptor.calls = []
 
     class FakeWrappedAttention:
@@ -323,17 +475,19 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
         "transformer_engine.jax.attention": attention_module,
     }
 
-    config = types.SimpleNamespace(
-        context_sharding="context",
-        context_parallel_strategy="ring",
-        context_parallel_load_balance=False,
-        packing=True,
-        dataset_type="grain",
-        max_segments_per_seq=4,
-        head_dim=2,
-        attention_kernel="cudnn_flash_te",
-    )
-    mesh = types.SimpleNamespace(shape={"context": 1})
+    if config is None:
+      config = types.SimpleNamespace(
+          context_sharding="context",
+          context_parallel_strategy="ring",
+          context_parallel_load_balance=False,
+          packing=True,
+          dataset_type="grain",
+          max_segments_per_seq=4,
+          head_dim=2,
+          attention_kernel="cudnn_flash_te",
+      )
+    if mesh is None:
+      mesh = types.SimpleNamespace(shape={"context": 1})
     attention = AttentionOp(
         config=config,
         mesh=mesh,
@@ -342,6 +496,8 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
         num_query_heads=2,
         num_kv_heads=2,
         dtype=jnp.float32,
+        attention_type=attention_type,
+        chunk_attn_window_size=chunk_attn_window_size,
     )
     query = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
     key = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
@@ -374,7 +530,7 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
           raise TypeError("older Transformer Engine does not accept THD metadata")
         return kwargs
 
-    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+    output, descriptor_calls = self._call_te_attention(SequenceDescriptor)
 
     self.assertEqual(len(descriptor_calls), 2)
     for call in descriptor_calls:
@@ -383,13 +539,37 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
     self.assertIs(output, descriptor_calls[0])
 
     SequenceDescriptor.reject_thd_kwargs = True
-    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+    output, descriptor_calls = self._call_te_attention(SequenceDescriptor)
     self.assertEqual(len(descriptor_calls), 4)
     self.assertIn("is_thd", descriptor_calls[0])
     self.assertNotIn("is_thd", descriptor_calls[1])
     self.assertIn("is_thd", descriptor_calls[2])
     self.assertNotIn("is_thd", descriptor_calls[3])
     self.assertIs(output, descriptor_calls[1])
+
+  def test_context_parallel_chunk_attention_rejected(self):
+    class SequenceDescriptor:
+      pass
+
+    config = types.SimpleNamespace(
+        context_sharding="context",
+        context_parallel_strategy="all_gather",
+        context_parallel_load_balance=False,
+        packing=False,
+        dataset_type="synthetic",
+        max_segments_per_seq=1,
+        head_dim=2,
+        attention_kernel="cudnn_flash_te",
+    )
+    mesh = types.SimpleNamespace(shape={"context": 2})
+    with self.assertRaisesRegex(ValueError, "Chunk attention"):
+      self._call_te_attention(
+          SequenceDescriptor,
+          config=config,
+          mesh=mesh,
+          attention_type=AttentionType.CHUNK,
+          chunk_attn_window_size=2,
+      )
 
 
 class AttentionTest(parameterized.TestCase):
@@ -964,17 +1144,6 @@ class AttentionTest(parameterized.TestCase):
   def test_tpu_flash_attention_ring_context_parallel(self):
     """Test equivalence between dot_product and flash attention + ring context parallelism"""
 
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
-    mha_generic_output, _ = self._attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    generic_state = nnx.state(self._attention_as_mha_generic)
-
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
@@ -985,9 +1154,36 @@ class AttentionTest(parameterized.TestCase):
         use_tokamax_splash=True,
         use_jax_splash=False,
         packing=False,
+        dtype="float32",
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_as_mha_generic = Attention(
+        config=self.cfg,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        rngs=self.nnx_rng,
+    )
+    mha_generic_output, _ = attention_as_mha_generic(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    generic_state = nnx.state(attention_as_mha_generic)
+
     attention_as_mha_flash_cp = Attention(
         config=cfg_cp,
         num_query_heads=cfg_cp.num_query_heads,
@@ -999,7 +1195,7 @@ class AttentionTest(parameterized.TestCase):
         inputs_kv_shape=lnx.shape,
         mesh=mesh_cp,
         attention_kernel="flash",
-        dtype=self.dtype,
+        dtype=cfg_cp.dtype,
         dropout_rate=cfg_cp.dropout_rate,
         model_mode=MODEL_MODE_PREFILL,
         rngs=self.nnx_rng,
@@ -1019,8 +1215,95 @@ class AttentionTest(parameterized.TestCase):
     mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
-        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
         msg="Logits from generic dot product and flash attention + ring context parallelism are not close.",
+    )
+
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_ring_context_parallel_grad(self):
+    """Test gradient equivalence between dot_product and flash attention + ring context parallelism"""
+
+    cfg_cp = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **self.config_arguments,
+        attention="flash",
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=False,
+        ici_context_parallelism=2,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        packing=False,
+        dtype="float32",
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_as_mha_generic = Attention(
+        config=self.cfg,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        rngs=self.nnx_rng,
+    )
+    generic_state = nnx.state(attention_as_mha_generic)
+
+    attention_as_mha_flash_cp = Attention(
+        config=cfg_cp,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=mesh_cp,
+        attention_kernel="flash",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=self.nnx_rng,
+    )
+    nnx.update(attention_as_mha_flash_cp, generic_state)
+
+    def generic_loss(lnx):
+      output, _ = attention_as_mha_generic(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    def ring_loss(lnx):
+      output, _ = attention_as_mha_flash_cp(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    generic_grad = jax.grad(generic_loss)(lnx)
+    with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      ring_grad = jax.grad(ring_loss)(lnx)
+    generic_grad = jax.device_get(generic_grad)
+    ring_grad = jax.device_get(ring_grad)
+
+    self.assertTrue(
+        jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
+        msg="Input gradients from generic dot product and flash attention + ring context parallelism are not close.",
     )
 
   @pytest.mark.tpu_only

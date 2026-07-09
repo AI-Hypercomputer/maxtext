@@ -4,12 +4,11 @@ echo "Running 512b.sh"
 #
 # Command Flags:
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
-# DATASET_PATH (Required, unless dataset_path is already set in base.yml)
 # RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
 # PLATFORM (Optional, can be "gke" or "gce", default is "gce")
 #
 # Example to invoke this script:
-# bash src/maxtext/configs/tpu/v5p/512b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
+# bash src/maxtext/configs/tpu/v5p/512b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>"
 #
 # Example to AOT compile:
 # bash src/maxtext/configs/tpu/v5p/512b.sh EXECUTABLE=train_compile M_COMPILE_TOPOLOGY=v5p-1024 M_COMPILE_TOPOLOGY_NUM_SLICES=2
@@ -47,5 +46,5 @@ python3 -m maxtext.trainers.pre_train.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXT
     remat_policy=full global_parameter_scale=512\
     ici_fsdp_parallelism=-1 ici_tensor_parallelism=8\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
-    dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
+    use_iota_embed=true reuse_example_batch=1\
     dataset_type=synthetic gcs_metrics=true attention='flash' quantization=""

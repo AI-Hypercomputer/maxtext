@@ -191,12 +191,11 @@ def get_datasets(
           f"Each shard will be read by at most {math.ceil(dataloading_host_count / len(data_files))} hosts. "
           f"Concurrent reading by multiple hosts may cause slow down."
       )
-    min_files_per_host = len(data_files) // dataloading_host_count
-    if grain_worker_count > min_files_per_host:
+    if grain_worker_count > files_per_host:
       raise ValueError(
-          f"grain_worker_count ({grain_worker_count}) exceeds the minimum number of {data_file_type} files "
-          f"per host ({min_files_per_host} = {len(data_files)} files / {dataloading_host_count} hosts). "
-          f"Lower grain_worker_count to at most {min_files_per_host}."
+          f"grain_worker_count ({grain_worker_count}) exceeds the number of {data_file_type} files "
+          f"per host ({files_per_host}). "
+          f"Lower grain_worker_count to at most {files_per_host}."
       )
     dataset = grain.MapDataset.source(data_files)
     if shuffle:
@@ -204,9 +203,9 @@ def get_datasets(
     dataset = dataset.repeat(num_epoch)
     dataset = dataset[file_slice]
     if data_file_type == "tfrecord":
-      dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
+      dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)  # pyrefly: ignore[missing-attribute]
     else:
-      dataset = dataset.map(grain.experimental.ParquetIterDataset)
+      dataset = dataset.map(grain.experimental.ParquetIterDataset)  # pyrefly: ignore[missing-attribute]
     cycle_length = min(files_per_host, grain_num_threads)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
     if row_shard is not None:

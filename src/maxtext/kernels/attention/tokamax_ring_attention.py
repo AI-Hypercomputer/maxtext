@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tokamax ring attention helpers."""
+"""MaxText integration for Tokamax ring attention.
+
+Tokamax 0.0.12 source:
+https://github.com/openxla/tokamax/tree/4936e75/tokamax/_src/ops/experimental/tpu/splash_attention
+"""
 
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ from typing import Any
 import jax
 from jax.experimental import pallas as pl
 
-from maxtext.common.common_types import AttentionType, MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.kernels.tokamax_splash_attention import ring_attention_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
@@ -116,7 +120,6 @@ def validate_tokamax_ring_runtime(
     indexer_mask: Any = None,
     bidirectional_mask: Any = None,
     record_max_logits: bool = False,
-    attention_type: AttentionType = AttentionType.GLOBAL,
 ) -> None:
   """Validates runtime-only constraints for the MaxText ring path."""
   if model_mode != MODEL_MODE_TRAIN:
@@ -133,8 +136,6 @@ def validate_tokamax_ring_runtime(
     raise ValueError("TPU Tokamax ring attention does not support bidirectional masks.")
   if record_max_logits:
     raise NotImplementedError("TPU Tokamax ring attention does not support record_max_logits yet.")
-  if attention_type != AttentionType.GLOBAL:
-    raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
 
 
 def validate_ring_mesh_axis(

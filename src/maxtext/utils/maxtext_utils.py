@@ -95,7 +95,7 @@ def get_functional_train_with_signature(
 ):
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
-  functional_train.__name__ = "train_step"
+  functional_train.__name__ = "train_step"  # pyrefly: ignore[missing-attribute]
   if config.pure_nnx:
     in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   else:
@@ -109,7 +109,7 @@ def get_functional_train_with_signature(
 def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
-  functional_eval.__name__ = "eval_step"
+  functional_eval.__name__ = "eval_step"  # pyrefly: ignore[missing-attribute]
   if config.pure_nnx:
     in_shardings = (state_mesh_shardings, data_sharding)  # State, batch (NNX: no rng)
   else:
@@ -1392,7 +1392,7 @@ def get_abstract_param(model, config):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,  # pyrefly: ignore[no-matching-overload]
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
   )
   return abstract_vars
@@ -1491,6 +1491,7 @@ def setup_initial_state(
         checkpoint_conversion_fn=config.checkpoint_conversion_fn,
         source_checkpoint_layout=config.source_checkpoint_layout,
         expansion_factor_real_data=config.expansion_factor_real_data,
+        maxtext_config=config,
     )
 
     if restored:
@@ -2021,7 +2022,7 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
   # Convert all input arguments recursively to purely local abstract ShapeDtypeStruct objects
   # to completely bypass remote Array objects and proxy tracing overhead.
   abstract_inputs = jax.tree.map(to_abstract, train_step_inputs)
-  p_train_jaxpr = jax.make_jaxpr(unwrapped_step)(*abstract_inputs)
+  p_train_jaxpr = jax.make_jaxpr(unwrapped_step)(*abstract_inputs)  # pyrefly: ignore[no-matching-overload]
 
   local_filename = "train_step.jaxpr"
   local_path = os.path.join(config.dump_jaxpr_local_dir, local_filename)
@@ -2066,3 +2067,43 @@ def get_mesh_from_config(
     axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
 
   return Mesh(devices_array, config.mesh_axes, axis_types=axis_types)
+
+
+def prepare_kv_caches_for_scan(kv_caches, scan_length, block_len, stack=False):
+  """Groups the flat list of KV caches into block-sized tuples and optionally stacks them."""
+  if kv_caches is None:
+    return None
+
+  if not isinstance(kv_caches, list):
+    raise TypeError(f"kv_caches must be a list, got {type(kv_caches)}")
+
+  grouped = [tuple(kv_caches[i * block_len : (i + 1) * block_len]) for i in range(scan_length)]
+
+  if stack:
+    # Stack the list of tuples into a tuple of stacked PyTrees along a new leading axis
+    return jax.tree_util.tree_map(lambda *args: jnp.stack(args, axis=0), *grouped)
+  else:
+    return grouped
+
+
+def update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length, block_len, stacked=False):
+  """Updates the original flat list of KV caches from the scanned outputs."""
+  if kv_caches is None or returned_kv_cache is None:
+    return
+
+  if not isinstance(kv_caches, list):
+    raise TypeError(f"kv_caches must be a list, got {type(kv_caches)}")
+
+  if stacked:
+    # Unstack the returned tuple of stacked PyTrees back into a list of tuples
+    unstacked = [jax.tree_util.tree_map(lambda x, i=i: x[i], returned_kv_cache) for i in range(scan_length)]
+    for i in range(scan_length):
+      start_idx = i * block_len
+      for offset, updated_item in enumerate(unstacked[i]):
+        kv_caches[start_idx + offset] = updated_item
+  else:
+    # returned_kv_cache is already a list of tuples
+    for i in range(scan_length):
+      start_idx = i * block_len
+      for offset, updated_item in enumerate(returned_kv_cache[i]):
+        kv_caches[start_idx + offset] = updated_item

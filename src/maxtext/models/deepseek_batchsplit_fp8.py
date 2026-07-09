@@ -1004,7 +1004,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
     w0_pspec = nn.logical_to_mesh_axes(gating_pspec)
     wo_pspec = nn.logical_to_mesh_axes(linear_pspec)
-    ignored_axes = ("expert", "tensor", "tensor_transpose")
+    ignored_axes = ("expert", "tensor")
 
     def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
       if pspec_dim_axes is None:

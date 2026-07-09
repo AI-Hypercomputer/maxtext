@@ -498,6 +498,7 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
   # 6. Handle environment variable overrides
   cli_keys = frozenset(omegaconf.OmegaConf.to_container(cli_cfg, resolve=True).keys())
   kwargs_keys = frozenset(kwargs.keys())
+  env_keys = set()
   for k in tuple(raw_keys_dict.keys()):
     env_key = yaml_key_to_env_key(k)
     if env_key in os.environ:
@@ -513,6 +514,7 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
             "This is not allowed, unless setting `override_model_config=True`."
         )
 
+      env_keys.add(k)
       new_proposal = os.environ.get(env_key)
       original_value = raw_keys_dict.get(k)
       parser = None
@@ -551,6 +553,8 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
       compilation_cache.set_cache_dir(os.path.expanduser(pydantic_kwargs["jax_cache_dir"]))
 
   pydantic_config = types.MaxTextConfig(**pydantic_kwargs)
+  explicit_keys = set((cli_keys | kwargs_keys | env_keys) & frozenset(types.MaxTextConfig.model_fields.keys()))
+  object.__setattr__(pydantic_config, "__pydantic_fields_set__", explicit_keys)
   config = HyperParameters(pydantic_config)
 
   if config.log_config:

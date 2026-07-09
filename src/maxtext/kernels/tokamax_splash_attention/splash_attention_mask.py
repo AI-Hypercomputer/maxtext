@@ -276,11 +276,7 @@ class CausalMask(_ComputableMask):
     if not isinstance(other, type(self)):
       return NotImplemented
 
-    return (
-        self.shape == other.shape
-        and self.offset == other.offset
-        and np.array_equal(self.q_sequence, other.q_sequence)
-    )
+    return self.shape == other.shape and self.offset == other.offset and np.array_equal(self.q_sequence, other.q_sequence)
 
   def __hash__(self):
     return hash(

@@ -137,7 +137,7 @@ def global_to_local(index: OlmoNpyIndex, instance_id: int) -> Tuple[int, int]:
   if instance_id < 0 or instance_id >= index.total_instances:
     raise IndexError(f"instance_id {instance_id} out of range " f"[0, {index.total_instances})")
   starts = index._instance_offset_starts  # type: ignore[attr-defined]  # pylint: disable=protected-access
-  file_idx = bisect.bisect_right(starts, instance_id) - 1
+  file_idx = bisect.bisect_right(starts, instance_id) - 1  # pyrefly: ignore[bad-argument-type]
   local_instance = instance_id - index.files[file_idx].instance_offset
   token_offset = local_instance * index.sequence_length
   return file_idx, token_offset

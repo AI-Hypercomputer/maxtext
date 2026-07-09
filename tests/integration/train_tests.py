@@ -30,10 +30,8 @@ from tests.utils.test_helpers import (
 )
 
 
-def _small_model_base_emb_dim(decoupled, device_count):
-  """Return a tiny embedding dim divisible by local decoupled devices."""
-  if not decoupled:
-    return 28
+def _small_model_base_emb_dim(device_count):
+  """Return a tiny embedding dim divisible by local devices."""
   return ((28 + device_count - 1) // device_count) * device_count
 
 
@@ -46,7 +44,7 @@ class TrainTests(unittest.TestCase):
   dataset_path = get_test_dataset_path()
 
   _small_model_overrides = [
-      f"base_emb_dim={_small_model_base_emb_dim(decoupled, dev_count)}",
+      f"base_emb_dim={_small_model_base_emb_dim(dev_count)}",
       "base_num_query_heads=4",
       "base_num_kv_heads=4",
       "base_mlp_dim=32",
@@ -95,18 +93,6 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           "per_device_batch_size=0.25",
           "ici_tensor_parallelism=4",
-          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
-      ]
-      + _small_model_overrides,
-      "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
-          None,
-          get_test_config_path(),
-          f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
-          "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
-          "steps=2",
-          "ici_tensor_transpose_parallelism=4",
-          "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
@@ -292,6 +278,22 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_te_fp8_delayedscaling(self):
     train_main(TrainTests.CONFIGS["te_fp8_delayedscaling"] + ["attention=dot_product"])
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_fp8_delayedscaling_tsp_cgemm(self):
+    if jax.process_count() <= 1:
+      pytest.skip("Requires rank-per-GPU launch (JAX_PROCESS_COUNT > 1)")
+    if jax.local_device_count() != 1:
+      pytest.skip(f"Requires rank-per-GPU launch (local_device_count==1), " f"got {jax.local_device_count()}")
+    if not jax.distributed.is_initialized():
+      pytest.skip("Requires jax.distributed.initialize() (hardware=gpu_multiprocess)")
+
+    train_main(
+        TrainTests.CONFIGS["te_fp8_delayedscaling"]
+        + ["attention=dot_product", "ici_tensor_sequence_parallelism=2", "use_te_comm_gemm_overlap=true"]
+    )
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.integration_test

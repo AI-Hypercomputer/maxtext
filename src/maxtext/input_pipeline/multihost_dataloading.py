@@ -239,11 +239,11 @@ class RemoteIterator:
       if jax.process_index() == 0:
         directory.mkdir(parents=True, exist_ok=True)
         filename = directory / "process_0.json"
-        filename.write_text(json.dumps(self.iterator.get_state(), indent=4))
+        filename.write_text(json.dumps(self.iterator.get_state(), indent=4))  # pyrefly: ignore[missing-attribute]
       return step_array
     directory.mkdir(parents=True, exist_ok=True)
     filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
-    state = json.dumps(self.iterator.get_state(), indent=4)
+    state = json.dumps(self.iterator.get_state(), indent=4)  # pyrefly: ignore[missing-attribute]
     filename.write_text(state)
     return step_array
 
@@ -255,7 +255,7 @@ class RemoteIterator:
     else:
       filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
     state = json.loads(filename.read_text())
-    self.iterator.set_state(state)
+    self.iterator.set_state(state)  # pyrefly: ignore[missing-attribute]
     return step_array
 
 
@@ -273,11 +273,11 @@ class RemoteIteratorWrapper:
     # named "local_iterator" to match MultiHostDataLoadIterator's interface.
     remote_iterator_cls = colocated_python.colocated_python_class(RemoteIterator)
     self.local_iterator = remote_iterator_cls(
-        get_ds_fn,
+        get_ds_fn,  # pyrefly: ignore[bad-argument-count]
         preprocessing_fn,
         global_shape,
         checkpoint_path,
-        elastic=elastic,
+        elastic=elastic,  # pyrefly: ignore[unexpected-keyword]
     )
     max_logging.log("RemoteIteratorWrapper initiated")
 
@@ -285,10 +285,10 @@ class RemoteIteratorWrapper:
     return self
 
   def reset(self):
-    self.local_iterator.reset()
+    self.local_iterator.reset()  # pyrefly: ignore[missing-attribute]
 
   def __next__(self):
-    out = self.local_iterator.get_next(self.dummy_array)
+    out = self.local_iterator.get_next(self.dummy_array)  # pyrefly: ignore[missing-attribute]
     # use tree_map is out is a dict
     return jax.device_put(out, self.tpu_sharding)
 
@@ -296,10 +296,10 @@ class RemoteIteratorWrapper:
     replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
     step_array = jnp.array(step, dtype=jnp.int32)
     step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.save_state(step_array)
+    self.local_iterator.save_state(step_array)  # pyrefly: ignore[missing-attribute]
 
   def restore_state(self, step):
     replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
     step_array = jnp.array(step, dtype=jnp.int32)
     step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.restore_state(step_array)
+    self.local_iterator.restore_state(step_array)  # pyrefly: ignore[missing-attribute]

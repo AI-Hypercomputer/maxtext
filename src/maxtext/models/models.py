@@ -102,9 +102,9 @@ class TransformerLinenPure(nn.Module):
       self.mtp_block = multi_token_prediction_block_as_linen(
           config=self.config,
           mesh=self.mesh,
-          transformer_layer_module=mtp_layer_nnx,
-          decoder=self.decoder,
-          rngs=self.make_rng("mtp_block"),
+          transformer_layer_module=mtp_layer_nnx,  # pyrefly: ignore[bad-argument-type]
+          decoder=self.decoder,  # pyrefly: ignore[bad-argument-type]
+          rngs=self.make_rng("mtp_block"),  # pyrefly: ignore[bad-argument-type]
       )
 
   def logits_from_hidden_states_for_vocab_tiling(self, hidden_states, deterministic, model_mode):
@@ -163,7 +163,7 @@ class TransformerLinenPure(nn.Module):
     deepstack_visual_embeds = None
 
     if self.config.use_multimodal and encoder_images is not None:
-      image_embeddings, deepstack_visual_embeds = self.vision_encoder(
+      image_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_images, deterministic=not enable_dropout
       )
       bidirectional_mask_image = mm_processor.get_bidirectional_mask_vision(
@@ -171,7 +171,7 @@ class TransformerLinenPure(nn.Module):
       )
 
     if self.config.use_multimodal and encoder_videos is not None:
-      video_embeddings, deepstack_visual_embeds = self.vision_encoder(
+      video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_videos, deterministic=not enable_dropout
       )
       bidirectional_mask_video = mm_processor.get_bidirectional_mask_vision(
@@ -384,7 +384,7 @@ class Transformer(nnx.Module):
       dummy_attention_metadata = None
 
     if not cfg.pure_nnx_decoder:
-      self.decoder.lazy_init(
+      self.decoder.lazy_init(  # pyrefly: ignore[missing-attribute]
           shared_embedding=self.token_embedder,
           decoder_input_tokens=dummy_decoder_input_tokens,
           decoder_positions=dummy_decoder_positions,
@@ -490,7 +490,7 @@ class Transformer(nnx.Module):
     audio_embeddings = None
     deepstack_visual_embeds = None
     if self.config.use_multimodal and encoder_images is not None:
-      image_embeddings, deepstack_visual_embeds = self.vision_encoder(
+      image_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_images, deterministic=not enable_dropout
       )
       bidirectional_mask_image = mm_processor.get_bidirectional_mask_vision(
@@ -498,7 +498,7 @@ class Transformer(nnx.Module):
       )
 
     if self.config.use_multimodal and encoder_videos is not None:
-      video_embeddings, deepstack_visual_embeds = self.vision_encoder(
+      video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_videos, deterministic=not enable_dropout
       )
       bidirectional_mask_video = mm_processor.get_bidirectional_mask_vision(
@@ -563,7 +563,7 @@ class Transformer(nnx.Module):
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
-          mutable=mutable_collections,
+          mutable=mutable_collections,  # pyrefly: ignore[unexpected-keyword]
       )  # pytype: disable=wrong-keyword-args
 
     # If we are initializing the model AND MTP is enabled, we must create

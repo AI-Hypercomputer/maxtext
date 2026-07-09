@@ -13,5 +13,6 @@
 # limitations under the License.
 """Tokamax SplashAttention runtime.
 
-These modules are adapted from OpenXLA Tokamax SplashAttention.
+Adapted from OpenXLA Tokamax 0.0.12:
+https://github.com/openxla/tokamax/tree/4936e75/tokamax/_src/ops/experimental/tpu/splash_attention
 """

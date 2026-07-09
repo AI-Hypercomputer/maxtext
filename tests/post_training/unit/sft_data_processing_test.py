@@ -331,7 +331,9 @@ class SFTDataProcessingTest(unittest.TestCase):
         ]
     )
     if exit_code != 0:
-      raise ValueError(f"Download tokenizer with gcloud storage cp failed with exit code: {exit_code}")
+      raise unittest.SkipTest(
+          f"Skipping SFTDataProcessingTest: Download tokenizer with gcloud storage cp failed with exit code: {exit_code}"
+      )
 
   def setUp(self):
     super().setUp()
@@ -504,7 +506,7 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
           ]
       )
       if exit_code != 0:
-        raise ValueError("Failed to download llama tokenizer")
+        raise unittest.SkipTest("Skipping SFTChatTemplateLogicTest: Failed to download llama tokenizer")
 
   def setUp(self):
     super().setUp()

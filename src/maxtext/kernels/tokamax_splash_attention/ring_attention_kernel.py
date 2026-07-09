@@ -122,9 +122,7 @@ def _ring_attention_forward(
 
     current_kv_shard_idx = (ring_axis_idx - i) % ring_axis_size
     local_fwd_mask_info = _dynamic_slice_mask_info(fwd_mask_info, current_kv_shard_idx, ring_axis_size)
-    local_fwd_mask_info = _offset_q_sequence_for_kv_shard(
-        local_fwd_mask_info, current_kv_shard_idx, k_current.shape[-2]
-    )
+    local_fwd_mask_info = _offset_q_sequence_for_kv_shard(local_fwd_mask_info, current_kv_shard_idx, k_current.shape[-2])
     k_next = shift(k_current)
     v_next = shift(v_current)
 
@@ -233,9 +231,7 @@ def _ring_attention_bwd(
 
     current_kv_shard_idx = (ring_axis_idx - i) % ring_axis_size
     local_dkv_mask_info = _dynamic_slice_mask_info(dkv_mask_info, current_kv_shard_idx, ring_axis_size)
-    local_dkv_mask_info = _offset_q_sequence_for_kv_shard(
-        local_dkv_mask_info, current_kv_shard_idx, k_current.shape[-2]
-    )
+    local_dkv_mask_info = _offset_q_sequence_for_kv_shard(local_dkv_mask_info, current_kv_shard_idx, k_current.shape[-2])
     if segment_ids is not None:
       kv_segment_ids_next = shift(segment_ids_current.kv)
       segment_ids_next = SegmentIds(segment_ids.q, kv_segment_ids_next)

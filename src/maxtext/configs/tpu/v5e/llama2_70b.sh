@@ -3,11 +3,10 @@
 #
 # Command Flags:
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
-# DATASET_PATH (Required, unless dataset_path is already set in base.yml)
 # RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
 #
 # Example to invoke this script:
-# bash src/maxtext/configs/tpu/v5e/llama2_70b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
+# bash src/maxtext/configs/tpu/v5e/llama2_70b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>"
 #
 # Example to AOT compile:
 # bash src/maxtext/configs/tpu/v5e/llama2_70b.sh EXECUTABLE=train_compile M_COMPILE_TOPOLOGY=v5e-256 M_COMPILE_TOPOLOGY_NUM_SLICES=2
@@ -42,6 +41,6 @@ fi
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 
 python3 -m maxtext.trainers.pre_train.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=llama2-70b\
-  base_output_directory=$OUTPUT_PATH dataset_path=${DATASET_PATH}\
+  base_output_directory=$OUTPUT_PATH dataset_type=synthetic\
   tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/tokenizer.llama2 per_device_batch_size=2 remat_policy=qkv_proj_offloaded\
   steps=15 enable_checkpointing=false use_iota_embed=true
