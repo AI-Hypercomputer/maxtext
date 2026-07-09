@@ -400,8 +400,8 @@ def run_benchmarks(config):
           config,
           multisampling_prefill_executable[prefill_length],
           params,
-          prefill_tokens[prefill_length],
-          prefill_true_lengths[prefill_length],
+          prefill_tokens[prefill_length],  # pyrefly: ignore[unbound-name]
+          prefill_true_lengths[prefill_length],  # pyrefly: ignore[unbound-name]
           benchmark_loop_iters,
       )
 

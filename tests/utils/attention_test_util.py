@@ -215,8 +215,8 @@ def forward_with_context_expert_parallelism(
         nn_partitioning.get_axis_rules(),
     )
     pos_spec = nn_partitioning.logical_to_mesh_axes((None, length_axis), nn_partitioning.get_axis_rules())
-    lnx_sharding = NamedSharding(mesh_cp, lnx_spec)
-    pos_sharding = NamedSharding(mesh_cp, pos_spec)
+    lnx_sharding = NamedSharding(mesh_cp, lnx_spec)  # pyrefly: ignore[bad-argument-type]
+    pos_sharding = NamedSharding(mesh_cp, pos_spec)  # pyrefly: ignore[bad-argument-type]
 
     lnx = jax.device_put(lnx, lnx_sharding)
     decoder_segment_ids = jax.device_put(decoder_segment_ids, pos_sharding)

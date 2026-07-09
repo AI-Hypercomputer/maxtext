@@ -153,7 +153,7 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
       hf_indices = list(range(block_idx, num_scanned, attention_pattern_length))
       for mx, hf in text_params:
         key = f"params-decoder-layers-layers_{block_idx}-{mx}"
-        mapping[key] = [f"model.language_model.layers.{i}.{hf}" for i in hf_indices]
+        mapping[key] = [f"model.language_model.layers.{i}.{hf}" for i in hf_indices]  # pyrefly: ignore[bad-assignment]
 
     # Remainder layers (unscanned): params-decoder-layers_remainder-layers_{rem_idx}-{param}
     if num_remaining > 0:
@@ -623,7 +623,7 @@ def QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
 
   if scan_layers:
     # This block handles scanned layers for both dense and MoE models.
-    mapping.update(
+    mapping.update(  # pyrefly: ignore[no-matching-overload]
         {
             "params-decoder-layers-pre_self_attention_layer_norm-scale": [
                 f"model.layers.{i}.input_layernorm.weight" for i in range(n_layers)
@@ -663,7 +663,7 @@ def QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
     if num_experts > 1:
       # For scanned MoE, we create a nested list: [[e0_l0, e0_l1..], [e1_l0, e1_l1..]..]
       # This follows the (experts, layers, ...) tensor layout.
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               "params-decoder-layers-moe_block-gate-kernel": [
                   f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)
@@ -683,7 +683,7 @@ def QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
           }
       )
     else:  # Dense MLP
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               "params-decoder-layers-mlp-wi_0-kernel": [
                   f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)
@@ -714,7 +714,7 @@ def QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
       )
       if num_experts > 1:
         # For each unscanned MoE layer, map the MaxText parameter to a 1D list of all expert weights for that layer.
-        mapping.update(
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 f"params-decoder-layers_{i}-moe_block-gate-kernel": f"model.layers.{i}.mlp.gate.weight",
                 f"params-decoder-layers_{i}-moe_block-wi_0": [
@@ -871,10 +871,10 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       prefix = f"params-decoder-layers-layer_{block_idx}"
 
       # Layer norms
-      mapping[f"{prefix}-input_layernorm-scale"] = [
+      mapping[f"{prefix}-input_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
           f"model.language_model.layers.{i}.input_layernorm.weight" for i in hf_indices
       ]
-      mapping[f"{prefix}-post_attention_layernorm-scale"] = [
+      mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
           f"model.language_model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
       ]
 
@@ -882,7 +882,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
 
       if is_full_attention_layer:
-        mapping.update(
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 f"{prefix}-attention-attention-query-kernel": [
                     f"model.language_model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices
@@ -906,7 +906,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
         )
       else:
         # Linear/Hybrid Attention Block
-        mapping.update(
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 # Provide a tuple of HF keys so MaxText concatenates them into qkvz
                 f"{prefix}-attention-in_proj_qkvz-kernel": [
@@ -941,7 +941,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
         )
 
       # 3. Handle MLP: Gates and Shared Experts
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-mlp-routed_experts-gate-kernel": [
                   f"model.language_model.layers.{i}.mlp.gate.weight" for i in hf_indices
@@ -962,7 +962,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       )
 
       # 4. Handle MoE Routed Experts
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-mlp-routed_experts-wo": [
                   f"model.language_model.layers.{i}.mlp.experts.down_proj" for i in hf_indices
@@ -999,7 +999,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
         )
       else:
         # Linear/Hybrid Attention Block (Unscanned)
-        mapping.update(
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 # Provide a tuple of HF keys so MaxText concatenates them into qkvz
                 f"{prefix}-attention-in_proj_qkvz-kernel": (
@@ -1033,7 +1033,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       )
 
       # MoE Routed Experts
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-mlp-routed_experts-wo": f"model.language_model.layers.{i}.mlp.experts.down_proj",
               (
@@ -1255,7 +1255,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
 
     if is_full_attention_layer:
       for key in ["query", "key", "value", "out"]:
-        hooks[f"{prefix}-attention-attention-{key}-kernel"] = reshape_kernel
+        hooks[f"{prefix}-attention-attention-{key}-kernel"] = reshape_kernel  # pyrefly: ignore[bad-assignment]
     else:
       hooks[f"{prefix}-attention-in_proj_qkvz-kernel"] = concat_qkvz_and_transpose
       hooks[f"{prefix}-attention-in_proj_ba-kernel"] = concat_ba_and_transpose
@@ -1269,7 +1269,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
 
-    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = process_wi_0_wi_1
+    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
     hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
 
   # Vision hooks for Qwen3.5
@@ -1340,23 +1340,23 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         return input_tensor.T.reshape(target_shape)
 
     # Apply vision hooks
-    hooks["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = reshape_conv3d_patch_embed
+    hooks["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = reshape_conv3d_patch_embed  # pyrefly: ignore[bad-assignment]
 
     for i in range(n_vision_layers):
       prefix = f"params-vision_encoder-Qwen3_5MoeVisionEncoder_0-blocks_{i}"
-      hooks[f"{prefix}-attn-attn-query-kernel"] = split_qkv_query
-      hooks[f"{prefix}-attn-attn-query-bias"] = split_qkv_bias_query
-      hooks[f"{prefix}-attn-attn-key-kernel"] = split_qkv_key
-      hooks[f"{prefix}-attn-attn-key-bias"] = split_qkv_bias_key
-      hooks[f"{prefix}-attn-attn-value-kernel"] = split_qkv_value
-      hooks[f"{prefix}-attn-attn-value-bias"] = split_qkv_bias_value
-      hooks[f"{prefix}-attn-attn-out-kernel"] = reshape_vision_attn_out
-      hooks[f"{prefix}-mlp-kernel"] = reshape_kernel_vision
-      hooks[f"{prefix}-mlp_out-kernel"] = reshape_kernel_vision
+      hooks[f"{prefix}-attn-attn-query-kernel"] = split_qkv_query  # pyrefly: ignore[bad-assignment]
+      hooks[f"{prefix}-attn-attn-query-bias"] = split_qkv_bias_query  # pyrefly: ignore[bad-assignment]
+      hooks[f"{prefix}-attn-attn-key-kernel"] = split_qkv_key  # pyrefly: ignore[bad-assignment]
+      hooks[f"{prefix}-attn-attn-key-bias"] = split_qkv_bias_key  # pyrefly: ignore[bad-assignment]
+      hooks[f"{prefix}-attn-attn-value-kernel"] = split_qkv_value  # pyrefly: ignore[bad-assignment]
+      hooks[f"{prefix}-attn-attn-value-bias"] = split_qkv_bias_value  # pyrefly: ignore[bad-assignment]
+      hooks[f"{prefix}-attn-attn-out-kernel"] = reshape_vision_attn_out  # pyrefly: ignore[bad-assignment]
+      hooks[f"{prefix}-mlp-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+      hooks[f"{prefix}-mlp_out-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
 
     # Vision projector
-    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = reshape_kernel_vision
-    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = reshape_kernel_vision
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
 
   return hooks
 
@@ -1384,8 +1384,8 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       prefix = f"params-decoder-layers-layer_{block_idx}"
 
       # Layer norms
-      mapping[f"{prefix}-input_layernorm-scale"] = [f"model.layers.{i}.input_layernorm.weight" for i in hf_indices]
-      mapping[f"{prefix}-post_attention_layernorm-scale"] = [
+      mapping[f"{prefix}-input_layernorm-scale"] = [f"model.layers.{i}.input_layernorm.weight" for i in hf_indices]  # pyrefly: ignore[bad-assignment]
+      mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
       ]
 
@@ -1393,7 +1393,7 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
 
       if is_full_attention_layer:
-        mapping.update(
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 f"{prefix}-attention-attention-query-kernel": [
                     f"model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices
@@ -1417,7 +1417,7 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
         )
       else:
         # Linear/Hybrid Attention Block
-        mapping.update(
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 f"{prefix}-attention-in_proj_qkvz-kernel": [
                     f"model.layers.{i}.linear_attn.in_proj_qkvz.weight" for i in hf_indices
@@ -1438,7 +1438,7 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
         )
 
       # 3. Handle MLP: Gates and Shared Experts
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-mlp-routed_experts-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in hf_indices],
               f"{prefix}-mlp-shared_expert-wi_0-kernel": [
@@ -1457,7 +1457,7 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       )
 
       # 4. Handle MoE Routed Experts
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-mlp-routed_experts-wi_0": [
                   [f"model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for i in hf_indices] for e in range(num_experts)
@@ -1521,7 +1521,7 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       )
 
       # MoE Routed Experts (List of expert weights for this specific layer)
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-mlp-routed_experts-wi_0": [
                   f"model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for e in range(num_experts)
@@ -1576,7 +1576,7 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
 
     if is_full_attention_layer:
       for key in ["query", "key", "value", "out"]:
-        hooks[f"{prefix}-attention-attention-{key}-kernel"] = reshape_kernel
+        hooks[f"{prefix}-attention-attention-{key}-kernel"] = reshape_kernel  # pyrefly: ignore[bad-assignment]
     else:
       hooks[f"{prefix}-attention-in_proj_qkvz-kernel"] = transpose
       hooks[f"{prefix}-attention-in_proj_ba-kernel"] = transpose
@@ -1663,17 +1663,17 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   # scan
   if scan_layers:
     for maxtext_key, hf_key in dense_layer_keys.items():
-      mapping[f"params-decoder-dense_layers-{maxtext_key}"] = [
+      mapping[f"params-decoder-dense_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers)
       ]
 
     for maxtext_key, hf_key in moe_layer_keys.items():
-      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [
+      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)
       ]
 
     for maxtext_key, hf_key in moe_expert_keys.items():
-      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [
+      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
           [f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)]
           for e in range(num_experts)
       ]
@@ -1690,7 +1690,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
         mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
 
       for maxtext_key, hf_key in moe_expert_keys.items():
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
             f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
         ]
   return mapping
@@ -1833,7 +1833,7 @@ def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
               f"model.layers.{i}.mlp.experts.gate_up_proj_bias" for i in hf_indices
           ],
       }
-      mapping.update(block_mapping)
+      mapping.update(block_mapping)  # pyrefly: ignore[no-matching-overload]
 
   else:
     # Unscan
@@ -1868,7 +1868,7 @@ def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
               f"{prefix}-GptOssMlp-wi_1_bias",
           ): f"model.layers.{i}.mlp.experts.gate_up_proj_bias",
       }
-      mapping.update(layer_mapping)
+      mapping.update(layer_mapping)  # pyrefly: ignore[no-matching-overload]
 
   return mapping
 
@@ -1916,7 +1916,7 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     """
     if saving_to_hf:
       wi_0, wi_1 = input_tensor
-      wi_0_1 = np.empty(target_shape, dtype=wi_0.dtype)
+      wi_0_1 = np.empty(target_shape, dtype=wi_0.dtype)  # pyrefly: ignore[no-matching-overload]
       wi_0_1[..., ::2] = wi_0
       wi_0_1[..., 1::2] = wi_1
       return wi_0_1
@@ -1936,14 +1936,14 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     prefix = f"params-decoder-layers-layers_{idx}" if scan_layers else f"params-decoder-layers_{idx}"
     # Attention Kernels & Biases
     for key in ["query", "key", "value"]:
-      hooks[f"{prefix}-GptOssAttention-{key}-kernel"] = reshape_kernel
+      hooks[f"{prefix}-GptOssAttention-{key}-kernel"] = reshape_kernel  # pyrefly: ignore[bad-assignment]
       hooks[f"{prefix}-GptOssAttention-{key}-bias"] = reshape_bias
-    hooks[f"{prefix}-GptOssAttention-out-kernel"] = reshape_kernel
+    hooks[f"{prefix}-GptOssAttention-out-kernel"] = reshape_kernel  # pyrefly: ignore[bad-assignment]
     # MLP Kernels & Biases
     hooks[f"{prefix}-GptOssMlp-gate-kernel"] = transpose
     # `composite_mt_key`: A hook for combining multiple MaxText params.
-    hooks[(f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1")] = interleave
-    hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = interleave
+    hooks[(f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1")] = interleave  # pyrefly: ignore[unsupported-operation]
+    hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = interleave  # pyrefly: ignore[unsupported-operation]
 
   return hooks
 
@@ -2407,31 +2407,31 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   }
 
   if scan_layers:
-    mapping["params-decoder-layers-self_attention-query-kernel"] = [
+    mapping["params-decoder-layers-self_attention-query-kernel"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.self_attn.q_proj.weight" for layer_idx in range(n_layers)
     ]
-    mapping["params-decoder-layers-self_attention-key-kernel"] = [
+    mapping["params-decoder-layers-self_attention-key-kernel"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.self_attn.k_proj.weight" for layer_idx in range(n_layers)
     ]
-    mapping["params-decoder-layers-self_attention-value-kernel"] = [
+    mapping["params-decoder-layers-self_attention-value-kernel"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.self_attn.v_proj.weight" for layer_idx in range(n_layers)
     ]
-    mapping["params-decoder-layers-self_attention-out-kernel"] = [
+    mapping["params-decoder-layers-self_attention-out-kernel"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.self_attn.o_proj.weight" for layer_idx in range(n_layers)
     ]
-    mapping["params-decoder-layers-mlp-wi_0-kernel"] = [
+    mapping["params-decoder-layers-mlp-wi_0-kernel"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.mlp.gate_proj.weight" for layer_idx in range(n_layers)
     ]
-    mapping["params-decoder-layers-mlp-wi_1-kernel"] = [
+    mapping["params-decoder-layers-mlp-wi_1-kernel"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.mlp.up_proj.weight" for layer_idx in range(n_layers)
     ]
-    mapping["params-decoder-layers-mlp-wo-kernel"] = [
+    mapping["params-decoder-layers-mlp-wo-kernel"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.mlp.down_proj.weight" for layer_idx in range(n_layers)
     ]
-    mapping["params-decoder-layers-pre_self_attention_layer_norm-scale"] = [
+    mapping["params-decoder-layers-pre_self_attention_layer_norm-scale"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.input_layernorm.weight" for layer_idx in range(n_layers)
     ]
-    mapping["params-decoder-layers-post_self_attention_layer_norm-scale"] = [
+    mapping["params-decoder-layers-post_self_attention_layer_norm-scale"] = [  # pyrefly: ignore[bad-assignment]
         f"model.layers.{layer_idx}.post_attention_layernorm.weight" for layer_idx in range(n_layers)
     ]
   else:
@@ -2816,7 +2816,7 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
     for layer_in_block in range(attention_pattern_length):
       hf_indices = list(range(layer_in_block, num_scanned, attention_pattern_length))
       prefix = f"params-decoder-scanned_blocks-layers_{layer_in_block}"
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-self_attention-query-kernel": [
                   f"{text_base}.layers.{i}.self_attn.q_proj.weight" for i in hf_indices
@@ -2841,14 +2841,14 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
           }
       )
       if maxtext_config.v_norm_with_scale:
-        mapping.update(
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 f"{prefix}-self_attention-value_norm-scale": [
                     f"{text_base}.layers.{i}.self_attn.v_norm.weight" for i in hf_indices
                 ]
             }
         )
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-pre_self_attention_norm-scale": [
                   f"{text_base}.layers.{i}.input_layernorm.weight" for i in hf_indices
@@ -2946,7 +2946,7 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
         )
         if maxtext_config.v_norm_with_scale:
           mapping.update({f"{prefix}-self_attention-value_norm-scale": (f"{hf_prefix}.self_attn.v_norm.weight")})
-        mapping.update(
+        mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 f"{prefix}-pre_self_attention_norm-scale": (f"{hf_prefix}.input_layernorm.weight"),
                 f"{prefix}-post_self_attention_norm-scale": (f"{hf_prefix}.post_attention_layernorm.weight"),
@@ -2998,7 +2998,7 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
       is_global = i % 6 == 5
       num_experts = tcfg.get("num_experts")
       num_experts = num_experts if num_experts is not None else 1
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-self_attention-query-kernel": (f"{hf_prefix}.self_attn.q_proj.weight"),
               f"{prefix}-self_attention-key-kernel": (f"{hf_prefix}.self_attn.k_proj.weight"),
@@ -3012,7 +3012,7 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
       )
       if maxtext_config.v_norm_with_scale:
         mapping.update({f"{prefix}-self_attention-value_norm-scale": (f"{hf_prefix}.self_attn.v_norm.weight")})
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-pre_self_attention_norm-scale": (f"{hf_prefix}.input_layernorm.weight"),
               f"{prefix}-post_self_attention_norm-scale": (f"{hf_prefix}.post_attention_layernorm.weight"),
@@ -3111,7 +3111,7 @@ def GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers
         }
     )
     if not is_shared:
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               f"{prefix}-self_attention-key-kernel": f"{hf_prefix}.self_attn.k_proj.weight",
               f"{prefix}-self_attention-value-kernel": f"{hf_prefix}.self_attn.v_proj.weight",
@@ -3527,7 +3527,7 @@ def OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
       hf_indices = range(cycle_idx, n_layers, layer_cycle_interval)
       prefix = f"params-decoder-layers-layers_{cycle_idx}"
 
-      mapping.update(
+      mapping.update(  # pyrefly: ignore[no-matching-overload]
           {
               # Attention Projections
               f"{prefix}-attention-query-kernel": [f"model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices],
@@ -3791,9 +3791,9 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       q_hf = input_tensor[:hidden_size, :]
       k_hf = input_tensor[hidden_size : 2 * hidden_size, :]
       v_hf = input_tensor[2 * hidden_size :, :]
-      q_mt = q_hf.T.reshape(target_shape[0])
-      k_mt = k_hf.T.reshape(target_shape[1])
-      v_mt = v_hf.T.reshape(target_shape[2])
+      q_mt = q_hf.T.reshape(target_shape[0])  # pyrefly: ignore[unsupported-operation]
+      k_mt = k_hf.T.reshape(target_shape[1])  # pyrefly: ignore[unsupported-operation]
+      v_mt = v_hf.T.reshape(target_shape[2])  # pyrefly: ignore[unsupported-operation]
       return np.stack([q_mt, k_mt, v_mt], axis=-1)
 
   def process_qkv_bias_vision(input_tensor, target_shape=None):
@@ -3808,9 +3808,9 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       qb_hf = input_tensor[:hidden_size]
       kb_hf = input_tensor[hidden_size : 2 * hidden_size]
       vb_hf = input_tensor[2 * hidden_size :]
-      qb_mt = qb_hf.reshape(target_shape[0])
-      kb_mt = kb_hf.reshape(target_shape[1])
-      vb_mt = vb_hf.reshape(target_shape[2])
+      qb_mt = qb_hf.reshape(target_shape[0])  # pyrefly: ignore[unsupported-operation]
+      kb_mt = kb_hf.reshape(target_shape[1])  # pyrefly: ignore[unsupported-operation]
+      vb_mt = vb_hf.reshape(target_shape[2])  # pyrefly: ignore[unsupported-operation]
       return np.stack([qb_mt, kb_mt, vb_mt], axis=-1)
 
   def reshape_vision_attn_out(input_tensor, target_shape):

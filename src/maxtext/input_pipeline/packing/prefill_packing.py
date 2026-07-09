@@ -330,7 +330,7 @@ class BatchedPrefillProcessor:
       prompt_logp_numpy = np.array(decode_state["prompt_logp"])
     for i in range(bucket.count):
       if return_prompt_logp:
-        prompt_logp = prompt_logp_numpy[:, offsets[i] : offsets[i] + lengths[i]]
+        prompt_logp = prompt_logp_numpy[:, offsets[i] : offsets[i] + lengths[i]]  # pyrefly: ignore[unsupported-operation]
         prefill_result.append(PrefillResult(first_tokens[i], bucket.slots[i], prompt_logp))
       else:
         prefill_result.append(PrefillResult(first_tokens[i], bucket.slots[i], None))

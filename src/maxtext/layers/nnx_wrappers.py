@@ -237,7 +237,7 @@ class ToNNX(Module):
     maybe_method = getattr(type(self.to_nnx__module), name, None)
     if callable(maybe_method):
       method = partial(self.__call__, method=maybe_method)
-      method.__self__ = self
+      method.__self__ = self  # pyrefly: ignore[missing-attribute]
       return method
     return super().__getattribute__(name)
 
@@ -361,14 +361,14 @@ def _fix_for_qwix_quantization(module: Module):
       if not linen.module._context.module_stack:  # pylint: disable=W0212
         return call_fn(*args, **kwargs)
       nn_module = linen.module._context.module_stack[-1]  # pylint: disable=W0212
-      old_path = nn_module.path
+      old_path = nn_module.path  # pyrefly: ignore[missing-attribute]
       # We modify the path of the current nn module in place. This is a little
       # bit hacky but should be good as a temporary solution.
-      nn_module.scope.path += (name,)
+      nn_module.scope.path += (name,)  # pyrefly: ignore[missing-attribute]
       try:
         return call_fn(*args, **kwargs)
       finally:
-        nn_module.scope.path = old_path
+        nn_module.scope.path = old_path  # pyrefly: ignore[missing-attribute]
 
     return wrapped
 
@@ -556,7 +556,7 @@ class ToLinen(linen.Module):
     maybe_method = getattr(self.nnx_class, name, None)
     if callable(maybe_method):
       method = partial(self.__call__, nnx_method=maybe_method)
-      method.__self__ = self
+      method.__self__ = self  # pyrefly: ignore[missing-attribute]
       return method
     return super().__getattribute__(name)
 
@@ -701,12 +701,12 @@ def to_linen_class(
 
     def __init_subclass__(cls, **kwargs):
       super().__init_subclass__(**kwargs)
-      cls.__init__ = __init__
+      cls.__init__ = __init__  # pyrefly: ignore[bad-assignment]
 
   ToLinenPartial.__name__ = class_name
   ToLinenPartial.__qualname__ = class_name
 
-  ToLinenPartial.__init__ = __init__
+  ToLinenPartial.__init__ = __init__  # pyrefly: ignore[bad-assignment]
   ToLinenPartial.module_class = base_nnx_class
 
   return ToLinenPartial

@@ -19,7 +19,7 @@ This config defines the architectural configurations of the Hugging Face version
 
 import transformers
 
-if transformers.__version__ >= "5.0.0":
+if transformers.__version__ >= "5.0.0":  # pyrefly: ignore[missing-attribute]
   from transformers.configuration_utils import PreTrainedConfig as PTConfig  # pytype: disable=import-error
 else:
   from transformers.configuration_utils import PretrainedConfig as PTConfig
@@ -120,7 +120,7 @@ gemma4_26b_dict = {
 
 gemma4_31b_dict = gemma4_26b_dict.copy()
 gemma4_31b_dict["text_config"] = gemma4_26b_dict["text_config"].copy()
-gemma4_31b_dict["text_config"].update(
+gemma4_31b_dict["text_config"].update(  # pyrefly: ignore[no-matching-overload]
     {
         "enable_moe_block": False,
         "hidden_size": 5376,
@@ -265,10 +265,10 @@ gemma4_e4b_dict["text_config"].update(
 
 try:
   # Will execute successfully if Transformers is updated with Gemma 4 support
-  gemma4_26b_config = transformers.Gemma4Config(**gemma4_26b_dict)
-  gemma4_31b_config = transformers.Gemma4Config(**gemma4_31b_dict)
-  gemma4_e2b_config = transformers.Gemma4Config(**gemma4_e2b_dict)
-  gemma4_e4b_config = transformers.Gemma4Config(**gemma4_e4b_dict)
+  gemma4_26b_config = transformers.Gemma4Config(**gemma4_26b_dict)  # pyrefly: ignore[missing-attribute]
+  gemma4_31b_config = transformers.Gemma4Config(**gemma4_31b_dict)  # pyrefly: ignore[missing-attribute]
+  gemma4_e2b_config = transformers.Gemma4Config(**gemma4_e2b_dict)  # pyrefly: ignore[missing-attribute]
+  gemma4_e4b_config = transformers.Gemma4Config(**gemma4_e4b_dict)  # pyrefly: ignore[missing-attribute]
 except AttributeError:
   # Graceful fallback to raw dict-based PTConfig if Gemma 4 natively is missing
   gemma4_26b_config = PTConfig(**gemma4_26b_dict)  # pytype: disable=wrong-arg-types
@@ -1011,7 +1011,7 @@ deepseek32_671b_dict = {
 
 
 # TODO(shuningjin): replace with DeepseekV32Config when available in transformers library
-class DeepseekV32Config(PTConfig):
+class DeepseekV32Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
   model_type = "deepseek_v32"
 
   def __init__(self, **kwargs):
@@ -1089,7 +1089,7 @@ gpt_oss_20b_dict = {
     "use_cache": True,
     "vocab_size": 201088,
 }
-gpt_oss_20b_config = transformers.GptOssConfig(**gpt_oss_20b_dict)
+gpt_oss_20b_config = transformers.GptOssConfig(**gpt_oss_20b_dict)  # pyrefly: ignore[bad-argument-type]
 
 # from https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
@@ -1171,7 +1171,7 @@ gpt_oss_120b_dict = {
     "use_cache": True,
     "vocab_size": 201088,
 }
-gpt_oss_120b_config = transformers.GptOssConfig(**gpt_oss_120b_dict)
+gpt_oss_120b_config = transformers.GptOssConfig(**gpt_oss_120b_dict)  # pyrefly: ignore[bad-argument-type]
 
 
 qwen3_omni_30b_a3b_config = transformers.Qwen3OmniMoeConfig(
@@ -1481,8 +1481,8 @@ qwen3_5_35b_a3b_dict = {
 
 try:
   # Will execute successfully if Transformers is updated with Qwen3.5 support
-  qwen3_5_35b_a3b_config = transformers.Qwen3_5MoeConfig(**qwen3_5_35b_a3b_dict)
-  qwen3_5_397b_a17b_config = transformers.Qwen3_5MoeConfig(**qwen3_5_397b_a17b_dict)
+  qwen3_5_35b_a3b_config = transformers.Qwen3_5MoeConfig(**qwen3_5_35b_a3b_dict)  # pyrefly: ignore[missing-attribute]
+  qwen3_5_397b_a17b_config = transformers.Qwen3_5MoeConfig(**qwen3_5_397b_a17b_dict)  # pyrefly: ignore[missing-attribute]
 except AttributeError:
   qwen3_5_35b_a3b_config = PTConfig(**qwen3_5_35b_a3b_dict)  # pytype: disable=wrong-arg-types
   qwen3_5_397b_a17b_config = PTConfig(**qwen3_5_397b_a17b_dict)  # pytype: disable=wrong-arg-types

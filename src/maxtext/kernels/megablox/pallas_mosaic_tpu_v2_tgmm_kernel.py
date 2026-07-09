@@ -252,7 +252,7 @@ def make_tgmm_configs(
         dims,
         lhs_cfgs,
         rhs_cfgs,
-        vmem_limit_bytes,
+        vmem_limit_bytes,  # pyrefly: ignore[bad-argument-type]
         out_dtype,
         acc_dtype,
         target_zero_ref_bytes,
@@ -340,7 +340,7 @@ def tgmm_inner_kernel(
 
     if is_group_changing:
       if cfgs.rhs_cfgs.has_scale:
-        scale_slice = tiled_rhs_scale_ref[0]
+        scale_slice = tiled_rhs_scale_ref[0]  # pyrefly: ignore[unsupported-operation]
         acc *= scale_slice
       tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
     else:
@@ -682,12 +682,12 @@ def tgmm_v2(
   cfgs = make_tgmm_configs(
       lhs,
       rhs,
-      rhs_scale,
+      rhs_scale,  # pyrefly: ignore[bad-argument-type]
       group_sizes,
       num_actual_groups,
       tile_info=tile_info,
       vmem_limit_bytes=vmem_limit_bytes,
-      out_dtype=preferred_element_type,
+      out_dtype=preferred_element_type,  # pyrefly: ignore[bad-argument-type]
       acc_dtype=acc_dtype,
       target_zero_ref_bytes=target_zero_ref_bytes,
   )
@@ -729,7 +729,7 @@ def tgmm_v2(
     pad_n = aligned_n - dims.size_n
     if pad_n > 0:
       rhs_scale = jnp.pad(rhs_scale, ((0, 0), (0, 0), (0, pad_n)))
-  rhs = OperandRef(value=rhs, scale=rhs_scale)
+  rhs = OperandRef(value=rhs, scale=rhs_scale)  # pyrefly: ignore[bad-assignment]
   hbm_spec = pl.BlockSpec(memory_space=pltpu.HBM)
   in_specs = [
       hbm_spec,  # lhs
@@ -745,7 +745,7 @@ def tgmm_v2(
           num_scalar_prefetch=2,
           in_specs=in_specs,
           out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
-          scratch_shapes=scratch_shapes,
+          scratch_shapes=scratch_shapes,  # pyrefly: ignore[bad-argument-type]
       ),
       compiler_params=pltpu.CompilerParams(
           vmem_limit_bytes=vmem_limit_bytes,

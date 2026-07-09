@@ -145,7 +145,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         encoder_images=data["images"] if config.use_multimodal else None,
         encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
         enable_dropout=config.enable_dropout if is_train else False,
-        rngs={"dropout": rng1, "params": aqt_rng},
+        rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
         mutable=mutable_collections,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
@@ -373,11 +373,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       if config.shard_optimizer_over_data:
         params = jax.tree.map(
             functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
-            params,
+            params,  # pyrefly: ignore[unbound-name]
             params_shardings,
         )
       sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
-      pure_params = params["params"] if sparsity_enabled else params
+      pure_params = params["params"] if sparsity_enabled else params  # pyrefly: ignore[unbound-name]
       batch_stats = params.get("batch_stats", {})
 
       grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
