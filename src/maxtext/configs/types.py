@@ -1779,7 +1779,6 @@ class AOT(BaseModel):
 class DevelopmentAndDebugging(BaseModel):
   """General settings for development and debugging."""
 
-  dry_run: bool = Field(False, description="Enable dry-run mode for shape checking without executing.")
   constant_bound_config: list = Field([], description="Legacy configuration for constant bounds.")
   jax_cache_dir: PathStr | None = Field(
       os.path.join(os.path.expanduser("~"), "jax_cache"),
@@ -2531,6 +2530,7 @@ class MaxTextConfig(
       default_factory=LoRA,
       description="Configuration for LoRA / QLoRA adapters.",
   )
+  dry_run: bool = Field(False, description="Enable dry run for shape checking without execution")
   model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
   @model_validator(mode="before")
