@@ -1779,6 +1779,7 @@ class AOT(BaseModel):
 class DevelopmentAndDebugging(BaseModel):
   """General settings for development and debugging."""
 
+  dry_run: bool = Field(False, description="Enable dry-run mode for shape checking without executing.")
   constant_bound_config: list = Field([], description="Legacy configuration for constant bounds.")
   jax_cache_dir: PathStr | None = Field(
       os.path.join(os.path.expanduser("~"), "jax_cache"),
