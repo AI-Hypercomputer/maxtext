@@ -100,6 +100,25 @@ class TestTransformLogic(unittest.TestCase):
   def test_standard_weight(self):
     self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "kernel")), mdn((0,), (-1,)))
 
+  # --- 4. DeepSeek V4 Specific ---
+  def test_deepseek_v4_exclusions(self):
+    # Scale, beta, base, sinks, and tid2eid nested segments should be excluded (None)
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "hc_head", "hc_scale")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "hc_head", "hc_base")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "layers", "layers_0", "mhc_attention", "res_beta")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "layers", "layers_0", "self_attention", "sinks")))
+    self.assertIsNone(
+        muon_utils.transform_logic(("decoder", "layers", "layers_0", "mlp", "MoeBlock_0", "gate", "tid2eid"))
+    )
+    self.assertIsNone(
+        muon_utils.transform_logic(("decoder", "layers", "layers_0", "self_attention", "rotary_embedding", "inv_freq"))
+    )
+
+  def test_deepseek_v4_self_attention_grouped_projection(self):
+    # o_a_proj projects with reduction on in_features_per_group (-2)
+    # and output on out_features_per_group (-1)
+    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "o_a_proj")), mdn((-2,), (-1,)))
+
 
 class TestGetTransformTree(unittest.TestCase):
   """Tests for get_transform_tree: recursive dict walk that applies transform_logic."""
