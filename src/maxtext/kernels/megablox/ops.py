@@ -194,6 +194,7 @@ def _gmm_fwd(
         lhs=lhs,
         rhs=rhs,
         group_sizes=group_sizes,
+        # group_offset=group_offset,
         tile_info=gmm_v2.TileSizes(
             tile_m=tiling[0],
             tile_k=tiling[1],
@@ -320,6 +321,7 @@ def _gmm_bwd(
           lhs=dlhs_dout,
           rhs=dlhs_rhs.swapaxes(1, 2),  # requires rhs to be [g, n, k]
           group_sizes=group_sizes,
+          # group_offset=group_offset,
           tile_info=gmm_v2.TileSizes(
               tile_m=tiling[3],
               tile_k=tiling[4],

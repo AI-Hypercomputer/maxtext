@@ -1057,7 +1057,7 @@ xprof_e2e_enable_fw_power_level_event: false
 xprof_e2e_enable_fw_thermal_event: false
 profile_power_events: false # Set to true to enable TPU-specific power/thermal profiling events. Defaults to false to avoid breaking GPU xplane tracing.
 
-log_config: true # Prints the config (after defaults have been set by pyconfig logic)
+log_config: false # Prints the config (after defaults have been set by pyconfig logic)
 debug_sharding: false # Prints model weights sharding info
 
 # Checkpoint Structured logging

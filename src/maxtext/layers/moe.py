@@ -47,6 +47,29 @@ from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_part
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
+
+
+# ---- TEMP DEBUG: NaN probe (remove after debugging) ----
+def _nan_probe(x, tag):
+  """Identity that prints NaN counts of value (fwd) and cotangent (bwd)."""
+
+  @jax.custom_vjp
+  def probe(x):
+    return x
+
+  def probe_fwd(x):
+    jax.debug.print("[NANPROBE fwd " + tag + "] nans={n} shape=" + str(x.shape), n=jnp.sum(jnp.isnan(x)))
+    return x, None
+
+  def probe_bwd(_, g):
+    jax.debug.print("[NANPROBE bwd " + tag + "] nans={n} shape=" + str(g.shape), n=jnp.sum(jnp.isnan(g)))
+    return (g,)
+
+  probe.defvjp(probe_fwd, probe_bwd)
+  return probe(x)
+
+
+# ---- END TEMP DEBUG ----
 import qwix.pallas as qpl
 import tokamax
 
@@ -1788,13 +1811,16 @@ class RoutedMoE(nnx.Module):
         x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs
     ):
       batch_size, sequence_length, _ = x.shape
+      x = _nan_probe(x, "input")
       x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+      x = _nan_probe(x, "after_route(sorted_inputs)")
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
       gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
       intermediate_layer = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather)
+      intermediate_layer = _nan_probe(intermediate_layer, "after_gmm_up")
 
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
       intermediate_output = gmm_fn(
@@ -1803,6 +1829,7 @@ class RoutedMoE(nnx.Module):
           tiling=wo_tile_size,
           weight_gather_axes=wo_gather_axes,
       )
+      intermediate_output = _nan_probe(intermediate_output, "after_wo_gmm")
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
             intermediate_output, self._tensor_parallelism_name, scatter_dimension=1, tiled=True
@@ -1822,12 +1849,14 @@ class RoutedMoE(nnx.Module):
             use_custom_sort_vjp=self.config.use_custom_sort_vjp,
             group_sizes=routing.group_sizes,
         )
+        output = _nan_probe(output, "after_unpermute")
 
         # Sum up the partial outputs across the expert shards.
         output = jnp.reshape(
             output, (-1, sequence_length, self.moe_expert_input_dim // self.get_tensor_parallelism_size())
         )
         output = jax.lax.psum_scatter(output, self._expert_parallelism_name, scatter_dimension=0, tiled=True)
+        output = _nan_probe(output, "after_psum_scatter")
         return output, routing.lb_loss, routing.bias_updates
 
       if self.get_expert_parallelism_size() > 1:
