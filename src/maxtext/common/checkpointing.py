@@ -194,23 +194,29 @@ def _default_for_sds(sds):
   return jax.jit(_make, out_shardings=sharding)()
 
 
-def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
+def _populate_pure_dict_from_partial(abstract_pure, partial_concrete, config=None):
   """Fills `abstract_pure` with values from `partial_concrete` (by path), defaulting the rest.
 
   Paths present in `partial_concrete` take the restored value; paths absent from
   it
-  (NNX-only state the Linen checkpoint never had) get `_default_for_sds`.
+  (NNX-only state the Linen checkpoint never had) get `_default_for_sds` or are preserved.
   """
   if isinstance(abstract_pure, dict):
     return {
         k: _populate_pure_dict_from_partial(
             v,
             partial_concrete.get(k) if isinstance(partial_concrete, dict) else None,
+            config,
         )
         for k, v in abstract_pure.items()
     }
   if partial_concrete is not None and not isinstance(partial_concrete, dict):
     return partial_concrete
+
+  # Under LoRA, preserve the already-initialized base weights instead of resetting to zeros
+  if config and config.lora and config.lora.enable_lora:
+    return abstract_pure
+
   return _default_for_sds(abstract_pure)
 
 
@@ -220,6 +226,7 @@ def _load_linen_checkpoint_into_nnx(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    config=None,
 ):
   """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
 
@@ -241,7 +248,7 @@ def _load_linen_checkpoint_into_nnx(
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
   partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx, config)
 
 
 def _restore_emergency_linen_checkpoint_into_nnx(
@@ -249,6 +256,7 @@ def _restore_emergency_linen_checkpoint_into_nnx(
     step,
     abstract_nnx_state,
     map_to_pspec,
+    config=None,
 ):
   """Restores an emergency Linen-layout checkpoint into an NNX state."""
   max_logging.log(f"Restoring emergency Linen-layout checkpoint into NNX state at step {step}")
@@ -262,7 +270,7 @@ def _restore_emergency_linen_checkpoint_into_nnx(
   )
   restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
   partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx, config)
 
 
 def _rebuild_nnx_with_values(abstract_nnx_state, concrete_weights):
@@ -318,6 +326,7 @@ def _load_full_state_from_path(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    config=None,
 ):
   """Load full state from checkpoint at specified path.
 
@@ -368,6 +377,7 @@ def _load_full_state_from_path(
           checkpoint_storage_concurrent_gb,
           use_ocdbt,
           use_zarr3,
+          config=config,
       )
 
     # Original v0 logic.
@@ -805,6 +815,7 @@ def load_state_if_possible(
             checkpoint_storage_concurrent_gb,
             use_ocdbt,
             use_zarr3,
+            config=maxtext_config,
         )
         return ({"items": restored_nnx}, None)
 
@@ -818,6 +829,7 @@ def load_state_if_possible(
             step,
             abstract_unboxed_pre_state,
             map_to_pspec,
+            config=maxtext_config,
         )
         return (
             restored,
@@ -908,6 +920,7 @@ def load_state_if_possible(
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
+        config=maxtext_config,
     )
     return {"items": restored_state}, None
   else:
@@ -1078,7 +1091,10 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
       step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
       state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
     else:
-      state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
+      pure_dict = state.to_pure_dict()
+      if config.lora and config.lora.enable_lora:
+        pure_dict["model"] = nnx.state(state.model, nnx.LoRAParam).to_pure_dict()
+      state = train_state_nnx.to_linen_checkpoint_dict(pure_dict)
 
   try:
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)

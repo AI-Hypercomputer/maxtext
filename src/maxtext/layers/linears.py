@@ -37,6 +37,7 @@ from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bi
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils import lora_utils
 from maxtext.utils.sharding import maybe_shard_with_logical
 
 
@@ -222,8 +223,16 @@ class DenseGeneral(nnx.Module):
     if quantizations.in_serve_mode(self.quant):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
+      restored_to_state = False
     else:
-      kernel = self.kernel[...]
+      kernel_val = self.kernel._raw_value if hasattr(self.kernel, "_raw_value") else self.kernel
+      restored_to_state = False
+      if isinstance(kernel_val, nnx.State):
+        kernel = lora_utils.restore_qlora_base_weights(kernel_val)
+        self.kernel.value = kernel
+        restored_to_state = True
+      else:
+        kernel = self.kernel[...]
       # Move logit_dense kernel to device if parameter offloading is enabled
       if self.parameter_memory_host_offload:
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
@@ -245,6 +254,9 @@ class DenseGeneral(nnx.Module):
         _initializing,
         out_sharding,
     )
+
+    if restored_to_state:
+      self.kernel.value = kernel_val
 
     if self.bias is not None:
       bias = jnp.asarray(self.bias[...], self.dtype)

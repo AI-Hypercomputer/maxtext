@@ -363,6 +363,7 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         "enable_multi_tier_checkpointing": False,
         "local_checkpoint_period": 0,
         "enable_autocheckpoint": False,
+        "lora": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)

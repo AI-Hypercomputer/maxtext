@@ -16,11 +16,15 @@
 Linen regression block at the end."""
 
 import unittest
+from unittest import mock
 
+from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maxtext.utils import lora_utils
+from maxtext.utils import sharding
 from maxtext.utils.lora_utils import (
     apply_lora_on_base_params,
     apply_lora_on_base_params_nnx,
@@ -180,7 +184,11 @@ class TestApplyLoraNnx(unittest.TestCase):
     rng = jax.random.key(42)
     base_orig = _concrete_base(rng)
     base = jax.tree_util.tree_map(jnp.copy, base_orig)
-    lora = _build_lora_params(base, _lora_config(rank=2, target_modules=("q_proj", "v_proj")), jax.random.key(7))
+    lora = _build_lora_params(
+        base,
+        _lora_config(rank=2, target_modules=("q_proj", "v_proj")),
+        jax.random.key(7),
+    )
     apply_lora_on_base_params_nnx(base, lora, lora_scale_factor=0.5)
     # The query and value kernels are targets and must have changed.
     self.assertFalse(
@@ -217,7 +225,11 @@ class TestApplyLoraNnx(unittest.TestCase):
     rng = jax.random.key(123)
     base_nnx = _concrete_base(rng)
     base_linen = {"params": jax.tree_util.tree_map(jnp.copy, base_nnx)}
-    lora = _build_lora_params(base_nnx, _lora_config(rank=2, target_modules=("q_proj",)), jax.random.key(5))
+    lora = _build_lora_params(
+        base_nnx,
+        _lora_config(rank=2, target_modules=("q_proj",)),
+        jax.random.key(5),
+    )
     apply_lora_on_base_params_nnx(base_nnx, lora, lora_scale_factor=0.7)
     apply_lora_on_base_params(base_linen, {"params": lora}, lora_scale_factor=0.7)
     np.testing.assert_allclose(
@@ -288,6 +300,115 @@ class TestLinenLoraRegression(unittest.TestCase):
         np.asarray(base["params"]["decoder"]["layers"]["self_attention"]["out"]["kernel"]),
         np.asarray(base_orig["params"]["decoder"]["layers"]["self_attention"]["out"]["kernel"]),
     )
+
+
+class TestShardingExtractionNnx(unittest.TestCase):
+  """Test sharding parameter extraction under different LoRA configurations."""
+
+  def test_sharding_extracts_only_lora_params(self):
+    class ToyModel(nnx.Module):
+
+      def __init__(self):
+        self.p = nnx.Param(jnp.ones((2, 2)))
+        self.lora_p = nnx.LoRAParam(jnp.zeros((2, 2)))
+
+    class DummyConfig:
+
+      class DummyLora:
+        enable_lora = True
+
+      lora = DummyLora()
+      shard_optimizer_over_data = False
+      pure_nnx = True
+
+    model = ToyModel()
+    _, state = nnx.split(model)
+
+    class DummyStateMeshShardings:
+      model = state
+
+    prev_params, _ = sharding.maybe_update_params_sharding_with_opt(DummyConfig(), DummyStateMeshShardings())
+    self.assertIn("lora_p", prev_params)
+    self.assertNotIn("p", prev_params)
+
+
+class TestRestoreLoraNnx(unittest.TestCase):
+  """Unit tests for lora_utils.restore_lora_from_path under NNX."""
+
+  def test_restore_lora_from_standalone_and_full_trainstate(self):
+    # 1. Setup a toy model with LoRA parameters
+    class ToyModel(nnx.Module):
+
+      def __init__(self):
+        self.p = nnx.Param(jnp.ones((2, 2)))
+        self.lora_p = nnx.LoRAParam(jnp.zeros((2, 2)))
+
+    class DummyLoraConfig:
+      enable_lora = True
+      lora_restore_path = "dummy/restore/path"
+      lora_rank = 4
+      lora_alpha = 8.0
+
+    class DummyConfig:
+      lora = DummyLoraConfig()
+      scan_layers = False
+
+    model = ToyModel()
+
+    # 2. Mocking Orbax restore for standalone LoRA checkpoint
+    standalone_restored_state = {"lora_p": {"value": jnp.ones((2, 2)) * 5.0}}
+
+    with mock.patch(
+        "orbax.checkpoint.PyTreeCheckpointer.restore",
+        return_value=standalone_restored_state,
+    ) as mock_restore:
+      lora_utils.restore_lora_from_path(model, DummyConfig())
+      mock_restore.assert_called_once()
+      # Verify that lora_p value was updated to 5.0
+      np.testing.assert_allclose(np.asarray(model.lora_p[...]), 5.0)
+
+    # Reset lora_p value
+    model.lora_p[...] = jnp.zeros((2, 2))
+
+    # 3. Mocking Orbax restore for full TrainState checkpoint (dict with "model")
+    full_trainstate_dict = {
+        "model": {"lora_p": {"value": jnp.ones((2, 2)) * 10.0}},
+        "optimizer": {},
+    }
+    with mock.patch(
+        "orbax.checkpoint.PyTreeCheckpointer.restore",
+        return_value=full_trainstate_dict,
+    ) as mock_restore:
+      lora_utils.restore_lora_from_path(model, DummyConfig())
+      mock_restore.assert_called_once()
+      # Verify that lora_p value was updated to 10.0
+      np.testing.assert_allclose(np.asarray(model.lora_p[...]), 10.0)
+
+    # Reset lora_p value
+    model.lora_p[...] = jnp.zeros((2, 2))
+
+    # 4. Mocking Orbax restore for full TrainState checkpoint (object with .model attribute)
+    class DummyTrainState:
+
+      def __init__(self):
+        self.model = {"lora_p": {"value": jnp.ones((2, 2)) * 15.0}}
+
+    dummy_state_obj = DummyTrainState()
+    with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=dummy_state_obj) as mock_restore:
+      lora_utils.restore_lora_from_path(model, DummyConfig())
+      mock_restore.assert_called_once()
+      # Verify that lora_p value was updated to 15.0
+      np.testing.assert_allclose(np.asarray(model.lora_p[...]), 15.0)
+
+    # 5. Mocking Orbax restore for checkpoint missing LoRA parameters (raises ValueError)
+    base_only_checkpoint = {
+        "p": {"value": jnp.ones((2, 2)) * 20.0},
+    }
+    with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=base_only_checkpoint) as mock_restore:
+      with self.assertRaises(ValueError) as context:
+        lora_utils.restore_lora_from_path(model, DummyConfig())
+      self.assertIn("No LoRA/adapter parameters were successfully restored", str(context.exception))
+      mock_restore.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -489,6 +489,156 @@ class LoraUtilsTest(unittest.TestCase):
     for path in non_matching_paths:
       self.assertFalse(compiled.search(path), f"Incorrectly matched invalid path: {path}")
 
+  def test_checkpoint_saving_lora_only(self):
+    """Test that the native checkpointer only saves LoRA parameters when enable_lora is True."""
+    # Create a mock config with lora enabled
+    cfg = _make_config(
+        lora={
+            "enable_lora": True,
+            "lora_rank": 8,
+            "lora_alpha": 16.0,
+        }
+    )
+    cfg.pure_nnx = True
+    cfg.enable_diloco = False
+    cfg.enable_checkpointing = True
+
+    # Create a mock state
+    mock_state = mock.MagicMock()
+    mock_state.to_pure_dict.return_value = {
+        "model": {
+            "decoder": {
+                "layers": {
+                    "0": {
+                        "self_attention": {
+                            "query": {
+                                "kernel": jnp.array([1.0]),  # Base weight
+                                "lora_a": jnp.array([2.0]),  # LoRA weight
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "optimizer": {
+            "step": jnp.array(0, dtype=jnp.uint32),
+            "opt_state": {},
+        },
+    }
+
+    # When nnx.state(state.model, nnx.LoRAParam) is called, return only the lora variables
+    mock_lora_state = mock.MagicMock()
+    mock_lora_state.to_pure_dict.return_value = {
+        "decoder": {
+            "layers": {
+                "0": {
+                    "self_attention": {
+                        "query": {
+                            "lora_a": jnp.array([2.0]),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    with (
+        mock.patch("flax.nnx.state") as mock_nnx_state,
+        mock.patch("maxtext.common.checkpointing.save_checkpoint") as mock_save,
+    ):
+      mock_nnx_state.return_value = mock_lora_state
+
+      # Call maybe_save_checkpoint
+      mock_manager = mock.MagicMock()
+      mock_manager.latest_step.return_value = -1
+      mock_manager.reached_preemption.return_value = False
+
+      checkpointing.maybe_save_checkpoint(
+          checkpoint_manager=mock_manager,
+          state=mock_state,
+          config=cfg,
+          data_iterator=None,
+          step=0,
+      )
+
+      # Ensure save_checkpoint was called
+      self.assertTrue(mock_save.called)
+
+      # Extract the saved state passed to save_checkpoint
+      saved_state = mock_save.call_args[0][2]
+
+      # Verify that saved_state has the legacy Linen format ("params" and "opt_state")
+      self.assertIn("params", saved_state)
+      self.assertIn("step", saved_state)
+
+      # Verify that base weights are GONE, but LoRA parameters are SAVED
+      saved_params = saved_state["params"]["params"]
+      # Inside saved_params, only lora_a exists, kernel is gone!
+      query_params = saved_params["decoder"]["layers"]["0"]["self_attention"]["query"]
+      self.assertIn("lora_a", query_params)
+      self.assertNotIn("kernel", query_params)
+
+  def test_checkpoint_restoration_preserves_base_weights(self):
+    """Test that _populate_pure_dict_from_partial preserves base model weights under LoRA."""
+    cfg = _make_config(
+        lora={
+            "enable_lora": True,
+            "lora_rank": 8,
+            "lora_alpha": 16.0,
+        }
+    )
+
+    # Live concrete state before restoration (containing pre-trained base weight [5.0])
+    abstract_pure = {
+        "model": {
+            "decoder": {
+                "layers": {
+                    "0": {
+                        "self_attention": {
+                            "query": {
+                                "kernel": jnp.array([5.0]),  # Loaded pre-trained base weight
+                                "lora_a": jnp.array([1.0]),  # Initialized LoRA weight
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # Restored checkpoint state (only containing saved LoRA weights [9.0])
+    partial_concrete = {
+        "model": {
+            "decoder": {
+                "layers": {
+                    "0": {
+                        "self_attention": {
+                            "query": {
+                                "lora_a": jnp.array([9.0]),  # Saved LoRA weight
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # Call _populate_pure_dict_from_partial
+    restored = checkpointing._populate_pure_dict_from_partial(
+        abstract_pure=abstract_pure,
+        partial_concrete=partial_concrete,
+        config=cfg,
+    )
+
+    # Verify results
+    query_restored = restored["model"]["decoder"]["layers"]["0"]["self_attention"]["query"]
+
+    # 1. Base weights ("kernel") must be preserved exactly as [5.0] (not reset to zeros!)
+    self.assertEqual(query_restored["kernel"][0], 5.0)
+
+    # 2. LoRA weights ("lora_a") must be restored exactly as [9.0]
+    self.assertEqual(query_restored["lora_a"][0], 9.0)
+
 
 if __name__ == "__main__":
   unittest.main()
