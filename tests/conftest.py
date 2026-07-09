@@ -260,3 +260,9 @@ def handle_gpu_only(request):
       has_gpu = False
     if not has_gpu:
       pytest.skip("Skipped: requires GPU hardware, none detected")
+
+
+def pytest_runtest_setup(item):
+  """Hook to inject markers as properties into the test item."""
+  for marker in item.iter_markers():
+    item.user_properties.append(("marker", marker.name))

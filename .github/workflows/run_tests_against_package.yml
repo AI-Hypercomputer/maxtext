@@ -19,6 +19,9 @@ name: Run Tests Against MaxText Package
 on:
   workflow_call:
     inputs:
+      flavor:
+        required: true
+        type: string
       device_type:
         required: true
         type: string
@@ -211,6 +214,7 @@ jobs:
               -v \
               -m "${FINAL_PYTEST_MARKER}" \
               --durations=0 \
+              --junitxml=test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}.xml \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS}
@@ -220,6 +224,7 @@ jobs:
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
+          INPUTS_FLAVOR: ${{ inputs.flavor }}
           INPUTS_PYTEST_ADDOPTS: ${{ inputs.pytest_addopts }}
           INPUTS_TOTAL_WORKERS: ${{ inputs.total_workers }}
           INPUTS_WORKER_GROUP: ${{ inputs.worker_group }}
@@ -243,3 +248,11 @@ jobs:
           # If scheduled, upload to scheduled flag only. If PR, upload to regular flag only.
           flags: ${{ inputs.is_scheduled_run == 'true' && 'scheduled' || 'regular' }}
           verbose: true
+      - name: Upload Test Results XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ inputs.flavor }}-${{ inputs.worker_group }}-${{ github.run_id }}
+          path: test-results-*.xml
+          retention-days: 1
+          if-no-files-found: ignore
