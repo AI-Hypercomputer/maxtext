@@ -339,7 +339,12 @@ class LayerwiseQuantization:
 
     # Convert-mode state has both `kernel` (full precision) and `AqtDotGeneral_0.qrhs.frozen`
     # at every quantized DenseGeneral; the serve-mode reader expects only the latter.
-    convert_state = nnx.state(convert_model).to_pure_dict()
+    # We filter out transient runtime state (RngState, Cache, Intermediate, BatchStat) so only persistent weights are saved.
+    convert_state = (
+        nnx.state(convert_model)
+        .filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)))
+        .to_pure_dict()
+    )
     serve_state = self._strip_kernels_at_quantized_paths(convert_state)
 
     if config.save_quantized_params_path:
