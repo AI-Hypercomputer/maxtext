@@ -25,6 +25,10 @@ on:
       device_name:
         required: true
         type: string
+      flavor:
+        required: false
+        type: string
+        default: ''
       base_image:
         required: true
         type: string
