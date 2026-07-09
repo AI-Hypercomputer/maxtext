@@ -723,34 +723,28 @@ class RoutedMoeTest(unittest.TestCase):
       )
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_ring_of_experts_ragged_buffer(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True, ragged_buffer_factor=1.5)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_ring_of_experts_fallback(self):
     self._run_ragged_sort_loss_and_grad(
         use_ring_of_experts=True, ragged_gather_fallback=True, ragged_gather_reduce_fallback=True
     )
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts_ragged_buffer(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False, ragged_buffer_factor=1.5)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts_fallback(self):
     self._run_ragged_sort_loss_and_grad(
         use_ring_of_experts=False, ragged_gather_fallback=True, ragged_gather_reduce_fallback=True
