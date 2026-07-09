@@ -31,9 +31,6 @@ repos:
           - '--disable=R0401,R0917,W0201,W0613'
           - "--ignore-patterns='.pytype,.*pyi$'"
           - '--ignore-paths=src/maxtext/input_pipeline/protos'
-          - 'benchmarks'
-          - 'src'
-          - 'tests'
 
   #  - repo: https://github.com/google/pytype
   #    rev: 2024.10.11
