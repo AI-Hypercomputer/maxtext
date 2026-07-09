@@ -147,7 +147,7 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   lm_model_type = "local-chat-completions" if backend == "evalchemy" else "local-completions"
   raw_results: dict = {}
 
-  with build_server_manager(cfg, token) as server:
+  with build_server_manager(cfg, token, enable_chat_api=backend == "evalchemy") as server:
     import jax as _jax
     from jax.experimental import multihost_utils as _multihost_utils
 

@@ -9,7 +9,7 @@ repos:
         args:
           - '-w'
           - '--skip="*.txt,pylintrc,.*,src/maxtext/assets/*,src/maxtext/input_pipeline/protos/*"'
-          - '-L ND,nd,sems,TE,ROUGE,rouge,astroid,ags,dout'
+          - '-L ND,nd,sems,TE,te,als,ROUGE,rouge,astroid,ags,dout'
           - '.'
         additional_dependencies:
           - tomli
@@ -30,7 +30,7 @@ repos:
         args:
           - '--disable=R0401,R0917,W0201,W0613'
           - "--ignore-patterns='.pytype,.*pyi$'"
-          - '--ignore-paths=src/maxtext/input_pipeline/protos'
+          - '--ignore-paths=src/maxtext/input_pipeline/protos|src/maxtext/eval/third_party'
 
   #  - repo: https://github.com/google/pytype
   #    rev: 2024.10.11
