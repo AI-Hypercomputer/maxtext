@@ -19,6 +19,13 @@ Get started quickly on a single machine. Clone the repo, install dependencies, a
 Run MaxText on single-host NVIDIA GPUs (e.g., A3 High/Mega). Includes Docker setup, NVIDIA Container Toolkit installation, and 1B/7B model training examples.
 :::
 
+:::{grid-item-card} 🚀 At scale with Cluster Toolkit (GKE)
+:link: run_maxtext/run_maxtext_via_cluster_toolkit
+:link-type: doc
+
+Deploy to Google Kubernetes Engine (GKE) using Cluster Toolkit's `gcluster` CLI. Package and run multi-host JAX workloads with on-the-fly container builds.
+:::
+
 :::{grid-item-card} 🏗️ At scale with XPK (GKE)
 :link: run_maxtext/run_maxtext_via_xpk
 :link-type: doc
@@ -55,6 +62,7 @@ maxdepth: 1
 ---
 run_maxtext/run_maxtext_localhost.md
 run_maxtext/run_maxtext_single_host_gpu.md
+run_maxtext/run_maxtext_via_cluster_toolkit.md
 run_maxtext/run_maxtext_via_xpk.md
 run_maxtext/run_maxtext_via_pathways.md
 run_maxtext/decoupled_mode.md
