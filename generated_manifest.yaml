@@ -3,8 +3,8 @@ kind: JobSet
 metadata:
   labels:
     kueue.x-k8s.io/queue-name: user-queue-4x4x4
-    xpk.google.com/workload: mohit-rl-agentic-7454
-  name: mohit-rl-agentic-7454
+    xpk.google.com/workload: mohit-rl-agentic-12722
+  name: mohit-rl-agentic-12722
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -32,7 +32,7 @@ spec:
               cloud.google.com/skip-tpu-webhook-check: 'true'
             labels:
               kueue.x-k8s.io/podset: worker
-              xpk.google.com/workload: mohit-rl-agentic-7454
+              xpk.google.com/workload: mohit-rl-agentic-12722
           spec:
             containers:
             - args:
@@ -76,7 +76,7 @@ spec:
               - name: RPA_D_BLOCK_SIZES
                 value: 1,4096,1,4096
               - name: VLLM_TORCH_PROFILER_DIR
-                value: gs://runner-maxtext-logs/mohit-rl-agentic-7454/tensorboard/sampler_tpu_profile
+                value: gs://runner-maxtext-logs/mohit-rl-agentic-12722/tensorboard/sampler_tpu_profile
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260623-jax_0.10.1
               imagePullPolicy: Always
               name: pathways-worker
@@ -276,10 +276,9 @@ spec:
                 \ NEW_MODEL_DESIGN=1 TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0\
                 \ JAX_PLATFORMS=proxy,cpu NUM_PRECOMPILE_WORKERS=1 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\
                 \ ENABLE_PATHWAYS_PERSISTENCE=1 PYTHONPATH=/app/src python3 -m maxtext.trainers.post_train.rl.train_rl\
-                \ model_name=qwen3-0.6b tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-agentic-7454\
+                \ model_name=qwen3-0.6b tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-agentic-12722\
                 \ checkpoint_storage_use_ocdbt=False async_scheduling=True base_output_directory=gs://runner-maxtext-logs/\
-                \ chips_per_vm=8 num_batches=20 num_test_batches=0 profiler=xplane\
-                \ skip_first_n_steps_for_profiler=1 profiler_steps=1 rl.num_generations=8\
+                \ chips_per_vm=8 num_batches=20 num_test_batches=0 rl.num_generations=8\
                 \ rl.grpo_beta=0.05 rl.grpo_epsilon=0.2 gradient_clipping_threshold=1.0\
                 \ decode_sampling_temperature=0.8 decode_sampling_top_k=50 decode_sampling_nucleus_p=0.95\
                 \ dataset_name=nvidia/OpenMathInstruct-2 hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet\
@@ -291,8 +290,8 @@ spec:
                 \ checkpoint_period=100 max_num_checkpoints_to_keep=1000 enable_checkpointing=true\
                 \ load_parameters_path=gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items\
                 \ rollout_vllm_init_with_random_weights=True rl.use_agentic_rollout=True\
-                \ rl.max_concurrency=256 rl.return_logprobs=False rl.use_rollout_logps=False\
-                \ rl.rollout_vllm_server_mode_submission_threshold=3840) & PID=$!;\n\
+                \ rl.max_concurrency=64 rl.return_logprobs=False rl.use_rollout_logps=False\
+                \ rl.rollout_vllm_server_mode_submission_threshold=64) & PID=$!;\n\
                 while kill -0 $PID 2>/dev/null;\n    do sleep 5;\ndone;\nwait $PID;\n\
                 EXIT_CODE=$?;\n\necho XPK End: $(date);\necho EXIT_CODE=$EXIT_CODE;\n\
                 \n\nexit $EXIT_CODE\n"
@@ -309,13 +308,15 @@ spec:
                 value: grpc://$(PATHWAYS_HEAD):29000
               - name: RPA_D_BLOCK_SIZES
                 value: 1,4096,1,4096
-              image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:bgyk-2026-07-08-16-49-50
+              image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:dugh-2026-07-09-18-45-17
               imagePullPolicy: Always
               name: jax-tpu
               resources:
                 limits:
                   cpu: '24'
-                  memory: 100G
+                  memory: 600G
+                requests:
+                  memory: 600G
               securityContext:
                 privileged: true
               volumeMounts:

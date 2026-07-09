@@ -104,6 +104,12 @@ for doc in data:
         containers = pod_spec.setdefault("containers", [])
         for container in containers:
           if container.get("name") == "jax-tpu":
+            resources = container.setdefault("resources", {})
+            limits = resources.setdefault("limits", {})
+            requests = resources.setdefault("requests", {})
+            limits["memory"] = "600G"
+            requests["memory"] = "600G"
+            print("Boosted jax-tpu container memory limit and request to 600G.")
             if built_image:
               container["image"] = built_image
               print(f"Replaced placeholder image with built image: {built_image}")

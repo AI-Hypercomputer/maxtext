@@ -877,6 +877,12 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       max_train_steps,
   )
 
+  # Disable Tunix TrajectoryLogger to save host RAM during high-concurrency runs
+  if hasattr(rl_trainer, "_trajectory_logger") and rl_trainer._trajectory_logger:  # pylint: disable=protected-access
+    max_logging.log("Disabling Tunix TrajectoryLogger to prevent GCS Pandas OOM.")
+    rl_trainer._trajectory_logger.stop()  # pylint: disable=protected-access
+    rl_trainer._trajectory_logger = None  # pylint: disable=protected-access
+
   # Enable programmatic sampler profiling
   wrap_generate_with_profiling(rl_cluster, trainer_config)
 

@@ -106,9 +106,6 @@ base_output_directory=$BASE_OUTPUT_DIRECTORY \
 chips_per_vm=8 \
 num_batches=20 \
 num_test_batches=0 \
-profiler=xplane \
-skip_first_n_steps_for_profiler=1 \
-profiler_steps=1 \
 rl.num_generations=8 \
 rl.grpo_beta=0.05 \
 rl.grpo_epsilon=0.2 \
@@ -140,10 +137,10 @@ enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
 rollout_vllm_init_with_random_weights=True \
 rl.use_agentic_rollout=True \
-rl.max_concurrency=256 \
+rl.max_concurrency=64 \
 rl.return_logprobs=False \
 rl.use_rollout_logps=False \
-rl.rollout_vllm_server_mode_submission_threshold=3840"
+rl.rollout_vllm_server_mode_submission_threshold=64"
 
 # 1. Run live submit to compile and upload the container image with local changes
 echo "Compiling and uploading container image via xpk..."
