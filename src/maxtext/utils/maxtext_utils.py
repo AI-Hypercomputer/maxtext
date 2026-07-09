@@ -1392,7 +1392,9 @@ def get_abstract_param(model, config):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,  # pyrefly: ignore[no-matching-overload]
+      encoder_images=np.ones(image_shape, dtype=jnp.int32)
+      if config.use_multimodal
+      else None,  # pyrefly: ignore[no-matching-overload]
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
   )
   return abstract_vars
@@ -1413,7 +1415,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   if not config.load_parameters_path:
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
-    state, state_mesh_annotations, _, _ = setup_initial_state(
+    state, state_mesh_annotations, _, _, _ = setup_initial_state(
         None, config, mesh, checkpoint_manager, init_state_fn, False
     )
   else:
@@ -1468,6 +1470,9 @@ def setup_initial_state(
   Returns:
     train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
     state_mesh_annotations: the mesh annotations for the train state
+    state_mesh_shardings: the mesh shardings for the train state
+    data_iterator: the updated data iterator
+    was_restored: True if state or params were restored from checkpoint, False if freshly initialized
   """
 
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
@@ -1493,6 +1498,8 @@ def setup_initial_state(
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
     )
+    # Partial or fully restored
+    was_restored = bool(restored is not None or raw_params is not None)
 
     if restored:
       if isinstance(
@@ -1548,7 +1555,7 @@ def setup_initial_state(
             state = state.replace(params=raw_params)
   if not config.pure_nnx:
     state = max_utils.unbox_logicallypartioned(state)
-  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 
 def get_logical_annotations(config, mesh, init_state_fn):

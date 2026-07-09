@@ -25,7 +25,6 @@ from typing import Sequence
 
 from absl import app
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
 import jax
 from jax import numpy as jnp
 from maxtext.configs import pyconfig
@@ -69,36 +68,25 @@ def checkpoint_loop(config, state=None):
     mesh = model.mesh
     _, tx = train_utils.create_training_optimizer(config, model)
     init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+
   checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
-  unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
   # A barrier to sync all hosts before starting to restore checkpoint
   jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
-  checkpoint_load_start = datetime.datetime.now()
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    state, _ = checkpointing.load_state_if_possible(
-        checkpoint_manager,
-        None,
-        config.load_parameters_path,
-        config.load_full_state_path,
-        config.checkpoint_storage_concurrent_gb,
-        unboxed_abstract_state,
-        use_ocdbt=config.checkpoint_storage_use_ocdbt,
-        use_zarr3=config.checkpoint_storage_use_zarr3,
-    )
-    if state:
-      state = state["items"]
 
+  checkpoint_load_start = datetime.datetime.now()
+  # Delegate checkpoint restoration or state initialization to setup_training_state
+  state, _, _, _, was_restored = maxtext_utils.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
   jax.block_until_ready(state)
   checkpoint_load_end = datetime.datetime.now()
-  if state is not None:  # Checkpoint was available for restore
+
+  if was_restored:
     if jax.process_index() == 0:
       max_logging.log(
           "STANDALONE CHECKPOINTER : Checkpoint restored in :" f" {checkpoint_load_end - checkpoint_load_start}"
       )
-  else:  # Checkpoint was unavailable, state needs to be initialized
-    state, _, _, _ = maxtext_utils.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
-  state = add_entropy_to_checkpoint(state)
+  else:  # Checkpoint was unavailable, fresh state needs to be perturbed with entropy
+    state = add_entropy_to_checkpoint(state)
 
   start_step = get_first_step(model, state)  # this is the start_step for training
   for step in np.arange(start_step, config.steps):
@@ -106,7 +94,8 @@ def checkpoint_loop(config, state=None):
       start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
-      if checkpointing.save_checkpoint(checkpoint_manager, int(step), state):
+      state_to_save = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict()) if config.pure_nnx else state
+      if checkpointing.save_checkpoint(checkpoint_manager, int(step), state_to_save):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         if jax.process_index() == 0:
