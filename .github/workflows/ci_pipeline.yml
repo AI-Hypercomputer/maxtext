@@ -59,6 +59,19 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.maxtext_sha || github.sha }}
+      - name: Check if PR added or modified tests
+        id: check_new_tests
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "has_new_tests=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch origin main:main 2>/dev/null || :
+          git remote add origin https://github.com/${GITHUB_REPOSITORY:-AI-Hypercomputer/maxtext}.git 2>/dev/null || :
+          git fetch origin main:refs/remotes/origin/main 2>/dev/null || :
+          HAS_NEW=$(python3 -c 'from tests.utils.newly_added_detection import get_changed_tests; print("true" if len(get_changed_tests()) > 0 else "false")' 2>/dev/null || echo "true")
+          echo "has_new_tests=${HAS_NEW}" >> "$GITHUB_OUTPUT"
+          echo "Detected has_new_tests=${HAS_NEW}"
       - name: Check for Code Changes
         id: check
         run: |
