@@ -45,6 +45,10 @@ on:
       is_scheduled_run:
         required: true
         type: string
+      is_pull_request:
+        required: false
+        type: string
+        default: 'false'
       xla_python_client_mem_fraction:
         required: true
         type: string
