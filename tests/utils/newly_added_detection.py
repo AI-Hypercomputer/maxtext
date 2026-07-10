@@ -147,13 +147,17 @@ def _build_diff_commands(base):
   remote; the local range is the fallback for a developer without ``origin`` and is
   never reached in CI, where ``origin/<base>`` is always fetched first.
   """
-  return [
+  cmds = []
+  if os.path.exists(".git/FETCH_HEAD"):
+    cmds.append(["git", "diff", "--unified=0", "FETCH_HEAD..HEAD"])
+  cmds.extend([
       ["git", "diff", "--unified=0", f"origin/{base}...HEAD"],
       ["git", "diff", "--unified=0", f"{base}...HEAD"],
       ["git", "diff", "--unified=0", f"origin/{base}..HEAD"],
       ["git", "diff", "--unified=0", f"{base}..HEAD"],
       ["git", "diff", "--unified=0", "FETCH_HEAD..HEAD"],
-  ]
+  ])
+  return cmds
 
 
 def get_changed_tests(base_ref=None):
