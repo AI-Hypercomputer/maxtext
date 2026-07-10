@@ -93,10 +93,15 @@ class VisionEncoder(nnx.Module):
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
-  def __call__(self, input_images, deterministic=False):
+  def __call__(self, input_images, input_masks=None, video_grid_thw=None, deterministic=False):
     # vision encoder output, frozen params in many cases
     encoder = getattr(self, self.encoder_name)
-    encoder_output = encoder(input_images, deterministic=deterministic)
+    if self.config.model_name.startswith("qwen3") and input_masks is not None:
+      encoder_output = encoder(
+          input_images, video_mask=input_masks, video_grid_thw=video_grid_thw, deterministic=deterministic
+      )
+    else:
+      encoder_output = encoder(input_images, deterministic=deterministic)
     deep_feats = None
     if isinstance(encoder_output, tuple):
       embeddings = encoder_output[0]
