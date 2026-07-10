@@ -162,7 +162,7 @@ jobs:
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
-          elif [[ "${INPUTS_FLAVOR}" =~ ^tpu7x- ]]; then
+          elif [ "${INPUTS_IS_PULL_REQUEST}" == "true" ] && [[ "${INPUTS_FLAVOR}" =~ ^tpu7x- ]]; then
             # Run only newly added/modified tests on TPU7X during Pull Requests (b/530220873)
             if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
               FINAL_PYTEST_MARKER="newly_added"

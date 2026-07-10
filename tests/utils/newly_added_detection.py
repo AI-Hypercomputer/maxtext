@@ -183,8 +183,10 @@ def get_changed_tests(base_ref=None):
     diff_text = None
     for command in _build_diff_commands(base):
       try:
-        diff_text = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
-        break
+        out = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
+        if parse_changed_line_map(out):
+          diff_text = out
+          break
       except Exception:  # pylint: disable=broad-exception-caught
         continue
     if diff_text is None:

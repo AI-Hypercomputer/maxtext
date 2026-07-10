@@ -195,6 +195,7 @@ jobs:
         flavor: [tpu-unit, tpu-integration, tpu-post-training-unit]
     with:
       flavor: ${{ matrix.flavor }}
+      is_pull_request: ${{ github.event_name == 'pull_request' }}
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
