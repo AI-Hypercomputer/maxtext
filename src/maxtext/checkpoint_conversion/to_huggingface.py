@@ -108,6 +108,15 @@ flags.DEFINE_bool(
     "with values from the MaxText config. If False, raises a ValueError on mismatch.",
 )
 
+flags.DEFINE_string(
+    "hf_model_path",
+    None,
+    "(Optional) Customized remote HF repo (or local path) to source the tokenizer/processor "
+    "from. If not specified, defaults to maxtext.utils.globals.HF_IDS[model_name]. Use this to "
+    "bundle a different tokenizer than the default (e.g., the base model's tokenizer instead of "
+    "the instruction-tuned one).",
+)
+
 FLAGS = flags.FLAGS
 
 
@@ -493,7 +502,7 @@ def main(argv: Sequence[str]) -> None:
   if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_token = config.hf_access_token
-  hf_tokenizer_id = HF_IDS[model_key]
+  hf_tokenizer_id = FLAGS.hf_model_path or HF_IDS[model_key]
   tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
 
   # For multi-modal case:
