@@ -15,6 +15,7 @@
 """Operations used by Grain"""
 
 import dataclasses
+import json
 import warnings
 from threading import current_thread
 from typing import Any, Iterable, TYPE_CHECKING
@@ -208,7 +209,7 @@ def extract_token_ids(tokens):
     raise ValueError(f"Can't extract token_ids from type {type(tokens)}")
 
 
-def _get_completion_in_chat_template(tokenizer_model, round_msgs):
+def _get_completion_in_chat_template(tokenizer_model, round_msgs, tools=None):
   """Calculates the completion part of a conversation turn formatted with a chat template.
 
   Uses the longest-common-prefix between the full conversation tokens and the
@@ -230,9 +231,14 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   Returns:
     A string representing the completion formatted by the chat template.
   """
-  prompt_completion_tokens = tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True)
+  tools_kwargs = {"tools": tools} if tools is not None else {}
+  prompt_completion_tokens = tokenizer_model.apply_chat_template(
+      round_msgs, add_generation_prompt=False, tokenize=True, enable_thinking=True, **tools_kwargs
+  )
   # include generation_prompt as part of the prompt tokens
-  prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
+  prompt_tokens = tokenizer_model.apply_chat_template(
+      round_msgs[:-1], add_generation_prompt=True, tokenize=True, enable_thinking=True, **tools_kwargs
+  )
 
   prompt_completion_ids = extract_token_ids(prompt_completion_tokens)
   prompt_ids = extract_token_ids(prompt_tokens)
@@ -257,7 +263,7 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   return tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
 
 
-def apply_chat_template(example, tokenizer_model, data_column_name):
+def apply_chat_template(example, tokenizer_model, data_column_name, tools_column_name=None):
   """Formats conversational data by applying the tokenizer's chat template
   and identifying prompt/completion segments for SFT masking.
 
@@ -268,6 +274,10 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
       which contains the specific chat template.
     data_column_name: The name of the column in the `example` dictionary
       that contains the list of messages.
+    tools_column_name: Optional name of an auxiliary column holding tool/function
+      definitions (a JSON string or list). When present, the tools are passed to every
+      `apply_chat_template` call so tool-calling turns render correctly, and are re-rendered
+      in every round of a multi-turn conversation.
 
   Returns:
     The modified `example` dictionary.
@@ -281,25 +291,48 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
   messages = []
   is_prompt = []
   round_msgs = []
+  leading_msgs = []  # persistent system/developer prefix; re-seeded each round (multi-turn tools fix)
+  conversation = example[data_column_name]
+  if isinstance(conversation, str):
+    conversation = json.loads(conversation)
+  tools = example.get(tools_column_name) if tools_column_name else None
+  if isinstance(tools, str):
+    tools = json.loads(tools)
+  tools_kwargs = {"tools": tools} if tools is not None else {}
   try:
-    for idx, message in enumerate(example[data_column_name]):
-      if message["role"] == "system":
+    for idx, message in enumerate(conversation):
+      if message["role"] in ("system", "developer"):
         if idx != 0:
-          raise ValueError(f"System message found at index {idx}. System messages must be at index 0.")
+          raise ValueError(f"'{message['role']}' message found at index {idx}. It must be at index 0.")
         round_msgs.append(message)
+        leading_msgs.append(message)
       elif message["role"] == "user":
         round_msgs.append(message)
         prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            round_msgs, add_generation_prompt=True, tokenize=False
+            round_msgs, add_generation_prompt=True, tokenize=False, enable_thinking=True, **tools_kwargs
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
-      elif message["role"] == "assistant":
+      elif message["role"] == "tool":
         round_msgs.append(message)
-        messages.append(_get_completion_in_chat_template(tokenizer_model, round_msgs))
+      elif message["role"] == "assistant":
+        if not round_msgs:
+          raise ValueError(f"Assistant message at index {idx} with no preceding context.")
+        round_msgs.append(message)
+        messages.append(_get_completion_in_chat_template(tokenizer_model, round_msgs, tools=tools))
         is_prompt.append(False)
-        # Round ended, clearing the buffer.
-        round_msgs.clear()
+        # Clear the round only when the next message starts a new user turn or the conversation
+        # ends. This preserves context for consecutive assistant/tool messages.
+        next_idx = idx + 1
+        if next_idx >= len(conversation) or conversation[next_idx]["role"] == "user":
+          # Re-seed with the leading system/developer turn instead of clearing it, so every
+          # subsequent multi-turn round still renders the tools/persona. Clearing dropped the
+          # leading turn -> later rounds rendered as a bare <bos>user prompt with no tools, and
+          # completion-only loss trained those rounds' tool-calls as (no-tools -> call), so the
+          # model emits spurious tool calls at inference.
+          round_msgs = list(leading_msgs)
+      else:
+        raise ValueError(f"Unsupported message role '{message['role']}' at index {idx}.")
   except ValueError as e:
     max_logging.log(f"Unable to apply chat template: {e}")
     raise e
@@ -582,13 +615,18 @@ class ParseFeatures(grain.MapTransform):
     self.data_columns = list(data_columns)
     self.tokenize = tokenize
 
+  # Columns that may legitimately be absent from a record (e.g. datasets without
+  # function-calling data). Missing optional columns are skipped, not an error,
+  # so a single mixture can blend tools/non-tools datasets.
+  OPTIONAL_COLUMNS = frozenset({"tools"})
+
   def map(self, element):
     """Parse a serialized tf.train.Example proto and extract features."""
     example = example_pb2.Example()
     example.ParseFromString(element)
     features = example.features.feature
 
-    missing = [c for c in self.data_columns if c not in features]
+    missing = [c for c in self.data_columns if c not in features and c not in self.OPTIONAL_COLUMNS]
     if missing:
       raise ValueError(
           f"Column {missing} not found in dataset. Available columns: {sorted(features.keys())}. "
@@ -629,11 +667,21 @@ class NormalizeFeatures(grain.MapTransform):
     self.column_names = column_names
     self.tokenize = tokenize
 
+  # Columns that may legitimately be absent from a record (e.g. datasets
+  # without function-calling data). Missing optional columns are skipped
+  # instead of raising, so a single mixture can blend tools/non-tools datasets.
+  OPTIONAL_COLUMNS = frozenset({"tools"})
+
   def map(self, element):
-    if self.tokenize:
-      return {col: element[col][0].decode() for col in self.column_names}
-    else:
-      return {col: element[col] for col in self.column_names}
+    """Normalize feature keys, skipping optional columns (e.g. `tools`) absent from a record."""
+    out = {}
+    for col in self.column_names:
+      if col not in element:
+        if col in self.OPTIONAL_COLUMNS:
+          continue  # e.g. a dataset that has no `tools` column
+        raise KeyError(f"Required column '{col}' missing from record. Present columns: {sorted(element.keys())}")
+      out[col] = element[col][0].decode() if self.tokenize else element[col]
+    return out
 
 
 @dataclasses.dataclass
@@ -650,9 +698,12 @@ class KeepFeatures(grain.MapTransform):
     self.feature_names = feature_names
     self.tokenize = tokenize
 
+  # See ParseFeatures.OPTIONAL_COLUMNS — absent optional columns are skipped, not an error.
+  OPTIONAL_COLUMNS = frozenset({"tools"})
+
   def map(self, element: dict[str, Any]) -> dict[str, Any]:
     """Applies the feature filtering to the input element."""
-    missing = [n for n in self.feature_names if n not in element]
+    missing = [n for n in self.feature_names if n not in element and n not in self.OPTIONAL_COLUMNS]
     if missing:
       raise ValueError(
           f"Column {missing} not found in dataset. Available columns: {sorted(element.keys())}. "

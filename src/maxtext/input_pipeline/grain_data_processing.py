@@ -307,26 +307,34 @@ def dpo_preprocessing_pipeline(
 
 def _format_chat_template_grain(element, data_columns, tokenizer_model):
   """Grain-compatible mapping function to format raw columns into conversational messages."""
+  tools_column_name = data_processing_utils.TOOLS_COLUMN if data_processing_utils.TOOLS_COLUMN in data_columns else None
+  primary_columns = [c for c in data_columns if c != data_processing_utils.TOOLS_COLUMN]
+
   # Convert raw columns to conversational messages
-  if "messages" in data_columns:
+  if "messages" in primary_columns:
     messages = element["messages"]
-  elif set(data_columns) == {"prompt", "completion"}:
+    if isinstance(messages, (str, bytes)):
+      messages = json.loads(messages)
+  elif set(primary_columns) == {"prompt", "completion"}:
     messages = [{"role": "user", "content": element["prompt"]}, {"role": "assistant", "content": element["completion"]}]
-  elif set(data_columns) == {"question", "answer"}:
+  elif set(primary_columns) == {"question", "answer"}:
     messages = [{"role": "user", "content": element["question"]}, {"role": "assistant", "content": element["answer"]}]
   else:
     # Fallback if it's already a single string
-    messages = element[data_columns[0]]
+    messages = element[primary_columns[0]]
 
   assert all(
       hasattr(m, "__contains__") and "role" in m and "content" in m for m in messages
   ), f"SFT requires a conversational format. Expected dicts with 'role' and 'content', but got: {messages}"
 
   # Assign the standardized messages back to the primary column
-  element[data_columns[0]] = messages
+  element[primary_columns[0]] = messages
 
   return input_pipeline_utils.apply_chat_template(
-      element, tokenizer_model=tokenizer_model, data_column_name=data_columns[0]
+      element,
+      tokenizer_model=tokenizer_model,
+      data_column_name=primary_columns[0],
+      tools_column_name=tools_column_name,
   )
 
 
