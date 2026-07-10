@@ -554,5 +554,3 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
 if __name__ == "__main__":
   unittest.main()
 
-  def test_dummy_tpu7x_newly_added(self):
-    self.assertTrue(True)
