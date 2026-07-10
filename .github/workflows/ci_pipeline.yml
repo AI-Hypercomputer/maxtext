@@ -66,6 +66,7 @@ jobs:
             echo "Not a pull request, running all tests"
             echo "run_tests=true" >> $GITHUB_OUTPUT
             echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            echo "has_new_tests=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -223,7 +224,7 @@ jobs:
     if: |
       always() &&
       needs.build_and_upload_maxtext_package.result == 'success' &&
-      needs.analyze_code_changes.outputs.has_new_tests == 'true' &&
+      (github.event_name != 'pull_request' || needs.analyze_code_changes.outputs.has_new_tests == 'true') &&
       (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
