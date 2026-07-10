@@ -53,6 +53,7 @@ jobs:
     outputs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
+      has_new_tests: ${{ steps.check_new_tests.outputs.has_new_tests }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -187,7 +188,12 @@ jobs:
 
   tpu-tests:
     name: ${{ matrix.flavor || 'TPU' }} tests
-    needs: [build_and_upload_maxtext_package, gate_test_run]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package, gate_test_run]
+    if: |
+      always() &&
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
+
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -213,10 +219,11 @@ jobs:
 
   tpu7x-tests:
     name: TPU7X tests
-    needs: [build_and_upload_maxtext_package, gate_test_run]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package, gate_test_run]
     if: |
       always() &&
       needs.build_and_upload_maxtext_package.result == 'success' &&
+      needs.analyze_code_changes.outputs.has_new_tests == 'true' &&
       (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
@@ -232,7 +239,12 @@ jobs:
 
   gpu-tests:
     name: ${{ matrix.flavor || 'GPU' }} tests
-    needs: [build_and_upload_maxtext_package, gate_test_run]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package, gate_test_run]
+    if: |
+      always() &&
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
+
     strategy:
       fail-fast: false
       matrix:
@@ -246,7 +258,12 @@ jobs:
 
   cpu-tests:
     name: ${{ matrix.flavor || 'CPU' }} tests
-    needs: [build_and_upload_maxtext_package, gate_test_run]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package, gate_test_run]
+    if: |
+      always() &&
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
+
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
