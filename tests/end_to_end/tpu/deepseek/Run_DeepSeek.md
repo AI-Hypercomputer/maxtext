@@ -16,7 +16,7 @@
 
 # DeepSeek
 
-DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The currently supported models are DeepSeek V2-Lite (16B), DeepSeek V3 (671B), DeepSeek R1 (671B), DeepSeek V3.1 (671B), and DeepSeek V3.2 (671B).
+DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The currently supported models are DeepSeek V2-Lite (16B), DeepSeek V3 (671B), DeepSeek R1 (671B), DeepSeek V3.1 (671B), DeepSeek V3.2 (671B), and DeepSeek V4-Flash (284B).
 
 * DeepSeek-V3 features advanced techniques, including Multi-Head Latent Attention (MLA), finer-grained and shared experts, Multi-Token Prediction (MTP), and FP8 mixed precision designed for enhanced efficiency and performance.
 
@@ -26,52 +26,75 @@ DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The
 
 * DeepSeek-V3.2 introduces [DeepSeek Sparse Attention](https://arxiv.org/pdf/2512.02556) (DSA), successfully reduces computational complexity while preserving model performance in long-context scenarios.
 
+* DeepSeek V4-Flash introduces radical architectural shifts, moving to Hybrid Attention (combining Compressed Sparse Attention and Heavily Compressed Attention) and Manifold-Constrained Hyper-Connections (mHC).
+
 **Please note:**
 * To leverage MLA with Flash Attention, ensure you have the latest JAX version.
 * The provided TPU configurations are examples and not mandatory.
 * For V3.1 & R1, use existing V3 671B model configurations, as it shares the same architecture.
 
 ## Checkpoint conversion
-To get started, follow the instructions at HuggingFace ([V3](https://huggingface.co/deepseek-ai/DeepSeek-V3), [V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)) to download the model. Currently for V3, V3.1, and R1, it uses mixed precision fp8 & bf16 weights. To convert all FP8 weights to BF16, use the script [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/ckpt_scripts/deepseek_fp8_to_bf16.py). Once downloaded and converted to BF16:
+To get started, follow the instructions at HuggingFace ([V3](https://huggingface.co/deepseek-ai/DeepSeek-V3), [V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)) to download the model. Currently for V3, V3.1, and R1, it uses mixed precision fp8 & bf16 weights. To convert all FP8 weights to BF16, use the script [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/ckpt_scripts/deepseek_dequantize.py). Once downloaded and converted to BF16:
 * run [convert_deepseek_family_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_deepseek_family_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) for training and fine-tuning. When converting a checkpoint with MTP layers (like DeepSeek-V3), be sure to add the `--enable_mtp` flag to process them correctly.
 * run [convert_deepseek_family_unscanned_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_deepseek_family_unscanned_ckpt.py) to convert the checkpoint to unscanned version in Orbax for decoding.
 
-### Checkpoint conversion for V3.2
+### Checkpoint conversion for V3.2 and V4
+For V3.2 (671B) and V4-Flash (284B), we use the unified conversion script `src/maxtext/checkpoint_conversion/to_maxtext.py`.
+
 #### 1. Download Model Weights
-Download the Hugging Face weights from [deepseek-ai/DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) to your local environment. Weights are provided in FP8.
+Download the Hugging Face weights to your local environment:
+* For V3.2: [deepseek-ai/DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2)
+* For V4-Flash: [deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
+
+#### 2. Dequantize Weights (if in FP8/FP4)
+If downloading the quantized weights, convert them from FP8/FP4 to BF16 using [deepseek_dequantize.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/deepseek_dequantize.py) on CPU:  
+
 ```bash
-hf download deepseek-ai/DeepSeek-V3.2 --local-dir <local_fp8_path>
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.deepseek_dequantize \
+    --input-fp8-hf-path=<local_fp8_path> \
+    --output-bf16-hf-path=<local_bf16_path>  
 ```
-
-#### 2. Dequantize Weights
-Convert the weights from FP8 to BF16 using script [deepseek_fp8_to_bf16.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/deepseek_fp8_to_bf16.py) on CPU:  
-
-```bash
-python3 -m maxtext.checkpoint_conversion.standalone_scripts.deepseek_fp8_to_bf16 --input-fp8-hf-path=<local_fp8_path> --output-bf16-hf-path=<local_bf16_path>  
-```
-
-Alternatively, we can use the official DeepSeek script [fp8_cast_bf16.py](https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/fp8_cast_bf16.py) to convert on GPU.  
+*(Alternatively, use the official DeepSeek script [fp8_cast_bf16.py](https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/fp8_cast_bf16.py) to convert on GPU).*
 
 #### 3. Convert to MaxText-compatible Orbax format
-Execute the following command to finalize the conversion. Ensure your environment variables (`$BASE_OUTPUT_PATH`, `$HF_TOKEN`, and `$DEQUANTIZED_LOCAL_WEIGHTS`) are exported before running.
-Setting `scan_layers=true` generates scanned Orbax format for training and fine-tuning.  Setting `scan_layers=false` unscanned format in Orbax for decoding. 
+Execute the following command to finalize the conversion. Ensure your environment variables (`$BASE_OUTPUT_PATH`, `$HF_TOKEN`, and `$BF16_LOCAL_PATH`) are exported before running. Set `MODEL_NAME` to `deepseek3.2-671b` or `deepseek4-284b`. Setting `scan_layers=true` generates scanned Orbax format for training and fine-tuning. Setting `scan_layers=false` generates unscanned format in Orbax for decoding.
+
+> [!TIP]
+> For large models like V3.2 and V4, you can optionally speed up the conversion drastically on large CPU machines by sharding checkpoint across simulated cpu devices and eagerly loading tensors. E.g., appending `--simulated_cpu_devices_count=16 --lazy_load_tensors=False` to the command.
+
+
 ```bash
+# scanned
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     src/maxtext/configs/base.yml \
-    model_name=deepseek3.2-671b \
+    model_name=${MODEL_NAME} \
     scan_layers=true \
-    attention=dot_product \
-    base_output_directory=$BASE_OUTPUT_PATH \
+    base_output_directory=$BASE_OUTPUT_PATH/scanned \
     hf_access_token=$HF_TOKEN \
     hardware=cpu \
     skip_jax_distributed_system=True \
-    --hf_model_path=$DEQUANTIZED_LOCAL_WEIGHTS \
-    --eager_load_method=safetensors \
+    --hf_model_path=$BF16_LOCAL_PATH \
+    --save_dtype=bfloat16
+
+# unscanned
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    src/maxtext/configs/base.yml \
+    model_name=${MODEL_NAME} \
+    scan_layers=false \
+    attention=dot_product \
+    base_output_directory=$BASE_OUTPUT_PATH/unscanned \
+    hf_access_token=$HF_TOKEN \
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    --hf_model_path=$BF16_LOCAL_PATH \
     --save_dtype=bfloat16
 ```
 
+
 ## Pre-training
-You can train from scratch to generate a new checkpoint. One example command to run pretraining with V3 on v5p-256.
+You can train from scratch or resume from a converted scanned checkpoint. The pre-training process and options are similar across all DeepSeek models.
+
+Here is an example command template. Export the variables `MODEL_NAME` (e.g., `deepseek3-671b`, `deepseek4-284b`), `TOKENIZER_PATH` (e.g., `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-V4-Flash`), and customize other arguments such as `attention` (`flash` or `dot_product`), `opt_type` (`sgd` or `adamw`), and parallelism topology configs to match your model and setup:
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
@@ -79,14 +102,14 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     run_name=matmul_pre_training \
     per_device_batch_size=1 \
     enable_checkpointing=false \
-    model_name=deepseek3-671b \
-    ici_fsdp_parallelism=128 \
+    model_name=${MODEL_NAME} \
+    ici_fsdp_parallelism=-1 \
     steps=5 \
     max_target_length=1024 \
     async_checkpointing=false \
     tokenizer_type=huggingface \
-    tokenizer_path=deepseek-ai/DeepSeek-V3 \
-    attention=flash \
+    tokenizer_path=${TOKENIZER_PATH} \
+    attention=flash \ # DSV4 does not yet support flash attention, need to use dot_product for now.
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     megablox=False \
@@ -303,6 +326,52 @@ python3 -m tests.utils.forward_pass_logit_checker \
 ```
 
 To run MMLU benchmarks and validate the model's performance, follow the instructions provided [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/api_server/README.md).
+
+### Logit comparison for V4-284b
+
+To verify correctness for the DeepSeek V4 model, we compare the logits against the HuggingFace implementation.
+
+Run the forward pass logit checker command below. The test uses `indexer_topk=4` to cover all pathways in the model without excessive sequence lengths in testing. To cover each pathway in the model, we need to set the prompt length such that: sliding window (`prompt_len > sliding_window_size`), HCA (`prompt_len / hca_compression_factor > 1`), and CSA (`prompt_len / csa_compression_factor > indexer_topk`).
+
+**Important Note for Golden Logit Generation**: To generate golden logits with `indexer_topk=4`, you must modify `config.json` in your local HuggingFace checkpoint directory, changing `"index_topk": 512` to `"index_topk": 4` before running the generation script.
+
+One example command to generate golden logits from HuggingFace for DeepSeek V4-Flash (using a prompt length of 512 tokens to trigger sliding window, CSA, and HCA layer requirements):
+
+```sh
+python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
+    --model-id=deepseek-ai/DeepSeek-V4-Flash \
+    --output-path=golden_data_deepseek4-284b_proper_512.jsonl \
+    --prompts='<Insert prompt here>' \
+    --hf-model-path=$BF16_LOCAL_PATH
+```
+
+```sh
+python3 -m tests.utils.forward_pass_logit_checker \
+    src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_PATH} \
+    run_name=ds4-parity \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    scan_layers=False \
+    attention=dot_product \
+    per_device_batch_size=1 \
+    model_name=deepseek4-284b \
+    max_target_length=1024 \
+    ici_fsdp_parallelism=1 \
+    ici_expert_parallelism=-1 \
+    weight_dtype=bfloat16 \
+    dtype=bfloat16 \
+    activations_in_float32=false \
+    matmul_precision=highest \
+    float32_logits=false \
+    float32_qk_product=false \
+    override_model_config=True \
+    indexer_topk=4 \
+    enable_nnx=false \
+    pure_nnx=false \
+    pure_nnx_decoder=false \
+    --golden_logits_path=golden_data_deepseek4-284b_proper_512.jsonl \
+    --max_kl_div=0.75
+```
 
 ## Supported MoE strategy
 * Dropless
