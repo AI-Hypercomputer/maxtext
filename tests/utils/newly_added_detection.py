@@ -152,6 +152,7 @@ def _build_diff_commands(base):
       ["git", "diff", "--unified=0", f"{base}...HEAD"],
       ["git", "diff", "--unified=0", f"origin/{base}..HEAD"],
       ["git", "diff", "--unified=0", f"{base}..HEAD"],
+      ["git", "diff", "--unified=0", "FETCH_HEAD..HEAD"],
   ]
 
 
