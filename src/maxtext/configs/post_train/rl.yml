@@ -117,6 +117,13 @@ num_batches: 4
 # and/or async sampling and training.
 train_micro_batch_size: -1
 rollout_micro_batch_size: -1
+# [NAVI patch C] Chunk size for LM-head projection when computing per-token logps.
+# 0 = OFF (stock full-logits path). >0 caps logits peak at [micro, chunk, vocab],
+# lifting the train_micro_batch_size HBM ceiling. Correctness-preserving.
+rl_compute_logps_chunk_size: 0
+# [NAVI patch D] Whole-model host offload (tunix ClusterConfig.offload_to_cpu).
+# False = OFF (stock). True moves params to pinned_host between phases.
+rl_offload_to_cpu: false
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200

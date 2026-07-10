@@ -1565,6 +1565,7 @@ class NNXDecoder(nnx.Module):
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
       multimodal_input: None | MultimodalInput = None,
+      skip_lm_head: bool = False,  # [NAVI patch C] robust: skip output head INSIDE decoder
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -1915,6 +1916,14 @@ class NNXDecoder(nnx.Module):
     elif cfg.num_vocab_tiling > 1 and model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow(nnx.Intermediate, "hidden_states", hidden_state)
+
+    # [NAVI patch C] Robust chunked-logps: when the caller (tunix compute_chunked_logps)
+    # asks to skip the LM head, DO NOT run apply_output_head here. This guarantees the
+    # [B, L, vocab] logits matmul never enters the graph (same mechanism as num_vocab_tiling
+    # above), rather than relying on XLA DCE to prune an already-emitted 40GB matmul. The
+    # caller re-projects hidden_state chunk-by-chunk via compute_final_logits under scan+remat.
+    elif skip_lm_head:
+      logits = None
 
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)

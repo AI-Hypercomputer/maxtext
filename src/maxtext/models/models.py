@@ -410,13 +410,24 @@ class Transformer(nnx.Module):
     """A no-op method to allow the model to be used in a lazy context."""
     return
 
-  def logits_from_hidden_states_for_vocab_tiling(self, hidden_states, deterministic, model_mode):
-    """Computes logits from hidden states; used by vocabulary tiling."""
+  def logits_from_hidden_states_for_vocab_tiling(self, hidden_states, deterministic, model_mode, rngs=None):
+    """Computes logits from hidden states; used by vocabulary tiling.
+
+    Optional ``rngs`` (a static jax.Array key) is forwarded to the ToNNX-wrapped
+    decoder so that, when this projection runs inside tunix ``compute_chunked_logps``
+    ``jax.lax.scan``, the ToNNX wrapper takes its ``isinstance(rngs, jax.Array)``
+    branch (``_rngs={"params": rngs}``) instead of calling ``stream()`` on live
+    Rngs — which would mutate an RngCount across the scan trace level and raise
+    ``flax.errors.TraceContextError``. Default ``None`` preserves the exact native
+    (non-chunked) behavior for all existing callers.
+    """
+    extra = {"rngs": rngs} if rngs is not None else {}
     return self.decoder.apply_output_head(
         shared_embedding=self.token_embedder,
         y=hidden_states,
         deterministic=deterministic,
         model_mode=model_mode,
+        **extra,
     )
 
   def init_cache(self, cache_size: int, batch_size: int, dtype=jnp.float32):
@@ -452,6 +463,7 @@ class Transformer(nnx.Module):
       decoder_target_mask: jax.Array | None = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      skip_lm_head: bool = False,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -548,6 +560,7 @@ class Transformer(nnx.Module):
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
+          skip_lm_head=skip_lm_head,  # [NAVI] robust chunked-logps: skip output head inside decoder
       )  # pytype: disable=wrong-keyword-args
     else:
       logits, hidden_state, kv_caches = self.decoder(
@@ -563,6 +576,7 @@ class Transformer(nnx.Module):
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
+          skip_lm_head=skip_lm_head,  # [NAVI] robust chunked-logps: skip output head inside decoder
           mutable=mutable_collections,  # pyrefly: ignore[unexpected-keyword]
       )  # pytype: disable=wrong-keyword-args
 
@@ -601,5 +615,11 @@ class Transformer(nnx.Module):
     if self.config.attention == "vllm_rpa":
       # In vLLM, logits are computed separately after updating the KV cache.
       return hidden_state, kv_caches
+
+    # [NAVI] Defer LM-head projection to the caller (tunix chunked-logps) to cap the
+    # logits peak at [B, chunk, vocab]. hidden_state is already computed; the caller
+    # re-projects chunk-by-chunk via compute_final_logits under scan+remat.
+    if skip_lm_head:
+      return hidden_state
 
     return logits

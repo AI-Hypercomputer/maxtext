@@ -2186,6 +2186,29 @@ class RLDataset(BaseModel):
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
   rollout_micro_batch_size: int = Field(-1, description="Micro batch size for rollout.")
+  rl_compute_logps_chunk_size: int = Field(
+      0,
+      description=(
+          "[NAVI patch C] If > 0, compute the actor/ref/old per-token log-probs "
+          "with the LM head projected in sequence chunks of this size (tunix "
+          "compute_chunked_logps: skip_lm_head + scan + remat). Caps the logits "
+          "memory peak at [micro, chunk, vocab] instead of [micro, seq, vocab], "
+          "which lifts the train_micro_batch_size HBM ceiling. Default 0 (OFF, "
+          "identical to stock full-logits path). Requires the model adapter to "
+          "expose skip_lm_head + compute_final_logits."
+      ),
+  )
+  rl_offload_to_cpu: bool = Field(
+      False,
+      description=(
+          "[NAVI patch D] If True, set tunix ClusterConfig.offload_to_cpu so the "
+          "actor/reference/rollout model params are moved to pinned_host between "
+          "phases (whole-model host offload; a DIFFERENT mechanism from the "
+          "validate-blocked optimizer_memory_host_offload). Trades host<->device "
+          "transfer time for device HBM headroom. Default False (OFF). Gate with "
+          "EXPERIMENTAL_RL_HOST_OFFLOAD."
+      ),
+  )
   dataset_processor_path: str = Field(
       "",
       description=(
