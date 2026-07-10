@@ -19,7 +19,6 @@
 # See github.com/google/maxtext/issues/20 for more
 
 from typing import Any, Sequence
-import datetime
 import functools
 import os
 
@@ -651,7 +650,6 @@ def training_loop_iteration(
 
   # Unpack python_vars
   step = python_vars["step"]
-  last_step_completion = python_vars["last_step_completion"]
   data_loader = python_vars["data_loader"]
   rampup_manager = python_vars["rampup_manager"]
   recorder = python_vars["recorder"]
@@ -694,9 +692,7 @@ def training_loop_iteration(
         if shard_optimizer_over_data and isinstance(model, nn.Module):
           state = sharding.maybe_shard_with_name(state, state_mesh_shardings, shard_mode)
         state, metrics = p_train_step(state, example_batch, *step_rng_args)
-
-  step_time_delta = datetime.datetime.now() - last_step_completion
-  last_step_completion = datetime.datetime.now()
+    metric_logger_instance.buffer_and_write_metrics(metrics, step)
 
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
@@ -718,7 +714,6 @@ def training_loop_iteration(
     max_logging.log(f"Starting eval after train step {step}")
 
     eval_step_count = 0
-    last_eval_step_completion = datetime.datetime.now()
     # pylint: disable=not-callable
     for eval_batch in eval_data_iterator:
       # Shard input eval data
@@ -727,10 +722,8 @@ def training_loop_iteration(
         break
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
-      eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
-      last_eval_step_completion = datetime.datetime.now()
       metric_logger_instance.buffer_and_write_metrics(
-          eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
+          eval_metrics, eval_step_count, is_training=False
       )
       eval_step_count += 1
 
@@ -739,11 +732,8 @@ def training_loop_iteration(
   if step == start_step:
     max_utils.print_mem_stats("After params initialized")
 
-  metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
-
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
-  python_vars["last_step_completion"] = last_step_completion
 
 
 def train_loop(config, recorder, state=None):
@@ -842,7 +832,6 @@ def train_loop(config, recorder, state=None):
 
   python_vars = {
       "step": start_step,
-      "last_step_completion": datetime.datetime.now(),
       "data_loader": data_loader,
       "rampup_manager": rampup_manager,
       "recorder": recorder,
@@ -874,8 +863,6 @@ def train_loop(config, recorder, state=None):
 
   _job_completed_gracefully = False
   try:
-    python_vars["last_step_completion"] = datetime.datetime.now()
-
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
       training_loop_iteration(jax_device_state, python_vars, immutable_data)
@@ -886,7 +873,6 @@ def train_loop(config, recorder, state=None):
 
     if immutable_data["save_checkpoint_on_completion"]:
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
-
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
       checkpoint_manager.wait_until_finished()
