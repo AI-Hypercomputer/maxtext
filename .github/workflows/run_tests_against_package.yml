@@ -244,6 +244,7 @@ jobs:
         env:
           INPUTS_FLAVOR: ${{ inputs.flavor }}
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
+          INPUTS_IS_PULL_REQUEST: ${{ inputs.is_pull_request }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
           INPUTS_PYTEST_ADDOPTS: ${{ inputs.pytest_addopts }}
