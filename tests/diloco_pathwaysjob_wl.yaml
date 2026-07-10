@@ -1,0 +1,36 @@
+apiVersion: pathways-job.pathways.domain/v1
+kind: PathwaysJob
+metadata:
+  name: diloco-test-2slice
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+spec:
+  controller:
+    deploymentMode: default
+    elasticSlices: 0
+    mainContainerName: jax-tpu
+    template:
+      spec:
+        containers:
+        - name: jax-tpu
+          image: us-east5-docker.pkg.dev/cloud-tpu-multipod-dev/maxtext-images/diloco-mohit:latest
+          imagePullPolicy: Always
+          command:
+          - python3
+          - /app/tests/diloco_colocated_cpu_test.py
+          resources:
+            limits:
+              cpu: "24"
+              memory: 100G
+          securityContext:
+            privileged: true
+        dnsPolicy: ClusterFirstWithHostNet
+        hostNetwork: true
+        restartPolicy: Never
+  pathwaysDir: gs://cloud-pathways-staging/tmp
+  workers:
+  - numSlices: 2
+    topology: 2x2x1
+    type: ct5p-hightpu-4t
+    maxSliceRestarts: 1

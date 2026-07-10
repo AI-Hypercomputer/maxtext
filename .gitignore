@@ -156,3 +156,5 @@ gha-creds-*.json
 # vscode workspace
 maxtext.code-workspace
 maxtext_output/
+
+.agents

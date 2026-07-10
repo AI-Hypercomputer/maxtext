@@ -1,0 +1,3 @@
+FROM gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2026-07-10
+WORKDIR /app
+COPY . /app/
