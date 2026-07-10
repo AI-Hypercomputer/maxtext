@@ -202,19 +202,27 @@ def _populate_pure_dict_from_partial(abstract_pure, partial_concrete, config=Non
   (NNX-only state the Linen checkpoint never had) get `_default_for_sds` or are preserved.
   """
   if isinstance(abstract_pure, dict):
-    return {
-        k: _populate_pure_dict_from_partial(
-            v,
-            partial_concrete.get(k) if isinstance(partial_concrete, dict) else None,
-            config,
-        )
-        for k, v in abstract_pure.items()
-    }
+    res = {}
+    for k, v in abstract_pure.items():
+      val = _populate_pure_dict_from_partial(
+          v,
+          partial_concrete.get(k) if isinstance(partial_concrete, dict) else None,
+          config,
+      )
+      if val is not None:
+        res[k] = val
+    return res
+
+  if isinstance(partial_concrete, jax.ShapeDtypeStruct):
+    partial_concrete = None
+
   if partial_concrete is not None and not isinstance(partial_concrete, dict):
     return partial_concrete
 
-  # Under LoRA, preserve the already-initialized base weights instead of resetting to zeros
+  # Under LoRA, return None for SDS to omit from state dict and preserve base weights.
   if config and config.lora and config.lora.enable_lora:
+    if isinstance(abstract_pure, jax.ShapeDtypeStruct):
+      return None
     return abstract_pure
 
   return _default_for_sds(abstract_pure)

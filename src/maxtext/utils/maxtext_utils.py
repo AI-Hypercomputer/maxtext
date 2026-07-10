@@ -1514,10 +1514,19 @@ def setup_initial_state(
         # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
 
-      # For NNX, convert the pure dict to nnx.State using the abstract state as template
+      # For NNX, convert pure dict to nnx.State. Under LoRA, overwrite concrete initial state.
       if config.pure_nnx:
-        nnx.replace_by_pure_dict(unboxed_abstract_state, state)
-        state = unboxed_abstract_state
+        if config.lora.enable_lora:
+          concrete_state = jax.jit(
+              lambda: nnx.state(init_state_fn()),
+              in_shardings=None,
+              out_shardings=state_mesh_shardings,
+          )()
+          nnx.replace_by_pure_dict(concrete_state, state)
+          state = concrete_state
+        else:
+          nnx.replace_by_pure_dict(unboxed_abstract_state, state)
+          state = unboxed_abstract_state
     else:
       init_state_partial = init_state_fn
       init_state_partial.__name__ = "initialize_state"
