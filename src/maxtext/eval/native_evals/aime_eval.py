@@ -56,26 +56,16 @@ QUERY_TEMPLATE = (
     '"Answer: $N" (without quotes), where $N is the integer answer.\n\n{problem}'
 )
 
-_ANSWER_LINE_RE = re.compile(r"(?i)Answer\s*:\s*\$?(-?\d+)")
-_BOXED_RE = re.compile(r"\\boxed\{(-?\d+)\}")
-_LAST_INT_RE = re.compile(r"-?\d+")
+_ANSWER_LINE_RE = re.compile(r"(?i)(?:^|\n)\s*Answer\s*:\s*\$?([0-9]{1,3})\$?\s*\Z")
 
 
 def extract_answer(response_text: str) -> str | None:
   """Pull the integer answer out of a response.
 
-  Tries an explicit "Answer: N" line first (what QUERY_TEMPLATE asks for),
-  then a LaTeX \\boxed{N} (common on models trained for math CoT that ignore
-  the requested format), then falls back to the last integer in the response.
+  Requires the explicit final-line format requested by QUERY_TEMPLATE.
   """
   match = _ANSWER_LINE_RE.search(response_text)
-  if match:
-    return match.group(1)
-  match = _BOXED_RE.search(response_text)
-  if match:
-    return match.group(1)
-  numbers = _LAST_INT_RE.findall(response_text)
-  return numbers[-1] if numbers else None
+  return match.group(1) if match else None
 
 
 class AIMEEval(Eval):
@@ -112,7 +102,19 @@ class AIMEEval(Eval):
           extracted_answer=extracted_answer,
       )
       convo = actual_queried_prompt_messages + [dict(content=response_text, role="assistant")]
-      return SingleEvalResult(html=html, score=score, convo=convo, metrics={"chars": len(response_text)})
+      return SingleEvalResult(
+          html=html,
+          score=score,
+          convo=convo,
+          metrics={"chars": len(response_text)},
+          example_level_metadata={
+              "request_id": sampler_response.response_metadata.get("request_id"),
+              "request_status": sampler_response.response_metadata.get("status", "success"),
+              "score": score,
+              "correct_answer": row["answer"],
+              "extracted_answer": extracted_answer,
+          },
+      )
 
     results = common.map_with_progress(fn, self.examples)
     return common.aggregate_results(results)

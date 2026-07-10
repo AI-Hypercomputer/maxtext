@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 import logging
 import os
 import sys
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 _HEALTH_ENDPOINT = "/health"
+_AUTO_REQUESTS_PER_ACCELERATOR = 4
 
 
 def _top_logprobs_dict(tokenizer: Any, lp_dict: dict | None) -> "dict[str, float] | None":
@@ -147,18 +149,22 @@ class _ChatBatchQueue:
   prompt in the batch instead of running them fully serially.
   """
 
-  def __init__(self, llm: Any, max_wait_s: float, max_batch: int):
+  def __init__(self, llm: Any, max_wait_s: float, max_batch: int, max_pending: int):
     self._llm = llm
     self._max_wait_s = max_wait_s
     self._max_batch = max_batch
-    self._pending: list[tuple[str, Any, "asyncio.Future"]] = []
+    self._max_pending = max_pending
+    self._pending: list[tuple[Any, Any, "asyncio.Future"]] = []
     self._timer: "asyncio.TimerHandle | None" = None
 
-  async def submit(self, prompt: str, sampling_params: Any) -> Any:
+  async def submit(self, prompt: Any, sampling_params: Any) -> Any:
     """Queue one rendered prompt and await its vLLM RequestOutput."""
+    if len(self._pending) >= self._max_pending:
+      raise _ChatQueueFullError(f"Chat request queue is full ({self._max_pending} pending requests).")
     loop = asyncio.get_running_loop()
     future = loop.create_future()
-    self._pending.append((prompt, sampling_params, future))
+    item = (prompt, sampling_params, future)
+    self._pending.append(item)
     if len(self._pending) >= self._max_batch:
       if self._timer is not None:
         self._timer.cancel()
@@ -166,7 +172,15 @@ class _ChatBatchQueue:
       self._flush()
     elif self._timer is None:
       self._timer = loop.call_later(self._max_wait_s, self._flush)
-    return await future
+    try:
+      return await future
+    except asyncio.CancelledError:
+      if item in self._pending:
+        self._pending.remove(item)
+        if not self._pending and self._timer is not None:
+          self._timer.cancel()
+          self._timer = None
+      raise
 
   def _flush(self) -> None:
     self._timer = None
@@ -202,7 +216,16 @@ class _ChatBatchQueue:
         future.set_result(output)
 
 
-def _build_app(llm: Any, chat_batch_wait_s: float = 0.02, chat_batch_max_size: int = 64) -> Any:
+class _ChatQueueFullError(RuntimeError):
+  """Raised when chat admission control rejects an excess request."""
+
+
+def _build_app(
+    llm: Any,
+    chat_batch_wait_s: float = 0.02,
+    chat_batch_max_size: int = 64,
+    request_concurrency: int = 16,
+) -> Any:
   """Return a FastAPI app that wraps an in-process vLLM LLM instance."""
   import fastapi  # pylint: disable=import-outside-toplevel
   from vllm.sampling_params import SamplingParams  # pylint: disable=import-outside-toplevel
@@ -211,7 +234,12 @@ def _build_app(llm: Any, chat_batch_wait_s: float = 0.02, chat_batch_max_size: i
 
   app = fastapi.FastAPI()
   app.state.request_count = 0
-  app.state.chat_batch_queue = _ChatBatchQueue(llm, max_wait_s=chat_batch_wait_s, max_batch=chat_batch_max_size)
+  app.state.chat_batch_queue = _ChatBatchQueue(
+      llm,
+      max_wait_s=chat_batch_wait_s,
+      max_batch=chat_batch_max_size,
+      max_pending=request_concurrency,
+  )
 
   @app.get("/health")
   def health():
@@ -346,20 +374,24 @@ def _build_app(llm: Any, chat_batch_wait_s: float = 0.02, chat_batch_max_size: i
       if reasoning_effort:
         template_kwargs["reasoning_effort"] = reasoning_effort
       try:
-        prompt = tokenizer.apply_chat_template(
+        prompt_token_ids = tokenizer.apply_chat_template(
             messages,
-            tokenize=False,
+            tokenize=True,
             add_generation_prompt=True,
             **template_kwargs,
         )
       except TypeError:
         if template_kwargs:
           logger.warning("Chat template rejected reasoning_effort=%s; rendering without it.", reasoning_effort)
-        prompt = tokenizer.apply_chat_template(
+        prompt_token_ids = tokenizer.apply_chat_template(
             messages,
-            tokenize=False,
+            tokenize=True,
             add_generation_prompt=True,
         )
+
+      if isinstance(prompt_token_ids, Mapping):
+        prompt_token_ids = prompt_token_ids["input_ids"]
+      prompt = {"prompt_token_ids": list(prompt_token_ids)}
 
       sp_kwargs: dict = {"max_tokens": max_tokens, "temperature": temperature}
       if stop:
@@ -368,6 +400,8 @@ def _build_app(llm: Any, chat_batch_wait_s: float = 0.02, chat_batch_max_size: i
       # Queued and generated together with other concurrent chat requests --
       # see _ChatBatchQueue -- instead of one llm.generate() call per request.
       output = await app.state.chat_batch_queue.submit(prompt, SamplingParams(**sp_kwargs))
+    except _ChatQueueFullError as exc:
+      raise fastapi.HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "1"}) from exc
     except BaseException as exc:  # noqa: B902  pylint: disable=broad-except
       # Catch BaseException (not just Exception): XLA/PJRT RESOURCE_EXHAUSTED and
       # other hard aborts are NOT Exception subclasses. Fatal aborts raised
@@ -451,6 +485,8 @@ class VllmServerManager:
       before flushing whatever has accumulated (see _ChatBatchQueue).
     chat_batch_max_size: Max requests /v1/chat/completions batches into one
       llm.generate() call before flushing early.
+    concurrency: Maximum accepted in-flight chat requests. None selects an
+      automatic value from CPU and accelerator counts and server limits.
     env: Optional environment-variable overrides.
     additional_vllm_kwargs: Extra kwargs merged into the vLLM LLM() constructor.
   """
@@ -473,6 +509,7 @@ class VllmServerManager:
       hbm_memory_utilization: float = 0.3,
       chat_batch_wait_s: float = 0.02,
       chat_batch_max_size: int = 64,
+      concurrency: int | None = None,
       env: dict[str, str] | None = None,
       additional_vllm_kwargs: dict | None = None,
   ):
@@ -499,6 +536,10 @@ class VllmServerManager:
     self.hbm_memory_utilization = hbm_memory_utilization
     self.chat_batch_wait_s = chat_batch_wait_s
     self.chat_batch_max_size = chat_batch_max_size
+    if concurrency is not None and concurrency <= 0:
+      raise ValueError("concurrency must be positive when specified.")
+    self._requested_concurrency = concurrency
+    self._concurrency: int | None = None
     self.env = env
     self.additional_vllm_kwargs = additional_vllm_kwargs or {}
 
@@ -511,6 +552,28 @@ class VllmServerManager:
   @property
   def base_url(self) -> str:
     return f"http://{self.host}:{self.port}"
+
+  @property
+  def concurrency(self) -> int:
+    """Resolved request concurrency; available after the server starts."""
+    if self._concurrency is None:
+      raise RuntimeError("Request concurrency is not resolved until the server starts.")
+    return self._concurrency
+
+  def _resolve_concurrency(self, cpu_count: int, accelerator_count: int) -> int:
+    """Resolve the sole request-pressure knob from host and accelerator capacity."""
+    if self._requested_concurrency is not None:
+      return self._requested_concurrency
+    limits = [
+        max(1, cpu_count),
+        # Four queued sequences per accelerator is a conservative starting
+        # point for TPU decode; max_num_seqs/chat batch caps still take priority.
+        max(1, accelerator_count * _AUTO_REQUESTS_PER_ACCELERATOR),
+        max(1, self.chat_batch_max_size),
+    ]
+    if self.max_num_seqs is not None:
+      limits.append(max(1, self.max_num_seqs))
+    return min(limits)
 
   def start(self) -> None:
     """Initialize the in-process vLLM LLM and start the HTTP server."""
@@ -582,6 +645,27 @@ class VllmServerManager:
 
     import jax as _jax  # pylint: disable=import-outside-toplevel
 
+    detected_accelerators = max(1, _jax.device_count())
+    active_accelerators = min(
+        detected_accelerators,
+        max(1, self.tensor_parallel_size * self.data_parallel_size),
+    )
+    self._concurrency = self._resolve_concurrency(
+        cpu_count=os.cpu_count() or 1,
+        accelerator_count=active_accelerators,
+    )
+    logger.info(
+        "Request concurrency=%d (%s; cpu=%d active_accelerators=%d detected_accelerators=%d "
+        "max_num_seqs=%s chat_batch_max_size=%d)",
+        self._concurrency,
+        "explicit" if self._requested_concurrency is not None else "auto",
+        os.cpu_count() or 1,
+        active_accelerators,
+        detected_accelerators,
+        self.max_num_seqs,
+        self.chat_batch_max_size,
+    )
+
     logger.info("Rank %d: vLLM LLM ready.", _jax.process_index())
 
     # Time-based memory monitor (all ranks) catches OOM/leak trajectory even when
@@ -596,6 +680,7 @@ class VllmServerManager:
           self._llm,
           chat_batch_wait_s=self.chat_batch_wait_s,
           chat_batch_max_size=self.chat_batch_max_size,
+          request_concurrency=self.concurrency,
       )
       config = uvicorn.Config(
           app,

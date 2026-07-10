@@ -307,6 +307,13 @@ Think step by step, then write a line of the form "Answer: $ANSWER" at the end o
                         score=score,
                         convo=convo,
                         metrics={"em_score": em_score, "f1_score": f1_score},
+                        example_level_metadata={
+                            "request_id": sampler_response.response_metadata.get("request_id"),
+                            "request_status": sampler_response.response_metadata.get("status", "success"),
+                            "score": score,
+                            "correct_answer": correct_answers,
+                            "extracted_answer": match.group(1) if match else None,
+                        },
                     )
 
         results = common.map_with_progress(fn, self.test_samples)

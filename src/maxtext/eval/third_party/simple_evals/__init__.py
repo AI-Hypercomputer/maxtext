@@ -2,8 +2,12 @@
 # Vendored from upstream commit: 652c89d
 #
 # These files are copied verbatim from the upstream project and are licensed
-# under the MIT License (see LICENSE in this directory). Only the grader-free
-# evals required by the MaxText simple_evals runner are vendored:
+# under the MIT License (see LICENSE in this directory), with one mechanical
+# deviation: in common.py, the MULTILINGUAL_ANSWER_REGEXES entries containing
+# "\s" were given raw-string (r"...") prefixes to silence Python 3.12's
+# SyntaxWarning for invalid escape sequences. The string values are unchanged.
+# Only the grader-free evals required by the MaxText simple_evals runner are
+# vendored:
 #
 #   types.py       Eval / Sampler / Result base types.
 #   common.py      Shared helpers (HTML report, answer extraction, aggregation).

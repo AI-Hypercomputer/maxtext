@@ -122,7 +122,17 @@ class MMLUEval(Eval):
             convo = actual_queried_prompt_messages + [dict(content=response_text, role="assistant")]
             category = subject2category.get(row["Subject"], "other")
             return SingleEvalResult(
-                html=html, score=score, metrics={category: score}, convo=convo
+                html=html,
+                score=score,
+                metrics={category: score},
+                convo=convo,
+                example_level_metadata={
+                    "request_id": sampler_response.response_metadata.get("request_id"),
+                    "request_status": sampler_response.response_metadata.get("status", "success"),
+                    "score": score,
+                    "correct_answer": row["Answer"],
+                    "extracted_answer": extracted_answer,
+                },
             )
 
         results = common.map_with_progress(fn, self.examples)

@@ -26,12 +26,13 @@ extraction and scoring (same "reason then 'Answer: N'" format, same grading).
 from __future__ import annotations
 
 import random
+import re
 
 import pandas
 
 from maxtext.eval.third_party.simple_evals import common
 from maxtext.eval.third_party.simple_evals.common import HTML_JINJA
-from maxtext.eval.third_party.simple_evals.mgsm_eval import parse_answer, score_mgsm
+from maxtext.eval.third_party.simple_evals.mgsm_eval import score_mgsm
 from maxtext.eval.third_party.simple_evals.types import Eval, EvalResult, SamplerBase, SingleEvalResult
 
 # HF-hosted auto-converted parquet for the canonical GSM8K test split (1319 examples).
@@ -45,7 +46,13 @@ QUERY_TEMPLATE = (
     '"Answer:".\n\n{question}'
 )
 
-ANSWER_PREFIX = "Answer"
+_ANSWER_LINE_RE = re.compile(r"(?i)(?:^|\n)\s*Answer\s*:\s*(-?[\d,]+(?:\.\d+)?)\s*\Z")
+
+
+def extract_answer(response_text: str) -> str | None:
+  """Extract the last answer that obeys GSM8K's requested final-line format."""
+  match = _ANSWER_LINE_RE.search(response_text)
+  return match.group(1).replace(",", "") if match else None
 
 
 class GSM8KEval(Eval):
@@ -68,8 +75,8 @@ class GSM8KEval(Eval):
       sampler_response = sampler(prompt_messages)
       response_text = sampler_response.response_text
       actual_queried_prompt_messages = sampler_response.actual_queried_message_list
-      extracted_answer = parse_answer(response_text, ANSWER_PREFIX)
-      score = score_mgsm(row["target"], extracted_answer)
+      extracted_answer = extract_answer(response_text)
+      score = score_mgsm(row["target"], extracted_answer or "")
       html = common.jinja_env.from_string(HTML_JINJA).render(
           prompt_messages=actual_queried_prompt_messages,
           next_message=dict(content=response_text, role="assistant"),
@@ -78,7 +85,18 @@ class GSM8KEval(Eval):
           extracted_answer=extracted_answer or None,
       )
       convo = actual_queried_prompt_messages + [dict(content=response_text, role="assistant")]
-      return SingleEvalResult(html=html, score=score, convo=convo)
+      return SingleEvalResult(
+          html=html,
+          score=score,
+          convo=convo,
+          example_level_metadata={
+              "request_id": sampler_response.response_metadata.get("request_id"),
+              "request_status": sampler_response.response_metadata.get("status", "success"),
+              "score": score,
+              "correct_answer": row["target"],
+              "extracted_answer": extracted_answer or None,
+          },
+      )
 
     results = common.map_with_progress(fn, self.examples)
     return common.aggregate_results(results)

@@ -33,7 +33,7 @@ LANG_TO_INSTRUCTIONS = {
     "en": """Solve this math problem. Give the reasoning steps before giving the final answer on the last line by itself in the format of "Answer:". Do not add anything other than the integer answer after "Answer:".
 
 {input}""",
-    "bn": """এই গণিতের সমস্যাটি সমাধান করুন। চূড়ান্ত উত্তর দেওয়ার আগে যুক্তিসম্পন্ন পদক্ষেপ প্রদান করুন। চূড়ান্ত উত্তরটি একক সংখ্যা হিসাবে "উত্তর:" এর পরে শেষ লাইনে দিন। "উত্তর:" এর পরে অন্য কিছু যুক্ত করবেন না।.
+    "bn": """এই গণিতের সমস্যাটি সমাধান করুন। চূড়ান্ত উত্তর দেওয়ার আগে যুক্তিসম্পন্ন পদক্ষেপ প্রদান করুন। চূড়ান্ত উত্তরটি একক সংখ্যা হিসাবে "উত্তর:" এর পরে শেষ লাইনে দিন। "উত্তর:" এর পরে অন্য কিছু যুক্ত করবেন না।.
 
 {input}""",
     "de": """Löse dieses Mathematikproblem. Gib die Schritte zur Begründung an, bevor du die endgültige Antwort in der letzten Zeile alleine im Format "Antwort:" gibst. Füge nichts anderes als die ganzzahlige Antwort nach "Antwort:" hinzu.
@@ -162,12 +162,9 @@ class MGSMEval(Eval):
                     content=instruction.format(input=example["inputs"]), role="user"
                 )
             ]
-            try:
-                sampler_response = sampler(prompt_messages)
-                response_text = sampler_response.response_text
-                actual_queried_prompt_messages = sampler_response.actual_queried_message_list
-            except Exception as e:
-                response_text = ""
+            sampler_response = sampler(prompt_messages)
+            response_text = sampler_response.response_text
+            actual_queried_prompt_messages = sampler_response.actual_queried_message_list
 
             answer_prefix = LANG_TO_ANSWER_PREFIX[language]
             extracted_answer = parse_answer(response_text, answer_prefix)
@@ -186,6 +183,13 @@ class MGSMEval(Eval):
                 score=score,
                 convo=convo,
                 metrics={language: score, latin_language: score},
+                example_level_metadata={
+                    "request_id": sampler_response.response_metadata.get("request_id"),
+                    "request_status": sampler_response.response_metadata.get("status", "success"),
+                    "score": score,
+                    "correct_answer": correct_answer,
+                    "extracted_answer": extracted_answer or None,
+                },
             )
 
         results = common.map_with_progress(fn, self.examples)

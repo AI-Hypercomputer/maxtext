@@ -35,7 +35,8 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
   Args:
     cfg: Merged configuration dict. Required key: max_model_len. Common
       optional keys: tensor_parallel_size, server_host, server_port,
-      max_num_batched_tokens, max_num_seqs, hf_mode, enable_expert_parallel.
+      max_num_batched_tokens, max_num_seqs, concurrency, hf_mode,
+      enable_expert_parallel.
     token: HuggingFace token (or None).
 
   Returns:
@@ -66,6 +67,9 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
   hbm_memory_utilization = float(cfg.get("hbm_memory_utilization") or 0.3)
   chat_batch_wait_s = float(cfg.get("chat_batch_wait_ms") or 20.0) / 1000.0
   chat_batch_max_size = int(cfg.get("chat_batch_max_size") or 64)
+  concurrency = cfg.get("concurrency")
+  if concurrency is not None:
+    concurrency = int(concurrency)
 
   server_env = {"HF_TOKEN": token} if token else None
 
@@ -84,6 +88,7 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
       hbm_memory_utilization=hbm_memory_utilization,
       chat_batch_wait_s=chat_batch_wait_s,
       chat_batch_max_size=chat_batch_max_size,
+      concurrency=concurrency,
       env=server_env,
   )
 

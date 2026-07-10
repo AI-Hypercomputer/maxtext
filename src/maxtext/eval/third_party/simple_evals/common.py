@@ -30,22 +30,22 @@ MULTILINGUAL_ANSWER_PATTERN_TEMPLATE = (
 )
 # All the different ways "Answer" is written in different languages
 MULTILINGUAL_ANSWER_REGEXES = [
-    "Answer\s*:",
-    "Answer\s*:​​​​​​",  # Korean invisible character
-    "উত্তর\s*:",
-    "उत्तर\s*:",
+    r"Answer\s*:",
+    r"Answer\s*:​​​​​​",  # Korean invisible character
+    r"উত্তর\s*:",
+    r"उत्तर\s*:",
     "উত্তরঃ",
-    "উত্তর\s*:",
-    "Antwort\s*:",
-    "답변\s*:",
-    "정답\s*:",
-    "답\s*:",
-    "答案\s*：",
-    "答案\s*:",
-    "答\s*：",
-    "答\s*:",
-    "答复\s*：",
-    "答曰\s*：",
+    r"উত্তর\s*:",
+    r"Antwort\s*:",
+    r"답변\s*:",
+    r"정답\s*:",
+    r"답\s*:",
+    r"答案\s*：",
+    r"答案\s*:",
+    r"答\s*：",
+    r"答\s*:",
+    r"答复\s*：",
+    r"答曰\s*：",
     "الإجابة:",
     "الجواب:",
     "إجابة:",
@@ -54,25 +54,35 @@ MULTILINGUAL_ANSWER_REGEXES = [
     "الإجابة الصحيحة هي:",
     "الإجابة هي:",
     "الجواب النهائي:",
-    "Respuesta\s*:",
-    "Risposta\s*:",
-    "答え\s*:",
-    "答え\s*：",
-    "回答\s*:",
-    "回答\s*：",
-    "解答\s*:",
-    "Jawaban\s*:",
-    "Réponse\s*:",
-    "Resposta\s*:",
-    "Jibu\s*:",
-    "Idahun\s*:",
-    "Ìdáhùn\s*:",
-    "Idáhùn\s*:",
-    "Àmọ̀nà\s*:",
-    "Àdáhùn\s*:",
-    "Ànúgọ\s*:",
-    "Àṣàyàn\s*:",
+    r"Respuesta\s*:",
+    r"Risposta\s*:",
+    r"答え\s*:",
+    r"答え\s*：",
+    r"回答\s*:",
+    r"回答\s*：",
+    r"解答\s*:",
+    r"Jawaban\s*:",
+    r"Réponse\s*:",
+    r"Resposta\s*:",
+    r"Jibu\s*:",
+    r"Idahun\s*:",
+    r"Ìdáhùn\s*:",
+    r"Idáhùn\s*:",
+    r"Àmọ̀nà\s*:",
+    r"Àdáhùn\s*:",
+    r"Ànúgọ\s*:",
+    r"Àṣàyàn\s*:",
 ]
+
+_DEFAULT_NUM_THREADS = os.cpu_count() or 10
+
+
+def set_default_num_threads(num_threads: int) -> None:
+    """Set the bounded worker count used by simple-evals task mapping."""
+    if num_threads <= 0:
+        raise ValueError("num_threads must be positive")
+    global _DEFAULT_NUM_THREADS
+    _DEFAULT_NUM_THREADS = num_threads
 
 
 EQUALITY_TEMPLATE = r"""
@@ -219,18 +229,19 @@ def aggregate_results(
 def map_with_progress(
     f: Callable,
     xs: list[Any],
-    num_threads: int = os.cpu_count() or 10,
+    num_threads: int | None = None,
     pbar: bool = True,
 ):
     """
     Apply f to each element of xs, using a ThreadPool, and show progress.
     """
     pbar_fn = tqdm if pbar else lambda x, *args, **kwargs: x
+    resolved_num_threads = num_threads if num_threads is not None else _DEFAULT_NUM_THREADS
 
     if os.getenv("debug"):
         return list(map(f, pbar_fn(xs, total=len(xs))))
     else:
-        with ThreadPool(min(num_threads, len(xs))) as pool:
+        with ThreadPool(min(resolved_num_threads, len(xs))) as pool:
             return list(pbar_fn(pool.imap(f, xs), total=len(xs)))
 
 

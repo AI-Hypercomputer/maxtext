@@ -20,8 +20,10 @@ Dispatches to the appropriate runner based on --runner:
   lm_eval       lm-evaluation-harness runner.
   evalchemy     evalchemy runner.
   simple_evals  OpenAI simple-evals runner (grader-free evals).
+  profile       XProf tracing runner (prefill/decode/batch bottleneck analysis).
 
-lm_eval and evalchemy dispatch to harness_runner.py; simple_evals uses simple_evals_runner.py.
+lm_eval and evalchemy dispatch to harness_runner.py; simple_evals uses
+simple_evals_runner.py; profile uses profile_runner.py.
 
 Usage::
 
@@ -78,7 +80,7 @@ def main() -> None:
   pre_parser.add_argument(
       "--runner",
       required=True,
-      choices=["eval", "lm_eval", "evalchemy", "simple_evals"],
+      choices=["eval", "lm_eval", "evalchemy", "simple_evals", "profile"],
       help="Which evaluation runner to use.",
   )
   pre_args, remaining = pre_parser.parse_known_args()
@@ -95,6 +97,10 @@ def main() -> None:
     _main()
   elif pre_args.runner == "simple_evals":
     from maxtext.eval.runner.simple_evals_runner import main as _main  # pylint: disable=import-outside-toplevel
+
+    _main()
+  elif pre_args.runner == "profile":
+    from maxtext.eval.runner.profile_runner import main as _main  # pylint: disable=import-outside-toplevel
 
     _main()
   else:  # evalchemy
