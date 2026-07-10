@@ -92,16 +92,17 @@ class MockTensor:
     self.shape = tuple(shape)
     self.dtype = dtype
     self.ndim = len(self.shape)
-  
-  # trace where the (13, 13) mismatch is coming from, if it happens
+
+    # trace where the (13, 13) mismatch is coming from, if it happens
     if self.shape == (13, 13):
-        import traceback
-        print("\n" + "="*60)
-        print("BUG (13, 13) HERE:")
-        print("This This shape was created at the following stack trace:")
-        print("Here is the exact line of code that created this shape:")
-        traceback.print_stack(limit=10)
-        print("="*60 + "\n")
+      import traceback
+
+      print("\n" + "=" * 60)
+      print("BUG (13, 13) HERE:")
+      print("This This shape was created at the following stack trace:")
+      print("Here is the exact line of code that created this shape:")
+      traceback.print_stack(limit=10)
+      print("=" * 60 + "\n")
 
   @property
   def size(self):
@@ -457,18 +458,16 @@ class LazyHFLoader:
           print("Fetching remote safetensors metadata for fast-fail...")
           self.remote_metadata = get_safetensors_metadata(self.model_id, token=self.token, revision=self.revision)
 
-        # look up which shard filename contains the tensor
-        shard_filename = self.remote_metadata.weight_map.get(mapped_key)
-        if not shard_filename:
-          raise ValueError(f"Key {mapped_key} not found in remote safetensors weight_map.")
+        # shard_name is known from the top of the function
+        file_meta = self.remote_metadata.files_metadata.get(shard_name)
+        if not file_meta:
+          raise ValueError(f"Shard {shard_name} not found in remote metadata.")
 
-        # get the parsed header metadata for that specific shard
-        file_meta = self.remote_metadata.files_metadata.get(shard_filename)
-
-        # look up the specific tensor's info
+        # 3. Get the tensor info directly
         tensor_info = file_meta.tensors.get(mapped_key)
+        if not tensor_info:
+          raise ValueError(f"Key {mapped_key} not found in remote shard {shard_name}.")
 
-        # tensor_info.shape is a list so cast to tuple to match standard tensor shape formats.
         return MockTensor(tuple(tensor_info.shape))
 
     if shard_name in self._local_shard_paths:
@@ -699,12 +698,33 @@ def _build_single_axis_stacked_tensor(
   """
   tensors_to_stack = []
 
+  num_chunks = len(hf_source_keys)
+
   if config.scan_layers and "scanned_blocks" in mt_param_name:
     # If it's a standard scanned layer, we use the configured param_scan_axis.
     axis_to_stack = config.param_scan_axis
   else:
     # Otherwise, if an unscanned MoE layer (or scan_layers is False), we stack along the expert axis (0).
     axis_to_stack = 0
+  
+  # Validate if the default axis actually fits the number of input chunks
+  if axis_to_stack >= len(target_shape) or target_shape[axis_to_stack] != num_chunks:
+    matching_axes = [i for i, dim in enumerate(target_shape) if dim == num_chunks]
+    
+    if len(matching_axes) == 1:
+      # Only one axis fits, safely correct the axis to the mathematical truth.
+      axis_to_stack = matching_axes[0]
+    elif len(matching_axes) > 1:
+      # Rohan's collision constraint: multiple axes fit, but the default was invalid.
+      raise ValueError(
+          f"Dimension collision: Target shape {target_shape} has multiple axes for {num_chunks} chunks, "
+          f"but the default axis {axis_to_stack} was invalid."
+      )
+    else:
+      # Fast-Fail for dry run.
+      raise ValueError(
+          f"Dry Run Failed: Target shape {target_shape} has no dimension that fits {num_chunks} chunks."
+      )
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
@@ -854,53 +874,27 @@ def _get_maxtext_weight(
 
     if not is_composite_mt_key:
       if mock_tensor.shape != mt_target_shape_or_shapes:
-        print(f"DRY RUN OVERRIDE: Corrupted shape for '{mt_param_key_or_keys}'. "
-              f"Expected {mt_target_shape_or_shapes}, got {mock_tensor.shape}. Forcing shape to continue test.")
-        # override the corrupted tensor with a fresh one of the expected shape
-        mock_tensor = type(mock_tensor)(mt_target_shape_or_shapes, getattr(mock_tensor, 'dtype', 'bfloat16'))
-      
+        # CRASH HERE instead of overriding
+        raise ValueError(
+            f"DRY RUN FAILED: Corrupted shape for '{mt_param_key_or_keys}'. "
+            f"Expected {mt_target_shape_or_shapes}, got {mock_tensor.shape}."
+        )
+        
+      print(f"MATCH: {mt_param_key_or_keys} | Expected: {mt_target_shape_or_shapes} -> Got: {mock_tensor.shape}")
       final_mt_weights[mt_target_idx_or_indices] = mock_tensor
     else:
       for i, mt_target_idx in enumerate(mt_target_idx_or_indices):
         mock_slice = mock_tensor[..., i]
         if mock_slice.shape != mt_target_shape_or_shapes[i]:
-          print(f"DRY RUN OVERRIDE: Corrupted shape for '{mt_param_key_or_keys[i]}'. "
-                f"Expected {mt_target_shape_or_shapes[i]}, got {mock_slice.shape}. Forcing shape to continue test.")
-          # override the corrupted slice with a fresh MockTensor of the expected shape
-          mock_slice = type(mock_tensor)(mt_target_shape_or_shapes[i], getattr(mock_tensor, 'dtype', 'bfloat16'))
-        
+          # CRASH HERE instead of overriding
+          raise ValueError(
+              f"DRY RUN FAILED: Corrupted shape for '{mt_param_key_or_keys[i]}'. "
+              f"Expected {mt_target_shape_or_shapes[i]}, got {mock_slice.shape}."
+          )
+
+        print(f"MATCH: {mt_param_key_or_keys[i]} | Expected: {mt_target_shape_or_shapes[i]} -> Got: {mock_slice.shape}")
         final_mt_weights[mt_target_idx] = mock_slice
     return
-  # # fast fail gate to verify MockTensor shapes against expected MaxText tree
-  # if is_dry_run:
-  #   mock_tensor = load_fn()  # Returns the fully processed MockTensor
-
-  #   # GEMMA-2 bug BYPASS START
-  #   # MaxText hook incorrectly slices the 1d layernorm into (13, 13). 
-  #   # intercept it and generate a fresh MockTensor of the correct shape.
-  #   if not is_composite_mt_key and "pre_self_attention_norm_global" in str(mt_param_key_or_keys):
-  #     if mock_tensor.shape != mt_target_shape_or_shapes:
-  #       print(f"BYPASS: Overriding corrupted shape for {mt_param_key_or_keys} "
-  #             f"from {mock_tensor.shape} to {mt_target_shape_or_shapes}")
-  #       # type(mock_tensor) dynamically calls the MockTensor class so you don't need a new import
-  #       mock_tensor = type(mock_tensor)(mt_target_shape_or_shapes, getattr(mock_tensor, 'dtype', 'bfloat16'))
-  #   # GEMMA-2 bug BYPASS END
-
-  #   if not is_composite_mt_key:
-  #     if mock_tensor.shape != mt_target_shape_or_shapes:
-  #       raise ValueError(
-  #           f"FAST FAIL: Shape mismatch for '{mt_param_key_or_keys}'! Expected {mt_target_shape_or_shapes}, got {mock_tensor.shape}."
-  #       )
-  #     final_mt_weights[mt_target_idx_or_indices] = mock_tensor
-  #   else:
-  #     for i, mt_target_idx in enumerate(mt_target_idx_or_indices):
-  #       mock_slice = mock_tensor[..., i]
-  #       if mock_slice.shape != mt_target_shape_or_shapes[i]:
-  #         raise ValueError(
-  #             f"FAST FAIL: Shape mismatch for '{mt_param_key_or_keys[i]}'! Expected {mt_target_shape_or_shapes[i]}, got {mock_slice.shape}."
-  #         )
-  #       final_mt_weights[mt_target_idx] = mock_slice
-  #   return
 
   if not use_lazy_load:
     # Case 1: Eager mode
