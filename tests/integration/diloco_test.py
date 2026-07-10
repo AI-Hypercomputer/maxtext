@@ -76,6 +76,7 @@ class DiLoCoTest(unittest.TestCase):
             "diloco_outer_momentum=0.9",
             "diloco_outer_lr=1.0",
             f"diloco_sync_period={num_steps-1}",
+            "pure_nnx=False",
         ]
     )
 

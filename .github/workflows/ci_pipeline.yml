@@ -213,7 +213,7 @@ jobs:
   tpu7x-tests:
     name: TPU7X tests
     needs: [build_and_upload_maxtext_package, gate_test_run]
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: true
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
