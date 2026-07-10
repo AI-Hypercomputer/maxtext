@@ -23,7 +23,9 @@ has_mismatch = False
 for k in all_keys:
   exp = ideal.get(k, "MISSING")
   got = actual.get(k, "MISSING")
-  if exp != got:
+  if exp == got:
+    print(f"MATCH: {k} | Expected: {exp} -> Got: {got}")
+  else:
     print(f"MISMATCH: {k} | Expected: {exp} -> Got: {got}")
     has_mismatch = True
 
