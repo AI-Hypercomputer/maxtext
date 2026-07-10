@@ -1065,7 +1065,7 @@ def from_pretrained(
         # written by `layerwise_quantization._load_and_quantize_nnx` carry both
         # Param kernels and `aqt`-typed `qrhs.frozen` quantized payloads.
         if hasattr(sharded_state, "filter"):
-          param_state = sharded_state.filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache)))
+          param_state = sharded_state.filter(lambda path, var: isinstance(var, nnx.Param) or type(var).__name__ == "aqt")
         else:
           param_state = sharded_state
         target_for_restore = jax.tree.map(

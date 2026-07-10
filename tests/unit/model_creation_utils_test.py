@@ -657,6 +657,50 @@ class TestCreateNnxModel(unittest.TestCase):
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.utils.model_creation_utils.get_transformer_model")
+  def test_from_pretrained_filters_out_rng_state(self, mock_get_model, mock_ocp):
+    """Verify that from_pretrained explicitly retains only nnx.Param and aqt variables."""
+
+    class DummyAqt(nnx.Variable):
+      pass
+
+    class DummyModel(nnx.Module):
+
+      def __init__(self):
+        self.p = nnx.Param(jnp.ones(1))
+        self.r_count = nnx.RngCount(jnp.zeros(1, dtype=jnp.uint32))
+        self.r_key = nnx.RngKey(jnp.zeros(2, dtype=jnp.uint32))
+        self.aqt_var = DummyAqt(jnp.ones(1))
+
+    DummyAqt.__name__ = "aqt"
+
+    dummy_model = DummyModel()
+    mock_get_model.return_value = dummy_model
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt", scan_layers=True)
+
+    with patch(
+        "maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata", return_value={"scan_layers": True}
+    ):
+      model_creation_utils.from_pretrained(cfg, self.mesh)
+
+    # target_for_restore is the first argument passed to construct_restore_args
+    call_args = mock_ocp.checkpoint_utils.construct_restore_args.call_args
+    target = call_args[0][0]
+
+    self.assertIn("p", target)
+    self.assertIn("aqt_var", target)
+    self.assertNotIn("r_count", target)
+    self.assertNotIn("r_key", target)
+
   # ---- checkpoint loading: mocked paths ----
 
   def _make_linen_metadata_mock(self):
