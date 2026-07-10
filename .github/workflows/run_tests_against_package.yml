@@ -221,7 +221,7 @@ jobs:
             # Ensure origin/main is available for newly_added diff detection (b/530220873)
             git fetch origin main:main 2>/dev/null || :
             git remote add origin https://github.com/AI-Hypercomputer/maxtext.git 2>/dev/null || :
-            git fetch origin main:refs/remotes/origin/main --depth=100 2>/dev/null || :
+            git fetch origin main:refs/remotes/origin/main 2>/dev/null || :
             echo "DEBUG DIFF origin/main...HEAD output:"
             git diff --unified=0 origin/main...HEAD tests/unit/max_utils_test.py || echo "DIFF FAILED"
             set +e

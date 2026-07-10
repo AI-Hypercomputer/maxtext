@@ -150,6 +150,8 @@ def _build_diff_commands(base):
   return [
       ["git", "diff", "--unified=0", f"origin/{base}...HEAD"],
       ["git", "diff", "--unified=0", f"{base}...HEAD"],
+      ["git", "diff", "--unified=0", f"origin/{base}..HEAD"],
+      ["git", "diff", "--unified=0", f"{base}..HEAD"],
   ]
 
 
