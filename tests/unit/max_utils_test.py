@@ -39,6 +39,9 @@ class MaxUtilsSummaryStats(unittest.TestCase):
     pytree_l2_norm = max_utils.l2norm_pytree(x)
     self.assertTrue(jax.numpy.allclose(pytree_l2_norm, 7, rtol=1e-05, atol=1e-08, equal_nan=False))
 
+  def test_dummy_tpu7x_newly_added(self):
+    self.assertTrue(True)
+
 
 class MaxUtilsPytree(unittest.TestCase):
   """Tests initialization of training and decode states in max_utils.py"""
