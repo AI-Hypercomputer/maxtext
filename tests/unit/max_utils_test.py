@@ -32,6 +32,9 @@ import pytest
 
 
 class MaxUtilsSummaryStats(unittest.TestCase):
+
+  def test_dummy_tpu7x_newly_added(self):
+    self.assertTrue(True)
   """Tests for the summary stats functions in max_utils.py"""
 
   def test_l2norm_pytree(self):
