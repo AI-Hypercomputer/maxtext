@@ -21,11 +21,13 @@ def run_mock_forward(checkpoint_path, model_name):
   ]
 
   # initialize pyconfig (extra [] argument not supported)
-  pyconfig.initialize(config_args)
+  # pyconfig.initialize(config_args)
+  # capture returned configuration object
+  config = pyconfig.initialize(config_args)
 
   print(f"Loading model from {checkpoint_path}...")
   #model = get_model(pyconfig.config, mesh=None)
-  model = transformer_as_linen(pyconfig.config, mesh=None, quant=None)
+  model = transformer_as_linen(config, mesh=None, quant=None)
 
   # run a single dummy pass
   mock_input = jnp.zeros((1, 128), dtype=jnp.int32)
