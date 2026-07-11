@@ -17,6 +17,8 @@ def run_mock_forward(checkpoint_path, model_name):
       "batch_size=1",
       "max_target_length=128",
       "scan_layers=false",
+      # tell jax to act as its own single-node cluster
+      "coordinator_address=127.0.0.1:8080"
   ]
 
   # initialize pyconfig (extra [] argument not supported)
