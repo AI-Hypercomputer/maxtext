@@ -37,7 +37,7 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
-from maxtext.layers import nnx_wrappers
+from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -646,9 +646,15 @@ class NNXDecoder(nnx.Module):
     attention_pattern_length = len(gemma4.GEMMA4_ATTENTION_PATTERN)
     scan_length = config.num_decoder_layers // attention_pattern_length
     num_remaining_layers = config.num_decoder_layers % attention_pattern_length
-    layer_kwargs = {"num_of_layers": attention_pattern_length}
-
-    rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
+    policy = self.get_remat_policy()
+    layer_kwargs = {
+        "num_of_layers": attention_pattern_length,
+        "remat_policy_fn": policy,
+    }
+    rem_layer_kwargs = {
+        "num_of_layers": num_remaining_layers,
+        "remat_policy_fn": policy,
+    }
 
     RemattedGemma4Block = gemma4.Gemma4ScannableBlock
 
@@ -838,95 +844,20 @@ class NNXDecoder(nnx.Module):
       rngs: nnx.Rngs,
       **layer_kwargs,
   ):
-    """Creates a scanned stack of layers using jax.lax.scan for memory-efficient initialization."""
-    if length == 0:
-      return None
-    scan_axis = self.config.param_scan_axis
-
-    # Fork rngs to get per-layer RNG states for scanning
-    try:
-      forked_rngs = rngs.fork(split=length)
-    except:  # pylint: disable=bare-except
-      pass
-
-    rngs_graphdef, rngs_state = nnx.split(forked_rngs)
-
-    first_rng_state = jax.tree.map(lambda x: x[0], rngs_state)
-    ref_rngs = nnx.merge(rngs_graphdef, first_rng_state)
-    ref_layer = decoder_layer_class(
-        config=self.config,
-        mesh=self.mesh,
-        quant=self.quant,
-        model_mode=self.model_mode,
-        rngs=ref_rngs,
-        **layer_kwargs,
+    return nnx_scan.create_scanned_layers(
+        lambda layer_rngs: decoder_layer_class(
+            config=self.config,
+            mesh=self.mesh,
+            model_mode=self.model_mode,
+            quant=self.quant,
+            rngs=layer_rngs,
+            **layer_kwargs,
+        ),
+        length=length,
+        param_scan_axis=self.config.param_scan_axis,
+        metadata_axis_name=metadata_axis_name,
+        rngs=rngs,
     )
-    layer_graphdef, _, _ = nnx.split(ref_layer, nnx.Param, ...)
-    del ref_layer
-
-    def scan_body(carry, rng_state_slice):
-      layer_rngs = nnx.merge(rngs_graphdef, rng_state_slice)
-      layer = decoder_layer_class(
-          config=self.config,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-          rngs=layer_rngs,
-          **layer_kwargs,
-      )
-      _, params, rest = nnx.split(layer, nnx.Param, ...)
-      return carry, (params, rest)
-
-    _, (stacked_params, stacked_rest) = jax.lax.scan(scan_body, None, rngs_state)
-
-    if scan_axis != 0:
-      stacked_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), stacked_params)
-
-    def _add_scan_metadata(state, axis):
-      def _update_leaf(leaf):
-        if hasattr(leaf, "replace") and hasattr(leaf, "value"):
-          replace_kwargs = {}
-          if hasattr(leaf, "get_metadata"):
-            replace_kwargs.update(leaf.get_metadata())
-
-          replace_kwargs[nnx.PARTITION_NAME] = metadata_axis_name
-          replace_kwargs["param_scan_axis"] = axis
-
-          for key in [
-              "sharding",
-              "out_sharding",
-              "kernel_axes",
-              "sharding_names",
-          ]:
-            val = getattr(leaf, key, None)
-            if val is None and key in replace_kwargs:
-              val = replace_kwargs[key]
-
-            if val is not None:
-              if isinstance(val, str):
-                val = (val,)
-              if isinstance(val, tuple):
-                l = list(val)
-                # Safely insert the scan axis into the logical axes string
-                if metadata_axis_name not in l:
-                  insert_idx = min(axis, len(l))
-                  l.insert(insert_idx, metadata_axis_name)
-                  replace_kwargs[key] = tuple(l)
-
-          return leaf.replace(**replace_kwargs)
-        return leaf
-
-      # We must use a custom is_leaf to catch the VariableState instances
-      return jax.tree.map(
-          _update_leaf,
-          state,
-          is_leaf=lambda x: hasattr(x, "replace") and hasattr(x, "value"),
-      )
-
-    stacked_params = _add_scan_metadata(stacked_params, scan_axis)
-    stacked_rest = _add_scan_metadata(stacked_rest, 0)
-
-    return nnx.merge(layer_graphdef, stacked_params, stacked_rest)
 
   def _apply_layer_with_remat(self, layer: nnx.Module, y: jax.Array, policy: Any, prevent_cse: bool, **kwargs):
     """Helper to cleanly apply jax.checkpoint to a single unscanned layer or block."""
@@ -944,7 +875,17 @@ class NNXDecoder(nnx.Module):
 
     return out
 
-  def _apply_layers_sequentially(self, layers, x_in, *args, length: int, kv_caches_stacked=None, **kwargs):
+  def _apply_layers_sequentially(
+      self,
+      layers,
+      x_in,
+      *args,
+      length: int,
+      kv_caches_stacked=None,
+      skip_block_remat: bool = False,
+      unroll: int = 1,
+      **kwargs,
+  ):
     """Runs the layer stack using nnx.scan.
 
     Args:
@@ -955,6 +896,11 @@ class NNXDecoder(nnx.Module):
       kv_caches_stacked: Optional pytree whose leaves have shape [num_layers, ...].
         When provided, the i-th slice is passed as `kv_cache=` to layer i and the
         updated caches are returned as a third element of the tuple.
+      skip_block_remat: When True, do not wrap the scanned body in jax.checkpoint.
+        Used when the scanned module already applies its own (finer-grained,
+        e.g. per-layer) remat internally, to avoid double rematerialization.
+      unroll: Number of scan iterations to unroll into straight-line code
+        (forwarded to jax.lax.scan). unroll >= length fully unrolls the loop.
       **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
 
     Returns:
@@ -1037,7 +983,12 @@ class NNXDecoder(nnx.Module):
         return new_carry, (new_current_state, updated_kv)
       return new_carry, new_current_state
 
-    layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
+    if skip_block_remat:
+      # The scanned module applies its own remat internally; wrapping the whole
+      # body again would double-remat and recompute the entire block.
+      layer_fn_wrapped = layer_fn
+    else:
+      layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
 
     if use_kv:
       # If kv_caches is provided (e.g., from vLLM), we CANNOT use jax.lax.scan
@@ -1069,7 +1020,7 @@ class NNXDecoder(nnx.Module):
       params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
       state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
 
-      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
+      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state), unroll=unroll)
       returned_kv_stacked = None
 
       # Ensure metadata rank matches the stacked values
@@ -2032,13 +1983,25 @@ class NNXDecoder(nnx.Module):
     if attention_metadata is not None:
       layer_kwargs["attention_metadata"] = attention_metadata
 
-    # Apply the main scan over the full blocks
+    # Apply the main scan over the full blocks. Gemma4ScannableBlock applies
+    # per-layer remat internally (local scan + global layer), so skip the
+    # block-level remat here to avoid double rematerialization. Unrolling the
+    # block loop (one iteration per repeated block) lets XLA pipeline/free block
+    # activations across iterations (memory + overlap knob).
+    block_unroll = max(1, scan_length)
     if scan_length > 0:
       grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(
           kv_caches, scan_length, attention_pattern_length, stack=False
       )
       y, self.scanned_blocks, _ = self._apply_layers_sequentially(
-          self.scanned_blocks, y, *layer_args, length=scan_length, kv_caches_stacked=grouped_kv_caches, **layer_kwargs
+          self.scanned_blocks,
+          y,
+          *layer_args,
+          length=scan_length,
+          kv_caches_stacked=grouped_kv_caches,
+          skip_block_remat=True,
+          unroll=block_unroll,
+          **layer_kwargs,
       )
       maxtext_utils.update_kv_caches_after_scan(
           kv_caches, grouped_kv_caches, scan_length, attention_pattern_length, stacked=False
