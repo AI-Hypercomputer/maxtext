@@ -4,7 +4,8 @@ import sys
 import jax
 import jax.numpy as jnp
 from maxtext import pyconfig
-from maxtext.models import get_model
+#from maxtext.models import get_model
+from maxtext.models.models import transformer_as_linen
 
 
 def run_mock_forward(checkpoint_path, model_name):
@@ -22,7 +23,8 @@ def run_mock_forward(checkpoint_path, model_name):
   pyconfig.initialize(config_args)
 
   print(f"Loading model from {checkpoint_path}...")
-  model = get_model(pyconfig.config, mesh=None)
+  #model = get_model(pyconfig.config, mesh=None)
+  model = transformer_as_linen(pyconfig.config, mesh=None, quant=None)
 
   # run a single dummy pass
   mock_input = jnp.zeros((1, 128), dtype=jnp.int32)
