@@ -26,7 +26,7 @@ from maxtext.common.goodput import (
 from maxtext.trainers.diloco import diloco
 from maxtext.utils import exceptions
 from maxtext.utils.sharding import get_input_data_sharding
-from maxtext.src.maxtext.utils import elastic_utils
+from maxtext.utils import elastic_utils
 
 
 class DataLoader:
