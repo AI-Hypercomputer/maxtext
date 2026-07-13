@@ -83,18 +83,18 @@ python -m maxtext.eval.runner.run \
 Runs OpenAI's [simple-evals](https://github.com/openai/simple-evals) benchmarks
 against the vLLM server's OpenAI-compatible `/v1/chat/completions` endpoint.
 
-Requires: `pip install openai jinja2 numpy pandas scipy requests tqdm`
+Requires: `pip install aiohttp openai jinja2 numpy pandas scipy requests tqdm`
 
 Phase 1 supports grader-free evals only: `mmlu`, `gpqa`, `gsm8k`, `drop`, `mgsm`,
-`aime2024`, `aime2025`. Grader-dependent evals (math, simpleqa, browsecomp,
+`mgsm_en`, `aime2024`, `aime2025`. Grader-dependent evals (math, simpleqa, browsecomp,
 healthbench) need an LLM grader endpoint and are not yet supported.
 
-`mmlu`, `gpqa`, `drop`, `mgsm` are vendored verbatim from
+`mmlu`, `gpqa`, `drop`, `mgsm` are based on the vendored implementations from
 [openai/simple-evals](https://github.com/openai/simple-evals); `gsm8k` and
 `aime2024`/`aime2025` are not part of upstream simple-evals and are
 MaxText-authored (`maxtext.eval.native_evals`) following the same
-grader-free Eval conventions. `mgsm` runs English-only here (`--tasks mgsm`
-evaluates MGSM-en, not the full 11-language suite).
+grader-free Eval conventions. `mgsm` matches upstream's 11-language suite;
+`mgsm_en` is the explicitly named English-only variant.
 
 ```bash
 python -m maxtext.eval.runner.run \
@@ -115,11 +115,81 @@ Simple-evals specific flags:
 
 | Flag | Description |
 |---|---|
-| `--tasks` | Space-separated task names (`mmlu`, `gpqa`, `gsm8k`, `drop`, `mgsm`, `aime2024`, `aime2025`). |
-| `--num_samples` | Limit examples per task (None = full dataset). |
-| `--n_repeats` | Repeats per example (gpqa and aime2024/aime2025 only; forced to 1 when `--num_samples` is set). |
+| `--tasks` | Space-separated task names (`mmlu`, `gpqa`, `gsm8k`, `drop`, `mgsm`, `mgsm_en`, `aime2024`, `aime2025`). |
+| `--num_samples` | Limit examples per task; for MGSM variants this is per language (None = full dataset). |
+| `--n_repeats` | Repeats per example (defaults: upstream GPQA=4, AIME=1; forced to 1 with `--num_samples`). |
 | `--max_tokens` | Max tokens per generation (default: 2048). |
-| `--temperature` | Sampling temperature (default: 0.0). |
+| `--temperature` | Sampling temperature (upstream default: 0.5). |
+| `--concurrency` | Task worker count and maximum in-flight requests. Omit for automatic selection from CPU count, accelerator count, `max_num_seqs`, and chat batch capacity. This is the only request-pressure setting users normally need to tune. |
+| `--log-debug-info` | Write a timestamp-matched `.debug.txt` report beside the result JSON. The report includes request/token throughput, latency percentiles, retry and terminal-error rates, output truncation, answer-extraction failures, confidence intervals, and bounded samples of final, reasoning, and raw model output. Reasoning and raw output remain diagnostic-only and are never graded. |
+| `--continue-on-request-error` | Score terminal request failures as zero instead of aborting. This is independent of debug logging. |
+
+Debug logging is observational and does not change request-failure behavior.
+When `--continue-on-request-error` is enabled, failed requests count as zero in
+official accuracy. The debug report also shows diagnostic accuracy excluding
+infrastructure failures; that diagnostic must not be used as the published
+benchmark score.
+
+Before a long TPU benchmark, run the one-shot chat-path diagnostic with the
+same model/server settings. For an 8-chip v6e GPT-OSS deployment in HF mode:
+
+```bash
+python -m maxtext.eval.runner.debug_simple_evals \
+  --model_name gpt-oss-20b \
+  --hf_path openai/gpt-oss-20b \
+  --hf_mode \
+  --base_output_directory /tmp \
+  --run_name simple_evals_debug \
+  --max_model_len 32768 \
+  --tensor_parallel_size 8 \
+  --debug_max_tokens 1024 \
+  --reasoning_effort high \
+  --debug_output /tmp/simple_evals_tpu_debug.json
+```
+
+The script launches the normal in-process server and checks Harmony prompt
+rendering, final/reasoning/raw separation, forced analysis-only truncation,
+diagnostic opt-in, token accounting, and two-request batch response ordering.
+It prints `PASS` and exits zero only when every applicable check succeeds;
+otherwise it writes the failure to the JSON report and exits nonzero. When
+testing a MaxText checkpoint, pass the same `--checkpoint_path` and
+`--model_name` used by the benchmark instead of `--hf_mode`.
+
+### XProf Profiling (inference bottleneck analysis)
+
+Boots the same in-process vLLM server as the eval runners and captures one
+xplane trace per workload phase — `prefill` (long prompt, 1 output token),
+`decode` (single-stream generation), and `batch` (concurrent requests through
+the chat batching queue) — so prefill-, decode-, and host-bound bottlenecks
+can be separated in XProf. Each phase runs once untraced first so XLA
+compilation is excluded from the trace.
+
+```bash
+python -m maxtext.eval.runner.run \
+  --runner profile \
+  --model_name gpt-oss-20b \
+  --hf_path openai/gpt-oss-20b \
+  --base_output_directory gs://<bucket>/ \
+  --run_name profile_run \
+  --max_model_len 8192 \
+  --tensor_parallel_size 8 \
+  --hf_token $HF_TOKEN
+
+# View the traces:
+pip install xprof
+xprof --logdir gs://<bucket>/profile_run/eval_results/xprof --port 8791
+```
+
+Profiling specific flags:
+
+| Flag | Description |
+|---|---|
+| `--profile_dir` | Trace output dir (default: `{base_output_directory}/{run_name}/eval_results/xprof`). |
+| `--prefill_prompt_words` | Approximate prompt length for the prefill phase (default: 1024). |
+| `--decode_prompt_words` | Approximate prompt length for decode/batch (default: 32). Sweep it across separate runs to test KV-length sensitivity; the summary reports actual token counts. |
+| `--decode_tokens` | Tokens generated per request in the decode/batch phases (default: 256). |
+| `--batch_concurrency` | Concurrent requests in the batch phase (default: 32). Must not exceed `--concurrency` after automatic/explicit resolution. |
+| `--reasoning_effort` | `low`/`medium`/`high`, for reasoning models like gpt-oss. |
 
 ## Common Flags
 

@@ -151,24 +151,38 @@ def _build_vllm_sampler(
         if debug_record is not None:
           debug_record["attempt_count"] += 1
         try:
-          extra_body = {"reasoning_effort": self.reasoning_effort} if self.reasoning_effort else {}
+          extra_body = {
+              # Evaluators grade only message.content. Reasoning and raw output
+              # are opt-in diagnostic data and are never copied into it.
+              "include_reasoning": debug_record is not None,
+              "include_raw_output": debug_record is not None,
+          }
+          if self.reasoning_effort:
+            extra_body["reasoning_effort"] = self.reasoning_effort
           response = self.client.chat.completions.create(
               model=self.model,
               messages=message_list,
               temperature=self.temperature,
               max_tokens=self.max_tokens,
-              extra_body=extra_body or None,
+              extra_body=extra_body,
           )
-          content = response.choices[0].message.content
-          if content is None:
-            raise ValueError("vLLM server returned an empty response.")
           choice = response.choices[0]
+          message = choice.message
+          # An analysis-only GPT-OSS truncation is a valid model result:
+          # Harmony returns reasoning plus final_content=None with
+          # finish_reason="length". Preserve that as an empty scored answer
+          # instead of misclassifying it as an inference failure and retrying.
+          content = message.content or ""
           usage = response.usage
           response_metadata = {"usage": usage}
           if debug_record is not None:
+            response_extra = getattr(response, "model_extra", None) or {}
+            diagnostics = response_extra.get("diagnostics") or getattr(response, "diagnostics", None) or {}
             debug_record.update(
                 status="success",
                 response_text=content,
+                reasoning_text=getattr(message, "reasoning", None),
+                raw_response_text=diagnostics.get("raw_output"),
                 successful_attempt_latency_s=time.monotonic() - attempt_start,
                 finish_reason=getattr(choice, "finish_reason", None),
                 prompt_tokens=getattr(usage, "prompt_tokens", None),

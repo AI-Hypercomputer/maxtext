@@ -35,6 +35,53 @@ _HEALTH_ENDPOINT = "/health"
 _AUTO_REQUESTS_PER_ACCELERATOR = 4
 
 
+def _is_harmony_model(llm: Any) -> bool:
+  """Whether the in-process vLLM model uses GPT-OSS Harmony messages."""
+  model_config = getattr(llm, "model_config", None)
+  hf_config = getattr(model_config, "hf_config", None)
+  return getattr(hf_config, "model_type", None) == "gpt_oss"
+
+
+def _get_harmony_stop_token_ids() -> list[int]:
+  """Return vLLM's EOS-like assistant action tokens for GPT-OSS."""
+  from vllm.entrypoints.openai.parser.harmony_utils import (  # pylint: disable=import-outside-toplevel
+      get_stop_tokens_for_assistant_actions,
+  )
+
+  return list(get_stop_tokens_for_assistant_actions())
+
+
+def _parse_harmony_chat_output(token_ids: list[int]) -> tuple[str | None, str | None, bool]:
+  """Parse GPT-OSS token IDs with the parser used by vLLM's OpenAI server."""
+  from vllm.entrypoints.openai.parser.harmony_utils import (  # pylint: disable=import-outside-toplevel
+      parse_chat_output,
+  )
+
+  return parse_chat_output(token_ids)
+
+
+def _render_harmony_chat_prompt(messages: list[dict[str, Any]], reasoning_effort: str | None) -> list[int]:
+  """Render GPT-OSS messages exactly as vLLM's OpenAI chat server does."""
+  from vllm.entrypoints.openai.parser.harmony_utils import (  # pylint: disable=import-outside-toplevel
+      get_system_message,
+      parse_chat_inputs_to_harmony_messages,
+      render_for_completion,
+  )
+
+  if reasoning_effort == "none":
+    raise ValueError("Harmony does not support reasoning_effort='none'.")
+  harmony_messages = [
+      get_system_message(
+          reasoning_effort=reasoning_effort,
+          browser_description=None,
+          python_description=None,
+          with_custom_tools=True,
+      )
+  ]
+  harmony_messages.extend(parse_chat_inputs_to_harmony_messages(messages))
+  return list(render_for_completion(harmony_messages))
+
+
 def _top_logprobs_dict(tokenizer: Any, lp_dict: dict | None) -> "dict[str, float] | None":
   if not lp_dict:
     return None
@@ -234,6 +281,14 @@ def _build_app(
 
   app = fastapi.FastAPI()
   app.state.request_count = 0
+  app.state.use_harmony = _is_harmony_model(llm)
+  app.state.harmony_stop_token_ids = _get_harmony_stop_token_ids() if app.state.use_harmony else []
+  configured_max_model_len = getattr(getattr(llm, "model_config", None), "max_model_len", None)
+  app.state.max_model_len = (
+      configured_max_model_len
+      if isinstance(configured_max_model_len, int) and configured_max_model_len > 0
+      else None
+  )
   app.state.chat_batch_queue = _ChatBatchQueue(
       llm,
       max_wait_s=chat_batch_wait_s,
@@ -358,48 +413,71 @@ def _build_app(
     body = await request.json()
     messages = body.get("messages", [])
     model_name = body.get("model", "")
-    max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
-    temperature = float(body.get("temperature") or 0.0)
+    try:
+      max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
+      temperature = float(body.get("temperature") or 0.0)
+    except (TypeError, ValueError) as exc:
+      raise fastapi.HTTPException(status_code=400, detail="max_tokens and temperature must be numeric.") from exc
     stop = body.get("stop")
     # Sent by the sampler via extra_body; OpenAI client hoists it to top-level body.
     reasoning_effort = body.get("reasoning_effort")
+    include_reasoning = bool(body.get("include_reasoning", True))
+    include_raw_output = bool(body.get("include_raw_output", False))
 
     try:
-      tokenizer = llm.get_tokenizer()
-      # reasoning_effort is a chat-template concern, not a SamplingParams field:
-      # e.g. gpt-oss renders "Reasoning: <effort>" into the system prompt. Thread
-      # it in as a template kwarg. Templates that don't reference it ignore it;
-      # signature-level rejection (old transformers) falls back without it.
-      template_kwargs: dict = {}
-      if reasoning_effort:
-        template_kwargs["reasoning_effort"] = reasoning_effort
-      try:
+      if not isinstance(messages, list):
+        raise ValueError("messages must be a list.")
+      if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive.")
+
+      if app.state.use_harmony:
+        prompt_token_ids = _render_harmony_chat_prompt(messages, reasoning_effort)
+      else:
+        tokenizer = llm.get_tokenizer()
+        template_kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
         prompt_token_ids = tokenizer.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,
             **template_kwargs,
         )
-      except TypeError:
-        if template_kwargs:
-          logger.warning("Chat template rejected reasoning_effort=%s; rendering without it.", reasoning_effort)
-        prompt_token_ids = tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-        )
 
       if isinstance(prompt_token_ids, Mapping):
         prompt_token_ids = prompt_token_ids["input_ids"]
+      prompt_token_ids = list(prompt_token_ids)
+      if app.state.max_model_len is not None:
+        if len(prompt_token_ids) >= app.state.max_model_len:
+          raise ValueError(
+              f"Input length ({len(prompt_token_ids)}) must be shorter than the model's maximum "
+              f"context length ({app.state.max_model_len})."
+          )
+        # Match vLLM's OpenAI serving behavior: cap the requested output budget
+        # to the context space remaining after chat rendering.
+        max_tokens = min(max_tokens, app.state.max_model_len - len(prompt_token_ids))
       prompt = {"prompt_token_ids": list(prompt_token_ids)}
 
       sp_kwargs: dict = {"max_tokens": max_tokens, "temperature": temperature}
       if stop:
         sp_kwargs["stop"] = [stop] if isinstance(stop, str) else list(stop)
+      if app.state.use_harmony:
+        requested_stop_token_ids = body.get("stop_token_ids") or []
+        if isinstance(requested_stop_token_ids, int):
+          requested_stop_token_ids = [requested_stop_token_ids]
+        if not isinstance(requested_stop_token_ids, list) or not all(
+            isinstance(token_id, int) for token_id in requested_stop_token_ids
+        ):
+          raise ValueError("stop_token_ids must be an integer or a list of integers.")
+        sp_kwargs["stop_token_ids"] = list(
+            dict.fromkeys([*requested_stop_token_ids, *app.state.harmony_stop_token_ids])
+        )
+      sampling_params = SamplingParams(**sp_kwargs)
+    except (TypeError, ValueError, KeyError) as exc:
+      raise fastapi.HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
       # Queued and generated together with other concurrent chat requests --
       # see _ChatBatchQueue -- instead of one llm.generate() call per request.
-      output = await app.state.chat_batch_queue.submit(prompt, SamplingParams(**sp_kwargs))
+      output = await app.state.chat_batch_queue.submit(prompt, sampling_params)
     except _ChatQueueFullError as exc:
       raise fastapi.HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "1"}) from exc
     except BaseException as exc:  # noqa: B902  pylint: disable=broad-except
@@ -420,6 +498,22 @@ def _build_app(
     gen = output.outputs[0]
     prompt_tokens = len(output.prompt_token_ids)
     completion_tokens = len(gen.token_ids)
+    raw_output = gen.text
+    reasoning = None
+    final_content = raw_output
+    if app.state.use_harmony:
+      try:
+        reasoning, final_content, _ = _parse_harmony_chat_output(list(gen.token_ids))
+      except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("Failed to parse GPT-OSS Harmony output token IDs: %s", exc)
+        logger.debug("Unparsed GPT-OSS raw output: %r", raw_output)
+        raise fastapi.HTTPException(status_code=500, detail="Failed to parse GPT-OSS Harmony output.") from exc
+      logger.debug(
+          "Parsed GPT-OSS Harmony output: raw=%r reasoning=%r final=%r",
+          raw_output,
+          reasoning,
+          final_content,
+      )
 
     # Per-request diagnostics. Two failure modes look identical from the client
     # (both surface as APIConnectionError after retries), so log signals that
@@ -441,7 +535,12 @@ def _build_app(
           _mem_line(llm),
       )
 
-    return {
+    message: dict[str, Any] = {"role": "assistant", "content": final_content}
+    if include_reasoning and reasoning is not None:
+      # Matches the field emitted by vLLM's OpenAI-compatible ChatMessage.
+      message["reasoning"] = reasoning
+
+    response = {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -449,7 +548,7 @@ def _build_app(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": gen.text},
+                "message": message,
                 "finish_reason": gen.finish_reason or "stop",
                 "logprobs": None,
             }
@@ -460,6 +559,11 @@ def _build_app(
             "total_tokens": prompt_tokens + completion_tokens,
         },
     }
+    if include_raw_output:
+      # Non-standard, opt-in diagnostics extension. Raw Harmony output must not
+      # leak into message.content because graders should see final content only.
+      response["diagnostics"] = {"raw_output": raw_output}
+    return response
 
   return app
 

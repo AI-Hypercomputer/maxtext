@@ -57,6 +57,7 @@ View the traces with XProf (or TensorBoard's profile plugin):
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import logging
 import time
@@ -89,11 +90,27 @@ class PhaseResult:
   wall_s: float
   prompt_tokens: int
   completion_tokens: int
+  prompt_tokens_min: int
+  prompt_tokens_max: int
+  completion_tokens_min: int
+  completion_tokens_max: int
+  finish_reasons: dict[str, int]
+  requested_max_tokens: int
+  configured_prompt_words: int
   trace_dir: str
 
   @property
-  def decode_tok_per_s(self) -> float:
+  def completion_tok_per_s(self) -> float:
     return self.completion_tokens / self.wall_s if self.wall_s > 0 else 0.0
+
+  @property
+  def prompt_tok_per_s(self) -> float:
+    return self.prompt_tokens / self.wall_s if self.wall_s > 0 else 0.0
+
+  @property
+  def decode_tok_per_s(self) -> float:
+    """Backward-compatible alias for completion-token throughput."""
+    return self.completion_tok_per_s
 
 
 def _send_chat_request(
@@ -103,7 +120,7 @@ def _send_chat_request(
     max_tokens: int,
     reasoning_effort: str | None = None,
 ) -> dict:
-  """POST one /v1/chat/completions request; return its usage dict."""
+  """POST one chat request and return usage plus its finish reason."""
   payload: dict = {
       "model": model,
       "messages": [{"role": "user", "content": prompt}],
@@ -118,7 +135,11 @@ def _send_chat_request(
       timeout=_REQUEST_TIMEOUT_S,
   )
   resp.raise_for_status()
-  return resp.json().get("usage", {})
+  body = resp.json()
+  usage = dict(body.get("usage", {}))
+  choices = body.get("choices") or []
+  usage["finish_reason"] = choices[0].get("finish_reason") if choices else None
+  return usage
 
 
 def _run_phase(
@@ -127,8 +148,8 @@ def _run_phase(
     prompts: list[str],
     max_tokens: int,
     reasoning_effort: str | None,
-) -> tuple[float, int, int]:
-  """Fire all prompts concurrently; return (wall_s, prompt_tokens, completion_tokens)."""
+) -> tuple[float, list[dict]]:
+  """Fire all prompts concurrently; return wall time and per-request usage."""
   start = time.monotonic()
   with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
     usages = list(
@@ -138,9 +159,7 @@ def _run_phase(
         )
     )
   wall = time.monotonic() - start
-  prompt_tokens = sum(u.get("prompt_tokens", 0) for u in usages)
-  completion_tokens = sum(u.get("completion_tokens", 0) for u in usages)
-  return wall, prompt_tokens, completion_tokens
+  return wall, usages
 
 
 def _profile_phase(
@@ -151,6 +170,7 @@ def _profile_phase(
     prompts: list[str],
     max_tokens: int,
     reasoning_effort: str | None,
+    configured_prompt_words: int,
 ) -> PhaseResult:
   """Run one phase: untraced compile pass, then the same workload under a trace."""
   import jax  # pylint: disable=import-outside-toplevel
@@ -161,25 +181,43 @@ def _profile_phase(
   logger.info("[%s] traced pass -> %s", name, trace_dir)
   jax.profiler.start_trace(trace_dir)
   try:
-    wall, prompt_tokens, completion_tokens = _run_phase(base_url, model, prompts, max_tokens, reasoning_effort)
+    wall, usages = _run_phase(base_url, model, prompts, max_tokens, reasoning_effort)
   finally:
     jax.profiler.stop_trace()
+
+  prompt_token_counts = [int(usage.get("prompt_tokens") or 0) for usage in usages]
+  completion_token_counts = [int(usage.get("completion_tokens") or 0) for usage in usages]
+  finish_reasons = Counter(str(usage.get("finish_reason") or "unknown") for usage in usages)
 
   result = PhaseResult(
       name=name,
       num_requests=len(prompts),
       wall_s=wall,
-      prompt_tokens=prompt_tokens,
-      completion_tokens=completion_tokens,
+      prompt_tokens=sum(prompt_token_counts),
+      completion_tokens=sum(completion_token_counts),
+      prompt_tokens_min=min(prompt_token_counts, default=0),
+      prompt_tokens_max=max(prompt_token_counts, default=0),
+      completion_tokens_min=min(completion_token_counts, default=0),
+      completion_tokens_max=max(completion_token_counts, default=0),
+      finish_reasons=dict(finish_reasons),
+      requested_max_tokens=max_tokens,
+      configured_prompt_words=configured_prompt_words,
       trace_dir=trace_dir,
   )
   logger.info(
-      "[%s] wall=%.2fs prompt_tok=%d completion_tok=%d decode_throughput=%.1f tok/s",
+      "[%s] wall=%.2fs prompt_tok=%d range=%d-%d completion_tok=%d range=%d-%d "
+      "prompt_throughput=%.1f tok/s completion_throughput=%.1f tok/s finish_reasons=%s",
       name,
       result.wall_s,
       result.prompt_tokens,
+      result.prompt_tokens_min,
+      result.prompt_tokens_max,
       result.completion_tokens,
-      result.decode_tok_per_s,
+      result.completion_tokens_min,
+      result.completion_tokens_max,
+      result.prompt_tok_per_s,
+      result.completion_tok_per_s,
+      result.finish_reasons,
   )
   return result
 
@@ -191,7 +229,14 @@ def _print_summary(results: list[PhaseResult], profile_dir: str) -> None:
     lines.append(
         f"  {r.name:<8} requests={r.num_requests:<4} wall={r.wall_s:8.2f}s "
         f"prompt_tok={r.prompt_tokens:<7} completion_tok={r.completion_tokens:<7} "
-        f"decode={r.decode_tok_per_s:8.1f} tok/s"
+        f"prompt_rate={r.prompt_tok_per_s:8.1f} tok/s "
+        f"completion_rate={r.completion_tok_per_s:8.1f} tok/s"
+    )
+    lines.append(
+        f"           configured_words={r.configured_prompt_words:<6} "
+        f"actual_prompt_tok={r.prompt_tokens_min}-{r.prompt_tokens_max} "
+        f"actual_completion_tok={r.completion_tokens_min}-{r.completion_tokens_max} "
+        f"finish_reasons={r.finish_reasons}"
     )
   lines += [
       "",
@@ -217,7 +262,7 @@ def run_profile(cfg: dict, hf_token: str | None = None) -> dict:
   Args:
     cfg: Configuration dict. Required keys: model_name, hf_path,
       max_model_len, results_path (used to derive the trace dir). Optional:
-      profile_dir, prefill_prompt_words, decode_tokens, batch_concurrency,
+      profile_dir, prefill_prompt_words, decode_prompt_words, decode_tokens, batch_concurrency,
       reasoning_effort, and all server keys handled by build_server_manager.
     hf_token: HuggingFace token for gated tokenizers.
 
@@ -230,12 +275,21 @@ def run_profile(cfg: dict, hf_token: str | None = None) -> dict:
   model_name = cfg["model_name"]
   profile_dir = cfg.get("profile_dir") or f"{cfg['results_path'].rstrip('/')}/xprof"
   prefill_words = int(cfg.get("prefill_prompt_words") or 1024)
+  decode_prompt_words = int(cfg.get("decode_prompt_words") or 32)
   decode_tokens = int(cfg.get("decode_tokens") or 256)
   batch_concurrency = int(cfg.get("batch_concurrency") or 32)
   reasoning_effort = cfg.get("reasoning_effort")
   token = resolve_token(cfg, hf_token)
 
-  short_prompt = "Write a long story about a spaceship crew exploring a new planet."
+  if prefill_words <= 0 or decode_prompt_words <= 0 or decode_tokens <= 0 or batch_concurrency <= 0:
+    raise ValueError(
+        "prefill_prompt_words, decode_prompt_words, decode_tokens, and batch_concurrency must be positive."
+    )
+
+  short_prompt = (
+      " ".join([_FILLER_WORD] * decode_prompt_words)
+      + "\nWrite a long story about a spaceship crew exploring a new planet."
+  )
   long_prompt = " ".join([_FILLER_WORD] * prefill_words) + "\nSummarize the text above in one word."
 
   results: list[PhaseResult] = []
@@ -245,6 +299,14 @@ def run_profile(cfg: dict, hf_token: str | None = None) -> dict:
     from jax.experimental import multihost_utils as _multihost_utils
 
     is_rank0 = _jax.process_index() == 0
+
+    # Validate on every rank before rank 0 enters the workload, so a bad
+    # distributed configuration cannot leave non-zero ranks blocked at sync.
+    if batch_concurrency > server.concurrency:
+      raise ValueError(
+          f"batch_concurrency ({batch_concurrency}) exceeds the server admission limit "
+          f"concurrency ({server.concurrency}); set --concurrency to at least --batch_concurrency."
+      )
 
     if is_rank0:
       if not cfg.get("skip_warmup"):
@@ -259,6 +321,7 @@ def run_profile(cfg: dict, hf_token: str | None = None) -> dict:
               prompts=[long_prompt],
               max_tokens=1,
               reasoning_effort=reasoning_effort,
+              configured_prompt_words=prefill_words,
           )
       )
       results.append(
@@ -270,6 +333,7 @@ def run_profile(cfg: dict, hf_token: str | None = None) -> dict:
               prompts=[short_prompt],
               max_tokens=decode_tokens,
               reasoning_effort=reasoning_effort,
+              configured_prompt_words=decode_prompt_words,
           )
       )
       results.append(
@@ -281,6 +345,7 @@ def run_profile(cfg: dict, hf_token: str | None = None) -> dict:
               prompts=[short_prompt] * batch_concurrency,
               max_tokens=decode_tokens,
               reasoning_effort=reasoning_effort,
+              configured_prompt_words=decode_prompt_words,
           )
       )
 
@@ -300,6 +365,15 @@ def run_profile(cfg: dict, hf_token: str | None = None) -> dict:
               "wall_s": round(r.wall_s, 3),
               "prompt_tokens": r.prompt_tokens,
               "completion_tokens": r.completion_tokens,
+              "prompt_tokens_min": r.prompt_tokens_min,
+              "prompt_tokens_max": r.prompt_tokens_max,
+              "completion_tokens_min": r.completion_tokens_min,
+              "completion_tokens_max": r.completion_tokens_max,
+              "finish_reasons": r.finish_reasons,
+              "requested_max_tokens": r.requested_max_tokens,
+              "configured_prompt_words": r.configured_prompt_words,
+              "prompt_tok_per_s": round(r.prompt_tok_per_s, 1),
+              "completion_tok_per_s": round(r.completion_tok_per_s, 1),
               "decode_tok_per_s": round(r.decode_tok_per_s, 1),
               "trace_dir": r.trace_dir,
           }
@@ -330,6 +404,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
       type=int,
       default=256,
       help="Tokens to generate per request in the decode and batch phases.",
+  )
+  parser.add_argument(
+      "--decode_prompt_words",
+      type=int,
+      default=32,
+      help=(
+          "Approximate prompt words used by the decode and batch phases. Sweep this in separate runs "
+          "to measure KV-length sensitivity; actual chat prompt tokens are reported in the summary."
+      ),
   )
   parser.add_argument(
       "--batch_concurrency",
