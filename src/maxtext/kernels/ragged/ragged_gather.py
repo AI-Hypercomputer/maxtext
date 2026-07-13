@@ -21,25 +21,6 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
-from packaging.version import Version
-
-# JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
-# versions renamed them to `out_type`/`scratch_types`.
-if Version(jax.__version__) <= Version("0.10.0"):
-  _OUT_KW = "out_shape"
-  _SCRATCH_KW = "scratch_shapes"
-  _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
-      "disable_bounds_checks": True,
-  }
-else:
-  _OUT_KW = "out_type"
-  _SCRATCH_KW = "scratch_types"
-  _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
-      "disable_bounds_checks": True,
-      "needs_layout_passes": False,
-  }
 
 
 def main_kernel(
@@ -453,8 +434,11 @@ def ragged_gather(
           subcore_axis_name=vector_mesh.subcore_axis_name,
           has_weights=has_weights,
       ),
-      compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
-          **_COMPILER_PARAMS,  # pyrefly: ignore[bad-argument-type]
+      out_type=jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
+      compiler_params=pltpu.CompilerParams(
+          use_tc_tiling_on_sc=True,
+          disable_bounds_checks=True,
+          needs_layout_passes=False,
       ),
       cost_estimate=get_cost_estimate(
           out_size=out_size + out_pad_size,
@@ -464,17 +448,14 @@ def ragged_gather(
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
       ),
+      scratch_types=[
+          pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+          pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          pltpu.VMEM((num_simd_lanes,), jnp.float32),
+          pltpu.SemaphoreType.DMA((2,)),
+      ],
       mesh=vector_mesh,
       name="sc_ragged_gather",
-      **{  # pyrefly: ignore[bad-argument-type]
-          _OUT_KW: jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
-          _SCRATCH_KW: [
-              pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              pltpu.VMEM((num_simd_lanes,), jnp.float32),
-              pltpu.SemaphoreType.DMA((2,)),
-          ],
-      },
   )(start, end, x, indices, weights)[:out_size, :hidden_size]
