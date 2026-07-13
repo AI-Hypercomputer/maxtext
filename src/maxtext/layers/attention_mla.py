@@ -221,26 +221,45 @@ class Indexer(nnx.Module):
     x = jnp.concatenate([x_pe, x_nope], axis=-1)
     return x
 
-  def generate_mask(self, topk_indices, s):
-    """
-    Creates a mask for top-k indices.
+  def generate_mask(self, indexer_score: Array, topk_values: Array) -> Array:
+    """Creates a mask for top-k indices
 
     Args:
-        topk_indices: [b, t, k] int - The indices to keep.
-        s: int - The total size to select from.
+        indexer_score: [b, t, s] float - The computed relevance scores for all tokens.
+        topk_values: [b, t, k] float - The top-k selected score values from jax.lax.top_k.
 
     Returns:
-        mask: [b, t, s] - `0.0` at topk_indices, `DEFAULT_MASK_VALUE` (large negative) elsewhere.
+        mask: [b, t, s] - `0.0` for top-k selected elements, `DEFAULT_MASK_VALUE` elsewhere.
     """
-    # 1. Create a range [0, 1, ..., s-1]
-    # 2. Broadcast compare against [b, t, k] to get [b, t, k, s]
-    # 3. Use .any() to see if a s-index is present in any of the k slots
-    is_topk = (jnp.arange(s) == topk_indices[..., None]).any(axis=-2)
-    # 4. Use where to select between 0.0 and the mask value
-    # cast values to dtype
+    cutoff_threshold = topk_values[..., -1:]
+
     val_true = jnp.array(0.0, dtype=self.dtype)
     val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=self.dtype)
-    return jnp.where(is_topk, val_true, val_false)
+
+    if self.config.indexer_mask_exact_topk:
+      # Prune ties by keeping only the first k unmasked tokens along sequence dimension
+      k = topk_values.shape[-1]
+      is_strictly_greater = indexer_score > cutoff_threshold
+      is_equal = indexer_score == cutoff_threshold
+
+      # Use cumsum to rank both strictly greater and equal tokens (XLA fuses these scans)
+      sg_rank = jnp.cumsum(is_strictly_greater.astype(jnp.int32), axis=-1)
+      eq_rank = jnp.cumsum(is_equal.astype(jnp.int32), axis=-1)
+
+      # Cap strictly greater elements to exactly k
+      sg_kept = is_strictly_greater & (sg_rank <= k)
+
+      # Calculate how many equals we still have room for
+      num_sg_kept = jnp.minimum(sg_rank[..., -1:], k)
+      num_eq_to_keep = k - num_sg_kept
+
+      selected = sg_kept | (is_equal & (eq_rank <= num_eq_to_keep))
+
+      return jnp.where(selected, val_true, val_false)
+    else:
+      # Raw threshold cutoff masking (optional: enables speedups, but may unmask > k tokens under indexer scores ties)
+      raw_mask = indexer_score >= cutoff_threshold
+      return jnp.where(raw_mask, val_true, val_false)
 
   def __call__(
       self,
@@ -367,16 +386,16 @@ class Indexer(nnx.Module):
 
     # TopK selection based on index score
     if self.config.indexer_use_approx_top_k:
-      _, topk_indices = jax.lax.approx_max_k(
+      topk_values, topk_indices = jax.lax.approx_max_k(
           indexer_score,
           k=self.indexer_topk,
           recall_target=self.config.indexer_approx_top_k_recall,
       )
     else:
-      _, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # topk_indices [b, t, k]
+      topk_values, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # [b, t, k]
 
     # Create Sparse Index Mask: 0 and large negatives
-    indexer_mask = self.generate_mask(topk_indices, k.shape[1])  # [b, t, s]
+    indexer_mask = self.generate_mask(indexer_score, topk_values)  # [b, t, s]
 
     # Re-apply attention mask after TopK: in case number of unmasked tokens < TopK
     if attention_mask is not None:
