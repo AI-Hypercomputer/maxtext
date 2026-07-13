@@ -929,8 +929,12 @@ class Attention(nnx.Module):
       num_frames = rope_kwargs.get("num_frames")
       height = rope_kwargs.get("height")
       width = rope_kwargs.get("width")
+      token_mask = rope_kwargs.get("token_mask")
+      valid_grid = rope_kwargs.get("valid_grid")
       # Type cast required: Omni rotary embedding uses different __call__ parameters than other embeddings.
-      return cast(Qwen3OmniMoeVisionRotaryEmbedding, self.rotary_embedding)(inputs, num_frames, height, width)
+      return cast(Qwen3OmniMoeVisionRotaryEmbedding, self.rotary_embedding)(
+          inputs, num_frames, height, width, token_mask=token_mask, valid_grid=valid_grid
+      )
     else:
       return self.rotary_embedding(inputs, inputs_positions)
 

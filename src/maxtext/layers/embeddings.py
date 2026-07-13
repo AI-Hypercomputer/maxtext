@@ -1394,7 +1394,15 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
     x2 = x[..., x.shape[-1] // 2 :]
     return jnp.concatenate([-x2, x1], axis=-1)
 
-  def __call__(self, inputs: Array, num_frames: int, height: int, width: int) -> Array:
+  def __call__(
+      self,
+      inputs: Array,
+      num_frames: int,
+      height: int,
+      width: int,
+      token_mask: Array | None = None,
+      valid_grid: tuple[int, int, int] | None = None,
+  ) -> Array:
     """Apply rotary position embeddings directly to inputs (Q or K tensors).
 
     Args:
@@ -1403,11 +1411,20 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
       num_frames: Number of temporal frames (static)
       height: Height in patches (static)
       width: Width in patches (static)
+      token_mask: Optional mask identifying valid tokens in the padded sequence.
+      valid_grid: Optional unpadded `(frames, height, width)` grid used to compute
+        RoPE for valid tokens.
 
     Returns:
       Rotated inputs with same shape [B, T*H*W, N, head_dim]
     """
     cos_emb, sin_emb = self.compute_cos_sin(num_frames, height, width)
+    if token_mask is not None and valid_grid is not None:
+      valid_cos, valid_sin = self.compute_cos_sin(*valid_grid)
+      valid_len = math.prod(valid_grid)
+      valid_indices = jnp.nonzero(token_mask[0], size=valid_len)[0]
+      cos_emb = jnp.ones_like(cos_emb).at[valid_indices].set(valid_cos)
+      sin_emb = jnp.zeros_like(sin_emb).at[valid_indices].set(valid_sin)
 
     if len(inputs.shape) == 4:
       cos_emb = cos_emb[None, :, None, :]  # [1, S, 1, H]

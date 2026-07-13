@@ -417,20 +417,23 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
         config_video_pad,
     )
 
-    raw_output, raw_attention_mask = self.jax_model(raw_hidden_states)
+    patch_shape = (-1, in_channels, temporal_patch_size, patch_size, patch_size)
+    raw_output, raw_attention_mask = self.jax_model(raw_hidden_states.reshape(patch_shape))
     padded_output, attention_mask = self.jax_model(
-        jnp.asarray(padded_hidden_states),
+        jnp.asarray(padded_hidden_states).reshape(patch_shape),
         video_mask=jnp.asarray(video_mask),
     )
 
     self.assertIsNone(raw_attention_mask)
     np.testing.assert_array_equal(padded_grid_thw, raw_grid_thw)
-    self.assertEqual(raw_output.shape, (batch_size, math.prod(raw_grid), self.config.hidden_size_for_vit))
-    self.assertEqual(padded_output.shape, (batch_size, math.prod(max_grid), self.config.hidden_size_for_vit))
+    self.assertEqual(raw_output.shape, (math.prod(raw_grid), 1, self.config.hidden_size_for_vit))
+    self.assertEqual(padded_output.shape, (math.prod(max_grid), 1, self.config.hidden_size_for_vit))
     self.assertEqual(attention_mask.shape, (batch_size, math.prod(max_grid)))
     self.assertEqual(int(jnp.sum(attention_mask)), math.prod(raw_grid))
 
-    padded_valid_output = np.array(padded_output)[np.array(attention_mask, dtype=bool)]
+    padded_valid_output = np.array(padded_output).reshape(-1, self.config.hidden_size_for_vit)[
+        np.array(attention_mask, dtype=bool).reshape(-1)
+    ]
     np.testing.assert_allclose(
         np.array(raw_output).reshape(-1, self.config.hidden_size_for_vit),
         padded_valid_output,
@@ -695,6 +698,55 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
           atol=1.5e-2,
           error_msg=f"Deep feature {i} differs",
       )
+
+  def test_padded_video_valid_outputs_match_unpadded(self):
+    """Padded tokens do not change valid outputs anywhere in the ViT."""
+    raw_grid = (2, 2, 2)
+    max_grid = (3, 4, 4)
+    config = pyconfig.initialize(
+        ["", base_config_path],
+        model_name="qwen3-omni-30b-a3b",
+        attention="dot_product",
+        attention_type="full",
+        dtype="float32",
+        dtype_mm="float32",
+        weight_dtype="float32",
+        override_model_config=True,
+        attention_for_vit="dot_product",
+        hidden_size_for_vit=16,
+        num_attention_heads_for_vit=2,
+        intermediate_size_for_vit=32,
+        num_hidden_layers_for_vit=1,
+        deepstack_visual_indexes_for_vit=[],
+        video_max_grid_t=max_grid[0],
+        video_max_grid_h=max_grid[1],
+        video_max_grid_w=max_grid[2],
+    )
+    patch_size = config.patch_size_for_vit
+    temporal_patch_size = config.temporal_patch_size_for_vit
+    raw_shape = (
+        1,
+        config.num_channels_for_vit,
+        raw_grid[0] * temporal_patch_size,
+        raw_grid[1] * patch_size,
+        raw_grid[2] * patch_size,
+    )
+    raw_video, _ = create_random_jax_torch(*raw_shape)
+    padded_video, _, video_mask = maybe_pad_video_values_to_max_grid(
+        np.asarray(raw_video), np.asarray([raw_grid]), config
+    )
+
+    encoder = JaxQwen3OmniMoeVisionEncoder(config=config, mesh=self.mesh, rngs=nnx.Rngs(42))
+    raw_output, _ = encoder(raw_video)
+    padded_output, _ = encoder(padded_video, video_mask=video_mask, video_grid_thw=raw_grid)
+    patch_mask = np.asarray(video_mask).reshape(1, -1, temporal_patch_size * patch_size * patch_size).max(-1).astype(bool)
+
+    np.testing.assert_allclose(
+        np.asarray(raw_output).reshape(-1, config.hidden_size_for_vit),
+        np.asarray(padded_output)[np.asarray(patch_mask)],
+        rtol=1e-4,
+        atol=1e-4,
+    )
 
 
 class TestDeepstackProcess(unittest.TestCase):
