@@ -10,7 +10,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -24,7 +23,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -44,7 +42,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -58,17 +55,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ]
+      "tensor"
     ],
     "shape": [
       1024
@@ -85,7 +78,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -99,7 +91,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -108,7 +99,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "tensor_transpose",
         "context",
         "expert"
       ],
@@ -137,7 +127,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -151,7 +140,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -160,7 +148,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "tensor_transpose",
         "context",
         "expert"
       ],
@@ -189,7 +176,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -203,7 +189,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -219,7 +204,6 @@
       "stage",
       [
         "fsdp",
-        "tensor_transpose",
         "context",
         "expert"
       ]
@@ -241,7 +225,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -255,17 +238,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -284,7 +263,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -298,17 +276,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -327,7 +301,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -341,7 +314,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -357,7 +329,6 @@
       "stage",
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -381,7 +352,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -395,17 +365,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -424,7 +390,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -438,7 +403,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -447,7 +411,6 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -478,7 +441,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -492,7 +454,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -508,7 +469,6 @@
       "stage",
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -532,7 +492,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -546,17 +505,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -575,7 +530,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -589,7 +543,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -605,7 +558,6 @@
       "stage",
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -629,7 +581,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -643,7 +594,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -652,7 +602,6 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -679,7 +628,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -693,7 +641,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -713,7 +660,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -727,17 +673,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ]
+      "tensor"
     ],
     "shape": [
       1024
@@ -754,7 +696,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -768,7 +709,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -777,7 +717,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "tensor_transpose",
         "context",
         "expert"
       ],
@@ -806,7 +745,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -820,7 +758,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -829,7 +766,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "tensor_transpose",
         "context",
         "expert"
       ],
@@ -858,7 +794,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -872,7 +807,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -888,7 +822,6 @@
       "stage",
       [
         "fsdp",
-        "tensor_transpose",
         "context",
         "expert"
       ]
@@ -910,7 +843,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -924,17 +856,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -953,7 +881,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -967,17 +894,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -996,7 +919,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1010,7 +932,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1026,7 +947,6 @@
       "stage",
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1050,7 +970,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1064,17 +983,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -1093,7 +1008,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1107,7 +1021,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1116,7 +1029,6 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1147,7 +1059,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1161,7 +1072,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1177,7 +1087,6 @@
       "stage",
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1201,7 +1110,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1215,17 +1123,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -1244,7 +1148,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1258,7 +1161,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1274,7 +1176,6 @@
       "stage",
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1298,7 +1199,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1312,7 +1212,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1321,7 +1220,6 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1348,7 +1246,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1362,17 +1259,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ]
+      "tensor"
     ],
     "shape": [
       1024
@@ -1389,7 +1282,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1403,7 +1295,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1412,7 +1303,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "tensor_transpose",
         "context",
         "expert"
       ],
@@ -1441,7 +1331,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1455,7 +1344,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1464,7 +1352,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "tensor_transpose",
         "context",
         "expert"
       ],
@@ -1493,7 +1380,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1507,7 +1393,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1523,7 +1408,6 @@
       "stage",
       [
         "fsdp",
-        "tensor_transpose",
         "context",
         "expert"
       ]
@@ -1545,7 +1429,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1559,17 +1442,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -1588,7 +1467,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1602,17 +1480,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -1631,7 +1505,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1645,7 +1518,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1661,7 +1533,6 @@
       "stage",
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1685,7 +1556,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1699,17 +1569,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -1728,7 +1594,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1742,7 +1607,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1751,7 +1615,6 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1782,7 +1645,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1796,7 +1658,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1812,7 +1673,6 @@
       "stage",
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1836,7 +1696,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1850,17 +1709,13 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
       }
     },
     "partition_spec": [
-      [
-        "tensor",
-        "tensor_transpose"
-      ],
+      "tensor",
       "stage"
     ],
     "shape": [
@@ -1879,7 +1734,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1893,7 +1747,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1909,7 +1762,6 @@
       "stage",
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1933,7 +1785,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1947,7 +1798,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1
@@ -1956,7 +1806,6 @@
     "partition_spec": [
       [
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "autoregressive"
       ],
@@ -1983,7 +1832,6 @@
         "context",
         "context_autoregressive",
         "tensor",
-        "tensor_transpose",
         "tensor_sequence",
         "expert",
         "autoregressive"
@@ -1997,7 +1845,6 @@
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
-        "tensor_transpose": 1,
         "tensor_sequence": 1,
         "expert": 1,
         "autoregressive": 1

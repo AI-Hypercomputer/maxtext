@@ -1070,6 +1070,7 @@ def main(
       simulated_cpu_devices_count,
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
+      config=config,
   )
 
   print_ram_usage("Program Ends")

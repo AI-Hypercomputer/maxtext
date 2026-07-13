@@ -49,6 +49,23 @@ from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
 from maxtext.utils import train_utils
 
+_SCAN_AXIS_NAMES = ("layers_per_stage", "layers", "circular_repeats")
+
+
+def get_scan_axis(config, sharding_or_spec, x=None):
+  """Find the scan axis from sharding spec or use default fallback if valid."""
+  if hasattr(sharding_or_spec, "spec"):
+    spec = sharding_or_spec.spec
+  else:
+    spec = sharding_or_spec
+
+  for name in _SCAN_AXIS_NAMES:
+    if name in spec:
+      return spec.index(name)
+  if x is not None and hasattr(x, "ndim") and x.ndim > config.param_scan_axis:
+    return config.param_scan_axis
+  return None
+
 
 def _possibly_unroll_params(config, training_state, training_state_annotations, mesh):
   """Unroll scanned input layers when force_unroll is set."""
@@ -106,8 +123,17 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
   and removes the original collection. Mirrors the same operation on
   `state_mesh_shardings` so downstream sharding stays correct.
   """
-  decoder_state = state.model.decoder
-  decoder_shardings = state_mesh_shardings.model.decoder
+  param_only_state, other_state = nnx.split_state(state, nnx.Param, ...)
+  param_paths = set(param_only_state.flat_state().paths)
+
+  param_only_shardings_items = [(path, val) for path, val in state_mesh_shardings.flat_state() if path in param_paths]
+  other_shardings_items = [(path, val) for path, val in state_mesh_shardings.flat_state() if path not in param_paths]
+
+  param_only_shardings = nnx.State.from_flat_path(param_only_shardings_items)
+  other_shardings = nnx.State.from_flat_path(other_shardings_items)
+
+  decoder_state = param_only_state.model.decoder
+  decoder_shardings = param_only_shardings.model.decoder
 
   def unroll_layer_group(num_layers, layer_name="layers"):
     layers = decoder_state.get(layer_name, None)
@@ -115,19 +141,42 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
     if layers is None or layers_shardings is None:
       raise ValueError(f"Missing {layer_name} in NNX state.model.decoder or state_mesh_shardings.")
 
-    def drop_scan_axis(named_sharding):
+    def drop_scan_axis(named_sharding, x):
       ps = named_sharding.spec
-      return jax.sharding.PartitionSpec(*(ps[0 : config.param_scan_axis] + ps[config.param_scan_axis + 1 :]))
+      val = x[...] if isinstance(x, nnx.Variable) else x
+      scan_axis = get_scan_axis(config, named_sharding, val)
+      if scan_axis is not None:
+        return jax.sharding.PartitionSpec(*(ps[0:scan_axis] + ps[scan_axis + 1 :]))
+      return ps
 
     new_layer_pspec = jax.tree_util.tree_map(
-        drop_scan_axis, layers_shardings, is_leaf=lambda x: isinstance(x, jax.sharding.NamedSharding)
+        drop_scan_axis,
+        layers_shardings,
+        layers,
+        is_leaf=lambda x: isinstance(x, (jax.sharding.NamedSharding, nnx.Variable)),
     )
     new_layer_sharding = jax.tree_util.tree_map(lambda ps: jax.sharding.NamedSharding(mesh, ps), new_layer_pspec)
 
     for i in range(num_layers):
 
+      # pylint: disable=cell-var-from-loop
       def slice_ith(input_layers):
-        return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=config.param_scan_axis), input_layers)
+        def _slice_leaf(x, sharding):
+          val = x[...] if isinstance(x, nnx.Variable) else x
+          scan_axis = get_scan_axis(config, sharding, val)
+          if scan_axis is not None:
+            sliced_val = jnp.take(val, i, axis=scan_axis)
+            if isinstance(x, nnx.Variable):
+              return type(x)(sliced_val)
+            return sliced_val
+          return x
+
+        return jax.tree_util.tree_map(
+            _slice_leaf,
+            input_layers,
+            layers_shardings,
+            is_leaf=lambda x: isinstance(x, (jax.sharding.NamedSharding, nnx.Variable)),
+        )
 
       # pylint: disable=not-callable
       new_layer = jax.jit(slice_ith, out_shardings=new_layer_sharding)(layers)
@@ -144,6 +193,13 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
     unroll_layer_group(config.num_decoder_layers - config.first_num_dense_layers, layer_name="moe_layers")
   else:
     unroll_layer_group(config.num_decoder_layers, layer_name="layers")
+
+  # Merge modified parameter state and other variables back in-place
+  merged_state = nnx.merge_state(param_only_state, other_state)
+  state.update(merged_state)
+
+  merged_shardings = nnx.merge_state(param_only_shardings, other_shardings)
+  state_mesh_shardings.update(merged_shardings)
 
 
 def _read_train_checkpoint(config, checkpoint_manager, mesh):
@@ -167,13 +223,14 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
     init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
 
-  state, state_mesh_notations, state_mesh_shardings, _ = maxtext_utils.setup_training_state(
+  state, state_mesh_notations, state_mesh_shardings, _, _ = maxtext_utils.setup_training_state(
       None, config, mesh, checkpoint_manager, init_state_fn
   )
   if config.pure_nnx:
     # On NNX, state is a flat nnx.State; params live under state.model and the
     # legacy notations are unused (callers receive shardings directly).
-    num_params = max_utils.calculate_num_params_from_pytree(state.model)
+    params, _ = nnx.split_state(state.model, nnx.Param, ...)
+    num_params = max_utils.calculate_num_params_from_pytree(params)
     max_logging.log(f"In input checkpoint Number of model params={num_params/1e9:.3f} billion")
     return state, state_mesh_shardings
   num_params = max_utils.calculate_num_params_from_pytree(state.params)
@@ -283,16 +340,36 @@ def _possibly_unroll_lora_params_nnx(config, lora_state, lora_state_annotations,
     if layers is None or layers_annotations is None:
       return  # No LoRA on this layer group; nothing to unroll.
 
-    def new_pspec(x):
-      return jax.sharding.PartitionSpec(*(x[0 : config.param_scan_axis] + x[config.param_scan_axis + 1 :]))
+    def drop_scan_axis(spec, x):
+      scan_axis = get_scan_axis(config, spec, x)
+      if scan_axis is not None:
+        return jax.sharding.PartitionSpec(*(spec[0:scan_axis] + spec[scan_axis + 1 :]))
+      return spec
 
-    new_layer_annotation = jax.tree_util.tree_map(new_pspec, layers_annotations)
+    new_layer_annotation = jax.tree_util.tree_map(
+        drop_scan_axis,
+        layers_annotations,
+        layers,
+        is_leaf=lambda x: isinstance(x, jax.sharding.PartitionSpec),
+    )
     new_layer_sharding = jax.tree_util.tree_map(lambda x: jax.sharding.NamedSharding(mesh, x), new_layer_annotation)
 
     for i in range(num_layers):
 
+      # pylint: disable=cell-var-from-loop
       def slice_ith(input_layers):
-        return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=config.param_scan_axis), input_layers)
+        def _slice_leaf(x, spec):
+          scan_axis = get_scan_axis(config, spec, x)
+          if scan_axis is not None:
+            return jnp.take(x, i, axis=scan_axis)
+          return x
+
+        return jax.tree_util.tree_map(
+            _slice_leaf,
+            input_layers,
+            layers_annotations,
+            is_leaf=lambda x: isinstance(x, jax.sharding.PartitionSpec),
+        )
 
       # pylint: disable=not-callable
       new_layer = jax.jit(slice_ith, out_shardings=new_layer_sharding)(layers)

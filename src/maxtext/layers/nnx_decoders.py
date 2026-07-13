@@ -653,7 +653,7 @@ class NNXDecoder(nnx.Module):
     RemattedGemma4Block = gemma4.Gemma4ScannableBlock
 
     if scan_length > 0:
-      self.layers = self._create_scanned_layers(
+      self.scanned_blocks = self._create_scanned_layers(
           RemattedGemma4Block,
           length=scan_length,
           metadata_axis_name="layers",
@@ -1140,6 +1140,7 @@ class NNXDecoder(nnx.Module):
         "query_proj",
         "value_proj",
         "key_proj",
+        "kv_proj",
         "qkv_proj",
         "out_proj",
         "mlpwi_0",
@@ -1187,6 +1188,7 @@ class NNXDecoder(nnx.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "context",
             "out_proj",
@@ -1196,6 +1198,7 @@ class NNXDecoder(nnx.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
             "mlpwo",
@@ -1205,6 +1208,7 @@ class NNXDecoder(nnx.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
         )
@@ -1213,6 +1217,7 @@ class NNXDecoder(nnx.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
         )
       elif cfg.remat_policy == "qkv_proj_offloaded":
@@ -1222,6 +1227,7 @@ class NNXDecoder(nnx.Module):
                 "query_proj",
                 "value_proj",
                 "key_proj",
+                "kv_proj",
             ],
             offload_src="device",
             offload_dst="pinned_host",
@@ -1233,6 +1239,7 @@ class NNXDecoder(nnx.Module):
                 "query_proj",
                 "value_proj",
                 "key_proj",
+                "kv_proj",
                 "qkv_proj",
                 "out_proj",
                 "mlpwi_0",
@@ -2030,8 +2037,8 @@ class NNXDecoder(nnx.Module):
       grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(
           kv_caches, scan_length, attention_pattern_length, stack=False
       )
-      y, self.layers, _ = self._apply_layers_sequentially(
-          self.layers, y, *layer_args, length=scan_length, kv_caches_stacked=grouped_kv_caches, **layer_kwargs
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks, y, *layer_args, length=scan_length, kv_caches_stacked=grouped_kv_caches, **layer_kwargs
       )
       maxtext_utils.update_kv_caches_after_scan(
           kv_caches, grouped_kv_caches, scan_length, attention_pattern_length, stacked=False

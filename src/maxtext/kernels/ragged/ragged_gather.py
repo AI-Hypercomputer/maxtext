@@ -21,25 +21,6 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
-from packaging.version import Version
-
-# JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
-# versions renamed them to `out_type`/`scratch_types`.
-if Version(jax.__version__) <= Version("0.10.0"):
-  _OUT_KW = "out_shape"
-  _SCRATCH_KW = "scratch_shapes"
-  _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
-      "disable_bounds_checks": True,
-  }
-else:
-  _OUT_KW = "out_type"
-  _SCRATCH_KW = "scratch_types"
-  _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
-      "disable_bounds_checks": True,
-      "needs_layout_passes": False,
-  }
 
 
 def main_kernel(
@@ -140,8 +121,8 @@ def main_kernel(
     # but for other bitwidths, this is not possible. Therefore, we bitcast data
     # into 32-bits first to fetch packing number of rows per dma and later
     # perform bitwise unpacking / packing to obtain desired results.
-    in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-    out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
+    in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)  # pyrefly: ignore[missing-attribute]
+    out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)  # pyrefly: ignore[missing-attribute]
 
     for col_vmem_start in range(0, col_size, num_lanes):
       col_hbm_start = col_tile_start + col_vmem_start
@@ -333,7 +314,7 @@ def _fallback_implementation(
   """Fallback to (non-ragged) JAX implementation for ragged gather."""
   out = x[indices]
   if has_weights:
-    out = out * weights[:, None]
+    out = out * weights[:, None]  # pyrefly: ignore[unsupported-operation]
   return out
 
 
@@ -433,7 +414,7 @@ def ragged_gather(
   indices = jnp.pad(indices, ((0, out_pad_size)))
 
   if has_weights:
-    weights = jnp.pad(weights, ((0, out_pad_size)), constant_values=1.0)
+    weights = jnp.pad(weights, ((0, out_pad_size)), constant_values=1.0)  # pyrefly: ignore[bad-argument-type]
   else:
     # Provide a dummy weights array; the kernel won't use it.
     weights = jnp.ones((out_size + out_pad_size,), dtype=jnp.float32)
@@ -453,8 +434,11 @@ def ragged_gather(
           subcore_axis_name=vector_mesh.subcore_axis_name,
           has_weights=has_weights,
       ),
-      compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
-          **_COMPILER_PARAMS,
+      out_type=jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
+      compiler_params=pltpu.CompilerParams(
+          use_tc_tiling_on_sc=True,
+          disable_bounds_checks=True,
+          needs_layout_passes=False,
       ),
       cost_estimate=get_cost_estimate(
           out_size=out_size + out_pad_size,
@@ -464,17 +448,14 @@ def ragged_gather(
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
       ),
+      scratch_types=[
+          pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+          pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          pltpu.VMEM((num_simd_lanes,), jnp.float32),
+          pltpu.SemaphoreType.DMA((2,)),
+      ],
       mesh=vector_mesh,
       name="sc_ragged_gather",
-      **{
-          _OUT_KW: jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
-          _SCRATCH_KW: [
-              pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              pltpu.VMEM((num_simd_lanes,), jnp.float32),
-              pltpu.SemaphoreType.DMA((2,)),
-          ],
-      },
   )(start, end, x, indices, weights)[:out_size, :hidden_size]

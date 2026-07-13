@@ -151,7 +151,7 @@ def apply_qk_clip_nnx(state, intermediate_outputs, config):
   tau = float(config.qk_clip_threshold)
 
   _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
-  params_dict = params_state.to_pure_dict()
+  params_dict = params_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
 
   def clip_mla_weights(path, param):
     if len(path) < 2:

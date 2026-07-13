@@ -96,18 +96,6 @@ class TrainTests(unittest.TestCase):
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
-      "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
-          None,
-          get_test_config_path(),
-          f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
-          "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
-          "steps=2",
-          "ici_tensor_transpose_parallelism=4",
-          "enable_goodput_recording=False",
-          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
-      ]
-      + _small_model_overrides,
       "int8": [  # tests base config with int8
           None,
           get_test_config_path(),
@@ -290,6 +278,22 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_te_fp8_delayedscaling(self):
     train_main(TrainTests.CONFIGS["te_fp8_delayedscaling"] + ["attention=dot_product"])
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_fp8_delayedscaling_tsp_cgemm(self):
+    if jax.process_count() <= 1:
+      pytest.skip("Requires rank-per-GPU launch (JAX_PROCESS_COUNT > 1)")
+    if jax.local_device_count() != 1:
+      pytest.skip(f"Requires rank-per-GPU launch (local_device_count==1), " f"got {jax.local_device_count()}")
+    if not jax.distributed.is_initialized():
+      pytest.skip("Requires jax.distributed.initialize() (hardware=gpu_multiprocess)")
+
+    train_main(
+        TrainTests.CONFIGS["te_fp8_delayedscaling"]
+        + ["attention=dot_product", "ici_tensor_sequence_parallelism=2", "use_te_comm_gemm_overlap=true"]
+    )
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.integration_test

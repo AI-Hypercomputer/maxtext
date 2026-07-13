@@ -473,7 +473,7 @@ def sc_gather_reduce(
 
           is_odd = arith.cmpi(
               arith.CmpIPredicate.eq,
-              parity,
+              parity,  # pyrefly: ignore[bad-argument-type]
               const_lut(0),
           )
           raw_weights_f32 = arith.select(is_odd, weights_odds, weights_evens)
@@ -533,8 +533,8 @@ def sc_gather_reduce(
                   _BF16[2, 16],
                   scratch_local,
                   [
-                      arith.addi(const_lut(row_idx_l), row_add),
-                      arith.muli(col_pos, const_lut(2)),  # NOTYPO
+                      arith.addi(const_lut(row_idx_l), row_add),  # pyrefly: ignore[bad-argument-type]
+                      arith.muli(col_pos, const_lut(2)),  # NOTYPO  # pyrefly: ignore[bad-argument-type]
                   ],
                   enable_all_sublanes_mask,
               )
@@ -567,20 +567,20 @@ def sc_gather_reduce(
 
           row0 = get_row_val(0)
           if weights_local is not None:
-            row0 = arith.mulf(row0, weights_vecs[0])
+            row0 = arith.mulf(row0, weights_vecs[0])  # pyrefly: ignore[unsupported-operation]
             if topk_wgt_zero_nan:
               row0 = arith.select(
-                  arith.cmpf(arith.CmpFPredicate.OEQ, weights_vecs[0], zero_vec_f32),
+                  arith.cmpf(arith.CmpFPredicate.OEQ, weights_vecs[0], zero_vec_f32),  # pyrefly: ignore[unbound-name, unsupported-operation]
                   zero_vec_f32,
                   row0,
               )
 
           row8 = get_row_val(8)
           if weights_local is not None:
-            row8 = arith.mulf(row8, weights_vecs[8])
+            row8 = arith.mulf(row8, weights_vecs[8])  # pyrefly: ignore[unsupported-operation]
             if topk_wgt_zero_nan:
               row8 = arith.select(
-                  arith.cmpf(arith.CmpFPredicate.OEQ, weights_vecs[8], zero_vec_f32),
+                  arith.cmpf(arith.CmpFPredicate.OEQ, weights_vecs[8], zero_vec_f32),  # pyrefly: ignore[unsupported-operation]
                   zero_vec_f32,
                   row8,
               )
@@ -588,12 +588,12 @@ def sc_gather_reduce(
           for sum_idx in range(7):
             tmp_row0 = get_row_val(sum_idx + 1)
             if weights_local is not None:
-              tmp_row0 = arith.mulf(tmp_row0, weights_vecs[sum_idx + 1])
+              tmp_row0 = arith.mulf(tmp_row0, weights_vecs[sum_idx + 1])  # pyrefly: ignore[unsupported-operation]
               if topk_wgt_zero_nan:
                 tmp_row0 = arith.select(
                     arith.cmpf(
                         arith.CmpFPredicate.OEQ,
-                        weights_vecs[sum_idx + 1],
+                        weights_vecs[sum_idx + 1],  # pyrefly: ignore[unsupported-operation]
                         zero_vec_f32,
                     ),
                     zero_vec_f32,
@@ -604,12 +604,12 @@ def sc_gather_reduce(
 
             tmp_row8 = get_row_val(8 + sum_idx + 1)
             if weights_local is not None:
-              tmp_row8 = arith.mulf(tmp_row8, weights_vecs[8 + sum_idx + 1])
+              tmp_row8 = arith.mulf(tmp_row8, weights_vecs[8 + sum_idx + 1])  # pyrefly: ignore[unsupported-operation]
               if topk_wgt_zero_nan:
                 tmp_row8 = arith.select(
                     arith.cmpf(
                         arith.CmpFPredicate.OEQ,
-                        weights_vecs[8 + sum_idx + 1],
+                        weights_vecs[8 + sum_idx + 1],  # pyrefly: ignore[unsupported-operation]
                         zero_vec_f32,
                     ),
                     zero_vec_f32,
@@ -743,7 +743,7 @@ def sc_gather_reduce(
             )
 
             if row_pos is not None:
-              local_vec = arith.addi(vec, row_vec_offset)
+              local_vec = arith.addi(vec, row_vec_offset)  # pyrefly: ignore[unbound-name]
             else:
               local_vec = vec
 
@@ -1154,7 +1154,7 @@ def sc_gather_reduce(
             lower_bound=const_lut(row_chunk_size * 1),
             upper_bound=const_lut(row_chunk_size * ((idx.shape[0] // num_sc // row_chunk_size) - 1)),
             step=const_lut(row_chunk_size * 2),
-            iter_args=[
+            iter_args=[  # pyrefly: ignore[bad-argument-type]
                 scratch_0,
                 scratch_out_0,
                 sflag_0,

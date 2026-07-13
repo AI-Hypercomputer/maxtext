@@ -387,7 +387,8 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
       init_state_fn = create_train_state_fn
     else:
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
-    state, _, _, _ = maxtext_utils.setup_initial_state(None, self.config, self.mesh, None, init_state_fn)
+    state, _, _, _, was_restored = maxtext_utils.setup_initial_state(None, self.config, self.mesh, None, init_state_fn)
+    self.assertFalse(was_restored)
     if self.config.pure_nnx:
       self.assertIsNotNone(state.optimizer)
     else:
@@ -1405,8 +1406,16 @@ class TestSetupTrainingState(unittest.TestCase):
 
       init_state_fn = create_train_state_fn
     else:
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
-    state, _, _, _ = maxtext_utils.setup_training_state(None, self.config, self.mesh, None, init_state_fn)
+      init_state_fn = functools.partial(
+          maxtext_utils.init_initial_state,
+          self.model,
+          tx,
+          self.config,
+          True,
+          rng,
+      )
+    state, _, _, _, was_restored = maxtext_utils.setup_training_state(None, self.config, self.mesh, None, init_state_fn)
+    self.assertFalse(was_restored)
     if self.config.pure_nnx:
       self.assertIsNotNone(state.optimizer)
     else:

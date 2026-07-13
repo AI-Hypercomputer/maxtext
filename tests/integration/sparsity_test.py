@@ -91,7 +91,7 @@ class Train(parameterized.TestCase):
               "weight_sparsity_update_step=1",
           ]
       )
-    train_main(args)
+    train_main(args)  # pyrefly: ignore[bad-argument-type]
 
 
 if __name__ == "__main__":

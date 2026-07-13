@@ -149,15 +149,15 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
   if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_gemma3(tokens, max_num_images=processor_output.num_images)
+    return add_extra_tokens_for_images_gemma3(tokens, max_num_images=processor_output.num_images)  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import add_extra_tokens_for_images_gemma4  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_gemma4(tokens, max_num_images=processor_output.num_images)
+    return add_extra_tokens_for_images_gemma4(tokens, max_num_images=processor_output.num_images)  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     from maxtext.multimodal.processor_llama4 import add_extra_tokens_for_images_llama4  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_llama4(tokens, processor_output)
+    return add_extra_tokens_for_images_llama4(tokens, processor_output)  # pyrefly: ignore[bad-argument-type]
   elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
 

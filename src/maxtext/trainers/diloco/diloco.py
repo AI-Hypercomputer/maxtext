@@ -157,9 +157,11 @@ def build_abstract_diloco_state(
   # for Linen under abstract_state.params.
   if config.pure_nnx:
     _, model_params, _ = nnx.split(abstract_state.model, nnx.Param, ...)
-    model_params = model_params.to_pure_dict()
-    _, model_params_sharding, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
-    model_params_sharding = model_params_sharding.to_pure_dict()
+    model_params = model_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
+    _, model_params_sharding, _ = nnx.split(
+        state_mesh_shardings.model, nnx.Param, ...
+    )
+    model_params_sharding = model_params_sharding.to_pure_dict()  # pyrefly: ignore[missing-attribute]
   else:
     model_params = abstract_state.params
     model_params_sharding = state_mesh_shardings.params
@@ -173,7 +175,7 @@ def build_abstract_diloco_state(
       inner_state=inner_state,
       params=model_params,
       outer_opt_state=outer_opt_state,
-      step=abstract_step,
+      step=abstract_step,  # pyrefly: ignore[bad-argument-type]
   )
 
   # Build shardings
@@ -188,7 +190,7 @@ def build_abstract_diloco_state(
       inner_state=inner_state_shardings,
       params=model_params_sharding,
       outer_opt_state=outer_opt_state_sharding,
-      step=None,
+      step=None,  # pyrefly: ignore[bad-argument-type]
   )
 
   return diloco_state, diloco_state_shardings, inner_state_shardings
@@ -219,7 +221,7 @@ def build_diloco_state(
     # for Linen under state.params.
     if config.pure_nnx:
       _, outer_params, _ = nnx.split(state.model, nnx.Param, ...)
-      outer_params = outer_params.to_pure_dict()
+      outer_params = outer_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
     else:
       outer_params = state.params
     outer_opt_state = outer_optimizer.init(outer_params)
@@ -264,8 +266,10 @@ def build_diloco_train_step(
     broadcast_outer_params = drjax.broadcast(state.params, mesh=mesh)
     # For NNX, model Param vars live under inner_state.model; for Linen under inner_state.params.
     if config.pure_nnx:
-      _, inner_model_params, _ = nnx.split(state.inner_state.model, nnx.Param, ...)
-      inner_model_params = inner_model_params.to_pure_dict()
+      _, inner_model_params, _ = nnx.split(
+          state.inner_state.model, nnx.Param, ...
+      )
+      inner_model_params = inner_model_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
     else:
       inner_model_params = state.inner_state.params
     model_delta = jax.tree.map(lambda x, y: y - x, inner_model_params, broadcast_outer_params)

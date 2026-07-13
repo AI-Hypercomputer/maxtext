@@ -41,6 +41,7 @@ from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
 import flax.linen as nn
+from huggingface_hub import get_token
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
@@ -776,7 +777,7 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
           use_no_op_mappings=use_no_op_mappings,
           pad_id=tokenizer_pad_id,
       )
-      actor_model.config = None
+      actor_model.config = None  # pyrefly: ignore[missing-attribute]
     actor_mesh = reference_mesh
   else:
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
@@ -790,6 +791,45 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
   return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
 
 
+def verify_and_sync_scan_layers(config):
+  """Verify and sync scan_layers based on checkpoint metadata."""
+  if not config.load_parameters_path:
+    return config
+
+  custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
+  saved_scan_layers = custom_metadata.get("scan_layers")
+  if not isinstance(saved_scan_layers, bool):
+    return config
+
+  if saved_scan_layers == config.scan_layers:
+    return config
+
+  # Extract the Pydantic config (or use direct config if already a Pydantic model)
+  pydantic_config = getattr(config, "_pydantic_config", config)
+  model_fields_set = getattr(pydantic_config, "model_fields_set", None)
+
+  # If model metadata tracking isn't supported, fall back to matching check (True)
+  is_explicit = "scan_layers" in model_fields_set if model_fields_set is not None else True
+
+  if is_explicit:
+    if saved_scan_layers != config.scan_layers:
+      raise ValueError(
+          f"Configuration mismatch: Your run specifies scan_layers={config.scan_layers}, "
+          f"but the checkpoint was saved with scan_layers={saved_scan_layers}."
+      )
+  else:
+    max_logging.log(f"Setting scan_layers={saved_scan_layers} loaded from checkpoint metadata.")
+    new_pydantic_config = pydantic_config.model_copy(update={"scan_layers": saved_scan_layers})
+    # Wrap back in HyperParameters if the original config was wrapped
+    if getattr(config, "_pydantic_config", None) is not None:
+      config = pyconfig.HyperParameters(new_pydantic_config)
+    else:
+      config = new_pydantic_config
+
+  return config
+
+
+# pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
     mesh=None,
@@ -811,8 +851,12 @@ def from_pretrained(
   if config.convert_checkpoint_if_possible and not config.load_parameters_path:
     if not (epath.Path(config.base_output_directory) / "0" / "items").exists():
       # Try to convert checkpoint on the fly
-      if not config.hf_access_token:
-        raise ValueError("hf_access_token must be provided when not providing a pre-existing checkpoint")
+      hf_access_token = config.hf_access_token or get_token()
+      if not hf_access_token:
+        raise ValueError(
+            "hf_access_token must be provided (or authenticate via"
+            " huggingface-cli) when not providing a pre-existing checkpoint"
+        )
 
       # Only process 0 performs the conversion; other processes wait at the barrier below.
       # Otherwise every host would race to download from HF and concurrently write the same
@@ -830,8 +874,8 @@ def from_pretrained(
         conversion_env = os.environ.copy()
         conversion_env["JAX_PLATFORMS"] = "cpu"
         # conversion_env["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
-        if config.hf_access_token:
-          conversion_env["HF_TOKEN"] = config.hf_access_token
+        if hf_access_token:
+          conversion_env["HF_TOKEN"] = hf_access_token
 
         to_maxtext_cmd = [
             sys.executable,
@@ -858,48 +902,35 @@ def from_pretrained(
     load_parameters_path = epath.Path(config.base_output_directory) / "0" / "items"
     # Create a copied Pydantic model with the updated values
     pydantic_config = getattr(config, "_pydantic_config", config)
-    new_config = pydantic_config.model_copy(
+    new_config = pydantic_config.model_copy(  # pyrefly: ignore[missing-attribute]
         update={
             "load_parameters_path": load_parameters_path,
         }
     )
     config = pyconfig.HyperParameters(new_config)
-  # Proactive verification of scan_layers from checkpoint metadata
-  if config.load_parameters_path:
-    custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
-    saved_scan_layers = custom_metadata.get("scan_layers")
-    if isinstance(saved_scan_layers, bool) and saved_scan_layers != config.scan_layers:
-      raise ValueError(
-          f"Configuration mismatch: Your run specifies scan_layers={config.scan_layers}, "
-          f"but the checkpoint was saved with scan_layers={saved_scan_layers}."
-      )
+
+  config = verify_and_sync_scan_layers(config)
+
+  # Compute abstract model and logical-axis specs for downstream checkpoint alignment.
+  # We invoke create_nnx_abstract_model once (a lightweight abstract trace with no physical memory cost)
+  # both to initialize pure NNX sharded models and to cleanly extract the logical PartitionSpec tree
+  # (e.g., axis names like "kv_heads", "mlp_moe") required by _align_checkpoint_to_model_shapes.
+  _create_model, abstract_model = create_nnx_abstract_model(
+      config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
+  )
+  _, _abs_state_for_specs = nnx.split(abstract_model)
+  specs = nnx.get_partition_spec(_abs_state_for_specs)
 
   if config.pure_nnx:
-    _create_model, abstract_model = create_nnx_abstract_model(
-        config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
-    )
     model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
     # TODO: print debug_sharding info
   else:
     model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
 
-  # Compute logical-axis specs for downstream checkpoint alignment.
-  # The model-creation helpers above resolve specs internally for sharding, but
-  # the checkpoint-loading branch below needs the logical PartitionSpec tree
-  # (axis names like "kv_heads", "mlp_moe") for repeat/zero-pad dispatch in
-  # _align_checkpoint_to_model_shapes. nnx.eval_shape is cheap (abstract trace).
-  _create_model_for_specs = get_nnx_create_model_fn(
-      config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
-  )
-  with nn.logical_axis_rules(config.logical_axis_rules):
-    _abs_model_for_specs = nnx.eval_shape(_create_model_for_specs)
-  _, _abs_state_for_specs = nnx.split(_abs_model_for_specs)
-  specs = nnx.get_partition_spec(_abs_state_for_specs)
-
   sharded_state = nnx.state(model)
 
   if mesh is None:
-    mesh = model.mesh
+    mesh = model.mesh  # pyrefly: ignore[missing-attribute]
 
   with mesh:
     if config.load_parameters_path:
@@ -963,6 +994,17 @@ def from_pretrained(
 
         return new_target
 
+      # Filter out transient runtime variables and rngs from NNX state before constructing target_for_restore.
+      # Checkpoints on disk only store persistent weight-like parameters. If we pass the full
+      # sharded_state directly, Orbax checks the disk for transient runtime state (like the layer
+      # dropout RNG seeds) and throws a structure mismatch error when it fails to find them.
+      # Note: We cannot use `nnx.split_state(sharded_state, nnx.Param)` to isolate weights because AQT
+      # serve-mode quantized models store their scale factors and integer payloads in custom AQT variable
+      # types (e.g. `qrhs.frozen`), which are NOT subclasses of `nnx.Param`. Negative filtering with
+      # `not isinstance(...)` safely retains all weight-like leaves while excluding transient runtime state.
+      param_state = sharded_state.filter(
+          lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+      )
       is_nnx_checkpoint = True
       if (
           "params" in metadata.item_metadata.tree.keys()
@@ -972,7 +1014,7 @@ def from_pretrained(
         is_nnx_checkpoint = False
         target_for_restore = jax.tree.map(
             lambda v: v[...],
-            sharded_state,
+            param_state,
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
 
@@ -995,8 +1037,8 @@ def from_pretrained(
         # NNX checkpoint: {'decoder': {'value': ...}}, or NNX-RL with extra 'base' nesting.
         # Restore only nnx.Param — RNG variable shapes may differ between checkpoint and model,
         # and pure-dict checkpoints written by `layerwise_quantization._load_and_quantize_nnx`
-        # don't carry RNG/dropout state at all (they only persist nnx.Param leaves, including
-        # AQT serve-mode `qrhs.frozen` which is a Param subclass).
+        # don't carry RNG/dropout state at all (they only persist weight-like leaves, including
+        # AQT serve-mode `qrhs.frozen` which is not an aqt Variable subclass).
         def _build_value_target(v):
           # `v[...]` (a.k.a. `v.get_value(index=...)`) descends into the inner
           # value with `value[Ellipsis]`. AQT serve-mode `qrhs.frozen` variables
@@ -1024,14 +1066,11 @@ def from_pretrained(
 
         # Keep persisted weight-like leaves: `nnx.Param` plus AQT serve-mode
         # `qrhs.frozen` (a separate `aqt` Variable type, NOT a Param subclass).
-        # Excluded: `nnx.RngState` (regenerated per load, shapes can drift) and
-        # `nnx.Cache` (PREFILL/AR scratch, not persisted). Pure-dict checkpoints
-        # written by `layerwise_quantization._load_and_quantize_nnx` carry both
-        # Param kernels and `aqt`-typed `qrhs.frozen` quantized payloads.
-        if hasattr(sharded_state, "filter"):
-          param_state = sharded_state.filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache)))
-        else:
-          param_state = sharded_state
+        # Excluded: `nnx.RngState` (regenerated per load, shapes can drift),
+        # `nnx.Cache` (PREFILL/AR scratch, not persisted), `nnx.Intermediate`
+        # (transient forward-pass activations), and `nnx.BatchStat` (runtime statistics).
+        # Pure-dict checkpoints written by `layerwise_quantization._load_and_quantize_nnx`
+        # carry both Param kernels and `aqt`-typed `qrhs.frozen` quantized payloads.
         target_for_restore = jax.tree.map(
             _build_value_target,
             param_state,
@@ -1047,10 +1086,12 @@ def from_pretrained(
         restore_args = {"base": restore_args} if has_base_key else restore_args
 
       # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
-      # Skip nnx.Cache variables — they hold runtime state (e.g. GDN conv/recurrent state) that is
-      # not present in the checkpoint and must remain valid after the restore.
+      # Skip transient runtime variables (RngState, Cache, Intermediate, BatchStat) — they hold runtime state
+      # that is not present in the checkpoint and must remain valid after the restore.
       def _free_device_memory(node):
-        if isinstance(node, nnx.Variable) and not isinstance(node, (nnx.RngState, nnx.Cache)):
+        if isinstance(node, nnx.Variable) and not isinstance(
+            node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)
+        ):
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
           # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
@@ -1073,7 +1114,7 @@ def from_pretrained(
       )
 
       if is_nnx_checkpoint:
-        restored_root = restored["base"] if has_base_key else restored
+        restored_root = restored["base"] if has_base_key else restored  # pyrefly: ignore[unbound-name]
         checkpoint = jax.tree.map(
             lambda v: v["value"],
             restored_root,
@@ -1161,11 +1202,11 @@ def from_pretrained(
       with mesh:
         use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
         model = TunixMaxTextAdapter(
-            base_model=model,
+            base_model=model,  # pyrefly: ignore[bad-argument-type]
             use_no_op_mappings=use_no_op_mappings,
             pad_id=tokenizer_pad_id,
         )
-        model.config = None
+        model.config = None  # pyrefly: ignore[missing-attribute]
 
     if original_mesh:
       return model

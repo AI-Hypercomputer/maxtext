@@ -303,9 +303,9 @@ class DeepSeekGenericLayer(nnx.Module):
     return hidden_states, intermediate_inputs
 
   def engram_op(self, x, decoder_input_tokens):
-    normed_x = self.engram_layer_norm(x)
+    normed_x = self.engram_layer_norm(x)  # pyrefly: ignore[not-callable]
     hash_ids = self.ngram_hash_mapping(decoder_input_tokens)[self.layer_idx]
-    return self.engram(normed_x, hash_ids)
+    return self.engram(normed_x, hash_ids)  # pyrefly: ignore[not-callable]
 
 
 class DeepSeekDenseLayer(DeepSeekGenericLayer):

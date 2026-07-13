@@ -95,7 +95,7 @@ def get_functional_train_with_signature(
 ):
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
-  functional_train.__name__ = "train_step"
+  functional_train.__name__ = "train_step"  # pyrefly: ignore[missing-attribute]
   if config.pure_nnx:
     in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   else:
@@ -109,7 +109,7 @@ def get_functional_train_with_signature(
 def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
-  functional_eval.__name__ = "eval_step"
+  functional_eval.__name__ = "eval_step"  # pyrefly: ignore[missing-attribute]
   if config.pure_nnx:
     in_shardings = (state_mesh_shardings, data_sharding)  # State, batch (NNX: no rng)
   else:
@@ -1392,7 +1392,9 @@ def get_abstract_param(model, config):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+      encoder_images=np.ones(image_shape, dtype=jnp.int32)
+      if config.use_multimodal
+      else None,  # pyrefly: ignore[no-matching-overload]
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
   )
   return abstract_vars
@@ -1413,7 +1415,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   if not config.load_parameters_path:
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
-    state, state_mesh_annotations, _, _ = setup_initial_state(
+    state, state_mesh_annotations, _, _, _ = setup_initial_state(
         None, config, mesh, checkpoint_manager, init_state_fn, False
     )
   else:
@@ -1468,6 +1470,9 @@ def setup_initial_state(
   Returns:
     train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
     state_mesh_annotations: the mesh annotations for the train state
+    state_mesh_shardings: the mesh shardings for the train state
+    data_iterator: the updated data iterator
+    was_restored: True if state or params were restored from checkpoint, False if freshly initialized
   """
 
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
@@ -1493,33 +1498,57 @@ def setup_initial_state(
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
     )
+    # Partial or fully restored
+    was_restored = bool(restored is not None or raw_params is not None)
 
-    if restored:
-      if isinstance(
-          checkpoint_manager,
-          (
-              emergency_checkpoint_manager.CheckpointManager,
-              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
-          ),
-      ):
-        state = restored
-      else:
-        # The update of data_iterator state happens in place, no need to assign explicitly
-        state = restored["items"]
+    init_state_partial = init_state_fn
+    init_state_partial.__name__ = "initialize_state"
 
-      # For NNX, convert the pure dict to nnx.State using the abstract state as template
-      if config.pure_nnx:
-        nnx.replace_by_pure_dict(unboxed_abstract_state, state)
-        state = unboxed_abstract_state
+    if config.pure_nnx:
+      # Always build the concrete init state, then overlay whatever we loaded. Anything the
+      # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
+      # value, so restore doesn't depend on knowing exactly what was saved.
+      state = jax.jit(
+          lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+          in_shardings=None,
+          out_shardings=state_mesh_shardings,
+      )()
+      if restored:
+        is_emergency = isinstance(
+            checkpoint_manager,
+            (
+                emergency_checkpoint_manager.CheckpointManager,
+                emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+            ),
+        )
+        # data_iterator state is updated in place during restore.
+        # The restore already overlaid the checkpoint onto a copy of the abstract, so a leaf it
+        # didn't carry is still an unmaterialized placeholder. Fill those from the fresh init: a
+        # present leaf comes from the checkpoint, an absent one keeps its init value.
+        overlay = restored if is_emergency else restored["items"]
+        merged = jax.tree.map(
+            lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
+            overlay.to_pure_dict(),
+            state.to_pure_dict(),
+            is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+        )
+        nnx.replace_by_pure_dict(state, merged)
+      elif raw_params:
+        # params-only load: overlay the restored weights, keep init for everything else.
+        nnx.update(state.model, raw_params)
     else:
-      init_state_partial = init_state_fn
-      init_state_partial.__name__ = "initialize_state"
-      if config.pure_nnx:
-        state = jax.jit(
-            lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
-            in_shardings=None,
-            out_shardings=state_mesh_shardings,
-        )()
+      if restored:
+        if isinstance(
+            checkpoint_manager,
+            (
+                emergency_checkpoint_manager.CheckpointManager,
+                emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+            ),
+        ):
+          state = restored
+        else:
+          # The update of data_iterator state happens in place, no need to assign explicitly
+          state = restored["items"]
       else:
         # pylint: disable=not-callable
         state = jax.jit(
@@ -1527,11 +1556,7 @@ def setup_initial_state(
             in_shardings=None,
             out_shardings=state_mesh_shardings,
         )()
-      if raw_params:  # If we loaded a partial state, we need to merge it.
-        if config.pure_nnx:
-          # raw_params should have the same sharding info as in the model
-          nnx.update(state.model, raw_params)
-        else:
+        if raw_params:  # If we loaded a partial state, we need to merge it.
           sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
           if sparsity_enabled:
             # Sparsity-init keeps freshly initialized params for any leaf still
@@ -1548,7 +1573,7 @@ def setup_initial_state(
             state = state.replace(params=raw_params)
   if not config.pure_nnx:
     state = max_utils.unbox_logicallypartioned(state)
-  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 
 def get_logical_annotations(config, mesh, init_state_fn):
@@ -2022,7 +2047,7 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
   # Convert all input arguments recursively to purely local abstract ShapeDtypeStruct objects
   # to completely bypass remote Array objects and proxy tracing overhead.
   abstract_inputs = jax.tree.map(to_abstract, train_step_inputs)
-  p_train_jaxpr = jax.make_jaxpr(unwrapped_step)(*abstract_inputs)
+  p_train_jaxpr = jax.make_jaxpr(unwrapped_step)(*abstract_inputs)  # pyrefly: ignore[no-matching-overload]
 
   local_filename = "train_step.jaxpr"
   local_path = os.path.join(config.dump_jaxpr_local_dir, local_filename)

@@ -18,11 +18,10 @@ echo "Running 52b.sh"
 #
 # Command Flags:
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
-# DATASET_PATH (Required, unless dataset_path is already set in base.yml)
 # RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
 #
 # Example to invoke this script:
-# bash src/maxtext/configs/tpu/v4/52b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
+# bash src/maxtext/configs/tpu/v4/52b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>"
 #
 # Example to AOT compile:
 # bash src/maxtext/configs/tpu/v4/52b.sh EXECUTABLE=train_compile M_COMPILE_TOPOLOGY=v4-384 M_COMPILE_TOPOLOGY_NUM_SLICES=2
@@ -59,4 +58,4 @@ python3 -m maxtext.trainers.pre_train.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXT
     profiler=xplane enable_checkpointing=false steps=10\
     ici_fsdp_parallelism=192 ici_tensor_parallelism=1 per_device_batch_size=7 remat_policy=full attention=flash num_vocab_tiling=8\
     base_num_decoder_layers=32 base_emb_dim=12288 base_mlp_dim=49152 base_num_query_heads=32 base_num_kv_heads=32 learning_rate=1e-8\
-    base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH
+    base_output_directory=$OUTPUT_PATH dataset_type=synthetic
