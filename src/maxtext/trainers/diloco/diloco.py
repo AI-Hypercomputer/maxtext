@@ -158,9 +158,7 @@ def build_abstract_diloco_state(
   if config.pure_nnx:
     _, model_params, _ = nnx.split(abstract_state.model, nnx.Param, ...)
     model_params = model_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-    _, model_params_sharding, _ = nnx.split(
-        state_mesh_shardings.model, nnx.Param, ...
-    )
+    _, model_params_sharding, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
     model_params_sharding = model_params_sharding.to_pure_dict()  # pyrefly: ignore[missing-attribute]
   else:
     model_params = abstract_state.params
@@ -266,9 +264,7 @@ def build_diloco_train_step(
     broadcast_outer_params = drjax.broadcast(state.params, mesh=mesh)
     # For NNX, model Param vars live under inner_state.model; for Linen under inner_state.params.
     if config.pure_nnx:
-      _, inner_model_params, _ = nnx.split(
-          state.inner_state.model, nnx.Param, ...
-      )
+      _, inner_model_params, _ = nnx.split(state.inner_state.model, nnx.Param, ...)
       inner_model_params = inner_model_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
     else:
       inner_model_params = state.inner_state.params
