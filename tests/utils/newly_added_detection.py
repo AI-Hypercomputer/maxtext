@@ -136,19 +136,12 @@ def touched_test_names(source, touched_lines):
 
 
 def _build_diff_commands(base):
-  """Return the ordered ``git diff`` argument lists to try, most-precise first.
-
-  Both ranges are three-dot (merge-base) ranges, so only the branch's own commits
-  are reported. Two-dot tip-vs-tip ranges are deliberately excluded: they over-report
-  every commit the base gained past the fork point (a stale local ``main`` can inflate
-  the changed set many-fold), which would drag unrelated ``scheduled_only`` tests into
-  pre-submit. The remote range covers CI and local checkouts that have an ``origin``
-  remote; the local range is the fallback for a developer without ``origin`` and is
-  never reached in CI, where ``origin/<base>`` is always fetched first.
-  """
   return [
       ["git", "diff", "--unified=0", f"origin/{base}...HEAD"],
       ["git", "diff", "--unified=0", f"{base}...HEAD"],
+      ["git", "diff", "--unified=0", f"origin/{base}..HEAD"],
+      ["git", "diff", "--unified=0", f"{base}..HEAD"],
+      ["git", "diff", "--unified=0", "FETCH_HEAD..HEAD"],
   ]
 
 
@@ -175,6 +168,12 @@ def get_changed_tests(base_ref=None):
     if os.environ.get("GITHUB_ACTIONS") == "true":
       subprocess.run(
           ["git", "fetch", "origin", f"{base}:refs/remotes/origin/{base}"],
+          stdout=subprocess.DEVNULL,
+          stderr=subprocess.DEVNULL,
+          check=False,
+      )
+      subprocess.run(
+          ["git", "fetch", "origin", base],
           stdout=subprocess.DEVNULL,
           stderr=subprocess.DEVNULL,
           check=False,
