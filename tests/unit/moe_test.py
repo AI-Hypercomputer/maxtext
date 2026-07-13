@@ -11,7 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Mixture of Experts (MoE) tests."""
+"""Mixture of Experts (MoE) tests.
+
+  python3 -m pytest -v --pyargs tests.unit.moe_test -rP -s -k "test_gmm_grad_equivalence"
+"""
 
 import unittest
 
@@ -33,6 +36,85 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
 import pytest
+from absl.testing import absltest, parameterized
+import os 
+from maxtext.utils import max_logging
+
+
+
+
+def find_nans(xs):
+  for x in jax.tree_util.tree_flatten(xs)[0]:
+    assert not jnp.any(jnp.isnan(x)), f"NaN found in {x=}"
+
+
+def compare_gradients(grad0, grad1, comparison_fn):
+  for a, b in zip(
+      jax.tree_util.tree_flatten(grad0)[0], jax.tree_util.tree_flatten(grad1)[0]
+  ):
+    comparison_fn(a, b)
+
+
+def assert_equal(a, b):
+  assert jnp.array_equal(
+      a, b
+  ), f"The following two arrays are not equal\n{a=}\n{b=}"
+
+
+def assert_close(a, b, rtol=1e-02, atol=1e-02):
+  assert jax.numpy.allclose(
+      a,
+      b,
+      rtol=rtol,
+      atol=atol,
+      equal_nan=False,
+  ), (
+      f"The following two arrays are not close\n{a=}\n{b=}\n"
+      f"total difference is {jnp.sum(jnp.abs(a - b))=}"
+  )
+
+
+def assert_norm_close(a, b, rtol=1e-02):
+  assert jnp.linalg.norm(a - b) / jnp.linalg.norm(a) < rtol, (
+      "The following two arrays are not close in norm\n"
+      f"{jnp.linalg.norm(a - b)=}\n{jnp.linalg.norm(a)=}"
+  )
+
+
+def calculate_diff(a, b, relative_norm_diff_threshold=1e-02):
+  # the first key is customized prefix define by user.
+  # the rest of the keys are extracted from the path tuple.
+  leaves_a, tree_def_a = jax.tree_util.tree_flatten_with_path(a)
+  leaves_b, tree_def_b = jax.tree_util.tree_flatten_with_path(b)
+
+  if tree_def_a != tree_def_b:
+    raise ValueError(
+        "Reference and actual pytrees must have the same structure."
+    )
+
+  log_lines = ["DEBUG: CALCULATE DIFF"]
+  for (path, a), (_, b) in zip(leaves_a, leaves_b):
+    # path = prefix + "-" + "-".join(param_key_parts_from_path(path))
+    path = "-".join([k.key for k in path if hasattr(k, "key")]) or "root"
+
+    assert a.dtype in (jnp.float32, jnp.bfloat16, jnp.float16)
+    a = a.astype(jnp.float32)
+    b = b.astype(jnp.float32)
+
+    max_abs_diff = jnp.max(jnp.abs(a - b))
+    relative_norm_diff = jnp.linalg.norm(a - b) / jnp.linalg.norm(a)
+
+    log_line = (
+        f"{path}"
+        f" | max_abs_diff: {max_abs_diff}"
+        f" | relative_norm_diff: | {relative_norm_diff}"
+    )
+    log_lines.append(log_line)
+    assert (
+        relative_norm_diff < relative_norm_diff_threshold
+    ), f"relative_norm_diff exceeds {relative_norm_diff_threshold=}"
+  return "\n".join(log_lines)
+
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -381,7 +463,7 @@ def get_moe_loop(
   return module
 
 
-class RoutedMoeTest(unittest.TestCase):
+class RoutedMoeTest(parameterized.TestCase):
   """Routed Mixture of Experts test."""
 
   def get_expected_output(self, rng, hidden_states, cfg, mesh):
@@ -1226,6 +1308,232 @@ class RoutedMoeTest(unittest.TestCase):
     )
     self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
 
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "megablox bf16",
+          "quantization": "",
+          "megablox": True,
+          "use_tokamax_gmm": False,
+          "use_gmm_v2_fwd": False,  # not matter
+          "use_gmm_v2_dlhs": False,  # not matter
+          "use_gmm_v2_drhs": False,  # not matter
+      },
+      {
+          "testcase_name": "megablox fp8",
+          "quantization": "fp8_full",
+          "megablox": True,
+          "use_tokamax_gmm": False,
+          "use_gmm_v2_fwd": False,  # not matter
+          "use_gmm_v2_dlhs": False,  # not matter
+          "use_gmm_v2_drhs": False,  # not matter
+      },
+      {
+          "testcase_name": "ragged_dot bf16",
+          "quantization": "",
+          "megablox": False,
+          "use_tokamax_gmm": False,
+          "use_gmm_v2_fwd": False,  # not matter
+          "use_gmm_v2_dlhs": False,  # not matter
+          "use_gmm_v2_drhs": False,  # not matter
+      },
+      # jax_ragged_dot_gmm
+      # quantization: tiling = (tiling[0], k, tiling[2])
+      # need more vmem
+      {
+          "testcase_name": "ragged_dot fp8",
+          "quantization": "fp8_full",
+          "megablox": False,
+          "use_tokamax_gmm": False,
+          "use_gmm_v2_fwd": False,  # not matter
+          "use_gmm_v2_dlhs": False,  # not matter
+          "use_gmm_v2_drhs": False,  # not matter
+      },
+      {
+          "testcase_name": "tokamax v1 bf16",
+          "quantization": "",
+          "megablox": True,  # not matter
+          "use_tokamax_gmm": True,
+          "use_gmm_v2_fwd": False,
+          "use_gmm_v2_dlhs": False,
+          "use_gmm_v2_drhs": False,
+      },
+      {
+          "testcase_name": "tokamax v1 fp8",
+          "quantization": "fp8_full",
+          "megablox": True,  # not matter
+          "use_tokamax_gmm": True,
+          "use_gmm_v2_fwd": False,
+          "use_gmm_v2_dlhs": False,
+          "use_gmm_v2_drhs": False,
+      },
+      {
+          "testcase_name": "tokamax v2+v1+v2 bf16",
+          "quantization": "",
+          "megablox": True,  # not matter
+          "use_tokamax_gmm": True,
+          "use_gmm_v2_fwd": True,
+          "use_gmm_v2_dlhs": False,
+          "use_gmm_v2_drhs": True,
+      },
+      {
+          "testcase_name": "tokamax v2+v1+v2 fp8",
+          "quantization": "fp8_full",
+          "megablox": True,  # not matter
+          "use_tokamax_gmm": True,
+          "use_gmm_v2_fwd": True,
+          "use_gmm_v2_dlhs": False,
+          "use_gmm_v2_drhs": True,
+      },
+      {
+          "testcase_name": "tokamax v2+v2+v2 bf16",
+          "quantization": "",
+          "megablox": True,  # not matter
+          "use_tokamax_gmm": True,
+          "use_gmm_v2_fwd": True,
+          "use_gmm_v2_dlhs": True,
+          "use_gmm_v2_drhs": True,
+      },
+      {
+          "testcase_name": "tokamax v2+v2+v2 fp8",
+          "quantization": "fp8_full",
+          "megablox": True,  # not matter
+          "use_tokamax_gmm": True,
+          "use_gmm_v2_fwd": True,
+          "use_gmm_v2_dlhs": True,
+          "use_gmm_v2_drhs": True,
+      },
+  )
+  def test_gmm_grad_equivalence(
+      self,
+      quantization: str,
+      megablox: bool,
+      use_tokamax_gmm: bool,
+      use_gmm_v2_fwd: bool,
+      use_gmm_v2_dlhs: bool,
+      use_gmm_v2_drhs: bool,
+  ):
+
+    def get_value_and_grad(
+        sparse_matmul,
+        quantization,
+        megablox,
+        use_tokamax_gmm,
+        use_gmm_v2_fwd,
+        use_gmm_v2_dlhs,
+        use_gmm_v2_drhs,
+    ):
+      cfg = pyconfig.initialize(
+          [
+              None,
+              get_test_config_path(),
+          ],
+          run_name="gmm_grad_equivalence_test",
+          enable_checkpointing=False,
+          # override_model_config=True,
+          # base_emb_dim=1024,
+          # base_mlp_dim=2048,
+          # base_moe_mlp_dim=2048,
+          model_name="mixtral-8x7b",
+          weight_dtype="float32",  # default is float32
+          dtype="bfloat16",
+          # workaround by change `init` batch size
+          per_device_batch_size=1,  # TODO(b/450900273): sharding error if pdbs=1
+          max_target_length=512,  # TODO(b/450900273): reduce length due to OOM
+          ici_expert_parallelism=1,  # TODO(shuningjin): EP gives NaN for all fp8 kernel
+          sparse_matmul=sparse_matmul,
+          megablox=megablox,  #  megablox or jax ragged dot
+          use_tokamax_gmm=use_tokamax_gmm,  # tokamax gmm
+          use_gmm_v2_fwd=use_gmm_v2_fwd,
+          use_gmm_v2_dlhs=use_gmm_v2_dlhs,
+          use_gmm_v2_drhs=use_gmm_v2_drhs,
+          # quantization
+          quantization=quantization,
+          use_qwix_quantization=quantization != "",
+          weight_quantization_calibration_method="fixed,-224,224",
+          act_quantization_calibration_method="fixed,-224,224",
+          # Add these overrides to reduce VMEM footprint for QWIX FP8:
+          wi_tile_fwd_batch_seq=128,
+          wi_tile_dlhs_batch_seq=128,
+          wi_tile_dlhs_embed_dim=256,
+          wi_tile_drhs_batch_seq=128,
+          wo_tile_fwd_batch_seq=128,
+          wo_tile_fwd_embed_dim=256,
+          wo_tile_dlhs_batch_seq=128,
+          wo_tile_dlhs_mlp_dim=256,
+          wo_tile_drhs_batch_seq=128,
+      )
+
+      rng = jax.random.PRNGKey(2345)
+      rng_model, rng_hidden_states = jax.random.split(rng)
+      device_count = jax.device_count()
+      hidden_states = jax.random.uniform(
+          rng_hidden_states,
+          (
+              int(cfg.per_device_batch_size) * device_count,
+              cfg.max_target_length,
+              cfg.base_emb_dim,
+          ),
+          dtype=cfg.dtype,
+      )
+
+      devices_array = maxtext_utils.create_device_mesh(cfg)
+      mesh = Mesh(devices_array, cfg.mesh_axes)
+      with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        variables, _ = self.get_expected_output(
+            rng_model, hidden_states, cfg, mesh
+        )
+        return self.get_moe_output_and_grad(variables, hidden_states, cfg, mesh)
+
+    # Run without tokamax GMM and with tokamax GMM
+    # output: output from fwd
+    # var_grad: weight gradient from bwd
+    # state_grad: activation gradient from bwd
+    output, var_grad, state_grad = get_value_and_grad(
+        sparse_matmul=False,  # dense matmul
+        quantization="",
+        megablox=False,
+        use_tokamax_gmm=False,
+        use_gmm_v2_fwd=False,
+        use_gmm_v2_dlhs=False,
+        use_gmm_v2_drhs=False,
+    )
+    custom_output, custom_var_grad, custom_state_grad = get_value_and_grad(
+        sparse_matmul=True,
+        quantization=quantization,
+        megablox=megablox,
+        use_tokamax_gmm=use_tokamax_gmm,
+        use_gmm_v2_fwd=use_gmm_v2_fwd,
+        use_gmm_v2_dlhs=use_gmm_v2_dlhs,
+        use_gmm_v2_drhs=use_gmm_v2_drhs,
+    )
+    # Construct the combined trees
+    tree_actual = {
+        "output": output,
+        "state_grad": state_grad,
+        "var_grad": var_grad,
+    }
+    tree_custom = {
+        "output": custom_output,
+        "state_grad": custom_state_grad,
+        "var_grad": custom_var_grad,
+    }
+    # Calculate diffs and log exactly once
+    relative_norm_diff_threshold = 0.2 if quantization else 1e-02
+    diff_text = calculate_diff(
+        tree_actual, tree_custom, relative_norm_diff_threshold
+    )
+    max_logging.log("\n" + diff_text)
+
+    # # forward pass outpt
+    # # assert_equal(output, custom_output)
+    # assert_close(output, custom_output, atol=1e-02, rtol=1e-02)
+    # # backward pass gradients
+    # cmp = lambda a, b: assert_norm_close(a, b, rtol=1e-03)
+    # compare_gradients(state_grad, custom_state_grad, cmp)
+    # compare_gradients(var_grad, custom_var_grad, cmp)
+
+
+################
 
 def make_moe(cfg, mesh):
   return moe.RoutedMoE(
