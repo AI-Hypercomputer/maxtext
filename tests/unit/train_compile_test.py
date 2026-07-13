@@ -1229,3 +1229,29 @@ class TrainCompile(parameterized.TestCase):
             "pure_nnx_decoder=true",
         )
     )
+
+  @pytest.mark.cpu_only
+  def test_dsv4(self):
+    """AOT test for qwen3-5"""
+    compiled_trainstep_file = "/tmp/test_dsv4"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek4-284b",
+            "per_device_batch_size=1",
+            "ici_tensor_parallelism=1",
+            "ici_fsdp_parallelism=-1",
+            "max_target_length=256",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=dot_product",
+            "use_tokamax_splash=True",
+            "enable_nnx=False",
+            "pure_nnx=False",
+            "pure_nnx_decoder=False"
+        )
+    )

@@ -854,6 +854,8 @@ class Decoder(nn.Module):
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
+    decoder_input_tokens = decoder_input_tokens.astype(jnp.int32)
+
     # [batch, length] -> [batch, length, emb_dim]
     y = self._apply_embedding(
         shared_embedding,
