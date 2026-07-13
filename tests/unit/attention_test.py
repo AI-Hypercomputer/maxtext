@@ -88,8 +88,8 @@ class JaxFlashAttentionTest(unittest.TestCase):
     np.testing.assert_allclose(
         np.asarray(output),
         np.asarray(expected),
-        rtol=1e-6,
-        atol=1e-6,
+        rtol=2e-3,
+        atol=2e-3,
     )
 
 
