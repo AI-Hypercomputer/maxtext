@@ -17,7 +17,7 @@ export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where
 export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-auto-nap2}" # Name of your Ironwood cluster
 export ZONE="${ZONE:-us-central1-c}" # Zone where your Ironwood cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
-export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:profile}" # Base Docker image
+export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:agentic}" # Base Docker image
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="${TPU_TYPE:-tpu7x-128}"
 export WORKLOAD_NAME="mohit-rl-qwen3-$RANDOM"
@@ -189,8 +189,8 @@ rm -f xpk_build.log
 
 
 echo "Detecting GKE TPU Nodepool..."
-GKE_NODEPOOL=$(/usr/bin/kubectl get nodes -l cloud.google.com/gke-tpu-accelerator=tpu7x -o jsonpath='{.items[0].metadata.labels.cloud\.google\.com/gke-nodepool}')
-echo "Detected GKE TPU Nodepool: ${GKE_NODEPOOL}"
+GKE_NODEPOOL=$(/usr/bin/kubectl get nodes -l cloud.google.com/gke-tpu-accelerator=tpu7x -o jsonpath='{.items[0].metadata.labels.cloud\.google\.com/gke-nodepool}' 2>/dev/null || true)
+echo "Detected GKE TPU Nodepool: ${GKE_NODEPOOL:-none (will auto-provision)}"
 
 echo "Applying Warden webhook bypass patch to generated_manifest.yaml..."
 python3 scripts/patch_manifest.py generated_manifest.yaml "" "" "${WORKLOAD_NAME}" ""
