@@ -1,7 +1,8 @@
 """Helper script to patch Kubernetes manifests for JobSet."""
 
-import yaml
+import subprocess
 import sys
+import yaml
 
 manifest_file = sys.argv[1]
 built_image = sys.argv[2] if (len(sys.argv) > 2 and sys.argv[2] != "") else None
@@ -59,8 +60,24 @@ for doc in data:
 
         accelerator = node_selector.get("cloud.google.com/gke-tpu-accelerator")
         if accelerator == "tpu7x":
-          node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20260317203000-769538580"
-          print("Injected cloud.google.com/reservation-name=cloudtpu-20260317203000-769538580 into nodeSelector.")
+          try:
+            res = subprocess.check_output(
+                [
+                    "/usr/bin/kubectl",
+                    "get",
+                    "nodes",
+                    "-l",
+                    "cloud.google.com/gke-tpu-accelerator=tpu7x",
+                    "-o",
+                    "jsonpath={.items[0].metadata.labels.cloud\\.google\\.com/reservation-name}",
+                ],
+                text=True,
+            ).strip()
+            res_name = res if res else "cloudtpu-20260710003900-159478293"
+          except (subprocess.SubprocessError, OSError, ValueError):
+            res_name = "cloudtpu-20260710003900-159478293"
+          node_selector["cloud.google.com/reservation-name"] = res_name
+          print(f"Injected cloud.google.com/reservation-name={res_name} into nodeSelector.")
         elif accelerator == "tpu-v5p-slice":
           node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20240716121201-595617744"
           print("Injected cloud.google.com/reservation-name=cloudtpu-20240716121201-595617744 into nodeSelector.")

@@ -3,9 +3,9 @@
 # This script launches the serving phased profiling repro workload using XPK.
 set -e
 
-export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}"
-export CLUSTER_NAME="${CLUSTER_NAME:-mlperf-v5p}"
-export ZONE="${ZONE:-europe-west4-a}"
+export PROJECT_ID="${PROJECT_ID:-cloud-tpu-shared-capacity}"
+export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-nap}"
+export ZONE="${ZONE:-us-central1}"
 export TPU_TYPE="${TPU_TYPE:-v5p-64}"
 export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:trkw-2026-06-25-22-36-41}"
 

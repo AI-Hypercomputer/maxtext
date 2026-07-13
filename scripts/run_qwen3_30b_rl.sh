@@ -13,9 +13,9 @@ if ! pip show xpk &> /dev/null; then
 fi
 
 # --- Environment Variables ---
-export PROJECT_ID="${PROJECT_ID:-}" # GCP project ID where the Ironwood cluster is deployed
-export CLUSTER_NAME="${CLUSTER_NAME:-}" # Name of your Ironwood cluster
-export ZONE="${ZONE:-}" # Zone where your Ironwood cluster is deployed
+export PROJECT_ID="${PROJECT_ID:-cloud-tpu-shared-capacity}" # GCP project ID where the Ironwood cluster is deployed
+export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-nap}" # Name of your Ironwood cluster
+export ZONE="${ZONE:-us-central1}" # Zone where your Ironwood cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-}" # GCS bucket path for outputs (e.g., gs://my-bucket/outputs)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-}" # GCS path of the MaxText checkpoint you want to fine-tune from (e.g., gs://my-bucket/checkpoints/maxtext-ckpt)

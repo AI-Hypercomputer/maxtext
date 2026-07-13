@@ -13,9 +13,9 @@ if ! /usr/local/google/home/mohitkhatwani/max_venv/bin/pip show xpk &> /dev/null
 fi
 
 # --- Environment Variables ---
-export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where the Ironwood cluster is deployed
-export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-auto-nap2}" # Name of your Ironwood cluster
-export ZONE="${ZONE:-us-central1-c}" # Zone where your Ironwood cluster is deployed
+export PROJECT_ID="${PROJECT_ID:-cloud-tpu-shared-capacity}" # GCP project ID where the Ironwood cluster is deployed
+export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-nap}" # Name of your Ironwood cluster
+export ZONE="${ZONE:-us-central1}" # Zone where your Ironwood cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
 export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:agentic}" # Base Docker image
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
@@ -195,8 +195,10 @@ echo "Detected GKE TPU Nodepool: ${GKE_NODEPOOL:-none (will auto-provision)}"
 echo "Applying Warden webhook bypass patch to generated_manifest.yaml..."
 python3 scripts/patch_manifest.py generated_manifest.yaml "" "" "${WORKLOAD_NAME}" ""
 
-echo "Patching queue to user-queue-4x4x4..."
-sed -i 's/multislice-queue/user-queue-4x4x4/g' generated_manifest.yaml
+echo "Auto-detecting Kueue LocalQueue..."
+LOCAL_QUEUE=$(/usr/bin/kubectl get localqueues.kueue.x-k8s.io -n default -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "multislice-queue")
+echo "Patching queue to ${LOCAL_QUEUE}..."
+sed -i "s/multislice-queue/${LOCAL_QUEUE}/g" generated_manifest.yaml
 
 echo "Deploying the patched workload manifest..."
 /usr/bin/kubectl apply -f generated_manifest.yaml

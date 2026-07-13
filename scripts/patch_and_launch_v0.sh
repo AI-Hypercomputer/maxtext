@@ -13,9 +13,9 @@ if ! /usr/local/google/home/mohitkhatwani/max_venv/bin/pip show xpk &> /dev/null
 fi
 
 # --- Environment Variables ---
-export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where the Ironwood cluster is deployed
-export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-super-xpk-x8p}" # Name of your Ironwood cluster
-export ZONE="${ZONE:-us-central1-ai1a}" # Zone where your Ironwood cluster is deployed
+export PROJECT_ID="${PROJECT_ID:-cloud-tpu-shared-capacity}" # GCP project ID where the Ironwood cluster is deployed
+export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-nap}" # Name of your Ironwood cluster
+export ZONE="${ZONE:-us-central1}" # Zone where your Ironwood cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs}" # GCS bucket path for outputs
 export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/tpu-prod-env-multipod/maxtext_post_training_nightly:2026-06-12}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
