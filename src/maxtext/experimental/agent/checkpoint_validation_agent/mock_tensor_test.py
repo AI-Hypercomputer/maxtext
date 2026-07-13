@@ -27,21 +27,24 @@ def run_mock_forward(checkpoint_path, model_name):
 
   print(f"Loading model from {checkpoint_path}...")
   #model = get_model(pyconfig.config, mesh=None)
+  # config is defined and passed to the model
   model = transformer_as_linen(config, mesh=None, quant=None)
 
   # run a single dummy pass
   mock_input = jnp.zeros((1, 128), dtype=jnp.int32)
+  # create a hollow array for the positional encodings
+  mock_positions = jnp.zeros((1, 128), dtype=jnp.int32)
   print("Executing forward pass...")
   try:
     rng = jax.random.PRNGKey(0)
 
-    # generate abstract shapes for the parameters (uses 0 memory)
+    # generate abstract shapes for the parameters which uses 0 memory
     print("Initializing abstract model parameters...")
-    abstract_variables = jax.eval_shape(model.init, rng, mock_input)
+    abstract_variables = jax.eval_shape(model.init, rng, mock_input, mock_positions)
 
     # dry-run the forward pass using the abstract parameters
     print("Tracing forward pass graph...")
-    out_shape = jax.eval_shape(model.apply, abstract_variables, mock_input, method=model.generate)
+    out_shape = jax.eval_shape(model.apply, abstract_variables, mock_input, mock_positions)  # method=model.generate)
 
     print(f"SUCCESS: Model architecture is stable. Output shape: {out_shape}")
   except Exception as e:  # pylint: disable=broad-exception-caught
