@@ -97,6 +97,7 @@ def apply_scanned_layers(
     length: int,
     param_scan_axis: int,
     apply_fn: Callable[[nnx.Module, Any], Any],
+    remat: bool = False,
     remat_policy: Callable[..., Any] | None = None,
     prevent_cse: bool = True,
     unroll: int = 1,
@@ -105,6 +106,8 @@ def apply_scanned_layers(
 
   This helper owns the generic NNX state and scan-axis mechanics. ``apply_fn``
   defines the model-specific module invocation and must return the next carry.
+  ``remat`` is separate from ``remat_policy`` because ``None`` is JAX's full
+  rematerialization policy, not an indication that rematerialization is off.
 
   Externally managed per-layer state, such as KV caches, is not supported by
   this scan path.
@@ -122,11 +125,7 @@ def apply_scanned_layers(
     next_carry = apply_fn(current_layer, current_carry)
     return next_carry, nnx.state(current_layer)
 
-  scan_fn = (
-      jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse)
-      if remat_policy is not None
-      else scan_body
-  )
+  scan_fn = jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse) if remat else scan_body
   final_carry, scanned_state = jax.lax.scan(scan_fn, carry, (params, state), unroll=unroll)
 
   if param_scan_axis != 0:

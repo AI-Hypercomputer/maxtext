@@ -523,6 +523,7 @@ class Gemma4ScannableBlock(nnx.Module):
         length=self.num_local,
         param_scan_axis=self.config.param_scan_axis,
         apply_fn=apply_layer,
+        remat=self.config.remat_policy != "none",
         remat_policy=remat_policy,
         prevent_cse=prevent_cse,
     )

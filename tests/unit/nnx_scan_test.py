@@ -14,6 +14,8 @@
 
 """Tests for NNX scan utilities."""
 
+from unittest import mock
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -59,3 +61,28 @@ def test_nonzero_param_scan_axis_round_trip():
 
   np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
   assert layers.kernel.value.shape == (2, length, 2)
+
+
+def test_full_remat_checkpoints_scan_body_with_none_policy():
+  """A None policy means full remat and must not disable jax.checkpoint."""
+  layers = nnx_scan.create_scanned_layers(
+      _LinearLayer,
+      length=2,
+      param_scan_axis=1,
+      metadata_axis_name="layers",
+      rngs=nnx.Rngs(0),
+  )
+
+  with mock.patch.object(nnx_scan.jax, "checkpoint", wraps=jax.checkpoint) as checkpoint:
+    nnx_scan.apply_scanned_layers(
+        layers,
+        jnp.array([1.0, -1.0]),
+        length=2,
+        param_scan_axis=1,
+        apply_fn=lambda layer, carry: layer(carry),
+        remat=True,
+        remat_policy=None,
+    )
+
+  checkpoint.assert_called_once()
+  assert checkpoint.call_args.kwargs["policy"] is None
