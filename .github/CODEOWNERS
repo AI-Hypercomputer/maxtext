@@ -1,38 +1,38 @@
-* @abhinavclemson @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng @jiangjy1982 @suexu1025 @NicoGrande @jesselu-google @dipannita08 @igorts-git @darisoy @xibinliu @huytransformer
+* @abhinavclemson @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng @jiangjy1982 @suexu1025 @jesselu-google @dipannita08 @igorts-git @darisoy @xibinliu @huytransformer
 
 # Model bring-up
-src/maxtext/assets @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @aireenmei
-src/maxtext/configs/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng @aireenmei
-src/maxtext/checkpoint_conversion @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @hengtaoguo @gagika @shralex @richjames0 @NicoGrande @aireenmei
-src/maxtext/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng @xibinliu @huytransformer @aireenmei
-src/maxtext/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng @xibinliu @huytransformer @aireenmei
+src/maxtext/assets @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @aireenmei @igorts-git
+src/maxtext/configs/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @jesselu-google @NuojCheng @aireenmei @igorts-git
+src/maxtext/checkpoint_conversion @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @hengtaoguo @gagika @shralex @richjames0 @aireenmei @igorts-git
+src/maxtext/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @jesselu-google @NuojCheng @xibinliu @huytransformer @aireenmei @igorts-git
+src/maxtext/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @jesselu-google @NuojCheng @xibinliu @huytransformer @aireenmei @igorts-git
 
 # Features
-src/maxtext/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex @NicoGrande @darisoy @shuwenf
-src/maxtext/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex @NicoGrande @darisoy @shuwenf
-src/maxtext/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google @darisoy @shuwenf
-src/maxtext/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex @darisoy @shuwenf
-src/maxtext/layers/pipeline.py @gobbleturk @richjames0 @shralex @NuojCheng @darisoy @shuwenf
-src/maxtext/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google @darisoy @shuwenf
-src/maxtext/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex @darisoy @shuwenf
-src/maxtext/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0 @shralex @darisoy @shuwenf
+src/maxtext/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex @darisoy @shuwenf @igorts-git
+src/maxtext/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex @darisoy @shuwenf @igorts-git
+src/maxtext/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google @darisoy @shuwenf @igorts-git
+src/maxtext/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex @darisoy @shuwenf @igorts-git
+src/maxtext/layers/pipeline.py @gobbleturk @richjames0 @shralex @NuojCheng @darisoy @shuwenf @igorts-git
+src/maxtext/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google @darisoy @shuwenf @igorts-git
+src/maxtext/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex @darisoy @shuwenf @igorts-git
+src/maxtext/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0 @shralex @darisoy @shuwenf @igorts-git
 
 # vLLM eval framework
-src/maxtext/eval/ @dipannita08 @NicoGrande @hengtaoguo
-tests/unit/eval/ @dipannita08 @NicoGrande @hengtaoguo
+src/maxtext/eval/ @dipannita08 @hengtaoguo @igorts-git
+tests/unit/eval/ @dipannita08 @hengtaoguo @igorts-git
 
 # Inference
-tests/inference/ @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
-src/maxtext/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
+tests/inference/ @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0 @igorts-git
+src/maxtext/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0 @igorts-git
 
 # Dockerfiles and dependencies
-src/dependencies/ @bvandermoon @SurbhiJainUSC @parambole @richjames0 @shralex @darisoy
+src/dependencies/ @bvandermoon @SurbhiJainUSC @parambole @richjames0 @shralex @darisoy @igorts-git
 
 # Docs
-docs/ @jacoguzo @bvandermoon @SurbhiJainUSC @richjames0 @shralex @gobbleturk @RissyRan @gagika @A9isha @jiangjy1982 @vipannalla @darisoy @aireenmei @shuwenf
+docs/ @jacoguzo @bvandermoon @SurbhiJainUSC @richjames0 @shralex @gobbleturk @RissyRan @gagika @A9isha @jiangjy1982 @vipannalla @darisoy @aireenmei @shuwenf @igorts-git
 
 # Workflow files
-.github/workflows/ @gobbleturk @khatwanimohit @shralex @parambole @bvandermoon @richjames0 @darisoy @xibinliu @huytransformer
+.github/workflows/ @gobbleturk @khatwanimohit @shralex @parambole @bvandermoon @richjames0 @darisoy @xibinliu @huytransformer @igorts-git
 
 # Benchmarking/Recipes
-benchmarks/ @SujeethJinesh @bvandermoon @richjames0 @shralex @vipannalla @mitalisi @RissyRan @shauryagup @NuojCheng @gobbleturk @khatwanimohit @Obliviour @notabee @suexu1025 @darisoy @aireenmei
+benchmarks/ @SujeethJinesh @bvandermoon @richjames0 @shralex @vipannalla @mitalisi @RissyRan @shauryagup @NuojCheng @gobbleturk @khatwanimohit @Obliviour @notabee @suexu1025 @darisoy @aireenmei @igorts-git
