@@ -39,6 +39,9 @@ from jax.sharding import NamedSharding
 
 import flax
 
+# Flax >= 0.12 eagerly shards every nnx.Variable that carries sharding metadata,
+# which conflicts with MaxText's own explicit sharding flow. Disable the feature
+# so MaxText stays in control of when resharding happens.
 try:
   flax.config.update("flax_always_shard_variable", False)
 except LookupError:
