@@ -43,6 +43,12 @@ SECTION_CONTENT_REGEX = re.compile(r'^\d+ (?:"[^"]*"|\{[^\}]*\})$')
 # Filters and normalizes an HLO line to ignore environment-specific details.
 STACK_FRAME_REGEX = re.compile(r"stack_frame_id=\d+")
 
+# The serialized Mosaic kernel of a Pallas custom call embeds the absolute path of the installed
+# jax package, so it differs between a venv install and a Docker image install even though the
+# compiled graph is the same. The kernel's shapes and block sizes are still checked, since they
+# appear as plain text elsewhere in the dump.
+CUSTOM_CALL_BODY_REGEX = re.compile(r'("custom_call_config":\{"body":")[^"]*(")')
+
 
 def filter_line(line):
   # Matches operation sections content like: 1234 {"sharding parameters", ...} or 1234 "operation metadata"
@@ -50,6 +56,8 @@ def filter_line(line):
     return None
   # Replace stack_frame_id=... with stack_frame_id=0
   line = STACK_FRAME_REGEX.sub("stack_frame_id=0", line)
+  # Replace the serialized Mosaic kernel with a placeholder
+  line = CUSTOM_CALL_BODY_REGEX.sub(r"\1<mosaic_body>\2", line)
   return line
 
 
