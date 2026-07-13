@@ -233,6 +233,10 @@ _MODEL_TO_CONVERSION_RULES = {
         WeightRenaming(r"decoder\.layers_(\d+)\.mlp\.wi_1\.kernel", r"model.layers.\1.mlp.up_proj.weight"),
         WeightRenaming(r"decoder\.layers\.(\d+)\.mlp\.wi_0\.kernel", r"model.layers.\1.mlp.gate_proj.weight"),
         WeightRenaming(r"decoder\.layers\.(\d+)\.mlp\.wi_1\.kernel", r"model.layers.\1.mlp.up_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.query_norm\.scale", r"model.layers.\1.self_attn.q_norm.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale", r"model.layers.\1.self_attn.k_norm.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.query_norm\.scale", r"model.layers.\1.self_attn.q_norm.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.key_norm\.scale", r"model.layers.\1.self_attn.k_norm.weight"),
     ],
 }
 
