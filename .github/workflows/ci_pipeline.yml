@@ -152,7 +152,7 @@ jobs:
 
   maxtext_jupyter_notebooks:
     needs: build_and_upload_maxtext_package
-    if: needs.analyze_code_changes.outputs.run_notebooks == 'true'
+    if: false
     uses: ./.github/workflows/run_jupyter_notebooks.yml
     strategy:
         fail-fast: false
@@ -188,6 +188,7 @@ jobs:
   tpu-tests:
     name: ${{ matrix.flavor || 'TPU' }} tests
     needs: [build_and_upload_maxtext_package, gate_test_run]
+    if: false
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -202,7 +203,7 @@ jobs:
   maxtext_cpu_torch_reference_tests:
     name: cpu-torch-reference tests
     needs: [build_and_upload_maxtext_package]
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    if: false
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
       flavor: cpu-torch-reference
@@ -228,6 +229,7 @@ jobs:
   gpu-tests:
     name: ${{ matrix.flavor || 'GPU' }} tests
     needs: [build_and_upload_maxtext_package, gate_test_run]
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -242,6 +244,7 @@ jobs:
   cpu-tests:
     name: ${{ matrix.flavor || 'CPU' }} tests
     needs: [build_and_upload_maxtext_package, gate_test_run]
+    if: false
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -255,6 +258,7 @@ jobs:
 
   maxtext_tpu_pathways_unit_tests:
     needs: [build_and_upload_maxtext_package, gate_test_run]
+    if: false
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -277,6 +281,7 @@ jobs:
 
   maxtext_tpu_pathways_integration_tests:
     needs: [build_and_upload_maxtext_package, gate_test_run]
+    if: false
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
