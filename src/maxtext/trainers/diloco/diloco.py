@@ -23,6 +23,7 @@ This module contains implementations of:
 """
 
 from collections.abc import Sequence
+import re
 from typing import Any, Callable
 
 import drjax
@@ -115,6 +116,100 @@ def reshape_first_axis_with_diloco(num_diloco_replicas: int, pytree: PyTree) -> 
     return jnp.reshape(arr, shape=diloco_shape)
 
   return jax.tree.map(reshape_for_diloco, pytree)
+
+
+class FragmentedTreeManipulator:
+  """Partitions and manipulates fragments of a JAX PyTree, supporting scanned layers."""
+
+  def __init__(
+      self, keypath_to_is_scanned: dict[str, bool], fragment_to_layer_indices: dict[int, jax.Array], num_fragments: int
+  ):
+    self.keypath_to_is_scanned = keypath_to_is_scanned
+    self.fragment_to_layer_indices = fragment_to_layer_indices
+    self.num_fragments = num_fragments
+
+  @classmethod
+  def create(cls, params_tree, config):
+    """Creates a FragmentedTreeManipulator from the parameters PyTree and configuration."""
+    kvs, _ = jax.tree_util.tree_flatten_with_path(params_tree)
+
+    num_layers = config.num_decoder_layers
+    num_transformer_fragments = config.num_diloco_fragments
+
+    assert num_layers % num_transformer_fragments == 0, (
+        f"num_decoder_layers ({num_layers}) must be divisible by "
+        f"num_diloco_fragments ({num_transformer_fragments}) for now."
+    )
+
+    num_synced = num_layers // num_transformer_fragments
+    use_sequential = config.use_sequential_layers
+    num_fragments = 1 + num_transformer_fragments
+
+    # Pre-compute layer indices for each fragment 1 ... num_transformer_fragments
+    fragment_to_layer_indices = {}
+    for i in range(1, num_fragments):
+      sync_id = i - 1
+      if use_sequential:
+        indices = list(range(sync_id * num_synced, (sync_id + 1) * num_synced))
+      else:
+        indices = list(range(sync_id, num_layers, num_transformer_fragments))
+      fragment_to_layer_indices[i] = jnp.array(indices)
+
+    # Regex to identify scanned layer parameters
+    scanned_regex = re.compile(r"/(?:layers|blocks|moe_layers|dense_layers|layers_outside_pipeline)(?:/|$)")
+    keypath_to_is_scanned = {}
+
+    for keypath, _ in kvs:
+      parts = []
+      for k in keypath:
+        parts.append(str(k.key) if hasattr(k, "key") else (str(k.idx) if hasattr(k, "idx") else str(k)))
+      serialized_path = "/" + "/".join(parts)
+      keypath_to_is_scanned[jax.tree_util.keystr(keypath)] = bool(scanned_regex.search(serialized_path))
+
+    return cls(keypath_to_is_scanned, fragment_to_layer_indices, num_fragments)
+
+  def get_flat_fragment(self, tree, fragment_idx: int, has_replica_dim: bool = False) -> dict[str, Any]:
+    """Extracts a flat dictionary containing parameters for the specified fragment index."""
+    kvs, _ = jax.tree_util.tree_flatten_with_path(tree)
+    flat_frag = {}
+    for k, v in kvs:
+      keystr = jax.tree_util.keystr(k)
+      is_scanned = self.keypath_to_is_scanned.get(keystr, False)
+      if fragment_idx == 0:
+        if not is_scanned:
+          flat_frag[keystr] = v
+      else:
+        if is_scanned:
+          indices = self.fragment_to_layer_indices[fragment_idx]
+          if has_replica_dim:
+            flat_frag[keystr] = v[:, indices]  # Slice second dimension (layer axis)
+          else:
+            flat_frag[keystr] = v[indices]  # Slice first dimension (layer axis)
+    return flat_frag
+
+  def apply_flat_fragment(self, tree, fragment_idx: int, flat_fragment: dict[str, Any], has_replica_dim: bool = False):
+    """Merges a flat fragment dictionary back into the full parameters PyTree structure."""
+    kvs, treedef = jax.tree_util.tree_flatten_with_path(tree)
+    new_kvs = []
+    for k, v in kvs:
+      keystr = jax.tree_util.keystr(k)
+      is_scanned = self.keypath_to_is_scanned.get(keystr, False)
+      if fragment_idx == 0:
+        if not is_scanned:
+          new_kvs.append(flat_fragment[keystr])
+        else:
+          new_kvs.append(v)
+      else:
+        if is_scanned:
+          indices = self.fragment_to_layer_indices[fragment_idx]
+          if has_replica_dim:
+            new_v = v.at[:, indices].set(flat_fragment[keystr])
+          else:
+            new_v = v.at[indices].set(flat_fragment[keystr])
+          new_kvs.append(new_v)
+        else:
+          new_kvs.append(v)
+    return jax.tree_util.tree_unflatten(treedef, new_kvs)
 
 
 def build_abstract_diloco_state(
@@ -349,14 +444,127 @@ def build_diloco_train_step(
         inner_state=inner_state,
         step=new_step,
     )
-    # Either synchronize the model, or no-op, depending on whether the current
-    # step falls on the synchronization period.
-    state = jax.lax.cond(
-        new_step % config.diloco_sync_period == 0,
-        synchronize,
-        lambda x: x,  # no-op
-        state,
-    )
+
+    if config.enable_streaming_diloco:
+      manipulator = FragmentedTreeManipulator.create(state.params, config)
+
+      num_transformer_fragments = config.num_diloco_fragments
+      num_fragments = 1 + num_transformer_fragments
+
+      steps_between_syncs_plus_1 = int(round(config.diloco_sync_period / num_fragments))
+      steps_between_syncs_plus_1 = max(1, steps_between_syncs_plus_1)
+      period = num_fragments * steps_between_syncs_plus_1
+
+      def synchronize_fragment(state, idx):
+        # 1. Extract global and local parameters for the fragment
+        outer_params_frag = manipulator.get_flat_fragment(state.params, idx, has_replica_dim=False)
+        inner_model_params = (
+            nnx.filter_state(state.inner_state.model, nnx.Param) if config.pure_nnx else state.inner_state.params
+        )
+        inner_params_frag = manipulator.get_flat_fragment(inner_model_params, idx, has_replica_dim=True)
+
+        # 2. Compute the pseudo-gradient: outer - inner
+        broadcast_outer_frag = drjax.broadcast(outer_params_frag, mesh=mesh)
+        unreduced_grads = jax.tree.map(lambda x, y: x - y, broadcast_outer_frag, inner_params_frag)
+
+        # 3. Average gradients across replicas
+        averaged_pseudo_grad = drjax.reduce_mean(unreduced_grads)
+
+        # 4. Extract outer optimizer state for this fragment (TraceState is (trace, EmptyState))
+        trace_frag = manipulator.get_flat_fragment(state.outer_opt_state[0].trace, idx, has_replica_dim=False)
+        opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
+
+        # 5. Run outer optimizer on the fragment
+        updates_frag, new_opt_state_frag = outer_optimizer.update(
+            averaged_pseudo_grad, opt_state_frag, params=outer_params_frag
+        )
+        new_outer_params_frag = optax.apply_updates(outer_params_frag, updates_frag)
+
+        # 6. Re-merge updated params and optimizer states back to full PyTree
+        new_params = manipulator.apply_flat_fragment(state.params, idx, new_outer_params_frag, has_replica_dim=False)
+        new_trace = manipulator.apply_flat_fragment(
+            state.outer_opt_state[0].trace, idx, new_opt_state_frag[0].trace, has_replica_dim=False
+        )
+        new_outer_opt_state = (optax.TraceState(trace=new_trace), state.outer_opt_state[1])
+
+        return state.replace(
+            params=new_params,
+            outer_opt_state=new_outer_opt_state,
+        )
+
+      def apply_fragment(state, idx):
+        # Get synced global params fragment
+        outer_params_frag = manipulator.get_flat_fragment(state.params, idx, has_replica_dim=False)
+
+        # Broadcast to replicas
+        broadcast_outer_frag = drjax.broadcast(outer_params_frag, mesh=mesh)
+
+        # Interpolation functions per replica
+        def replace_nnx_model_params_frag(s, outer_frag_replica):
+          full_params = nnx.filter_state(s.model, nnx.Param)
+          if config.communication_overlapping_alpha > 0.0:
+            inner_frag = manipulator.get_flat_fragment(full_params, idx, has_replica_dim=False)
+            alpha = config.communication_overlapping_alpha
+            merged_frag = jax.tree.map(lambda i, o: alpha * i + (1 - alpha) * o, inner_frag, outer_frag_replica)
+          else:
+            merged_frag = outer_frag_replica
+
+          new_full_params = manipulator.apply_flat_fragment(full_params, idx, merged_frag, has_replica_dim=False)
+          non_param_model = nnx.filter_state(s.model, nnx.Not(nnx.Param))
+          new_model = nnx.merge_state(non_param_model, new_full_params)
+
+          result = type(s)({})
+          result["model"] = new_model
+          result["optimizer"] = s["optimizer"]
+          return result
+
+        def replace_linen_model_params_frag(s, outer_frag_replica):
+          if config.communication_overlapping_alpha > 0.0:
+            inner_frag = manipulator.get_flat_fragment(s.params, idx, has_replica_dim=False)
+            alpha = config.communication_overlapping_alpha
+            merged_frag = jax.tree.map(lambda i, o: alpha * i + (1 - alpha) * o, inner_frag, outer_frag_replica)
+          else:
+            merged_frag = outer_frag_replica
+          new_params = manipulator.apply_flat_fragment(s.params, idx, merged_frag, has_replica_dim=False)
+          return s.replace(params=new_params)
+
+        # Apply to replica inner states
+        replace_fn = replace_nnx_model_params_frag if config.pure_nnx else replace_linen_model_params_frag
+        new_inner_state = drjax.map_fn(replace_fn, (state.inner_state, broadcast_outer_frag), mesh=mesh)
+        return state.replace(inner_state=new_inner_state)
+
+      # Step 1: Run the synchronization logic if we hit a sync step
+      is_sync_step = jax.lax.bitwise_and(new_step > 0, new_step % steps_between_syncs_plus_1 == 0)
+
+      def do_sync(s):
+        frag_idx = (new_step % period) // steps_between_syncs_plus_1
+        return jax.lax.switch(
+            frag_idx, [lambda state_arg, idx=i: synchronize_fragment(state_arg, idx) for i in range(num_fragments)], s
+        )
+
+      state = jax.lax.cond(is_sync_step, do_sync, lambda s: s, state)
+
+      # Step 2: Apply the synced parameters (with delay V)
+      V = config.num_communication_overlapping_steps
+      is_apply_step = jax.lax.bitwise_and(new_step - V > 0, (new_step - V) % steps_between_syncs_plus_1 == 0)
+
+      def do_apply(s):
+        frag_idx = ((new_step - V) % period) // steps_between_syncs_plus_1
+        return jax.lax.switch(
+            frag_idx, [lambda state_arg, idx=i: apply_fragment(state_arg, idx) for i in range(num_fragments)], s
+        )
+
+      state = jax.lax.cond(is_apply_step, do_apply, lambda s: s, state)
+
+    else:
+      # Either synchronize the model, or no-op, depending on whether the current
+      # step falls on the synchronization period.
+      state = jax.lax.cond(
+          new_step % config.diloco_sync_period == 0,
+          synchronize,
+          lambda x: x,  # no-op
+          state,
+      )
     return state, avg_metrics
 
   return diloco_train_step
