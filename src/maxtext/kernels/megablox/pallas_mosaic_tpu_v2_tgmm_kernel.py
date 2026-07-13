@@ -26,7 +26,9 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
+# modified import
+from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
+
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)

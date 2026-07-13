@@ -53,6 +53,7 @@ load_full_state_path: ""
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: true
+save_checkpoint_on_start: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
 checkpoint_period: 10_000

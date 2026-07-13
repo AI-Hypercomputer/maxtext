@@ -351,6 +351,9 @@ class Checkpointing(BaseModel):
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
   )
+  save_checkpoint_on_start: bool = Field(
+      True, description="If True, saves an initial checkpoint upon training start."
+  )
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
   )
@@ -612,17 +615,6 @@ class Attention(BaseModel):
   use_post_attn_norm: bool = Field(False, description="Apply LayerNorm after the attention block.")
   use_post_ffw_norm: bool = Field(False, description="Apply LayerNorm after the feed-forward block.")
   use_ragged_attention: bool = Field(False, description="Whether to use ragged attention kernels.")
-  # use_tokamax_gmm: bool = Field(
-  #     False,
-  #     description="Whether to use the Tokamax library for GMM kernel implementation.",
-  # )
-  # use_gmm_v2: bool = Field(
-  #     False,
-  #     description=(
-  #         "Whether to use GMM v2 (with bf16 activations and weights) for MoE."
-  #         " Requires use_tokamax_gmm: true. Currently incompatible with quantization."
-  #     ),
-  # )
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
@@ -2850,7 +2842,7 @@ class MaxTextConfig(
             "Please migrate to Qwix by setting use_qwix_quantization=True."
         )
 
-    # Check quant config is not empty for Qwix quantization
+    # Check quant config is non-empty for Qwix quantization
     if self.use_qwix_quantization and not self.quantization:
       raise ValueError(
           "Qwix quantization is enabled but quantization is not set."
