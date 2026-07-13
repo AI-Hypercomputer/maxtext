@@ -167,7 +167,7 @@ def compare_top_tokens(converted_tokens, golden_tokens):
   max_logging.log(table_str)
 
 
-def check_kl_divergence(model_logits, golden_logits, atol=0.02):
+def check_kl_divergence(model_logits, golden_logits, atol=0.02, clip_logits_epsilon=None):
   """
   Calculates KL divergence D_KL(P_golden || Q_model) over a batch of sequences.
 
@@ -189,7 +189,16 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
 
   # 3. Get the probability distributions.
   golden_probabilities = F.softmax(golden_logits_reshaped, dim=-1)
-  model_log_probabilities = F.log_softmax(model_logits_reshaped, dim=-1)
+
+  # Apply clipping and re-normalization to predicted probabilities ONLY
+  if clip_logits_epsilon is not None:
+    model_probabilities = F.softmax(model_logits_reshaped, dim=-1)
+    model_probabilities = torch.clamp(model_probabilities, min=clip_logits_epsilon)
+    model_probabilities = model_probabilities / model_probabilities.sum(dim=-1, keepdim=True)
+    # Compute manual log-probabilities of the model. Safe because of clamping.
+    model_log_probabilities = torch.log(model_probabilities)
+  else:
+    model_log_probabilities = F.log_softmax(model_logits_reshaped, dim=-1)
 
   # 4. Calculate avg KL divergence for all token distributions.
   # use 'batchmean'; the sum of the KL divergences for each token in the batch
@@ -464,6 +473,9 @@ def main(config, test_args):  # pylint: disable=W0621
       if test_args.clip_logits_epsilon is not None:
         model_probabilities = jnp.clip(jax.nn.softmax(train_logits_slice, axis=-1), min=test_args.clip_logits_epsilon)
         golden_probabilities = jnp.clip(jax.nn.softmax(golden_logits_slice, axis=-1), min=test_args.clip_logits_epsilon)
+        # Re-normalize so probabilities sum to 1.
+        golden_probabilities = golden_probabilities / jnp.sum(golden_probabilities, axis=-1, keepdims=True)
+        model_probabilities = model_probabilities / jnp.sum(model_probabilities, axis=-1, keepdims=True)
       else:
         model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
         golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
@@ -661,6 +673,7 @@ def main(config, test_args):  # pylint: disable=W0621
           mt_logits_torch[0, start_index:].unsqueeze(0),
           hf_logits_torch[0, start_index:].unsqueeze(0),
           atol=test_args.max_kl_div,
+          clip_logits_epsilon=test_args.clip_logits_epsilon,
       )
       if jax.process_index() == 0 and test_args.output_logits_path:
         data_to_save = {
@@ -728,9 +741,6 @@ if __name__ == "__main__":
   assert (
       test_args.atol is not None or test_args.max_kl_div is not None
   ), "At least one of --atol or --max_kl_div must be specified to define the test criteria."
-
-  if test_args.run_hf_model and test_args.clip_logits_epsilon is not None:
-    raise ValueError("--clip_logits_epsilon is not supported when running HF model on-the-fly (run_hf_model=True).")
 
   if cfg.use_multimodal:
     assert not test_args.run_hf_model, (
