@@ -146,7 +146,7 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
 
     if isinstance(item, list):
       restored_items = []
-      for data_iter, process_idx in zip(item, process_index):
+      for data_iter, process_idx in zip(item, process_index):  # pyrefly: ignore[bad-argument-type]
         restored_items.append(restore_single_process(data_iter, process_idx, process_count))
       return restored_items
     else:
@@ -423,7 +423,7 @@ def create_orbax_checkpoint_manager(
 
   if dataset_type is not None and dataset_type == "grain":
     item_names += ("iter",)
-    item_handlers["iter"] = GrainCheckpointHandler()
+    item_handlers["iter"] = GrainCheckpointHandler()  # pyrefly: ignore[bad-assignment]
 
   # local storage checkpoint needs parent directory created
   p = gcs_utils.mkdir_and_check_permissions(checkpoint_dir)
@@ -762,7 +762,7 @@ def load_state_if_possible(
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
 
-    step = checkpoint_manager.latest_step() if step < 0 else step
+    step = checkpoint_manager.latest_step() if step < 0 else step  # pyrefly: ignore[bad-assignment]
     if step is not None:
       max_logging.log(f"restoring from this run's directory step {step}")
 
@@ -1150,10 +1150,10 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   if config and config.dataset_type == "grain" and not isinstance(data_iterator, PlaceHolderDataIterator):
     if isinstance(data_iterator, RemoteIteratorWrapper):
       # Pass the wrapper directly; GrainCheckpointHandler will call save_state with the step
-      save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator)
-    elif not isinstance(data_iterator, list) and isinstance(data_iterator.local_iterator, ElasticIterator):
+      save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator)  # pyrefly: ignore[bad-assignment]
+    elif not isinstance(data_iterator, list) and isinstance(data_iterator.local_iterator, ElasticIterator):  # pyrefly: ignore[missing-attribute]
       # ElasticIterator checkpoints a single global scalar shared by all shards.
-      save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator.local_iterator)
+      save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator.local_iterator)  # pyrefly: ignore[bad-assignment]
     else:
       if not isinstance(data_iterator, list):
         data_iterator = [data_iterator]
@@ -1163,8 +1163,8 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         process_count_total = process_count_total // config.expansion_factor_real_data
       for i, data_iter in enumerate(data_iterator):
         process_index = jax.process_index() + i * jax.process_count()
-        grain_iters_to_save.append((data_iter.local_iterator, process_index, process_count_total))
-      save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)
+        grain_iters_to_save.append((data_iter.local_iterator, process_index, process_count_total))  # pyrefly: ignore[missing-attribute]
+      save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)  # pyrefly: ignore[bad-assignment]
 
   custom_metadata = {}
   if config:
