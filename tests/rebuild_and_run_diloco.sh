@@ -11,8 +11,9 @@ JOB_NAME="diloco-test-2slice"
 echo "======================================================================"
 echo "Step 1: Rebuilding and pushing custom Docker image..."
 echo "======================================================================"
-# gcloud builds submit is recommended as it runs fast in Cloud Build without local push bandwidth limits
-gcloud builds submit --tag "$IMAGE_TAG" . --project="$PROJECT"
+gcloud auth configure-docker us-east5-docker.pkg.dev --quiet
+docker build -f Dockerfile.diloco -t "$IMAGE_TAG" .
+docker push "$IMAGE_TAG"
 
 echo "======================================================================"
 echo "Step 2: Authenticating to cluster $CLUSTER and submitting job..."

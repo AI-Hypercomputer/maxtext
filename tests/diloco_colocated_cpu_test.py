@@ -21,7 +21,7 @@ except ImportError:
   pathwaysutils = None
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from jax.experimental import compute_on
+from jax.experimental import colocated_python
 import numpy as np
 
 
@@ -80,20 +80,18 @@ def learner_thread_task(
 
 
 def syncer_thread_task(
-    full_mesh: Mesh,
+    full_tpu_mesh: Mesh,
     to_syncer_queues: List[queue.Queue],
     from_syncer_queues: List[queue.Queue],
     expected_syncs: int = 2,
 ):
-  """Simulates the synchronizer running on colocated host CPUs via XLA:CPU (@compute_on)."""
-  print(
-      f"[{time.strftime('%X')}] 🧠 Syncer starting on full mesh {full_mesh.devices.shape} using 'pinned_host' memory..."
-  )
+  """Simulates the synchronizer running on colocated host CPUs via XLA:CPU on CPU mesh."""
+  cpu_mesh = colocated_python.colocated_cpu_devices(full_tpu_mesh)
+  print(f"[{time.strftime('%X')}] 🧠 Syncer starting on CPU mesh {cpu_mesh.devices.shape} (derived via colocated_cpu)...")
 
-  @compute_on.compute_on("device_host")
   @jax.jit
   def cpu_allreduce_merge(stacked_array: jax.Array) -> jax.Array:
-    """Executes on host CPU RAM using XLA:CPU."""
+    """Executes on host CPU mesh using XLA:CPU."""
     # All-reduce / average across the 'replica' axis on CPU
     mean_weights = jnp.mean(stacked_array, axis=0, keepdims=True)
     return jnp.repeat(mean_weights, stacked_array.shape[0], axis=0)
@@ -106,13 +104,11 @@ def syncer_thread_task(
     received_fragments.sort(key=lambda x: x[0])  # sort by learner_id
 
     learner_arrays = [frag[2] for frag in received_fragments]
-    print(f"[{time.strftime('%X')}] 📦 Syncer cycle {sync_idx}: received all fragments. Transferring to host RAM...")
+    print(f"[{time.strftime('%X')}] 📦 Syncer cycle {sync_idx}: received all fragments. Transferring to CPU mesh RAM...")
     learner_cpu_arrays = [
-        jax.device_put(np.asarray(arr), NamedSharding(full_mesh, P(None, "model")).with_memory_kind("pinned_host"))
-        for arr in learner_arrays
+        jax.device_put(np.asarray(arr), NamedSharding(cpu_mesh, P(None, "model"))) for arr in learner_arrays
     ]
     stacked_cpu_array = jnp.stack(learner_cpu_arrays, axis=0)
-    print(f"[{time.strftime('%X')}]    Stacked array memory kind: {stacked_cpu_array.sharding.memory_kind}")
 
     # 3. Execute XLA:CPU megascale merge math on host
     print(f"[{time.strftime('%X')}] 🧮 Syncer cycle {sync_idx}: executing XLA:CPU allreduce merge on host...")
