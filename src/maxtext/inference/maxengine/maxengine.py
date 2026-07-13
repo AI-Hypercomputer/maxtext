@@ -219,7 +219,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     nnx.replace_by_pure_dict(cache_state, cache_dict)
     # copy=True avoids reusing Variable objects across traces (TraceContextError),
     # mirroring the workaround in train.py's diff_wrapper.
-    model = nnx.merge(self.graphdef, params, cache_state, self._nnx_rest_state, copy=True)  # pyrefly: ignore[no-matching-overload]
+    model = nnx.merge(
+        self.graphdef, params, cache_state, self._nnx_rest_state, copy=True
+    )  # pyrefly: ignore[no-matching-overload]
     logits = model(
         decoder_input_tokens,
         decoder_positions,
@@ -280,7 +282,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if x.format == l:
         return x
       # Somehow this can be None sometimes.
-      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l  # pyrefly: ignore[missing-attribute]
+      dll = (
+          (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l
+      )  # pyrefly: ignore[missing-attribute]
       f = jax.jit(self._identity, out_shardings=Format(dll, s)).lower(x).compile(compiler_options=xla_flags)
       y = f(x)
       # Achieves donation of the input argument, but allows for different memory
@@ -409,7 +413,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       with nn_partitioning.axis_rules(self.config.logical_axis_rules):
         full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
       concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
-          self.model, self._create_model_fn, mesh=self._mesh, named_sharding=full_sharding  # pyrefly: ignore[bad-argument-type]
+          self.model,
+          self._create_model_fn,
+          mesh=self._mesh,
+          named_sharding=full_sharding,  # pyrefly: ignore[bad-argument-type]
       )
       graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       self.graphdef = graphdef

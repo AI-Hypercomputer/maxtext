@@ -624,7 +624,9 @@ def _apply_mask_and_soft_cap(
 
       repeats, rem = divmod(k_slice.size, NUM_LANES)
       assert rem == 0
-      q_sequence = jnp.tile(q_sequence_ref[...], (1, repeats))  # [bq, k_slice.size]  # pyrefly: ignore[unsupported-operation]
+      q_sequence = jnp.tile(
+          q_sequence_ref[...], (1, repeats)
+      )  # [bq, k_slice.size]  # pyrefly: ignore[unsupported-operation]
     else:
       assert q_sequence_ref.shape == (NUM_SUBLANES, bq)  # pyrefly: ignore[missing-attribute]
 
@@ -1694,7 +1696,9 @@ def _flash_attention_dkv_kernel(
   if is_mqa:
     should_write = jnp.logical_and(should_write, q_head_index == num_q_heads - 1)
   elif num_kv_heads < num_q_heads:
-    should_write = jnp.logical_and(should_write, q_head_index_per_kv_head == q_heads_per_kv_heads - 1)  # pyrefly: ignore[unsupported-operation]
+    should_write = jnp.logical_and(
+        should_write, q_head_index_per_kv_head == q_heads_per_kv_heads - 1
+    )  # pyrefly: ignore[unsupported-operation]
 
   @pl.when(should_write)
   def end():
@@ -2425,8 +2429,12 @@ class SplashAttentionKernel:
         data_next=spec if self.fwd_mask_info.data_next is not None else None,  # pyrefly: ignore[bad-argument-type]
         mask_next=spec if self.fwd_mask_info.mask_next is not None else None,  # pyrefly: ignore[bad-argument-type]
         block_mask=spec if self.fwd_mask_info.block_mask is not None else None,  # pyrefly: ignore[bad-argument-type]
-        partial_mask_blocks=partial_mask_blocks_spec if self.fwd_mask_info.partial_mask_blocks is not None else None,  # pyrefly: ignore[bad-argument-type]
-        q_sequence=q_sequence_spec if self.fwd_mask_info.q_sequence is not None else None,  # pyrefly: ignore[bad-argument-type]
+        partial_mask_blocks=partial_mask_blocks_spec
+        if self.fwd_mask_info.partial_mask_blocks is not None
+        else None,  # pyrefly: ignore[bad-argument-type]
+        q_sequence=q_sequence_spec
+        if self.fwd_mask_info.q_sequence is not None
+        else None,  # pyrefly: ignore[bad-argument-type]
     )
     return SplashAttentionKernel(
         mask_info_specs,

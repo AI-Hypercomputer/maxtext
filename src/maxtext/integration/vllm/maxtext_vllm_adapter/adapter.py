@@ -345,9 +345,7 @@ class MaxTextForCausalLM(nnx.Module):
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
       if self.maxtext_config.lora.enable_lora:
-        model = lora_utils.apply_lora_to_model(
-            model, self.mesh, self.maxtext_config
-        )
+        model = lora_utils.apply_lora_to_model(model, self.mesh, self.maxtext_config)
         if self.maxtext_config.lora.lora_restore_path:
           lora_utils.restore_lora_from_path(model, self.maxtext_config)
       self.model = nnx.data(model)

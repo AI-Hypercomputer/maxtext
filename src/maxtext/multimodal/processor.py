@@ -149,11 +149,15 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
   if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_gemma3(tokens, max_num_images=processor_output.num_images)  # pyrefly: ignore[missing-attribute]
+    return add_extra_tokens_for_images_gemma3(
+        tokens, max_num_images=processor_output.num_images
+    )  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import add_extra_tokens_for_images_gemma4  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_gemma4(tokens, max_num_images=processor_output.num_images)  # pyrefly: ignore[missing-attribute]
+    return add_extra_tokens_for_images_gemma4(
+        tokens, max_num_images=processor_output.num_images
+    )  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     from maxtext.multimodal.processor_llama4 import add_extra_tokens_for_images_llama4  # pylint: disable=import-outside-toplevel
 
