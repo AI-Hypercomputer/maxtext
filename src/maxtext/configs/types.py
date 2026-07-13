@@ -612,17 +612,17 @@ class Attention(BaseModel):
   use_post_attn_norm: bool = Field(False, description="Apply LayerNorm after the attention block.")
   use_post_ffw_norm: bool = Field(False, description="Apply LayerNorm after the feed-forward block.")
   use_ragged_attention: bool = Field(False, description="Whether to use ragged attention kernels.")
-  use_tokamax_gmm: bool = Field(
-      False,
-      description="Whether to use the Tokamax library for GMM kernel implementation.",
-  )
-  use_gmm_v2: bool = Field(
-      False,
-      description=(
-          "Whether to use GMM v2 (with bf16 activations and weights) for MoE."
-          " Requires use_tokamax_gmm: true. Currently incompatible with quantization."
-      ),
-  )
+  # use_tokamax_gmm: bool = Field(
+  #     False,
+  #     description="Whether to use the Tokamax library for GMM kernel implementation.",
+  # )
+  # use_gmm_v2: bool = Field(
+  #     False,
+  #     description=(
+  #         "Whether to use GMM v2 (with bf16 activations and weights) for MoE."
+  #         " Requires use_tokamax_gmm: true. Currently incompatible with quantization."
+  #     ),
+  # )
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
@@ -902,6 +902,23 @@ class MoEKernels(BaseModel):
 
   merge_gating_gmm: bool = Field(False, description="whether to merge the two gating gmm kernels into one.")
 
+  # tokamax gmm
+  use_tokamax_gmm: bool = Field(
+      False,
+      description="Whether to use the Tokamax library for GMM kernel implementation.",
+  )
+  use_gmm_v2_fwd: bool = Field(
+      False,
+      description="Whether to use GMM v2 for MoE forward pass. (Requires use_tokamax_gmm: true)",
+  )
+  use_gmm_v2_dlhs: bool = Field(
+      False,
+      description="Whether to use GMM v2 for MoE backward pass (dlhs). (Requires use_tokamax_gmm: true)",
+  )
+  use_gmm_v2_drhs: bool = Field(
+      False,
+      description="Whether to use GMM v2 for MoE backward pass (drhs). (Requires use_tokamax_gmm: true)",
+  )
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -2833,6 +2850,12 @@ class MaxTextConfig(
             "Please migrate to Qwix by setting use_qwix_quantization=True."
         )
 
+    # Check quant config is not empty for Qwix quantization
+    if self.use_qwix_quantization and not self.quantization:
+      raise ValueError(
+          "Qwix quantization is enabled but quantization is not set."
+      )
+
     # Default quantization sharding count to number of local devices if not set.
     if self.quantization_local_shard_count == -1:
       try:
@@ -3403,9 +3426,7 @@ class MaxTextConfig(
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
-    if self.use_gmm_v2 and (self.quantization or self.use_qwix_quantization):
-      raise ValueError("Quantization with GMM v2 is not supported yet.")
-    if self.use_gmm_v2 and not self.use_tokamax_gmm:
+    if (self.use_gmm_v2_fwd or self.use_gmm_v2_dlhs or self.use_gmm_v2_drhs) and not self.use_tokamax_gmm:
       raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
 
     for val in self.compress_ratios:

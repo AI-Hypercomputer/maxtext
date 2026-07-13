@@ -13,8 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Forked from:
-# https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/
-# tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py
+# https://github.com/openxla/tokamax/blob/b609f6314747d7079d8f3b3daf68ec04c0dada94/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py
 """TGMM kernel"""
 
 import dataclasses
@@ -27,8 +26,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
-
+from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
@@ -54,7 +52,6 @@ TileTgmmFn = Callable[
         jnp.dtype,
         jnp.dtype,
         int,
-        bool,
     ],
     gmm_v2.TileSizes,
 ]
@@ -74,7 +71,9 @@ def get_cost_estimate(cfgs: gmm_v2.GmmConfigs) -> pl.CostEstimate:
   flops = 2 * dims.size_m * dims.size_k * dims.size_n
   lhs_bytes = dims.size_m * dims.size_k * cfgs.lhs_cfgs.dtype.itemsize
   rhs_bytes = dims.size_m * dims.size_n * cfgs.rhs_cfgs.dtype.itemsize
-  out_bytes = dims.size_group * dims.size_k * dims.size_n * cfgs.out_dtype.itemsize
+  out_bytes = (
+      dims.size_group * dims.size_k * dims.size_n * cfgs.out_dtype.itemsize
+  )
   return pl.CostEstimate(
       flops=flops,
       bytes_accessed=lhs_bytes + rhs_bytes + out_bytes,
@@ -90,7 +89,6 @@ def calculate_tgmm_tiling(
     out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype,
     target_zero_ref_bytes: int,
-    has_partial_sum: bool = False,
 ) -> gmm_v2.TileSizes:
   """Calculate optimal tile sizes for TGMM kernel."""
   # In tgmm, we calculate lhs.T @ dout which doesn't require quantization.
@@ -123,10 +121,8 @@ def calculate_tgmm_tiling(
     # XLU's transpose. in order to reduce redundant XLU computation, instead
     # of performing XLU's transpose every time lhs is pushed into XLU, it
     # caches the transposed value into VMEM. this increases VMEM requirement.
-    ps_bytes = tile_k * tile_n * num_buffers * out_bytes if has_partial_sum else 0
     budget = (
         tile_k * tile_n * (acc_bytes + num_buffers * out_bytes)
-        + ps_bytes
         + (num_buffers + 1) * (tile_m * tile_k * lhs_bytes)
         + num_buffers * (tile_m * tile_n * rhs_bytes)
         # Reserve VMEM for zero_ref. Use the upper bound target_zero_ref_bytes
@@ -142,7 +138,9 @@ def calculate_tgmm_tiling(
     # The reason why we do "tile_n * num_n_tiles must cover size_n." is
     # tile_n must be a multiple of num_lanes and
     # tile_n * num_n_tiles must cover size_n.
-    tile_n = gmm_v2.align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
+    tile_n = (
+        gmm_v2.align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
+    )
     # If size_n is small and awkwardly sized (e.g., size_n=100, num_lanes=128),
     # align_to(100, N*128) // N can get stuck at a constant value (128) as N
     # grows. If that constant value is above the floor and budget still
@@ -157,19 +155,25 @@ def calculate_tgmm_tiling(
 
   if tile_n < tile_n_lower_bound:
     num_n_tiles -= 1
-    tile_n = gmm_v2.align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
+    tile_n = (
+        gmm_v2.align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
+    )
 
   prev_tile_k = tile_k
   while not within_vmem_limit(tile_m, tile_k, tile_n):
     num_k_tiles += 1
-    tile_k = gmm_v2.align_to(dims.size_k, num_k_tiles * num_lanes) // num_k_tiles
+    tile_k = (
+        gmm_v2.align_to(dims.size_k, num_k_tiles * num_lanes) // num_k_tiles
+    )
     if tile_k < num_lanes or tile_k >= prev_tile_k:
       break
     prev_tile_k = tile_k
 
   if tile_k < num_lanes:
     num_k_tiles -= 1
-    tile_k = gmm_v2.align_to(dims.size_k, num_k_tiles * num_lanes) // num_k_tiles
+    tile_k = (
+        gmm_v2.align_to(dims.size_k, num_k_tiles * num_lanes) // num_k_tiles
+    )
 
   if not within_vmem_limit(tile_m, tile_k, tile_n):
     raise ValueError(
@@ -183,7 +187,6 @@ def make_tgmm_configs(
     lhs: jax.Array,  # [m, k]
     rhs: jax.Array,  # [m, n]
     rhs_scale: jax.Array,  # [1, 1, n] (per-N scale)
-    partial_sum: jax.Array | None,
     group_sizes: jax.Array,
     num_actual_groups: int,
     *,
@@ -196,7 +199,8 @@ def make_tgmm_configs(
   """Fills the GMM config for the TGMM kernel."""
   assert out_dtype, "out_dtype cannot be None"
   assert lhs.shape[0] == rhs.shape[0], (
-      f"lhs and rhs m-dim mismatch: {lhs.shape[0]}!={rhs.shape[0]} {lhs.shape}" f" vs {rhs.shape}"
+      f"lhs and rhs m-dim mismatch: {lhs.shape[0]}!={rhs.shape[0]} {lhs.shape}"
+      f" vs {rhs.shape}"
   )
   size_m, size_k = lhs.shape
   _, size_n = rhs.shape
@@ -213,7 +217,8 @@ def make_tgmm_configs(
           " Sub-channel quantization is not implemented."
       )
     assert rhs_scale.shape == (1, 1, size_n), (
-        f"expecting rhs_scale.shape to be (1, 1, size_n) but got" f" {rhs_scale.shape}"
+        f"expecting rhs_scale.shape to be (1, 1, size_n) but got"
+        f" {rhs_scale.shape}"
     )
   # size_lhs_sublane is used in tgmm_inner_kernel to set the
   # (m/size_lhs_sublane, size_lhs_sublane, ...) reshape tile used on the m-axis
@@ -223,7 +228,8 @@ def make_tgmm_configs(
   size_rhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(rhs.dtype)
   size_rhs_sublane = min(size_rhs_sublane, size_m)
   assert size_lhs_sublane == size_rhs_sublane, (
-      f"size_lhs_sublane should be the same as size_rhs_sublane {lhs.dtype=}," f" {rhs.dtype=}"
+      f"size_lhs_sublane should be the same as size_rhs_sublane {lhs.dtype=},"
+      f" {rhs.dtype=}"
   )
   dims = gmm_v2.Dimensions(
       size_m=size_m,
@@ -254,14 +260,8 @@ def make_tgmm_configs(
     tiles = tile_info
   else:
     tiles = tile_info(
-        dims,
-        lhs_cfgs,
-        rhs_cfgs,
-        vmem_limit_bytes,  # pyrefly: ignore[bad-argument-type]
-        out_dtype,
-        acc_dtype,
+        dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, out_dtype, acc_dtype,
         target_zero_ref_bytes,
-        partial_sum is not None,
     )
 
   return gmm_v2.GmmConfigs(
@@ -269,7 +269,6 @@ def make_tgmm_configs(
       tiles=tiles,
       lhs_cfgs=lhs_cfgs,
       rhs_cfgs=rhs_cfgs,
-      has_partial_sum=(partial_sum is not None),
       out_dtype=jnp.dtype(out_dtype),
       acc_dtype=jnp.dtype(acc_dtype),
       # GMM's 'zero_init' zeros unvisited m-rows via DMA, which doesn't apply to
@@ -286,7 +285,6 @@ def tgmm_inner_kernel(
     tiled_rhs_ref: OperandRef,
     # .value: [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     # .scale: [1, 1, tile_n] or None
-    tiled_ps_ref: jax.Array | None,
     tiled_out_ref: jax.Array,
     acc_ref: jax.Array,
     metadata_ref: gmm_v2.MetadataRef,
@@ -326,13 +324,17 @@ def tgmm_inner_kernel(
     m_start_local = m_start - m_offset
     m_end_local = m_end - m_offset
     lhs_iota = lax.broadcasted_iota(jnp.int32, tiled_lhs_ref.shape, 0)
-    lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
+    lhs_mask = jnp.logical_and(
+        m_start_local <= lhs_iota, lhs_iota < m_end_local
+    )
     lhs_masked = jnp.where(lhs_mask, tiled_lhs_ref[...], 0)
     # If there are no NaNs, masking both lhs and rhs shouldn't be necessary.
     # But without masking both, we sometimes see the result contain NaNs so we
     # decide to mask both to be safe.
     rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)
-    rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
+    rhs_mask = jnp.logical_and(
+        m_start_local <= rhs_iota, rhs_iota < m_end_local
+    )
     rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
 
     acc = jax.lax.dot_general(
@@ -347,10 +349,8 @@ def tgmm_inner_kernel(
 
     if is_group_changing:
       if cfgs.rhs_cfgs.has_scale:
-        scale_slice = tiled_rhs_scale_ref[0]  # pyrefly: ignore[unsupported-operation]
+        scale_slice = tiled_rhs_scale_ref[0]
         acc *= scale_slice
-      if cfgs.has_partial_sum:
-        acc += tiled_ps_ref[...].astype(acc.dtype)
       tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
     else:
       acc_ref[...] = acc
@@ -373,7 +373,10 @@ def tgmm_inner_kernel(
 
   prev_gm_id = jnp.where(gm_id > 0, gm_id - 1, 0)
   is_first_gm = gm_id == 0
-  group_id_changed = metadata_ref.gm_id_to_group_id[gm_id] != metadata_ref.gm_id_to_group_id[prev_gm_id]
+  group_id_changed = (
+      metadata_ref.gm_id_to_group_id[gm_id]
+      != metadata_ref.gm_id_to_group_id[prev_gm_id]
+  )
   new_group = jnp.logical_or(is_first_gm, group_id_changed)
 
   is_last_gm = gm_id == (pl.num_programs(2) - 1)
@@ -429,7 +432,9 @@ class TgmmIndexMaps:
     row_size = row_end - row_start
     return (pl.ds(row_start, row_size), 0, n_id)
 
-  def rhs_scale_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+  def rhs_scale_index_map(
+      self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array
+  ):
     return (0, 0, n_id)
 
   def out_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
@@ -439,14 +444,16 @@ class TgmmIndexMaps:
 
 def generate_tgmm_block_specs(
     metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs
-) -> Tuple[Tuple[pl.BlockSpec, OperandRef, pl.BlockSpec | None], pl.BlockSpec]:
+) -> Tuple[Tuple[pl.BlockSpec, OperandRef], pl.BlockSpec]:
   """Generates block specs for the given lhs, rhs, and out refs."""
   index_map = TgmmIndexMaps(metadata_ref, cfgs)
   # NB: in tgmm, LHS is reshaped from (M, K) to (-1, size_lhs_sublane, K) so
   # that DMA transfers are aligned to sublane boundaries. The first dimension
   # after this reshape has size tile_m // size_lhs_sublane — i.e., the number of
   # "sublane-rows" in a tile.
-  bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m // cfgs.dims.size_lhs_sublane)
+  bounded_slice_gm = pl.BoundedSlice(
+      cfgs.tiles.tile_m // cfgs.dims.size_lhs_sublane
+  )
   lhs_block_spec = pl.BlockSpec(
       (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_k),
       index_map.lhs_index_map,
@@ -466,14 +473,8 @@ def generate_tgmm_block_specs(
       (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
       index_map.out_index_map,
   )
-  ps_block_spec = None
-  if cfgs.has_partial_sum:
-    ps_block_spec = pl.BlockSpec(
-        (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
-        index_map.out_index_map,
-    )
-  in_specs = (lhs_block_spec, rhs_spec, ps_block_spec)
-  return in_specs, out_block_spec
+
+  return (lhs_block_spec, rhs_spec), out_block_spec
 
 
 def zero_out_start(
@@ -527,7 +528,9 @@ def zero_out_end(
     semaphore_ref,  # [1]
 ):
   """Drain the DMAs started by zero_out_start."""
-  dst = out_ref.at[pl.ds(0, num_groups_to_zero),]
+  dst = out_ref.at[
+      pl.ds(0, num_groups_to_zero),
+  ]
   src = dst
   pltpu.make_async_copy(
       src_ref=src,
@@ -541,7 +544,6 @@ def tgmm_kernel_main(
     group_offset_ref,  # int32[1]
     lhs_ref,  # [m, k]
     rhs_ref,  # OperandRef: .value [m, n], .scale [1, 1, n] or None
-    partial_sum_ref,  # [num_actual_groups, k, n] or None
     out_ref,  # [num_actual_groups, k, n]
     # Scratch memory
     acc_ref: jax.Array,  # [tile_k, tile_n]
@@ -592,14 +594,13 @@ def tgmm_kernel_main(
   )
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
   rhs_value = rhs_ref.value
-  rhs_in = rhs_value.reshape(-1, cfgs.dims.size_lhs_sublane, rhs_value.shape[-1])
+  rhs_in = rhs_value.reshape(
+      -1, cfgs.dims.size_lhs_sublane, rhs_value.shape[-1]
+  )
   rhs_operand = OperandRef(value=rhs_in, scale=rhs_ref.scale)
-  ps_in = None
-  if cfgs.has_partial_sum:
-    ps_in = partial_sum_ref
   scratches = [acc_ref, metadata_ref]
 
-  pipeline_fn(lhs_in, rhs_operand, ps_in, out_ref, scratches=scratches)
+  pipeline_fn(lhs_in, rhs_operand, out_ref, scratches=scratches)
   zero_out_end(
       num_groups_to_zero,
       out_ref,
@@ -651,7 +652,6 @@ def tgmm_v2(
     group_sizes: jax.Array,
     num_actual_groups: int,
     rhs_scale: jax.Array | None = None,  # [1, 1, size_n] (per-N scale)
-    partial_sum: jax.Array | None = None,
     group_offset: jax.Array | None = None,
     *,
     tile_info: gmm_v2.TileSizes | TileTgmmFn = calculate_tgmm_tiling,
@@ -702,13 +702,12 @@ def tgmm_v2(
   cfgs = make_tgmm_configs(
       lhs,
       rhs,
-      rhs_scale,  # pyrefly: ignore[bad-argument-type]
-      partial_sum,
+      rhs_scale,
       group_sizes,
       num_actual_groups,
       tile_info=tile_info,
       vmem_limit_bytes=vmem_limit_bytes,
-      out_dtype=preferred_element_type,  # pyrefly: ignore[bad-argument-type]
+      out_dtype=preferred_element_type,
       acc_dtype=acc_dtype,
       target_zero_ref_bytes=target_zero_ref_bytes,
   )
@@ -721,7 +720,9 @@ def tgmm_v2(
   # stays in-bounds, and (b) the zero-init path can slice in sublane-aligned
   # chunks. tile_k is num_lanes-aligned, which is also sublane-tile-aligned.
   aligned_k = gmm_v2.align_to(dims.size_k, tiles.tile_k)
-  out_init = jax.ShapeDtypeStruct((num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype)
+  out_init = jax.ShapeDtypeStruct(
+      (num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype
+  )
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
       # acc_ref
@@ -750,27 +751,23 @@ def tgmm_v2(
     pad_n = aligned_n - dims.size_n
     if pad_n > 0:
       rhs_scale = jnp.pad(rhs_scale, ((0, 0), (0, 0), (0, pad_n)))
-  rhs = OperandRef(value=rhs, scale=rhs_scale)  # pyrefly: ignore[bad-assignment]
+  rhs = OperandRef(value=rhs, scale=rhs_scale)
   hbm_spec = pl.BlockSpec(memory_space=pltpu.HBM)
-  partial_sum_spec = None
-  if partial_sum is not None:
-    partial_sum_spec = hbm_spec
   in_specs = [
       hbm_spec,  # lhs
       # the tree.map build a
       # OperandRef(value=hbm_spec, scale=None if scale is None else hbm_spec.
-      jax.tree.map(lambda _: hbm_spec, rhs),  # rhs
-      partial_sum_spec,
+      jax.tree.map(lambda _: hbm_spec, rhs),   # rhs
   ]
 
-  raw_out = pl.pallas_call(
+  return pl.pallas_call(
       functools.partial(tgmm_kernel_main, cfgs=cfgs),
       out_shape=out_init,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=in_specs,
           out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
-          scratch_shapes=scratch_shapes,  # pyrefly: ignore[bad-argument-type]
+          scratch_shapes=scratch_shapes,
       ),
       compiler_params=pltpu.CompilerParams(
           vmem_limit_bytes=vmem_limit_bytes,
@@ -781,10 +778,4 @@ def tgmm_v2(
       # the metadata here is for profiling, debugging, and cost modeling.
       # It does not affect the kernel's computation.
       metadata=gmm_v2.get_metadata(cfgs),
-  )(group_sizes, group_offset, lhs, rhs, partial_sum)[:, : dims.size_k, : dims.size_n]
-
-  if partial_sum is not None:
-    local_group_sizes = lax.dynamic_slice(group_sizes, (group_offset[0],), (num_actual_groups,))
-    empty_mask = (local_group_sizes == 0).reshape(num_actual_groups, 1, 1)
-    return jnp.where(empty_mask, partial_sum, raw_out)
-  return raw_out
+  )(group_sizes, group_offset, lhs, rhs)[:, :dims.size_k, :dims.size_n]
