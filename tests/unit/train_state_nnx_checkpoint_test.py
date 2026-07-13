@@ -505,13 +505,16 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     mgr = mock.MagicMock()
     mgr.reached_preemption.return_value = False
 
-    with mock.patch.object(checkpointing, "save_checkpoint") as save_checkpoint_mock:
+    with (
+        mock.patch.object(checkpointing, "save_checkpoint") as save_checkpoint_mock,
+        mock.patch.object(train_state_nnx, "to_checkpoint_dict") as to_checkpoint_dict_mock,
+    ):
       checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=3)
 
     mgr.latest_step.assert_not_called()
     mgr.reached_preemption.assert_called_once_with(3)
     mgr.wait_until_finished.assert_not_called()
-    state.to_pure_dict.assert_not_called()
+    to_checkpoint_dict_mock.assert_not_called()
     save_checkpoint_mock.assert_not_called()
 
   def test_maybe_save_checkpoint_handles_preemption_on_non_checkpoint_step(
@@ -523,14 +526,17 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     mgr = mock.MagicMock()
     mgr.reached_preemption.return_value = True
 
-    with mock.patch.object(checkpointing, "save_checkpoint") as save_checkpoint_mock:
+    with (
+        mock.patch.object(checkpointing, "save_checkpoint") as save_checkpoint_mock,
+        mock.patch.object(train_state_nnx, "to_checkpoint_dict") as to_checkpoint_dict_mock,
+    ):
       with self.assertRaises(checkpointing.exceptions.StopTraining):
         checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=3)
 
     mgr.latest_step.assert_not_called()
     mgr.reached_preemption.assert_called_once_with(3)
     mgr.wait_until_finished.assert_called_once_with()
-    state.to_pure_dict.assert_not_called()
+    to_checkpoint_dict_mock.assert_not_called()
     save_checkpoint_mock.assert_not_called()
 
   def test_maybe_save_checkpoint_allows_local_checkpoint_period(self):
@@ -541,10 +547,6 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     ):
       with self.subTest(checkpoint_flag=checkpoint_flag):
         state = mock.Mock()
-        state.to_pure_dict.return_value = {
-            "model": {},
-            "optimizer": {"step": 5},
-        }
         config = self._config(
             checkpoint_period=100,
             local_checkpoint_period=5,
@@ -555,13 +557,16 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         mgr.reached_preemption.return_value = False
         save_checkpoint_mock = mock.MagicMock(return_value=False)
 
-        with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+        with (
+            mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock),
+            mock.patch.object(train_state_nnx, "to_checkpoint_dict") as to_checkpoint_dict_mock,
+        ):
           checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=5)
 
         mgr.latest_step.assert_called_once_with()
         mgr.reached_preemption.assert_called_once_with(5)
         mgr.wait_until_finished.assert_not_called()
-        state.to_pure_dict.assert_called_once_with()
+        to_checkpoint_dict_mock.assert_called_once_with(state)
         save_checkpoint_mock.assert_called_once()
 
   def test_maybe_save_checkpoint_allows_mtc_period_with_continuous_policy(
@@ -569,7 +574,6 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   ):
     """Continuous checkpointing should not suppress MTC local saves."""
     state = mock.Mock()
-    state.to_pure_dict.return_value = {"model": {}, "optimizer": {"step": 5}}
     config = self._config(
         checkpoint_period=100,
         enable_continuous_checkpointing=True,
@@ -582,13 +586,16 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     mgr.reached_preemption.return_value = False
     save_checkpoint_mock = mock.MagicMock(return_value=False)
 
-    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+    with (
+        mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock),
+        mock.patch.object(train_state_nnx, "to_checkpoint_dict") as to_checkpoint_dict_mock,
+    ):
       checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=5)
 
     mgr.should_save.assert_called_once_with(5)
     mgr.latest_step.assert_called_once_with()
     mgr.reached_preemption.assert_called_once_with(5)
-    state.to_pure_dict.assert_called_once_with()
+    to_checkpoint_dict_mock.assert_called_once_with(state)
     save_checkpoint_mock.assert_called_once()
 
 
