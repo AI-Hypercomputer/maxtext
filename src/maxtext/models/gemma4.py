@@ -15,6 +15,7 @@
 """Specialized layers for Gemma 4."""
 
 import jax
+from jax.experimental import xla_metadata
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -460,7 +461,7 @@ class Gemma4ScannableBlock(nnx.Module):
               quant=self.quant,
               rngs=layer_rngs,
               attention_type=AttentionType.LOCAL_SLIDING,
-              layer_idx=0,
+              layer_idx=0,  # layer_idx is not used in the class
           ),
           length=self.num_local,
           param_scan_axis=self.config.param_scan_axis,
@@ -478,7 +479,7 @@ class Gemma4ScannableBlock(nnx.Module):
           rngs=self.rngs,
           quant=self.quant,
           attention_type=AttentionType.GLOBAL,
-          layer_idx=5,
+          layer_idx=5,  # layer_idx is not used in the class
       )
     else:
       self.global_layer = None
@@ -611,10 +612,11 @@ class Gemma4ScannableBlock(nnx.Module):
       else:
         graphdef_g, state_g = nnx.split(self.global_layer)
 
-        def apply_global_layer(carry, current_state):
+        def scan_global_layer(carry, _):
+          current_y, current_state = carry
           layer = nnx.merge(graphdef_g, current_state)
           layer_out = layer(
-              carry,
+              current_y,
               decoder_segment_ids,
               decoder_positions,
               deterministic,
@@ -624,8 +626,8 @@ class Gemma4ScannableBlock(nnx.Module):
               bidirectional_mask=bidirectional_mask,
               attention_metadata=attention_metadata,
           )
-          new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-          return new_carry, nnx.state(layer)
+          new_y = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+          return (new_y, nnx.state(layer)), None
 
         # Remat the global layer symmetrically with the local layers. The global
         # layer runs full-sequence (not sliding-window) attention, so it holds the
@@ -633,13 +635,27 @@ class Gemma4ScannableBlock(nnx.Module):
         # keep those activations live across all scanned blocks.
         if self.config.remat_policy != "none":
           prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
-          apply_global_layer = jax.checkpoint(
-              apply_global_layer,
+          scan_global_layer = jax.checkpoint(
+              scan_global_layer,
               policy=self.remat_policy_fn,
               prevent_cse=prevent_cse,
           )
 
-        y, global_state = apply_global_layer(y, state_g)
+        # Keep the global layer behind a trip-count-one while boundary. This
+        # reduces activation liveness compared with an inlined direct call.
+        # Carry state through the loop instead of returning a stacked [1, ...]
+        # scan result: slicing that result previously introduced a bitcast
+        # between device and pinned-host memory under offload remat.
+        with xla_metadata.set_xla_metadata(
+            **{"skip-simplify-while-loops_trip-count-one": "true"}
+        ):
+          (y, global_state), _ = jax.lax.scan(
+              scan_global_layer,
+              (y, state_g),
+              xs=None,
+              length=1,
+          )
+
         nnx.update(self.global_layer, global_state)
 
     if kv_cache is not None:

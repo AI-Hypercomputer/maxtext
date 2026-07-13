@@ -33,10 +33,51 @@ class _StatefulDecoderLayer(nnx.Module):
     self.call_count = nnx.Intermediate(jnp.array(0, dtype=jnp.int32))
     self.received_attention_metadata = nnx.Intermediate(jnp.array(False))
 
-  def __call__(self, inputs, *unused_args, kv_cache=None, attention_metadata=None, **unused_kwargs):
+  def __call__(
+      self,
+      inputs,
+      *unused_args,
+      kv_cache=None,
+      attention_metadata=None,
+      **unused_kwargs,
+  ):
     self.call_count.value += 1
     self.received_attention_metadata.value = attention_metadata is not None
-    return inputs + self.increment, kv_cache + self.increment
+    output = inputs + self.increment
+    if kv_cache is None:
+      return output
+    return output, kv_cache + self.increment
+
+
+def test_scannable_block_updates_state_through_global_single_iteration_scan():
+  config = SimpleNamespace(
+      dtype=jnp.float32,
+      param_scan_axis=1,
+      remat_policy="none",
+      scan_layers=True,
+  )
+
+  with mock.patch.object(gemma4, "Gemma4DecoderLayer", _StatefulDecoderLayer):
+    block = gemma4.Gemma4ScannableBlock(
+        config=config,
+        mesh=None,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=nnx.Rngs(0),
+    )
+    output, updated_kvs = block(
+        jnp.zeros((1, 1, 1)),
+        decoder_segment_ids=None,
+        decoder_positions=None,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+    )
+
+  np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 15))
+  assert updated_kvs is None
+  np.testing.assert_array_equal(
+      block.local_layers.call_count.value, jnp.ones(5, dtype=jnp.int32)
+  )
+  np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
 
 
 def test_scannable_block_restores_local_state_and_preserves_kv_order():
