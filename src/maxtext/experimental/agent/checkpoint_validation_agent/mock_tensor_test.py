@@ -3,6 +3,8 @@
 import sys
 import jax
 import jax.numpy as jnp
+import numpy as np
+from jax.sharding import Mesh
 from maxtext import pyconfig
 #from maxtext.models import get_model
 from maxtext.models.models import transformer_as_linen
@@ -27,8 +29,10 @@ def run_mock_forward(checkpoint_path, model_name):
 
   print(f"Loading model from {checkpoint_path}...")
   #model = get_model(pyconfig.config, mesh=None)
-  # config is defined and passed to the model
-  model = transformer_as_linen(config, mesh=None, quant=None)
+  # create a dummy 1-device hardware mesh using pod's single CPU
+  dummy_mesh = Mesh(np.array(jax.devices()), ('data',))
+  # pass dummy_mesh instead of None
+  model = transformer_as_linen(config, mesh=dummy_mesh, quant=None)
 
   # run a single dummy pass
   mock_input = jnp.zeros((1, 128), dtype=jnp.int32)
