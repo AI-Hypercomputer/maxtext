@@ -110,20 +110,21 @@ jobs:
 
           # 4. Check for source code changes (anything not .md and not .ipynb)
           if echo "$CHANGED_FILES" | grep -v -E '\.(md|ipynb)$' > /dev/null; then
-            echo "Source code changed, enabling unit tests."
+            echo "Source code changed, enabling unit tests and notebooks."
             echo "run_tests=true" >> $GITHUB_OUTPUT
+            echo "run_notebooks=true" >> $GITHUB_OUTPUT
           else
             echo "No source code changes (only notebook/doc), skipping unit tests."
             echo "run_tests=false" >> $GITHUB_OUTPUT
-          fi
 
-          # 5. Check for notebook (.ipynb) changes
-          if echo "$CHANGED_FILES" | grep '\.ipynb$' > /dev/null; then
-            echo "Notebook files changed, enabling notebook run."
-            echo "run_notebooks=true" >> $GITHUB_OUTPUT
-          else
-            echo "No notebook changes, skipping notebook run."
-            echo "run_notebooks=false" >> $GITHUB_OUTPUT
+            # 5. Check for notebook (.ipynb) changes
+            if echo "$CHANGED_FILES" | grep '\.ipynb$' > /dev/null; then
+              echo "Notebook files changed, enabling notebook run."
+              echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            else
+              echo "No notebook changes, skipping notebook run."
+              echo "run_notebooks=false" >> $GITHUB_OUTPUT
+            fi
           fi
 
   code_quality_check:
@@ -151,8 +152,11 @@ jobs:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   maxtext_jupyter_notebooks:
-    needs: build_and_upload_maxtext_package
-    if: needs.analyze_code_changes.outputs.run_notebooks == 'true'
+    needs: [analyze_code_changes, build_and_upload_maxtext_package]
+    if: |
+      always() &&
+      needs.analyze_code_changes.outputs.run_notebooks == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
     uses: ./.github/workflows/run_jupyter_notebooks.yml
     strategy:
         fail-fast: false
@@ -176,6 +180,7 @@ jobs:
     outputs:
       total_workers: ${{ steps.set-params.outputs.total_workers }}
       worker_groups: ${{ steps.set-params.outputs.worker_groups }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
     steps:
       - id: set-params
         name: Formalize Test Suite Parameters
@@ -187,7 +192,10 @@ jobs:
 
   tpu-tests:
     name: ${{ matrix.flavor || 'TPU' }} tests
-    needs: [build_and_upload_maxtext_package, gate_test_run]
+    needs: [gate_test_run]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -197,23 +205,28 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   maxtext_cpu_torch_reference_tests:
     name: cpu-torch-reference tests
-    needs: [build_and_upload_maxtext_package]
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    needs: [gate_test_run]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success'
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
       flavor: cpu-torch-reference
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   tpu7x-tests:
     name: TPU7X tests
-    needs: [build_and_upload_maxtext_package, gate_test_run]
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: [gate_test_run]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success' &&
+      github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -223,11 +236,14 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   gpu-tests:
     name: ${{ matrix.flavor || 'GPU' }} tests
-    needs: [build_and_upload_maxtext_package, gate_test_run]
+    needs: [gate_test_run]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -237,11 +253,14 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-cuda12:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-tests:
     name: ${{ matrix.flavor || 'CPU' }} tests
-    needs: [build_and_upload_maxtext_package, gate_test_run]
+    needs: [gate_test_run]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -251,10 +270,13 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
-    needs: [build_and_upload_maxtext_package, gate_test_run]
+    needs: [gate_test_run]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -271,12 +293,15 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
       total_workers: ${{ needs.gate_test_run.outputs.total_workers || '2' }}
       worker_group: ${{ matrix.group }}
 
   maxtext_tpu_pathways_integration_tests:
-    needs: [build_and_upload_maxtext_package, gate_test_run]
+    needs: [gate_test_run]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -291,7 +316,7 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   all_tests_passed:
     name: All Required Tests Passed
