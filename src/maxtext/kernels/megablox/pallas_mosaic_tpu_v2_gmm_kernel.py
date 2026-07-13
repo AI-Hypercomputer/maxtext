@@ -909,7 +909,9 @@ def calculate_tiling(
     tile_n_limit //= fuse_act_factor
 
   def _is_tile_k_quant_block_compatible(tk: int) -> bool:
-    if tk % rhs_cfgs.quant_block_size != 0 and rhs_cfgs.quant_block_size % tk != 0:  # pyrefly: ignore[unsupported-operation]
+    if (
+        tk % rhs_cfgs.quant_block_size != 0 and rhs_cfgs.quant_block_size % tk != 0
+    ):  # pyrefly: ignore[unsupported-operation]
       return False
     return True
 
@@ -999,7 +1001,9 @@ def validate_inputs(
   if rhs_bias is not None:
     assert rhs_bias.shape == (size_group, 1, size_n)
   if partial_sum is not None:
-    assert partial_sum.shape == (size_m, size_n)
+    assert partial_sum.shape[-1] == size_n
+    # lhs's m dimension can sometimes be padded to wi_tile_fwd_batch_seq
+    assert partial_sum.shape[0] <= size_m
   if rhs_scale is not None:
     num_quant_blocks = rhs_scale.shape[1]
     assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
@@ -1341,6 +1345,13 @@ def gmm_v2(
       partial_sum_spec,  # partial_sum
   ]
 
+  input_output_aliases = {}
+  if partial_sum is not None:
+    flat_args_preceding = (group_sizes, group_offset, lhs, rhs_weights)
+    leaves = jax.tree_util.tree_leaves(flat_args_preceding)
+    partial_sum_idx = sum(1 for x in leaves if x is not None)
+    input_output_aliases = {partial_sum_idx: 0}
+
   return pl.pallas_call(
       functools.partial(kernel_main, cfgs=cfgs),
       out_shape=out_init,
@@ -1357,4 +1368,5 @@ def gmm_v2(
       name=get_scope_name(cfgs),
       cost_estimate=get_cost_estimate(cfgs),
       metadata=get_metadata(cfgs),
+      input_output_aliases=input_output_aliases,
   )(group_sizes, group_offset, lhs, rhs_weights, partial_sum)[:, : cfgs.out_size_n]
