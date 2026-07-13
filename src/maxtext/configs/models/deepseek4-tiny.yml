@@ -11,16 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Test Model config for DeepSeek-V4-Flash 284B (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
 
-base_emb_dim: 4096
-base_num_query_heads: 64
+# Model config for DeepSeek-V4-Flash 284B (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
+
+base_emb_dim: 256
+base_num_query_heads: 4
 base_num_kv_heads: 1
 base_num_decoder_layers: 7
-base_mlp_dim: 2048
-base_moe_mlp_dim: 2048
-vocab_size: 129280
-head_dim: 512
+base_mlp_dim: 512
+base_moe_mlp_dim: 512
+vocab_size: 32000
+head_dim: 64
 
 # --- Standard Defaults ---
 enable_dropout: false
@@ -31,9 +32,9 @@ normalization_layer_epsilon: 1.0e-6
 decoder_block: "deepseek4"
 mhc_expansion_rate: 4
 first_num_hash_layers: 3
-indexer_head_dim: 128
-indexer_n_heads: 64
-indexer_topk: 512
+indexer_head_dim: 64
+indexer_n_heads: 2
+indexer_topk: 4
 
 # Note: Layers (0, 1, 2) are prefix layers as `first_num_hash_layers=3`.
 # The 6th layer (MTP module with compress_ratio=0) has been explicitly dropped for now.
@@ -56,10 +57,10 @@ routed_scaling_factor: 1.5
 # --- Attention configuration ---
 attention_type: 'compressed'
 attention: 'dot_product'
-q_lora_rank: 1024
+q_lora_rank: 64
 o_groups: 8
-o_lora_rank: 1024
-sliding_window_size: 128
+o_lora_rank: 64
+sliding_window_size: 32
 
 # --- RoPE ---
 rope_type: "default"
@@ -67,4 +68,3 @@ rope_max_timescale: 10000                  # Main RoPE theta
 compressed_rope_max_timescale: 160000      # Compressed RoPE theta
 max_position_embeddings: 1048576
 original_max_position_embeddings: 65536
-

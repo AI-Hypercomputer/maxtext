@@ -57,6 +57,16 @@ config_lib, engine_api, token_utils, tokenizer_api, _token_params_ns = jetstream
 TokenizerParameters = getattr(_token_params_ns, "TokenizerParameters", object)  # type: ignore[assignment]
 TokenizerType = getattr(_token_params_ns, "TokenizerType", object)  # type: ignore[assignment]
 
+_DEEPSEEK_V4_CACHE_KEYS = frozenset(
+    (
+        "entry_count",
+        "accumulator_index",
+        "leftover_buffer_kv",
+        "leftover_buffer_gate",
+        "overlap_kv",
+        "overlap_gate",
+    )
+)
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
@@ -1492,6 +1502,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
+      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
+        # Copy these states by explicitly overwriting the target slots matching current request id
+        for slot in slots:
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+        return full_cache
+
       for slot in slots:
         if path_key == "cache_ar_segment_id":
           ### goal: zero this out in case there is existing data
@@ -1606,6 +1622,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+
+      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
+        # Copy these states by explicitly overwriting the target slot matching current request id
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
 
       if path_key == "cache_ar_segment_id":
         s = list(full_cache.shape)
@@ -1740,6 +1760,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+
+      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
+        # Direct batch slot index overwrite for fixed-size metadata trackers
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
 
       if path_key == "cache_ar_segment_id":
         ### goal: zero this out in case there is existing data
