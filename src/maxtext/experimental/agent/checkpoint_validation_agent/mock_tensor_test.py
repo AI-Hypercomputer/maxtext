@@ -32,25 +32,22 @@ def run_mock_forward(checkpoint_path, model_name):
 
   # run a single dummy pass
   mock_input = jnp.zeros((1, 128), dtype=jnp.int32)
-  # create a hollow array for the positional encodings
   mock_positions = jnp.zeros((1, 128), dtype=jnp.int32)
+  mock_segment_ids = jnp.zeros((1, 128), dtype=jnp.int32)
+
   print("Executing forward pass...")
-  try:
-    rng = jax.random.PRNGKey(0)
+  # tracing full traceback without try/except block
+  rng = jax.random.PRNGKey(0)
 
-    # generate abstract shapes for the parameters which uses 0 memory
-    print("Initializing abstract model parameters...")
-    abstract_variables = jax.eval_shape(model.init, rng, mock_input, mock_positions)
+  # generate abstract shapes for the parameters which uses 0 memory
+  print("Initializing abstract model parameters...")
+  abstract_variables = jax.eval_shape(model.init, rng, mock_input, mock_positions, mock_segment_ids)
 
-    # dry-run the forward pass using the abstract parameters
-    print("Tracing forward pass graph...")
-    out_shape = jax.eval_shape(model.apply, abstract_variables, mock_input, mock_positions)  # method=model.generate)
+  # dry-run the forward pass using the abstract parameters
+  print("Tracing forward pass graph...")
+  out_shape = jax.eval_shape(model.apply, abstract_variables, mock_input, mock_positions, mock_segment_ids)
 
-    print(f"SUCCESS: Model architecture is stable. Output shape: {out_shape}")
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    print(f"FAILURE: Forward pass crashed: {e}")
-    sys.exit(1)
-
+  print(f"SUCCESS: Model architecture is stable. Output shape: {out_shape}")
 
 if __name__ == "__main__":
   run_mock_forward(sys.argv[1], sys.argv[2])
