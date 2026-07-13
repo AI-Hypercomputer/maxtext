@@ -1415,6 +1415,7 @@ class RoutedMoE(nnx.Module):
       inputs,
       gate_logits,
       pre_bias_logits,
+      wi_kernel,
       w0_kernel,
       w1_kernel,
       wo_kernel,
@@ -1423,6 +1424,11 @@ class RoutedMoE(nnx.Module):
       wo_bias,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
+
+    # Keep the fused [experts, embed, 2 * mlp] kernel intact through shard_map.
+    # This lets FSDP all-gather it once instead of independently gathering the
+    # two halves and concatenating them again immediately before the GMM.
+    use_fused_wi = self.config.fused_moe_mlp and wi_kernel is not None
 
     # Extract gate expert bias internally when TE path is active.
     # This avoids exposing gate_expert_bias in the public API.
@@ -1594,23 +1600,24 @@ class RoutedMoE(nnx.Module):
       quantization_rule = qpl.get_current_rule("gmm")
       if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
         # special sharding when using static scaling for weights in quantization with shard_exp_on_fsdp
-        w0_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
-        w1_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
+        wi_base_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
         wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)
         weight_gather = True
       else:
         # special sharding for dsv3 to remove overhead between gmm/AG
-        w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-        w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
+        wi_base_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
     elif self.config.use_2d_fsdp_sharding:
-      w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-      w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+      wi_base_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
       wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
     else:
-      w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      w1_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      wi_base_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+    wi_pspec = wi_base_pspec if use_fused_wi else None
+    w0_pspec = None if use_fused_wi else wi_base_pspec
+    w1_pspec = None if use_fused_wi else wi_base_pspec
+    if isinstance(wi_kernel, aqt.QTensor):
+      wi_pspec = aqt.partition_spec(wi_pspec, (1,), wi_kernel.dtype, use_bias=False)
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
@@ -1625,6 +1632,7 @@ class RoutedMoE(nnx.Module):
             input_partition_pspec,
             gate_logits_pspec,
             pre_bias_logits_pspec,
+            wi_pspec,
             w0_pspec,
             w1_pspec,
             wo_pspec,
@@ -1641,7 +1649,20 @@ class RoutedMoE(nnx.Module):
         ),
         check_vma=False,
     )
-    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs, gate_expert_bias):
+    def wrapper(
+        x,
+        logits,
+        pre_bias_logits,
+        wi,
+        w0,
+        w1,
+        wo,
+        w0_bias,
+        w1_bias,
+        wo_bias,
+        rngs,
+        gate_expert_bias,
+    ):
       batch_size, sequence_length, _ = x.shape
       num_expert_parallelism = self.get_expert_parallelism_size()
       if num_expert_parallelism > 1:
@@ -1833,8 +1854,9 @@ class RoutedMoE(nnx.Module):
 
       if weight_gather:
         # wi [Experts, In, Hidden] -> Gather Exp(0) and Hidden(2)
-        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
-        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
+        wi_weight_pspec = wi_pspec if use_fused_wi else w0_pspec
+        wi_gather_axes.extend(get_active_sharding_axes(wi_weight_pspec[0], 0))
+        wi_gather_axes.extend(get_active_sharding_axes(wi_weight_pspec[2], 2))
 
         # wo [Experts, Hidden, Out] -> Gather Exp(0) and Hidden(1)
         wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
@@ -1867,7 +1889,20 @@ class RoutedMoE(nnx.Module):
           self.config.wo_tile_drhs_mlp_dim,
       )
 
-      if self.config.fused_moe_mlp:
+      if use_fused_wi:
+        out = gmm_fn(x, wi, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        if self.get_tensor_transpose_parallelism_size() > 1:
+          # Sum both projections in one collective before the nonlinear SwiGLU.
+          out = jax.lax.psum(out, "tensor_transpose")
+        if self.config.mlp_bias:
+          out = out + jnp.concatenate([w0_bias, w1_bias], axis=-1)
+        n = wi.shape[-1] // 2
+        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+      elif self.config.fused_moe_mlp:
+        # Quantized serving currently retrieves the two halves separately.
+        # Preserve that path until fused quantized-weight retrieval is supported.
         w_fused = jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
         n = w0.shape[-1]
@@ -2035,21 +2070,42 @@ class RoutedMoE(nnx.Module):
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
-      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"))
+      if use_fused_wi:
+        wi_kernel = self._maybe_shard_with_logical(
+            wi_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp")
+        )
+      else:
+        w0_kernel = self._maybe_shard_with_logical(
+            w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp")
+        )
+        w1_kernel = self._maybe_shard_with_logical(
+            w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp")
+        )
 
       # Unshard on fsdp_transpose axis
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp", "embed_tensor_transpose"))
 
       # Make sure XLA does not optimize by combining above All-Gather to unshard
       # on FSDP axis and the subsequent unshard on fsdp_transpose axis
-      w0_kernel = jax.lax.optimization_barrier(w0_kernel)
-      w1_kernel = jax.lax.optimization_barrier(w1_kernel)
+      if use_fused_wi:
+        wi_kernel = jax.lax.optimization_barrier(wi_kernel)
+      else:
+        w0_kernel = jax.lax.optimization_barrier(w0_kernel)
+        w1_kernel = jax.lax.optimization_barrier(w1_kernel)
       wo_kernel = jax.lax.optimization_barrier(wo_kernel)
 
       # Unshard on both fsdp and fsdp_transpose transpose
-      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      if use_fused_wi:
+        wi_kernel = self._maybe_shard_with_logical(
+            wi_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp")
+        )
+      else:
+        w0_kernel = self._maybe_shard_with_logical(
+            w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp")
+        )
+        w1_kernel = self._maybe_shard_with_logical(
+            w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp")
+        )
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", "embed_tensor_transpose"))
 
     if self.get_tensor_transpose_parallelism_size() > 1:
@@ -2067,8 +2123,11 @@ class RoutedMoE(nnx.Module):
     gate_logits = self._maybe_shard_with_logical(gate_logits, gate_logits_axes)
     pre_bias_logits = self._maybe_shard_with_logical(pre_bias_logits, pre_bias_logits_axes)
 
-    w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
-    w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
+    if use_fused_wi:
+      wi_kernel = self._maybe_shard_with_pspec(wi_kernel, wi_pspec)
+    else:
+      w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
+      w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
     wo_kernel = self._maybe_shard_with_pspec(wo_kernel, wo_pspec)
     if w0_bias is not None:
       w0_bias = self._maybe_shard_with_pspec(w0_bias, w0_bias_pspec)
@@ -2078,7 +2137,17 @@ class RoutedMoE(nnx.Module):
       wo_bias = self._maybe_shard_with_pspec(wo_bias, wo_bias_pspec)
 
     return wrapper(
-        inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, self.rngs,
+        inputs,
+        gate_logits,
+        pre_bias_logits,
+        wi_kernel,
+        w0_kernel,
+        w1_kernel,
+        wo_kernel,
+        w0_bias,
+        w1_bias,
+        wo_bias,
+        self.rngs,
         gate_expert_bias,
     )
 
@@ -2668,12 +2737,21 @@ class RoutedMoE(nnx.Module):
     else:
       gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
-    if cfg.fused_moe_mlp:
+    use_fused_wi = (
+        cfg.fused_moe_mlp and cfg.sparse_matmul and not quantizations.in_serve_mode(self.quant)
+    )
+    if use_fused_wi:
+      wi_kernel = jnp.asarray(self.wi[...], self.dtype)
+      w0_kernel = None
+      w1_kernel = None
+    elif cfg.fused_moe_mlp:
       wi = jnp.asarray(self.wi[...], self.dtype)
       n = wi.shape[-1] // 2
+      wi_kernel = None
       w0_kernel = wi[..., :n]
       w1_kernel = wi[..., n:]
     else:
+      wi_kernel = None
       w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
       w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
@@ -2702,7 +2780,16 @@ class RoutedMoE(nnx.Module):
             wo_bias,
         )
       output, lb_loss, bias_updates = self.sparse_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias,
+          inputs,
+          gate_logits,
+          pre_bias_logits,
+          wi_kernel,
+          w0_kernel,
+          w1_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -2842,6 +2929,7 @@ def get_gate_logit(
   return module
 
 
+
 def get_routed_moe(
     config: ctypes.Config,
     num_experts: int,
@@ -2902,4 +2990,3 @@ def get_routed_and_shared_moe(
       abstract_init=False,
   )
   return module
-
