@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+import importlib
 import logging
 import os
 import sys
@@ -33,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 _HEALTH_ENDPOINT = "/health"
 _AUTO_REQUESTS_PER_ACCELERATOR = 4
+_HARMONY_UTILS_MODULE = "vllm.entrypoints.openai.parser.harmony_utils"
+
+
+def _load_harmony_utils() -> Any:
+  """Load vLLM's version-specific Harmony helper module lazily."""
+  return importlib.import_module(_HARMONY_UTILS_MODULE)
 
 
 def _is_harmony_model(llm: Any) -> bool:
@@ -43,43 +50,55 @@ def _is_harmony_model(llm: Any) -> bool:
 
 
 def _get_harmony_stop_token_ids() -> list[int]:
-  """Return vLLM's EOS-like assistant action tokens for GPT-OSS."""
-  from vllm.entrypoints.openai.parser.harmony_utils import (  # pylint: disable=import-outside-toplevel
-      get_stop_tokens_for_assistant_actions,
-  )
+  """Return stop IDs only for vLLM revisions that explicitly override them.
 
-  return list(get_stop_tokens_for_assistant_actions())
+  vLLM removed get_stop_tokens_for_assistant_actions in #44009 together with
+  its frontend stop_token_ids override. Newer revisions rely on model/engine
+  EOS handling, so an absent helper deliberately means "do not override".
+  """
+  harmony_utils = _load_harmony_utils()
+  get_stop_tokens = getattr(harmony_utils, "get_stop_tokens_for_assistant_actions", None)
+  if get_stop_tokens is None:
+    logger.info("vLLM uses model/engine-managed GPT-OSS stop tokens; no frontend override needed.")
+    return []
+  return list(get_stop_tokens())
 
 
 def _parse_harmony_chat_output(token_ids: list[int]) -> tuple[str | None, str | None, bool]:
   """Parse GPT-OSS token IDs with the parser used by vLLM's OpenAI server."""
-  from vllm.entrypoints.openai.parser.harmony_utils import (  # pylint: disable=import-outside-toplevel
-      parse_chat_output,
-  )
-
+  harmony_utils = _load_harmony_utils()
+  parse_chat_output = getattr(harmony_utils, "parse_chat_output", None)
+  if parse_chat_output is None:
+    raise RuntimeError(f"Installed vLLM does not provide {_HARMONY_UTILS_MODULE}.parse_chat_output.")
   return parse_chat_output(token_ids)
 
 
 def _render_harmony_chat_prompt(messages: list[dict[str, Any]], reasoning_effort: str | None) -> list[int]:
   """Render GPT-OSS messages exactly as vLLM's OpenAI chat server does."""
-  from vllm.entrypoints.openai.parser.harmony_utils import (  # pylint: disable=import-outside-toplevel
-      get_system_message,
-      parse_chat_inputs_to_harmony_messages,
-      render_for_completion,
+  harmony_utils = _load_harmony_utils()
+  required_helpers = (
+      "get_system_message",
+      "parse_chat_inputs_to_harmony_messages",
+      "render_for_completion",
   )
+  missing_helpers = [name for name in required_helpers if not callable(getattr(harmony_utils, name, None))]
+  if missing_helpers:
+    raise RuntimeError(
+        f"Installed vLLM Harmony API is missing required helper(s): {', '.join(missing_helpers)}."
+    )
 
   if reasoning_effort == "none":
     raise ValueError("Harmony does not support reasoning_effort='none'.")
   harmony_messages = [
-      get_system_message(
+      harmony_utils.get_system_message(
           reasoning_effort=reasoning_effort,
           browser_description=None,
           python_description=None,
           with_custom_tools=True,
       )
   ]
-  harmony_messages.extend(parse_chat_inputs_to_harmony_messages(messages))
-  return list(render_for_completion(harmony_messages))
+  harmony_messages.extend(harmony_utils.parse_chat_inputs_to_harmony_messages(messages))
+  return list(harmony_utils.render_for_completion(harmony_messages))
 
 
 def _top_logprobs_dict(tokenizer: Any, lp_dict: dict | None) -> "dict[str, float] | None":
@@ -467,9 +486,11 @@ def _build_app(
             isinstance(token_id, int) for token_id in requested_stop_token_ids
         ):
           raise ValueError("stop_token_ids must be an integer or a list of integers.")
-        sp_kwargs["stop_token_ids"] = list(
+        harmony_stop_token_ids = list(
             dict.fromkeys([*requested_stop_token_ids, *app.state.harmony_stop_token_ids])
         )
+        if harmony_stop_token_ids:
+          sp_kwargs["stop_token_ids"] = harmony_stop_token_ids
       sampling_params = SamplingParams(**sp_kwargs)
     except (TypeError, ValueError, KeyError) as exc:
       raise fastapi.HTTPException(status_code=400, detail=str(exc)) from exc
