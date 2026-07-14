@@ -824,6 +824,15 @@ def recover(
 
   while True:
     try:
+      # Clear JAX caches and delete live arrays to avoid DATA_LOSS interference
+      _logger.info("Cleaning up JAX caches and live arrays before recovery attempt...")
+      jax.clear_caches()
+      for array in jax.live_arrays():
+        try:
+          array.delete()
+        except Exception as e:
+          _logger.debug("Failed to delete array during cleanup: %s", e)
+
       # 1. Find currently active slices (wait if none are active)
       min_slices = 1 if config.elastic_min_slice_count == -1 else config.elastic_min_slice_count
 
@@ -1111,7 +1120,7 @@ def scale_up(
       jax_device_state,
       python_vars,
       immutable_data,
-      active_state=active_state,
+      active_state=None,
   )
 
 
