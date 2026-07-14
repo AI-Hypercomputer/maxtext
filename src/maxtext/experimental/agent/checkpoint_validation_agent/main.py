@@ -1,3 +1,17 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "innovation" basis,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Automated Checkpoint Validation Agent for MaxText."""
 
 import maxtext
@@ -9,19 +23,24 @@ import argparse
 from maxtext.utils import max_logging as logger
 
 
-def sanitize_gcs_path(path):
-  """Cleans up Google Cloud Storage browser URLs into valid gs:// paths."""
-  path = path.split("?")[0]
-  prefixes_to_replace = [
-      "https://pantheon.corp.google.com/storage/browser/",
-      "https://console.cloud.google.com/storage/browser/",
-  ]
-  for prefix in prefixes_to_replace:
-    if path.startswith(prefix):
-      path = "gs://" + path[len(prefix) :]
-      break
+def upload_to_gcs(local_path, gcs_dir):
+  """Uploads a local file to a GCS directory using gsutil."""
+  if not gcs_dir.startswith("gs://"):
+    logger.error(f"GCS path must start with gs://, got: {gcs_dir}")
+    return
 
-  return path
+  # Ensure the directory path ends with a slash for proper gsutil copying
+  if not gcs_dir.endswith("/"):
+    gcs_dir += "/"
+    
+  gcs_dest = f"{gcs_dir}{os.path.basename(local_path)}"
+  logger.info(f"Uploading report to {gcs_dest}...")
+  
+  try:
+    subprocess.run(["gsutil", "cp", local_path, gcs_dest], check=True, capture_output=True, text=True)
+    logger.info("GCS Upload successful.")
+  except subprocess.CalledProcessError as e:
+    logger.error(f"Failed to upload report to GCS: {e.stderr}")
 
 
 def validate_checkpoint(json_config_path):
@@ -47,8 +66,9 @@ def validate_checkpoint(json_config_path):
   # extract the mandatory fields from the json config
   run_name = user_config["run_name"]
   internal_model_name = user_config["maxtext_model_name"]
-  checkpoint_path = sanitize_gcs_path(user_config["checkpoint_gcs_path"])
+  checkpoint_path = user_config["checkpoint_gcs_path"]
   overrides = user_config.get("maxtext_overrides", {})
+  report_gcs_dir = user_config.get("report_gcs_dir")
 
   # raise error if user doesn't provide required fields
   if "tokenizer_path" not in overrides:
@@ -105,7 +125,11 @@ def validate_checkpoint(json_config_path):
 
   with open(output_path, "w", encoding="utf-8") as f:
     json.dump(report, f, indent=4)
-  logger.info(f"Report saved to {output_path}")
+  logger.info(f"Report saved locally to {output_path}")
+
+  # upload to GCS if configured
+  if report_gcs_dir:
+    upload_to_gcs(output_path, report_gcs_dir)
 
 
 if __name__ == "__main__":
