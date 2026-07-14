@@ -88,7 +88,7 @@ class LoraUtilsTest(unittest.TestCase):
     path = lora_utils._get_lora_module_path(mock_config)
     self.assertEqual(
         path,
-        "decoder/layers/(?:[0-9]+/)?.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
+        "decoder/layers(?:_[0-9]+|/[0-9]+)?/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
     )
 
     mock_config.model_name = "gemma4-9b"
@@ -106,7 +106,7 @@ class LoraUtilsTest(unittest.TestCase):
     # Fallback to default
     self.assertEqual(
         path,
-        "decoder/layers/(?:[0-9]+/)?.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
+        "decoder/layers(?:_[0-9]+|/[0-9]+)?/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
     )
 
     mock_config.lora.lora_module_path = "custom/path"
