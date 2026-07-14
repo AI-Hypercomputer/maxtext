@@ -17,14 +17,6 @@ class Concatenate(Operation):
     def __init__(self, dim: int): self.dim = dim
     def __call__(self, tensors): return jnp.concatenate(tensors, axis=self.dim)
 
-class Transpose(Operation):
-    def __init__(self, axes: tuple): self.axes = axes
-    def __call__(self, tensors): return jnp.transpose(tensors[0], self.axes)
-
-class UnstackScanned(Operation):
-    def __init__(self, scan_axis: int = 1): self.scan_axis = scan_axis
-    def __call__(self, tensors): return tuple(jnp.moveaxis(tensors[0], self.scan_axis, 0))
-
 class SliceAxis(Operation):
     def __init__(self, axis: int, index: int):
         self.axis = axis
@@ -34,14 +26,6 @@ class SliceAxis(Operation):
 class Cast(Operation):
     def __init__(self, dtype): self.dtype = dtype
     def __call__(self, tensors): return tensors[0].astype(self.dtype)
-
-class FlattenSpatial(Operation):
-    # Flattens the last two dimensions (num_heads, head_dim) into a single dimension per tensor
-    def __call__(self, tensors):
-        out = []
-        for t in tensors:
-            out.append(t.reshape(*t.shape[:-2], -1))
-        return out
 
 class PadAxes(Operation):
     def __init__(self, pad_specs): self.pad_specs = pad_specs
@@ -210,6 +194,7 @@ class WeightConverter(abc.ABC):
 # ==========================================
 # 4. Registries and Builders
 # ==========================================
+# To replace the legacy transfer_state_with_mappings()
 _MODEL_TO_CONVERSION_RULES = {
     "qwen3": [
         WeightRenaming(r"token_embedder\.embedding", "model.embed_tokens.weight"),
@@ -239,12 +224,16 @@ _MODEL_TO_CONVERSION_RULES = {
         WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.key_norm\.scale", r"model.layers.\1.self_attn.k_norm.weight"),
     ],
 }
+
+
 def _shapes_are_repeatable(candidate_shape, tgt_shape):
     if len(candidate_shape) != len(tgt_shape): return False
     for s, t in zip(candidate_shape, tgt_shape):
         if s > t or t % s != 0: return False
     return True
 
+# To replace the legacy transfer_state_directly()
+# This is an dynamic automatical tree clawer to compute padding, sharding, or concatenation on-the-fly
 def build_converter_rules(src_pytree, target_state) -> list:
     # Unwrap Source
     if isinstance(src_pytree, dict) and 'base' in src_pytree:
