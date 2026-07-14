@@ -225,8 +225,7 @@ jobs:
     needs: [gate_test_run]
     if: |
       always() &&
-      needs.gate_test_run.result == 'success' &&
-      github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      needs.gate_test_run.result == 'success'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
