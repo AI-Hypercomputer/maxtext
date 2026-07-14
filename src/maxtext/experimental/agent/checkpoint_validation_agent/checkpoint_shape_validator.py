@@ -14,22 +14,48 @@ def load_shapes(filepath):
   return shapes
 
 
-ideal = load_shapes("/tmp/ideal_shapes.txt")
-actual = load_shapes("/tmp/actual_shapes.txt")
+# ideal = load_shapes("/tmp/ideal_shapes.txt")
+# actual = load_shapes("/tmp/actual_shapes.txt")
 
-all_keys = sorted(set(ideal.keys()) | set(actual.keys()))
-has_mismatch = False
+# all_keys = sorted(set(ideal.keys()) | set(actual.keys()))
+# has_mismatch = False
 
-for k in all_keys:
-  exp = ideal.get(k, "MISSING")
-  got = actual.get(k, "MISSING")
-  if exp == got:
-    print(f"MATCH: {k} | Expected: {exp} -> Got: {got}")
-  else:
-    print(f"MISMATCH: {k} | Expected: {exp} -> Got: {got}")
-    has_mismatch = True
+# for k in all_keys:
+#   exp = ideal.get(k, "MISSING")
+#   got = actual.get(k, "MISSING")
+#   if exp == got:
+#     print(f"MATCH: {k} | Expected: {exp} -> Got: {got}")
+#   else:
+#     print(f"MISMATCH: {k} | Expected: {exp} -> Got: {got}")
+#     has_mismatch = True
 
-if has_mismatch:
-  print("\nERROR: Structural mismatches found!")
-  sys.exit(1)
-print("\nSUCCESS: All parameters match perfectly.")
+
+# if has_mismatch:
+#   print("\nERROR: Structural mismatches found!")
+#   sys.exit(1)
+# print("\nSUCCESS: All parameters match perfectly.")
+def check_mismatches(ideal, actual):
+  """Compares dictionaries and returns True if mismatches exist."""
+  all_keys = sorted(set(ideal.keys()) | set(actual.keys()))
+  has_mismatch = False
+
+  for k in all_keys:
+    exp = ideal.get(k, "MISSING")
+    got = actual.get(k, "MISSING")
+    if exp == got:
+      print(f"MATCH: {k} | Expected: {exp} -> Got: {got}")
+    else:
+      print(f"MISMATCH: {k} | Expected: {exp} -> Got: {got}")
+      has_mismatch = True
+
+  return has_mismatch
+
+if __name__ == "__main__":
+  ideal_shapes = load_shapes("/tmp/ideal_shapes.txt")
+  actual_shapes = load_shapes("/tmp/actual_shapes.txt")
+
+  if check_mismatches(ideal_shapes, actual_shapes):
+    print("\nERROR: Structural mismatches found!")
+    sys.exit(1)
+
+  print("\nSUCCESS: All parameters match perfectly.")
