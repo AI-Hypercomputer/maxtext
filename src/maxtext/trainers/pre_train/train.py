@@ -29,9 +29,12 @@ from absl import app
 
 import optax
 
+import pathwaysutils  # pylint: disable=unused-import
+from pathwaysutils.debug import watchdog
+
+import tensorflow as tf
+
 import jax
-import pathwaysutils
-pathwaysutils.initialize()
 # Force initialization of JAX platforms (including pathways if JAX_PLATFORMS is set)
 # to register their absl flags before app.run() parses flags.
 try:
@@ -39,10 +42,6 @@ try:
 except Exception as e:  # pylint: disable=broad-except
   import sys
   print(f"WARNING: JAX initialization failed during import: {e}", file=sys.stderr)
-from pathwaysutils.debug import watchdog
-
-import tensorflow as tf
-
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
