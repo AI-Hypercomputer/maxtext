@@ -230,6 +230,7 @@ ModelName = Literal[
     "deepseek3.2-671b",
     "deepseek4-284b",
     "deepseek-custom",
+    "glm5.1-744b",
     "kimi-k2-1t",
     "gemma-7b",
     "gemma-2b",
