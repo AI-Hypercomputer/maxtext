@@ -17,7 +17,7 @@
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
-from maxtext.kernels.ragged.ragged_gather_reduce import ragged_gather_reduce
+from maxtext.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
 
 
 def ring_ragged_sort(
