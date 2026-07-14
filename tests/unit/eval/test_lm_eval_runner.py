@@ -95,16 +95,11 @@ class TestMapResults(unittest.TestCase):
 
 
 _REQUIRED_ARGS = [
-    "--model_name",
-    "llama3.1-8b",
-    "--hf_path",
-    "meta-llama/Llama-3.1-8B",
-    "--base_output_directory",
-    "gs://bucket/",
-    "--run_name",
-    "test_run",
-    "--max_model_len",
-    "4096",
+    "--model_name", "llama3.1-8b",
+    "--hf_path", "meta-llama/Llama-3.1-8B",
+    "--base_output_directory", "gs://bucket/",
+    "--run_name", "test_run",
+    "--max_model_len", "4096",
 ]
 
 

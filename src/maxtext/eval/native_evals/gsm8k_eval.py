@@ -35,10 +35,12 @@ from maxtext.eval.third_party.simple_evals.common import HTML_JINJA
 from maxtext.eval.third_party.simple_evals.mgsm_eval import score_mgsm
 from maxtext.eval.third_party.simple_evals.types import Eval, EvalResult, SamplerBase, SingleEvalResult
 
-# HF-hosted auto-converted parquet for the canonical GSM8K test split (1319 examples).
-DATASET_URL = (
-    "https://huggingface.co/datasets/openai/gsm8k/resolve/refs%2Fconvert%2Fparquet/main/test/0000.parquet"
-)
+# Canonical GSM8K main/test split (1,319 examples). Do not read the Hub's
+# implementation-detail `refs/convert/parquet` URL directly: it can redirect
+# to restricted object storage and fails with HTTP 403 on TPU hosts. The Hub
+# client handles authentication, redirects, Xet storage, and local caching.
+_DATASET_REPO_ID = "openai/gsm8k"
+_TEST_PARQUET_FILENAME = "main/test-00000-of-00001.parquet"
 
 QUERY_TEMPLATE = (
     "Solve this math problem. Give the reasoning steps before giving the final answer on the last line "
@@ -55,12 +57,39 @@ def extract_answer(response_text: str) -> str | None:
   return match.group(1).replace(",", "") if match else None
 
 
+def _load_gsm8k_examples() -> list[dict]:
+  """Download/cache the canonical GSM8K test parquet through HF Hub."""
+  try:
+    from huggingface_hub import hf_hub_download  # pylint: disable=import-outside-toplevel
+  except ImportError as exc:
+    raise ImportError(
+        "GSM8K evaluation requires huggingface_hub. Install it with `pip install huggingface_hub`."
+    ) from exc
+
+  try:
+    parquet_path = hf_hub_download(
+        repo_id=_DATASET_REPO_ID,
+        repo_type="dataset",
+        filename=_TEST_PARQUET_FILENAME,
+    )
+  except Exception as exc:  # pylint: disable=broad-except
+    raise RuntimeError(
+        "Could not download the canonical GSM8K main/test split from Hugging Face. "
+        "Check outbound Hub access and HF_TOKEN for any proxy policy."
+    ) from exc
+
+  df = pandas.read_parquet(parquet_path)
+  examples = [row.to_dict() for _, row in df.iterrows()]
+  if len(examples) != 1319:
+    raise ValueError(f"Expected 1319 GSM8K main/test examples, found {len(examples)}.")
+  return examples
+
+
 class GSM8KEval(Eval):
   """GSM8K eval: zero-shot CoT prompt, gold answer parsed from the '#### N' suffix."""
 
   def __init__(self, num_examples: int | None = None):
-    df = pandas.read_parquet(DATASET_URL)
-    examples = [row.to_dict() for _, row in df.iterrows()]
+    examples = _load_gsm8k_examples()
     for example in examples:
       example["target"] = example["answer"].split("####")[-1].strip().replace(",", "")
     if num_examples:
