@@ -824,12 +824,22 @@ def recover(
 
   while True:
     try:
+      # Extract active array IDs to preserve them during cleanup (for active-state resharding)
+      active_array_ids = set()
+      if active_state is not None:
+        leaves, _ = jax.tree.flatten(active_state)
+        for leaf in leaves:
+          if isinstance(leaf, jax.Array):
+            active_array_ids.add(id(leaf))
+
       # Clear JAX caches and delete live TPU arrays to avoid DATA_LOSS interference
-      # We keep pinned host arrays (snapshots) alive.
+      # We keep pinned host arrays (snapshots) and active state arrays alive.
       _logger.info("Cleaning up JAX caches and live TPU arrays before recovery attempt...")
       jax.clear_caches()
       for array in jax.live_arrays():
         try:
+          if id(array) in active_array_ids:
+            continue
           if hasattr(array.sharding, "memory_kind") and array.sharding.memory_kind == "pinned_host":
             continue
           if any(d.platform == "tpu" for d in array.devices()):
@@ -1124,7 +1134,7 @@ def scale_up(
       jax_device_state,
       python_vars,
       immutable_data,
-      active_state=None,
+      active_state=active_state,
   )
 
 
