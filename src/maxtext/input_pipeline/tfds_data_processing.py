@@ -255,9 +255,12 @@ def make_tfds_train_iterator(
         pack_examples=config.packing,
         hf_access_token=config.hf_access_token,
     )
+    from maxtext.utils import sharding as max_sharding
+    data_sharding = max_sharding.get_input_data_sharding(config, global_mesh)
+    sharding_spec = data_sharding.spec
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(
-        get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path=config.checkpoint_dir
+        get_ds_fn, preprocessing_fn, global_mesh, global_shape, sharding_spec=sharding_spec, checkpoint_path=config.checkpoint_dir, elastic=config.elastic_enabled
     )
 
 
@@ -322,7 +325,10 @@ def make_tfds_eval_iterator(
         pack_examples=config.packing,
         hf_access_token=config.hf_access_token,
     )
+    from maxtext.utils import sharding as max_sharding
+    data_sharding = max_sharding.get_input_data_sharding(config, global_mesh)
+    sharding_spec = data_sharding.spec
     global_shape = (config.global_batch_size_to_load_eval, config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(
-        get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path=config.checkpoint_dir
+        get_ds_fn, preprocessing_fn, global_mesh, global_shape, sharding_spec=sharding_spec, checkpoint_path=config.checkpoint_dir
     )
