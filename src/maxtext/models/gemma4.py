@@ -630,20 +630,32 @@ class Gemma4ScannableBlock(nnx.Module):
           new_y = layer_out[0] if isinstance(layer_out, tuple) else layer_out
           return (new_y, nnx.state(layer)), None
 
-        # Remat the global layer symmetrically with the local layers. The global
-        # layer runs full-sequence (not sliding-window) attention, so it holds the
-        # largest activation residual in the block; leaving it un-rematted would
-        # keep those activations live across all scanned blocks.
+        # Remat the global layer, kept behind the trip-count-one while boundary
+        # below. The boundary bounds its full-sequence-attention activations to one
+        # layer live; without it (blocks are unrolled) XLA co-schedules every
+        # block's backward working set and OOMs.
+        #
+        # Offloaded (pinned-host) residuals cannot cross that boundary: XLA stacks
+        # them over the length-1 scan axis in host memory and unstacks them in the
+        # backward via a squeeze that lowers to a host<->device bitcast, which is
+        # rejected. So the global layer saves would-be-offloaded tensors on device
+        # instead; the local-layer scan (a real multi-iteration scan) still offloads.
+        global_remat_policy = self.remat_policy_fn
+        offload_names = maxtext_utils.get_offload_remat_names(cfg)
+        if offload_names is not None and (offload_names[0] or offload_names[1]):
+          save_names, offload_to_device = offload_names
+          global_remat_policy = jax.checkpoint_policies.save_only_these_names(
+              *(save_names + offload_to_device)
+          )
+
         if self.config.remat_policy != "none":
           prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
           scan_global_layer = jax.checkpoint(
               scan_global_layer,
-              policy=self.remat_policy_fn,
+              policy=global_remat_policy,
               prevent_cse=prevent_cse,
           )
 
-        # Keep the global layer behind a trip-count-one while boundary. This
-        # reduces activation liveness compared with an inlined direct call.
         # Carry state through the loop instead of returning a stacked [1, ...]
         # scan result: slicing that result previously introduced a bitcast
         # between device and pinned-host memory under offload remat.

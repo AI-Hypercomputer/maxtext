@@ -411,36 +411,15 @@ class Decoder(nn.Module):
             "kv_proj",
             "qkv_proj",
         )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
+      elif cfg.remat_policy in ("qkv_proj_offloaded", "minimal_offloaded", "custom"):
+        # minimal_offloaded offloads all except context. All three share a single
+        # source of truth for their save/offload name lists (see
+        # maxtext_utils.get_offload_remat_names) so that offloading configured via
+        # `custom` resolves identically to the named presets.
+        save_names, offload_names = maxtext_utils.get_offload_remat_names(cfg)
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj", "kv_proj"],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "minimal_offloaded":
-        # offload all except context
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=[
-                "query_proj",
-                "value_proj",
-                "key_proj",
-                "kv_proj",
-                "qkv_proj",
-                "out_proj",
-                "mlpwi_0",
-                "mlpwi_1",
-                "mlpwi",
-                "mlpwo",
-            ],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "custom":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=cfg.tensors_to_offload,
+            names_which_can_be_saved=save_names,
+            names_which_can_be_offloaded=offload_names,
             offload_src="device",
             offload_dst="pinned_host",
         )
