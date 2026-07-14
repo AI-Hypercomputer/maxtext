@@ -1261,7 +1261,13 @@ class Decoder(nn.Module):
             if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
               visual_embeds = deepstack_visual_embeds[lyr]
               # Use bidirectional_mask to identify visual token positions
-              bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+              bidirectional_mask_value = None
+              if multimodal_input is not None:
+                bidirectional_mask_value = (
+                    multimodal_input.bidirectional_mask
+                    if multimodal_input.bidirectional_mask is not None
+                    else multimodal_input.bidirectional_mask_video
+                )
               if bidirectional_mask_value is not None and visual_embeds is not None:
                 y = deepstack_process(y, bidirectional_mask_value, visual_embeds)
 
