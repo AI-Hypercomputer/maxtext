@@ -485,7 +485,11 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           lambda x: jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(None, *x.spec)),
           self.prefill_kv_cache_shardings,
       )
-      self.prefill_kv_cache_shardings = {"decoder": {"layers": self.prefill_kv_cache_shardings["decoder"]["layers"][0]}}
+      if "layers" in self.prefill_kv_cache_shardings["decoder"]:
+        first_layer_sharding = self.prefill_kv_cache_shardings["decoder"]["layers"][0]
+      else:
+        first_layer_sharding = self.prefill_kv_cache_shardings["decoder"]["layers_0"]
+      self.prefill_kv_cache_shardings = {"decoder": {"layers": first_layer_sharding}}
     # scan_layers=True is already stacked on axis 0; shardings stay as-is and stack/unstack are no-ops.
     # AR-mode abstract model so axis names use CACHE_BATCH (not CACHE_BATCH_PREFILL);
     # bulk_insert / _insert_jit search for "cache_batch" in the per-leaf logical axes.
@@ -609,10 +613,16 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if self.config.scan_layers:
         # scan_layers already stacks the per-layer KV cache on axis 0; nothing to restack.
         return cache
-      # scan_layers=False: stack the per-layer subtrees under decoder/layers into one
+      # scan_layers=False: stack the per-layer subtrees under decoder into one
       # subtree with a leading layer axis (matching the scan_layers=True shape).
-      layers = cache["decoder"]["layers"]
-      stacked = jax.tree.map(lambda *c: jnp.stack(c), *[layers[i] for i in range(self.config.num_decoder_layers)])
+      if "layers" in cache["decoder"]:
+        layers = cache["decoder"]["layers"]
+        layer_cache = [layers[i] for i in range(self.config.num_decoder_layers)]
+      else:
+        layer_keys = [f"layers_{i}" for i in range(self.config.num_decoder_layers)]
+        layer_cache = [cache["decoder"][key] for key in layer_keys]
+
+      stacked = jax.tree.map(lambda *c: jnp.stack(c), *layer_cache)
       return {"decoder": {"layers": stacked}}
 
     layer_keys = []
@@ -635,8 +645,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         return cache
       # scan_layers=False: split the leading layer axis back into per-layer subtrees.
       stacked = cache["decoder"]["layers"]
-      layers = {i: jax.tree.map(lambda x, i=i: x[i], stacked) for i in range(self.config.num_decoder_layers)}
-      return {"decoder": {"layers": layers}}
+      res_cache = {"decoder": {}}
+      for i in range(self.config.num_decoder_layers):
+        res_cache["decoder"][f"layers_{i}"] = jax.tree.map(lambda x, i=i: x[i], stacked)
+      return res_cache
 
     flat_cache, treedef = jax.tree.flatten(cache)
     layer_cache = [jax.tree.unflatten(treedef, flat_cache_vars) for flat_cache_vars in zip(*flat_cache, strict=True)]

@@ -690,11 +690,11 @@ class NNXDecoder(nnx.Module):
           **layer_kwargs,
       )
     else:
-      self.layers = nnx.List([])
+      self.layers = []
 
   def _init_sequential_layers(self, decoder_block_classes, rngs):
     """Initializes decoder layers sequentially (no scanning)."""
-    self.layers = nnx.List([])
+    self.layers = []
 
     if self.is_deepseek:
       self._init_sequential_deepseek(decoder_block_classes, rngs)
@@ -706,9 +706,9 @@ class NNXDecoder(nnx.Module):
     config = self.config
     dense_cls, moe_cls = decoder_block_classes
     for i in range(config.first_num_dense_layers):
-      self._create_and_register_layer(dense_cls, rngs, "dense_layer", i)
+      self._create_and_register_named_layer(dense_cls, rngs, "dense_layers", i)
     for i in range(config.num_decoder_layers - config.first_num_dense_layers):
-      self._create_and_register_layer(moe_cls, rngs, "moe_layer", i)
+      self._create_and_register_named_layer(moe_cls, rngs, "moe_layers", i)
 
   def _init_sequential_generic(self, decoder_block_classes, rngs):
     """Initializes sequential generic decoder layers with per-architecture layer_kwargs."""
@@ -736,7 +736,7 @@ class NNXDecoder(nnx.Module):
       elif config.decoder_block == DecoderBlockType.OLMO3:
         layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
 
-      self._create_and_register_layer(layer_cls, rngs, "layers", lyr, **layer_kwargs)
+      self._create_and_register_named_layer(layer_cls, rngs, "layers", lyr, **layer_kwargs)
 
   def _init_gemma4_small_layers(self, rngs):
     """Eagerly builds the Gemma4-small (E2B/E4B) per-layer-input embedder and one DISTINCT
@@ -749,7 +749,7 @@ class NNXDecoder(nnx.Module):
     ``_create_and_register_layer``.
     """
     cfg = self.config
-    self.layers = nnx.List([])
+    self.layers = []
     # Only register the PLE submodule when it exists (mirrors the optional position_embedder
     # pattern); assigning None first would make nnx treat the attribute as static.
     if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
@@ -767,7 +767,6 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
       )
       setattr(self, f"layers_{lyr}", layer)
-      self.layers.append(layer)
 
   def _get_pipeline_stage_module(self, decoder_blocks, rngs):
     """Retrieves the wrapper module formatted for single pipeline stage execution."""
@@ -1861,7 +1860,15 @@ class NNXDecoder(nnx.Module):
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
-        for lyr, layer in enumerate(self.layers):
+        for lyr in range(cfg.num_decoder_layers):
+          if self.is_deepseek:
+            if lyr < cfg.first_num_dense_layers:
+              layer = getattr(self, f"dense_layers_{lyr}")
+            else:
+              moe_idx = lyr - cfg.first_num_dense_layers
+              layer = getattr(self, f"moe_layers_{moe_idx}")
+          else:
+            layer = getattr(self, f"layers_{lyr}", self.layers[lyr] if hasattr(self, "layers") and self.layers else None)
           graphdef, state = nnx.split(layer)
           if kv_caches is not None:
             if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):

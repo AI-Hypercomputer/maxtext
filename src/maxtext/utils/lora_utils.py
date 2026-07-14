@@ -433,10 +433,10 @@ def _get_lora_module_path(mt_config: pyconfig.HyperParameters) -> str:
 
   raw_path = lora_configs.get(matched_key, "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))")
 
-  # This regex makes the layer index optional, matching both scanned and unscanned layer paths
-  # (e.g. 'layers/0/mlp/...' vs 'layers/mlp/...').
-  optional_layer_index = "(?:[0-9]+/)?"
-  final_path = str(raw_path).replace("layers/", f"layers/{optional_layer_index}")
+  # This regex makes the layer index optional, matching scanned, unscanned named (layers_0),
+  # and unscanned index (layers/0) layer paths.
+  layer_pattern = r"layers(?:_[0-9]+|/[0-9]+)?/"
+  final_path = str(raw_path).replace("layers/", layer_pattern)
 
   max_logging.log(f"Using lora_module_path: {final_path}")
   return final_path
