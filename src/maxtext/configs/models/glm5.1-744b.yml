@@ -45,6 +45,7 @@ decoder_block: "deepseek"
 
 # Multi-head Latent Attention (MLA)
 attention_type: "mla"
+attention: "dot_product"
 q_lora_rank: 2048
 kv_lora_rank: 512
 qk_nope_head_dim: 192
