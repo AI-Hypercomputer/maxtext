@@ -6,38 +6,40 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
 from maxtext import pyconfig
-#from maxtext.models import get_model
 from maxtext.models.models import transformer_as_linen
 
 
-def run_mock_forward(checkpoint_path, model_name):
+def run_mock_forward(checkpoint_path, model_name, *overrides):
   """Initializes the model abstractly and dry-runs a forward pass."""
-  # minimal config to load the model and run a pass
+  # minimal config required to bypass distributed TPU checks
   config_args = [
       f"model_name={model_name}",
       f"load_parameters_path={checkpoint_path}",
-      "batch_size=1",
-      "max_target_length=128",
-      "scan_layers=false",
       "skip_jax_distributed_system=true",
   ]
 
-  # initialize pyconfig (extra [] argument not supported)
-  # pyconfig.initialize(config_args)
+  # append all dynamic overrides passed from Airflow
+  config_args.extend(overrides)
+
   # capture returned configuration object
   config = pyconfig.initialize(config_args)
 
   print(f"Loading model from {checkpoint_path}...")
-  #model = get_model(pyconfig.config, mesh=None)
   # create a dummy 1-device hardware mesh using pod's single CPU
   dummy_mesh = Mesh(np.array(jax.devices()), ('data',))
   # pass dummy_mesh instead of None
   model = transformer_as_linen(config, mesh=dummy_mesh, quant=None)
 
+  # dynamically generate tensor shapes based on the parsed config
+  batch_size = int(config.per_device_batch_size) if config.per_device_batch_size else 1
+  seq_len = int(config.max_target_length) if config.max_target_length else 128
+
+  print(f"Generating mock tensors with shape: ({batch_size}, {seq_len})")
+
   # run a single dummy pass
-  mock_input = jnp.zeros((1, 128), dtype=jnp.int32)
-  mock_positions = jnp.zeros((1, 128), dtype=jnp.int32)
-  mock_segment_ids = jnp.zeros((1, 128), dtype=jnp.int32)
+  mock_input = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+  mock_positions = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+  mock_segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
 
   print("Executing forward pass...")
   # tracing full traceback without try/except block
@@ -54,4 +56,5 @@ def run_mock_forward(checkpoint_path, model_name):
   print(f"SUCCESS: Model architecture is stable. Output shape: {out_shape}")
 
 if __name__ == "__main__":
-  run_mock_forward(sys.argv[1], sys.argv[2])
+  # sys.argv[1] is checkpoint, sys.argv[2] is model_name, sys.argv[3:] captures any overrides
+  run_mock_forward(sys.argv[1], sys.argv[2], *sys.argv[3:])
