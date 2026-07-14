@@ -824,12 +824,16 @@ def recover(
 
   while True:
     try:
-      # Clear JAX caches and delete live arrays to avoid DATA_LOSS interference
-      _logger.info("Cleaning up JAX caches and live arrays before recovery attempt...")
+      # Clear JAX caches and delete live TPU arrays to avoid DATA_LOSS interference
+      # We keep pinned host arrays (snapshots) alive.
+      _logger.info("Cleaning up JAX caches and live TPU arrays before recovery attempt...")
       jax.clear_caches()
       for array in jax.live_arrays():
         try:
-          array.delete()
+          if hasattr(array.sharding, "memory_kind") and array.sharding.memory_kind == "pinned_host":
+            continue
+          if any(d.platform == "tpu" for d in array.devices()):
+            array.delete()
         except Exception as e:
           _logger.debug("Failed to delete array during cleanup: %s", e)
 
