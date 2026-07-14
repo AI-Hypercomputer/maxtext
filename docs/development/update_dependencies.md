@@ -80,7 +80,7 @@ overrides. You will need to do this separately for the TPU and GPU environments.
 
 ### TPU Pre-Training
 
-> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-requirements.txt` in the repository was generated using JAX build commit hash: [efd6cf797ee9c4f29c6c6d5e91ae4432209063be](https://github.com/jax-ml/jax/commit/efd6cf797ee9c4f29c6c6d5e91ae4432209063be). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
+> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-requirements.txt` in the repository was generated using JAX build commit hash: [31c559c7744105009f5d5fcfc3919e505db37f8b](https://github.com/jax-ml/jax/commit/31c559c7744105009f5d5fcfc3919e505db37f8b). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
 
 If you have made changes to TPU pre-training dependencies in `src/dependencies/requirements/base_requirements/tpu-requirements.txt`, you need to regenerate the pinned pre-training requirements in `generated_requirements/` directory. Run the following command, replacing `<jax-build-commit-hash>` with the hash you copied in the previous step:
 
@@ -89,7 +89,7 @@ bash src/dependencies/scripts/generate_requirements.sh \
 --base-requirements src/dependencies/requirements/base_requirements/tpu-requirements.txt \
 --generated-requirements tpu-requirements.txt \
 --override-requirements src/dependencies/extra_deps/tpu_overrides.txt \
---seed-commit efd6cf797ee9c4f29c6c6d5e91ae4432209063be
+--seed-commit 31c559c7744105009f5d5fcfc3919e505db37f8b
 
 # Copy generated requirements to src/dependencies/requirements/generated_requirements
 mv generated_artifacts/python3_12/tpu-requirements.txt \

@@ -320,11 +320,9 @@ def get_maxtext_model_info(config):
   # Get abstract model structure (name, shape) without materializing the weights to save memory
   abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
 
-  abstract_params_flat, abstract_params_treedef = (
-      jax.tree_util.tree_flatten_with_path(
-          abstract_params_tree,
-          is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
-      )
+  abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
+      abstract_params_tree,
+      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
   )
 
   max_logging.log("MaxText abstract model and state initialized.")
@@ -1072,6 +1070,7 @@ def main(
       simulated_cpu_devices_count,
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
+      config=config,
   )
 
   print_ram_usage("Program Ends")

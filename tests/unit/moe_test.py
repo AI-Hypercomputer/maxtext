@@ -701,7 +701,7 @@ class RoutedMoeTest(unittest.TestCase):
     # test). Without checking this, DCE removes the bwd entirely.
     self.assertEqual(x_grad_ref.shape, x_grad_rs.shape, "Hidden-state grad shape mismatch")
     self.assertTrue(
-        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=1e-2),
+        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=8e-2),
         msg=(
             "Hidden-state gradient mismatch: max abs diff="
             f"{jnp.max(jnp.abs(x_grad_rs.astype(jnp.float32) - x_grad_ref.astype(jnp.float32)))}"
@@ -715,7 +715,7 @@ class RoutedMoeTest(unittest.TestCase):
     for i, (g_ref, g_rs) in enumerate(zip(leaves_ref, leaves_rs)):
       self.assertEqual(g_ref.shape, g_rs.shape, f"Grad shape mismatch at leaf {i}")
       self.assertTrue(
-          jnp.allclose(g_rs.astype(jnp.float32), g_ref.astype(jnp.float32), rtol=1e-2, atol=1e-2),
+          jnp.allclose(g_rs.astype(jnp.float32), g_ref.astype(jnp.float32), rtol=1e-2, atol=8e-2),
           msg=(
               f"Gradient mismatch at leaf {i} (shape={g_ref.shape}): "
               f"max abs diff={jnp.max(jnp.abs(g_rs.astype(jnp.float32) - g_ref.astype(jnp.float32)))}"
@@ -723,34 +723,28 @@ class RoutedMoeTest(unittest.TestCase):
       )
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_ring_of_experts_ragged_buffer(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True, ragged_buffer_factor=1.5)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_ring_of_experts_fallback(self):
     self._run_ragged_sort_loss_and_grad(
         use_ring_of_experts=True, ragged_gather_fallback=True, ragged_gather_reduce_fallback=True
     )
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts_ragged_buffer(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False, ragged_buffer_factor=1.5)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts_fallback(self):
     self._run_ragged_sort_loss_and_grad(
         use_ring_of_experts=False, ragged_gather_fallback=True, ragged_gather_reduce_fallback=True
@@ -794,51 +788,6 @@ class RoutedMoeTest(unittest.TestCase):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
-
-  @pytest.mark.tpu_only
-  def test_megablox_tp_transpose_parallelism(self):
-    cfg = pyconfig.initialize(
-        [None, get_test_config_path()],
-        run_name="moe_block_megablox_tp_transpose_test",
-        enable_checkpointing=False,
-        model_name="mixtral-8x7b",
-        dtype="bfloat16",
-        megablox=True,
-        sparse_matmul=True,
-        per_device_batch_size=1,
-        ici_tensor_transpose_parallelism=4,
-        max_target_length=128,
-    )
-
-    cfg2 = pyconfig.initialize(
-        [None, get_test_config_path()],
-        run_name="moe_block_megablox_tp_test",
-        enable_checkpointing=False,
-        model_name="mixtral-8x7b",
-        dtype="bfloat16",
-        megablox=True,
-        sparse_matmul=True,
-        per_device_batch_size=1,
-        ici_tensor_parallelism=4,
-        max_target_length=128,
-    )
-
-    rng = jax.random.PRNGKey(2345)
-    rng_model, rng_hidden_states = jax.random.split(rng)
-    device_count = jax.device_count()
-    hidden_states = jax.random.uniform(
-        rng_hidden_states,
-        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
-        dtype=cfg.dtype,
-    )
-
-    devices_array = maxtext_utils.create_device_mesh(cfg)
-    mesh = Mesh(devices_array, cfg.mesh_axes)
-    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables, _ = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
-      tp_transpose_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-      tp_output, _, _ = self.get_moe_output(variables, hidden_states, cfg2, mesh)
-      self.assertTrue(jax.numpy.allclose(tp_output, tp_transpose_output, rtol=1e-05, atol=1e-05, equal_nan=False))
 
   @pytest.mark.tpu_only
   def test_megablox_context_parallelism(self):

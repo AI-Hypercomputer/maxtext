@@ -248,14 +248,14 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Skipping jax distributed system since its not needed for single controller.")
     if raw_keys["enable_multi_tier_checkpointing"]:
       max_logging.log("Initializing multi-tier checkpointing for single controller...")
+      mtc_init_kwargs = elastic_utils.single_controller_mtc_init_kwargs(raw_keys)
       initialize_multi_tier_checkpointing(
           local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
           backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
           run_name=raw_keys["run_name"],
           jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
-          data_parallelism=raw_keys["mtc_data_parallelism"],
-          num_slices=raw_keys["num_slices"],
           use_colocated_python=True,
+          **mtc_init_kwargs,
       )
     return
   if jax.distributed.is_initialized():
@@ -336,8 +336,8 @@ def initialize_jax_for_gpu(raw_keys):
 
     jax.distributed.initialize(
         coordinator_address=f"{coordinator_ip}:{coordinator_port}",
-        num_processes=int(os.getenv("NNODES")),
-        process_id=int(os.getenv("NODE_RANK")),
+        num_processes=int(os.getenv("NNODES")),  # pyrefly: ignore[bad-argument-type]
+        process_id=int(os.getenv("NODE_RANK")),  # pyrefly: ignore[bad-argument-type]
         initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
         local_device_ids=devices,
     )
@@ -349,16 +349,16 @@ def initialize_jax_for_cpu(raw_keys):
   coordinator_ip_address = get_coordinator_ip_address()
   coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port used in XPK
   # Env variables to be set in XPK or otherwise
-  job_index = int(os.environ.get("JOB_INDEX"))
-  job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))
-  processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))
+  job_index = int(os.environ.get("JOB_INDEX"))  # pyrefly: ignore[bad-argument-type]
+  job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))  # pyrefly: ignore[bad-argument-type]
+  processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))  # pyrefly: ignore[bad-argument-type]
   pid = job_index * processes_in_job + job_completion_index
   max_logging.log(f" Jax process id is {pid} ")
   # Explicit initialize is needed only for CPUs
   jax.distributed.initialize(
       coordinator_address=coordinator_address,
       process_id=pid,
-      num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
+      num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),  # pyrefly: ignore[bad-argument-type]
       initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
   )
 
@@ -444,7 +444,7 @@ def get_coordinator_ip_address():
     max_coordinator_lookups = 50
     while not coordinator_found and lookup_attempt <= max_coordinator_lookups:
       try:
-        coordinator_ip_address = socket.gethostbyname(coordinator_address)
+        coordinator_ip_address = socket.gethostbyname(coordinator_address)  # pyrefly: ignore[bad-argument-type]
         coordinator_found = True
       except socket.gaierror:
         max_logging.log(
@@ -676,7 +676,7 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
   log_z = jnp.squeeze(jnp.log(sum_exp) + max_logit, axis=-1)
   total_z_loss = z_loss * jax.lax.square(log_z)
   loss += total_z_loss
-  return (loss, total_z_loss), (
+  return (loss, total_z_loss), (  # pyrefly: ignore[bad-return]
       logits,
       targets,
       z_loss,
@@ -698,11 +698,11 @@ def _cross_entropy_with_logits_bwd(
     g: tuple[jnp.ndarray, jnp.ndarray],
 ) -> tuple[jnp.ndarray, None, None]:
   """Backward-mode of `cross_entropy_with_logits`."""
-  g = g[0]  # Ignore z_loss component as that is only used for logging.
+  g = g[0]  # Ignore z_loss component as that is only used for logging.  # pyrefly: ignore[bad-assignment]
   logits, targets, z_loss, exp_shifted, sum_exp, log_z = res
   # z-loss term adds the (2 * z_loss * log_z) factor.
   deriv = jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * exp_shifted / sum_exp - targets
-  g_logits = jnp.expand_dims(g, axis=-1) * deriv
+  g_logits = jnp.expand_dims(g, axis=-1) * deriv  # pyrefly: ignore[bad-argument-type]
 
   return (
       jnp.asarray(g_logits, logits.dtype),
@@ -1185,6 +1185,22 @@ def print_non_trivial_mesh_axis(mesh):
       print(f"{mesh_axis}: {axis_size}", flush=True)
 
 
+def bootstrap_transformer_engine_cgemm(config):
+  """Potentially initialize NCCL communicators for Collective GEMM operations if
+  the environment is distributed and has the appropriate config."""
+  import transformer_engine.jax.cpp_extensions as tex  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+  tsp_size = config.ici_tensor_sequence_parallelism * config.dcn_tensor_sequence_parallelism
+
+  # Setup NCCL buffers for GPU Collective GEMM operations
+  tex.collective_gemm_bootstrap(
+      jax.device_count(),
+      jax.local_device_count(),
+      jax.process_index(),
+      tsp_size,
+  )
+
+
 @contextmanager
 def maybe_get_transformer_engine_context(config):
   """Runs a transformer engine context engine manager for GPUs only."""
@@ -1212,9 +1228,9 @@ def transformer_engine_context():
     mesh_resource = MeshResource(  # pytype: disable=wrong-arg-types
         dp_resource="data",
         tp_resource="tensor",
-        # tpsp_resource = "tensor_sequence", #TODO(Phuong): add this back when upstreaming CGEMM
+        tpsp_resource="tensor_sequence",
         fsdp_resource="fsdp",
-        pp_resource=None,
+        pp_resource=None,  # pyrefly: ignore[bad-argument-type]
         cp_resource="context",
     )
     with global_shard_guard(mesh_resource):

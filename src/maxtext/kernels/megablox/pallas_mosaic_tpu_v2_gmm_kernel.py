@@ -210,7 +210,7 @@ class GmmConfigs:
 
   @property
   def num_quant_blocks_per_tile_k(self) -> int:
-    return pl.cdiv(self.tiles.tile_k, self.rhs_cfgs.quant_block_size)
+    return pl.cdiv(self.tiles.tile_k, self.rhs_cfgs.quant_block_size)  # pyrefly: ignore[no-matching-overload]
 
   @property
   def out_size_n(self) -> int:
@@ -253,7 +253,7 @@ class IndexMaps:
     # Simply multiplying k_id by num_quant_blocks_per_tile_k will not work
     # since a single quant block could be shared along multiple k tile.
     k_row = k_id * self.cfgs.tiles.tile_k
-    b_row = k_row // self.cfgs.rhs_cfgs.quant_block_size
+    b_row = k_row // self.cfgs.rhs_cfgs.quant_block_size  # pyrefly: ignore[unsupported-operation]
     b_tile_id = b_row // self.cfgs.num_quant_blocks_per_tile_k
     return (group_id, b_tile_id, 0, n_id)
 
@@ -420,8 +420,8 @@ def inner_kernel(
 
         acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size), dtype=acc_ref.dtype)
         for b_id in range(cfgs.num_quant_blocks_per_tile_k):
-          start_k = b_id * rhs_qbs
-          end_k = start_k + rhs_qbs
+          start_k = b_id * rhs_qbs  # pyrefly: ignore[unsupported-operation]
+          end_k = start_k + rhs_qbs  # pyrefly: ignore[unsupported-operation]
 
           block_acc = jnp.matmul(
               tiled_lhs[:, start_k:end_k],
@@ -458,8 +458,8 @@ def inner_kernel(
         col_size = end_n - start_n
 
         acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size), dtype=acc_ref.dtype)
-        for start_k in range(0, cfgs.tiles.tile_k, q_block_size):
-          end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)
+        for start_k in range(0, cfgs.tiles.tile_k, q_block_size):  # pyrefly: ignore[bad-argument-type]
+          end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)  # pyrefly: ignore[unsupported-operation]
 
           block_lhs = tiled_lhs[:, start_k:end_k]
           block_rhs = tiled_rhs[start_k:end_k, start_n:end_n]
@@ -493,7 +493,7 @@ def inner_kernel(
 
           # Apply rhs subchannel scale per quant block.
           if cfgs.rhs_cfgs.should_dequantize_after_matmul:
-            b_id = start_k // cfgs.rhs_cfgs.quant_block_size
+            b_id = start_k // cfgs.rhs_cfgs.quant_block_size  # pyrefly: ignore[unsupported-operation]
             rhs_scale_slice = tiled_rhs_ref.get_scale()
             block_acc *= rhs_scale_slice[b_id, :, start_n:end_n].astype(acc_ref.dtype)
 
@@ -510,7 +510,7 @@ def inner_kernel(
         tiled_rhs_bias = tiled_rhs_ref.get_bias()
         acc += tiled_rhs_bias.astype(acc.dtype)
       if cfgs.has_partial_sum:
-        ps_tile = tiled_ps_ref[...].reshape(acc.shape)
+        ps_tile = tiled_ps_ref[...].reshape(acc.shape)  # pyrefly: ignore[unsupported-operation]
         acc += ps_tile.astype(acc.dtype)
 
       acc = apply_act_fn(acc, cfgs.fuse_act)
@@ -829,8 +829,8 @@ def kernel_main(
   if cfgs.zero_init:
     zero_size = zero_out_start(
         out_ref,
-        zero_ref,
-        semaphore_ref,
+        zero_ref,  # pyrefly: ignore[bad-argument-type]
+        semaphore_ref,  # pyrefly: ignore[bad-argument-type]
         metadata_ref,
         num_gm,
         dims=cfgs.dims,
@@ -840,7 +840,7 @@ def kernel_main(
 
   if cfgs.fuse_act is not None:
     rhs_up_ref = jax.tree.map(lambda x: x.at[..., cfgs.out_size_n :], rhs_ref)
-    rhs_ref = FusedWeightsRef(gate=rhs_ref, up=rhs_up_ref)
+    rhs_ref = FusedWeightsRef(gate=rhs_ref, up=rhs_up_ref)  # pyrefly: ignore[bad-assignment]
 
     rhs_spec = FusedWeightsRef(
         gate=rhs_spec,
@@ -866,7 +866,7 @@ def kernel_main(
   pipeline_fn(lhs_in, rhs_ref, ps_in, out_in, scratches=scratches)
 
   if cfgs.zero_init:
-    zero_out_end(out_ref, semaphore_ref, zero_size, dims=cfgs.dims)
+    zero_out_end(out_ref, semaphore_ref, zero_size, dims=cfgs.dims)  # pyrefly: ignore[bad-argument-type, unbound-name]
 
 
 def calculate_tiling(
@@ -909,7 +909,7 @@ def calculate_tiling(
     tile_n_limit //= fuse_act_factor
 
   def _is_tile_k_quant_block_compatible(tk: int) -> bool:
-    if tk % rhs_cfgs.quant_block_size != 0 and rhs_cfgs.quant_block_size % tk != 0:
+    if tk % rhs_cfgs.quant_block_size != 0 and rhs_cfgs.quant_block_size % tk != 0:  # pyrefly: ignore[unsupported-operation]
       return False
     return True
 
@@ -1046,7 +1046,7 @@ def get_cost_estimate(cfgs: GmmConfigs):
   rhs_size = dims.size_group * dims.size_k * dims.size_n
   rhs_bytes = rhs_size * rhs_bits // 8
   if cfgs.rhs_cfgs.has_scale:
-    num_quant_blocks = pl.cdiv(dims.size_k, cfgs.rhs_cfgs.quant_block_size)
+    num_quant_blocks = pl.cdiv(dims.size_k, cfgs.rhs_cfgs.quant_block_size)  # pyrefly: ignore[no-matching-overload]
     rhs_bytes += dims.size_group * num_quant_blocks * dims.size_n * fp32_bytes
   if cfgs.rhs_cfgs.has_bias:
     rhs_bytes += dims.size_group * dims.size_n * fp32_bytes
@@ -1113,14 +1113,14 @@ def make_gmm_configs(
   lhs_q_dtype = None
   if maybe_quantize_lhs and rhs_cfgs.should_dequantize_after_matmul:
     # Choose lhs quantization dtype based on TPU hardware support.
-    is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
+    is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)  # pyrefly: ignore[bad-argument-type]
     tpu_info = pltpu.get_tpu_info()
     # Check if there is hardware compute support for rhs dtype group.
     if tpu_info.fp8_ops_per_second > 0:
       # Special handling for 4-bit integer rhs as it can be converted to fp8
       # without a numeric issues. Note that this is not the case for 4-bit
       # floating rhs as conversion to int8 will cause numeric issues.
-      is_rhs_4bits = jax.dtypes.itemsize_bits(rhs_quant_dtype) == 4
+      is_rhs_4bits = jax.dtypes.itemsize_bits(rhs_quant_dtype) == 4  # pyrefly: ignore[bad-argument-type]
       if is_rhs_float or is_rhs_4bits:
         lhs_q_dtype = jnp.float8_e4m3fn.dtype
     if tpu_info.int8_ops_per_second > 0:
@@ -1199,7 +1199,7 @@ def gmm_v2(
     partial_sum: jax.Array | None = None,  # [size_m, size_n]
     group_offset: jax.Array | None = None,  # int32[1]
     *,
-    tile_info: TileSizes | TileFn = calculate_tiling,
+    tile_info: TileSizes | TileFn = calculate_tiling,  # pyrefly: ignore[bad-function-definition]
     vmem_limit_bytes: int | None = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
@@ -1348,7 +1348,7 @@ def gmm_v2(
           num_scalar_prefetch=2,
           in_specs=in_specs,
           out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
-          scratch_shapes=scratch_shapes,
+          scratch_shapes=scratch_shapes,  # pyrefly: ignore[bad-argument-type]
       ),
       compiler_params=pltpu.CompilerParams(
           vmem_limit_bytes=vmem_limit_bytes,

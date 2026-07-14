@@ -42,7 +42,6 @@ ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 ici_sequence_parallelism: 1
 ici_context_parallelism: 1
-ici_tensor_transpose_parallelism: 1
 ici_tensor_sequence_parallelism: 1
 ici_autoregressive_parallelism: 1
 ici_fsdp_parallelism: -1
@@ -57,7 +56,6 @@ dcn_pipeline_parallelism: 1
 dcn_expert_parallelism: 1
 dcn_sequence_parallelism: 1
 dcn_context_parallelism: 1
-dcn_tensor_transpose_parallelism: 1
 dcn_tensor_sequence_parallelism: 1
 dcn_autoregressive_parallelism: 1
 dcn_fsdp_parallelism: 1

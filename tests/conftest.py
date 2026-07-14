@@ -115,6 +115,7 @@ if os.getenv("JAX_PLATFORMS") == "proxy":
   import maxtext  # pylint: disable=unused-import
 
 from maxtext.common.gcloud_stub import is_decoupled
+from tests.utils.newly_added_detection import get_changed_tests
 
 # Configure JAX to use unsafe_rbg PRNG implementation to match main scripts.
 if is_decoupled():
@@ -149,6 +150,15 @@ def pytest_collection_modifyitems(config, items):
   - Deselect tests marked as external_serving/training in decoupled mode.
   - Mark remaining tests with the `decoupled` marker when running decoupled.
   """
+
+  changed_tests = get_changed_tests()  # set[(file_path, test_name)]
+  if changed_tests:
+    for item in items:
+      item_file = item.nodeid.split("::", 1)[0]
+      base_name = getattr(item, "originalname", item.name)
+      if (item_file, base_name) in changed_tests or (item_file, item.name) in changed_tests:
+        item.add_marker(pytest.mark.newly_added)
+
   decoupled = is_decoupled()
   remaining = []
   deselected = []
@@ -199,6 +209,7 @@ def pytest_configure(config):
       "external_training: goodput integrations",
       "decoupled: marked on tests that are not skipped due to GCP deps, when DECOUPLE_GCLOUD=TRUE",
       "skip_on_tpu7x: skip test if running on TPU7x platform",
+      "newly_added: newly introduced or modified tests in PRs, executed even if scheduled_only",
   ]:
     config.addinivalue_line("markers", m)
 

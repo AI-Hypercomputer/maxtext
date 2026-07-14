@@ -25,9 +25,12 @@ on:
           Test flavor (
             tpu-unit, tpu-integration,
             tpu-post-training-unit, tpu-post-training-integration,
+            tpu7x-unit, tpu7x-integration,
+            tpu7x-post-training-unit, tpu7x-post-training-integration,
             gpu-unit, gpu-integration,
             cpu-unit,
-            cpu-post-training-unit
+            cpu-post-training-unit,
+            cpu-torch-reference
           )
         required: true
         type: string
@@ -120,10 +123,15 @@ jobs:
           "tpu-integration": "tpu",
           "tpu-post-training-unit": "tpu",
           "tpu-post-training-integration": "tpu",
+          "tpu7x-unit": "tpu",
+          "tpu7x-integration": "tpu",
+          "tpu7x-post-training-unit": "tpu",
+          "tpu7x-post-training-integration": "tpu",
           "gpu-unit": "cuda12",
           "gpu-integration": "cuda12",
           "cpu-unit": "cpu",
-          "cpu-post-training-unit": "cpu"
+          "cpu-post-training-unit": "cpu",
+          "cpu-torch-reference": "cpu"
         }')[inputs.flavor] }}
 
       device_name: >-
@@ -132,10 +140,15 @@ jobs:
           "tpu-integration": "v6e-4",
           "tpu-post-training-unit": "v6e-4",
           "tpu-post-training-integration": "v6e-4",
+          "tpu7x-unit": "tpu7x-8",
+          "tpu7x-integration": "tpu7x-8",
+          "tpu7x-post-training-unit": "tpu7x-8",
+          "tpu7x-post-training-integration": "tpu7x-8",
           "gpu-unit": "a100-40gb-4",
           "gpu-integration": "a100-40gb-4",
           "cpu-unit": "X64",
-          "cpu-post-training-unit": "X64"
+          "cpu-post-training-unit": "X64",
+          "cpu-torch-reference": "X64"
         }')[inputs.flavor] }}
 
       cloud_runner: >-
@@ -144,10 +157,15 @@ jobs:
           "tpu-integration": "linux-x86-ct6e-180-4tpu",
           "tpu-post-training-unit": "linux-x86-ct6e-180-4tpu",
           "tpu-post-training-integration": "linux-x86-ct6e-180-4tpu",
+          "tpu7x-unit": "linux-x86-tpu7x-224-4tpu",
+          "tpu7x-integration": "linux-x86-tpu7x-224-4tpu",
+          "tpu7x-post-training-unit": "linux-x86-tpu7x-224-4tpu",
+          "tpu7x-post-training-integration": "linux-x86-tpu7x-224-4tpu",
           "gpu-unit": "linux-x86-a2-48-a100-4gpu",
           "gpu-integration": "linux-x86-a2-48-a100-4gpu",
           "cpu-unit": "linux-x86-n2-32",
-          "cpu-post-training-unit": "linux-x86-n2-32"
+          "cpu-post-training-unit": "linux-x86-n2-32",
+          "cpu-torch-reference": "linux-x86-n2-32"
         }')[inputs.flavor] }}
       # Pytest Marker Mapping
       pytest_marker: >-
@@ -156,10 +174,15 @@ jobs:
             "tpu-integration": "not cpu_only and not gpu_only and integration_test and not post_training",
             "tpu-post-training-unit": "not cpu_only and not gpu_only and not integration_test and post_training",
             "tpu-post-training-integration": "not cpu_only and not gpu_only and integration_test",
+            "tpu7x-unit": "not cpu_only and not gpu_only and not integration_test and not post_training",
+            "tpu7x-integration": "not cpu_only and not gpu_only and integration_test and not post_training",
+            "tpu7x-post-training-unit": "not cpu_only and not gpu_only and not integration_test and post_training",
+            "tpu7x-post-training-integration": "not cpu_only and not gpu_only and integration_test",
             "gpu-unit": "not cpu_only and not tpu_only and not integration_test and not post_training",
             "gpu-integration": "not cpu_only and not tpu_only and integration_test and not post_training",
             "cpu-unit": "cpu_only and not post_training",
-            "cpu-post-training-unit": "cpu_only and post_training"
+            "cpu-post-training-unit": "cpu_only and post_training",
+            "cpu-torch-reference": "not post_training"
           }')[inputs.flavor] }}
 
       pytest_addopts: >-
@@ -168,10 +191,15 @@ jobs:
             "tpu-integration": "",
             "tpu-post-training-unit": "tests/post_training/unit tests/unit",
             "tpu-post-training-integration": "tests/post_training/integration",
+            "tpu7x-unit": "",
+            "tpu7x-integration": "",
+            "tpu7x-post-training-unit": "tests/post_training/unit tests/unit",
+            "tpu7x-post-training-integration": "tests/post_training/integration",
             "gpu-unit": "",
             "gpu-integration": "",
             "cpu-unit": "",
-            "cpu-post-training-unit": "tests/post_training/unit tests/unit"
+            "cpu-post-training-unit": "tests/post_training/unit tests/unit",
+            "cpu-torch-reference": ""
           }')[inputs.flavor] }}
 
       pytest_extra_args: >-
@@ -180,10 +208,15 @@ jobs:
             "tpu-integration": "--ignore=tests/post_training",
             "tpu-post-training-unit": "",
             "tpu-post-training-integration": "",
+            "tpu7x-unit": "--ignore=tests/post_training",
+            "tpu7x-integration": "--ignore=tests/post_training",
+            "tpu7x-post-training-unit": "",
+            "tpu7x-post-training-integration": "",
             "gpu-unit": "--ignore=tests/post_training",
             "gpu-integration": "--ignore=tests/post_training",
             "cpu-unit": "--ignore=tests/post_training",
-            "cpu-post-training-unit": ""
+            "cpu-post-training-unit": "",
+            "cpu-torch-reference": "-o addopts= -rf --import-mode=importlib --strict-markers tests/unit/gemma4_layers_test.py tests/unit/gemma4_small_layers_test.py tests/unit/qwen3_next_vs_reference_test.py tests/unit/qwen3_5_layers_test.py tests/unit/qwen3_omni_layers_test.py"
           }')[inputs.flavor] }}
         ${{ inputs.additional_pytest_args }}
 
@@ -204,3 +237,4 @@ jobs:
       total_workers: ${{ fromJSON(needs.setup-parameters.outputs.total_workers) }}
       maxtext_sha: ${{ inputs.maxtext_sha }}
       is_update_hlo: ${{ inputs.is_update_hlo }}
+      install_torch_cpu: ${{ inputs.flavor == 'cpu-torch-reference' }}

@@ -74,6 +74,11 @@ on:
         required: false
         type: boolean
         default: false
+      install_torch_cpu:
+        description: 'Install CPU-only torch for layer-wise reference tests'
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -100,6 +105,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: ${{ inputs.maxtext_sha }}
+          fetch-depth: 0
       - name: Download the maxtext wheel
         if: ${{ !inputs.maxtext_installed }}
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -119,8 +125,14 @@ jobs:
           else
             install_tpu_pre_train_extra_deps
           fi
+          if [ "${INPUTS_INSTALL_TORCH_CPU}" == "true" ]; then
+            python3 -m pip install --quiet torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu --no-deps
+            python3 -c "import torch; print(f'torch {torch.__version__}')"
+          fi
           python3 --version
           python3 -m pip freeze
+        env:
+          INPUTS_INSTALL_TORCH_CPU: ${{ inputs.install_torch_cpu }}
       - name: Copy test assets files
         if: ${{ !inputs.maxtext_installed }}
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
@@ -147,7 +159,11 @@ jobs:
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
           else
-            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and not scheduled_only"
+            if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
+              FINAL_PYTEST_MARKER="not scheduled_only or newly_added"
+            else
+              FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and (not scheduled_only or newly_added)"
+            fi
           fi
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)

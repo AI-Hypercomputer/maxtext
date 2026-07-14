@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Qwen3-Omni-specific preprocessing utilities for multimodal features. 
+"""Qwen3-Omni-specific preprocessing utilities for multimodal features.
 
 Original implementation from HuggingFace: Qwen/Qwen3-Omni-30B-A3B-Instruct.
 """
@@ -167,7 +167,7 @@ def maybe_pad_video_values_to_max_grid(
   if video_values.ndim != 5:
     raise ValueError(f"video_values must have shape (batch, channels, time, height, width), got {video_values.shape}.")
 
-  max_t, max_h, max_w = (int(dim) for dim in max_grid)
+  max_t, max_h, max_w = (int(dim) for dim in max_grid)  # pyrefly: ignore[bad-argument-type]
   actual_t, actual_h, actual_w = (int(dim) for dim in video_grid_thw[0])
   if actual_t > max_t or actual_h > max_h or actual_w > max_w:
     raise ValueError(
@@ -177,9 +177,6 @@ def maybe_pad_video_values_to_max_grid(
 
   temporal_patch_size = config.temporal_patch_size_for_vit
   patch_size = config.patch_size_for_vit
-  valid_t_px = actual_t * temporal_patch_size
-  valid_h_px = actual_h * patch_size
-  valid_w_px = actual_w * patch_size
   max_t_px = max_t * temporal_patch_size
   max_h_px = max_h * patch_size
   max_w_px = max_w * patch_size
@@ -188,18 +185,27 @@ def maybe_pad_video_values_to_max_grid(
       (video_values.shape[0], video_values.shape[1], max_t_px, max_h_px, max_w_px),
       dtype=video_values.dtype,
   )
-  padded_video_values[:, :, :valid_t_px, :valid_h_px, :valid_w_px] = video_values[
-      :, :, :valid_t_px, :valid_h_px, :valid_w_px
-  ]
+  patch_elements = video_values.shape[1] * temporal_patch_size * patch_size * patch_size
+  valid_patches = actual_t * actual_h * actual_w
+  padded_video_values.reshape((video_values.shape[0], -1, patch_elements))[:, :valid_patches] = video_values.reshape(
+      (video_values.shape[0], valid_patches, patch_elements)
+  )
 
   video_mask = np.zeros((video_values.shape[0], 1, max_t_px, max_h_px, max_w_px), dtype=np.int32)
-  video_mask[:, :, :valid_t_px, :valid_h_px, :valid_w_px] = 1
+  mask_patch_elements = temporal_patch_size * patch_size * patch_size
+  video_mask.reshape((video_values.shape[0], -1, mask_patch_elements))[:, :valid_patches] = 1
 
   return padded_video_values, video_grid_thw, video_mask
 
 
 def smart_resize(
-    height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 14 * 14 * 4 * 1280
+    height: int,
+    width: int,
+    factor: int = 28,
+    min_pixels: int = 56 * 56,
+    max_pixels: int = 14 * 14 * 4 * 1280,
+    max_h_pixels: int | None = None,
+    max_w_pixels: int | None = None,
 ):
   """Rescales the image so that the following conditions are met:
 
@@ -208,6 +214,10 @@ def smart_resize(
   2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
 
   3. The aspect ratio of the image is maintained as closely as possible.
+
+  4. (Optional) Neither dimension exceeds max_h_pixels / max_w_pixels. When either
+     cap is exceeded, both dimensions are scaled down proportionally and re-aligned
+     to 'factor'.
 
   """
   if max(height, width) / min(height, width) > MAX_RATIO:
@@ -224,6 +234,13 @@ def smart_resize(
     beta = math.sqrt(min_pixels / (height * width))
     h_bar = math.ceil(height * beta / factor) * factor
     w_bar = math.ceil(width * beta / factor) * factor
+  # Apply per-dimension pixel caps, scaling down proportionally if either is exceeded.
+  if (max_h_pixels is not None and h_bar > max_h_pixels) or (max_w_pixels is not None and w_bar > max_w_pixels):
+    cap_h = max_h_pixels if max_h_pixels is not None else h_bar
+    cap_w = max_w_pixels if max_w_pixels is not None else w_bar
+    scale = min(cap_h / h_bar, cap_w / w_bar)
+    h_bar = min(max(factor, round(h_bar * scale / factor) * factor), (cap_h // factor) * factor)
+    w_bar = min(max(factor, round(w_bar * scale / factor) * factor), (cap_w // factor) * factor)
   return h_bar, w_bar
 
 
@@ -348,6 +365,7 @@ def calculate_video_frame_range(
   # Validate frame order
   if start_frame >= end_frame:
     raise ValueError(
+        # pyrefly: ignore[unbound-name]
         f"Invalid time range: Start frame {start_frame} (at {video_start_clamped if video_start is not None else 0}s) "
         f"exceeds end frame {end_frame} (at {video_end_clamped if video_end is not None else max_duration}s). "
         f"Video duration: {max_duration:.2f}s ({total_frames} frames @ {video_fps}fps)"
@@ -461,6 +479,10 @@ def preprocess_video(video, config):
 
   nframes, channel, height, width = video.shape
   max_pixels = max(min(VIDEO_MAX_PIXELS, VIDEO_TOTAL_PIXELS / nframes * FRAME_FACTOR), int(VIDEO_MIN_PIXELS * 1.05))
+  max_grid_h = getattr(config, "video_max_grid_h", None)
+  max_grid_w = getattr(config, "video_max_grid_w", None)
+  max_h_pixels = int(max_grid_h) * patch_size if max_grid_h is not None else None
+  max_w_pixels = int(max_grid_w) * patch_size if max_grid_w is not None else None
   resized_height_1, resized_width_1 = smart_resize(
       height,
       width,
@@ -488,6 +510,8 @@ def preprocess_video(video, config):
       factor=patch_size * merge_size,
       min_pixels=VIDEO_MIN_PIXELS,
       max_pixels=VIDEO_MAX_PIXELS,
+      max_h_pixels=max_h_pixels,
+      max_w_pixels=max_w_pixels,
   )
 
   # Second resize - process each channel separately to preserve float values
@@ -780,7 +804,7 @@ def add_extra_tokens_for_qwen3_omni(tokens, config, processor_output):
         new_tokens.append(qwen_tokens.audio_pad)
         audio_data_idx += 1
 
-      new_tokens.append(qwen_tokens.audio_pad)
+      new_tokens.append(qwen_tokens.audio_end)
       new_tokens.append(qwen_tokens.vision_end)
 
       video_idx += 1
@@ -1112,7 +1136,9 @@ def get_rope_index(
       # Process modality-specific content
       # Audio Only
       if min_ed == ed_audio_start:
-        audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()
+        audio_len = _get_feat_extract_output_lengths(
+            audio_lengths[audio_idx]
+        ).item()  # pyrefly: ignore[unsupported-operation]
         audio_pos = np.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
         llm_pos_ids_list.append(audio_pos)
 
@@ -1122,45 +1148,61 @@ def get_rope_index(
 
       # Image Only
       elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == qwen_tokens.image_pad:
-        grid_t = image_grid_thw[image_idx, 0].item()
-        grid_hs = image_grid_thw[:, 1]
-        grid_ws = image_grid_thw[:, 2]
+        grid_t = image_grid_thw[image_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
+        grid_hs = image_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
+        grid_ws = image_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
         t_index = np.arange(grid_t, dtype=np.float32) * 1 * position_id_per_seconds
 
-        image_pos = get_llm_pos_ids_for_vision(st_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
+        image_pos = get_llm_pos_ids_for_vision(
+            st_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws
+        )  # pyrefly: ignore[bad-argument-type]
         llm_pos_ids_list.append(image_pos)
 
-        image_len = int(np.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2))
+        image_len = int(
+            np.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2)
+        )  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + image_len + eos_len)
         image_idx += 1
         remain_images -= 1
 
       # Video Only
       elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == qwen_tokens.video_pad:
-        grid_t = video_grid_thw[video_idx, 0].item()
-        grid_hs = video_grid_thw[:, 1]
-        grid_ws = video_grid_thw[:, 2]
-        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+        grid_t = video_grid_thw[video_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
+        grid_hs = video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
+        grid_ws = video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
+        t_index = (
+            np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+        )  # pyrefly: ignore[unsupported-operation]
 
-        video_pos = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
+        video_pos = get_llm_pos_ids_for_vision(
+            st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws
+        )  # pyrefly: ignore[bad-argument-type]
         llm_pos_ids_list.append(video_pos)
 
-        video_len = int(np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
+        video_len = int(
+            np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2)
+        )  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + video_len + eos_len)
         video_idx += 1
         remain_videos -= 1
 
       # Audio in Video (interleaved)
       elif min_ed == ed_vision_start and ed_vision_start + 1 == ed_audio_start:
-        audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()
+        audio_len = _get_feat_extract_output_lengths(
+            audio_lengths[audio_idx]
+        ).item()  # pyrefly: ignore[unsupported-operation]
         audio_llm_pos_ids = np.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
 
-        grid_t = video_grid_thw[video_idx, 0].item()
-        grid_hs = video_grid_thw[:, 1]
-        grid_ws = video_grid_thw[:, 2]
-        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+        grid_t = video_grid_thw[video_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
+        grid_hs = video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
+        grid_ws = video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
+        t_index = (
+            np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+        )  # pyrefly: ignore[unsupported-operation]
 
-        video_llm_pos_ids = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
+        video_llm_pos_ids = get_llm_pos_ids_for_vision(
+            st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws
+        )  # pyrefly: ignore[bad-argument-type]
 
         # Interleave audio and video based on temporal ordering
         video_data_index = 0
@@ -1179,7 +1221,9 @@ def get_rope_index(
         if audio_data_index < audio_llm_pos_ids.shape[1]:
           llm_pos_ids_list.append(audio_llm_pos_ids[:, audio_data_index:])
 
-        video_len = int(np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
+        video_len = int(
+            np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2)
+        )  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + audio_len + video_len + eos_len)
 
         audio_idx += 1

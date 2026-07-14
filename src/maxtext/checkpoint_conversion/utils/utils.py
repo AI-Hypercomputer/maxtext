@@ -968,9 +968,7 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   for path_tuple, leaf_value in leaves_with_paths:
     path_keys = param_key_parts_from_path(path_tuple)
     # Skip NNX RNG state variables (not model weights)
-    if "to_nnx__rngs" in path_keys or any(
-        k == "rngs" or k.endswith("_rngs") for k in path_keys
-    ):
+    if "to_nnx__rngs" in path_keys or any(k == "rngs" or k.endswith("_rngs") for k in path_keys):
       continue
     maxtext_param_key = "params-" + "-".join(path_keys)
     if not isinstance(leaf_value, (jax.Array, np.ndarray)):
@@ -1192,6 +1190,7 @@ def save_weights_to_checkpoint(
     device_count: int,
     use_ocdbt: bool,
     use_zarr3: bool,
+    config=None,
 ):
   """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
 
@@ -1207,6 +1206,7 @@ def save_weights_to_checkpoint(
       use_ocdbt: If True, enables the Optimized Checkpoint Database with Transactions
           (OCDBT) format for improved metadata handling.
       use_zarr3: If True, uses the Zarr3 storage format for the underlying array data.
+      config: Optional config to save along with checkpoint metadata.
   """
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -1243,7 +1243,7 @@ def save_weights_to_checkpoint(
   )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-  if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+  if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new, config=config):
     max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
   checkpoint_manager.wait_until_finished()

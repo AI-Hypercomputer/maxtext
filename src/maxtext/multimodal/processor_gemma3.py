@@ -86,7 +86,7 @@ def preprocess_mm_data_gemma3(images):
 def get_image_offsets_gemma3(processor_output: mm_utils.PreprocessorOutput | None):
   """Get the increase in total token count after inserting image token placeholders"""
   has_images = processor_output is not None and processor_output.pixel_values is not None
-  num_images = processor_output.pixel_values.shape[0] if has_images else 1
+  num_images = processor_output.pixel_values.shape[0] if has_images else 1  # pyrefly: ignore[missing-attribute]
   return (
       GEMMA_NUM_TOKENS_PER_MEDIA - 1
   ) * num_images  # -1 because <start_of_image> is already present in the input tokens.

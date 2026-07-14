@@ -16,6 +16,7 @@
 
 import jax
 import jax.numpy as jnp
+from jax.experimental.xla_metadata import set_xla_metadata
 from jax.sharding import NamedSharding
 from flax import nnx
 
@@ -108,11 +109,16 @@ def gradient_accumulation_loss_and_grad(
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
+    # Scope double-buffering to model scans, not the enclosing gradient accumulation scan.
+    # This metadata only affects XLA:GPU; see https://github.com/openxla/xla/pull/43468.
+    # Enable it with JAX_OPTIMIZATION_LEVEL=O1 and
+    # XLA_FLAGS="--xla_gpu_enable_while_loop_unrolling=WHILE_LOOP_UNROLLING_MANUAL_UNROLL".
     if is_nnx:
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.
       local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
-      (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, is_train=True)
+      with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
+        (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, is_train=True)
       _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
     else:
@@ -121,7 +127,8 @@ def gradient_accumulation_loss_and_grad(
           if dropout_rng is not None
           else None
       )
-      (_, aux), cur_batch_gradient = grad_func(model, config, data, rng, ga_params, is_train=True)
+      with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
+        (_, aux), cur_batch_gradient = grad_func(model, config, data, rng, ga_params, is_train=True)
     acc_grad_and_loss["loss"] += aux["xent_sum"] + aux.get("dpo_loss", 0.0)
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["indexer_loss"] += aux["indexer_loss"]
@@ -150,7 +157,7 @@ def gradient_accumulation_loss_and_grad(
       "ga_params": ga_params,
   }
   if is_nnx:
-    init_grad_and_loss["rest_state"] = rest
+    init_grad_and_loss["rest_state"] = rest  # pyrefly: ignore[unbound-name]
 
   grad_and_loss, aux = jax.lax.scan(
       accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps

@@ -46,3 +46,8 @@ tokamax!=0.1.0
 transformers>=5.8.0
 uvloop
 qwix>=0.1.6
+coverage
+blobfile
+shortuuid
+nltk
+evaluate

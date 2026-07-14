@@ -78,9 +78,7 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 def get_first_step(model, state):
   if isinstance(model, nn.Module):
     return int(state.step)
-  if hasattr(
-      state, "inner_state"
-  ):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
+  if hasattr(state, "inner_state"):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
     return int(state.step.get_value())
   return int(state.optimizer.step.get_value())
 
@@ -147,7 +145,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         encoder_images=data["images"] if config.use_multimodal else None,
         encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
         enable_dropout=config.enable_dropout if is_train else False,
-        rngs={"dropout": rng1, "params": aqt_rng},
+        rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
         mutable=mutable_collections,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
@@ -375,11 +373,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       if config.shard_optimizer_over_data:
         params = jax.tree.map(
             functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
-            params,
+            params,  # pyrefly: ignore[unbound-name]
             params_shardings,
         )
       sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
-      pure_params = params["params"] if sparsity_enabled else params
+      pure_params = params["params"] if sparsity_enabled else params  # pyrefly: ignore[unbound-name]
       batch_stats = params.get("batch_stats", {})
 
       grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
@@ -784,11 +782,7 @@ def train_loop(config, recorder, state=None):
     # the Zero-1 opt overlay doesn't apply through the diloco wrapper.
     params_shardings = state_mesh_shardings.params
   else:
-    params_shardings, state_mesh_shardings = (
-        sharding.maybe_update_params_sharding_with_opt(
-            config, state_mesh_shardings
-        )
-    )
+    params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config,
@@ -828,9 +822,7 @@ def train_loop(config, recorder, state=None):
   if isinstance(model, nn.Module):
     setup_params = state.params
   elif config.enable_diloco:
-    setup_params = (
-        state.params
-    )  # DiLoCoTrainState.params: the outer (global) params
+    setup_params = state.params  # DiLoCoTrainState.params: the outer (global) params
   else:
     _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
   metric_logger_instance.write_setup_info_to_tensorboard(setup_params)
@@ -934,6 +926,9 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
+
+  if config.use_te_comm_gemm_overlap:
+    max_utils.bootstrap_transformer_engine_cgemm(config)
 
   # Create the Goodput recorder
   recorder = create_goodput_recorder(config)

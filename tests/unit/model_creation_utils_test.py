@@ -723,6 +723,65 @@ class TestCreateNnxModel(unittest.TestCase):
     with self.assertRaises(RuntimeError):
       model_creation_utils.from_pretrained(cfg, self.mesh)
 
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_scan_layers_mismatch_raises_error(self, mock_load_meta):
+    """ValueError is raised if run specifies scan_layers=True but checkpoint specifies scan_layers=False."""
+    mock_load_meta.return_value = {"scan_layers": False}
+
+    cfg = _make_config(
+        enable_checkpointing=True, load_parameters_path="gs://fake/scan_layers_false_ckpt", scan_layers=True
+    )
+
+    with self.assertRaises(ValueError) as context:
+      model_creation_utils.from_pretrained(cfg, self.mesh)
+    self.assertIn(
+        "Configuration mismatch: Your run specifies scan_layers=True, "
+        "but the checkpoint was saved with scan_layers=False",
+        str(context.exception),
+    )
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_scan_layers_match_no_error(self, mock_ocp, mock_load_meta):
+    """If the run specifies scan_layers=True and the checkpoint matches, it proceeds without error."""
+    mock_load_meta.return_value = {"scan_layers": True}
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    cfg = _make_config(
+        enable_checkpointing=True, load_parameters_path="gs://fake/scan_layers_true_ckpt", scan_layers=True
+    )
+
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    self.assertIsInstance(model, models.Transformer)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_scan_layers_missing_metadata_no_error(self, mock_ocp, mock_load_meta):
+    """Skip verification and proceed if custom_metadata lacks 'scan_layers'."""
+    mock_load_meta.return_value = {}
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    cfg = _make_config(
+        enable_checkpointing=True, load_parameters_path="gs://fake/scan_layers_missing_ckpt", scan_layers=True
+    )
+
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    self.assertIsInstance(model, models.Transformer)
+
 
 class TestSetupDecodeStateFromNnx(unittest.TestCase):
   """Tests for setup_decode_state_from_nnx()."""
@@ -773,5 +832,190 @@ class TestSetupDecodeStateFromNnx(unittest.TestCase):
     self.assertIsNotNone(state_mesh_annotations)
 
 
+class TestVerifyAndSyncScanLayers(unittest.TestCase):
+  """Tests for verify_and_sync_scan_layers()."""
+
+  def setUp(self):
+    self.mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("x",))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_sync_to_false_when_implicit(self, mock_load_meta):
+    """If scan_layers is not explicit, sync scan_layers to False from checkpoint metadata."""
+    mock_load_meta.return_value = {"scan_layers": False}
+    # Create config without scan_layers in kwargs so it's not explicit
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+
+    # Pre-assertions
+    pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
+    self.assertTrue(cfg.scan_layers)  # default is True
+    self.assertNotIn("scan_layers", pydantic_cfg.model_fields_set)
+
+    # Call verify_and_sync_scan_layers
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+
+    # Post-assertions
+    self.assertFalse(synced_cfg.scan_layers)
+    synced_pydantic_cfg = getattr(synced_cfg, "_pydantic_config", synced_cfg)
+    self.assertFalse(synced_pydantic_cfg.scan_layers)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_sync_to_true_when_implicit(self, mock_load_meta):
+    """If scan_layers is not explicit, sync scan_layers to True from checkpoint metadata."""
+    mock_load_meta.return_value = {"scan_layers": True}
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+    self.assertTrue(synced_cfg.scan_layers)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_explicit_match_raises_no_error(self, mock_load_meta):
+    """If scan_layers is explicit and matches checkpoint metadata, no error is raised."""
+    mock_load_meta.return_value = {"scan_layers": True}
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt", scan_layers=True)
+
+    # Pre-assertions
+    pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
+    self.assertTrue(cfg.scan_layers)
+    self.assertIn("scan_layers", pydantic_cfg.model_fields_set)
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+    self.assertTrue(synced_cfg.scan_layers)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_explicit_mismatch_raises_value_error(self, mock_load_meta):
+    """If scan_layers is explicit and mismatches checkpoint metadata, ValueError is raised."""
+    mock_load_meta.return_value = {"scan_layers": False}
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt", scan_layers=True)
+
+    # Pre-assertions
+    pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
+    self.assertTrue(cfg.scan_layers)
+    self.assertIn("scan_layers", pydantic_cfg.model_fields_set)
+
+    with self.assertRaises(ValueError) as context:
+      model_creation_utils.verify_and_sync_scan_layers(cfg)
+
+    self.assertIn("Configuration mismatch", str(context.exception))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch("maxtext.utils.model_creation_utils.max_logging.log")
+  def test_sync_log_and_early_return(self, mock_log, mock_load_meta):
+    """Test that we log only when auto-resolution actually changes scan_layers, and early return otherwise."""
+    # Scenario A: saved_scan_layers == config.scan_layers (default True).
+    # Since they match, it should return early, and NO log should be printed.
+    mock_load_meta.return_value = {"scan_layers": True}
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+    self.assertTrue(synced_cfg.scan_layers)
+    mock_log.assert_not_called()
+
+    # Scenario B: saved_scan_layers (False) != config.scan_layers (default True), and is not explicit (implicit).
+    # It should log the auto-resolution and update scan_layers to False.
+    mock_load_meta.return_value = {"scan_layers": False}
+    cfg2 = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+
+    synced_cfg2 = model_creation_utils.verify_and_sync_scan_layers(cfg2)
+    self.assertFalse(synced_cfg2.scan_layers)
+    mock_log.assert_called_once_with("Setting scan_layers=False loaded from checkpoint metadata.")
+
+
 if __name__ == "__main__":
   unittest.main()
+
+
+class TestFromPretrainedAuth(unittest.TestCase):
+  """Tests for Hugging Face authentication in from_pretrained."""
+
+  def _make_nnx_metadata_mock(self):
+    meta = MagicMock()
+    meta.item_metadata.tree.keys.return_value = ["decoder"]
+    meta.item_metadata.tree.get.return_value = {}
+    return meta
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.utils.model_creation_utils.subprocess.run")
+  @patch("maxtext.utils.model_creation_utils.get_token")
+  @patch("maxtext.utils.model_creation_utils.epath.Path")
+  def test_auth_success_with_config_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
+    config = _make_config(
+        convert_checkpoint_if_possible=True,
+        base_output_directory="gs://fake_bucket/fake_run",
+        hf_access_token="config_token",
+    )
+    mesh = _make_mesh(config)
+
+    mock_ckpt_path = MagicMock()
+    mock_ckpt_path.exists.return_value = False
+    mock_path.return_value.__truediv__.return_value.__truediv__.return_value = mock_ckpt_path
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    model = model_creation_utils.from_pretrained(config, mesh)
+    self.assertIsInstance(model, models.Transformer)
+
+    mock_run.assert_called_once()
+    called_env = mock_run.call_args[1].get("env", {})
+    self.assertEqual(called_env.get("HF_TOKEN"), "config_token")
+    mock_get_token.assert_not_called()
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.utils.model_creation_utils.subprocess.run")
+  @patch("maxtext.utils.model_creation_utils.get_token")
+  @patch("maxtext.utils.model_creation_utils.epath.Path")
+  def test_auth_success_with_cached_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
+    config = _make_config(
+        convert_checkpoint_if_possible=True,
+        base_output_directory="gs://fake_bucket/fake_run",
+        hf_access_token="",
+    )
+    mesh = _make_mesh(config)
+
+    mock_ckpt_path = MagicMock()
+    mock_ckpt_path.exists.return_value = False
+    mock_path.return_value.__truediv__.return_value.__truediv__.return_value = mock_ckpt_path
+
+    mock_get_token.return_value = "cached_token"
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    model = model_creation_utils.from_pretrained(config, mesh)
+    self.assertIsInstance(model, models.Transformer)
+
+    mock_get_token.assert_called_once()
+    mock_run.assert_called_once()
+    called_env = mock_run.call_args[1].get("env", {})
+    self.assertEqual(called_env.get("HF_TOKEN"), "cached_token")
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.utils.model_creation_utils.subprocess.run")
+  @patch("maxtext.utils.model_creation_utils.get_token")
+  @patch("maxtext.utils.model_creation_utils.epath.Path")
+  def test_auth_failure_no_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
+    config = _make_config(
+        convert_checkpoint_if_possible=True,
+        base_output_directory="gs://fake_bucket/fake_run",
+        hf_access_token="",
+    )
+    mesh = _make_mesh(config)
+
+    mock_ckpt_path = MagicMock()
+    mock_ckpt_path.exists.return_value = False
+    mock_path.return_value.__truediv__.return_value.__truediv__.return_value = mock_ckpt_path
+
+    mock_get_token.return_value = None
+
+    with self.assertRaisesRegex(ValueError, "hf_access_token must be provided"):
+      model_creation_utils.from_pretrained(config, mesh)
+
+    mock_run.assert_not_called()

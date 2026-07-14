@@ -117,7 +117,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
       cfg.checkpoint_period,
   )
 
-  state, _, _, _ = maxtext_utils.setup_training_state(None, cfg, mesh, checkpoint_manager, init_state_fn)
+  state, _, _, _, _ = maxtext_utils.setup_training_state(None, cfg, mesh, checkpoint_manager, init_state_fn)
   max_logging.log("start")
   max_utils.print_mem_stats("After params initialized")
 

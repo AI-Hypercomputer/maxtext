@@ -277,7 +277,7 @@ class KVCache(BaseCache):
       *,
       # Not used in KVCache but passed in by nnx_wrappers.to_linen.
       # TODO: Remove when bridge no longer needed
-      rngs: nnx.Rngs = None,
+      rngs: nnx.Rngs = None,  # pyrefly: ignore[bad-function-definition]
   ):
     """Initializes the KVCache module.
 
@@ -612,8 +612,8 @@ class KVCache(BaseCache):
     # For quantized kv cached. Could be get without transpose twice.
     cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
     cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
-    cached_key_value = jnp.transpose(cached_key, self.prefill_cache_axis_order)
-    cached_value_value = jnp.transpose(cached_value, self.prefill_cache_axis_order)
+    cached_key_value = jnp.transpose(cached_key, self.prefill_cache_axis_order)  # pyrefly: ignore[bad-argument-type]
+    cached_value_value = jnp.transpose(cached_value, self.prefill_cache_axis_order)  # pyrefly: ignore[bad-argument-type]
 
     seq_axis = self.prefill_cache_logical_axis_names.index(CACHE_SEQUENCE)
     cache_seq_axis = self.prefill_cache_axis_order.index(seq_axis)
@@ -767,17 +767,17 @@ class KVCache(BaseCache):
     if use_ragged_attention:
       cache_locations = [slice(None)] * 4
       new_token_locations = [slice(None)] * 4
-      new_token_locations[ar_cache_sequence_axis] = 0
+      new_token_locations[ar_cache_sequence_axis] = 0  # pyrefly: ignore[unsupported-operation]
 
       def key_body(i, val):
         cache_locations[ar_cache_batch_axis] = i
-        cache_locations[ar_cache_sequence_axis] = lengths[i]
+        cache_locations[ar_cache_sequence_axis] = lengths[i]  # pyrefly: ignore[unsupported-operation]
         new_token_locations[ar_cache_batch_axis] = i
         return val.at[tuple(cache_locations)].set(one_token_key_shaped_for_cache[tuple(new_token_locations)])
 
       def value_body(i, val):
         cache_locations[ar_cache_batch_axis] = i
-        cache_locations[ar_cache_sequence_axis] = lengths[i]
+        cache_locations[ar_cache_sequence_axis] = lengths[i]  # pyrefly: ignore[unsupported-operation]
         new_token_locations[ar_cache_batch_axis] = i
         return val.at[tuple(cache_locations)].set(one_token_value_shaped_for_cache[tuple(new_token_locations)])
 
@@ -815,7 +815,7 @@ class KVCache(BaseCache):
       cached_key_scale.set_value(
           jax.lax.dynamic_update_index_in_dim(
               cached_key_scale.get_value(),
-              one_token_key_scale_shaped_for_cache,
+              one_token_key_scale_shaped_for_cache,  # pyrefly: ignore[unbound-name]
               ar_cache_update_idx,
               ar_cache_scale_update_axis,
           )
@@ -823,7 +823,7 @@ class KVCache(BaseCache):
       cached_value_scale.set_value(
           jax.lax.dynamic_update_index_in_dim(
               cached_value_scale.get_value(),
-              one_token_value_scale_shaped_for_cache,
+              one_token_value_scale_shaped_for_cache,  # pyrefly: ignore[unbound-name]
               ar_cache_update_idx,
               ar_cache_scale_update_axis,
           )
@@ -844,7 +844,7 @@ class KVCache(BaseCache):
       elif dtype == jnp.float8_e4m3fn:
         scale_value /= E4M3_MAX
 
-      cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])
+      cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])  # pyrefly: ignore[unexpected-keyword]
     cache_value_in_logical_shape = jax.tree.map(lambda x: reverse_transpose(x, cache_axis_order), cache_value)
     return cache_value_in_logical_shape
 
@@ -1061,7 +1061,7 @@ class MlaKVCache(KVCache):
       *,
       # Not used in MlaKVCache but passed in by nnx_wrappers.to_linen.
       # TODO: Remove when bridge no longer needed
-      rngs: nnx.Rngs = None,
+      rngs: nnx.Rngs = None,  # pyrefly: ignore[bad-function-definition]
   ):
     """Initializes the MlaKVCache module.
 

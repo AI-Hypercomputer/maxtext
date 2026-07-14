@@ -74,7 +74,7 @@ In MaxText, the **`scan_layers`** configuration parameter is used to control thi
 - `scan_layers=false` tells MaxText to keep layer parameters unstacked (often required for inference and certain model architectures).
 
 > [!IMPORTANT]
-> **PyTree Structure Compatibility:** Because JAX expects the loaded PyTree structure to exactly match the model's instantiated structure, the value of the `scan_layers` flag during execution (training, SFT, RL, DPO, or decoding) **must** match the format of the checkpoint being loaded. A mismatch will cause PyTree loading or shape/path mismatch errors (which MaxText will intercept to raise a descriptive `ValueError` pointing to the scan_layers setting).
+> **Automatic scan_layers Resolution:** MaxText automatically loads `scan_layers` from the checkpoint's saved metadata when resuming (via `load_parameters_path`) if you do not explicitly specify `scan_layers` on the command-line. If you explicitly specify a value for `scan_layers` that conflicts with the checkpoint format, MaxText will raise a descriptive `ValueError` mismatch error to prevent JAX PyTree structure or shape mismatch errors during loading.
 
 ### Takeaways
 

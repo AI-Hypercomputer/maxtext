@@ -93,11 +93,11 @@ class TestHloDiff:
     return False
 
   @pytest.mark.parametrize(
-      "test_id, config_file, overrides",
+      "test_id, model_name, overrides",
       [
           (
               "deepseek3",
-              "src/maxtext/configs/models/deepseek3-test.yml",
+              "deepseek3-test",
               {
                   "compile_topology": "v6e-4",
                   "base_num_decoder_layers": 4,
@@ -107,7 +107,7 @@ class TestHloDiff:
           ),
           (
               "llama3_8b",
-              "src/maxtext/configs/models/llama3-8b.yml",
+              "llama3-8b",
               {
                   "compile_topology": "v6e-4",
                   "base_num_decoder_layers": 4,
@@ -117,7 +117,7 @@ class TestHloDiff:
           ),
           (
               "qwen3_1.7b",
-              "src/maxtext/configs/models/qwen3-1.7b.yml",
+              "qwen3-1.7b",
               {
                   "compile_topology": "v6e-4",
                   "base_num_decoder_layers": 4,
@@ -127,7 +127,7 @@ class TestHloDiff:
           ),
       ],
   )
-  def test_hlo_diff(self, test_id, config_file, overrides):
+  def test_hlo_diff(self, test_id, model_name, overrides):
     """Test HLO diff for parameterized configurations."""
     local_landing_dir = os.path.join(os.path.dirname(__file__), f"hlo_diff_dump_{test_id}")
 
@@ -138,12 +138,16 @@ class TestHloDiff:
 
     try:
       base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-      config_path = os.path.join(base_dir, config_file)
+      # Load via base.yml + model_name, the normal training path: pyconfig resolves the model
+      # yml from model_name and merges it onto base.yml. Loading the model yml directly as the
+      # top-level config skips base.yml, leaving logical_axis_rules empty.
+      base_config_path = os.path.join(base_dir, "src/maxtext/configs/base.yml")
 
       # Arguments for train_compile
       test_args = [
           None,
-          config_path,
+          base_config_path,
+          f"model_name={model_name}",
           "dataset_type=synthetic",
           "override_model_config=true",
           "compile_topology_num_slices=1",

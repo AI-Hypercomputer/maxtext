@@ -22,26 +22,6 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as jnp
-from packaging.version import Version
-
-
-# JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
-# versions renamed them to `out_type`/`scratch_types`.
-if Version(jax.__version__) <= Version("0.10.0"):
-  _OUT_KW = "out_shape"
-  _SCRATCH_KW = "scratch_shapes"
-  _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
-      "disable_bounds_checks": True,
-  }
-else:
-  _OUT_KW = "out_type"
-  _SCRATCH_KW = "scratch_types"
-  _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
-      "disable_bounds_checks": True,
-      "needs_layout_passes": False,
-  }
 
 
 # ceil up to the nearest multiple of b.
@@ -228,8 +208,8 @@ def main_kernel(
       input_dtype_bits = jax.dtypes.itemsize_bits(in_dtype)
       input_packing = 32 // input_dtype_bits
 
-      in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
+      in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)  # pyrefly: ignore[missing-attribute]
+      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)  # pyrefly: ignore[missing-attribute]
 
       for col_vmem_start in range(0, col_size, num_lanes):
         col_hbm_start = col_start + col_vmem_start
@@ -558,8 +538,14 @@ def ragged_gather_reduce(
           num_row_partitions=num_rows_partitions,
           num_column_partitions=num_column_partitions,
       ),
-      compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
-          **_COMPILER_PARAMS,
+      out_type=jax.ShapeDtypeStruct(
+          (padded_input_size // reduce_group_size, aligned_hidden_size),
+          jnp.float32,
+      ),
+      compiler_params=pltpu.CompilerParams(
+          use_tc_tiling_on_sc=True,
+          disable_bounds_checks=True,
+          needs_layout_passes=False,
       ),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,
@@ -569,23 +555,17 @@ def ragged_gather_reduce(
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
       ),
+      scratch_types=dict(  # pylint: disable=use-dict-literal
+          num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+          prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
+          src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
+          sem_ref=pltpu.SemaphoreType.DMA((2,)),
+      ),
       mesh=vector_mesh,
       name="sc_ragged_gather_reduce",
-      **{
-          _OUT_KW: jax.ShapeDtypeStruct(
-              (padded_input_size // reduce_group_size, aligned_hidden_size),
-              jnp.float32,
-          ),
-          _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
-              num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
-              src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
-              sem_ref=pltpu.SemaphoreType.DMA((2,)),
-          ),
-      },
   )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
 
   # If there is no valid source row in a reduce group, set that group's output

@@ -330,7 +330,7 @@ class Gpt3MultiHeadAttention(nnx.Module):
     )
 
   def update_kv_caches(self, key, value, decoder_segment_ids, model_mode, previous_chunk):
-    prefill_kv_cache, ar_kv_cache = self.KVCache_0(
+    prefill_kv_cache, ar_kv_cache = self.KVCache_0(  # pyrefly: ignore[not-callable]
         key=key,
         value=value,
         decoder_segment_ids=decoder_segment_ids,
