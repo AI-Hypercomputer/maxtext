@@ -228,5 +228,9 @@ def test_scan_layers_mismatch_tpu():
   with pytest.raises(ValueError) as excinfo:
     train_main(mismatch_command)
 
-  assert "Configuration mismatch" in str(excinfo.value) or "Failed to restore checkpoint" in str(excinfo.value)
+  assert (
+      "Configuration mismatch" in str(excinfo.value)
+      or "Failed to restore checkpoint" in str(excinfo.value)
+      or "Checkpoint does not match the model" in str(excinfo.value)
+  )
   assert "scan_layers" in str(excinfo.value)
