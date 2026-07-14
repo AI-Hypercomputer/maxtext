@@ -763,6 +763,13 @@ def tgmm_v2(
       partial_sum_spec,
   ]
 
+  input_output_aliases = {}
+  if partial_sum is not None:
+    flat_args_preceding = (group_sizes, group_offset, lhs, rhs)
+    leaves = jax.tree_util.tree_leaves(flat_args_preceding)
+    partial_sum_idx = sum(1 for x in leaves if x is not None)
+    input_output_aliases = {partial_sum_idx: 0}
+
   raw_out = pl.pallas_call(
       functools.partial(tgmm_kernel_main, cfgs=cfgs),
       out_shape=out_init,
@@ -781,6 +788,7 @@ def tgmm_v2(
       # the metadata here is for profiling, debugging, and cost modeling.
       # It does not affect the kernel's computation.
       metadata=gmm_v2.get_metadata(cfgs),
+      input_output_aliases=input_output_aliases,
   )(group_sizes, group_offset, lhs, rhs, partial_sum)[:, : dims.size_k, : dims.size_n]
 
   if partial_sum is not None:

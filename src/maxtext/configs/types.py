@@ -626,6 +626,9 @@ class Attention(BaseModel):
           " Requires use_tokamax_gmm: true. Currently incompatible with quantization."
       ),
   )
+  num_moe_emb_chunks: int = Field(
+      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
+  )
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for Transformer Engine padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
@@ -2623,6 +2626,17 @@ class MaxTextConfig(
           "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
       )
 
+  def validate_num_moe_emb_chunks(self):
+    """
+    Validates that num_moe_emb_chunks is used with supported settings.
+    """
+    if self.num_moe_emb_chunks > 0:
+      if not self.use_gmm_v2 or not self.use_ring_of_experts:
+        raise ValueError(
+            f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
+            f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
+        )
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
@@ -3240,6 +3254,7 @@ class MaxTextConfig(
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
+    self.validate_num_moe_emb_chunks()
 
     # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
