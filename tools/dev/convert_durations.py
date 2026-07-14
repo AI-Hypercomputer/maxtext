@@ -3,9 +3,7 @@ import os
 import sys
 
 def convert_entry(key, duration):
-  # key: "tests.gather_reduce_sc_test.GatherReduceScTest.test_column0"
-  # target: "tests/gather_reduce_sc_test.py::GatherReduceScTest::test_column0"
-
+  """Converts a test entry from dot notation to pytest-split format."""
   parts = key.split('.')
   if not parts or parts[0] != 'tests':
     return None
@@ -24,6 +22,7 @@ def convert_entry(key, duration):
   return new_key, duration
 
 def test_conversion():
+  """Runs unit tests for convert_entry."""
   original_isfile = os.path.isfile
   try:
     os.path.isfile = lambda path: path in [
@@ -33,22 +32,26 @@ def test_conversion():
     ]
 
     res1 = convert_entry("tests.gather_reduce_sc_test.GatherReduceScTest.test_column0", 0.003)
-    assert res1 == ("tests/gather_reduce_sc_test.py::GatherReduceScTest::test_column0", 0.003), f"Expected tests/gather_reduce_sc_test.py::GatherReduceScTest::test_column0, got {res1}"
+    exp1 = ("tests/gather_reduce_sc_test.py::GatherReduceScTest::test_column0", 0.003)
+    assert res1 == exp1, f"Expected {exp1}, got {res1}"
 
     res2 = convert_entry("tests.unit.attention_test.AttentionTest.test_dot_product_reshape_q", 64.84)
-    assert res2 == ("tests/unit/attention_test.py::AttentionTest::test_dot_product_reshape_q", 64.84), f"Expected tests/unit/attention_test.py::AttentionTest::test_dot_product_reshape_q, got {res2}"
+    exp2 = ("tests/unit/attention_test.py::AttentionTest::test_dot_product_reshape_q", 64.84)
+    assert res2 == exp2, f"Expected {exp2}, got {res2}"
 
     res3 = convert_entry("tests.unit.non_existent_test.AttentionTest.test_foo", 1.0)
     assert res3 is None, f"Expected None, got {res3}"
 
     res4 = convert_entry("tests.unit.no_class_test.test_bar", 1.0)
-    assert res4 == ("tests/unit/no_class_test.py::test_bar", 1.0), f"Expected tests/unit/no_class_test.py::test_bar, got {res4}"
+    exp4 = ("tests/unit/no_class_test.py::test_bar", 1.0)
+    assert res4 == exp4, f"Expected {exp4}, got {res4}"
 
     print("All tests passed!")
   finally:
     os.path.isfile = original_isfile
 
 def main():
+  """Main function to run conversion or tests."""
   if len(sys.argv) > 1 and sys.argv[1] == "--test":
     test_conversion()
     sys.exit(0)
@@ -61,7 +64,7 @@ def main():
   output_file = sys.argv[2]
 
   try:
-    with open(input_file, 'r') as f:
+    with open(input_file, 'r', encoding='utf-8') as f:
       data = json.load(f)
   except FileNotFoundError:
     print(f"Input file {input_file} not found.")
@@ -74,7 +77,7 @@ def main():
       new_key, new_duration = result
       converted_data[new_key] = new_duration
 
-  with open(output_file, 'w') as f:
+  with open(output_file, 'w', encoding='utf-8') as f:
     json.dump(converted_data, f, indent=2)
 
 if __name__ == "__main__":
