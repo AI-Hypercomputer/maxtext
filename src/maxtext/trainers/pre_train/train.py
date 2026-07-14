@@ -35,6 +35,12 @@ from pathwaysutils.debug import watchdog
 import tensorflow as tf
 
 import jax
+# Force initialization of JAX platforms (including pathways if JAX_PLATFORMS is set)
+# to register their absl flags before app.run() parses flags.
+try:
+  jax.devices()
+except Exception:  # pylint: disable=broad-except
+  pass
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
