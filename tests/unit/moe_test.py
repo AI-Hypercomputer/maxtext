@@ -636,6 +636,8 @@ class RoutedMoeTest(unittest.TestCase):
           use_ring_of_experts=use_ring_of_experts,
           max_target_length=128,
           use_ragged_sort=use_ragged_sort,
+          use_tokamax_gmm=False,
+          use_gmm_v2=False,
           ragged_buffer_factor=effective_buffer_factor,
           ragged_gather_fallback=ragged_gather_fallback,
           ragged_gather_reduce_fallback=ragged_gather_reduce_fallback,
