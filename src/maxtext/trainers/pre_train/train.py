@@ -39,8 +39,9 @@ import jax
 # to register their absl flags before app.run() parses flags.
 try:
   jax.devices()
-except Exception:  # pylint: disable=broad-except
-  pass
+except Exception as e:  # pylint: disable=broad-except
+  import sys
+  print(f"WARNING: JAX initialization failed during import: {e}", file=sys.stderr)
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
