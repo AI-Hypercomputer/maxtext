@@ -1,11 +1,14 @@
+"""Utility to convert test durations format for pytest-split."""
+
 import json
 import os
 import sys
 
+
 def convert_entry(key, duration):
   """Converts a test entry from dot notation to pytest-split format."""
-  parts = key.split('.')
-  if not parts or parts[0] != 'tests':
+  parts = key.split(".")
+  if not parts or parts[0] != "tests":
     return None
 
   file_path = ""
@@ -20,6 +23,7 @@ def convert_entry(key, duration):
 
   new_key = f"{file_path}::" + "::".join(remaining_parts)
   return new_key, duration
+
 
 def test_conversion():
   """Runs unit tests for convert_entry."""
@@ -50,6 +54,7 @@ def test_conversion():
   finally:
     os.path.isfile = original_isfile
 
+
 def main():
   """Main function to run conversion or tests."""
   if len(sys.argv) > 1 and sys.argv[1] == "--test":
@@ -64,7 +69,7 @@ def main():
   output_file = sys.argv[2]
 
   try:
-    with open(input_file, 'r', encoding='utf-8') as f:
+    with open(input_file, "r", encoding="utf-8") as f:
       data = json.load(f)
   except FileNotFoundError:
     print(f"Input file {input_file} not found.")
@@ -77,8 +82,9 @@ def main():
       new_key, new_duration = result
       converted_data[new_key] = new_duration
 
-  with open(output_file, 'w', encoding='utf-8') as f:
+  with open(output_file, "w", encoding="utf-8") as f:
     json.dump(converted_data, f, indent=2)
+
 
 if __name__ == "__main__":
   main()
