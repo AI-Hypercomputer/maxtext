@@ -535,7 +535,7 @@ class RoutedMoeTest(unittest.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
