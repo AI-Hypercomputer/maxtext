@@ -17,7 +17,11 @@ for doc in data:
   if doc and doc.get("kind") == "JobSet":
     replicated_jobs = doc.get("spec", {}).get("replicatedJobs", [])
 
-    # Swap order of replicated jobs so worker starts before pathways-head under InOrder startup policy
+    startup_policy = doc.get("spec", {}).setdefault("startupPolicy", {})
+    startup_policy["startupPolicyOrder"] = "AnyOrder"
+    print("Set startupPolicyOrder to AnyOrder.")
+
+    # Swap order of replicated jobs so worker starts before pathways-head
     worker_job = None
     head_job = None
     for job in replicated_jobs:
@@ -31,9 +35,11 @@ for doc in data:
       print("Swapped replicatedJobs order: 'worker' will start before 'pathways-head'.")
 
     for job in replicated_jobs:
-      if job.get("name") == "worker":
-        pod_template = job.get("template", {}).get("spec", {}).get("template", {})
+      pod_template = job.get("template", {}).get("spec", {}).get("template", {})
+      pod_spec = pod_template.setdefault("spec", {})
+      pod_spec["priorityClassName"] = "super-high"
 
+      if job.get("name") == "worker":
         metadata = pod_template.setdefault("metadata", {})
         labels = metadata.setdefault("labels", {})
         labels["kueue.x-k8s.io/podset"] = "worker"
@@ -104,13 +110,14 @@ for doc in data:
 
             # Inject VLLM_TORCH_PROFILER_DIR env var
             env = container.setdefault("env", [])
-            env.append(
-                {
-                    "name": "VLLM_TORCH_PROFILER_DIR",
-                    "value": f"gs://runner-maxtext-logs/{workload_name}/tensorboard/sampler_tpu_profile",
-                }
-            )
-            print(f"Injected VLLM_TORCH_PROFILER_DIR to pathways-worker container for workload {workload_name}")
+            if not any(e.get("name") == "VLLM_TORCH_PROFILER_DIR" for e in env if isinstance(e, dict)):
+              env.append(
+                  {
+                      "name": "VLLM_TORCH_PROFILER_DIR",
+                      "value": f"gs://runner-maxtext-logs/{workload_name}/tensorboard/sampler_tpu_profile",
+                  }
+              )
+              print(f"Injected VLLM_TORCH_PROFILER_DIR to pathways-worker container for workload {workload_name}")
       elif job.get("name") == "pathways-head":
         pod_template = job.get("template", {}).get("spec", {}).get("template", {})
         metadata = pod_template.setdefault("metadata", {})

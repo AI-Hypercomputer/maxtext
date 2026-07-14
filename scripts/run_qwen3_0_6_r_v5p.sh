@@ -149,6 +149,9 @@ max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
 rollout_vllm_init_with_random_weights=True \
+rl.use_agentic_rollout=True \
+rl.max_concurrency=64 \
+rl.rollout_vllm_server_mode_submission_threshold=64 \
 vllm_additional_config='{\"enable_continue_decode\": true}'"
 
 # 4. Run dry-run using the built image to generate manifest

@@ -495,6 +495,8 @@ def create_rl_components(
               # Ensures vLLM model initializes with correct dtype (not float32 default)
               "dtype": trainer_config.weight_dtype,
               "enable_chunked_prefill": False,
+              "kv_cache_metrics": getattr(trainer_config.rl, "kv_cache_metrics", True),
+              "disable_log_stats": getattr(trainer_config.rl, "disable_log_stats", False),
           },
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
@@ -502,6 +504,9 @@ def create_rl_components(
               "include_stop_str_in_output": trainer_config.stop_strings is not None,
           },
           rollout_vllm_server_mode_submission_threshold=trainer_config.rl.rollout_vllm_server_mode_submission_threshold,
+          rollout_vllm_server_mode_submission_timeout_s=getattr(
+              trainer_config.rl, "rollout_vllm_server_mode_submission_timeout_s", 5.0
+          ),
           return_logprobs=trainer_config.rl.return_logprobs
           if trainer_config.rl.return_logprobs is not None
           else trainer_config.rl.use_agentic_rollout,
