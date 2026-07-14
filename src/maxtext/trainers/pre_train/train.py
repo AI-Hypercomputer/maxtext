@@ -817,6 +817,14 @@ def recover(
   recorder = python_vars.get("recorder")
   elastic_manager = python_vars.get("elastic_manager")
   snapshot_mgr = python_vars.get("snapshot") or python_vars.get("snapshot_mgr") or python_vars.get("snapshot_manager")
+  # Delete old iterators and loaders to release colocated python resources before JAX cleanup
+  for key in ["data_iterator", "eval_data_iterator", "data_loader"]:
+    if key in python_vars:
+      _logger.info("Deleting old %s to release colocated python resources...", key)
+      del python_vars[key]
+  import gc
+  gc.collect()
+
   if snapshot_mgr is None and config.elastic_enabled:
     replica_axis_idx = config.mesh_axes.index("data")
     snapshot_mgr = Snapshotter(replica_axis_index=replica_axis_idx)
