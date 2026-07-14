@@ -822,265 +822,273 @@ def recover(
     snapshot_mgr = Snapshotter(replica_axis_index=replica_axis_idx)
     python_vars["snapshot"] = snapshot_mgr
 
-  # 1. Find currently active slices (wait if none are active)
-  min_slices = 1 if config.elastic_min_slice_count == -1 else config.elastic_min_slice_count
+  while True:
+    try:
+      # 1. Find currently active slices (wait if none are active)
+      min_slices = 1 if config.elastic_min_slice_count == -1 else config.elastic_min_slice_count
 
-  _logger.info("Waiting for at least %d slices to be active for recovery...", min_slices)
-  all_active_slices = elastic.wait_for_slices(
-      slice_count=min_slices,
-      slice_to_devices=elastic_manager.slice_to_devices,
-      timeout=config.elastic_timeout_seconds,
-  )
-  elastic_manager.active_slice_indices = all_active_slices
-  _logger.info(
-      "Active slices after recovery: %s", elastic_manager.active_slice_indices
-  )
-  _logger.info(
-      "Active devices after recovery: %d", len(elastic_utils.live_devices(config))
-  )
+      _logger.info("Waiting for at least %d slices to be active for recovery...", min_slices)
+      all_active_slices = elastic.wait_for_slices(
+          slice_count=min_slices,
+          slice_to_devices=elastic_manager.slice_to_devices,
+          timeout=config.elastic_timeout_seconds,
+      )
+      elastic_manager.active_slice_indices = all_active_slices
+      _logger.info(
+          "Active slices after recovery: %s", elastic_manager.active_slice_indices
+      )
+      _logger.info(
+          "Active devices after recovery: %d", len(elastic_utils.live_devices(config))
+      )
 
-  elastic_utils.elastic_manager = elastic_manager
+      elastic_utils.elastic_manager = elastic_manager
 
-  # Dynamically mutate the config to match the degraded slice topology
-  new_slice_count = elastic_manager.active_slice_count
-  _logger.info(
-      "[*] Dynamically mutating config.num_slices and"
-      " config.dcn_data_parallelism to: %d",
-      new_slice_count,
-  )
-  object.__setattr__(config, "num_slices", new_slice_count)
-  object.__setattr__(config, "dcn_data_parallelism", new_slice_count)
+      # Dynamically mutate the config to match the degraded slice topology
+      new_slice_count = elastic_manager.active_slice_count
+      _logger.info(
+          "[*] Dynamically mutating config.num_slices and"
+          " config.dcn_data_parallelism to: %d",
+          new_slice_count,
+      )
+      object.__setattr__(config, "num_slices", new_slice_count)
+      object.__setattr__(config, "dcn_data_parallelism", new_slice_count)
 
-  # Update DCN data parallel axis in dcn_parallelism list
-  data_axis_idx = config.mesh_axes.index("data")
-  config.dcn_parallelism[data_axis_idx] = new_slice_count
+      # Update DCN data parallel axis in dcn_parallelism list
+      data_axis_idx = config.mesh_axes.index("data")
+      config.dcn_parallelism[data_axis_idx] = new_slice_count
 
-  # Recalculate num_target_devices and batch sizes for the new topology
-  new_num_devices = len(elastic_utils.live_devices(config))
-  object.__setattr__(config, "num_target_devices", new_num_devices)
+      # Recalculate num_target_devices and batch sizes for the new topology
+      new_num_devices = len(elastic_utils.live_devices(config))
+      object.__setattr__(config, "num_target_devices", new_num_devices)
 
-  def calc_gbs(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps):
-    if per_device_batch_size < 1.0:
-      mbs_load = num_devices * (expansion_factor if expansion_factor > 0 else 1)
-    else:
-      mbs_load = int(num_devices * per_device_batch_size * (expansion_factor if expansion_factor > 0 else 1))
-    mbs_train = int(num_devices * per_device_batch_size)
-    gbs_load = int(mbs_load * grad_accum_steps)
-    gbs_train = int(mbs_train * grad_accum_steps)
-    return gbs_load, gbs_train, mbs_train
+      def calc_gbs(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps):
+        if per_device_batch_size < 1.0:
+          mbs_load = num_devices * (expansion_factor if expansion_factor > 0 else 1)
+        else:
+          mbs_load = int(num_devices * per_device_batch_size * (expansion_factor if expansion_factor > 0 else 1))
+        mbs_train = int(num_devices * per_device_batch_size)
+        gbs_load = int(mbs_load * grad_accum_steps)
+        gbs_train = int(mbs_train * grad_accum_steps)
+        return gbs_load, gbs_train, mbs_train
 
-  # Update train batch sizes
-  gbs_load, gbs_train, mbs_train = calc_gbs(
-      config.per_device_batch_size,
-      config.expansion_factor_real_data,
-      new_num_devices,
-      config.gradient_accumulation_steps,
-  )
-  object.__setattr__(config, "global_batch_size_to_load", gbs_load)
-  object.__setattr__(config, "global_batch_size_to_train_on", gbs_train)
-  object.__setattr__(config, "micro_batch_size_to_train_on", mbs_train)
+      # Update train batch sizes
+      gbs_load, gbs_train, mbs_train = calc_gbs(
+          config.per_device_batch_size,
+          config.expansion_factor_real_data,
+          new_num_devices,
+          config.gradient_accumulation_steps,
+      )
+      object.__setattr__(config, "global_batch_size_to_load", gbs_load)
+      object.__setattr__(config, "global_batch_size_to_train_on", gbs_train)
+      object.__setattr__(config, "micro_batch_size_to_train_on", mbs_train)
 
-  # Update eval batch sizes
-  gbs_load_eval, gbs_eval, mbs_eval = calc_gbs(
-      config.eval_per_device_batch_size,
-      config.expansion_factor_real_data,
-      new_num_devices,
-      1,
-  )
-  object.__setattr__(config, "global_batch_size_to_load_eval", gbs_load_eval)
-  object.__setattr__(config, "global_batch_size_to_eval_on", gbs_eval)
-  object.__setattr__(config, "micro_batch_size_to_eval_on", mbs_eval)
+      # Update eval batch sizes
+      gbs_load_eval, gbs_eval, mbs_eval = calc_gbs(
+          config.eval_per_device_batch_size,
+          config.expansion_factor_real_data,
+          new_num_devices,
+          1,
+      )
+      object.__setattr__(config, "global_batch_size_to_load_eval", gbs_load_eval)
+      object.__setattr__(config, "global_batch_size_to_eval_on", gbs_eval)
+      object.__setattr__(config, "micro_batch_size_to_eval_on", mbs_eval)
 
-  if config.enable_rampup_batch_size:
-    gbs_load_start = calc_gbs(
-        config.per_device_batch_size_start,
-        config.expansion_factor_real_data,
-        new_num_devices,
-        config.gradient_accumulation_steps,
-    )[0]
-    gbs_load_inc, _, _ = calc_gbs(
-        config.per_device_batch_size_increment,
-        config.expansion_factor_real_data,
-        new_num_devices,
-        config.gradient_accumulation_steps,
-    )
-    object.__setattr__(config, "global_batch_size_to_load_start", gbs_load_start)
-    object.__setattr__(config, "global_batch_size_to_load_increment", gbs_load_inc)
+      if config.enable_rampup_batch_size:
+        gbs_load_start = calc_gbs(
+            config.per_device_batch_size_start,
+            config.expansion_factor_real_data,
+            new_num_devices,
+            config.gradient_accumulation_steps,
+        )[0]
+        gbs_load_inc, _, _ = calc_gbs(
+            config.per_device_batch_size_increment,
+            config.expansion_factor_real_data,
+            new_num_devices,
+            config.gradient_accumulation_steps,
+        )
+        object.__setattr__(config, "global_batch_size_to_load_start", gbs_load_start)
+        object.__setattr__(config, "global_batch_size_to_load_increment", gbs_load_inc)
 
-    diff_batch_size = gbs_load - gbs_load_start
-    if gbs_load_inc > 0:
-      num_increments = diff_batch_size // gbs_load_inc
-      if num_increments > 0:
-        rampup_samples_per_increment = config.global_rampup_samples / num_increments
-        object.__setattr__(config, "rampup_samples_per_increment_to_load", rampup_samples_per_increment)
+        diff_batch_size = gbs_load - gbs_load_start
+        if gbs_load_inc > 0:
+          num_increments = diff_batch_size // gbs_load_inc
+          if num_increments > 0:
+            rampup_samples_per_increment = config.global_rampup_samples / num_increments
+            object.__setattr__(config, "rampup_samples_per_increment_to_load", rampup_samples_per_increment)
 
-        total_rampup_steps = 0
-        current_batch_size = gbs_load_start
-        for _ in range(int(num_increments)):
-          steps_for_this_stage = (
-              int(np.ceil(rampup_samples_per_increment / current_batch_size)) if current_batch_size > 0 else 0
+            total_rampup_steps = 0
+            current_batch_size = gbs_load_start
+            for _ in range(int(num_increments)):
+              steps_for_this_stage = (
+                  int(np.ceil(rampup_samples_per_increment / current_batch_size)) if current_batch_size > 0 else 0
+              )
+              total_rampup_steps += steps_for_this_stage
+              current_batch_size += gbs_load_inc
+            object.__setattr__(config, "rampup_end_step", total_rampup_steps)
+
+      # 2. Re-run setup_train_loop to rebuild Mesh, Model, Optimizers, Dataloader
+      (
+          init_rng,
+          checkpoint_manager,
+          state_mesh_shardings,
+          model,
+          mesh,
+          learning_rate_schedule,
+          data_iterator,
+          data_loader,
+          rampup_manager,
+          eval_data_iterator,
+          state,  # Newly initialized scratch state
+      ) = train_utils.setup_train_loop(
+          config,
+          recorder,
+          devices=elastic_utils.live_devices(config),
+          restore_checkpoint=False,
+      )
+      init_rng = jax.device_put(
+          init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      )
+
+      params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
+      # 3. Re-compile train and eval steps for the NEW mesh
+      if isinstance(model, nn.Module):
+        jit_model = model
+      else:
+        jit_model, _ = nnx.split(state)
+
+      with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+            config,
+            jit_model,
+            mesh,
+            state,
+            state_mesh_shardings,
+            train_step,
+            eval_step,
+            eval_data_iterator,
+            params_shardings,
+        )
+
+      # 4. Restore TrainState from host snapshot or active state
+      if active_state is not None:
+        _logger.info("[*] Resharding active state directly (device-to-device)...")
+        if isinstance(model, nn.Module):
+          abstract_dict = {
+              "step": state.step,
+              "params": state.params,
+              "opt_state": state.opt_state,
+          }
+          active_dict = {
+              "step": active_state.step,
+              "params": active_state.params,
+              "opt_state": active_state.opt_state,
+          }
+          restored_dict = jax.device_put(
+              active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
           )
-          total_rampup_steps += steps_for_this_stage
-          current_batch_size += gbs_load_inc
-        object.__setattr__(config, "rampup_end_step", total_rampup_steps)
+          restored_state = state.replace(
+              step=restored_dict["step"],
+              params=restored_dict["params"],
+              opt_state=restored_dict["opt_state"],
+          )
+          restored_step = int(restored_state.step)
+        else:
+          model_state = nnx.state(state.model) if hasattr(state, "model") else state
+          opt_state = nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
+          abstract_dict = {"model": nnx.to_pure_dict(model_state)}
+          if opt_state is not None:
+            abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
 
-  # 2. Re-run setup_train_loop to rebuild Mesh, Model, Optimizers, Dataloader
-  (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      data_loader,
-      rampup_manager,
-      eval_data_iterator,
-      state,  # Newly initialized scratch state
-  ) = train_utils.setup_train_loop(
-      config,
-      recorder,
-      devices=elastic_utils.live_devices(config),
-      restore_checkpoint=False,
-  )
-  init_rng = jax.device_put(
-      init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-  )
+          act_model_state = nnx.state(active_state.model) if hasattr(active_state, "model") else active_state
+          act_opt_state = nnx.state(active_state.optimizer) if hasattr(active_state, "optimizer") else None
+          active_dict = {"model": nnx.to_pure_dict(act_model_state)}
+          if act_opt_state is not None:
+            active_dict["optimizer"] = nnx.to_pure_dict(act_opt_state)
 
-  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+          restored_dict = jax.device_put(
+              active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
+          )
+          if hasattr(state, "model") and "model" in restored_dict:
+            nnx.update(state.model, restored_dict["model"])
+          if hasattr(state, "optimizer") and "optimizer" in restored_dict:
+            nnx.update(state.optimizer, restored_dict["optimizer"])
+          restored_state = state
+          try:
+            if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+              step_val = state.optimizer.step
+              restored_step = int(getattr(step_val, "value", step_val))
+          except Exception:
+            restored_step = 0
+        _logger.info(
+            "Resharding complete. Retrying. Slices used: %s",
+            elastic_manager.active_slice_indices,
+        )
+      else:
+        if snapshot_mgr.latest is None:
+          raise RuntimeError("No snapshots available to restore from. Cannot recover.")
+        restored_step = snapshot_mgr.latest.step
+        if isinstance(model, nn.Module):
+          abstract_dict = {
+              "step": state.step,
+              "params": state.params,
+              "opt_state": state.opt_state,
+          }
+          restored_dict = snapshot_mgr.load_pytree(abstract_dict)
+          restored_state = state.replace(
+              step=restored_dict["step"],
+              params=restored_dict["params"],
+              opt_state=restored_dict["opt_state"],
+          )
+        else:
+          model_state = nnx.state(state.model) if hasattr(state, "model") else state
+          opt_state = nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
+          abstract_dict = {"model": nnx.to_pure_dict(model_state)}
+          if opt_state is not None:
+            abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+          restored_dict = snapshot_mgr.load_pytree(abstract_dict)
+          if hasattr(state, "model") and "model" in restored_dict:
+            nnx.update(state.model, restored_dict["model"])
+          if hasattr(state, "optimizer") and "optimizer" in restored_dict:
+            nnx.update(state.optimizer, restored_dict["optimizer"])
+          restored_state = state
+          try:
+            if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+              step_val = state.optimizer.step
+              restored_step = int(getattr(step_val, "value", step_val))
+          except Exception:
+            pass
+        if metric_logger_instance is not None:
+          metric_logger_instance.recover_metrics(restored_dict.get("metrics"))
 
-  # 3. Re-compile train and eval steps for the NEW mesh
-  if isinstance(model, nn.Module):
-    jit_model = model
-  else:
-    jit_model, _ = nnx.split(state)
+      # Update jax_device_state with the newly built JAX objects
+      if not isinstance(model, nn.Module) and isinstance(restored_state, train_state_nnx.TrainStateNNX):
+        _, restored_state = nnx.split(restored_state)
+      jax_device_state["state"] = restored_state
+      jax_device_state["init_rng"] = init_rng
+      jax_device_state["mesh"] = mesh
+      jax_device_state["state_mesh_shardings"] = state_mesh_shardings
+      jax_device_state["p_train_step"] = p_train_step
+      jax_device_state["p_eval_step"] = p_eval_step
 
-  with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-        config,
-        jit_model,
-        mesh,
-        state,
-        state_mesh_shardings,
-        train_step,
-        eval_step,
-        eval_data_iterator,
-        params_shardings,
-    )
+      # Update python_vars with new loop state and dataloader
+      python_vars["step"] = restored_step
+      python_vars["data_loader"] = data_loader
+      python_vars["data_iterator"] = data_iterator
+      python_vars["eval_data_iterator"] = eval_data_iterator
+      python_vars["checkpoint_manager"] = checkpoint_manager
+      python_vars["rampup_manager"] = rampup_manager
+      python_vars["last_step_completion"] = datetime.datetime.now()
 
-  # 4. Restore TrainState from host snapshot or active state
-  if active_state is not None:
-    _logger.info("[*] Resharding active state directly (device-to-device)...")
-    if isinstance(model, nn.Module):
-      abstract_dict = {
-          "step": state.step,
-          "params": state.params,
-          "opt_state": state.opt_state,
-      }
-      active_dict = {
-          "step": active_state.step,
-          "params": active_state.params,
-          "opt_state": active_state.opt_state,
-      }
-      restored_dict = jax.device_put(
-          active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
+      _logger.info(
+          "Recovery complete! Resuming safely at step %d...", restored_step
       )
-      restored_state = state.replace(
-          step=restored_dict["step"],
-          params=restored_dict["params"],
-          opt_state=restored_dict["opt_state"],
-      )
-      restored_step = int(restored_state.step)
-    else:
-      model_state = nnx.state(state.model) if hasattr(state, "model") else state
-      opt_state = nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
-      abstract_dict = {"model": nnx.to_pure_dict(model_state)}
-      if opt_state is not None:
-        abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+      break
 
-      act_model_state = nnx.state(active_state.model) if hasattr(active_state, "model") else active_state
-      act_opt_state = nnx.state(active_state.optimizer) if hasattr(active_state, "optimizer") else None
-      active_dict = {"model": nnx.to_pure_dict(act_model_state)}
-      if act_opt_state is not None:
-        active_dict["optimizer"] = nnx.to_pure_dict(act_opt_state)
-
-      restored_dict = jax.device_put(
-          active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
-      )
-      if hasattr(state, "model") and "model" in restored_dict:
-        nnx.update(state.model, restored_dict["model"])
-      if hasattr(state, "optimizer") and "optimizer" in restored_dict:
-        nnx.update(state.optimizer, restored_dict["optimizer"])
-      restored_state = state
-      try:
-        if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
-          step_val = state.optimizer.step
-          restored_step = int(getattr(step_val, "value", step_val))
-      except Exception:
-        restored_step = 0
-    _logger.info(
-        "Resharding complete. Retrying. Slices used: %s",
-        elastic_manager.active_slice_indices,
-    )
-  else:
-    if snapshot_mgr.latest is None:
-      raise RuntimeError("No snapshots available to restore from. Cannot recover.")
-    restored_step = snapshot_mgr.latest.step
-    if isinstance(model, nn.Module):
-      abstract_dict = {
-          "step": state.step,
-          "params": state.params,
-          "opt_state": state.opt_state,
-      }
-      restored_dict = snapshot_mgr.load_pytree(abstract_dict)
-      restored_state = state.replace(
-          step=restored_dict["step"],
-          params=restored_dict["params"],
-          opt_state=restored_dict["opt_state"],
-      )
-    else:
-      model_state = nnx.state(state.model) if hasattr(state, "model") else state
-      opt_state = nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
-      abstract_dict = {"model": nnx.to_pure_dict(model_state)}
-      if opt_state is not None:
-        abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
-      restored_dict = snapshot_mgr.load_pytree(abstract_dict)
-      if hasattr(state, "model") and "model" in restored_dict:
-        nnx.update(state.model, restored_dict["model"])
-      if hasattr(state, "optimizer") and "optimizer" in restored_dict:
-        nnx.update(state.optimizer, restored_dict["optimizer"])
-      restored_state = state
-      try:
-        if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
-          step_val = state.optimizer.step
-          restored_step = int(getattr(step_val, "value", step_val))
-      except Exception:
-        pass
-    if metric_logger_instance is not None:
-      metric_logger_instance.recover_metrics(restored_dict.get("metrics"))
-
-  # Update jax_device_state with the newly built JAX objects
-  if not isinstance(model, nn.Module) and isinstance(restored_state, train_state_nnx.TrainStateNNX):
-    _, restored_state = nnx.split(restored_state)
-  jax_device_state["state"] = restored_state
-  jax_device_state["init_rng"] = init_rng
-  jax_device_state["mesh"] = mesh
-  jax_device_state["state_mesh_shardings"] = state_mesh_shardings
-  jax_device_state["p_train_step"] = p_train_step
-  jax_device_state["p_eval_step"] = p_eval_step
-
-  # Update python_vars with new loop state and dataloader
-  python_vars["step"] = restored_step
-  python_vars["data_loader"] = data_loader
-  python_vars["data_iterator"] = data_iterator
-  python_vars["eval_data_iterator"] = eval_data_iterator
-  python_vars["checkpoint_manager"] = checkpoint_manager
-  python_vars["rampup_manager"] = rampup_manager
-  python_vars["last_step_completion"] = datetime.datetime.now()
-
-  _logger.info(
-      "Recovery complete! Resuming safely at step %d...", restored_step
-  )
+    except pathways_manager.ScaleUpSignalError as e:
+      _logger.info("ScaleUpSignalError caught during recovery: %s. Retrying recovery.", e)
+      if elastic_manager is not None:
+        elastic_manager.new_slice_event.clear()
 
 
 def scale_up(
@@ -1364,6 +1372,18 @@ def train_loop(config, recorder, state=None):
                 immutable_data,
                 active_state=jax_device_state["state"],
             )
+            # Restart monitor thread because it exited
+            _logger.info("Restarting monitor thread after scale-up...")
+            if monitor_thread is not None:
+              stop_event.set()
+              monitor_thread.join()
+            stop_event = threading.Event()
+            monitor_thread = threading.Thread(
+                target=elastic_manager._monitor_new_slices,  # pylint: disable=protected-access
+                args=(stop_event, config.elastic_new_slice_check_period),
+                daemon=True,
+            )
+            monitor_thread.start()
             # Start snapshot save immediately on the new mesh
             snapshot_mgr = python_vars["snapshot"]
             state = jax_device_state["state"]
