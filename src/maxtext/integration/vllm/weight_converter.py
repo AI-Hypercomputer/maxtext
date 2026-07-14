@@ -118,13 +118,13 @@ class WeightConverter(abc.ABC):
         flat_src_tuples = traverse_util.flatten_dict(src_pytree)
         flat_src = {'.'.join(str(k) for k in keys): v for keys, v in flat_src_tuples.items()}
         
-        print(f"DEBUG: src_pytree flat keys (first 10): {list(flat_src.keys())[:10]}")
+        # print(f"DEBUG: src_pytree flat keys (first 10): {list(flat_src.keys())[:10]}")
         
         dst_dict = {}
         
         rules_to_apply = list(self.rules)
         if target_state is not None:
-            direct_rules = build_maxtext_direct_rules(src_pytree, target_state)
+            direct_rules = build_converter_rules(src_pytree, target_state)
             print(f"DEBUG: Generated {len(direct_rules)} direct rules.")
             if len(direct_rules) > 0:
                 print(f"DEBUG: First direct rule sample: {direct_rules[0].__dict__}")
@@ -239,17 +239,13 @@ _MODEL_TO_CONVERSION_RULES = {
         WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.key_norm\.scale", r"model.layers.\1.self_attn.k_norm.weight"),
     ],
 }
-
-def build_torchax_rules(mapping_config) -> list:
-    return [WeightRenaming(src, tgt) for src, tgt in mapping_config.items()]
-
 def _shapes_are_repeatable(candidate_shape, tgt_shape):
     if len(candidate_shape) != len(tgt_shape): return False
     for s, t in zip(candidate_shape, tgt_shape):
         if s > t or t % s != 0: return False
     return True
 
-def build_maxtext_direct_rules(src_pytree, target_state) -> list:
+def build_converter_rules(src_pytree, target_state) -> list:
     # Unwrap Source
     if isinstance(src_pytree, dict) and 'base' in src_pytree:
         src_pytree = src_pytree['base']
