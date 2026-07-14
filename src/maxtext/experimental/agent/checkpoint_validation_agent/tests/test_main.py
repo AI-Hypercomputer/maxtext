@@ -1,3 +1,17 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "innovation" basis,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Unit tests for the Checkpoint Validation Agent."""
 
 import unittest
@@ -70,6 +84,22 @@ class TestCheckpointValidationAgent(unittest.TestCase):
       self.assertIn("model_name=qwen3-4b", executed_command)
       self.assertIn("scan_layers=False", executed_command)
       self.assertIn("per_device_batch_size=16.0", executed_command)
+
+  @patch("src.maxtext.experimental.agent.checkpoint_validation_agent.main.subprocess.run")
+  def test_upload_to_gcs(self, mock_subprocess):
+    """test that upload_to_gcs correctly calls gsutil."""
+    from src.maxtext.experimental.agent.checkpoint_validation_agent.main import upload_to_gcs
+    upload_to_gcs("/local/report.json", "gs://my-bucket/reports")
+    mock_subprocess.assert_called_once()
+    executed_command = mock_subprocess.call_args[0][0]
+    self.assertEqual(executed_command, ["gsutil", "cp", "/local/report.json", "gs://my-bucket/reports/report.json"])
+
+  @patch("src.maxtext.experimental.agent.checkpoint_validation_agent.main.subprocess.run")
+  def test_upload_to_gcs_invalid_path(self, mock_subprocess):
+    """test that upload_to_gcs rejects invalid paths without running gsutil."""
+    from src.maxtext.experimental.agent.checkpoint_validation_agent.main import upload_to_gcs
+    upload_to_gcs("/local/report.json", "https://invalid/path")
+    mock_subprocess.assert_not_called()
 
 
 if __name__ == "__main__":

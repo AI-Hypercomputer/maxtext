@@ -1,3 +1,17 @@
+# Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "innovation" basis,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Mock tensor dry-run to validate checkpoint architecture stability."""
 
 import sys
@@ -13,6 +27,7 @@ def run_mock_forward(checkpoint_path, model_name, *overrides):
   """Initializes the model abstractly and dry-runs a forward pass."""
   # minimal config required to bypass distributed TPU checks
   config_args = [
+      "src/maxtext/configs/base.yml",
       f"model_name={model_name}",
       f"load_parameters_path={checkpoint_path}",
       "skip_jax_distributed_system=true",
