@@ -702,7 +702,7 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -938,6 +938,163 @@ def calculate_vision_encoder_tflops(config):
   return mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops
 
 
+def calculate_mhc_flops_per_layer(config):
+  """Calculates the training FLOPs per layer for Manifold-Constrained Hyper-Connections (mHC)."""
+  batch_size = config.per_device_batch_size
+  seq_len = config.max_target_length
+  k_mhc = getattr(config, "mhc_expansion_rate", 1)
+  emb_dim = config.emb_dim
+
+  # Inside mhc.py, inputs are projected to an expanded manifold space bounded by k_mhc.
+  # pre_alpha / post_alpha maps input [B, S, k * D] to [B, S, k]
+  pre_alpha_flops = 2 * batch_size * seq_len * (k_mhc * emb_dim) * k_mhc
+  pre_contract_flops = 2 * batch_size * seq_len * k_mhc * emb_dim
+  post_alpha_flops = 2 * batch_size * seq_len * (k_mhc * emb_dim) * k_mhc
+  post_outer_flops = batch_size * seq_len * k_mhc * emb_dim
+  # res_alpha maps input [B, S, k * D] to [B, S, k^2]
+  res_alpha_flops = 2 * batch_size * seq_len * (k_mhc * emb_dim) * (k_mhc**2)
+  res_contract_flops = 2 * batch_size * seq_len * (k_mhc**2) * emb_dim
+
+  return pre_alpha_flops + pre_contract_flops + post_alpha_flops + post_outer_flops + res_alpha_flops + res_contract_flops
+
+
+def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_layers, embedding_flops):
+  """Calculates the training TFLOPs per device for DeepSeek-V4.
+
+  DeepSeek-V4 adopts a multi-track attention topology and Manifold-Constrained
+  Hyper-Connections (mHC). This function models:
+  1. Base Attention block projections (Q/KV/Grouped Out mapping).
+  2. mHC projections (pre, post, residual alpha/contraction projections) applied twice per layer.
+  3. Prefix-only Sliding Window track (C=0).
+  4. HCA (Hybrid Compressed Attention, C=128) incorporating global context.
+  5. CSA (Causal Sparse Attention, C=4) containing poolers, indexer top-k query scoring,
+     and sparse sequence attention.
+
+  Args:
+    config: MaxTextConfig instance containing architectural hyperparameters.
+    total_ffn_flops_all_layers: Pre-computed Feed-Forward (MoE/Shared MLP) FLOPs.
+    embedding_flops: Pre-computed input token embedding layer FLOPs.
+
+  Returns:
+    A tuple of (total_attn_flops_in_tflops, total_weight_flops_in_tflops).
+  """
+  batch_size = config.per_device_batch_size
+  seq_len = config.max_target_length
+  sliding_window_size = config.sliding_window_size
+  num_layers = config.num_decoder_layers
+
+  # DeepSeek-V4 Attention topology compression rates (HCA = 128, CSA = 4)
+  HCA_RATIO = 128
+  CSA_RATIO = 4
+
+  # 1. Dynamic YAML-compliant Layer Counting
+  # DeepSeek-V4 alternates layers with different compression rates (C = 0, 128, 4).
+  # If the YAML config doesn't declare it explicitly, we default to the standard
+  # DeepSeek-V4 profile (2 prefix sliding window, 20 HCA, and 21 CSA layers).
+  c_ratios = getattr(config, "compress_ratios", [])
+  if not c_ratios:
+    num_sliding_layers, num_hca_layers, num_csa_layers = 2, 20, 21
+  else:
+    num_sliding_layers = c_ratios.count(0)
+    num_hca_layers = c_ratios.count(HCA_RATIO)
+    num_csa_layers = c_ratios.count(CSA_RATIO)
+
+  # 2. Base Attention Block Projections (Executed on all layers)
+  # - Q projection: projects inputs to q_lora_rank, then up-projects to query_heads * head_dim.
+  #   FLOPs = 2 * B * S * (D * Q_rank + Q_rank * H * D_h)
+  wq_flops = (
+      2
+      * batch_size
+      * seq_len
+      * ((config.emb_dim * config.q_lora_rank) + (config.q_lora_rank * config.num_query_heads * config.head_dim))
+  )
+  # - KV projection: embeds to kv_heads * head_dim.
+  #   FLOPs = 2 * B * S * D * (KV_heads * D_h)
+  wkv_flops = 2 * batch_size * seq_len * config.emb_dim * (config.num_kv_heads * config.head_dim)
+  # - Grouped Out projection: projects out groups of heads down to o_lora_rank, then up to emb_dim.
+  #   FLOPs = 2 * B * S * (H * D_h) * o_lora_rank + 2 * B * S * (o_groups * o_lora_rank) * D
+  grp_feat = (config.num_query_heads * config.head_dim) // config.o_groups
+  o_flops = (2 * batch_size * seq_len * config.o_groups * grp_feat * config.o_lora_rank) + (
+      2 * batch_size * seq_len * (config.o_groups * config.o_lora_rank) * config.emb_dim
+  )
+  base_attention_weights = wq_flops + wkv_flops + o_flops
+
+  # 3. Manifold-Constrained Hyper-Connections (mHC) Overheads
+  # Inside mhc.py, inputs are projected to an expanded manifold space.
+  # These operations are executed twice per layer (wrapping the attention block and FFN block).
+  if getattr(config, "mhc_expansion_rate", 1) > 1:
+    mhc_flops_per_layer = calculate_mhc_flops_per_layer(config)
+  else:
+    mhc_flops_per_layer = 0
+
+  # 4. Multi-Track Sequence Length Operations
+  # - Track 1: Sliding Window Prefix (C=0)
+  #   Uses exact causal sliding window surface area formula to count attention dot products:
+  #   FLOPs = 4 * B * (S * W - 0.5 * W^2) * H * D_h
+  prefix_attn = (
+      4
+      * batch_size
+      * (seq_len * sliding_window_size - 0.5 * sliding_window_size**2)
+      * config.num_query_heads
+      * config.head_dim
+  )
+
+  # - Track 2: HCA Compressed Branch (C=128)
+  #   Includes HCA compressor dense projection: D -> D_h
+  hca_pooler = 4 * batch_size * seq_len * config.emb_dim * config.head_dim
+  #   Calculates prefix sliding window attention + global cross-attention to the S/128 elements
+  hca_attn = prefix_attn + 2 * batch_size * seq_len * (seq_len / HCA_RATIO) * config.num_query_heads * config.head_dim
+
+  # - Track 3: CSA Sparse Branch (C=4)
+  #   - Indexer Projections: Q_rank -> H_idx * D_idx, and D -> H_idx
+  idx_proj = (
+      2
+      * batch_size
+      * seq_len
+      * (
+          (config.q_lora_rank * config.indexer_n_heads * config.indexer_head_dim)
+          + (config.emb_dim * config.indexer_n_heads)
+      )
+  )
+  #   - Indexer query-block scoring (divided by 2 for causal mask)
+  idx_score = batch_size * seq_len * (seq_len / CSA_RATIO) * config.indexer_n_heads * config.indexer_head_dim
+  #   - Indexer head reduction (divided by 2 for causal mask)
+  idx_reduce = batch_size * seq_len * (seq_len / CSA_RATIO) * config.indexer_n_heads
+  #   - Indexer key/gate pooler projections: Down-projects D -> 2 * D_idx
+  idx_kv_gate_pool = 4 * batch_size * seq_len * config.emb_dim * (2 * config.indexer_head_dim)
+  csa_indexer = idx_proj + idx_score + idx_reduce + idx_kv_gate_pool
+
+  #   Includes CSA compressor pooler projection: D -> 2 * D_h
+  csa_pooler = 4 * batch_size * seq_len * config.emb_dim * (2 * config.head_dim)
+  #   - Sparse causal attention: attends to top-k blocks of size 4 in preceding sequence of size S/4
+  csa_k = min(config.indexer_topk, seq_len // CSA_RATIO)
+  #   We reuse the mask multiplier helper for the csa causal ratio:
+  #   Ratio = (K/T) - 0.5 * (K/T)^2
+  csa_mask_ratio = calculate_indexer_mask_ratio(csa_k, seq_len // CSA_RATIO)
+  csa_sparse_attn = (
+      4 * batch_size * (seq_len * (seq_len / CSA_RATIO)) * config.num_query_heads * config.head_dim * csa_mask_ratio
+  )
+  csa_attn = prefix_attn + csa_sparse_attn + csa_indexer
+
+  # 5. Pipeline TFLOP Aggregation
+  total_attn_flops = (num_sliding_layers * prefix_attn) + (num_hca_layers * hca_attn) + (num_csa_layers * csa_attn)
+
+  total_weight_flops = (
+      (num_layers * base_attention_weights)
+      + (2 * num_layers * mhc_flops_per_layer)  # mHC runs twice per layer
+      + (num_hca_layers * hca_pooler)
+      + (num_csa_layers * csa_pooler)
+      + total_ffn_flops_all_layers
+      + embedding_flops
+  )
+
+  # Scale final values by 3x to account for Forward + Backward (2x Forward) training passes
+  return (
+      total_attn_flops * 3 / 10**12,
+      total_weight_flops * 3 / 10**12,
+  )
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   # MLP flops
@@ -950,6 +1107,7 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
         DecoderBlockType.GEMMA4,
+        DecoderBlockType.DEEPSEEK4,
     ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
@@ -1040,6 +1198,10 @@ def calculate_tflops_training_per_device(config, log=True):
     # KV sharing, double-wide MLP on shared layers, and the per-layer-embedding
     # block.
     attention_tflops, learnable_weight_tflops = calculate_gemma4_small_tflops_training_per_device(config, embedding_flops)
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK4:
+    attention_tflops, learnable_weight_tflops = calculate_deepseek4_tflops_training_per_device(
+        config, total_ffn_flops_all_layers, embedding_flops
+    )
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
