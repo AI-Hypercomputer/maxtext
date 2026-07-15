@@ -15,6 +15,7 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
+import asyncio
 import time
 from typing import Any, Optional
 
@@ -167,6 +168,44 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   item: Any
   process_index: Optional[int | list[int]] = None
   process_count: Optional[int] = None
+
+
+class GrainCheckpointable(ocp_v1.StatefulCheckpointable):
+  """Adapts `GrainCheckpointHandler` to Orbax v1's `StatefulCheckpointable`."""
+
+  def __init__(
+      self,
+      *,
+      save_args: GrainCheckpointSave | None = None,
+      restore_args: GrainCheckpointRestore | None = None,
+  ):
+    self._handler = GrainCheckpointHandler()
+    self._save_args = save_args
+    self._restore_args = restore_args
+
+  async def save(self, directory):
+    """Saves the Grain iterator state to the given directory."""
+    # `GrainCheckpointHandler.save` snapshots iterator state (`get_state`) AND
+    # writes it; both must happen in this (blocking) save phase, NOT in the
+    # returned background coroutine.
+    path = await directory.await_creation()
+    self._handler.save(path, args=self._save_args)
+
+    async def _committed():  # nothing left for the background commit phase
+      return None
+
+    return _committed()
+
+  async def load(self, directory: epath.Path):
+    """Loads the Grain iterator state from the given directory."""
+    handler, args = self._handler, self._restore_args
+
+    # This will be ran to completion so asynchronous portion is just for
+    # compatibility with Orbax v1 API.
+    async def _background_load():
+      await asyncio.to_thread(handler.restore, directory, args=args)
+
+    return _background_load()
 
 
 def _weight_mismatches(want, have, path=()):
@@ -1151,9 +1190,13 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     if isinstance(data_iterator, RemoteIteratorWrapper):
       # Pass the wrapper directly; GrainCheckpointHandler will call save_state with the step
       save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator)  # pyrefly: ignore[bad-assignment]
-    elif not isinstance(data_iterator, list) and isinstance(data_iterator.local_iterator, ElasticIterator):  # pyrefly: ignore[missing-attribute]
+    elif not isinstance(data_iterator, list) and isinstance(
+        data_iterator.local_iterator, ElasticIterator
+    ):  # pyrefly: ignore[missing-attribute]
       # ElasticIterator checkpoints a single global scalar shared by all shards.
-      save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator.local_iterator)  # pyrefly: ignore[bad-assignment]
+      save_args_composite["iter"] = GrainCheckpointSave(
+          item=data_iterator.local_iterator
+      )  # pyrefly: ignore[bad-assignment]
     else:
       if not isinstance(data_iterator, list):
         data_iterator = [data_iterator]
@@ -1163,7 +1206,9 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         process_count_total = process_count_total // config.expansion_factor_real_data
       for i, data_iter in enumerate(data_iterator):
         process_index = jax.process_index() + i * jax.process_count()
-        grain_iters_to_save.append((data_iter.local_iterator, process_index, process_count_total))  # pyrefly: ignore[missing-attribute]
+        grain_iters_to_save.append(
+            (data_iter.local_iterator, process_index, process_count_total)
+        )  # pyrefly: ignore[missing-attribute]
       save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)  # pyrefly: ignore[bad-assignment]
 
   custom_metadata = {}
