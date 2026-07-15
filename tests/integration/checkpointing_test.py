@@ -197,36 +197,74 @@ def test_with_dot_product():
   run_checkpointing("gpu", "dot_product")
 
 
+def _get_mismatch_cmd(run_date, steps, metrics_file):
+  """Command for the mismatch tests: synthetic data, local output."""
+  return get_checkpointing_command(
+      run_date,
+      hardware="tpu",
+      steps=steps,
+      metrics_file=metrics_file,
+      attention_type="autoselected",
+      dataset_type="synthetic",
+      dataset_path="/tmp/gcsfuse",
+      base_output_directory="/tmp/maxtext_local_output",
+  )
+
+
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.scheduled_only
 def test_scan_layers_mismatch_tpu():
-  """Tests scan_layers mismatch checkpoint loading raises ValueError on TPU."""
-  hardware = "tpu"
-  attention_type = "autoselected"
-  run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-  local_ckpt_dir = "/tmp/maxtext_local_output"
+  """An explicit scan_layers conflicting with checkpoint metadata raises the config-level error.
 
-  def get_cmd(steps, metrics_file):
-    return get_checkpointing_command(
-        run_date,
-        hardware=hardware,
-        steps=steps,
-        metrics_file=metrics_file,
-        attention_type=attention_type,
-        dataset_type="synthetic",
-        dataset_path="/tmp/gcsfuse",
-        base_output_directory=local_ckpt_dir,
-    )
+  The metadata pre-flight (`verify_and_sync_scan_layers`) must reject the run
+  before any model is built or any weight is read.
+  """
+  run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
   # 1. Save checkpoint with scan_layers=True (default) and steps=1
-  train_main(get_cmd(steps=1, metrics_file="saved_metrics_mismatch.txt"))
+  train_main(_get_mismatch_cmd(run_date, steps=1, metrics_file="saved_metrics_mismatch.txt"))
 
-  # 2. Attempt to restore with scan_layers=False and assert ValueError
-  mismatch_command = get_cmd(steps=2, metrics_file="restored_metrics_mismatch.txt") + ["scan_layers=False"]
+  # 2. Attempt to restore with an explicit scan_layers=False and assert ValueError
+  mismatch_command = _get_mismatch_cmd(run_date, steps=2, metrics_file="restored_metrics_mismatch.txt") + [
+      "scan_layers=False"
+  ]
 
   with pytest.raises(ValueError) as excinfo:
     train_main(mismatch_command)
 
-  assert "Configuration mismatch" in str(excinfo.value) or "Failed to restore checkpoint" in str(excinfo.value)
-  assert "scan_layers" in str(excinfo.value)
+  message = str(excinfo.value)
+  assert "Configuration mismatch" in message
+  assert "scan_layers" in message
+
+
+@pytest.mark.integration_test
+@pytest.mark.tpu_only
+@pytest.mark.scheduled_only
+def test_weight_mismatch_tpu():
+  """A checkpoint missing weights the model needs raises the weight-level error.
+
+  Both runs use unscanned layers with matching scan_layers metadata, so the
+  config pre-flight passes; run 2's model has one more decoder layer than the
+  checkpoint carries, so the weight check (`_raise_on_weight_mismatch`) must
+  name it.
+  """
+  run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+
+  # 1. Save an unscanned single-layer checkpoint (base_num_decoder_layers=1) at steps=1
+  train_main(
+      _get_mismatch_cmd(run_date, steps=1, metrics_file="saved_metrics_weight_mismatch.txt") + ["scan_layers=False"]
+  )
+
+  # 2. Restore into a two-layer model: layer 1 exists only in the model
+  mismatch_command = [
+      "base_num_decoder_layers=2" if str(arg).startswith("base_num_decoder_layers=") else arg
+      for arg in _get_mismatch_cmd(run_date, steps=2, metrics_file="restored_metrics_weight_mismatch.txt")
+  ] + ["scan_layers=False"]
+
+  with pytest.raises(ValueError) as excinfo:
+    train_main(mismatch_command)
+
+  message = str(excinfo.value)
+  assert "Checkpoint does not match the model" in message
+  assert "decoder/layers/1/" in message

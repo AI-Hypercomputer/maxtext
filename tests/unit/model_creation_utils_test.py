@@ -919,6 +919,37 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     self.assertFalse(synced_cfg2.scan_layers)
     mock_log.assert_called_once_with("Setting scan_layers=False loaded from checkpoint metadata.")
 
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_explicit_checkpoint_path_overrides_config_paths(self, mock_load_meta):
+    """An explicit checkpoint_path is read even when the config carries no load path (run-dir resume)."""
+    mock_load_meta.return_value = {"scan_layers": False}
+    cfg = _make_config(enable_checkpointing=True)
+    self.assertFalse(cfg.load_parameters_path)
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg, checkpoint_path="gs://fake/run/checkpoints/0")
+
+    mock_load_meta.assert_called_once_with("gs://fake/run/checkpoints/0")
+    self.assertFalse(synced_cfg.scan_layers)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_falls_back_to_load_full_state_path(self, mock_load_meta):
+    """Without checkpoint_path or load_parameters_path, load_full_state_path is checked."""
+    mock_load_meta.return_value = {"scan_layers": False}
+    cfg = _make_config(enable_checkpointing=True, load_full_state_path="gs://fake/full_state/0/items")
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+
+    mock_load_meta.assert_called_once_with("gs://fake/full_state/0/items")
+    self.assertFalse(synced_cfg.scan_layers)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_no_paths_skips_metadata_read(self, mock_load_meta):
+    """With no resume source at all, the pre-flight is a no-op."""
+    cfg = _make_config(enable_checkpointing=True)
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+    mock_load_meta.assert_not_called()
+    self.assertIs(synced_cfg, cfg)
+
 
 if __name__ == "__main__":
   unittest.main()
