@@ -22,6 +22,7 @@ import jax
 import pytest
 
 from jax.sharding import PartitionSpec
+from maxtext.utils.sharding import partition_mesh_by_diloco_axis
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.lax import with_sharding_constraint
@@ -198,3 +199,53 @@ def test_fsdp_sharding():
     TFLOPs_per_device = parameters * 6 * BATCH_SIZE / 10**12 / len(jax.devices())
     time = simple_timeit(lambda: jax.block_until_ready(jit_func(presharded_X, presharded_layers)))
     print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush=True)
+
+
+def test_partition_mesh_by_diloco_axis():
+
+  devices = jax.devices()
+  if len(devices) < 2:
+    pytest.skip("partition_mesh_by_diloco_axis test requires at least 2 devices")
+
+  num_diloco = 2
+  num_data = len(devices) // num_diloco
+
+  if num_data == 0:
+    pytest.skip("Not enough devices for 2-way diloco partitioning")
+
+  # Test with diloco as first axis
+  devices_grid = np.array(devices[: num_diloco * num_data]).reshape((num_diloco, num_data))
+  global_mesh = Mesh(devices_grid, ["diloco", "data"])
+
+  submeshes = partition_mesh_by_diloco_axis(global_mesh, num_diloco)
+
+  assert len(submeshes) == num_diloco
+  for i, submesh in enumerate(submeshes):
+    assert submesh.axis_names == ("data",)
+    assert submesh.shape == {"data": num_data}
+    expected_devices = devices_grid[i]
+    np.testing.assert_array_equal(submesh.devices, expected_devices)
+
+  # Test with diloco as second axis
+  devices_grid = np.array(devices[: num_diloco * num_data]).reshape((num_data, num_diloco))
+  global_mesh = Mesh(devices_grid, ["data", "diloco"])
+
+  submeshes = partition_mesh_by_diloco_axis(global_mesh, num_diloco)
+
+  assert len(submeshes) == num_diloco
+  for i, submesh in enumerate(submeshes):
+    assert submesh.axis_names == ("data",)
+    assert submesh.shape == {"data": num_data}
+    expected_devices = devices_grid[:, i]
+    np.testing.assert_array_equal(submesh.devices, expected_devices)
+
+  # Error case: axis not found
+  global_mesh_no_diloco = Mesh(np.array(devices[:num_data]).reshape((num_data,)), ["data"])
+  with pytest.raises(ValueError, match="Axis diloco not found"):
+    partition_mesh_by_diloco_axis(global_mesh_no_diloco, num_diloco)
+
+  # Error case: size mismatch
+  devices_grid = np.array(devices[: num_diloco * num_data]).reshape((num_diloco, num_data))
+  global_mesh = Mesh(devices_grid, ["diloco", "data"])
+  with pytest.raises(ValueError, match="Diloco axis size .* must match num_replicas"):
+    partition_mesh_by_diloco_axis(global_mesh, num_diloco + 1)

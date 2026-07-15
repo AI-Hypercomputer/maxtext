@@ -14,6 +14,7 @@
 
 """Input pipeline"""
 import functools
+import inspect
 
 import jax
 from jax.sharding import PartitionSpec as P
@@ -46,20 +47,33 @@ def get_process_loading_real_data(
   return list(process_loading_real_data)
 
 
-def create_process_specific_iterator(config: pyconfig.HyperParameters, mesh, process_indices, input_iterator):
+def create_process_specific_iterator(
+    config: pyconfig.HyperParameters,
+    mesh,
+    process_indices,
+    input_iterator,
+    learner_idx: int = 0,
+    num_learners: int = 1,
+):
   """
   If the current process's index is among the `process_indices`, a real
   data iterator is created. Otherwise, a placeholder iterator is returned.
   """
   if jax.process_index() in process_indices:
-    iterator_fn = functools.partial(input_iterator, config, mesh, process_indices)
+    sig = inspect.signature(input_iterator)
+    kwargs = {}
+    if "learner_idx" in sig.parameters:
+      kwargs["learner_idx"] = learner_idx
+    if "num_learners" in sig.parameters:
+      kwargs["num_learners"] = num_learners
+    iterator_fn = functools.partial(input_iterator, config, mesh, process_indices, **kwargs)
     output_iterator = iterator_fn()
   else:
     output_iterator = PlaceHolderDataIterator(config, mesh)
   return output_iterator
 
 
-def create_data_iterator(config: pyconfig.HyperParameters, mesh):
+def create_data_iterator(config: pyconfig.HyperParameters, mesh, learner_idx: int = 0, num_learners: int = 1):
   """Create train and eval data iterators given configs and mesh."""
 
   # Return synthetic dataset if selected
@@ -99,7 +113,9 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
       config.max_target_length,
       mesh,
   )
-  output_train_iterator = create_process_specific_iterator(config, mesh, process_indices_train, train_iterator)
+  output_train_iterator = create_process_specific_iterator(
+      config, mesh, process_indices_train, train_iterator, learner_idx=learner_idx, num_learners=num_learners
+  )
   if config.expansion_factor_real_data > 1:  # assert number of hosts loading real data
     assert len(process_indices_train) == jax.process_count() // config.expansion_factor_real_data
 
@@ -116,5 +132,7 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
 
     if config.expansion_factor_real_data > 1:
       assert len(process_indices_eval) == jax.process_count() // config.expansion_factor_real_data
-    output_eval_iterator = create_process_specific_iterator(config, mesh, process_indices_eval, eval_iterator)
+    output_eval_iterator = create_process_specific_iterator(
+        config, mesh, process_indices_eval, eval_iterator, learner_idx=learner_idx, num_learners=num_learners
+    )
   return output_train_iterator, output_eval_iterator

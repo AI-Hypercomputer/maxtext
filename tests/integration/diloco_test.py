@@ -34,6 +34,7 @@ import numpy as np
 import optax
 import pytest
 
+from maxtext.trainers.pre_train.train import main as train_main
 
 class SimpleNNXModel(nnx.Module):
   """A simple state for testing a minimal model."""
@@ -235,11 +236,7 @@ class DiLoCoTest(unittest.TestCase):
       #   = 0.81
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 2.0)
-<<<<<<< HEAD
       chex.assert_trees_all_close(loss, 0.65, rtol=1e-2, atol=1e-2)
-=======
-      chex.assert_trees_all_close(loss, 0.49)
->>>>>>> dac903a32 ([DiLoCo]Use split PRNG key and log losses separatedly on tb)
       # Assert no updates to the global model yet (no synchronization)
       if test_config.pure_nnx:
         _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
@@ -284,11 +281,7 @@ class DiLoCoTest(unittest.TestCase):
       # based outer optimizer.
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 3.0)
-<<<<<<< HEAD
       chex.assert_trees_all_close(loss, 0.4481, rtol=1e-2, atol=1e-2)
-=======
-      chex.assert_trees_all_close(loss, 0.2401)
->>>>>>> dac903a32 ([DiLoCo]Use split PRNG key and log losses separatedly on tb)
       # Assert that inner and outer parameters are all equal now that
       # synchronization has happened.
       if test_config.pure_nnx:
@@ -346,11 +339,7 @@ class DiLoCoTest(unittest.TestCase):
       step_three_outer_params = diloco_test_state.params
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 4.0)
-<<<<<<< HEAD
       chex.assert_trees_all_close(loss, 0.574244, rtol=1e-2, atol=1e-2)
-=======
-      chex.assert_trees_all_close(loss, 0.20754369)
->>>>>>> dac903a32 ([DiLoCo]Use split PRNG key and log losses separatedly on tb)
       # Assert no updates to the global model since previous step (no
       # synchronization).
       chex.assert_trees_all_equal(diloco_test_state.params, step_three_outer_params)
@@ -434,3 +423,47 @@ class DiLoCoTest(unittest.TestCase):
             "head_dim=4",
         )
     )
+
+  @pytest.mark.cpu_only
+  def test_threaded_diloco_minimal_run(self):
+    """Runs a minimal training run with threaded DiLoCo on CPU."""
+    devices = jax.devices()
+    num_replicas = 2
+    if len(devices) < num_replicas:
+      self.skipTest(f"Test requires {num_replicas} devices, but only {len(devices)} are available.")
+
+    temp_dir = gettempdir()
+    base_output_directory = os.path.join(temp_dir, "test_threaded_diloco")
+    run_name = "test_threaded_diloco_run"
+
+    argv = [
+        "",
+        get_test_config_path(),
+        f"base_output_directory={base_output_directory}",
+        f"run_name={run_name}",
+        "steps=4",
+        "dataset_type=synthetic",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "enable_non_spmd_diloco=True",
+        "pure_nnx=True",
+        "num_diloco_fragments=2",
+        "num_diloco_replicas=2",
+        "diloco_sync_period=2",
+        "num_communication_overlapping_steps=1",
+        "communication_overlapping_alpha=0.5",
+        "ici_diloco_parallelism=2",
+        "ici_fsdp_parallelism=2",
+        "ici_tensor_parallelism=1",
+        "ici_pipeline_parallelism=1",
+        "base_emb_dim=16",
+        "base_num_query_heads=1",
+        "base_num_kv_heads=1",
+        "base_mlp_dim=16",
+        "base_num_decoder_layers=2",
+        "head_dim=4",
+        "max_target_length=16",
+        "vocab_size=32",
+    ]
+
+    train_main(argv)
