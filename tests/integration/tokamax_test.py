@@ -28,23 +28,6 @@ train_main = train.main
 gettempdir = tempfile.gettempdir
 
 
-from flax import nnx
-import flax.linen as nn
-from flax.linen import partitioning as nn_partitioning
-
-import jax
-import jax.numpy as jnp
-from jax.sharding import Mesh
-
-from maxtext.configs import pyconfig
-from maxtext.common import common_types
-from maxtext.common.common_types import Config, DType
-from maxtext.utils import globals as maxtext_globals
-from maxtext.utils import maxtext_utils, sharding
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from maxtext.layers import linears, moe, nnx_wrappers, decoders, embeddings, quantizations
-from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from maxtext.utils import max_logging
 from absl import logging
 # Add this inside your test method before train_main(args)
 logging.set_verbosity(logging.INFO)

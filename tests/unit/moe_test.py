@@ -36,8 +36,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
 import pytest
-from absl.testing import absltest, parameterized
-import os 
+from absl.testing import parameterized
 from maxtext.utils import max_logging
 import qwix
 
