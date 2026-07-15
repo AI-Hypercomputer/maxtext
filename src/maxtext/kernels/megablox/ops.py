@@ -268,7 +268,7 @@ def _gmm_fwd(
       )
     if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
       if not use_manual_quantization:
-         rhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
+        rhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
             rhs,
             quantization_rule.weight_qtype,
             # If only considering the fwd pass, we could also enable channelwise
@@ -416,8 +416,10 @@ def _gmm_bwd(
       dlhs_dout *= rhs.scale.astype(grad.dtype).reshape(1, -1)  # [1, n]
       rhs = rhs.qvalue
     else:
-      # NOTE: current rhs scale can not be used for dlhs computation.
-      # If transpose_rhs is supported, then we can fuse rhs_scale inside gmm_dlhs
+      # NOTE: rhs.scale is for the contracting dimension (N) in DLHS, but gmm_v2
+      # only supports scaling the output dimension. Thus, we must scale dlhs_dout 
+      # beforehand. If the kernel supports transposing RHS internally, we can fuse 
+      # this scale inside the kernel.
       dlhs_dout = _scale_grad_by_rhs_scale(
           dlhs_dout, rhs, group_sizes, transpose_rhs
       )
@@ -478,7 +480,8 @@ def _gmm_bwd(
           implementation="mosaic",
           **dlhs_kwargs,
       )
-    if not use_gmm_v2_dlhs and use_gmm_v2_fwd:
+    if not use_gmm_v2_dlhs and use_gmm_v2_fwd:  
+      # TOKAMAX DLHS GMM 1 (with tile passing inside scheme 2+1+2)
       dlhs = tokamax_backend.gmm(
           lhs=dlhs_dout,
           rhs=rhs,
@@ -492,19 +495,18 @@ def _gmm_bwd(
           input_buffer_count=input_buffer_count[1],
       )
     else:  # TOKAMAX DLHS GMM 2
-      # NOTE: We want to fuse rhs transpose into gmm_v2. This would allow rhs_scale to be fused as well.
+      # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs 
+      # support. Fusing this transpose into the kernel would also allow us to fuse 
+      # the rhs_scale application.
       dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
-
+      dlhs_lhs = (
+          dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
+      )
       custom_dlhs_tiling = gmm_v2.TileSizes(
           tile_m=tiling[3],
           tile_k=tiling[4],
           tile_n=tiling[5],
       )
-
-      dlhs_lhs = (
-          dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
-      )
-
       dlhs = gmm_v2.gmm_v2(
           lhs=dlhs_lhs,
           rhs=dlhs_rhs,

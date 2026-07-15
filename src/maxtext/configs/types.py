@@ -3479,6 +3479,30 @@ class MaxTextConfig(
     if (self.use_gmm_v2_fwd or self.use_gmm_v2_dlhs or self.use_gmm_v2_drhs) and not self.use_tokamax_gmm:
       raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
 
+    # Ensure GMM v2 flags (fwd, dlhs, drhs) are set to a valid combination:
+    # - v1+v1+v1 (False, False, False)
+    # - v2+v2+v2 (True, True, True)
+    # - v2+v1+v2 (True, False, True)
+    gmm_v2_combo = (
+        self.use_gmm_v2_fwd,
+        self.use_gmm_v2_dlhs,
+        self.use_gmm_v2_drhs,
+    )
+    valid_combos = {
+        (False, False, False),  # 111 (v1+v1+v1)
+        (True, True, True),     # 222 (v2+v2+v2)
+        (True, False, True),    # 212 (v2+v1+v2)
+    }
+    if gmm_v2_combo not in valid_combos:
+      raise ValueError(
+          "Invalid GMM v2 configuration combination (fwd, dlhs, drhs). "
+          "Allowed combinations are:\n"
+          "  - v1+v1+v1 (False, False, False)\n"
+          "  - v2+v2+v2 (True, True, True)\n"
+          "  - v2+v1+v2 (True, False, True)\n"
+          f"But got: {gmm_v2_combo}"
+      )
+
     for val in self.compress_ratios:
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
