@@ -30,8 +30,6 @@ import qwix
 import qwix.pallas as qpl
 import tokamax
 from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_kernel as tokamax_backend
-# from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
-# from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 
 
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
@@ -96,7 +94,6 @@ def gmm(
           "Expect a QtRule for quantized training. "
           f"But get quantization_rule={quantization_rule}"
       )
-    max_logging.log(f"DEBUG, ops.gmm, quantization_rule: {quantization_rule}")
   else:
     # Handcraft a rule that matches the AQT's behavior.
     if lhs_quantize_dtype or rhs_quantize_dtype:
@@ -291,7 +288,6 @@ def _gmm_fwd(
     # QAG is only supported for following conditions
     if quantization_rule and quantization_rule.bwd_qtype:
       if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
-        # jax.debug.print("DEBUG weight_gather_axes: {x}", x=weight_gather_axes)
         if weight_gather_axes:
           for axis_name, axis_idx in weight_gather_axes:
             rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
@@ -304,38 +300,22 @@ def _gmm_fwd(
       # used in batchsplit
       out_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
 
-    if not use_gmm_v2_fwd:  # FWD GMM 1
+    if not use_gmm_v2_fwd:  # TOKAMAX FWD GMM 1
       # Handle transpose_rhs manually as ragged_dot assumes (G, K, N)
-      # if transpose_rhs:
-      #   rhs = rhs.swapaxes(1, 2)
-      # out = tokamax.ragged_dot(
-      #     lhs=lhs,
-      #     rhs=rhs,
-      #     group_sizes=group_sizes,
-      #     precision=jax.lax.Precision.DEFAULT,
-      #     preferred_element_type=preferred_element_type,
-      #     # `group_offset` is not yet supported
-      #     group_offset=None,
-      #     implementation="mosaic",
-      #     **out_kwargs,
-      # )
-
-      # X[m, k] @ W[g, k, n] = Y[m, n]
-      # if transpose_rhs=False, gmm assumes rhs [g, k, n]
-      # if transpose_rhs=True, gmm assumes rhs [g, n, k], implicit internal transpose
-      out = tokamax_backend.gmm(
+      if transpose_rhs:
+        rhs = rhs.swapaxes(1, 2)
+      out = tokamax.ragged_dot(
           lhs=lhs,
           rhs=rhs,
           group_sizes=group_sizes,
           precision=jax.lax.Precision.DEFAULT,
-          out_dtype=preferred_element_type,
-          tiling=tiling[:3],
-          group_offset=group_offset,
-          transpose_rhs=transpose_rhs,
-          interpret=interpret,
-          input_buffer_count=input_buffer_count[0],
+          preferred_element_type=preferred_element_type,
+          # `group_offset` is not yet supported
+          group_offset=None,
+          implementation="mosaic",
+          **out_kwargs,
       )
-    else:  # FWD GMM 2
+    else:  # TOKAMAX FWD GMM 2
       # preserve rhs to be returned in the residual
       # if transpose_rhs=False, [g, k, n]
       # if transpose_rhs=True, [g, n, k], explicit transpose to [g, k, n]
@@ -362,7 +342,7 @@ def _gmm_fwd(
           preferred_element_type=preferred_element_type,
           partial_sum=partial_sum,
       )
-  # END TOKAMAX
+
   else:
     out = backend.gmm(
         lhs,
@@ -378,11 +358,6 @@ def _gmm_fwd(
     for axis in lhs_vma_axes:
       out = jax.lax.pcast(out, axis_name=axis, to="varying")
 
-  max_logging.log(
-      f"DEBUG_dtypes: out.dtype={out.dtype},"
-      f" preferred={preferred_element_type}, lhs.dtype={lhs.dtype},"
-      f" rhs.dtype={rhs.dtype}"
-  )
   return out, (lhs, rhs, group_sizes, group_offset, partial_sum)
 
 
@@ -414,7 +389,6 @@ def _gmm_bwd(
     grad: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray, jnp.ndarray | None]:
   """Backward function for throughput GMM VJP."""
-
   del preferred_element_type
   lhs, rhs, group_sizes, group_offset, partial_sum_fwd = residual
   num_actual_groups = rhs.shape[0]
@@ -487,23 +461,24 @@ def _gmm_bwd(
       )
 
     # TOKAMAX DLHS
-    if not use_gmm_v2_dlhs:  # TOKAMAX DLHS GMM 1
-      # # Handle transpose_rhs manually
-      # dlhs_rhs = rhs
-      # if transpose_rhs:
-      #   dlhs_rhs = dlhs_rhs.swapaxes(1, 2)
-      # dlhs = tokamax.ragged_dot_general(
-      #     lhs=dlhs_dout,
-      #     rhs=dlhs_rhs,
-      #     group_sizes=group_sizes,
-      #     ragged_dot_dimension_numbers=DLHS_RAGGED_DOT_DIM_NUMS,
-      #     precision=jax.lax.Precision.DEFAULT,
-      #     preferred_element_type=lhs_dtype,
-      #     # `group_offset` is not yet supported
-      #     group_offset=None,
-      #     implementation="mosaic",
-      #     **dlhs_kwargs,
-      # )
+    if not use_gmm_v2_dlhs and not use_gmm_v2_fwd:  # TOKAMAX DLHS GMM 1
+      # Handle transpose_rhs manually
+      dlhs_rhs = rhs
+      if transpose_rhs:
+        dlhs_rhs = dlhs_rhs.swapaxes(1, 2)
+      dlhs = tokamax.ragged_dot_general(
+          lhs=dlhs_dout,
+          rhs=dlhs_rhs,
+          group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=DLHS_RAGGED_DOT_DIM_NUMS,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=lhs_dtype,
+          # `group_offset` is not yet supported
+          group_offset=None,
+          implementation="mosaic",
+          **dlhs_kwargs,
+      )
+    if not use_gmm_v2_dlhs and use_gmm_v2_fwd:
       dlhs = tokamax_backend.gmm(
           lhs=dlhs_dout,
           rhs=rhs,
@@ -546,33 +521,17 @@ def _gmm_bwd(
 
     # TOKAMAX DRHS
     if not use_gmm_v2_drhs:  # TOKAMAX DRHS TGMM 1
-      # drhs = tokamax.ragged_dot_general(
-      #     lhs=lhs,
-      #     rhs=drhs_dout,
-      #     group_sizes=group_sizes,
-      #     ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
-      #     precision=jax.lax.Precision.DEFAULT,
-      #     preferred_element_type=rhs_dtype,
-      #     # `group_offset` is not yet supported
-      #     group_offset=None,
-      #     implementation="mosaic",
-      #     **drhs_kwargs,
-      # )
-
-      tiling_drhs = tiling[-3:]
-
-      drhs = tokamax_backend.tgmm(
-          lhs=lhs.swapaxes(0, 1),
+      drhs = tokamax.ragged_dot_general(
+          lhs=lhs,
           rhs=drhs_dout,
           group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
           precision=jax.lax.Precision.DEFAULT,
-          out_dtype=rhs_dtype,
-          tiling=tiling_drhs,
-          group_offset=group_offset,
-          num_actual_groups=num_actual_groups,
-          interpret=interpret,
-          input_buffer_count=input_buffer_count[2],
-          combine_scopes=combine_scopes,
+          preferred_element_type=rhs_dtype,
+          # `group_offset` is not yet supported
+          group_offset=None,
+          implementation="mosaic",
+          **drhs_kwargs,
       )
     else:  # TOKAMAX DRHS TGMM 2
       # Extract arrays
@@ -608,13 +567,11 @@ def _gmm_bwd(
           tile_info=custom_drhs_tiling,
       )
 
-    # TOKAMAX POST-PROCESSING
     if quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
       # Scatter back in reverse order of gather
       for axis_name, axis_idx in reversed(weight_gather_axes):
         drhs = jax.lax.psum_scatter(drhs, axis_name, scatter_dimension=axis_idx, tiled=True)
 
-  # END TOKAMAX
   else:
     dlhs = backend.gmm(
         dlhs_dout,
@@ -640,11 +597,12 @@ def _gmm_bwd(
         varying_axes=rhs_vma_axes,
     )
 
-  # UNIVERSAL POST-PROCESSING
   # NOTE: If the rhs transposition is fused into the forward pass we need to
   # return the transpose of the rhs gradient that we calculated above.
   #
   # TODO(tgale, enriqueps, apaske): Fuse this transposition into the tgmm.
   drhs = drhs.swapaxes(1, 2) if transpose_rhs else drhs
   dpartial_sum = grad if partial_sum_fwd is not None else None
-  return dlhs, drhs, None, None, grad, dpartial_sum
+  # tokamax gmm path ignore existing_out
+  d_existing_out = None if use_tokamax_backend else grad
+  return dlhs, drhs, None, None, d_existing_out, dpartial_sum
