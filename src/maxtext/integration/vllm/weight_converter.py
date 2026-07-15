@@ -21,20 +21,26 @@ class SliceAxis(Operation):
     def __init__(self, axis: int, index: int):
         self.axis = axis
         self.index = index
-    def __call__(self, tensors): return jnp.take(tensors[0], self.index, axis=self.axis)
+    def __call__(self, tensors): 
+        t = tensors[0] if isinstance(tensors, list) else tensors
+        return jnp.take(t, self.index, axis=self.axis)
 
 class Cast(Operation):
     def __init__(self, dtype): self.dtype = dtype
-    def __call__(self, tensors): return tensors[0].astype(self.dtype)
+    def __call__(self, tensors): 
+        t = tensors[0] if isinstance(tensors, list) else tensors
+        return t.astype(self.dtype)
 
 class PadAxes(Operation):
     def __init__(self, pad_specs): self.pad_specs = pad_specs
-    def __call__(self, tensors): return jnp.pad(tensors[0], self.pad_specs)
+    def __call__(self, tensors): 
+        t = tensors[0] if isinstance(tensors, list) else tensors
+        return jnp.pad(t, self.pad_specs)
 
 class InterleavedPadAxes(Operation):
     def __init__(self, pad_specs): self.pad_specs = pad_specs
     def __call__(self, tensors):
-        out = tensors[0]
+        out = tensors[0] if isinstance(tensors, list) else tensors
         for axis, n_shards, per_shard_extra in self.pad_specs:
             if per_shard_extra <= 0: continue
             src_dim = out.shape[axis]
@@ -54,10 +60,18 @@ class InterleavedPadAxes(Operation):
 class RepeatAxes(Operation):
     def __init__(self, repeats): self.repeats = repeats
     def __call__(self, tensors): 
-        res = tensors[0]
+        res = tensors[0] if isinstance(tensors, list) else tensors
         for axis, rep in self.repeats:
             res = jnp.repeat(res, rep, axis=axis)
         return res
+
+class Transpose(Operation):
+    def __init__(self, axes): self.axes = axes
+    def __call__(self, tensors):
+        if isinstance(tensors, list):
+            return [jnp.transpose(t, self.axes) for t in tensors]
+        else:
+            return jnp.transpose(tensors, self.axes)
 
 # ==========================================
 # 2. Rules
@@ -102,7 +116,36 @@ class WeightConverter(abc.ABC):
         flat_src_tuples = traverse_util.flatten_dict(src_pytree)
         flat_src = {'.'.join(str(k) for k in keys): v for keys, v in flat_src_tuples.items()}
         
-        # print(f"DEBUG: src_pytree flat keys (first 10): {list(flat_src.keys())[:10]}")
+        # Unroll scanned layers seamlessly
+        unrolled_src = {}
+        import numpy as np
+        for src_key, src_val in flat_src.items():
+            if "layers." in src_key and ".layers_" not in src_key:
+                # Scanned! We need to unstack
+                layer_dim = 0
+                # Special cases where layer dimension is 1
+                if 'wi_0' in src_key or 'wi_1' in src_key or 'wo' in src_key:
+                    if 'moe' in src_key or (hasattr(src_val, 'shape') and len(src_val.shape) == 4 and 'mlp' in src_key):
+                        layer_dim = 1 # experts dim is 0
+                
+                if hasattr(src_val, 'shape') and len(src_val.shape) > layer_dim:
+                    num_layers = src_val.shape[layer_dim]
+                    for i in range(num_layers):
+                        new_key = src_key.replace("layers.", f"layers_{i}.")
+                        # For numpy or jax array
+                        try:
+                            import jax
+                            unrolled_src[new_key] = jax.lax.slice_in_dim(src_val, i, i+1, axis=layer_dim).reshape(
+                                src_val.shape[:layer_dim] + src_val.shape[layer_dim+1:]
+                            )
+                        except Exception:
+                            # Fallback if somehow not jax device array
+                            unrolled_src[new_key] = np.take(src_val, i, axis=layer_dim)
+                else:
+                    unrolled_src[src_key] = src_val
+            else:
+                unrolled_src[src_key] = src_val
+        flat_src = unrolled_src
         
         dst_dict = {}
         
@@ -184,6 +227,8 @@ class WeightConverter(abc.ABC):
         for k_str, val in dst_dict.items():
             if k_str in target_tuple_map:
                 dst_dict_tuples[target_tuple_map[k_str]] = val
+            elif f"vllm_model.{k_str}" in target_tuple_map:
+                dst_dict_tuples[target_tuple_map[f"vllm_model.{k_str}"]] = val
             else:
                 # If not mapped by target state, just split the string stringly
                 dst_dict_tuples[tuple(k_str.split('.'))] = val
@@ -199,7 +244,7 @@ _MODEL_TO_CONVERSION_RULES = {
     "qwen3": [
         WeightRenaming(r"token_embedder\.embedding", "model.embed_tokens.weight"),
         WeightRenaming(r"decoder\.decoder_norm\.scale", "model.norm.weight"),
-        WeightRenaming(r"logits_dense\.kernel", "lm_head.weight"),
+        WeightRenaming(r"(?:decoder\.)?logits_dense\.kernel", "lm_head.weight"),
         WeightRenaming(r"decoder\.layers_(\d+)\.pre_self_attention_layer_norm\.scale", r"model.layers.\1.input_layernorm.weight"),
         WeightRenaming(r"decoder\.layers_(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
         WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.out\.kernel", r"model.layers.\1.self_attn.o_proj.weight"),
@@ -222,6 +267,52 @@ _MODEL_TO_CONVERSION_RULES = {
         WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale", r"model.layers.\1.self_attn.k_norm.weight"),
         WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.query_norm\.scale", r"model.layers.\1.self_attn.q_norm.weight"),
         WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.key_norm\.scale", r"model.layers.\1.self_attn.k_norm.weight"),
+    ],
+    "qwen3_moe": [
+        WeightRenaming(r"token_embedder\.embedding", "model.embed_tokens.weight"),
+        WeightRenaming(r"decoder\.decoder_norm\.scale", "model.norm.weight"),
+        WeightRenaming(r"(?:decoder\.)?logits_dense\.kernel", "lm_head.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.pre_self_attention_layer_norm\.scale", r"model.layers.\1.input_layernorm.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.out\.kernel", r"model.layers.\1.self_attn.o_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.mlp\.wo(?:\.kernel)?", r"model.layers.\1.mlp.down_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.pre_self_attention_layer_norm\.scale", r"model.layers.\1.input_layernorm.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.out\.kernel", r"model.layers.\1.self_attn.o_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.mlp\.wo(?:\.kernel)?", r"model.layers.\1.mlp.down_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"model.layers.\1.self_attn.q_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"model.layers.\1.self_attn.k_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.value\.kernel", r"model.layers.\1.self_attn.v_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.query\.kernel", r"model.layers.\1.self_attn.q_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.key\.kernel", r"model.layers.\1.self_attn.k_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.value\.kernel", r"model.layers.\1.self_attn.v_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.mlp\.wi_0(?:\.kernel)?", r"model.layers.\1.mlp.gate_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.mlp\.wi_1(?:\.kernel)?", r"model.layers.\1.mlp.up_proj.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.mlp\.wi_0(?:\.kernel)?", r"model.layers.\1.mlp.gate_proj.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.query_norm\.scale", r"model.layers.\1.self_attn.q_norm.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale", r"model.layers.\1.self_attn.k_norm.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.query_norm\.scale", r"model.layers.\1.self_attn.q_norm.weight"),
+        WeightRenaming(r"decoder\.layers\.(\d+)\.self_attention\.key_norm\.scale", r"model.layers.\1.self_attn.k_norm.weight"),
+        WeightRenaming(r"decoder\.layers_(\d+)\.moe_block\.gate\.kernel", r"model.layers.\1.mlp.gate.weight"),
+        WeightConverterRule(
+            source_patterns=[
+                r"decoder\.layers_(\d+)\.moe_block\.wo",
+            ],
+            target_pattern="model.layers.{}.mlp.experts.routed_experts.w2_weight",
+            operations=[
+                Transpose(axes=(0, 2, 1))
+            ]
+        ),
+        WeightConverterRule(
+            source_patterns=[
+                r"decoder\.layers_(\d+)\.moe_block\.wi_0",
+                r"decoder\.layers_(\d+)\.moe_block\.wi_1"
+            ],
+            target_pattern="model.layers.{}.mlp.experts.routed_experts.w13_weight",
+            operations=[
+                Concatenate(dim=2)
+            ]
+        )
     ],
 }
 
@@ -269,9 +360,16 @@ def build_converter_rules(src_pytree, target_state) -> list:
         
         # Determine candidate source keys
         candidate_key_tuples = [tgt_key_tuple]
-        if tgt_key_tuple and tgt_key_tuple[0] == 'model':
-            candidate_key_tuples.append(tgt_key_tuple[1:])
-            candidate_key_tuples.append(('decoder',) + tgt_key_tuple[1:])
+        
+        # If target has a vllm_model wrapper (e.g. from vllm tpu inference wrapper)
+        inner_tgt = tgt_key_tuple
+        if inner_tgt and inner_tgt[0] == 'vllm_model':
+            inner_tgt = inner_tgt[1:]
+            candidate_key_tuples.append(inner_tgt)
+
+        if inner_tgt and inner_tgt[0] == 'model':
+            candidate_key_tuples.append(inner_tgt[1:])
+            candidate_key_tuples.append(('decoder',) + inner_tgt[1:])
             
         # Scanned logic
         layer_idx = -1
