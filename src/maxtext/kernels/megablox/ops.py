@@ -291,6 +291,7 @@ def _gmm_fwd(
     # QAG is only supported for following conditions
     if quantization_rule and quantization_rule.bwd_qtype:
       if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
+        # jax.debug.print("DEBUG weight_gather_axes: {x}", x=weight_gather_axes)
         if weight_gather_axes:
           for axis_name, axis_idx in weight_gather_axes:
             rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)

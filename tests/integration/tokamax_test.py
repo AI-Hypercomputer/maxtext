@@ -202,6 +202,7 @@ class Train(parameterized.TestCase):
         f"use_qwix_quantization={quantization != ""}",
         "weight_quantization_calibration_method=fixed,-224,224",
         "act_quantization_calibration_method=fixed,-224,224",
+        "bwd_quantization_calibration_method=fixed,-224,224",
         # train
         "per_device_batch_size=8",
         "dataset_type=synthetic",
