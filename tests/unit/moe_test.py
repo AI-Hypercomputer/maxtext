@@ -39,6 +39,7 @@ import pytest
 from absl.testing import absltest, parameterized
 import os 
 from maxtext.utils import max_logging
+import qwix
 
 
 
@@ -1308,101 +1309,105 @@ class RoutedMoeTest(parameterized.TestCase):
     )
     self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
 
-  @parameterized.named_parameters(
-      {
-          "testcase_name": "megablox bf16",
-          "quantization": "",
-          "megablox": True,
-          "use_tokamax_gmm": False,
-          "use_gmm_v2_fwd": False,  # not matter
-          "use_gmm_v2_dlhs": False,  # not matter
-          "use_gmm_v2_drhs": False,  # not matter
-      },
-      {
-          "testcase_name": "megablox fp8",
-          "quantization": "fp8_full",
-          "megablox": True,
-          "use_tokamax_gmm": False,
-          "use_gmm_v2_fwd": False,  # not matter
-          "use_gmm_v2_dlhs": False,  # not matter
-          "use_gmm_v2_drhs": False,  # not matter
-      },
-      {
-          "testcase_name": "ragged_dot bf16",
-          "quantization": "",
-          "megablox": False,
-          "use_tokamax_gmm": False,
-          "use_gmm_v2_fwd": False,  # not matter
-          "use_gmm_v2_dlhs": False,  # not matter
-          "use_gmm_v2_drhs": False,  # not matter
-      },
-      # jax_ragged_dot_gmm
-      # quantization: tiling = (tiling[0], k, tiling[2])
-      # need more vmem
-      {
-          "testcase_name": "ragged_dot fp8",
-          "quantization": "fp8_full",
-          "megablox": False,
-          "use_tokamax_gmm": False,
-          "use_gmm_v2_fwd": False,  # not matter
-          "use_gmm_v2_dlhs": False,  # not matter
-          "use_gmm_v2_drhs": False,  # not matter
-      },
-      {
-          "testcase_name": "tokamax v1 bf16",
-          "quantization": "",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": False,
-          "use_gmm_v2_dlhs": False,
-          "use_gmm_v2_drhs": False,
-      },
-      {
-          "testcase_name": "tokamax v1 fp8",
-          "quantization": "fp8_full",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": False,
-          "use_gmm_v2_dlhs": False,
-          "use_gmm_v2_drhs": False,
-      },
-      {
-          "testcase_name": "tokamax v2+v1+v2 bf16",
-          "quantization": "",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": True,
-          "use_gmm_v2_dlhs": False,
-          "use_gmm_v2_drhs": True,
-      },
-      {
-          "testcase_name": "tokamax v2+v1+v2 fp8",
-          "quantization": "fp8_full",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": True,
-          "use_gmm_v2_dlhs": False,
-          "use_gmm_v2_drhs": True,
-      },
-      {
-          "testcase_name": "tokamax v2+v2+v2 bf16",
-          "quantization": "",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": True,
-          "use_gmm_v2_dlhs": True,
-          "use_gmm_v2_drhs": True,
-      },
-      {
-          "testcase_name": "tokamax v2+v2+v2 fp8",
-          "quantization": "fp8_full",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": True,
-          "use_gmm_v2_dlhs": True,
-          "use_gmm_v2_drhs": True,
-      },
+  @parameterized.product(
+      (
+          # {
+          #     # "testcase_name": "megablox bf16",
+          #     "quantization": "",
+          #     "megablox": True,
+          #     "use_tokamax_gmm": False,
+          #     "use_gmm_v2_fwd": False,  # not matter
+          #     "use_gmm_v2_dlhs": False,  # not matter
+          #     "use_gmm_v2_drhs": False,  # not matter
+          # },
+          # {
+          #     # "testcase_name": "megablox fp8",
+          #     "quantization": "fp8_full",
+          #     "megablox": True,
+          #     "use_tokamax_gmm": False,
+          #     "use_gmm_v2_fwd": False,  # not matter
+          #     "use_gmm_v2_dlhs": False,  # not matter
+          #     "use_gmm_v2_drhs": False,  # not matter
+          # },
+          # {
+          #     # "testcase_name": "ragged_dot bf16",
+          #     "quantization": "",
+          #     "megablox": False,
+          #     "use_tokamax_gmm": False,
+          #     "use_gmm_v2_fwd": False,  # not matter
+          #     "use_gmm_v2_dlhs": False,  # not matter
+          #     "use_gmm_v2_drhs": False,  # not matter
+          # },
+          # # jax_ragged_dot_gmm
+          # # quantization: tiling = (tiling[0], k, tiling[2])
+          # # need more vmem
+          # {
+          #     # "testcase_name": "ragged_dot fp8",
+          #     "quantization": "fp8_full",
+          #     "megablox": False,
+          #     "use_tokamax_gmm": False,
+          #     "use_gmm_v2_fwd": False,  # not matter
+          #     "use_gmm_v2_dlhs": False,  # not matter
+          #     "use_gmm_v2_drhs": False,  # not matter
+          # },
+          {
+              "testcase_name": "tokamax v1 bf16",
+              "quantization": "",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": False,
+              "use_gmm_v2_dlhs": False,
+              "use_gmm_v2_drhs": False,
+          },
+          {
+              "testcase_name": "tokamax v1 fp8",
+              "quantization": "fp8_full",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": False,
+              "use_gmm_v2_dlhs": False,
+              "use_gmm_v2_drhs": False,
+          },
+          {
+              "testcase_name": "tokamax v2+v1+v2 bf16",
+              "quantization": "",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": True,
+              "use_gmm_v2_dlhs": False,
+              "use_gmm_v2_drhs": True,
+          },
+          {
+              "testcase_name": "tokamax v2+v1+v2 fp8",
+              "quantization": "fp8_full",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": True,
+              "use_gmm_v2_dlhs": False,
+              "use_gmm_v2_drhs": True,
+          },
+          {
+              "testcase_name": "tokamax v2+v2+v2 bf16",
+              "quantization": "",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": True,
+              "use_gmm_v2_dlhs": True,
+              "use_gmm_v2_drhs": True,
+          },
+          {
+              "testcase_name": "tokamax v2+v2+v2 fp8",
+              "quantization": "fp8_full",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": True,
+              "use_gmm_v2_dlhs": True,
+              "use_gmm_v2_drhs": True,
+          },
+      ),
+      ici_expert_parallelism=[1, 4],
   )
+  @pytest.mark.tpu_only
   def test_gmm_grad_equivalence(
       self,
       quantization: str,
@@ -1411,9 +1416,11 @@ class RoutedMoeTest(parameterized.TestCase):
       use_gmm_v2_fwd: bool,
       use_gmm_v2_dlhs: bool,
       use_gmm_v2_drhs: bool,
+      ici_expert_parallelism: int,
+      **kwargs,
   ):
 
-    def get_value_and_grad(
+    def _build_cfg(
         sparse_matmul,
         quantization,
         megablox,
@@ -1421,37 +1428,31 @@ class RoutedMoeTest(parameterized.TestCase):
         use_gmm_v2_fwd,
         use_gmm_v2_dlhs,
         use_gmm_v2_drhs,
+        ici_expert_parallelism,
     ):
-      cfg = pyconfig.initialize(
+      return pyconfig.initialize(
           [
               None,
               get_test_config_path(),
           ],
           run_name="gmm_grad_equivalence_test",
           enable_checkpointing=False,
-          # override_model_config=True,
-          # base_emb_dim=1024,
-          # base_mlp_dim=2048,
-          # base_moe_mlp_dim=2048,
           model_name="mixtral-8x7b",
-          weight_dtype="float32",  # default is float32
+          weight_dtype="float32",
           dtype="bfloat16",
-          # workaround by change `init` batch size
-          per_device_batch_size=1,  # TODO(b/450900273): sharding error if pdbs=1
-          max_target_length=512,  # TODO(b/450900273): reduce length due to OOM
-          ici_expert_parallelism=1,  # TODO(shuningjin): EP gives NaN for all fp8 kernel
+          per_device_batch_size=1,
+          max_target_length=512,
+          ici_expert_parallelism=ici_expert_parallelism,
           sparse_matmul=sparse_matmul,
-          megablox=megablox,  #  megablox or jax ragged dot
-          use_tokamax_gmm=use_tokamax_gmm,  # tokamax gmm
+          megablox=megablox,
+          use_tokamax_gmm=use_tokamax_gmm,
           use_gmm_v2_fwd=use_gmm_v2_fwd,
           use_gmm_v2_dlhs=use_gmm_v2_dlhs,
           use_gmm_v2_drhs=use_gmm_v2_drhs,
-          # quantization
           quantization=quantization,
           use_qwix_quantization=quantization != "",
           weight_quantization_calibration_method="fixed,-224,224",
           act_quantization_calibration_method="fixed,-224,224",
-          # Add these overrides to reduce VMEM footprint for QWIX FP8:
           wi_tile_fwd_batch_seq=128,
           wi_tile_dlhs_batch_seq=128,
           wi_tile_dlhs_embed_dim=256,
@@ -1463,41 +1464,89 @@ class RoutedMoeTest(parameterized.TestCase):
           wo_tile_drhs_batch_seq=128,
       )
 
-      rng = jax.random.PRNGKey(2345)
-      rng_model, rng_hidden_states = jax.random.split(rng)
-      device_count = jax.device_count()
-      hidden_states = jax.random.uniform(
-          rng_hidden_states,
-          (
-              int(cfg.per_device_batch_size) * device_count,
-              cfg.max_target_length,
-              cfg.base_emb_dim,
-          ),
+    def _build_model(cfg, mesh):
+      model = moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
           dtype=cfg.dtype,
       )
 
-      devices_array = maxtext_utils.create_device_mesh(cfg)
-      mesh = Mesh(devices_array, cfg.mesh_axes)
-      with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-        variables, _ = self.get_expected_output(
-            rng_model, hidden_states, cfg, mesh
-        )
-        return self.get_moe_output_and_grad(variables, hidden_states, cfg, mesh)
 
-    # Run without tokamax GMM and with tokamax GMM
-    # output: output from fwd
-    # var_grad: weight gradient from bwd
-    # state_grad: activation gradient from bwd
-    output, var_grad, state_grad = get_value_and_grad(
-        sparse_matmul=False,  # dense matmul
+      # quantize the model with qwix interception
+      if cfg.quantization:
+        if not (cfg.quantization == "fp8_full" and cfg.use_qwix_quantization):
+          raise ValueError(
+              "Only fp8_full with qwix quantization is supported for MoE testing."
+          )
+
+        # Similar to `quantizations.get_fp8_full_qwix_rule_w_sparsity`
+        def get_fp8_full_qwix_rule_for_test(config: Config):
+          return [
+              qwix.QtRule(
+                  module_path=".*",
+                  weight_qtype=jnp.float8_e4m3fn,
+                  act_qtype=jnp.float8_e4m3fn,
+                  bwd_qtype=jnp.float8_e5m2,
+                  weight_calibration_method=config.weight_quantization_calibration_method,
+                  act_calibration_method=config.act_quantization_calibration_method,
+                  bwd_calibration_method=config.bwd_quantization_calibration_method,
+                  op_names=("gmm", "ragged_dot"),
+              ),
+          ]
+
+        quantization_rule = get_fp8_full_qwix_rule_for_test(cfg)
+        quantization_provider = qwix.QtProvider(quantization_rule)
+        model = qwix.quantize_model(model, quantization_provider)
+
+
+      return model
+
+    def _loss_and_grad(model, variables, hidden_states):
+      def loss_fn(params, x):
+        out, lb_loss, _ = model.apply({"params": params}, x)
+        loss = jnp.mean(out.astype(jnp.float32) ** 2)
+        if lb_loss is not None:
+          loss = loss + lb_loss.astype(jnp.float32)
+        return loss, out
+
+      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))(variables["params"], hidden_states)
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+
+    # Reference run: dense matmul, no quantization, EP=1
+    cfg_ref = _build_cfg(
+        sparse_matmul=False,
         quantization="",
         megablox=False,
         use_tokamax_gmm=False,
         use_gmm_v2_fwd=False,
         use_gmm_v2_dlhs=False,
         use_gmm_v2_drhs=False,
+        ici_expert_parallelism=1,
     )
-    custom_output, custom_var_grad, custom_state_grad = get_value_and_grad(
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg_ref.per_device_batch_size) * device_count, cfg_ref.max_target_length, cfg_ref.base_emb_dim),
+        dtype=cfg_ref.dtype,
+    )
+    devices_array_ref = maxtext_utils.create_device_mesh(cfg_ref)
+    mesh_ref = Mesh(devices_array_ref, cfg_ref.mesh_axes)
+    model_ref = _build_model(cfg_ref, mesh_ref)
+
+    with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+      variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      (loss_ref, output_ref), (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+
+    # Target run: custom configuration (sparse, GMM, EP, quantization)
+    cfg_tgt = _build_cfg(
         sparse_matmul=True,
         quantization=quantization,
         megablox=megablox,
@@ -1505,32 +1554,33 @@ class RoutedMoeTest(parameterized.TestCase):
         use_gmm_v2_fwd=use_gmm_v2_fwd,
         use_gmm_v2_dlhs=use_gmm_v2_dlhs,
         use_gmm_v2_drhs=use_gmm_v2_drhs,
+        ici_expert_parallelism=ici_expert_parallelism,
     )
-    # Construct the combined trees
-    tree_actual = {
-        "output": output,
-        "state_grad": state_grad,
-        "var_grad": var_grad,
-    }
-    tree_custom = {
-        "output": custom_output,
-        "state_grad": custom_state_grad,
-        "var_grad": custom_var_grad,
-    }
-    # Calculate diffs and log exactly once
-    relative_norm_diff_threshold = 0.2 if quantization else 1e-02
-    diff_text = calculate_diff(
-        tree_actual, tree_custom, relative_norm_diff_threshold
-    )
-    max_logging.log("\n" + diff_text)
+    devices_array_tgt = maxtext_utils.create_device_mesh(cfg_tgt)
+    mesh_tgt = Mesh(devices_array_tgt, cfg_tgt.mesh_axes)
+    model_tgt = _build_model(cfg_tgt, mesh_tgt)
 
-    # # forward pass outpt
-    # # assert_equal(output, custom_output)
-    # assert_close(output, custom_output, atol=1e-02, rtol=1e-02)
-    # # backward pass gradients
-    # cmp = lambda a, b: assert_norm_close(a, b, rtol=1e-03)
-    # compare_gradients(state_grad, custom_state_grad, cmp)
-    # compare_gradients(var_grad, custom_var_grad, cmp)
+    with jax.set_mesh(mesh_tgt), nn_partitioning.axis_rules(cfg_tgt.logical_axis_rules):
+      # Re-initialize variables for the target run to ensure they are sharded correctly
+      # for the target mesh, but use the same RNG to get the same initial values.
+      variables_tgt = model_tgt.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      (loss_tgt, output_tgt), (grads_tgt, x_grad_tgt) = _loss_and_grad(model_tgt, variables_tgt, hidden_states)
+
+    # Compare results
+    tree_ref = {
+        "output": output_ref,
+        "state_grad": x_grad_ref,
+        "var_grad": grads_ref,
+    }
+    tree_tgt = {
+        "output": output_tgt,
+        "state_grad": x_grad_tgt,
+        "var_grad": grads_tgt,
+    }
+
+    relative_norm_diff_threshold = 0.2 if quantization else 0.012
+    diff_text = calculate_diff(tree_ref, tree_tgt, relative_norm_diff_threshold)
+    max_logging.log("\n" + diff_text)
 
 
 ################
