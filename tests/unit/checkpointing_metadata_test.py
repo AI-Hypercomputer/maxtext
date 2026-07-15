@@ -147,6 +147,21 @@ class PreRestoreWeightCheckTest(unittest.TestCase):
     self.assertIn("Checkpoint does not match the model", message)
     self.assertIn("(2, 2)", message)
 
+  def test_pre_restore_check_skips_when_collection_not_located(self):
+    """An empty stored collection (unfamiliar layout) must skip, not report every weight missing."""
+    want = {"w": jax.ShapeDtypeStruct((2, 2), jnp.float32)}
+    checkpointing._pre_restore_weight_check(want, {})  # pylint: disable=protected-access
+
+  def test_pre_restore_check_still_raises_on_real_mismatch(self):
+    """A located-but-mismatched collection must still fail before restore."""
+    want = {
+        "w": jax.ShapeDtypeStruct((2, 2), jnp.float32),
+        "w_extra": jax.ShapeDtypeStruct((2, 2), jnp.float32),  # not in the checkpoint
+    }
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._pre_restore_weight_check(want, self.stored_params)  # pylint: disable=protected-access
+    self.assertIn("'w_extra'", str(ctx.exception))
+
 
 if __name__ == "__main__":
   unittest.main()

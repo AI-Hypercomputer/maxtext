@@ -237,6 +237,19 @@ def _stored_metadata_tree(read_tree):
   return tree if isinstance(tree, dict) else None
 
 
+def _pre_restore_weight_check(want, have):
+  """Runs the weight check against stored metadata, but only when `have` was located.
+
+  An empty `have` means the params collection wasn't found where this layout expects it
+  (an unfamiliar on-disk nesting), not that the checkpoint is missing every weight -- so
+  skip rather than hard-fail a valid restore with a "missing" for every weight. A real
+  partial mismatch leaves the other weights in `have`, so it still raises here; a
+  genuinely empty checkpoint is caught after restore.
+  """
+  if isinstance(have, dict) and have:
+    _raise_on_weight_mismatch(want, have)
+
+
 def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
   """Reshapes a restored Linen-layout `items` dict into an NNX state.
 
@@ -822,7 +835,7 @@ def load_state_if_possible(
         # ("items" must be indexed, not attribute-accessed: Composite.items is a method.)
         stored_tree = _stored_metadata_tree(lambda: checkpoint_manager.item_metadata(step)["items"].tree)
         if stored_tree is not None:
-          _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_unboxed_pre_state, stored_tree))
+          _pre_restore_weight_check(*_expected_and_restored_params(abstract_unboxed_pre_state, stored_tree))
         if (
             dataset_type == "grain"
             and data_iterator
@@ -993,7 +1006,7 @@ def load_params_from_path(
   stored_tree = _stored_metadata_tree(lambda: ckptr.metadata(epath.Path(load_parameters_from_path)).item_metadata.tree)
   if stored_tree is not None:
     stored_collection = stored_tree.get("params", {})
-    _raise_on_weight_mismatch(want, stored_collection.get("params", {}) if is_nnx else stored_collection)
+    _pre_restore_weight_check(want, stored_collection.get("params", {}) if is_nnx else stored_collection)
 
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
