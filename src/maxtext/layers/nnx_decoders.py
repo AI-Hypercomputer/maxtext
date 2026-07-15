@@ -647,13 +647,17 @@ class NNXDecoder(nnx.Module):
     scan_length = config.num_decoder_layers // attention_pattern_length
     num_remaining_layers = config.num_decoder_layers % attention_pattern_length
     policy = self.get_remat_policy()
+    # The pure-NNX decoder skips block-level remat (skip_block_remat=True below),
+    # so the block rematerializes its own local/global layers instead.
     layer_kwargs = {
         "num_of_layers": attention_pattern_length,
         "remat_policy_fn": policy,
+        "apply_internal_remat": True,
     }
     rem_layer_kwargs = {
         "num_of_layers": num_remaining_layers,
         "remat_policy_fn": policy,
+        "apply_internal_remat": True,
     }
 
     RemattedGemma4Block = gemma4.Gemma4ScannableBlock

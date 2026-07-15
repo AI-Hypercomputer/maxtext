@@ -422,6 +422,7 @@ class Gemma4ScannableBlock(nnx.Module):
       quant: None | Quant = None,
       num_of_layers: int = 6,
       remat_policy_fn: Any = None,
+      apply_internal_remat: bool = False,
   ):
     """Initializes the instance.
 
@@ -433,6 +434,13 @@ class Gemma4ScannableBlock(nnx.Module):
       quant: The quantization configuration.
       num_of_layers: The number of layers in the model.
       remat_policy_fn: The resolved rematerialization policy function.
+      apply_internal_remat: When True, the block rematerializes its own local
+        (scanned) and global layers, and the caller must NOT also apply
+        block-level remat (that would double-rematerialize and make XLA treat the
+        whole block as one unit). Both the pure-NNX and linen decoders set this
+        and skip block-level remat, so remat happens per layer rather than over
+        the whole block. When False, the block does not self-remat and relies on
+        the caller's block-level remat instead.
     """
     self.config = config
     self.mesh = mesh
@@ -441,6 +449,7 @@ class Gemma4ScannableBlock(nnx.Module):
     self.rngs = rngs
     self.num_of_layers = num_of_layers
     self.remat_policy_fn = remat_policy_fn
+    self.apply_internal_remat = apply_internal_remat
 
     pattern_length = len(GEMMA4_ATTENTION_PATTERN)
     if not 0 <= num_of_layers <= pattern_length:
@@ -510,7 +519,8 @@ class Gemma4ScannableBlock(nnx.Module):
       )
       return layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-    if self.config.remat_policy != "none":
+    apply_remat = self.apply_internal_remat and self.config.remat_policy != "none"
+    if apply_remat:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
       remat_policy = self.remat_policy_fn
     else:
@@ -523,7 +533,7 @@ class Gemma4ScannableBlock(nnx.Module):
         length=self.num_local,
         param_scan_axis=self.config.param_scan_axis,
         apply_fn=apply_layer,
-        remat=self.config.remat_policy != "none",
+        remat=apply_remat,
         remat_policy=remat_policy,
         prevent_cse=prevent_cse,
     )
@@ -648,7 +658,7 @@ class Gemma4ScannableBlock(nnx.Module):
               *(save_names + offload_to_device)
           )
 
-        if self.config.remat_policy != "none":
+        if self.apply_internal_remat and self.config.remat_policy != "none":
           prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
           scan_global_layer = jax.checkpoint(
               scan_global_layer,

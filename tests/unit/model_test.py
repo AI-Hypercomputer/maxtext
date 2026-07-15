@@ -237,6 +237,51 @@ class TestModel(unittest.TestCase):
     )
     self.assertEqual(logits.shape, (new_config.global_batch_size_to_train_on, new_config.max_target_length, new_config.vocab_size))
 
+  def test_gemma4_model_linen(self):
+    """Test the shared Gemma4 scannable block on the linen (ToLinen) path.
+
+    The block is shared with the pure-NNX path. On the linen path it is driven
+    through nn.scan + the ToLinen wrapper with apply_internal_remat=True (the
+    block rematerializes its own layers; no block-level remat), exercising the
+    nested transform stack and guarding against nnx-migration regressions.
+    """
+    new_config = self.init_pyconfig(
+        decoder_block="gemma4",
+        share_kv_projections=True,
+        use_post_attn_norm=True,
+        use_post_ffw_norm=True,
+        base_num_decoder_layers=12,
+        scan_layers=True,
+        remat_policy="minimal",
+    )
+    devices_array = maxtext_utils.create_device_mesh(new_config)
+    mesh = Mesh(devices_array, new_config.mesh_axes)
+    model = models.transformer_as_linen(config=new_config, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+
+    shape = (new_config.global_batch_size_to_train_on, new_config.max_target_length)
+    ids = jax.random.randint(self.rng, shape, 0, new_config.vocab_size)
+    decoder_segment_ids = jnp.full(shape, DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    decoder_positions = jnp.broadcast_to(jnp.arange(new_config.max_target_length, dtype=jnp.int32), shape)
+
+    transformer_vars = model.init(
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+    )
+    logits = model.apply(
+        transformer_vars,
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+    logits = logits[0] if isinstance(logits, tuple) else logits
+    self.assertEqual(logits.shape, (new_config.global_batch_size_to_train_on, new_config.max_target_length, new_config.vocab_size))
+
 
 if __name__ == "__main__":
   unittest.main()
