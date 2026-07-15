@@ -85,6 +85,13 @@ jobs:
           echo "run_tests=true" >> $GITHUB_OUTPUT
           echo "run_notebooks=true" >> $GITHUB_OUTPUT
 
+          # Pre-calculate if notebooks changed
+          if echo "$CHANGED_FILES" | grep '\.ipynb$' > /dev/null; then
+            NOTEBOOKS_CHANGED="true"
+          else
+            NOTEBOOKS_CHANGED="false"
+          fi
+
           # 1. Check if only documentation files (.md) were changed
           if ! echo "$CHANGED_FILES" | grep -v -E '\.md$' > /dev/null; then
             echo "Documentation-only files changed, skipping all tests and notebooks."
@@ -95,16 +102,17 @@ jobs:
 
           # 2. Check if dependencies or Github workflows were changed
           if echo "$CHANGED_FILES" | grep -E '(^|/)(src/dependencies/|\.github/workflows/)' > /dev/null; then
-            echo "Core files (dependencies, workflows) changed, enabling all tests and notebooks."
+            echo "Core files (dependencies, workflows) changed, enabling all tests (notebooks only if changed)."
             echo "run_tests=true" >> $GITHUB_OUTPUT
-            echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            echo "run_notebooks=$NOTEBOOKS_CHANGED" >> $GITHUB_OUTPUT
             exit 0
           fi
 
           # 3. Check if post-training files were changed
           if echo "$CHANGED_FILES" | grep -E 'src/maxtext/trainers/post_train/' > /dev/null; then
+            echo "Post-training files changed, enabling all tests (notebooks only if changed)."
             echo "run_tests=true" >> $GITHUB_OUTPUT
-            echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            echo "run_notebooks=$NOTEBOOKS_CHANGED" >> $GITHUB_OUTPUT
             exit 0
           fi
 
