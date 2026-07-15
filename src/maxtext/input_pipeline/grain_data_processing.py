@@ -98,11 +98,14 @@ def get_datasets(
     elastic=False,
 ):
   """Load dataset from array_record files for using with grain"""
-  if data_file_type == "arrayrecord":
+  if data_file_type in ("arrayrecord", "bagz"):
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
       files = find_data_files(pattern)
-      source = grain.ArrayRecordDataSource(files)
+      if data_file_type == "arrayrecord":
+        source = grain.ArrayRecordDataSource(files)
+      elif data_file_type == "bagz":
+        source = grain.BagzDataSource(files)
       return grain.MapDataset.source(source)
 
     # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
@@ -215,7 +218,7 @@ def get_datasets(
     return dataset
   else:
     raise ValueError(
-        f"grain pipeline supports (arrayrecord, tfrecord, parquet) as grain_file_type, but got {data_file_type}"
+        f"grain pipeline supports (arrayrecord, tfrecord, parquet, bagz) as grain_file_type, but got {data_file_type}"
     )
 
 

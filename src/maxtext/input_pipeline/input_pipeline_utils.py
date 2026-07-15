@@ -1070,3 +1070,5 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     element[f"{self.data_column}_mrope_deltas"] = mrope_position_deltas
 
     return element
+
+
