@@ -45,6 +45,9 @@ from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.layers import linears, moe, nnx_wrappers, decoders, embeddings, quantizations
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.utils import max_logging
+from absl import logging
+# Add this inside your test method before train_main(args)
+logging.set_verbosity(logging.INFO)
 
 
 @pytest.mark.integration_test
