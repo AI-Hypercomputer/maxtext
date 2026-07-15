@@ -1026,6 +1026,9 @@ def _should_save_checkpoint_at_step(checkpoint_manager, step, config, force):
   """Returns whether MaxText should build and dispatch checkpoint args."""
   if force:
     return True
+  if step == 0 and not config.save_checkpoint_on_start:
+    # if step = 0, `step % config.checkpoint_period == 0` is always true, force skip
+    return False
   if config.enable_continuous_checkpointing:
     base_checkpoint_due = bool(checkpoint_manager.should_save(step))
   else:

@@ -1355,6 +1355,7 @@ class RoutedMoE(nnx.Module):
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
+      # Clamps the tile size using the minimum
       tiling = (
           min(tiling[0], m),
           min(tiling[1], k),
@@ -1365,7 +1366,7 @@ class RoutedMoE(nnx.Module):
         if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
           raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
         rhs_inputs = kernel.qvalue
-      if self.config.use_qwix_quantization:
+      if self.config.quantization and self.config.use_qwix_quantization:
         # Use full contraction for QWIX quantization to allow quantization
         # fusion (max reduce over contracting dimension).
         tiling = (tiling[0], k, tiling[2])
@@ -1396,7 +1397,7 @@ class RoutedMoE(nnx.Module):
       return output
 
     def get_tokamax_group_sizes(group_sizes, inputs, kernel):
-      if self.config.use_qwix_quantization:
+      if self.config.quantization and self.config.use_qwix_quantization:
         return group_sizes
       elif self.config.attention == "vllm_rpa":
         return group_sizes
@@ -1442,12 +1443,16 @@ class RoutedMoE(nnx.Module):
       kernel = kernel.astype(self.dtype)
       lhs_quantize_dtype, rhs_quantize_dtype = get_quantization_dtypes()
 
-      # We support three implementations for gmm - tokamax, older forked kernel, or jax.lax.ragged_dot
+      # We support three implementations for gmm - tokamax, older forked megablox, or jax.lax.ragged_dot
       # For quantized tokamax we call a forked version that supports our quantization recipes.
       if self.config.use_tokamax_gmm:
-        # tokamax gmm v1 (quantized) or tokamax gmm v2 (unquantized)
-        # tokamax gmm v2 (quantized) not supported yet
-        if self.config.quantization or self.config.use_gmm_v2:
+        # tokamax (v1 quantized, v2 both quantized and unquantized)
+        if (
+            self.config.quantization
+            or self.config.use_gmm_v2_fwd
+            or self.config.use_gmm_v2_dlhs
+            or self.config.use_gmm_v2_drhs
+        ):
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,
@@ -1462,10 +1467,12 @@ class RoutedMoE(nnx.Module):
               weight_gather_axes=weight_gather_axes,
               lhs_vma_axes=lhs_vma_axes,
               rhs_vma_axes=rhs_vma_axes,
-              use_gmm_v2=self.config.use_gmm_v2,
+              use_gmm_v2_fwd=self.config.use_gmm_v2_fwd,
+              use_gmm_v2_dlhs=self.config.use_gmm_v2_dlhs,
+              use_gmm_v2_drhs=self.config.use_gmm_v2_drhs,
               partial_sum=partial_sum,
           )
-        else:  # tokamax (unquantized)
+        else:  # tokamax (v1 unquantized)
           output = tokamax.ragged_dot(
               lhs=inputs,
               rhs=kernel,
