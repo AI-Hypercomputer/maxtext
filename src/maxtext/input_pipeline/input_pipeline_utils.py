@@ -496,6 +496,15 @@ def make_tfrecord_iter_dataset(path: str):
   return TFRecordIterDataset(path)
 
 
+def make_parquet_iter_dataset(path: str):
+  """Returns the appropriate ParquetIterDataset for local or HF paths."""
+  if path.startswith("hf://"):
+    from huggingface_hub import HfFileSystem  # pylint: disable=import-outside-toplevel
+    return grain.experimental.ParquetIterDataset(path, filesystem=HfFileSystem())
+  return grain.experimental.ParquetIterDataset(path)
+
+
+
 def compute_file_sharding(file_count, host_index, host_count):
   """Compute per-host file slicing and optional row-shard parameters.
 

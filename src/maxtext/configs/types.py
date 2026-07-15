@@ -3340,8 +3340,8 @@ class MaxTextConfig(
       if self.eval_interval > 0 and not self.hf_eval_split:
         raise ValueError("Please specify hf_eval_split or set eval_interval to <=0.")
     elif self.dataset_type == DatasetType.GRAIN:
-      if not self.grain_train_files and not self.grain_train_mixture_config_path:
-        raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
+      if not self.grain_train_files and not self.grain_train_mixture_config_path and not self.hf_path:
+        raise ValueError("When dataset_type=grain, please set grain_train_files, grain_train_mixture_config_path, or hf_path")
       if self.eval_interval > 0 and not self.grain_eval_files:
         raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
     elif self.dataset_type == DatasetType.TFDS:
