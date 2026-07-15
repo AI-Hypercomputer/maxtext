@@ -351,9 +351,7 @@ class Checkpointing(BaseModel):
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
   )
-  save_checkpoint_on_start: bool = Field(
-      True, description="If True, saves an initial checkpoint upon training start."
-  )
+  save_checkpoint_on_start: bool = Field(True, description="If True, saves an initial checkpoint upon training start.")
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
   )
@@ -925,6 +923,7 @@ class MoEKernels(BaseModel):
   num_moe_emb_chunks: int = Field(
       0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
   )
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -2900,9 +2899,7 @@ class MaxTextConfig(
 
     # Check quant config is non-empty for Qwix quantization
     if self.use_qwix_quantization and not self.quantization:
-      raise ValueError(
-          "Qwix quantization is enabled but quantization is not set."
-      )
+      raise ValueError("Qwix quantization is enabled but quantization is not set.")
 
     # Default quantization sharding count to number of local devices if not set.
     if self.quantization_local_shard_count == -1:
@@ -3490,8 +3487,8 @@ class MaxTextConfig(
     )
     valid_combos = {
         (False, False, False),  # 111 (v1+v1+v1)
-        (True, True, True),     # 222 (v2+v2+v2)
-        (True, False, True),    # 212 (v2+v1+v2)
+        (True, True, True),  # 222 (v2+v2+v2)
+        (True, False, True),  # 212 (v2+v1+v2)
     }
     if gmm_v2_combo not in valid_combos:
       raise ValueError(

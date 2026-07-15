@@ -41,24 +41,18 @@ from maxtext.utils import max_logging
 import qwix
 
 
-
-
 def find_nans(xs):
   for x in jax.tree_util.tree_flatten(xs)[0]:
     assert not jnp.any(jnp.isnan(x)), f"NaN found in {x=}"
 
 
 def compare_gradients(grad0, grad1, comparison_fn):
-  for a, b in zip(
-      jax.tree_util.tree_flatten(grad0)[0], jax.tree_util.tree_flatten(grad1)[0]
-  ):
+  for a, b in zip(jax.tree_util.tree_flatten(grad0)[0], jax.tree_util.tree_flatten(grad1)[0]):
     comparison_fn(a, b)
 
 
 def assert_equal(a, b):
-  assert jnp.array_equal(
-      a, b
-  ), f"The following two arrays are not equal\n{a=}\n{b=}"
+  assert jnp.array_equal(a, b), f"The following two arrays are not equal\n{a=}\n{b=}"
 
 
 def assert_close(a, b, rtol=1e-02, atol=1e-02):
@@ -69,15 +63,13 @@ def assert_close(a, b, rtol=1e-02, atol=1e-02):
       atol=atol,
       equal_nan=False,
   ), (
-      f"The following two arrays are not close\n{a=}\n{b=}\n"
-      f"total difference is {jnp.sum(jnp.abs(a - b))=}"
+      f"The following two arrays are not close\n{a=}\n{b=}\n" f"total difference is {jnp.sum(jnp.abs(a - b))=}"
   )
 
 
 def assert_norm_close(a, b, rtol=1e-02):
   assert jnp.linalg.norm(a - b) / jnp.linalg.norm(a) < rtol, (
-      "The following two arrays are not close in norm\n"
-      f"{jnp.linalg.norm(a - b)=}\n{jnp.linalg.norm(a)=}"
+      "The following two arrays are not close in norm\n" f"{jnp.linalg.norm(a - b)=}\n{jnp.linalg.norm(a)=}"
   )
 
 
@@ -88,9 +80,7 @@ def calculate_diff(a, b, relative_norm_diff_threshold=1e-02):
   leaves_b, tree_def_b = jax.tree_util.tree_flatten_with_path(b)
 
   if tree_def_a != tree_def_b:
-    raise ValueError(
-        "Reference and actual pytrees must have the same structure."
-    )
+    raise ValueError("Reference and actual pytrees must have the same structure.")
 
   log_lines = ["DEBUG: CALCULATE DIFF"]
   for (path, a), (_, b) in zip(leaves_a, leaves_b):
@@ -104,17 +94,12 @@ def calculate_diff(a, b, relative_norm_diff_threshold=1e-02):
     max_abs_diff = jnp.max(jnp.abs(a - b))
     relative_norm_diff = jnp.linalg.norm(a - b) / jnp.linalg.norm(a)
 
-    log_line = (
-        f"{path}"
-        f" | max_abs_diff: {max_abs_diff}"
-        f" | relative_norm_diff: | {relative_norm_diff}"
-    )
+    log_line = f"{path}" f" | max_abs_diff: {max_abs_diff}" f" | relative_norm_diff: | {relative_norm_diff}"
     log_lines.append(log_line)
     assert (
         relative_norm_diff < relative_norm_diff_threshold
     ), f"relative_norm_diff exceeds {relative_norm_diff_threshold=}"
   return "\n".join(log_lines)
-
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -1511,13 +1496,10 @@ class RoutedMoeTest(parameterized.TestCase):
           dtype=cfg.dtype,
       )
 
-
-      # quantize the model with qwix interception
+      # quantize the model with qwix rule for gmm
       if cfg.quantization:
         if not (cfg.quantization == "fp8_full" and cfg.use_qwix_quantization):
-          raise ValueError(
-              "Only fp8_full with qwix quantization is supported for MoE testing."
-          )
+          raise ValueError("Only fp8_full with qwix quantization is supported for MoE testing.")
 
         # Similar to `quantizations.get_fp8_full_qwix_rule_w_sparsity`
         def get_fp8_full_qwix_rule_for_test(config: Config):
@@ -1537,7 +1519,6 @@ class RoutedMoeTest(parameterized.TestCase):
         quantization_rule = get_fp8_full_qwix_rule_for_test(cfg)
         quantization_provider = qwix.QtProvider(quantization_rule)
         model = qwix.quantize_model(model, quantization_provider)
-
 
       return model
 

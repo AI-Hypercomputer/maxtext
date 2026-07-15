@@ -27,9 +27,8 @@ import pytest
 train_main = train.main
 gettempdir = tempfile.gettempdir
 
-
+# TODO: revert before merge
 from absl import logging
-# Add this inside your test method before train_main(args)
 logging.set_verbosity(logging.INFO)
 
 

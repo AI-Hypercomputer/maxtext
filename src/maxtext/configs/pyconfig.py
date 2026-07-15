@@ -39,6 +39,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import max_logging
 
 logger = logging.getLogger(__name__)
+# TODO: revert before merge
 # logger.setLevel(os.environ.get("LOGLEVEL", "INFO"))
 
 _BASE_CONFIG_ATTR = "base_config"

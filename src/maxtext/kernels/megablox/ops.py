@@ -90,10 +90,7 @@ def gmm(
     # 2. for batchsplit, explicitly pass the rule
     quantization_rule = qwix_rule if qwix_rule else qpl.get_current_rule("gmm")
     if not quantization_rule or not isinstance(quantization_rule, qwix.QtRule):
-      raise ValueError(
-          "Expect a QtRule for quantized training. "
-          f"But get quantization_rule={quantization_rule}"
-      )
+      raise ValueError("Expect a QtRule for quantized training. " f"But get quantization_rule={quantization_rule}")
   else:
     # Handcraft a rule that matches the AQT's behavior.
     if lhs_quantize_dtype or rhs_quantize_dtype:
@@ -135,9 +132,7 @@ def gmm(
   )
 
 
-def _prepare_fwd_rhs_scale(
-    rhs: qpl.QArray, transpose_rhs: bool = False
-) -> jnp.ndarray:
+def _prepare_fwd_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.ndarray:
   """Formats and broadcasts rhs scale for the V2 GMM forward kernel."""
   # Target shape: (size_group, num_quant_blocks, 1, size_n)
   if transpose_rhs:
@@ -255,11 +250,7 @@ def _gmm_fwd(
   """
 
   if quantization_rule:
-    if (
-        quantization_rule.act_qtype
-        and not isinstance(lhs, qpl.QArray)
-        and not use_gmm_v2_fwd
-    ):
+    if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2_fwd:
       lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
           lhs,
           quantization_rule.act_qtype,
@@ -417,12 +408,10 @@ def _gmm_bwd(
       rhs = rhs.qvalue
     else:
       # NOTE: rhs.scale is for the contracting dimension (N) in DLHS, but gmm_v2
-      # only supports scaling the output dimension. Thus, we must scale dlhs_dout 
-      # beforehand. If the kernel supports transposing RHS internally, we can fuse 
+      # only supports scaling the output dimension. Thus, we must scale dlhs_dout
+      # beforehand. If the kernel supports transposing RHS internally, we can fuse
       # this scale inside the kernel.
-      dlhs_dout = _scale_grad_by_rhs_scale(
-          dlhs_dout, rhs, group_sizes, transpose_rhs
-      )
+      dlhs_dout = _scale_grad_by_rhs_scale(dlhs_dout, rhs, group_sizes, transpose_rhs)
       rhs = rhs.qvalue
 
   # Apply lhs.scale to drhs_dout, lhs_transpose[k, m] @ drhs_out[m, n] = drhs[g, k, n]
@@ -444,9 +433,7 @@ def _gmm_bwd(
     drhs_dout = qpl.quantize(
         drhs_dout,
         quantization_rule.bwd_qtype,
-        channelwise_axes=[]
-        if quantization_rule.disable_channelwise_axes
-        else [1],
+        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
         calibration_method=quantization_rule.bwd_calibration_method,
     )
 
@@ -480,7 +467,7 @@ def _gmm_bwd(
           implementation="mosaic",
           **dlhs_kwargs,
       )
-    if not use_gmm_v2_dlhs and use_gmm_v2_fwd:  
+    if not use_gmm_v2_dlhs and use_gmm_v2_fwd:
       # TOKAMAX DLHS GMM 1 (with tile passing inside scheme 2+1+2)
       dlhs = tokamax_backend.gmm(
           lhs=dlhs_dout,
@@ -495,13 +482,11 @@ def _gmm_bwd(
           input_buffer_count=input_buffer_count[1],
       )
     else:  # TOKAMAX DLHS GMM 2
-      # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs 
-      # support. Fusing this transpose into the kernel would also allow us to fuse 
+      # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs
+      # support. Fusing this transpose into the kernel would also allow us to fuse
       # the rhs_scale application.
       dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
-      dlhs_lhs = (
-          dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
-      )
+      dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
       custom_dlhs_tiling = gmm_v2.TileSizes(
           tile_m=tiling[3],
           tile_k=tiling[4],
@@ -537,9 +522,7 @@ def _gmm_bwd(
       )
     else:  # TOKAMAX DRHS TGMM 2
       # Extract arrays
-      drhs_rhs = (
-          drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
-      )
+      drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
       drhs_lhs = lhs
       # TGMM kernel requires matching sublane sizes (dtypes) for hardware packing.
       # If mismatch, cast lhs to match rhs_q.
