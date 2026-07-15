@@ -101,6 +101,14 @@ class QuantizationType(str, Enum):
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
 
 
+class TeCommGemmOverlapPolicy(str, Enum):
+  """Transformer Engine collective GEMM overlap scope."""
+
+  DISABLED = "disabled"
+  MLP = "mlp"
+  FULL = "full"
+
+
 class KvQuantAxis(str, Enum):
   """Axes to quantize over for the Key-Value cache."""
 
@@ -470,8 +478,13 @@ class Quantization(BaseModel):
       50,
       description=("The first number of steps before updating the sparsity masks."),
   )
-  use_te_comm_gemm_overlap: bool = Field(
-      False, description="If True, uses Transformer Engine's collective GEMM overlap algorithm."
+  te_comm_gemm_overlap: str = Field(
+      TeCommGemmOverlapPolicy.DISABLED.value,
+      description=(
+          "Transformer Engine collective GEMM overlap policy. "
+          "'disabled' disables overlap; 'mlp' overlaps MLP up/down projections; "
+          "'full' also overlaps attention QKV and output projections."
+      ),
   )
 
 
@@ -2606,8 +2619,8 @@ class MaxTextConfig(
           "  2. Ragged sort with ring of experts (use_ring_of_experts=True AND use_ragged_sort=True)"
       )
 
-  def _validate_use_te_comm_gemm_overlap(self):
-    """Validates that use_te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
+  def _validate_te_comm_gemm_overlap(self):
+    """Validates that te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
     te_has_distributed_env = jax.local_device_count() == 1 and jax.distributed.is_initialized()
 
     if self.hardware != "gpu_multiprocess" or not te_has_distributed_env:
@@ -3545,14 +3558,16 @@ class MaxTextConfig(
 
     self._validate_check_vma_is_supported()
 
-    if self.use_te_comm_gemm_overlap:
-      self._validate_use_te_comm_gemm_overlap()
-
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
       self.decoder_block = DecoderBlockType(self.decoder_block.lower())
     if isinstance(self.shard_mode, str):
       self.shard_mode = ShardMode(self.shard_mode.lower())
+    if isinstance(self.te_comm_gemm_overlap, str):
+      self.te_comm_gemm_overlap = TeCommGemmOverlapPolicy(self.te_comm_gemm_overlap.lower())
+
+      if self.te_comm_gemm_overlap != TeCommGemmOverlapPolicy.DISABLED:
+        self._validate_te_comm_gemm_overlap()
 
     constant_bound_config = getattr(self, "constant_bound_config", None)
     if isinstance(constant_bound_config, str):

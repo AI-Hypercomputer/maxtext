@@ -47,6 +47,7 @@ except ImportError:
   from qwix._src import flax_util  # pytype: disable=import-error
 from maxtext.layers import nnx_wrappers
 
+from maxtext.configs.types import TeCommGemmOverlapPolicy
 from maxtext.common.common_types import DType, Config
 from maxtext.inference.kvcache import KVQuant
 
@@ -386,13 +387,16 @@ class NANOOFp8Quantization(Quantization):
 
 
 def _get_int8_quant_config(config):
+  """Get int8 quantization configuration based on user config."""
   drhs_bits = None
   drhs_accumulator_dtype = None
   drhs_local_aqt = None
   if config.quantization_local_shard_count != 0:
     drhs_bits = 8
     drhs_accumulator_dtype = jnp.int32
-    drhs_local_aqt = aqt_config.LocalAqt(contraction_axis_shard_count=config.quantization_local_shard_count)  # pyrefly: ignore[unexpected-keyword]
+    drhs_local_aqt = aqt_config.LocalAqt(
+        contraction_axis_shard_count=config.quantization_local_shard_count
+    )  # pyrefly: ignore[unexpected-keyword]
   return aqt_config.config_v3(
       fwd_bits=8,
       dlhs_bits=8,
@@ -565,9 +569,13 @@ def _dot_general_make(quant_cfg):
   rhs_scale = quant_cfg[_W_SCALE]
   aqt_dg = aqt_config.dot_general_make(lhs_bits=lhs_bits, rhs_bits=rhs_bits)
   if lhs_scale < 1.0:
-    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=lhs_scale)  # pyrefly: ignore[missing-attribute]
+    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(
+        calibration.AbsMaxCalibration, scale=lhs_scale
+    )  # pyrefly: ignore[missing-attribute]
   if rhs_scale < 1.0:
-    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=rhs_scale)  # pyrefly: ignore[missing-attribute]
+    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(
+        calibration.AbsMaxCalibration, scale=rhs_scale
+    )  # pyrefly: ignore[missing-attribute]
   return aqt_dg
 
 
@@ -951,7 +959,7 @@ class TransformerEngineQuantization(Quantization):
 
     self._recipe = TransformerEngineQuantization._get_recipe(config.quantization)
 
-    self._perform_collective_gemm = config.use_te_comm_gemm_overlap
+    self._te_comm_gemm_overlap_policy = config.te_comm_gemm_overlap
 
   def __hash__(self):
     return hash((self.quant_mode, self._recipe))
@@ -1024,6 +1032,7 @@ class TransformerEngineQuantization(Quantization):
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     default_recipe = self._recipe
+    overlap_policy = self._te_comm_gemm_overlap_policy
 
     class TEWrapper(transformer_engine.jax.flax.module.TransformerEngineBase):
       """Wrapper module for TransformerEngine quantization."""
@@ -1048,12 +1057,21 @@ class TransformerEngineQuantization(Quantization):
 
       def generate_collective_op_set(self, mesh_axes: Tuple[str, ...] = ()):
         """Inspect the kernel's mesh axes to determine the type of collective operation to use for collective GEMM."""
+        if overlap_policy == TeCommGemmOverlapPolicy.DISABLED:
+          return tex.noop_collective_op_set
 
         if len(mesh_axes) >= 1:
+          # CGEMM in MLP layer (up projection, down projection)
           if mesh_axes[0] == "embed" and mesh_axes[-1] == "mlp":
             return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
           elif mesh_axes[0] == "mlp" and mesh_axes[-1] == "embed":
             return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
+          elif overlap_policy == TeCommGemmOverlapPolicy.FULL:
+            # CGEMM also in Attention layer (QKV projection, output projection)
+            if mesh_axes[0] == "embed" and mesh_axes[-1].startswith("kv"):
+              return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
+            elif mesh_axes[0] == "heads" and mesh_axes[-1] == "embed":
+              return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
 
         return tex.noop_collective_op_set
 
@@ -1076,7 +1094,9 @@ class TransformerEngineQuantization(Quantization):
 
       quantizer_set = generate_quantizer_set()
       collective_op_set = (
-          generate_collective_op_set(mesh_axes) if self._perform_collective_gemm else tex.noop_collective_op_set
+          generate_collective_op_set(mesh_axes)
+          if self._te_comm_gemm_overlap_policy != TeCommGemmOverlapPolicy.DISABLED
+          else tex.noop_collective_op_set
       )
       return transformer_engine.jax.dense.dense(
           x,

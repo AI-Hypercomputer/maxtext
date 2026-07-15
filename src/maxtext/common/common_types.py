@@ -35,6 +35,7 @@ BATCH = "activation_batch"
 BATCH_ATTN = "activation_batch_attn"
 
 ATTN_LENGTH = "activation_length_attn"
+ATTN_INPUT_LENGTH = "activation_input_length_attn"
 
 LENGTH = "activation_length"
 PREFILL_LENGTH = "prefill_activation_length"
