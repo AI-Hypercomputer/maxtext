@@ -71,20 +71,11 @@ class MaxEngineTest(unittest.TestCase):
 
   def test_stack_and_unstack_prefill_cache_nnx(self):
     """scan_layers=False: per-layer cache subtrees stack onto a leading layer axis and back."""
-    cfg = self._init_nnx_pyconfig(
-        stack_prefill_result_cache=True, scan_layers=False
-    )
+    cfg = self._init_nnx_pyconfig(stack_prefill_result_cache=True, scan_layers=False)
     engine = maxengine.MaxEngine(cfg, jax.devices())
     num_layers = engine.config.num_decoder_layers
     # scan_layers=False keeps the per-layer subtrees under decoder/layers, keyed by layer index.
-    cache = {
-        "decoder": {
-            "layers": {
-                i: {"a": jnp.ones((1, 10)), "b": jnp.ones((1, 9))}
-                for i in range(num_layers)
-            }
-        }
-    }
+    cache = {"decoder": {"layers": {i: {"a": jnp.ones((1, 10)), "b": jnp.ones((1, 9))} for i in range(num_layers)}}}
 
     expected_stacked = {
         "decoder": {

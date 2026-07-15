@@ -51,6 +51,7 @@ class ElasticUtilsTest(parameterized.TestCase):
   """Unit tests for Elastic Training utility functions."""
 
   def setUp(self):
+    """Set up the test environment."""
     super().setUp()
     # Save original dependencies
     self.original_pathwaysutils = elastic_utils.pathwaysutils
@@ -86,13 +87,13 @@ class ElasticUtilsTest(parameterized.TestCase):
     # Reset global state for testing is no longer needed
 
   def tearDown(self):
-    # Restore original dependencies
+    """Restore original dependencies"""
     elastic_utils.pathwaysutils = self.original_pathwaysutils
     elastic_utils.jax = self.original_jax
     elastic_utils.gcs_utils = self.original_gcs_utils
     elastic_utils.max_logging = self.original_max_logging
     pathwaysutils.elastic.manager.Manager = self.original_manager_class
-    pathwaysutils.elastic.manager.ScaleUpSignalError = ( # pyrefly: ignore[bad-assignment]
+    pathwaysutils.elastic.manager.ScaleUpSignalError = (  # pyrefly: ignore[bad-assignment]
         self.original_scale_up_signal_error,
     )
     elastic_utils.elastic_manager = None
@@ -465,8 +466,6 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     self.fake_manager.available_inactive_slices = available_inactive_slices
     self.assertEqual(elastic_utils.is_scale_up_event(config), expected)
-
-
 
 
 if __name__ == "__main__":
