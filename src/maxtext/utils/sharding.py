@@ -18,6 +18,7 @@
 from collections.abc import Iterable
 import inspect  # for debugging only
 from pathlib import Path
+import numpy as np
 
 from flax import linen as nn, nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
@@ -207,7 +208,7 @@ def mesh_axes_size(mesh, axes, *, label):
   for axis in axes:
     if axis not in mesh.shape:
       raise ValueError(f"{label} requires mesh axis {axis!r} to exist.")
-    size *= mesh.shape[axis]
+  size *= mesh.shape[axis]
   return size
 
 
@@ -252,8 +253,6 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
         else:
           new_spec.append(None)
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
-
-
 def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Variable:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
   val = v.get_value()
@@ -1070,3 +1069,30 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
+
+
+def partition_mesh_by_diloco_axis(
+    global_mesh: jax.sharding.Mesh, num_replicas: int, diloco_axis_name: str = "diloco"
+) -> list[jax.sharding.Mesh]:
+  """Slices a global mesh along the diloco axis into multiple submeshes."""
+
+  if diloco_axis_name not in global_mesh.axis_names:
+    raise ValueError(f"Axis {diloco_axis_name} not found in mesh axis names: {global_mesh.axis_names}")
+
+  diloco_axis_index = global_mesh.axis_names.index(diloco_axis_name)
+  diloco_axis_size = global_mesh.shape[diloco_axis_name]
+
+  if diloco_axis_size != num_replicas:
+    raise ValueError(f"Diloco axis size ({diloco_axis_size}) must match num_replicas ({num_replicas})")
+
+  devices = global_mesh.devices
+  submeshes = []
+  axis_names = list(global_mesh.axis_names)
+  axis_names.remove(diloco_axis_name)
+
+  for i in range(num_replicas):
+    sub_devices = np.take(devices, i, axis=diloco_axis_index)
+    submesh = jax.sharding.Mesh(sub_devices, axis_names)
+    submeshes.append(submesh)
+
+  return submeshes
