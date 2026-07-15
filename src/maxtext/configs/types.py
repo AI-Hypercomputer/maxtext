@@ -3280,8 +3280,13 @@ class MaxTextConfig(
           "STRIPED reorder strategy requires Transformer Engine and is only supported on GPUs. "
           f"Got hardware={self.hardware!r}."
       )
-    if self.hardware == "gpu" and self.packing and self.attention == "cudnn_flash_te" and self.max_segments_per_seq <= 0:
-      raise ValueError("max_segments_per_seq must be set when using TransformerEngine attention and packing")
+    if (
+        self.hardware == "gpu"
+        and self.packing
+        and self.attention in ("cudnn_flash_te", "cudnn_flash_jax", "cutlass_flash")
+        and self.max_segments_per_seq <= 0
+    ):
+      raise ValueError(f"max_segments_per_seq must be set when using attention={self.attention!r} and packing")
     dcn_product = (
         self.dcn_data_parallelism
         * self.dcn_pipeline_parallelism

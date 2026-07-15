@@ -373,7 +373,7 @@ param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
-attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
+attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te, cutlass_flash (GPU FlashAttention-2, head_dim<=256)
 attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
 share_kv_projections: false # Note: Not compatible with attention_type='mla'
 attention_bias: false # If true, adds a learnable bias to the query, key, and value projections
