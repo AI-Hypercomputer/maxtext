@@ -22,9 +22,14 @@ import pytest
 from absl.testing import absltest
 from contextlib import redirect_stdout
 
-from maxtext.inference.decode import main as decode_main
+from maxtext.inference.decode import main as _decode_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory, get_config_with_unique_run_name
+
+
+def decode_main(config_list):
+  return _decode_main(get_config_with_unique_run_name(config_list, "decode_test"))
+
 
 pytestmark = [pytest.mark.tpu_only, pytest.mark.external_serving, pytest.mark.integration_test]
 

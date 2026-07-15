@@ -20,9 +20,11 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import pytest
 from maxtext.trainers.pre_train import train
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_config_with_unique_run_name
 
-train_main = train.main
+def train_main(config_list):
+  return train.main(get_config_with_unique_run_name(config_list, "sparsity_test"))
+
 gettempdir = tempfile.gettempdir
 
 

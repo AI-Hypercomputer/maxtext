@@ -26,11 +26,20 @@ import os
 import os.path
 
 from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.trainers.pre_train.train import main as train_main
+from maxtext.trainers.pre_train.train import main as _train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.trainers.post_train.sft.train_sft_native import main as sft_main
+from maxtext.trainers.post_train.sft.train_sft_native import main as _sft_main
 
-from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory, get_config_with_unique_run_name
+
+
+def train_main(config_list):
+  return _train_main(get_config_with_unique_run_name(config_list))
+
+
+def sft_main(config_list):
+  return _sft_main(get_config_with_unique_run_name(config_list, "sft_grad_accumulate"))
+
 
 
 def generate_random_string(length=10):

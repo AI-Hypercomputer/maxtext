@@ -20,13 +20,19 @@ import jax
 
 from absl.testing import absltest
 from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.trainers.pre_train.train import main as train_main
+from maxtext.trainers.pre_train.train import main as _train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+
+
+def train_main(config_list):
+  return _train_main(get_config_with_unique_run_name(config_list))
+
 from tests.utils.test_helpers import (
     get_test_config_path,
     get_test_dataset_path,
     get_test_base_output_directory,
     is_rocm_backend,
+    get_config_with_unique_run_name,
 )
 
 

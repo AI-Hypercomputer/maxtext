@@ -28,7 +28,9 @@ from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.layers.decoders import Decoder
 from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_config_with_unique_run_name
 import pytest
+
 
 
 class DummyEmbedding:
@@ -117,14 +119,17 @@ class TestDeepSeekScanEngram(unittest.TestCase):
 
     config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
     config = pyconfig.initialize(
-        [None, config_path]
-        + self._COMMON_CONFIG
-        + [
-            f"engram_layers=[{engram_layers_str}]",
-            f"first_num_dense_layers={first_num_dense_layers}",
-            f"base_num_decoder_layers={base_num_decoder_layers}",
-            f"num_decoder_layers={base_num_decoder_layers}",
-        ]
+        get_config_with_unique_run_name(
+            [None, config_path]
+            + self._COMMON_CONFIG
+            + [
+                f"engram_layers=[{engram_layers_str}]",
+                f"first_num_dense_layers={first_num_dense_layers}",
+                f"base_num_decoder_layers={base_num_decoder_layers}",
+                f"num_decoder_layers={base_num_decoder_layers}",
+            ],
+            "deepseek_scan_engram_test",
+        )
     )
 
     devices_array = maxtext_utils.create_device_mesh(config)

@@ -28,7 +28,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.configs import pyconfig
+from maxtext.configs import pyconfig as _pyconfig
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.gcloud_stub import is_decoupled
@@ -37,9 +37,22 @@ from maxtext.layers import pipeline
 from maxtext.models import deepseek
 from maxtext.models import simple_layer
 from maxtext.utils import maxtext_utils
-from maxtext.trainers.pre_train.train import main as train_main
-from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
+from maxtext.trainers.pre_train.train import main as _train_main
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory, get_config_with_unique_run_name, get_test_run_name
 import pytest
+
+
+class pyconfig:
+  @staticmethod
+  def initialize(args, **kwargs):
+    if "run_name" in kwargs:
+      kwargs["run_name"] = get_test_run_name(kwargs["run_name"])
+    return _pyconfig.initialize(get_config_with_unique_run_name(args), **kwargs)
+
+
+def train_main(config_list):
+  return _train_main(get_config_with_unique_run_name(config_list))
+
 
 
 # Helper to fix pipeline parallelism in test_full_train_fp8 and test_full_train_nanoo_fp8

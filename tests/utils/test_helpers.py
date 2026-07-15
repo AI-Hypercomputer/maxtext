@@ -90,10 +90,32 @@ def get_test_base_output_directory(cloud_path=None):
   return cloud_path or "gs://runner-maxtext-logs"
 
 
+def get_test_run_name(prefix: str) -> str:
+  """Generate a unique run name for test isolation."""
+  import random
+  import string
+  random_string = "".join(random.SystemRandom().choice(string.ascii_uppercase + string.digits) for _ in range(6))
+  return f"{prefix}_{random_string}"
+
+
+def get_config_with_unique_run_name(config_list, prefix="runner_test"):
+  """Returns a copy of the config list with run_name replaced by a unique name."""
+  unique_run_name = get_test_run_name(prefix)
+  res = []
+  for arg in config_list:
+    if arg is not None and isinstance(arg, str) and arg.startswith("run_name="):
+      res.append(f"run_name={unique_run_name}")
+    else:
+      res.append(arg)
+  return res
+
+
 __all__ = [
     "get_test_base_output_directory",
     "is_rocm_backend",
     "get_test_config_path",
     "get_post_train_test_config_path",
     "get_test_dataset_path",
+    "get_config_with_unique_run_name",
 ]
+

@@ -28,9 +28,10 @@ from maxtext.inference.maxengine import maxengine
 from maxtext.models import models
 from maxtext.multimodal import processor_gemma3
 from maxtext.multimodal import utils as mm_utils
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_config_with_unique_run_name
 import numpy as np
 import pytest
+
 
 pytestmark = [pytest.mark.external_serving, pytest.mark.integration_test]
 
@@ -70,7 +71,9 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
     """Correctness test for the gemma3-4b image embedding."""
     # Load weights from reference checkpoint
-    config = pyconfig.initialize(VisionEncoderEmbeddingTest.CONFIGS["gemma3-4b"])
+    config = pyconfig.initialize(
+        get_config_with_unique_run_name(VisionEncoderEmbeddingTest.CONFIGS["gemma3-4b"], "vision_encoder_test")
+    )
     engine = maxengine.MaxEngine(config)
     rng = jax.random.PRNGKey(1234)
     rng, rng_load_params = jax.random.split(rng)

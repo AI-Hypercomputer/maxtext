@@ -19,8 +19,11 @@ import os.path
 import pytest
 
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.trainers.pre_train.train import main as train_main
-from tests.utils.test_helpers import get_test_config_path
+from maxtext.trainers.pre_train.train import main as _train_main
+from tests.utils.test_helpers import get_test_config_path, get_config_with_unique_run_name
+
+def train_main(config_list):
+  return _train_main(get_config_with_unique_run_name(config_list, "simple_decoder_layer_test"))
 
 pytestmark = pytest.mark.integration_test
 

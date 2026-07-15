@@ -196,6 +196,8 @@ jobs:
     if: |
       always() &&
       needs.gate_test_run.result == 'success'
+    concurrency:
+      group: tpu-v6e-4-lock-${{ matrix.flavor }}
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -227,6 +229,8 @@ jobs:
       always() &&
       needs.gate_test_run.result == 'success' &&
       github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    concurrency:
+      group: tpu-tpu7x-8-lock-${{ matrix.flavor }}
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -244,6 +248,8 @@ jobs:
     if: |
       always() &&
       needs.gate_test_run.result == 'success'
+    concurrency:
+      group: gpu-a100-lock-${{ matrix.flavor }}
     strategy:
       fail-fast: false
       matrix:
@@ -277,6 +283,8 @@ jobs:
     if: |
       always() &&
       needs.gate_test_run.result == 'success'
+    concurrency:
+      group: tpu-v6e-4-lock-pathways-unit-${{ matrix.group }}
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -302,6 +310,8 @@ jobs:
     if: |
       always() &&
       needs.gate_test_run.result == 'success'
+    concurrency:
+      group: tpu-v6e-4-lock-pathways-integration
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false

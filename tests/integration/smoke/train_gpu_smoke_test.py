@@ -19,9 +19,14 @@ import unittest
 from absl.testing import absltest
 
 from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.trainers.pre_train.train import main as train_main
+from maxtext.trainers.pre_train.train import main as _train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from tests.utils.test_helpers import get_test_dataset_path, get_test_base_output_directory, get_test_config_path
+from tests.utils.test_helpers import get_test_dataset_path, get_test_base_output_directory, get_test_config_path, get_config_with_unique_run_name
+
+
+def train_main(config_list):
+  return _train_main(get_config_with_unique_run_name(config_list))
+
 
 
 class Train(unittest.TestCase):
@@ -47,7 +52,7 @@ class Train(unittest.TestCase):
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path={self.dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "enable_checkpointing=False",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
