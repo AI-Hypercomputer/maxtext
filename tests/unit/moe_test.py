@@ -11,12 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Mixture of Experts (MoE) tests.
-
-  python3 -m pytest -v --pyargs tests.unit.moe_test -rP -s -k "test_gmm_grad_equivalence"
-"""
+"""Mixture of Experts (MoE) tests."""
 
 import unittest
+from absl.testing import parameterized
+import pytest
 
 from flax import nnx
 import flax.linen as nn
@@ -24,6 +23,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 import numpy as np
+import qwix
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import Config, DType
@@ -32,48 +32,15 @@ from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization
-from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils, max_logging
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
-import pytest
-from absl.testing import parameterized
-from maxtext.utils import max_logging
-import qwix
 
 
-def find_nans(xs):
-  for x in jax.tree_util.tree_flatten(xs)[0]:
-    assert not jnp.any(jnp.isnan(x)), f"NaN found in {x=}"
-
-
-def compare_gradients(grad0, grad1, comparison_fn):
-  for a, b in zip(jax.tree_util.tree_flatten(grad0)[0], jax.tree_util.tree_flatten(grad1)[0]):
-    comparison_fn(a, b)
-
-
-def assert_equal(a, b):
-  assert jnp.array_equal(a, b), f"The following two arrays are not equal\n{a=}\n{b=}"
-
-
-def assert_close(a, b, rtol=1e-02, atol=1e-02):
-  assert jax.numpy.allclose(
-      a,
-      b,
-      rtol=rtol,
-      atol=atol,
-      equal_nan=False,
-  ), (
-      f"The following two arrays are not close\n{a=}\n{b=}\n" f"total difference is {jnp.sum(jnp.abs(a - b))=}"
-  )
-
-
-def assert_norm_close(a, b, rtol=1e-02):
-  assert jnp.linalg.norm(a - b) / jnp.linalg.norm(a) < rtol, (
-      "The following two arrays are not close in norm\n" f"{jnp.linalg.norm(a - b)=}\n{jnp.linalg.norm(a)=}"
-  )
-
-
-def calculate_diff(a, b, relative_norm_diff_threshold=1e-02):
+def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
+  """
+  Compute the relative norm difference between two pytrees and enforce threshold.
+  """
   # the first key is customized prefix define by user.
   # the rest of the keys are extracted from the path tuple.
   leaves_a, tree_def_a = jax.tree_util.tree_flatten_with_path(a)
@@ -82,9 +49,8 @@ def calculate_diff(a, b, relative_norm_diff_threshold=1e-02):
   if tree_def_a != tree_def_b:
     raise ValueError("Reference and actual pytrees must have the same structure.")
 
-  log_lines = ["DEBUG: CALCULATE DIFF"]
+  log_lines = ["CALCULATE DIFF"]
   for (path, a), (_, b) in zip(leaves_a, leaves_b):
-    # path = prefix + "-" + "-".join(param_key_parts_from_path(path))
     path = "-".join([k.key for k in path if hasattr(k, "key")]) or "root"
 
     assert a.dtype in (jnp.float32, jnp.bfloat16, jnp.float16)
@@ -99,7 +65,8 @@ def calculate_diff(a, b, relative_norm_diff_threshold=1e-02):
     assert (
         relative_norm_diff < relative_norm_diff_threshold
     ), f"relative_norm_diff exceeds {relative_norm_diff_threshold=}"
-  return "\n".join(log_lines)
+  diff_summary = "\n".join(log_lines)
+  return diff_summary
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -1330,50 +1297,9 @@ class RoutedMoeTest(parameterized.TestCase):
 
   @parameterized.product(
       (
-          # {
-          #     # "testcase_name": "megablox bf16",
-          #     "quantization": "",
-          #     "megablox": True,
-          #     "use_tokamax_gmm": False,
-          #     "use_gmm_v2_fwd": False,  # not matter
-          #     "use_gmm_v2_dlhs": False,  # not matter
-          #     "use_gmm_v2_drhs": False,  # not matter
-          # },
-          # {
-          #     # "testcase_name": "megablox fp8",
-          #     "quantization": "fp8_full",
-          #     "megablox": True,
-          #     "use_tokamax_gmm": False,
-          #     "use_gmm_v2_fwd": False,  # not matter
-          #     "use_gmm_v2_dlhs": False,  # not matter
-          #     "use_gmm_v2_drhs": False,  # not matter
-          # },
-          # {
-          #     # "testcase_name": "ragged_dot bf16",
-          #     "quantization": "",
-          #     "megablox": False,
-          #     "use_tokamax_gmm": False,
-          #     "use_gmm_v2_fwd": False,  # not matter
-          #     "use_gmm_v2_dlhs": False,  # not matter
-          #     "use_gmm_v2_drhs": False,  # not matter
-          # },
-          # # jax_ragged_dot_gmm
-          # # quantization: tiling = (tiling[0], k, tiling[2])
-          # # need more vmem
-          # {
-          #     # "testcase_name": "ragged_dot fp8",
-          #     "quantization": "fp8_full",
-          #     "megablox": False,
-          #     "use_tokamax_gmm": False,
-          #     "use_gmm_v2_fwd": False,  # not matter
-          #     "use_gmm_v2_dlhs": False,  # not matter
-          #     "use_gmm_v2_drhs": False,  # not matter
-          # },
           {
               "testcase_name": "tokamax v1 bf16",
               "quantization": "",
-              "megablox": True,  # not matter
-              "use_tokamax_gmm": True,
               "use_gmm_v2_fwd": False,
               "use_gmm_v2_dlhs": False,
               "use_gmm_v2_drhs": False,
@@ -1381,8 +1307,6 @@ class RoutedMoeTest(parameterized.TestCase):
           {
               "testcase_name": "tokamax v1 fp8",
               "quantization": "fp8_full",
-              "megablox": True,  # not matter
-              "use_tokamax_gmm": True,
               "use_gmm_v2_fwd": False,
               "use_gmm_v2_dlhs": False,
               "use_gmm_v2_drhs": False,
@@ -1390,8 +1314,6 @@ class RoutedMoeTest(parameterized.TestCase):
           {
               "testcase_name": "tokamax v2+v1+v2 bf16",
               "quantization": "",
-              "megablox": True,  # not matter
-              "use_tokamax_gmm": True,
               "use_gmm_v2_fwd": True,
               "use_gmm_v2_dlhs": False,
               "use_gmm_v2_drhs": True,
@@ -1399,8 +1321,6 @@ class RoutedMoeTest(parameterized.TestCase):
           {
               "testcase_name": "tokamax v2+v1+v2 fp8",
               "quantization": "fp8_full",
-              "megablox": True,  # not matter
-              "use_tokamax_gmm": True,
               "use_gmm_v2_fwd": True,
               "use_gmm_v2_dlhs": False,
               "use_gmm_v2_drhs": True,
@@ -1408,8 +1328,6 @@ class RoutedMoeTest(parameterized.TestCase):
           {
               "testcase_name": "tokamax v2+v2+v2 bf16",
               "quantization": "",
-              "megablox": True,  # not matter
-              "use_tokamax_gmm": True,
               "use_gmm_v2_fwd": True,
               "use_gmm_v2_dlhs": True,
               "use_gmm_v2_drhs": True,
@@ -1417,8 +1335,6 @@ class RoutedMoeTest(parameterized.TestCase):
           {
               "testcase_name": "tokamax v2+v2+v2 fp8",
               "quantization": "fp8_full",
-              "megablox": True,  # not matter
-              "use_tokamax_gmm": True,
               "use_gmm_v2_fwd": True,
               "use_gmm_v2_dlhs": True,
               "use_gmm_v2_drhs": True,
@@ -1430,14 +1346,14 @@ class RoutedMoeTest(parameterized.TestCase):
   def test_gmm_grad_equivalence(
       self,
       quantization: str,
-      megablox: bool,
-      use_tokamax_gmm: bool,
       use_gmm_v2_fwd: bool,
       use_gmm_v2_dlhs: bool,
       use_gmm_v2_drhs: bool,
       ici_expert_parallelism: int,
       **kwargs,
   ):
+    megablox = False
+    use_tokamax_gmm = True
 
     def _build_cfg(
         sparse_matmul,
@@ -1450,10 +1366,7 @@ class RoutedMoeTest(parameterized.TestCase):
         ici_expert_parallelism,
     ):
       return pyconfig.initialize(
-          [
-              None,
-              get_test_config_path(),
-          ],
+          [None, get_test_config_path()],
           run_name="gmm_grad_equivalence_test",
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
@@ -1472,6 +1385,7 @@ class RoutedMoeTest(parameterized.TestCase):
           use_qwix_quantization=quantization != "",
           weight_quantization_calibration_method="fixed,-224,224",
           act_quantization_calibration_method="fixed,-224,224",
+          bwd_quantization_calibration_method="absmax",
           wi_tile_fwd_batch_seq=128,
           wi_tile_dlhs_batch_seq=128,
           wi_tile_dlhs_embed_dim=256,
@@ -1594,8 +1508,8 @@ class RoutedMoeTest(parameterized.TestCase):
     }
 
     relative_norm_diff_threshold = 0.2 if quantization else 0.012
-    diff_text = calculate_diff(tree_ref, tree_tgt, relative_norm_diff_threshold)
-    max_logging.log("\n" + diff_text)
+    diff_summary = compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold)
+    max_logging.log("\n" + diff_summary)
 
 
 def make_moe(cfg, mesh):
