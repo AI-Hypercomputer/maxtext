@@ -33,13 +33,13 @@ pylint
 pytest
 pytype
 qwix>=0.1.6
-sentencepiece
+sentencepiece>=0.2.0
 tensorboard-plugin-profile
 tensorboardx
 tensorflow-datasets
 tensorflow-text
 tensorflow
-tiktoken
+tiktoken>=0.5.0
 tokamax>=0.0.4
 transformers
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip

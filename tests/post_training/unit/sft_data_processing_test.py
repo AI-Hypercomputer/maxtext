@@ -320,20 +320,23 @@ class SFTDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    exit_code = subprocess.call(
-        [
-            "gcloud",
-            "storage",
-            "cp",
-            "--recursive",
-            "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
-            os.path.join(MAXTEXT_ASSETS_ROOT, ""),
-        ]
-    )
-    if exit_code != 0:
-      raise unittest.SkipTest(
-          f"Skipping SFTDataProcessingTest: Download tokenizer with gcloud storage cp failed with exit code: {exit_code}"
+    try:
+      exit_code = subprocess.call(
+          [
+              "gcloud",
+              "storage",
+              "cp",
+              "--recursive",
+              "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
+              os.path.join(MAXTEXT_ASSETS_ROOT, ""),
+          ]
       )
+      if exit_code != 0:
+        raise unittest.SkipTest(
+            f"Skipping SFTDataProcessingTest: Download tokenizer with gcloud storage cp failed with exit code: {exit_code}"
+        )
+    except (FileNotFoundError, OSError) as e:
+      raise unittest.SkipTest(f"Skipping SFTDataProcessingTest: gcloud is not installed or available: {e}")
 
   def setUp(self):
     super().setUp()
@@ -342,7 +345,10 @@ class SFTDataProcessingTest(unittest.TestCase):
       tokenizer_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
 
     self.config = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "sft_trainer"), os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
+        [
+            os.path.join(MAXTEXT_PKG_DIR, "sft_trainer"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml"),
+        ],
         per_device_batch_size=2,
         run_name="test",
         mesh_axes=["data"],
@@ -409,14 +415,21 @@ class SFTDataProcessingTest(unittest.TestCase):
 
     # Check Truncation
     self.assertEqual(self.tokenizer.decode(batch["inputs"][0]), expected["truncated_exp1_inputs"])
-    self.assertEqual(self.tokenizer.decode(batch["targets"][0]), expected["truncated_exp1_targets"])
+    self.assertEqual(
+        self.tokenizer.decode(batch["targets"][0]),
+        expected["truncated_exp1_targets"],
+    )
     self.assertEqual(
         self.tokenizer.decode(np.where(batch["inputs_segmentation"][0] > 0, batch["inputs"][0], 0)),
         expected["truncated_exp1_inputs"],
     )
     self.assertEqual(
         self.tokenizer.decode(
-            np.where(batch["targets_segmentation"][0] > 0, batch["targets"][0], _get_pad_id(self.tokenizer))
+            np.where(
+                batch["targets_segmentation"][0] > 0,
+                batch["targets"][0],
+                _get_pad_id(self.tokenizer),
+            )
         ),
         expected["truncated_exp1_targets"],
     )
@@ -430,7 +443,11 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
     self.assertEqual(
         self.tokenizer.decode(
-            np.where(batch["targets_segmentation"][1] > 0, batch["targets"][1], _get_pad_id(self.tokenizer))
+            np.where(
+                batch["targets_segmentation"][1] > 0,
+                batch["targets"][1],
+                _get_pad_id(self.tokenizer),
+            )
         ),
         expected["packed_exp2_targets_predictable"],
     )
@@ -446,14 +463,21 @@ class SFTDataProcessingTest(unittest.TestCase):
 
     # Check Truncation
     self.assertEqual(self.tokenizer.decode(batch["inputs"][0]), expected["truncated_exp1_inputs"])
-    self.assertEqual(self.tokenizer.decode(batch["targets"][0]), expected["truncated_exp1_targets"])
+    self.assertEqual(
+        self.tokenizer.decode(batch["targets"][0]),
+        expected["truncated_exp1_targets"],
+    )
     self.assertEqual(
         self.tokenizer.decode(np.where(batch["inputs_segmentation"][0] > 0, batch["inputs"][0], 0)),
         expected["truncated_exp1_inputs"],
     )
     self.assertEqual(
         self.tokenizer.decode(
-            np.where(batch["targets_segmentation"][0] > 0, batch["targets"][0], _get_pad_id(self.tokenizer))
+            np.where(
+                batch["targets_segmentation"][0] > 0,
+                batch["targets"][0],
+                _get_pad_id(self.tokenizer),
+            )
         ),
         expected["truncated_exp1_targets_predictable"],
     )
@@ -467,7 +491,11 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
     self.assertEqual(
         self.tokenizer.decode(
-            np.where(batch["targets_segmentation"][1] > 0, batch["targets"][1], _get_pad_id(self.tokenizer))
+            np.where(
+                batch["targets_segmentation"][1] > 0,
+                batch["targets"][1],
+                _get_pad_id(self.tokenizer),
+            )
         ),
         expected["packed_exp2_targets_predictable"],
     )
@@ -495,18 +523,21 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     if not os.path.exists(cls.LLAMA_TOKENIZER_PATH):
-      exit_code = subprocess.call(
-          [
-              "gcloud",
-              "storage",
-              "cp",
-              "-r",
-              "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
-              os.path.join(MAXTEXT_ASSETS_ROOT, ""),
-          ]
-      )
-      if exit_code != 0:
-        raise unittest.SkipTest("Skipping SFTChatTemplateLogicTest: Failed to download llama tokenizer")
+      try:
+        exit_code = subprocess.call(
+            [
+                "gcloud",
+                "storage",
+                "cp",
+                "-r",
+                "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
+                os.path.join(MAXTEXT_ASSETS_ROOT, ""),
+            ]
+        )
+        if exit_code != 0:
+          raise unittest.SkipTest("Skipping SFTChatTemplateLogicTest: Failed to download llama tokenizer")
+      except (FileNotFoundError, OSError) as e:
+        raise unittest.SkipTest(f"Skipping SFTChatTemplateLogicTest: gcloud is not installed or available: {e}")
 
   def setUp(self):
     super().setUp()
@@ -530,9 +561,15 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
     result = self._apply_chat_template(self.qwen3_tokenizer)
     self.assertEqual(result["is_prompt"], [True, False, True, False])
     self.assertEqual(len(result["messages"]), 4)
-    self.assertIn("<|im_start|>user\nQ1<|im_end|>\n<|im_start|>assistant\n", result["messages"][0])
+    self.assertIn(
+        "<|im_start|>user\nQ1<|im_end|>\n<|im_start|>assistant\n",
+        result["messages"][0],
+    )
     self.assertIn("<think>\n\n</think>\n\nA1<|im_end|>\n", result["messages"][1])
-    self.assertIn("<|im_start|>user\nQ2<|im_end|>\n<|im_start|>assistant\n", result["messages"][2])
+    self.assertIn(
+        "<|im_start|>user\nQ2<|im_end|>\n<|im_start|>assistant\n",
+        result["messages"][2],
+    )
     self.assertIn("<think>\n\n</think>\n\nA2<|im_end|>\n", result["messages"][3])
 
   def test_apply_chat_template_with_llama2_tokenizer(self):
@@ -550,9 +587,15 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
     result = self._apply_chat_template(self.gemma4_tokenizer)
     self.assertEqual(result["is_prompt"], [True, False, True, False])
     self.assertEqual(len(result["messages"]), 4)
-    self.assertIn("<|turn>user\nQ1<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", result["messages"][0])
+    self.assertIn(
+        "<|turn>user\nQ1<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        result["messages"][0],
+    )
     self.assertIn("A1<turn|>\n", result["messages"][1])
-    self.assertIn("<|turn>user\nQ2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", result["messages"][2])
+    self.assertIn(
+        "<|turn>user\nQ2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        result["messages"][2],
+    )
     self.assertIn("A2<turn|>\n", result["messages"][3])
 
 
@@ -582,7 +625,12 @@ class SFTPromptMaskingTest(unittest.TestCase):
         max_target_length=self.max_target_length,
         unk_id=unk_id,
     )
-    return op.map({"messages": tokenized_example["messages"], "is_prompt": modified_example["is_prompt"]})
+    return op.map(
+        {
+            "messages": tokenized_example["messages"],
+            "is_prompt": modified_example["is_prompt"],
+        }
+    )
 
   def _verify_prompt_masking(self, tokenizer, inputs, targets, unk_id):
     """Helper function to verify that the prompt masking was applied correctly."""
