@@ -34,6 +34,7 @@ from collections.abc import Sequence
 import dataclasses
 from functools import partial
 import os
+import re
 import subprocess
 import sys
 from typing import Callable, overload
@@ -829,6 +830,77 @@ def verify_and_sync_scan_layers(config):
   return config
 
 
+_LIST_NAMES = {"layers", "dense_layers", "moe_layers"}
+
+
+def _is_digit_like(x):
+  """Check if x is an int or a string that represents an integer."""
+  if isinstance(x, int):
+    return True
+  if isinstance(x, str) and x.isdigit():
+    return True
+  return False
+
+
+def _nnx_to_linen_struct(tree):
+  """Convert a nested NNX structure to a flattened Linen-compatible structure."""
+  if not hasattr(tree, "items"):
+    return tree
+
+  new_tree = {}
+  for k, v in tree.items():
+    if k in _LIST_NAMES and hasattr(v, "items") and all(_is_digit_like(ki) for ki in v.keys()) and v:
+      for ki, vi in v.items():
+        new_tree[f"{k}_{ki}"] = _nnx_to_linen_struct(vi)
+    else:
+      new_tree[k] = _nnx_to_linen_struct(v)
+  return new_tree
+
+
+def _linen_to_nnx_struct(tree):
+  """Convert a nested Linen-compatible structure to a nested NNX structure."""
+  if not hasattr(tree, "items"):
+    return tree
+
+  grouped_keys = {}
+  non_list_keys = []
+
+  for k in tree.keys():
+    match = re.match(r"^(.*)_(\d+)$", k)
+    if match:
+      prefix, idx = match.groups()
+      if prefix in _LIST_NAMES:
+        if prefix not in grouped_keys:
+          grouped_keys[prefix] = []
+        grouped_keys[prefix].append((idx, k))
+        continue
+    non_list_keys.append(k)
+
+  new_tree = {}
+  for k in non_list_keys:
+    new_tree[k] = _linen_to_nnx_struct(tree[k])
+
+  for prefix, items in grouped_keys.items():
+    list_dict = {}
+    for idx, orig_key in items:
+      list_dict[int(idx)] = _linen_to_nnx_struct(tree[orig_key])
+    new_tree[prefix] = list_dict
+
+  return new_tree
+
+
+def _is_legacy_linen_checkpoint(stored_tree):
+  if not hasattr(stored_tree, "items"):
+    return False
+  for k, v in stored_tree.items():
+    for list_name in _LIST_NAMES:
+      if re.match(rf"^{list_name}_\d+$", str(k)):
+        return True
+    if _is_legacy_linen_checkpoint(v):
+      return True
+  return False
+
+
 # pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
@@ -1017,6 +1089,9 @@ def from_pretrained(
             param_state,
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
+        is_legacy_linen = _is_legacy_linen_checkpoint(metadata.item_metadata.tree)
+        if is_legacy_linen:
+          target_for_restore = _nnx_to_linen_struct(target_for_restore)
 
         target_for_restore = _adjust_target_for_moe_fusion(
             target_for_restore, metadata.item_metadata.tree["params"]["params"], False
@@ -1122,6 +1197,8 @@ def from_pretrained(
         )
       else:
         checkpoint = restored["params"]["params"]
+        if is_legacy_linen:
+          checkpoint = _linen_to_nnx_struct(checkpoint)
 
       if checkpoint:
         # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
