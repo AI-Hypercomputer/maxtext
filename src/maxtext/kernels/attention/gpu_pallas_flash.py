@@ -46,6 +46,11 @@ import jax.numpy as jnp
 
 from maxtext.common.common_types import DEFAULT_MASK_VALUE
 
+# jax.experimental.pallas.triton.dot was added after jax 0.10.0 (the repo's
+# pinned floor); jax.experimental.pallas.dot is the pre-move, still-working
+# (if deprecated on newer jax) alias, so prefer triton.dot but fall back.
+_dot = getattr(plgpu, "dot", None) or pl.dot
+
 _LOG2E = math.log2(math.e)
 
 
@@ -200,7 +205,7 @@ def mha_forward_kernel(
     qk = jnp.zeros((block_q, block_k), dtype=jnp.float32)
     for c in range(num_chunks):
       k_c = plgpu.load(k_ref.at[curr_k_slice, cslices[c]], mask=cmasks[c], other=0.0)
-      qk += plgpu.dot(q_chunks[c], k_c.T)
+      qk += _dot(q_chunks[c], k_c.T)
     qk, _ = _scaled_logits(qk, sm_scale, soft_cap)
 
     if causal or window is not None or segment_ids_ref is not None:
@@ -222,7 +227,7 @@ def mha_forward_kernel(
     o_next = []
     for c in range(num_chunks):
       v_c = plgpu.load(v_ref.at[curr_k_slice, cslices[c]], mask=cmasks[c], other=0.0)
-      o_next.append(correction[:, None] * o_prev[c] + plgpu.dot(s_curr.astype(v_c.dtype), v_c))
+      o_next.append(correction[:, None] * o_prev[c] + _dot(s_curr.astype(v_c.dtype), v_c))
     return tuple(o_next), m_next, l_next
 
   if causal:
@@ -491,7 +496,7 @@ def mha_backward_kernel(
 
     qk = jnp.zeros((block_q_dkv, block_kv_dkv), dtype=jnp.float32)
     for c in range(num_chunks):
-      qk += plgpu.dot(q_chunks[c], k_chunks[c].T)
+      qk += _dot(q_chunks[c], k_chunks[c].T)
     qk, tanh_val = _scaled_logits(qk, sm_scale, soft_cap)
 
     if causal or window is not None or segment_ids_ref is not None:
@@ -507,7 +512,7 @@ def mha_backward_kernel(
     p = jnp.exp2(qk - lse[:, None])
     dp = jnp.zeros((block_q_dkv, block_kv_dkv), dtype=jnp.float32) - di[:, None]
     for c in range(num_chunks):
-      dp += plgpu.dot(do_chunks[c], v_chunks[c].T)
+      dp += _dot(do_chunks[c], v_chunks[c].T)
     ds = p * dp
     if soft_cap is not None:
       ds = ds * (1.0 - tanh_val * tanh_val)
@@ -516,8 +521,8 @@ def mha_backward_kernel(
 
     p_t = p.astype(do_chunks[0].dtype).T
     ds_t = ds.astype(q_ref.dtype).T
-    dv = tuple(dv[c] + plgpu.dot(p_t, do_chunks[c]) for c in range(num_chunks))
-    dk = tuple(dk[c] + plgpu.dot(ds_t, q_chunks[c]) for c in range(num_chunks))
+    dv = tuple(dv[c] + _dot(p_t, do_chunks[c]) for c in range(num_chunks))
+    dk = tuple(dk[c] + _dot(ds_t, q_chunks[c]) for c in range(num_chunks))
     return dv, dk
 
   lower_bound_dkdv = lax.div(start_k * block_kv_dkv, block_q_dkv) if causal else 0
@@ -552,7 +557,7 @@ def mha_backward_kernel(
 
     qk = jnp.zeros((block_q_dq, block_kv_dq), dtype=jnp.float32)
     for c in range(num_chunks):
-      qk += plgpu.dot(q_chunks[c], k_chunks_dq[c].T)
+      qk += _dot(q_chunks[c], k_chunks_dq[c].T)
     qk, tanh_val = _scaled_logits(qk, sm_scale, soft_cap)
 
     if causal or window is not None or segment_ids_ref is not None:
@@ -565,7 +570,7 @@ def mha_backward_kernel(
     p = jnp.exp2(qk - lse[:, None])
     dp = jnp.zeros((block_q_dq, block_kv_dq), dtype=jnp.float32) - di[:, None]
     for c in range(num_chunks):
-      dp += plgpu.dot(do_chunks[c], v_chunks_dq[c].T)
+      dp += _dot(do_chunks[c], v_chunks_dq[c].T)
     ds = p * dp
     if soft_cap is not None:
       ds = ds * (1.0 - tanh_val * tanh_val)
@@ -573,7 +578,7 @@ def mha_backward_kernel(
       ds = ds * sm_scale
 
     ds_cast = ds.astype(k_ref.dtype)
-    return tuple(dq[c] + plgpu.dot(ds_cast, k_chunks_dq[c]).astype(dq[c].dtype) for c in range(num_chunks))
+    return tuple(dq[c] + _dot(ds_cast, k_chunks_dq[c]).astype(dq[c].dtype) for c in range(num_chunks))
 
   if causal:
     upper_bound_dq = pl.cdiv((start_q + 1) * block_q_dq, block_kv_dq)

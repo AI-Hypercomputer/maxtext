@@ -62,7 +62,9 @@ class GpuAttentionPackingTest(parameterized.TestCase):
         packing=True,
         max_segments_per_seq=4,
     )
-    devices_array = maxtext_utils.create_device_mesh(self.config)
+    # Single-device mesh: this test checks kernel masking correctness against
+    # a reference, not multi-device sharding, and must run on any GPU count.
+    devices_array = maxtext_utils.create_device_mesh(self.config, devices=[jax.devices()[0]])
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
 
     rng_q, rng_k, rng_v = jax.random.split(jax.random.PRNGKey(0), 3)
