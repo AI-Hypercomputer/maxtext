@@ -1051,10 +1051,7 @@ class AttentionOp(nnx.Module):
         and soft_cap is None
         and query.shape[-1] <= 256
         and query.dtype in (jnp.bfloat16, jnp.float16)
-        and (
-            not self._needs_packed_masking(decoder_segment_ids, model_mode)
-            or self.config.max_segments_per_seq >= 1
-        )
+        and (not self._needs_packed_masking(decoder_segment_ids, model_mode) or self.config.max_segments_per_seq >= 1)
     )
     if use_cutlass:
       return self._cutlass_flash_attention(query, key, value, decoder_segment_ids, window, model_mode)

@@ -295,7 +295,8 @@ def mha(
   dim_chunk = _pick_dim_chunk(head_dim_padded)
   if (q.shape[-1] != k.shape[-1]) or (q.shape[-1] != v.shape[-1]):
     raise ValueError(
-        f"This kernel expects q, k, and v to have the same head dimension, but" f" found {q.shape=}, {k.shape=}, {v.shape=}."
+        f"This kernel expects q, k, and v to have the same head dimension, but"
+        f" found {q.shape=}, {k.shape=}, {v.shape=}."
     )
   if q_seq_len % block_q != 0:
     raise ValueError(f"{q_seq_len=} must be a multiple of {block_q=}")

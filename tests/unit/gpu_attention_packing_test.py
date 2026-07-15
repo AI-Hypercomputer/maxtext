@@ -51,6 +51,7 @@ class GpuAttentionPackingTest(parameterized.TestCase):
   """Compares GPU attention kernels against dot_product on packed batches."""
 
   def setUp(self):
+    """Builds a packing-enabled config and shared bf16 query/key/value tensors."""
     super().setUp()
     self.config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
