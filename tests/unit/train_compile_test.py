@@ -566,6 +566,63 @@ class TrainCompile(parameterized.TestCase):
     )
 
   @pytest.mark.cpu_only
+  def test_moe_emb_chunking(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_emb_chunking.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-test",
+            "sparse_matmul=True",
+            "megablox=False",
+            "use_tokamax_gmm=True",
+            "use_gmm_v2=True",
+            "num_moe_emb_chunks=7",
+            "use_ring_of_experts=True",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_moe_emb_chunking_with_mlp_bias(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_emb_chunking_bias.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-test",
+            "sparse_matmul=True",
+            "megablox=False",
+            "use_tokamax_gmm=True",
+            "use_gmm_v2=True",
+            "num_moe_emb_chunks=7",
+            "use_ring_of_experts=True",
+            "mlp_bias=True",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+        )
+    )
+
+  @pytest.mark.cpu_only
   def test_moe_deepseek_unscanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
@@ -809,24 +866,26 @@ class TrainCompile(parameterized.TestCase):
   def test_deepseek4(self, scan_layers):
     # test deepseek4 compile (Linen-only: DeepSeek NNX decoder rewrite is a follow-up PR).
     compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}.pickle"
-    train_compile_main((
-        "",
-        get_test_config_path(),
-        f"compiled_trainstep_file={compiled_trainstep_file}",
-        "compile_topology=v5p-256",
-        "use_iota_embed=true",
-        "compile_topology_num_slices=1",
-        "model_name=deepseek4-284b",
-        "per_device_batch_size=1",
-        "max_target_length=1024",
-        f"scan_layers={scan_layers}",
-        "attention=dot_product",
-        "dtype=bfloat16",
-        "weight_dtype=bfloat16",
-        "enable_nnx=False",
-        "pure_nnx=False",
-        "pure_nnx_decoder=False",
-    ))
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek4-284b",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            f"scan_layers={scan_layers}",
+            "attention=dot_product",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "enable_nnx=False",
+            "pure_nnx=False",
+            "pure_nnx_decoder=False",
+        )
+    )
 
   @pytest.mark.cpu_only
   def test_indexer_dense_warmup(self):

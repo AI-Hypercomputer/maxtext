@@ -922,6 +922,9 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use GMM v2 for MoE backward pass (drhs). (Requires use_tokamax_gmm: true)",
   )
+  num_moe_emb_chunks: int = Field(
+      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
+  )
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -1926,6 +1929,9 @@ class Metrics(BaseModel):
       False,
       description="Whether to enable Tunix-managed metrics measurement. The metrics will be uploaded to tensorboard.",
   )
+  enable_wandb: bool = Field(False, description="Enable Weights & Biases logging.")
+  wandb_project_name: str = Field("maxtext", description="Weights & Biases project name.")
+  wandb_run_name: str = Field("", description="Weights & Biases run name. If empty, a default name is generated.")
 
 
 class ManagedMLDiagnostics(BaseModel):
@@ -2632,6 +2638,17 @@ class MaxTextConfig(
           "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
       )
 
+  def validate_num_moe_emb_chunks(self):
+    """
+    Validates that num_moe_emb_chunks is used with supported settings.
+    """
+    if self.num_moe_emb_chunks > 0:
+      if not self.use_gmm_v2 or not self.use_ring_of_experts:
+        raise ValueError(
+            f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
+            f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
+        )
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
@@ -3255,6 +3272,7 @@ class MaxTextConfig(
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
+    self.validate_num_moe_emb_chunks()
 
     # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
@@ -3464,6 +3482,9 @@ class MaxTextConfig(
     for val in self.compress_ratios:
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
+
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.mtp_num_layers > 0:
+      raise ValueError("DeepSeek4 decoder block currently does not support MTP layers.")
 
     if self.num_kv_shared_layers > 0:
       if self.fused_qkv:

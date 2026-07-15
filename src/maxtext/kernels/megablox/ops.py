@@ -82,6 +82,7 @@ def gmm(
     use_gmm_v2_fwd: bool = False,
     use_gmm_v2_dlhs: bool = False,
     use_gmm_v2_drhs: bool = False,
+    partial_sum: jnp.ndarray | None = None,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -133,6 +134,7 @@ def gmm(
       use_gmm_v2_fwd,
       use_gmm_v2_dlhs,
       use_gmm_v2_drhs,
+      partial_sum,
   )
 
 
@@ -236,6 +238,7 @@ def _gmm_fwd(
     use_gmm_v2_fwd: bool = False,
     use_gmm_v2_dlhs: bool = False,
     use_gmm_v2_drhs: bool = False,
+    partial_sum: jnp.ndarray | None = None,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -356,6 +359,7 @@ def _gmm_fwd(
           group_offset=group_offset,
           tile_info=custom_fwd_tiling,
           preferred_element_type=preferred_element_type,
+          partial_sum=partial_sum,
       )
   # END TOKAMAX
   else:
@@ -378,7 +382,7 @@ def _gmm_fwd(
       f" preferred={preferred_element_type}, lhs.dtype={lhs.dtype},"
       f" rhs.dtype={rhs.dtype}"
   )
-  return out, (lhs, rhs, group_sizes, group_offset)
+  return out, (lhs, rhs, group_sizes, group_offset, partial_sum)
 
 
 def _gmm_bwd(
@@ -404,13 +408,14 @@ def _gmm_bwd(
         jnp.ndarray | qpl.QArray,
         jnp.ndarray,
         jnp.ndarray | None,
+        jnp.ndarray | None,
     ],
     grad: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray, jnp.ndarray | None]:
   """Backward function for throughput GMM VJP."""
 
   del preferred_element_type
-  lhs, rhs, group_sizes, group_offset = residual
+  lhs, rhs, group_sizes, group_offset, partial_sum_fwd = residual
   num_actual_groups = rhs.shape[0]
 
   # Jargon used here:
@@ -640,4 +645,5 @@ def _gmm_bwd(
   #
   # TODO(tgale, enriqueps, apaske): Fuse this transposition into the tgmm.
   drhs = drhs.swapaxes(1, 2) if transpose_rhs else drhs
-  return dlhs, drhs, None, None, grad
+  dpartial_sum = grad if partial_sum_fwd is not None else None
+  return dlhs, drhs, None, None, grad, dpartial_sum
