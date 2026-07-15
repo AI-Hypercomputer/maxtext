@@ -263,7 +263,7 @@ def _gmm_fwd(
         and not isinstance(lhs, qpl.QArray)
         and not use_gmm_v2_fwd
     ):
-      lhs = qpl.quantize(
+      lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
           lhs,
           quantization_rule.act_qtype,
           channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
@@ -271,7 +271,7 @@ def _gmm_fwd(
       )
     if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
       if not use_manual_quantization:
-        rhs = qpl.quantize(
+         rhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
             rhs,
             quantization_rule.weight_qtype,
             # If only considering the fwd pass, we could also enable channelwise
@@ -281,7 +281,7 @@ def _gmm_fwd(
             calibration_method=quantization_rule.weight_calibration_method,
         )
       else:
-        rhs = quantizations.manual_quantize(
+        rhs = quantizations.manual_quantize(  # pyrefly: ignore[bad-assignment]
             rhs,
             quantization_rule.weight_qtype,
             calibration_method=quantization_rule.weight_calibration_method,

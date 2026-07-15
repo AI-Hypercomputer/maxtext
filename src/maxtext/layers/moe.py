@@ -1444,15 +1444,15 @@ class RoutedMoE(nnx.Module):
       lhs_quantize_dtype, rhs_quantize_dtype = get_quantization_dtypes()
 
       # We support three implementations for gmm - tokamax, older forked megablox, or jax.lax.ragged_dot
-      # Note `mblx.gmm` contains 
       # For quantized tokamax we call a forked version that supports our quantization recipes.
       if self.config.use_tokamax_gmm:
+        # tokamax (v1 quantized, v2 both quantized and unquantized)
         if (
             self.config.quantization
             or self.config.use_gmm_v2_fwd
             or self.config.use_gmm_v2_dlhs
             or self.config.use_gmm_v2_drhs
-        ):  # tokamax (v1 quantized, v2 both quantized and unquantized)
+        ):
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,

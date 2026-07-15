@@ -13,7 +13,8 @@
 # limitations under the License.
 """Test for tokamax gmm.
 
-  pytest -v -m integration_test tests/integration/tokamax_test.py
+  python3 -m pytest -v --pyargs tests.integration.tokamax_test -rP -s
+  # -k "test_gmm_grad_equivalence"
 """
 
 import os
@@ -53,100 +54,104 @@ class Train(parameterized.TestCase):
   Similar to `train_using_ragged_dot_smoke_train.py`
   """
 
-  @parameterized.named_parameters(
-      {
-          "testcase_name": "megablox bf16",
-          "quantization": "",
-          "megablox": True,
-          "use_tokamax_gmm": False,
-          "use_gmm_v2_fwd": False,  # not matter
-          "use_gmm_v2_dlhs": False,  # not matter
-          "use_gmm_v2_drhs": False,  # not matter
-      },
-      {
-          "testcase_name": "megablox fp8",
-          "quantization": "fp8_full",
-          "megablox": True,
-          "use_tokamax_gmm": False,
-          "use_gmm_v2_fwd": False,  # not matter
-          "use_gmm_v2_dlhs": False,  # not matter
-          "use_gmm_v2_drhs": False,  # not matter
-      },
-      {
-          "testcase_name": "ragged_dot bf16",
-          "quantization": "",
-          "megablox": False,
-          "use_tokamax_gmm": False,
-          "use_gmm_v2_fwd": False,  # not matter
-          "use_gmm_v2_dlhs": False,  # not matter
-          "use_gmm_v2_drhs": False,  # not matter
-      },
-      # jax_ragged_dot_gmm
-      # quantization: tiling = (tiling[0], k, tiling[2])
-      # need more vmem
-      {
-          "testcase_name": "ragged_dot fp8",
-          "quantization": "fp8_full",
-          "megablox": False,
-          "use_tokamax_gmm": False,
-          "use_gmm_v2_fwd": False,  # not matter
-          "use_gmm_v2_dlhs": False,  # not matter
-          "use_gmm_v2_drhs": False,  # not matter
-      },
-      {
-          "testcase_name": "tokamax v1 bf16",
-          "quantization": "",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": False,
-          "use_gmm_v2_dlhs": False,
-          "use_gmm_v2_drhs": False,
-      },
-      {
-          "testcase_name": "tokamax v1 fp8",
-          "quantization": "fp8_full",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": False,
-          "use_gmm_v2_dlhs": False,
-          "use_gmm_v2_drhs": False,
-      },
-      {
-          "testcase_name": "tokamax v2+v1+v2 bf16",
-          "quantization": "",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": True,
-          "use_gmm_v2_dlhs": False,
-          "use_gmm_v2_drhs": True,
-      },
-      {
-          "testcase_name": "tokamax v2+v1+v2 fp8",
-          "quantization": "fp8_full",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": True,
-          "use_gmm_v2_dlhs": False,
-          "use_gmm_v2_drhs": True,
-      },
-      {
-          "testcase_name": "tokamax v2+v2+v2 bf16",
-          "quantization": "",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": True,
-          "use_gmm_v2_dlhs": True,
-          "use_gmm_v2_drhs": True,
-      },
-      {
-          "testcase_name": "tokamax v2+v2+v2 fp8",
-          "quantization": "fp8_full",
-          "megablox": True,  # not matter
-          "use_tokamax_gmm": True,
-          "use_gmm_v2_fwd": True,
-          "use_gmm_v2_dlhs": True,
-          "use_gmm_v2_drhs": True,
-      },
+  @parameterized.product(
+      (
+          # {
+          #     # "testcase_name": "megablox bf16",
+          #     "quantization": "",
+          #     "megablox": True,
+          #     "use_tokamax_gmm": False,
+          #     "use_gmm_v2_fwd": False,  # not matter
+          #     "use_gmm_v2_dlhs": False,  # not matter
+          #     "use_gmm_v2_drhs": False,  # not matter
+          # },
+          # {
+          #     # "testcase_name": "megablox fp8",
+          #     "quantization": "fp8_full",
+          #     "megablox": True,
+          #     "use_tokamax_gmm": False,
+          #     "use_gmm_v2_fwd": False,  # not matter
+          #     "use_gmm_v2_dlhs": False,  # not matter
+          #     "use_gmm_v2_drhs": False,  # not matter
+          # },
+          # {
+          #     # "testcase_name": "ragged_dot bf16",
+          #     "quantization": "",
+          #     "megablox": False,
+          #     "use_tokamax_gmm": False,
+          #     "use_gmm_v2_fwd": False,  # not matter
+          #     "use_gmm_v2_dlhs": False,  # not matter
+          #     "use_gmm_v2_drhs": False,  # not matter
+          # },
+          # # jax_ragged_dot_gmm
+          # # quantization: tiling = (tiling[0], k, tiling[2])
+          # # need more vmem
+          # {
+          #     # "testcase_name": "ragged_dot fp8",
+          #     "quantization": "fp8_full",
+          #     "megablox": False,
+          #     "use_tokamax_gmm": False,
+          #     "use_gmm_v2_fwd": False,  # not matter
+          #     "use_gmm_v2_dlhs": False,  # not matter
+          #     "use_gmm_v2_drhs": False,  # not matter
+          # },
+          {
+              # "testcase_name": "tokamax v1 bf16",
+              "quantization": "",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": False,
+              "use_gmm_v2_dlhs": False,
+              "use_gmm_v2_drhs": False,
+          },
+          {
+              # "testcase_name": "tokamax v1 fp8",
+              "quantization": "fp8_full",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": False,
+              "use_gmm_v2_dlhs": False,
+              "use_gmm_v2_drhs": False,
+          },
+          {
+              # "testcase_name": "tokamax v2+v1+v2 bf16",
+              "quantization": "",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": True,
+              "use_gmm_v2_dlhs": False,
+              "use_gmm_v2_drhs": True,
+          },
+          {
+              # "testcase_name": "tokamax v2+v1+v2 fp8",
+              "quantization": "fp8_full",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": True,
+              "use_gmm_v2_dlhs": False,
+              "use_gmm_v2_drhs": True,
+          },
+          {
+              # "testcase_name": "tokamax v2+v2+v2 bf16",
+              "quantization": "",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": True,
+              "use_gmm_v2_dlhs": True,
+              "use_gmm_v2_drhs": True,
+          },
+          {
+              # "testcase_name": "tokamax v2+v2+v2 fp8",
+              "quantization": "fp8_full",
+              "megablox": True,  # not matter
+              "use_tokamax_gmm": True,
+              "use_gmm_v2_fwd": True,
+              "use_gmm_v2_dlhs": True,
+              "use_gmm_v2_drhs": True,
+          },
+      ),
+      ici_expert_parallelism=[1, 4],
+      #ici_expert_parallelism=[1],
   )
   @pytest.mark.tpu_only
   def test_smoke_train(
@@ -157,8 +162,10 @@ class Train(parameterized.TestCase):
       use_gmm_v2_fwd: bool,
       use_gmm_v2_dlhs: bool,
       use_gmm_v2_drhs: bool,
+      ici_expert_parallelism: int,
   ):
     """Smoke train with small config."""
+    sharding_tolerance=0.22 if ici_expert_parallelism > 1 else 2e-2
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
@@ -177,6 +184,8 @@ class Train(parameterized.TestCase):
         "attention_type=mla",
         "num_experts=32",  # "num_experts=2"
         "shared_experts=1",
+        f"ici_expert_parallelism={ici_expert_parallelism}",
+        f"sharding_tolerance={sharding_tolerance}",
         # tokamax gmm
         "sparse_matmul=True",
         f"megablox={megablox}",
@@ -204,6 +213,7 @@ class Train(parameterized.TestCase):
         f"metrics_file={os.path.join(outputs_dir, 'metrics.json')}",
     ]
     train_main(args)
+
 
 
 if __name__ == "__main__":

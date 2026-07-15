@@ -1618,8 +1618,6 @@ class RoutedMoeTest(parameterized.TestCase):
     max_logging.log("\n" + diff_text)
 
 
-################
-
 def make_moe(cfg, mesh):
   return moe.RoutedMoE(
       config=cfg,
