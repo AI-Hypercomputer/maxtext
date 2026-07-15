@@ -49,10 +49,10 @@ _BASE_CONFIG = {
     "base_num_decoder_layers": 1,
     "attention": "dot_product",
     "max_target_length": 8,
-    "base_emb_dim": 128,
+    "base_emb_dim": 256,
     "base_num_query_heads": 2,
     "base_num_kv_heads": 2,
-    "base_mlp_dim": 256,
+    "base_mlp_dim": 512,
     "max_prefill_predict_length": 4,
     "model_name": "llama2-7b",
     "enable_nnx": True,
@@ -243,6 +243,15 @@ class LoraUtilsTest(unittest.TestCase):
 
     # Verify it IS now LoRA enabled
     self.assertTrue(lora_utils.is_lora_enabled(lora_model))
+
+    # Verify quantization if weight_qtype is set
+    flat_state_paths = [".".join(str(p) for p in path) for path, _ in state.flat_state()]
+    if weight_qtype is not None:
+      self.assertTrue(any("qvalue" in path for path in flat_state_paths), "Expected quantized weights (qvalue) in state")
+    else:
+      self.assertFalse(
+          any("qvalue" in path for path in flat_state_paths), "Did not expect quantized weights (qvalue) in state"
+      )
 
     # Test fit for PeftTrainer
     trainer_cfg = peft_trainer.TrainingConfig(eval_every_n_steps=10)

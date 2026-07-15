@@ -579,6 +579,7 @@ def apply_lora_to_model(
     mt_config: pyconfig.HyperParameters,
 ) -> nnx.Module:
   """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
+  # pylint: disable=protected-access
   # Skip Qwix LoRA if MaxText LoRA adapters are loaded
   if mt_config.lora_input_adapters_path:
     max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
@@ -586,6 +587,94 @@ def apply_lora_to_model(
 
   if not mt_config.lora.enable_lora:
     return model
+
+  # Monkeypatch qwix.LoraProvider.dot_general to fix find_param with PTQ
+  if not hasattr(qwix.LoraProvider, "_patched_for_maxtext"):
+    # pylint: disable=import-outside-toplevel
+    from qwix._src.providers.lora import LoraProvider, LoraRule, _create_lora_layer_shapes, _get_or_create_lora_params, _compute_lora_delta
+    from qwix._src.providers import ptq
+
+    try:
+      from qwix._src.utils import flax_util
+    except ImportError:
+      from qwix._src import flax_util
+    # pylint: enable=import-outside-toplevel
+
+    def patched_dot_general(
+        self,
+        lhs: jax.Array,
+        rhs: jax.Array,
+        dimension_numbers: jax.lax.DotDimensionNumbers,
+        precision: jax.lax.PrecisionLike = None,
+        preferred_element_type: jax.typing.DTypeLike | None = None,
+        out_sharding: jax.sharding.NamedSharding | None = None,
+    ) -> jax.Array:
+      weight_name = flax_util.find_param(rhs)
+
+      res = ptq.PtqProvider.dot_general(
+          self,
+          lhs,
+          rhs,
+          dimension_numbers,
+          precision,
+          preferred_element_type,
+          out_sharding=out_sharding,
+      )
+
+      rule, _ = self._get_current_rule_and_op_id("dot_general", repeated_call=True)
+      if not isinstance(rule, LoraRule):
+        return res
+
+      if weight_name is None:  # rhs is not a weight.
+        return res
+
+      (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
+
+      rhs_ra = (*(i for i in range(rhs.ndim) if i not in rhs_ca and i not in rhs_ba),)
+
+      contract_shape = (*(rhs.shape[i] for i in rhs_ca),)
+      batch_shape = (*(rhs.shape[i] for i in rhs_ba),)
+      remain_shape = (*(rhs.shape[i] for i in rhs_ra),)
+
+      a_shape, a_sharding_transpose, b_shape, b_sharding_transpose = _create_lora_layer_shapes(
+          rhs_ca,
+          rhs_ba,
+          rhs_ra,
+          contract_shape,
+          batch_shape,
+          remain_shape,
+          rule.rank,
+      )
+
+      lora_a, lora_b = _get_or_create_lora_params(
+          name=weight_name,
+          rule=rule,
+          a_shape=a_shape,
+          b_shape=b_shape,
+          a_sharding_transpose=a_sharding_transpose,
+          b_sharding_transpose=b_sharding_transpose,
+      )
+
+      if rule.dropout > 0:
+        lhs = nnx.Dropout(rule.dropout, deterministic=False)(lhs, rngs=flax_util.make_rng("dropout"))
+
+      delta = _compute_lora_delta(
+          lhs,
+          lora_a,
+          lora_b,
+          lhs_ca,
+          lhs_ba,
+          contract_shape,
+          batch_shape,
+          remain_shape,
+          rule.rank,
+          precision=precision,
+      )
+
+      return res + delta * (rule.alpha / rule.rank)
+
+    LoraProvider.dot_general = patched_dot_general
+    LoraProvider._patched_for_maxtext = True
 
   # Dynamically detect and set LoRA rank before model creation if restoring
 

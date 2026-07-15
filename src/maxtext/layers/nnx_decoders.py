@@ -1845,20 +1845,9 @@ class NNXDecoder(nnx.Module):
       else:
         prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
-        # Hoisted function to preserve XLA cache ID
-        def pure_layer_fn(graphdef, state_in, y_in, kv_in):
-
-          if cfg.parameter_memory_host_offload:
-            state_in = jax.tree.map(
-                lambda x: jax.device_put(x, max_utils.device_space()),
-                state_in,
-            )
-
-          merged_layer = nnx.merge(graphdef, state_in)
-          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
-          return out_y, out_kv, nnx.state(merged_layer)
-
-        checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
+        # Define dynamic_graph_init and updated_graphdefs
+        dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
+        updated_graphdefs = [None] * cfg.num_decoder_layers
 
         for lyr in range(cfg.num_decoder_layers):
           if self.is_deepseek:
@@ -1888,8 +1877,46 @@ class NNXDecoder(nnx.Module):
           if input_tokens is not None:
             layer_kwargs["decoder_input_tokens"] = input_tokens
 
-          y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache)
-          nnx.update(layer, new_state)
+          # Define pure_layer_fn locally to capture 'lyr' and 'updated_graphdefs'
+          def pure_layer_fn_local(graphdef_in, state_in, y_in, kv_in, lyr=lyr):
+            if cfg.parameter_memory_host_offload:
+              state_in = jax.tree.map(
+                  lambda x: jax.device_put(x, max_utils.device_space()),
+                  state_in,
+              )
+            merged_layer = nnx.merge(graphdef_in, state_in)
+            out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
+            state_out = nnx.state(merged_layer)
+
+            if dynamic_graph_init:
+              new_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
+              updated_graphdefs[lyr] = new_graphdef
+
+            return out_y, out_kv, state_out
+
+          checkpointed_fn_local = jax.checkpoint(pure_layer_fn_local, policy=policy, prevent_cse=prevent_cse)
+
+          if cfg.remat_policy != "none":
+            y, kv_cache, new_state = checkpointed_fn_local(graphdef, state, y, kv_cache)
+          else:
+            y, kv_cache, new_state = pure_layer_fn_local(graphdef, state, y, kv_cache)
+
+          if dynamic_graph_init:
+            new_params, new_rest = new_state.split(nnx.Param, ...)
+            new_layer = nnx.merge(updated_graphdefs[lyr], new_params, new_rest)
+            if self.is_deepseek:
+              if lyr < cfg.first_num_dense_layers:
+                setattr(self, f"dense_layers_{lyr}", new_layer)
+              else:
+                moe_idx = lyr - cfg.first_num_dense_layers
+                setattr(self, f"moe_layers_{moe_idx}", new_layer)
+            else:
+              if hasattr(self, "layers") and self.layers:
+                self.layers[lyr] = new_layer
+              else:
+                setattr(self, f"layers_{lyr}", new_layer)
+          else:
+            nnx.update(layer, new_state)
 
           if kv_caches is not None and kv_cache is not None:
             if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
