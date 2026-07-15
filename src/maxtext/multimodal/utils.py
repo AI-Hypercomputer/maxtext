@@ -161,9 +161,19 @@ def merge_mm_embeddings(
       # This handles cases where token_masks is already (B, ...)
       flat_tile_masks = token_masks.reshape(batch_size, -1)
 
-    # Expand the tile-level mask to a token-level mask to match the embeddings.
-    # A mask of shape (B, N*T) becomes (B, N*T*K) by repeating each element K times.
-    flat_token_masks_processed = jnp.repeat(flat_tile_masks, repeats=num_toks_per_token, axis=1)
+    if flat_tile_masks.shape[1] == flat_multimodal_embeddings.shape[1]:
+      # Qwen padded video supplies one validity value per projected token.
+      flat_token_masks_processed = flat_tile_masks
+    else:
+      # Tiled image models supply one validity value per tile. Expand each tile
+      # validity value over the tokens produced by that tile.
+      expected_tile_count = flat_multimodal_embeddings.shape[1] // num_toks_per_token
+      if flat_tile_masks.shape[1] != expected_tile_count:
+        raise ValueError(
+            "token_masks must contain either one value per multimodal token or one value per tile. "
+            f"Got {flat_tile_masks.shape[1]} mask values for {flat_multimodal_embeddings.shape[1]} embeddings."
+        )
+      flat_token_masks_processed = jnp.repeat(flat_tile_masks, repeats=num_toks_per_token, axis=1)
 
   # Vmap the inner merge function over the batch dimension
   return jax.vmap(

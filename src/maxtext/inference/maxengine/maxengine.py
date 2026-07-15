@@ -212,6 +212,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       encoder_image_masks=None,
       encoder_videos=None,
       encoder_video_masks=None,
+      encoder_video_grid_thw=None,
       encoder_audios=None,
   ):
     """NNX equivalent of `model.apply(..., mutable=["cache"])`. Returns (logits, new_cache_dict)."""
@@ -230,6 +231,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         encoder_image_masks=encoder_image_masks,
         encoder_videos=encoder_videos,
         encoder_video_masks=encoder_video_masks,
+        encoder_video_grid_thw=encoder_video_grid_thw,
         encoder_audios=encoder_audios,
         enable_dropout=enable_dropout,
         model_mode=model_mode,
@@ -671,7 +673,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     )
 
   @functools.partial(
-      jax.jit, static_argnums=(0,), static_argnames=("return_prompt_logp", "algorithm", "topk", "nucleus_topp")
+      jax.jit,
+      static_argnums=(0,),
+      static_argnames=("video_grid_thw", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"),
   )
   def _prefill_jit(
       self,
@@ -685,6 +689,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       image_masks: jax.Array | None = None,
       videos: jax.Array | None = None,
       video_masks: jax.Array | None = None,
+      video_grid_thw: tuple[int, int, int] | None = None,
       audio_values: jax.Array | None = None,
       audio_masks: jax.Array | None = None,
       true_length: int,
@@ -792,6 +797,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
             encoder_image_masks=image_masks,
             encoder_videos=videos,
             encoder_video_masks=video_masks,
+            encoder_video_grid_thw=video_grid_thw,
             encoder_audios=audio_values,
             enable_dropout=False,
             model_mode=MODEL_MODE_PREFILL,
@@ -810,6 +816,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
             encoder_image_masks=image_masks,
             encoder_videos=videos,
             encoder_video_masks=video_masks,
+            encoder_video_grid_thw=video_grid_thw,
             encoder_audios=audio_values,
             decoder_segment_ids=sequence_indicator,
             enable_dropout=False,
@@ -894,6 +901,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       image_masks: jax.Array | None = None,
       videos: jax.Array | None = None,
       video_masks: jax.Array | None = None,
+      video_grid_thw: jax.Array | None = None,
       audio_values: jax.Array | None = None,
       audio_masks: jax.Array | None = None,
       true_length: int,
@@ -908,6 +916,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       temperature: float | None = None,
   ):  # returns (new_prefix, result_tokens)
     """Public API for prefill that updates page state outside JIT."""
+    if video_grid_thw is not None:
+      flat_video_grid = jax.device_get(video_grid_thw).reshape(-1)
+      if flat_video_grid.size != 3:
+        raise ValueError(f"Decode currently supports one video grid with 3 values, got shape {video_grid_thw.shape}.")
+      video_grid_thw = tuple(int(dim) for dim in flat_video_grid)
+
     # Update page state before JIT call
 
     # Sample rng before JIT call
@@ -927,6 +941,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         image_masks=image_masks,
         videos=videos,
         video_masks=video_masks,
+        video_grid_thw=video_grid_thw,
         audio_values=audio_values,
         audio_masks=audio_masks,
         sampler=sampler,
