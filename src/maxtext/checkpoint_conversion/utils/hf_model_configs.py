@@ -1699,8 +1699,18 @@ qwen3_vl_2b_dict = {
 qwen3_vl_2b_config = PTConfig(**qwen3_vl_2b_dict)
 
 
+glm5_1_744b_dict = {
+    "architectures": ["GlmMoeDsaForCausalLM"],
+    "num_hidden_layers": 78,
+    "first_k_dense_replace": 3,
+    "n_routed_experts": 256,
+}
+glm5_1_744b_config = transformers.DeepseekV3Config(**glm5_1_744b_dict)
+
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
+    "glm5.1-744b": glm5_1_744b_config,
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
     "gemma2-27b": gemma2_27b_config,

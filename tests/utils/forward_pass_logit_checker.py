@@ -568,6 +568,12 @@ def main(config, test_args):  # pylint: disable=W0621
     hf_model = model_class.from_pretrained(
         test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
     )
+    if config.base_num_decoder_layers < hf_model.config.num_hidden_layers:
+      max_logging.log(
+          f"Truncating HF model from {hf_model.config.num_hidden_layers} to {config.base_num_decoder_layers} layers "
+          f"to match MaxText base_num_decoder_layers."
+      )
+      hf_model.model.layers = hf_model.model.layers[:config.base_num_decoder_layers]
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
       max_logging.log(f"Loading HF PEFT LoRA adapter from {hf_lora_path}")

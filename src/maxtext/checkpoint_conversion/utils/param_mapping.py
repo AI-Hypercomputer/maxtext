@@ -29,7 +29,7 @@ It provides two key types of mappings for each model:
     **Value: corresponding Hugging Face parameters, with following forms:**
     First, the base element mapped to can be either:
     - `atomic_hf_key`: A single string representing one Hugging Face parameter.
-    - `composite_hf_key`: A tuple of strings representing multiple Hugging Face parameters that combine 
+    - `composite_hf_key`: A tuple of strings representing multiple Hugging Face parameters that combine
     into a single MaxText parameter (e.g., Qwen's qkv and z).
 
     These base elements (strings or tuples) are then structured as:
@@ -1269,7 +1269,9 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
 
-    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
+    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
+        process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
+    )
     hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
 
   # Vision hooks for Qwen3.5
@@ -1340,7 +1342,9 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         return input_tensor.T.reshape(target_shape)
 
     # Apply vision hooks
-    hooks["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = reshape_conv3d_patch_embed  # pyrefly: ignore[bad-assignment]
+    hooks["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = (
+        reshape_conv3d_patch_embed  # pyrefly: ignore[bad-assignment]
+    )
 
     for i in range(n_vision_layers):
       prefix = f"params-vision_encoder-Qwen3_5MoeVisionEncoder_0-blocks_{i}"
@@ -1355,8 +1359,12 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       hooks[f"{prefix}-mlp_out-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
 
     # Vision projector
-    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
-    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = (
+        reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    )
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = (
+        reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    )
 
   return hooks
 
@@ -1384,7 +1392,9 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       prefix = f"params-decoder-layers-layer_{block_idx}"
 
       # Layer norms
-      mapping[f"{prefix}-input_layernorm-scale"] = [f"model.layers.{i}.input_layernorm.weight" for i in hf_indices]  # pyrefly: ignore[bad-assignment]
+      mapping[f"{prefix}-input_layernorm-scale"] = [
+          f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
+      ]  # pyrefly: ignore[bad-assignment]
       mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
       ]
@@ -1607,7 +1617,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       or scanned with expert stacking (nested list of strings).
   """
   # Extract hf configuration parameters, without mtp
-  num_main_layers = config["num_hidden_layers"]
+  num_main_layers = min(config["num_hidden_layers"], maxtext_config.base_num_decoder_layers)
   first_num_dense_layers = config["first_k_dense_replace"]
   num_experts = config.get("n_routed_experts", 0)
 
@@ -1681,16 +1691,14 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   else:
     for i in range(first_num_dense_layers):
       for maxtext_key, hf_key in dense_layer_keys.items():
-        mapping[f"params-decoder-dense_layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+        mapping[f"params-decoder-dense_layer_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
 
     for i in range(first_num_dense_layers, num_main_layers):
-      moe_layer_idx = i - first_num_dense_layers
-
       for maxtext_key, hf_key in moe_layer_keys.items():
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+        mapping[f"params-decoder-layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
 
       for maxtext_key, hf_key in moe_expert_keys.items():
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
+        mapping[f"params-decoder-layers_{i}-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
             f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
         ]
   return mapping
@@ -1707,7 +1715,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     else:
       return input_tensor.T.reshape(target_shape)
 
-  num_main_layers = config["num_hidden_layers"]
+  num_main_layers = min(config["num_hidden_layers"], maxtext_config.base_num_decoder_layers)
   first_num_dense_layers = config["first_k_dense_replace"]
 
   mapping = {
@@ -1755,11 +1763,10 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   else:
     for i in range(first_num_dense_layers):
       for key in dense_need_reshape:
-        mapping[f"params-decoder-dense_layers_{i}-{key}"] = reshape_kernel
+        mapping[f"params-decoder-dense_layer_{i}-{key}"] = reshape_kernel
     for i in range(first_num_dense_layers, num_main_layers):
-      moe_layer_idx = i - first_num_dense_layers
       for key in moe_need_reshape:
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{key}"] = reshape_kernel
+        mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
 
   return mapping
 
@@ -1943,7 +1950,9 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     hooks[f"{prefix}-GptOssMlp-gate-kernel"] = transpose
     # `composite_mt_key`: A hook for combining multiple MaxText params.
     hooks[(f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1")] = interleave  # pyrefly: ignore[unsupported-operation]
-    hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = interleave  # pyrefly: ignore[unsupported-operation]
+    hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = (
+        interleave  # pyrefly: ignore[unsupported-operation]
+    )
 
   return hooks
 
@@ -3859,6 +3868,7 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 
 # {maxtext model name: {maxtext weight name: hf weight name}}
 PARAM_MAPPING = {
+    "glm5.1-744b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -3911,6 +3921,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "glm5.1-744b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
