@@ -189,7 +189,7 @@ def jit_train_and_eval_step(
   return p_train_step, p_eval_step
 
 
-def setup_train_loop(config, recorder, devices=None):
+def setup_train_loop(config, recorder, devices=None, mesh=None):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -215,7 +215,8 @@ def setup_train_loop(config, recorder, devices=None):
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     is_training = True
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    if mesh is None:
+      mesh = maxtext_utils.get_mesh_from_config(config, devices)
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     if config.pure_nnx:
       # Create abstract NNX model.
@@ -241,7 +242,9 @@ def setup_train_loop(config, recorder, devices=None):
         validate_completed_steps(checkpoint_step + 1, config.steps)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
-    data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
+    learner_idx = getattr(config, "learner_idx", 0)
+    num_learners = getattr(config, "num_learners", 1)
+    data_iterator, eval_data_iterator = create_data_iterator(config, mesh, learner_idx, num_learners)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()

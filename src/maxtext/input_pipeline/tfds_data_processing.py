@@ -185,6 +185,8 @@ def make_tfds_train_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices_train,
+    learner_idx: int = 0,
+    num_learners: int = 1,
 ):
   """load dataset, preprocess and return iterators"""
   assert (
@@ -200,8 +202,8 @@ def make_tfds_train_iterator(
   }
   if not config.colocated_python_data_input:
     train_ds = get_datasets(
-        dataloading_host_index=process_indices_train.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_train),
+        dataloading_host_index=process_indices_train.index(jax.process_index()) * num_learners + learner_idx,
+        dataloading_host_count=len(process_indices_train) * num_learners,
         **get_datasets_kwargs,
     )
     train_dataloader = preprocessing_pipeline(
@@ -254,6 +256,8 @@ def make_tfds_eval_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices_eval,
+    learner_idx: int = 0,
+    num_learners: int = 1,
 ):
   """load eval dataset, preprocess and return iterators"""
   assert (
@@ -266,8 +270,8 @@ def make_tfds_eval_iterator(
         data_split=config.eval_split,
         shuffle_files=False,
         shuffle_seed=config.data_shuffle_seed,
-        dataloading_host_index=process_indices_eval.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_eval),
+        dataloading_host_index=process_indices_eval.index(jax.process_index()) * num_learners + learner_idx,
+        dataloading_host_count=len(process_indices_eval) * num_learners,
     )
     eval_dataloader = preprocessing_pipeline(
         dataset=eval_ds,

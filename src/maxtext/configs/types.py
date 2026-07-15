@@ -1531,6 +1531,7 @@ class DilocoParams(BaseModel):
 
   # Streaming DiLoCo parameters
   enable_streaming_diloco: bool = Field(False, description="Enable streaming DiLoCo parallelism.")
+  enable_non_spmd_diloco: bool = Field(False, description="Enable non-SPMD, multi-threaded streaming DiLoCo.")
   num_diloco_fragments: int = Field(16, description="Number of fragments to partition the model layers into.")
   use_sequential_layers: bool = Field(False, description="Whether to sync layers sequentially (or interleaved).")
   num_communication_overlapping_steps: int = Field(
@@ -1547,6 +1548,17 @@ class DilocoParams(BaseModel):
           " globally shared one."
       ),
   )
+
+  @model_validator(mode="after")
+  def validate_overlap_steps(self) -> "DilocoParams":
+    if self.enable_streaming_diloco:
+      if self.num_communication_overlapping_steps >= self.diloco_sync_period:
+        raise ValueError(
+            "num_communication_overlapping_steps must be strictly less than"
+            f" diloco_sync_period. Got {self.num_communication_overlapping_steps=}"
+            f" and {self.diloco_sync_period=}"
+        )
+    return self
 
 
 class Optimizer(BaseModel):
@@ -3044,6 +3056,8 @@ class MaxTextConfig(
           "Colocated python data input is only supported with Pathways (single"
           " controller) enabled (`enable_single_controller=True`)."
       )
+    if self.enable_non_spmd_diloco and self.colocated_python_data_input:
+      raise ValueError("Non-SPMD DiLoCo does not support colocated python data input.")
     if self.grain_use_elastic_iterator and self.grain_file_type != "arrayrecord":
       raise ValueError(
           "`grain_use_elastic_iterator=True` only supports `grain_file_type=arrayrecord`. "

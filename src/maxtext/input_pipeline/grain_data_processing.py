@@ -422,6 +422,8 @@ def make_grain_train_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices,
+    learner_idx: int = 0,
+    num_learners: int = 1,
 ):
   """Load, preprocess dataset and return iterators"""
   assert (
@@ -478,9 +480,11 @@ def make_grain_train_iterator(
   if 0 < config.expansion_factor_real_data < 1:
     num_dataloader_to_restore = int(1 / config.expansion_factor_real_data)
     train_dataloader_list = []
-    dataloading_host_count = len(process_indices) * num_dataloader_to_restore
+    dataloading_host_count = len(process_indices) * num_dataloader_to_restore * num_learners
     for i in range(num_dataloader_to_restore):
-      dataloading_host_index = len(process_indices) * i + process_indices.index(jax.process_index())
+      dataloading_host_index = (
+          len(process_indices) * i + process_indices.index(jax.process_index())
+      ) * num_learners + learner_idx
       train_ds = get_ds_fn(dataloading_host_index=dataloading_host_index, dataloading_host_count=dataloading_host_count)
       train_dataloader = preprocessing_fn(dataset=train_ds)
       train_dataloader_list.append(train_dataloader)
@@ -490,8 +494,8 @@ def make_grain_train_iterator(
     ]
 
   # Default non-colocated, non-expansion path
-  shard_index = process_indices.index(jax.process_index())
-  shard_count = len(process_indices)
+  shard_index = process_indices.index(jax.process_index()) * num_learners + learner_idx
+  shard_count = len(process_indices) * num_learners
   train_ds = get_ds_fn(
       dataloading_host_index=shard_index,
       dataloading_host_count=shard_count,
@@ -523,6 +527,8 @@ def make_grain_eval_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices,
+    learner_idx: int = 0,
+    num_learners: int = 1,
 ):
   """Load, preprocess dataset and return iterators"""
   assert (
@@ -556,8 +562,8 @@ def make_grain_eval_iterator(
 
   if not config.colocated_python_data_input:
     eval_ds = get_ds_fn(
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
+        dataloading_host_index=process_indices.index(jax.process_index()) * num_learners + learner_idx,
+        dataloading_host_count=len(process_indices) * num_learners,
     )
     eval_dataloader = preprocessing_fn(dataset=eval_ds)
     return multihost_dataloading.MultiHostDataLoadIterator(

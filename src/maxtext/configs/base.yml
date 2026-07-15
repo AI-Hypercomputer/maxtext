@@ -898,6 +898,7 @@ dcn_bandwidth_interface: "eth0"
 
 # Streaming DiLoCo params
 enable_streaming_diloco: false
+enable_non_spmd_diloco: false
 num_diloco_fragments: 16
 use_sequential_layers: false
 num_communication_overlapping_steps: 0

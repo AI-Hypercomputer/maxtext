@@ -39,6 +39,7 @@ from jax.sharding import NamedSharding
 from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
+from maxtext.trainers.diloco.threaded_diloco import run_threaded_diloco
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import EPS
@@ -792,7 +793,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
 def run(config, recorder):
   """Run the job given hyperparameters and utilities."""
   with (max_utils.maybe_get_transformer_engine_context(config),):
-    train_loop(config, recorder)
+    if config.enable_non_spmd_diloco:
+      run_threaded_diloco(config, recorder, train_step, eval_step)
+    else:
+      train_loop(config, recorder)
 
 
 def get_train_func(config, recorder, argv):
