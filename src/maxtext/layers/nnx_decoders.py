@@ -2035,6 +2035,55 @@ class NNXDecoder(nnx.Module):
   def _apply_gemma3_scanned_blocks(
       self,
       y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      slot=None,
+      previous_chunk=None,
+      decoder_input_tokens=None,
+  ):
+    cfg = self.config
+    num_hash_layers = cfg.first_num_hash_layers
+
+    layer_call_kwargs = {
+        "previous_chunk": previous_chunk,
+        "slot": slot,
+        "decoder_input_tokens": decoder_input_tokens,
+    }
+
+    # 1. Unrolled prefix layers (0, 1, 2)
+    for layer_idx in range(num_hash_layers):
+      layer = getattr(self, f"layers_{layer_idx}")
+      y, _ = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          **layer_call_kwargs,
+      )
+
+    # 2. Scanned blocks
+    num_remaining_layers = cfg.num_decoder_layers - num_hash_layers
+    num_full_blocks = num_remaining_layers // 2
+    if num_full_blocks > 0 and hasattr(self, "scanned_blocks"):
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          length=num_full_blocks,
+          **layer_call_kwargs,
+      )
+
+    return y
+
+  def _apply_gemma3_scanned_blocks(
+      self,
+      y,
       layer_args,
       layer_kwargs,
       kv_caches=None,
