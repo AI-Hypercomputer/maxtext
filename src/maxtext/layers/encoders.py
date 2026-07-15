@@ -80,7 +80,7 @@ class VisionEncoder(nnx.Module):
       )
       setattr(self, projector_name, qwen3_5_vision.Qwen3_5MoeVisionProjector(config=self.config, rngs=self.rngs))
       return encoder_name, projector_name
-    elif self.config.model_name in ["qwen3-vl-4b", "qwen3-vl-2b"]:
+    elif self.config.model_name in ["qwen3-vl-4b", "qwen3-vl-2b", "cosmos3-nano-reasoner"]:
       from maxtext.models import qwen3_vl_vision  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Qwen3VLVisionEncoder_0"
@@ -96,7 +96,9 @@ class VisionEncoder(nnx.Module):
   def __call__(self, input_images, input_masks=None, video_grid_thw=None, deterministic=False):
     # vision encoder output, frozen params in many cases
     encoder = getattr(self, self.encoder_name)
-    if self.config.model_name.startswith("qwen3") and input_masks is not None:
+    if (
+        self.config.model_name.startswith("qwen3") or self.config.model_name.startswith("cosmos3")
+    ) and input_masks is not None:
       encoder_output = encoder(
           input_images, video_mask=input_masks, video_grid_thw=video_grid_thw, deterministic=deterministic
       )

@@ -788,7 +788,7 @@ class Attention(nnx.Module):
     rope_type = self.rope_type
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
-      if self.config.model_name.startswith("qwen3"):
+      if self.config.model_name.startswith("qwen3") or self.config.model_name.startswith("cosmos3"):
         rotary_embedding = Qwen3OmniMoeVisionRotaryEmbedding(
             hidden_size=self.config.hidden_size_for_vit,
             num_attention_heads=self.config.num_attention_heads_for_vit,

@@ -44,7 +44,14 @@ def preprocess_mm_data(config):
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
     processor_outputs = preprocess_mm_data_llama4(images)
-  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+  elif config.model_name in [
+      "qwen3-omni-30b-a3b",
+      "qwen3-vl-2b",
+      "qwen3-vl-4b",
+      "qwen3.5-35b-a3b",
+      "qwen3.5-397b-a17b",
+      "cosmos3-nano-reasoner",
+  ]:
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     processor_outputs = preprocess_mm_data_qwen3_omni(config)
@@ -68,7 +75,14 @@ def preprocess_image_for_training(image, config):
     from maxtext.multimodal.processor_llama4 import preprocess_mm_data_llama4  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_llama4(image)
-  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+  elif config.model_name in [
+      "qwen3-omni-30b-a3b",
+      "qwen3-vl-2b",
+      "qwen3-vl-4b",
+      "qwen3.5-35b-a3b",
+      "qwen3.5-397b-a17b",
+      "cosmos3-nano-reasoner",
+  ]:
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_qwen3_omni_for_training(image, config)
@@ -90,7 +104,14 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_llama4 import get_image_offsets_llama4  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_llama4(processor_output)
-  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+  elif config.model_name in [
+      "qwen3-omni-30b-a3b",
+      "qwen3-vl-2b",
+      "qwen3-vl-4b",
+      "qwen3.5-35b-a3b",
+      "qwen3.5-397b-a17b",
+      "cosmos3-nano-reasoner",
+  ]:
     from maxtext.multimodal.processor_qwen3_omni import get_mm_offsets_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return get_mm_offsets_qwen3_omni(config, processor_output)
@@ -112,7 +133,14 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
     from maxtext.multimodal.processor_llama4 import reformat_prompt_llama4  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_llama4(prompt, image_placeholder, num_images)
-  elif model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+  elif model_name in [
+      "qwen3-omni-30b-a3b",
+      "qwen3-vl-2b",
+      "qwen3-vl-4b",
+      "qwen3.5-35b-a3b",
+      "qwen3.5-397b-a17b",
+      "cosmos3-nano-reasoner",
+  ]:
     from maxtext.multimodal.processor_qwen3_omni import reformat_prompt_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_qwen3_omni(
@@ -137,7 +165,14 @@ def reformat_response(response, model_name):
   elif model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     formatted_response = f"{response}<turn|>"
     return formatted_response
-  elif model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+  elif model_name in [
+      "qwen3-omni-30b-a3b",
+      "qwen3-vl-2b",
+      "qwen3-vl-4b",
+      "qwen3.5-35b-a3b",
+      "qwen3.5-397b-a17b",
+      "cosmos3-nano-reasoner",
+  ]:
     formatted_response = f"{response}<|im_end|>"
     return formatted_response
   else:
@@ -149,16 +184,27 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
   if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_gemma3(tokens, max_num_images=processor_output.num_images)  # pyrefly: ignore[missing-attribute]
+    return add_extra_tokens_for_images_gemma3(
+        tokens, max_num_images=processor_output.num_images
+    )  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import add_extra_tokens_for_images_gemma4  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_gemma4(tokens, max_num_images=processor_output.num_images)  # pyrefly: ignore[missing-attribute]
+    return add_extra_tokens_for_images_gemma4(
+        tokens, max_num_images=processor_output.num_images
+    )  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     from maxtext.multimodal.processor_llama4 import add_extra_tokens_for_images_llama4  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_llama4(tokens, processor_output)  # pyrefly: ignore[bad-argument-type]
-  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+  elif config.model_name in [
+      "qwen3-omni-30b-a3b",
+      "qwen3-vl-2b",
+      "qwen3-vl-4b",
+      "qwen3.5-35b-a3b",
+      "qwen3.5-397b-a17b",
+      "cosmos3-nano-reasoner",
+  ]:
     from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
@@ -181,7 +227,12 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     from maxtext.multimodal.processor_llama4 import get_dummy_image_shape_for_init_llama4  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_llama4(batch_size, num_image_per_sequence)
-  elif model_name.startswith("qwen3-omni") or model_name.startswith("qwen3-vl") or model_name.startswith("qwen3.5"):
+  elif (
+      model_name.startswith("qwen3-omni")
+      or model_name.startswith("qwen3-vl")
+      or model_name.startswith("qwen3.5")
+      or model_name.startswith("cosmos3")
+  ):
     from maxtext.multimodal.processor_qwen3_omni import get_dummy_image_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
@@ -222,7 +273,14 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
     from maxtext.multimodal.processor_llama4 import LLAMA4_PATCH_TOKEN  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = decoder_input_tokens == LLAMA4_PATCH_TOKEN
-  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+  elif config.model_name in [
+      "qwen3-omni-30b-a3b",
+      "qwen3-vl-2b",
+      "qwen3-vl-4b",
+      "qwen3.5-35b-a3b",
+      "qwen3.5-397b-a17b",
+      "cosmos3-nano-reasoner",
+  ]:
     from maxtext.multimodal.processor_qwen3_omni import QwenTokens  # pylint: disable=import-outside-toplevel
 
     tokens = QwenTokens(config)

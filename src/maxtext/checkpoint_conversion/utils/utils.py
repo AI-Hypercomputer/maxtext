@@ -1095,7 +1095,7 @@ def load_hf_dict_from_safetensors(model_id_or_path, token, revision, framework="
         revision=revision,
     )
   # load safetensors
-  ckpt_paths = sorted(pathlib.Path(local_path).glob("[!.]*.safetensors"))
+  ckpt_paths = sorted(pathlib.Path(local_path).rglob("[!.]*.safetensors"))
   hf_state_dict = {}
   max_logging.log(f"Loading {len(ckpt_paths)} checkpoints")
   for ckpt_path in tqdm(ckpt_paths, total=len(ckpt_paths)):

@@ -3283,6 +3283,7 @@ class MaxTextConfig(
           "qwen3-vl-4b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
+          "cosmos3-nano-reasoner",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
