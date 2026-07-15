@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Forked from:
-# https://github.com/openxla/tokamax/blob/73048d9df5d06e33b3f241a53b9568676028191f/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py
+# https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py
 """TGMM kernel"""
 
 import dataclasses
