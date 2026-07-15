@@ -74,9 +74,7 @@ def _build_state_mesh_shardings(model, tx):
       pspec = PartitionSpec("data", "model")
     return var.replace(NamedSharding(mesh, pspec))
 
-  return jax.tree.map(
-      _to_sharding, state, is_leaf=lambda x: isinstance(x, nnx.Variable)
-  )
+  return jax.tree.map(_to_sharding, state, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
 
 class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
@@ -88,12 +86,8 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
   def test_dispatch_from_main_helper_when_pure_nnx(self):
     """maybe_update_params_sharding_with_opt should dispatch to the NNX variant."""
     cfg = _Cfg(pure_nnx=True, shard_optimizer_over_data=False)
-    state_mesh_shardings = _build_state_mesh_shardings(
-        self.model, optax.adam(1e-3)
-    )
-    prev, updated = sharding.maybe_update_params_sharding_with_opt(
-        cfg, state_mesh_shardings
-    )
+    state_mesh_shardings = _build_state_mesh_shardings(self.model, optax.adam(1e-3))
+    prev, updated = sharding.maybe_update_params_sharding_with_opt(cfg, state_mesh_shardings)
     # prev is the param-only view (no rngs / non-Param nodes)
     self.assertIsInstance(prev, nnx.State)
     self.assertIn("linear", prev)
@@ -103,15 +97,9 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
   def test_extract_param_only_skips_non_param_variables(self):
     """prev_params_shardings must contain Params only — RngKey/RngCount/OptVariable filtered out."""
     cfg = _Cfg(shard_optimizer_over_data=False)
-    state_mesh_shardings = _build_state_mesh_shardings(
-        self.model, optax.adam(1e-3)
-    )
-    prev, _ = sharding.maybe_update_params_sharding_with_opt_nnx(
-        cfg, state_mesh_shardings
-    )
-    leaves = jax.tree.leaves(
-        prev, is_leaf=lambda x: isinstance(x, nnx.Variable)
-    )
+    state_mesh_shardings = _build_state_mesh_shardings(self.model, optax.adam(1e-3))
+    prev, _ = sharding.maybe_update_params_sharding_with_opt_nnx(cfg, state_mesh_shardings)
+    leaves = jax.tree.leaves(prev, is_leaf=lambda x: isinstance(x, nnx.Variable))
     # Every surviving leaf is wrapped as an nnx.Param.
     self.assertTrue(all(isinstance(leaf, nnx.Param) for leaf in leaves))
     # The model has linear.kernel and linear.bias — exactly two Param leaves.
@@ -120,20 +108,14 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
   def test_returns_unchanged_when_shard_optimizer_over_data_false(self):
     """When shard_optimizer_over_data=False, the second return value must be the input object."""
     cfg = _Cfg(shard_optimizer_over_data=False)
-    state_mesh_shardings = _build_state_mesh_shardings(
-        self.model, optax.adam(1e-3)
-    )
-    _, updated = sharding.maybe_update_params_sharding_with_opt_nnx(
-        cfg, state_mesh_shardings
-    )
+    state_mesh_shardings = _build_state_mesh_shardings(self.model, optax.adam(1e-3))
+    _, updated = sharding.maybe_update_params_sharding_with_opt_nnx(cfg, state_mesh_shardings)
     self.assertIs(updated, state_mesh_shardings)
 
   def test_zero1_propagates_mu_sharding_to_model_params(self):
     """Zero-1: model param shardings must be replaced with the optimizer mu shardings."""
     cfg = _Cfg(shard_optimizer_over_data=True)
-    state_mesh_shardings = _build_state_mesh_shardings(
-        self.model, optax.adam(1e-3)
-    )
+    state_mesh_shardings = _build_state_mesh_shardings(self.model, optax.adam(1e-3))
 
     # Mutate the optimizer mu leaves in place so the function picks up a distinct PartitionSpec.
     mesh = _create_2d_test_mesh()
@@ -145,20 +127,14 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
     # After _build_state_mesh_shardings, every leaf's value is a NamedSharding (no .shape),
     # so we just override every Variable leaf in mu in place via set_value (modern API).
     mu_state = state_mesh_shardings.optimizer.opt_state[0]["mu"]
-    for var in jax.tree.leaves(
-        mu_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
-    ):
+    for var in jax.tree.leaves(mu_state, is_leaf=lambda x: isinstance(x, nnx.Variable)):
       if isinstance(var, nnx.Variable):
         var.set_value(new_mu_sharding)
 
-    _, updated = sharding.maybe_update_params_sharding_with_opt_nnx(
-        cfg, state_mesh_shardings
-    )
+    _, updated = sharding.maybe_update_params_sharding_with_opt_nnx(cfg, state_mesh_shardings)
 
     # All Param leaves under updated.model must now share the new mu sharding.
-    param_leaves = jax.tree.leaves(
-        updated.model, is_leaf=lambda x: isinstance(x, nnx.Variable)
-    )
+    param_leaves = jax.tree.leaves(updated.model, is_leaf=lambda x: isinstance(x, nnx.Variable))
     param_leaves = [v for v in param_leaves if isinstance(v, nnx.Param)]
     self.assertGreater(len(param_leaves), 0)
     for leaf in param_leaves:
@@ -167,13 +143,9 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
   def test_raises_when_no_adam_state_present(self):
     """Stateless optimizers (e.g., SGD) have no mu — function must raise NotImplementedError."""
     cfg = _Cfg(shard_optimizer_over_data=True)
-    state_mesh_shardings = _build_state_mesh_shardings(
-        self.model, optax.sgd(1e-3)
-    )
+    state_mesh_shardings = _build_state_mesh_shardings(self.model, optax.sgd(1e-3))
     with self.assertRaises(NotImplementedError):
-      sharding.maybe_update_params_sharding_with_opt_nnx(
-          cfg, state_mesh_shardings
-      )
+      sharding.maybe_update_params_sharding_with_opt_nnx(cfg, state_mesh_shardings)
 
   def test_chained_optimizer_recursion_finds_adam_mu(self):
     """A nested optax.chain(clip, adam) wraps mu under multiple containers — recursion must find it."""
@@ -182,22 +154,18 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
     state_mesh_shardings = _build_state_mesh_shardings(self.model, chained)
 
     # Should not raise; verify update happens (params replaced with mu shardings).
-    prev, updated = sharding.maybe_update_params_sharding_with_opt_nnx(
-        cfg, state_mesh_shardings
-    )
+    prev, updated = sharding.maybe_update_params_sharding_with_opt_nnx(cfg, state_mesh_shardings)
     self.assertIsInstance(prev, nnx.State)
     self.assertIsInstance(updated, nnx.State)
     # Same number of Param leaves before and after.
-    n_prev = len(
-        jax.tree.leaves(prev, is_leaf=lambda x: isinstance(x, nnx.Variable))
+    n_prev = len(jax.tree.leaves(prev, is_leaf=lambda x: isinstance(x, nnx.Variable)))
+    n_after = len(
+        [
+            v
+            for v in jax.tree.leaves(updated.model, is_leaf=lambda x: isinstance(x, nnx.Variable))
+            if isinstance(v, nnx.Param)
+        ]
     )
-    n_after = len([
-        v
-        for v in jax.tree.leaves(
-            updated.model, is_leaf=lambda x: isinstance(x, nnx.Variable)
-        )
-        if isinstance(v, nnx.Param)
-    ])
     self.assertEqual(n_prev, n_after)
 
 
@@ -244,9 +212,7 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
       result_sharding = out["w"].get_value()
       self.assertIsInstance(result_sharding, NamedSharding)
       # 'layers' resolves to physical axis 'stage' and is inserted at position 1 (param_scan_axis=1).
-      self.assertEqual(
-          result_sharding.spec, PartitionSpec(None, "stage", "fsdp")
-      )
+      self.assertEqual(result_sharding.spec, PartitionSpec(None, "stage", "fsdp"))
 
   def test_scan_axis_not_inserted_when_already_present(self):
     """Guard against double-insertion when partition_name is already in out_sharding."""
@@ -260,9 +226,7 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
       out = self._run(self._build_state(w=v))
       result_sharding = out["w"].get_value()
       # 'stage' must appear exactly once — the same PartitionSpec we started with.
-      self.assertEqual(
-          result_sharding.spec, PartitionSpec("stage", None, "fsdp")
-      )
+      self.assertEqual(result_sharding.spec, PartitionSpec("stage", None, "fsdp"))
 
   def test_masked_node_preserved_as_is(self):
     """Values without a .shape attribute (e.g., optax.MaskedNode) are returned unchanged."""
@@ -406,9 +370,7 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
     sharding.remove_size_one_mesh_axis = self._old_remove_size_one_mesh_axis
     try:
       # Use an explicit 1x1 mesh so physical axis 'fsdp' has size 1 deterministically.
-      mesh_1x1 = Mesh(
-          np.array(jax.local_devices()[:1]).reshape(1, 1), ("fsdp", "stage")
-      )
+      mesh_1x1 = Mesh(np.array(jax.local_devices()[:1]).reshape(1, 1), ("fsdp", "stage"))
       with jax.set_mesh(mesh_1x1):
         v = nnx.Param(
             jnp.zeros((4,)),
@@ -427,9 +389,7 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
     sharding.remove_size_one_mesh_axis = self._old_remove_size_one_mesh_axis
     try:
       # Use an explicit 1x1 mesh so physical axes 'fsdp' and 'stage' have size 1 deterministically.
-      mesh_1x1 = Mesh(
-          np.array(jax.local_devices()[:1]).reshape(1, 1), ("fsdp", "stage")
-      )
+      mesh_1x1 = Mesh(np.array(jax.local_devices()[:1]).reshape(1, 1), ("fsdp", "stage"))
       rules = (("embed", "fsdp"), ("layers", "stage"))
       with jax.set_mesh(mesh_1x1), nn_partitioning.axis_rules(rules):
         v = nnx.Param(

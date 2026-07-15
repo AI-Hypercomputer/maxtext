@@ -1151,9 +1151,13 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     if isinstance(data_iterator, RemoteIteratorWrapper):
       # Pass the wrapper directly; GrainCheckpointHandler will call save_state with the step
       save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator)  # pyrefly: ignore[bad-assignment]
-    elif not isinstance(data_iterator, list) and isinstance(data_iterator.local_iterator, ElasticIterator):  # pyrefly: ignore[missing-attribute]
+    elif not isinstance(data_iterator, list) and isinstance(
+        data_iterator.local_iterator, ElasticIterator
+    ):  # pyrefly: ignore[missing-attribute]
       # ElasticIterator checkpoints a single global scalar shared by all shards.
-      save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator.local_iterator)  # pyrefly: ignore[bad-assignment]
+      save_args_composite["iter"] = GrainCheckpointSave(
+          item=data_iterator.local_iterator
+      )  # pyrefly: ignore[bad-assignment]
     else:
       if not isinstance(data_iterator, list):
         data_iterator = [data_iterator]
@@ -1163,7 +1167,9 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         process_count_total = process_count_total // config.expansion_factor_real_data
       for i, data_iter in enumerate(data_iterator):
         process_index = jax.process_index() + i * jax.process_count()
-        grain_iters_to_save.append((data_iter.local_iterator, process_index, process_count_total))  # pyrefly: ignore[missing-attribute]
+        grain_iters_to_save.append(
+            (data_iter.local_iterator, process_index, process_count_total)
+        )  # pyrefly: ignore[missing-attribute]
       save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)  # pyrefly: ignore[bad-assignment]
 
   custom_metadata = {}

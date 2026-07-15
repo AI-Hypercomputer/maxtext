@@ -545,7 +545,9 @@ def hertz_to_mel(freq: Union[float, np.ndarray], mel_scale: str = "htk") -> Unio
 
   if isinstance(freq, np.ndarray):
     log_region = freq >= min_log_hertz
-    mels[log_region] = min_log_mel + np.log(freq[log_region] / min_log_hertz) * logstep  # pyrefly: ignore[unsupported-operation]
+    mels[log_region] = (
+        min_log_mel + np.log(freq[log_region] / min_log_hertz) * logstep
+    )  # pyrefly: ignore[unsupported-operation]
   elif freq >= min_log_hertz:
     mels = min_log_mel + np.log(freq / min_log_hertz) * logstep
 
@@ -603,7 +605,9 @@ def mel_to_hertz(mels: Union[float, np.ndarray], mel_scale: str = "htk") -> Unio
 
   if isinstance(mels, np.ndarray):
     log_region = mels >= min_log_mel
-    freq[log_region] = min_log_hertz * np.exp(logstep * (mels[log_region] - min_log_mel))  # pyrefly: ignore[unsupported-operation]
+    freq[log_region] = min_log_hertz * np.exp(
+        logstep * (mels[log_region] - min_log_mel)
+    )  # pyrefly: ignore[unsupported-operation]
   elif mels >= min_log_mel:
     freq = min_log_hertz * np.exp(logstep * (mels - min_log_mel))
 

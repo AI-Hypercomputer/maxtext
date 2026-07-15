@@ -82,7 +82,9 @@ def build_grain_iterator(data_file_pattern: str, data_file_type: str, data_keys:
   if data_file_type == "parquet":
     dataset = grain.MapDataset.source(data_files)
     dataset = dataset.map(grain.experimental.ParquetIterDataset)
-    dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(data_files))  # pyrefly: ignore[bad-argument-type]
+    dataset = grain.experimental.InterleaveIterDataset(
+        dataset, cycle_length=len(data_files)
+    )  # pyrefly: ignore[bad-argument-type]
     dataset = dataset.map(input_pipeline_utils.KeepFeatures(feature_names=list(data_keys)))
     return iter(dataset)
   elif data_file_type == "arrayrecord":
@@ -94,7 +96,9 @@ def build_grain_iterator(data_file_pattern: str, data_file_type: str, data_keys:
   elif data_file_type == "tfrecord":
     dataset = grain.MapDataset.source(data_files)
     dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
-    dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(data_files))  # pyrefly: ignore[bad-argument-type]
+    dataset = grain.experimental.InterleaveIterDataset(
+        dataset, cycle_length=len(data_files)
+    )  # pyrefly: ignore[bad-argument-type]
     dataset = dataset.map(input_pipeline_utils.ParseFeatures(list(data_keys), tokenize=True))
     dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(list(data_keys), tokenize=True))
     return iter(dataset)
