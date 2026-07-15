@@ -74,7 +74,23 @@ def _map_results(raw_results: dict, tasks: list[str]) -> dict:
     if acc_norm is not None:
       scores[f"{task}_accuracy_norm"] = round(float(acc_norm) * 100, 2)
 
-    if acc is None and task_r:
+    # Extract ifeval and other task-specific custom accuracy keys
+    has_custom_keys = False
+    for suffix in (
+        "prompt_level_strict_acc,none",
+        "inst_level_strict_acc,none",
+        "prompt_level_loose_acc,none",
+        "inst_level_loose_acc,none",
+        "prompt_level_strict_acc",
+        "inst_level_strict_acc",
+        "prompt_level_loose_acc",
+        "inst_level_loose_acc",
+    ):
+      if task_r.get(suffix) is not None:
+        scores[f"{task}_{suffix.replace(',none', '')}"] = round(float(task_r[suffix]) * 100, 2)
+        has_custom_keys = True
+
+    if acc is None and not has_custom_keys and task_r:
       logger.warning(
           "No known accuracy keys found for task '%s'. Available: %s",
           task,
@@ -167,6 +183,8 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
           "limit": num_samples,
           "log_samples": False,
       }
+      if cfg.get("max_num_seqs") is not None:
+        simple_eval_kwargs["batch_size"] = cfg["max_num_seqs"]
       if apply_chat_template:
         simple_eval_kwargs["apply_chat_template"] = True
       if fewshot_as_multiturn:
