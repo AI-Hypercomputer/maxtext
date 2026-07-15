@@ -153,7 +153,7 @@ class Train(parameterized.TestCase):
               "use_gmm_v2_drhs": True,
           },
       ),
-      ici_expert_parallelism=[1, 4],
+      ici_expert_parallelism=[1, 2],
       #ici_expert_parallelism=[1],
   )
   @pytest.mark.tpu_only
