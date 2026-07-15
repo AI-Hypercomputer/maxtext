@@ -92,13 +92,13 @@ jobs:
 
           FLAVOR="${{ inputs.flavor }}"
 
-          if [[ "$FLAVOR" == "cpu-unit" || "$FLAVOR" == "cpu-post-training-unit" ]]; then
+          if [[ "$FLAVOR" == cpu-* ]]; then
             echo "worker_groups=${CPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
             echo "total_workers=${CPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
-          elif [[ "$FLAVOR" == "tpu-unit" ]]; then
+          elif [[ "$FLAVOR" == tpu-* || "$FLAVOR" == tpu7x-* ]]; then
             echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
             echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
-          elif [[ "$FLAVOR" == "gpu-unit" ]]; then
+          elif [[ "$FLAVOR" == gpu-* ]]; then
             echo "worker_groups=${GPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
             echo "total_workers=${GPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
           else
