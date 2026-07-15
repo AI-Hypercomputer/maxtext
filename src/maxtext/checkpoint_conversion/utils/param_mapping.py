@@ -1269,7 +1269,9 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
 
-    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
+    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
+        process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
+    )
     hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
 
   # Vision hooks for Qwen3.5
@@ -1340,7 +1342,9 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         return input_tensor.T.reshape(target_shape)
 
     # Apply vision hooks
-    hooks["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = reshape_conv3d_patch_embed  # pyrefly: ignore[bad-assignment]
+    hooks["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = (
+        reshape_conv3d_patch_embed  # pyrefly: ignore[bad-assignment]
+    )
 
     for i in range(n_vision_layers):
       prefix = f"params-vision_encoder-Qwen3_5MoeVisionEncoder_0-blocks_{i}"
@@ -1355,8 +1359,12 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       hooks[f"{prefix}-mlp_out-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
 
     # Vision projector
-    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
-    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = (
+        reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    )
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = (
+        reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    )
 
   return hooks
 
@@ -1384,7 +1392,9 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       prefix = f"params-decoder-layers-layer_{block_idx}"
 
       # Layer norms
-      mapping[f"{prefix}-input_layernorm-scale"] = [f"model.layers.{i}.input_layernorm.weight" for i in hf_indices]  # pyrefly: ignore[bad-assignment]
+      mapping[f"{prefix}-input_layernorm-scale"] = [
+          f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
+      ]  # pyrefly: ignore[bad-assignment]
       mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
       ]
@@ -1943,7 +1953,9 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     hooks[f"{prefix}-GptOssMlp-gate-kernel"] = transpose
     # `composite_mt_key`: A hook for combining multiple MaxText params.
     hooks[(f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1")] = interleave  # pyrefly: ignore[unsupported-operation]
-    hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = interleave  # pyrefly: ignore[unsupported-operation]
+    hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = (
+        interleave  # pyrefly: ignore[unsupported-operation]
+    )
 
   return hooks
 
@@ -3747,6 +3759,60 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   return mapping
 
 
+def COSMOS3_TEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping from MaxText to HuggingFace Cosmos3-Nano Reasoner text-only weight paths (flat)."""
+  mapping = {}
+
+  if "text_config" in config:
+    text_config = config["text_config"]
+  else:
+    text_config = config
+
+  n_layers_text = text_config["num_hidden_layers"]
+  text_mapping = QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(
+      config={"num_hidden_layers": n_layers_text},
+      maxtext_config=maxtext_config,
+      scan_layers=scan_layers,
+  )
+
+  def replace_prefix(val):
+    if isinstance(val, list):
+      return [replace_prefix(v) for v in val]
+    elif isinstance(val, str):
+      if val.startswith("model."):
+        val = val[len("model.") :]
+      val = val.replace("self_attn.q_proj", "self_attn.to_q")
+      val = val.replace("self_attn.k_proj", "self_attn.to_k")
+      val = val.replace("self_attn.v_proj", "self_attn.to_v")
+      val = val.replace("self_attn.o_proj", "self_attn.to_out")
+      val = val.replace("self_attn.q_norm", "self_attn.norm_q")
+      val = val.replace("self_attn.k_norm", "self_attn.norm_k")
+      return val
+    return val
+
+  for key, value in text_mapping.items():
+    mapping[key] = replace_prefix(value)
+
+  return mapping
+
+
+def COSMOS3_TEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Cosmos3-Nano Reasoner text-only."""
+  if "text_config" in config:
+    text_config = config["text_config"]
+  else:
+    text_config = config
+
+  n_layers_text = text_config["num_hidden_layers"]
+  text_hooks = QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+      config={"num_hidden_layers": n_layers_text},
+      maxtext_config=maxtext_config,
+      scan_layers=scan_layers,
+      saving_to_hf=saving_to_hf,
+  )
+  return text_hooks
+
+
 def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Qwen3-VL."""
   mapping = {}
@@ -3885,6 +3951,7 @@ PARAM_MAPPING = {
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "cosmos3-nano-reasoner": COSMOS3_TEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -3937,6 +4004,7 @@ HOOK_FNS = {
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "cosmos3-nano-reasoner": COSMOS3_TEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,

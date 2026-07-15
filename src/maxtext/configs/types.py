@@ -263,6 +263,7 @@ ModelName = Literal[
     "qwen3-480b-a35b",
     "qwen3-vl-2b",
     "qwen3-vl-4b",
+    "cosmos3-nano-reasoner",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",

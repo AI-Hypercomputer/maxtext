@@ -184,7 +184,9 @@ def main(argv: Sequence[str]) -> None:
           positions=position_ids,  # pyrefly: ignore[bad-argument-type]
           mrope_deltas=mrope_position_deltas,  # pyrefly: ignore[bad-argument-type]
           images=processor_outputs.pixel_values if config.use_multimodal else None,  # pyrefly: ignore[bad-argument-type]
-          image_masks=processor_outputs.pixel_mask if config.use_multimodal and "llama4" in config.model_name else None,  # pyrefly: ignore[bad-argument-type]
+          image_masks=processor_outputs.pixel_mask
+          if config.use_multimodal and "llama4" in config.model_name
+          else None,  # pyrefly: ignore[bad-argument-type]
           videos=getattr(processor_outputs, "video_values", None) if config.use_multimodal else None,
           audio_values=processor_outputs.audio_values if config.use_audio else None,  # pyrefly: ignore[bad-argument-type]
           audio_masks=processor_outputs.audio_mask if config.use_audio else None,  # pyrefly: ignore[bad-argument-type]
@@ -220,6 +222,7 @@ def main(argv: Sequence[str]) -> None:
   # Get results
   for i in range(_NUM_STREAMS):
     results = [t.get_result_at_slot(i).tokens.item() for t in sampled_tokens_list]
+    print(f"DEBUG: raw token ids for stream {i}: {results}")
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
 
