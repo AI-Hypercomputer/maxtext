@@ -863,12 +863,13 @@ class TrainCompile(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "scanned", "scan_layers": "true"},
+      {"testcase_name": "linen_scanned", "scan_layers": "true", "enable_nnx": "False"},
+      {"testcase_name": "nnx_scanned", "scan_layers": "true", "enable_nnx": "True"},
   )
   @pytest.mark.cpu_only
-  def test_deepseek4(self, scan_layers):
-    # test deepseek4 compile (Linen-only: DeepSeek NNX decoder rewrite is a follow-up PR).
-    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}.pickle"
+  def test_deepseek4(self, scan_layers, enable_nnx):
+    # test deepseek4 compile across Linen and NNX
+    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}_{enable_nnx}.pickle"
     train_compile_main(
         (
             "",
@@ -884,9 +885,9 @@ class TrainCompile(parameterized.TestCase):
             "attention=dot_product",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
-            "enable_nnx=False",
-            "pure_nnx=False",
-            "pure_nnx_decoder=False",
+            f"enable_nnx={enable_nnx}",
+            f"pure_nnx={enable_nnx}",
+            f"pure_nnx_decoder={enable_nnx}",
         )
     )
 
