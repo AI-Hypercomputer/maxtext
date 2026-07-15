@@ -44,10 +44,16 @@ def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
   if config.enable_diloco:
     data_sharding = create_sharding(
-        mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=config.logical_axis_rules
+        mesh,
+        ["diloco"] + config.input_data_sharding_logical_axes,
+        rules=config.logical_axis_rules,
     )
   else:
-    data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
+    data_sharding = create_sharding(
+        mesh,
+        config.input_data_sharding_logical_axes,
+        rules=config.logical_axis_rules,
+    )
   return data_sharding
 
 
@@ -71,7 +77,13 @@ def _get_sharding_desc(inputs, extra_stack_level):
 
 
 def maybe_shard_with_name(
-    inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0, sharding_desc="", logical_axes=None
+    inputs,
+    named_sharding,
+    shard_mode,
+    debug_sharding=False,
+    extra_stack_level=0,
+    sharding_desc="",
+    logical_axes=None,
 ):
   """
   In auto shardmode, this function hints inputs follow given named_sharding.
@@ -93,10 +105,21 @@ def maybe_shard_with_name(
       logical_axes = tuple(logical_axes)
 
     pspec = remove_size_one_mesh_axis(getattr(named_sharding, "spec"), getattr(named_sharding, "mesh"))
-    log_key = (sharding_desc, str(jax.typeof(inputs)), tuple(pspec), extra_stack_level)
+    log_key = (
+        sharding_desc,
+        str(jax.typeof(inputs)),
+        tuple(pspec),
+        extra_stack_level,
+    )
     if log_key not in _LOGGED_ACTIVATION_SHARDINGS:
-      max_logging.info(f"{sharding_desc} Logical: {log_key[1]:.<60} {logical_axes}.", stacklevel=3 + extra_stack_level)
-      max_logging.info(f"{sharding_desc} Physical: {log_key[1]:.<60} {log_key[2]}.", stacklevel=3 + extra_stack_level)
+      max_logging.info(
+          f"{sharding_desc} Logical: {log_key[1]:.<60} {logical_axes}.",
+          stacklevel=3 + extra_stack_level,
+      )
+      max_logging.info(
+          f"{sharding_desc} Physical: {log_key[1]:.<60} {log_key[2]}.",
+          stacklevel=3 + extra_stack_level,
+      )
       _LOGGED_ACTIVATION_SHARDINGS.add(log_key)
 
       _ACTIVATION_SHARDINGS_DUMP.append(
@@ -114,8 +137,14 @@ def maybe_shard_with_name(
 
 
 def maybe_shard_with_pspec(
-    inputs, pspec: jax.sharding.PartitionSpec | None, mesh, shard_mode, debug_sharding=False, extra_stack_level=0
+    inputs,
+    pspec: jax.sharding.PartitionSpec | None,
+    mesh,
+    shard_mode,
+    debug_sharding=False,
+    extra_stack_level=0,
 ):
+  """Shard inputs using a PartitionSpec, delegating to maybe_shard_with_name."""
   if pspec is None:
     return None
   sharding = NamedSharding(mesh, pspec)
@@ -129,7 +158,15 @@ def maybe_shard_with_pspec(
 
 
 def maybe_shard_with_logical(
-    inputs, logical_axes, mesh, shard_mode, rules=None, debug_sharding=False, extra_stack_level=0, sharding_desc=""
+    inputs,
+    logical_axes,
+    mesh,
+    shard_mode,
+    rules=None,
+    debug_sharding=False,
+    extra_stack_level=0,
+    sharding_desc="",
+    skip_trivial_specs=False,
 ):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
@@ -143,6 +180,9 @@ def maybe_shard_with_logical(
     sharding_desc = _get_sharding_desc(inputs, extra_stack_level + 1)
 
   named_sharding = create_sharding(mesh, logical_axes, rules=rules)
+
+  if skip_trivial_specs and all(ax is None or ax == () for ax in named_sharding.spec):
+    return inputs
 
   return maybe_shard_with_name(
       inputs,
@@ -484,7 +524,10 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   # Check if the amount of unsharded parameters is within the tolerance and
   # raise an exception if it is not.
   _raise_if_unsharded_exceeds_tolerance(
-      unsharded_params_total_size, total_num_params, tolerance, problematic_tensors_details
+      unsharded_params_total_size,
+      total_num_params,
+      tolerance,
+      problematic_tensors_details,
   )
 
 
@@ -568,7 +611,9 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       # When quantization=fp8 is enabled the sharded_fp32_params
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
-    state_mesh_shardings = state_mesh_shardings.replace(params=dict(prev_params_shardings, **sharded_fp32_params))  # pyrefly: ignore[bad-unpacking]
+    state_mesh_shardings = state_mesh_shardings.replace(
+        params=dict(prev_params_shardings, **sharded_fp32_params)
+    )  # pyrefly: ignore[bad-unpacking]
   return prev_params_shardings, state_mesh_shardings
 
 
@@ -673,7 +718,9 @@ def maybe_update_params_sharding_with_opt_nnx(
     return var
 
   new_model_shardings = jax.tree_util.tree_map_with_path(
-      _update_model_var, model_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable)
+      _update_model_var,
+      model_shardings,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
   )
   # Use jax.tree_util.tree_map (identity) to create a new nnx.State via JAX's unflatten
   # mechanism (not the nnx.State constructor). This is critical because:
@@ -691,12 +738,9 @@ def maybe_update_params_sharding_with_opt_nnx(
 def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_shardings):
   """Build the train-step input shardings under shard_optimizer_over_data (Zero-1).
 
-  Model params on input use the original pre-Zero-1 sharding (params_shardings),
-  while the rest
-  of the state — including the optimizer state — keeps the Zero-1 layout from
-  state_mesh_shardings,
-  so the optimizer state input matches its output. When
-  shard_optimizer_over_data is False,
+  Model params on input use the original pre-Zero-1 sharding (params_shardings), while the rest
+  of the state — including the optimizer state — keeps the Zero-1 layout from state_mesh_shardings,
+  so the optimizer state input matches its output. When shard_optimizer_over_data is False,
   state_mesh_shardings passes through unchanged.
   """
   if not config.shard_optimizer_over_data:
@@ -705,11 +749,7 @@ def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_
     return state_mesh_shardings.replace(params=params_shardings)
   # nnx.State has no .replace: shallow-copy via tree_map (preserves nested container
   # types) and overlay params_shardings under input_state.model.
-  input_state = jax.tree_util.tree_map(
-      lambda x: x,
-      state_mesh_shardings,
-      is_leaf=lambda x: isinstance(x, nnx.Variable),
-  )
+  input_state = jax.tree_util.tree_map(lambda x: x, state_mesh_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
   def _overlay(model_node, params_node):
     for k, pv in params_node.items():

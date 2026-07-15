@@ -109,16 +109,13 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
 @pytest.mark.parametrize(
     "quantization",
     [
-        "",
+        (""),
         pytest.param(
             "int8",
             marks=pytest.mark.skip(
-                reason=(
-                    "NNX int8 param-only generation is a convert-on-load case"
-                    " (the fp32 training checkpoint has no AqtDotGeneral state"
-                    " the int8 model expects); tracked as a follow-up alongside"
-                    " layerwise_quantization."
-                )
+                reason="NNX int8 param-only generation is a convert-on-load case (the fp32 training "
+                "checkpoint has no AqtDotGeneral state the int8 model expects); tracked as a follow-up "
+                "alongside layerwise_quantization."
             ),
         ),
     ],
@@ -138,16 +135,13 @@ def test_param_ckpt_generation_with_autoselected_attention(quantization, capsys)
 @pytest.mark.parametrize(
     "quantization",
     [
-        "",
+        (""),
         pytest.param(
             "int8",
             marks=pytest.mark.skip(
-                reason=(
-                    "NNX int8 param-only generation is a convert-on-load case"
-                    " (the fp32 training checkpoint has no AqtDotGeneral state"
-                    " the int8 model expects); tracked as a follow-up alongside"
-                    " layerwise_quantization."
-                )
+                reason="NNX int8 param-only generation is a convert-on-load case (the fp32 training "
+                "checkpoint has no AqtDotGeneral state the int8 model expects); tracked as a follow-up "
+                "alongside layerwise_quantization."
             ),
         ),
     ],

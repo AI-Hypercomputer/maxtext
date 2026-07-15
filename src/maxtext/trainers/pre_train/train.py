@@ -36,6 +36,16 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
+
+import flax
+
+# Flax >= 0.12 eagerly shards every nnx.Variable that carries sharding metadata,
+# which conflicts with MaxText's own explicit sharding flow. Disable the feature
+# so MaxText stays in control of when resharding happens.
+try:
+  flax.config.update("flax_always_shard_variable", False)
+except LookupError:
+  pass
 from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
@@ -425,10 +435,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       (loss, (aux, new_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
       nnx.update(state.model, nnx.State.merge(custom_grads, new_rest))
 
-  raw_grads = jax.tree_util.tree_map(
-      lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
-      raw_grads,
-  )
+  if config.grad_dtype != jnp.float32:
+    raw_grads = jax.tree_util.tree_map(
+        lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
+        raw_grads,
+    )
   if config.parameter_memory_host_offload:
     raw_grads = jax.device_put(
         raw_grads,
