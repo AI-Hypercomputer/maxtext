@@ -32,14 +32,14 @@ ______________________________________________________________________
 
 For interactive playground setups on Google Colab or local JupyterLab, we provide fully detailed demo notebooks:
 
-- **Qwen3 Native LoRA Demo**: [qwen3_native_lora_demo.ipynb](../../examples/qwen3_native_lora_demo.ipynb)
-- **Gemma4 Native LoRA Demo**: [gemma4_native_lora_demo.ipynb](../../examples/gemma4_native_lora_demo.ipynb)
+- **Qwen3 Native LoRA Demo**: [qwen3_native_lora_demo.ipynb](../../../src/maxtext/examples/qwen3_native_lora_demo.ipynb)
+- **Gemma4 Native LoRA Demo**: [gemma4_native_lora_demo.ipynb](../../../src/maxtext/examples/gemma4_native_lora_demo.ipynb)
 
 ______________________________________________________________________
 
 ## Setup environment variables
 
-Login to Hugging Face. Provide your access token when prompted:
+Log in to Hugging Face. Provide your access token when prompted:
 
 ```bash
 hf auth login
@@ -50,6 +50,7 @@ Set the following environment variables before running LoRA Fine-tuning.
 ```sh
 # -- Model configuration --
 export MODEL_NAME=<MODEL_NAME> # e.g., 'qwen3-0.6b' or 'gemma4-e2b'
+export TOKENIZER_PATH=<TOKENIZER_PATH> # e.g., 'Qwen/Qwen3-0.6B' or 'google/gemma-4-E2B-it'
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/my-output-directory or /path/to/my-output-directory
@@ -84,7 +85,7 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ### Option 2: Converting a Hugging Face checkpoint
 
-Refer to the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Similar to Option 1, you can set the following environment and move on.
+Refer to the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a Hugging Face checkpoint to MaxText. Similar to Option 1, you can set the following environment variable and move on.
 
 ```sh
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items or /path/to/my-model-checkpoint/0/items
@@ -92,9 +93,9 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ______________________________________________________________________
 
-## Run Native LoRA Supervised Fine-Tuning (SFT)
+## Run Native LoRA Fine-Tuning
 
-Execute the following command to begin SFT training on a Hugging Face dataset (e.g. GSM8K) using the native SFT entrypoint `train_sft_native.py`:
+Execute the following command to begin LoRA fine-tuning on a Hugging Face dataset (e.g. GSM8K) using the native SFT entrypoint `train_sft_native.py`:
 
 ```sh
 python3 -m maxtext.trainers.post_train.sft.train_sft_native \
@@ -103,7 +104,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft_native \
     base_output_directory="${BASE_OUTPUT_DIRECTORY?}" \
     model_name="${MODEL_NAME?}" \
     load_parameters_path="${MAXTEXT_CKPT_PATH?}" \
-    tokenizer_path="Qwen/Qwen3-0.6B" \
+    tokenizer_path="${TOKENIZER_PATH?}" \
     hf_path="${DATASET_NAME?}" \
     train_split="${TRAIN_SPLIT?}" \
     hf_data_dir="${HF_DATA_DIR?}" \
