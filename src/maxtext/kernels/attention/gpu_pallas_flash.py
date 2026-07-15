@@ -51,6 +51,17 @@ from maxtext.common.common_types import DEFAULT_MASK_VALUE
 # (if deprecated on newer jax) alias, so prefer triton.dot but fall back.
 _dot = getattr(plgpu, "dot", None) or pl.dot
 
+
+def _shape_dtype_like(x):
+  """jax.ShapeDtypeStruct.like equivalent; the classmethod postdates jax 0.10.0 (the repo's pinned floor).
+
+  Only the per-shard shape and dtype matter for a pallas_call out_shape, so the
+  fallback drops the sharding that .like would otherwise copy.
+  """
+  like = getattr(jax.ShapeDtypeStruct, "like", None)
+  return like(x) if like is not None else jax.ShapeDtypeStruct(x.shape, x.dtype)
+
+
 _LOG2E = math.log2(math.e)
 
 
@@ -422,7 +433,7 @@ def _preprocess_backward(out, do, lse, block_q: int, debug: bool, interpret: boo
   batch_size, seq_len, num_heads, head_dim = out.shape
   head_dim_padded = pl.next_power_of_2(head_dim)
   dim_chunk = _pick_dim_chunk(head_dim_padded)
-  out_shape = jax.ShapeDtypeStruct.like(lse)
+  out_shape = _shape_dtype_like(lse)
   delta = pl.pallas_call(
       functools.partial(_preprocess_backward_kernel, head_dim=head_dim, dim_chunk=dim_chunk),
       grid=(pl.cdiv(seq_len, block_q), batch_size, num_heads),
@@ -700,9 +711,9 @@ def _mha_backward(
 
     delta = _preprocess_backward(out, do, lse, block_q, debug, interpret)
     out_shapes = [
-        jax.ShapeDtypeStruct.like(q),
-        jax.ShapeDtypeStruct.like(k),
-        jax.ShapeDtypeStruct.like(v),
+        _shape_dtype_like(q),
+        _shape_dtype_like(k),
+        _shape_dtype_like(v),
     ]
 
     in_specs: list[pl.BlockSpec | None] = [
