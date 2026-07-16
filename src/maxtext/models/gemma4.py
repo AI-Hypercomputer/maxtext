@@ -15,13 +15,14 @@
 """Specialized layers for Gemma 4."""
 
 import jax
+from jax.experimental import xla_metadata
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
 from flax import nnx
-from typing import Optional
+from typing import Optional, Any
 
 from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
 from maxtext.layers import initializers
@@ -35,6 +36,7 @@ import jax.sharding
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 
 
 GEMMA4_ATTENTION_PATTERN = (
@@ -407,9 +409,8 @@ Gemma4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
-
 class Gemma4ScannableBlock(nnx.Module):
-  """A repeatable block of Gemma4 decoder layers."""
+  """A repeatable block of Gemma4 decoder layers, scanning local layers."""
 
   def __init__(
       self,
@@ -418,7 +419,8 @@ class Gemma4ScannableBlock(nnx.Module):
       model_mode: str,
       rngs: nnx.Rngs,
       quant: None | Quant = None,
-      num_of_layers: int = 1,
+      num_of_layers: int = 6,
+      remat_policy_fn: Any = None,
   ):
     """Initializes the instance.
 
@@ -429,6 +431,7 @@ class Gemma4ScannableBlock(nnx.Module):
       rngs: The random number generators for initialization.
       quant: The quantization configuration.
       num_of_layers: The number of layers in the model.
+      remat_policy_fn: The resolved rematerialization policy function.
     """
     self.config = config
     self.mesh = mesh
@@ -436,20 +439,96 @@ class Gemma4ScannableBlock(nnx.Module):
     self.quant = quant
     self.rngs = rngs
     self.num_of_layers = num_of_layers
+    self.remat_policy_fn = remat_policy_fn
 
-    for layer_id in range(self.num_of_layers):
-      attention_type = get_attention_type(layer_id)
-      layer_name = f"layers_{layer_id}"
-      layer = Gemma4DecoderLayer(
+    # Pattern is 5 local, 1 global.
+    self.num_local = min(5, num_of_layers)
+    self.num_global = max(0, num_of_layers - 5)
+
+    if self.num_local > 0:
+      self.local_layers = nnx_wrappers.create_scanned_layers(
+          Gemma4DecoderLayer,
+          config=self.config,
+          mesh=self.mesh,
+          model_mode=self.model_mode,
+          quant=self.quant,
+          length=self.num_local,
+          metadata_axis_name="local_layers",
+          rngs=self.rngs,
+          attention_type=AttentionType.LOCAL_SLIDING,
+          layer_idx=0,
+      )
+    else:
+      self.local_layers = None
+
+    if self.num_global > 0:
+      self.global_layer = Gemma4DecoderLayer(
           config=self.config,
           mesh=self.mesh,
           model_mode=self.model_mode,
           rngs=self.rngs,
           quant=self.quant,
-          attention_type=attention_type,
-          layer_idx=layer_id,
+          attention_type=AttentionType.GLOBAL,
+          layer_idx=5,
       )
-      setattr(self, layer_name, layer)
+    else:
+      self.global_layer = None
+
+  def _apply_local_layers(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      slot=None,
+      page_state=None,
+      previous_chunk=None,
+      bidirectional_mask=None,
+  ):
+    graphdef, params, state = nnx.split(self.local_layers, nnx.Param, ...)
+
+    scan_axis = self.config.param_scan_axis
+    if scan_axis != 0:
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+
+    def scan_body(carry, scanned_vars):
+      current_params, current_state = scanned_vars
+      layer = nnx.merge(graphdef, current_params, current_state)
+      layer_out = layer(
+          carry,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          slot=slot,
+          page_state=page_state,
+          previous_chunk=previous_chunk,
+          bidirectional_mask=bidirectional_mask,
+      )
+      new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+      return new_carry, nnx.state(layer)
+
+    if self.config.remat_policy != "none":
+      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
+      scan_body_for_scan = jax.checkpoint(
+          scan_body,
+          policy=self.remat_policy_fn,
+          prevent_cse=prevent_cse,
+      )
+    else:
+      scan_body_for_scan = scan_body
+
+    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+      final_carry, scanned_state = jax.lax.scan(scan_body_for_scan, y, (params, state))
+
+    if scan_axis != 0:
+      scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
+      scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
+      scanned_state = nnx.State.merge(scanned_params, scanned_other)
+
+    nnx.update(self.local_layers, scanned_state)
+    return final_carry
 
   def __call__(
       self,
@@ -471,22 +550,108 @@ class Gemma4ScannableBlock(nnx.Module):
     y = inputs
 
     updated_kvs = []
-    for layer_id in range(self.num_of_layers):
-      current_kv = kv_cache[layer_id] if kv_cache is not None else None
-      y, new_kv = getattr(self, f"layers_{layer_id}")(
+
+    if kv_cache is not None:
+      # Decode/inference path. Per-layer kv_cache slices need in-place-safe updates,
+      # which jax.lax.scan can't provide (it stacks/copies the carry) - see the same
+      # constraint on the outer block loop in nnx_decoders._apply_layers_sequentially.
+      # So apply local layers via a static unroll instead of _apply_local_layers's scan.
+      if self.local_layers is not None:
+        graphdef, params, state = nnx.split(self.local_layers, nnx.Param, ...)
+        scan_axis = self.config.param_scan_axis
+        if scan_axis != 0:
+          params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+        for i in range(self.num_local):
+          current_params = jax.tree.map(lambda x, i=i: x[i], params)
+          current_state = jax.tree.map(lambda x, i=i: x[i], state)
+          layer = nnx.merge(graphdef, current_params, current_state)
+          y, new_kv = layer(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              slot=slot,
+              page_state=page_state,
+              previous_chunk=previous_chunk,
+              bidirectional_mask=bidirectional_mask,
+              kv_cache=kv_cache[i],
+              attention_metadata=attention_metadata,
+          )
+          updated_kvs.append(new_kv)
+    elif self.local_layers is not None:
+      y = self._apply_local_layers(
           y,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
-          previous_chunk=previous_chunk,
           slot=slot,
+          page_state=page_state,
+          previous_chunk=previous_chunk,
           bidirectional_mask=bidirectional_mask,
-          kv_cache=current_kv,
-          attention_metadata=attention_metadata,
       )
+
+    if self.global_layer is not None:
       if kv_cache is not None:
+        # Decode/inference path: same in-place-safe constraint as the local layers above,
+        # so call the global layer directly instead of wrapping it in a scan.
+        y, new_kv = self.global_layer(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            previous_chunk=previous_chunk,
+            slot=slot,
+            page_state=page_state,
+            bidirectional_mask=bidirectional_mask,
+            kv_cache=kv_cache[self.num_local],
+            attention_metadata=attention_metadata,
+        )
         updated_kvs.append(new_kv)
+      else:
+        graphdef_g, state_g = nnx.split(self.global_layer)
+
+        # Add a dummy dimension of 1 for scanning
+        state_g = jax.tree.map(lambda x: jnp.expand_dims(x, 0), state_g)
+
+        def scan_body_g(carry, curr_state):
+          layer = nnx.merge(graphdef_g, curr_state)
+          layer_out = layer(
+              carry,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              previous_chunk=previous_chunk,
+              slot=slot,
+              bidirectional_mask=bidirectional_mask,
+          )
+          new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+          return new_carry, nnx.state(layer)
+
+        # Remat the global layer symmetrically with the local layers. The global
+        # layer runs full-sequence (not sliding-window) attention, so it holds the
+        # largest activation residual in the block; leaving it un-rematted would
+        # keep those activations live across all scanned blocks.
+        if self.config.remat_policy != "none":
+          prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
+          scan_body_g_for_scan = jax.checkpoint(
+              scan_body_g,
+              policy=self.remat_policy_fn,
+              prevent_cse=prevent_cse,
+          )
+        else:
+          scan_body_g_for_scan = scan_body_g
+
+        with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+          y, scanned_state_g = jax.lax.scan(scan_body_g_for_scan, y, state_g)
+
+        # Remove the dummy dimension
+        scanned_state_g = jax.tree.map(lambda x: jnp.squeeze(x, 0), scanned_state_g)
+
+        nnx.update(self.global_layer, scanned_state_g)
 
     if kv_cache is not None:
       return y, tuple(updated_kvs)

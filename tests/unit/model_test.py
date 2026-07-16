@@ -42,19 +42,22 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Init pyconfig."""
+    default_kwargs = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "base_num_decoder_layers": 2,
+        "attention": "dot_product",
+        "max_target_length": 16,
+        "base_emb_dim": 32,
+        "base_num_query_heads": 2,
+        "base_num_kv_heads": 2,
+        "max_prefill_predict_length": 4,
+    }
+    default_kwargs.update(kwargs)
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        base_num_decoder_layers=2,
-        attention="dot_product",
-        max_target_length=16,
-        base_emb_dim=32,
-        base_num_query_heads=2,
-        base_num_kv_heads=2,
-        max_prefill_predict_length=4,
-        **kwargs,
+        **default_kwargs,
     )
     return config
 
@@ -196,6 +199,42 @@ class TestModel(unittest.TestCase):
           equal_nan=False,
       )
 
+  def test_gemma4_model(self):
+    """Test model execution with gemma4 block."""
+    new_config = self.init_pyconfig(
+        decoder_block="gemma4",
+        share_kv_projections=True,
+        use_post_attn_norm=True,
+        use_post_ffw_norm=True,
+        base_num_decoder_layers=6,
+        scan_layers=True,
+    )
+    devices_array = maxtext_utils.create_device_mesh(new_config)
+    mesh = Mesh(devices_array, new_config.mesh_axes)
+    model = models.transformer_as_linen(config=new_config, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+
+    ids, decoder_segment_ids, decoder_positions = self.get_data()
+
+    transformer_vars = model.init(
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+    )
+
+    logits = model.apply(
+        transformer_vars,
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+    self.assertEqual(logits.shape, (new_config.global_batch_size_to_train_on, new_config.max_target_length, new_config.vocab_size))
+
 
 if __name__ == "__main__":
   unittest.main()
+

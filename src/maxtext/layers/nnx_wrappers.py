@@ -706,3 +706,94 @@ def to_linen_class(
   ToLinenPartial.module_class = base_nnx_class
 
   return ToLinenPartial
+
+
+def create_scanned_layers(
+    decoder_layer_class: tp.Callable[..., Module],
+    config: Any,
+    mesh: Any,
+    model_mode: str,
+    quant: Any,
+    length: int,
+    metadata_axis_name: str,
+    rngs: Rngs,
+    **layer_kwargs,
+) -> Module | None:
+  """Creates a scanned stack of layers using jax.lax.scan for memory-efficient initialization."""
+  import jax.numpy as jnp  # Local import
+
+  if length == 0:
+    return None
+  scan_axis = config.param_scan_axis
+
+  # Fork rngs to get per-layer RNG states for scanning
+  try:
+    forked_rngs = rngs.fork(split=length)
+  except:  # pylint: disable=bare-except
+    pass
+
+  rngs_graphdef, rngs_state = nnx.split(forked_rngs)
+
+  first_rng_state = jax.tree.map(lambda x: x[0], rngs_state)
+  ref_rngs = nnx.merge(rngs_graphdef, first_rng_state)
+  ref_layer = decoder_layer_class(
+      config=config, mesh=mesh, quant=quant, model_mode=model_mode, rngs=ref_rngs, **layer_kwargs
+  )
+  layer_graphdef, _, _ = nnx.split(ref_layer, nnx.Param, ...)
+  del ref_layer
+
+  def scan_body(carry, rng_state_slice):
+    layer_rngs = nnx.merge(rngs_graphdef, rng_state_slice)
+    layer = decoder_layer_class(
+        config=config,
+        mesh=mesh,
+        quant=quant,
+        model_mode=model_mode,
+        rngs=layer_rngs,
+        **layer_kwargs,
+    )
+    _, params, rest = nnx.split(layer, nnx.Param, ...)
+    return carry, (params, rest)
+
+  _, (stacked_params, stacked_rest) = jax.lax.scan(scan_body, None, rngs_state)
+
+  if scan_axis != 0:
+    stacked_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), stacked_params)
+
+  def _add_scan_metadata(state, axis):
+    def _update_leaf(leaf):
+      if hasattr(leaf, "replace") and hasattr(leaf, "value"):
+        replace_kwargs = {}
+        if hasattr(leaf, "get_metadata"):
+          replace_kwargs.update(leaf.get_metadata())
+
+        replace_kwargs[nnx.PARTITION_NAME] = metadata_axis_name
+        replace_kwargs["param_scan_axis"] = axis
+
+        for key in ["sharding", "out_sharding", "kernel_axes", "sharding_names"]:
+          val = getattr(leaf, key, None)
+          if val is None and key in replace_kwargs:
+            val = replace_kwargs[key]
+
+          if val is not None:
+            if isinstance(val, str):
+              val = (val,)
+            if isinstance(val, tuple):
+              l = list(val)
+              # Safely insert the scan axis into the logical axes string
+              if metadata_axis_name not in l:
+                insert_idx = min(axis, len(l))
+                l.insert(insert_idx, metadata_axis_name)
+                replace_kwargs[key] = tuple(l)
+
+        return leaf.replace(**replace_kwargs)
+      return leaf
+
+    # We must use a custom is_leaf to catch the VariableState instances
+    return jax.tree.map(_update_leaf, state, is_leaf=lambda x: hasattr(x, "replace") and hasattr(x, "value"))
+
+  stacked_params = _add_scan_metadata(stacked_params, scan_axis)
+  stacked_rest = _add_scan_metadata(stacked_rest, 0)
+
+  return nnx.merge(layer_graphdef, stacked_params, stacked_rest)
+
