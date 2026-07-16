@@ -498,13 +498,13 @@ class NNXDecoder(nnx.Module):
     else:
       self.num_dense_layers = config.first_num_dense_layers
       for i in range(self.num_dense_layers):
-        self._create_and_register_named_layer(dense_cls, rngs, "dense_layers", i)
+        self._create_and_register_layer(dense_cls, rngs, "dense_layers", i)
       self.num_moe_outside_pipeline = (
           config.num_decoder_layers - config.first_num_dense_layers
       ) - config.pipeline_parallel_layers
       if self.num_moe_outside_pipeline > 0:
         for i in range(self.num_moe_outside_pipeline):
-          self._create_and_register_named_layer(moe_cls, rngs, "moe_layers_outside_pipeline", i)
+          self._create_and_register_layer(moe_cls, rngs, "moe_layers_outside_pipeline", i)
 
   def _init_pipeline_generic(self, decoder_block_classes, rngs):
     """Initializes generic decoder layers outside pipeline."""
@@ -522,7 +522,7 @@ class NNXDecoder(nnx.Module):
       else:
         self.num_layers_outside_pipeline = remaining_layers
         for i in range(self.num_layers_outside_pipeline):
-          self._create_and_register_named_layer(base_cls, rngs, "layers_outside_pipeline", i)
+          self._create_and_register_layer(base_cls, rngs, "layers_outside_pipeline", i)
 
   def _init_scanned_layers(self, decoder_block_classes, rngs, mesh):
     """Initializes decoder layers with scanning (non-pipeline)."""
@@ -689,12 +689,9 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
           **layer_kwargs,
       )
-    else:
-      self.layers = []
 
   def _init_sequential_layers(self, decoder_block_classes, rngs):
     """Initializes decoder layers sequentially (no scanning)."""
-    self.layers = []
 
     if self.is_deepseek:
       self._init_sequential_deepseek(decoder_block_classes, rngs)
@@ -706,9 +703,9 @@ class NNXDecoder(nnx.Module):
     config = self.config
     dense_cls, moe_cls = decoder_block_classes
     for i in range(config.first_num_dense_layers):
-      self._create_and_register_named_layer(dense_cls, rngs, "dense_layers", i)
+      self._create_and_register_layer(dense_cls, rngs, "dense_layers", i)
     for i in range(config.num_decoder_layers - config.first_num_dense_layers):
-      self._create_and_register_named_layer(moe_cls, rngs, "moe_layers", i)
+      self._create_and_register_layer(moe_cls, rngs, "moe_layers", i)
 
   def _init_sequential_generic(self, decoder_block_classes, rngs):
     """Initializes sequential generic decoder layers with per-architecture layer_kwargs."""
@@ -736,7 +733,7 @@ class NNXDecoder(nnx.Module):
       elif config.decoder_block == DecoderBlockType.OLMO3:
         layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
 
-      self._create_and_register_named_layer(layer_cls, rngs, "layers", lyr, **layer_kwargs)
+      self._create_and_register_layer(layer_cls, rngs, "layers", lyr, **layer_kwargs)
 
   def _init_gemma4_small_layers(self, rngs):
     """Eagerly builds the Gemma4-small (E2B/E4B) per-layer-input embedder and one DISTINCT
@@ -749,7 +746,6 @@ class NNXDecoder(nnx.Module):
     ``_create_and_register_layer``.
     """
     cfg = self.config
-    self.layers = []
     # Only register the PLE submodule when it exists (mirrors the optional position_embedder
     # pattern); assigning None first would make nnx treat the attribute as static.
     if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
@@ -796,14 +792,7 @@ class NNXDecoder(nnx.Module):
     )
 
   def _create_and_register_layer(self, layer_cls, rngs, base_name, i, **layer_kwargs):
-    attr_name = f"{base_name}_{i}"
-    layer = self._create_single_layer(layer_cls, rngs, **layer_kwargs)
-    setattr(self, attr_name, layer)
-    self.layers.append(layer)
-
-  def _create_and_register_named_layer(self, layer_cls, rngs, base_name, i, **layer_kwargs):
-    """Creates a layer registered ONLY via named attribute. Used by pipeline-outside paths
-    to avoid double-registration when self.layers list is also tracked elsewhere."""
+    """Creates a layer registered ONLY via named attribute."""
     attr_name = f"{base_name}_{i}"
     layer = self._create_single_layer(layer_cls, rngs, **layer_kwargs)
     setattr(self, attr_name, layer)
@@ -2147,7 +2136,7 @@ class NNXDecoder(nnx.Module):
     cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, num_kv_shared)
 
     for lyr in range(cfg.num_decoder_layers):
-      layer = self.layers[lyr]
+      layer = getattr(self, f"layers_{lyr}")
       donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
       is_donor = gemma4_small.is_kv_donor_layer(lyr, layer_types, num_kv_shared)
 
