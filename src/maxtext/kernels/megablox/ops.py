@@ -74,6 +74,7 @@ def gmm(
     qwix_rule: qwix.QtRule | None = None,
     use_manual_quantization: bool = False,  # used in batchsplit
     use_gmm_v2: bool = False,
+    partial_sum: jnp.ndarray | None = None,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -112,6 +113,7 @@ def gmm(
       lhs_vma_axes,
       rhs_vma_axes,
       use_gmm_v2,
+      partial_sum,
   )
 
 
@@ -142,6 +144,7 @@ def _gmm_fwd(
     lhs_vma_axes: tuple = tuple(),
     rhs_vma_axes: tuple = tuple(),
     use_gmm_v2: bool = False,
+    partial_sum: jnp.ndarray | None = None,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -200,6 +203,7 @@ def _gmm_fwd(
             tile_n=tiling[2],
         ),
         preferred_element_type=preferred_element_type,
+        partial_sum=partial_sum,
     )
   elif use_tokamax_backend:
     # manual_axis_type is for gmm with shard_map check_vma=True, needs tokamax > 0.0.12
@@ -234,7 +238,7 @@ def _gmm_fwd(
     for axis in lhs_vma_axes:
       out = jax.lax.pcast(out, axis_name=axis, to="varying")
 
-  return out, (lhs, rhs, group_sizes, group_offset)
+  return out, (lhs, rhs, group_sizes, group_offset, partial_sum)
 
 
 def _gmm_bwd(
@@ -256,12 +260,13 @@ def _gmm_bwd(
         jnp.ndarray | qpl.QArray,
         jnp.ndarray,
         jnp.ndarray | None,
+        jnp.ndarray | None,
     ],
     grad: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray, jnp.ndarray | None]:
   """Backward function for throughput GMM VJP."""
   del preferred_element_type
-  lhs, rhs, group_sizes, group_offset = residual
+  lhs, rhs, group_sizes, group_offset, partial_sum_fwd = residual
   num_actual_groups = rhs.shape[0]
 
   # Jargon used here:
@@ -406,4 +411,5 @@ def _gmm_bwd(
   #
   # TODO(tgale, enriqueps, apaske): Fuse this transposition into the tgmm.
   drhs = drhs.swapaxes(1, 2) if transpose_rhs else drhs
-  return dlhs, drhs, None, None, grad
+  dpartial_sum = grad if partial_sum_fwd is not None else None
+  return dlhs, drhs, None, None, grad, dpartial_sum

@@ -777,7 +777,7 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
           use_no_op_mappings=use_no_op_mappings,
           pad_id=tokenizer_pad_id,
       )
-      actor_model.config = None
+      actor_model.config = None  # pyrefly: ignore[missing-attribute]
     actor_mesh = reference_mesh
   else:
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
@@ -902,7 +902,7 @@ def from_pretrained(
     load_parameters_path = epath.Path(config.base_output_directory) / "0" / "items"
     # Create a copied Pydantic model with the updated values
     pydantic_config = getattr(config, "_pydantic_config", config)
-    new_config = pydantic_config.model_copy(
+    new_config = pydantic_config.model_copy(  # pyrefly: ignore[missing-attribute]
         update={
             "load_parameters_path": load_parameters_path,
         }
@@ -930,7 +930,7 @@ def from_pretrained(
   sharded_state = nnx.state(model)
 
   if mesh is None:
-    mesh = model.mesh
+    mesh = model.mesh  # pyrefly: ignore[missing-attribute]
 
   with mesh:
     if config.load_parameters_path:
@@ -1114,7 +1114,7 @@ def from_pretrained(
       )
 
       if is_nnx_checkpoint:
-        restored_root = restored["base"] if has_base_key else restored
+        restored_root = restored["base"] if has_base_key else restored  # pyrefly: ignore[unbound-name]
         checkpoint = jax.tree.map(
             lambda v: v["value"],
             restored_root,
@@ -1202,11 +1202,11 @@ def from_pretrained(
       with mesh:
         use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
         model = TunixMaxTextAdapter(
-            base_model=model,
+            base_model=model,  # pyrefly: ignore[bad-argument-type]
             use_no_op_mappings=use_no_op_mappings,
             pad_id=tokenizer_pad_id,
         )
-        model.config = None
+        model.config = None  # pyrefly: ignore[missing-attribute]
 
     if original_mesh:
       return model

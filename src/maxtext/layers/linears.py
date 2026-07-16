@@ -506,6 +506,11 @@ class MlpBlock(nnx.Module):
     activations = []
     if cfg.fused_mlp:
       x = self.wi(inputs, out_sharding=intermediate_sharding)
+
+      # Enforce fused activations don't shard on num_activations axis
+      fused_intermediate_logical = self.intermediate_logical[:2] + (None,) + self.intermediate_logical[2:]
+      x = self._maybe_shard_with_logical(x, fused_intermediate_logical)
+
       x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])

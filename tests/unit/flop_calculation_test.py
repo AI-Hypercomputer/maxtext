@@ -377,6 +377,72 @@ class FlopCalculation(parameterized.TestCase):
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
+  def test_deepseek4_284b_flops(self):
+    """Test DeepSeek V4 284B MFU FLOP calculation"""
+    cfg = self._initialize_model_config(
+        "deepseek4-284b",
+        max_target_length=4096,
+        per_device_batch_size=4,
+        attention="dot_product",
+    )
+    B = cfg.per_device_batch_size
+    S = cfg.max_target_length
+
+    # Calculate analytical active parameters per token
+    embedding_params = cfg.vocab_size * cfg.emb_dim
+    wq_params = (cfg.emb_dim * cfg.q_lora_rank) + (cfg.q_lora_rank * cfg.num_query_heads * cfg.head_dim)
+    wkv_params = cfg.emb_dim * (cfg.num_kv_heads * cfg.head_dim)
+    o_params = (cfg.num_query_heads * cfg.head_dim * cfg.o_lora_rank) + (cfg.o_groups * cfg.o_lora_rank * cfg.emb_dim)
+    base_attn_params = wq_params + wkv_params + o_params
+
+    k = cfg.mhc_expansion_rate
+    mhc_norm_params = k * cfg.emb_dim
+    pre_alpha_params = k * cfg.emb_dim * k + 1 + k
+    post_alpha_params = k * cfg.emb_dim * k + 1 + k
+    res_alpha_params = k * cfg.emb_dim * (k * k) + 1 + (k * k)
+    mhc_params_per_layer = 2 * (mhc_norm_params + pre_alpha_params + post_alpha_params + res_alpha_params)
+
+    gate_params = cfg.emb_dim * cfg.num_experts
+    active_experts = cfg.num_experts_per_tok + cfg.shared_experts
+    moe_ffn_params = gate_params + (active_experts * 3 * cfg.emb_dim * cfg.moe_mlp_dim)
+
+    hca_pooler_params = cfg.emb_dim * cfg.head_dim
+    csa_pooler_params = cfg.emb_dim * (2 * cfg.head_dim)
+    idx_proj_params = (cfg.q_lora_rank * cfg.indexer_n_heads * cfg.indexer_head_dim) + (cfg.emb_dim * cfg.indexer_n_heads)
+    idx_pool_params = cfg.emb_dim * (2 * cfg.indexer_head_dim)
+    csa_indexer_params = idx_proj_params + idx_pool_params
+
+    c_ratios = getattr(cfg, "compress_ratios", [])
+    num_hca_layers = c_ratios.count(128)
+    num_csa_layers = c_ratios.count(4)
+
+    total_active_params = (
+        embedding_params
+        + cfg.num_decoder_layers * (base_attn_params + mhc_params_per_layer + moe_ffn_params)
+        + num_hca_layers * hca_pooler_params
+        + num_csa_layers * (csa_pooler_params + csa_indexer_params)
+    )
+
+    calculated_total, calculated_weight, calculated_attn = calculate_tflops_training_per_device(cfg, log=False)
+
+    golden_weight_flops = 6 * B * S * total_active_params / 1e12
+    golden_total_flops = golden_weight_flops + calculated_attn
+
+    # Verify our calculated FLOPs align within 5% tolerance of the standard 6BP analytical baseline
+    self.assertFlopsAlmostEqual(calculated_total, golden_total_flops)
+    self.assertFlopsAlmostEqual(calculated_weight, golden_weight_flops)
+
+  def test_deepseek4_mtp_validation(self):
+    """Test that DeepSeek-V4 with MTP layers raises a ValueError"""
+    with self.assertRaises(ValueError):
+      self._initialize_model_config(
+          "deepseek4-284b",
+          max_target_length=4096,
+          per_device_batch_size=4,
+          attention="dot_product",
+          mtp_num_layers=1,
+      )
+
   def test_custom_engram_flops(self):
     """Test model with Engram Flops calculation"""
     cfg = self._initialize_model_config(

@@ -1269,7 +1269,9 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
 
-    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
+    hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
+        process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
+    )
     hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
 
   # Vision hooks for Qwen3.5
@@ -1340,7 +1342,9 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         return input_tensor.T.reshape(target_shape)
 
     # Apply vision hooks
-    hooks["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = reshape_conv3d_patch_embed  # pyrefly: ignore[bad-assignment]
+    hooks["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = (
+        reshape_conv3d_patch_embed  # pyrefly: ignore[bad-assignment]
+    )
 
     for i in range(n_vision_layers):
       prefix = f"params-vision_encoder-Qwen3_5MoeVisionEncoder_0-blocks_{i}"
@@ -1355,8 +1359,12 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       hooks[f"{prefix}-mlp_out-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
 
     # Vision projector
-    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
-    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = (
+        reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    )
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = (
+        reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
+    )
 
   return hooks
 
@@ -1384,7 +1392,9 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       prefix = f"params-decoder-layers-layer_{block_idx}"
 
       # Layer norms
-      mapping[f"{prefix}-input_layernorm-scale"] = [f"model.layers.{i}.input_layernorm.weight" for i in hf_indices]  # pyrefly: ignore[bad-assignment]
+      mapping[f"{prefix}-input_layernorm-scale"] = [
+          f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
+      ]  # pyrefly: ignore[bad-assignment]
       mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
       ]
@@ -1943,7 +1953,9 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     hooks[f"{prefix}-GptOssMlp-gate-kernel"] = transpose
     # `composite_mt_key`: A hook for combining multiple MaxText params.
     hooks[(f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1")] = interleave  # pyrefly: ignore[unsupported-operation]
-    hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = interleave  # pyrefly: ignore[unsupported-operation]
+    hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = (
+        interleave  # pyrefly: ignore[unsupported-operation]
+    )
 
   return hooks
 

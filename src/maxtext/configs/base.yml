@@ -101,6 +101,10 @@ metrics_file: "" # for testing, local file that stores scalar metrics. if empty,
 # if true save metrics such as loss and tflops to gcs in {base_output_directory}/{run_name}/metrics/
 gcs_metrics: false
 
+enable_wandb: False
+wandb_project_name: "maxtext"
+wandb_run_name: ""
+
 # if true save config to gcs in {base_output_directory}/{run_name}/
 save_config_to_gcs: false
 
@@ -220,6 +224,7 @@ load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
+num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).
 # Only affects the dense (dense_matmul) MoE path; the sparse (shard_map) path is unaffected.
@@ -356,6 +361,7 @@ moe_mlpwo: 'remat'
 query_proj: 'remat'
 key_proj: 'remat'
 value_proj: 'remat'
+kv_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
 query_wa_proj: 'remat'
@@ -1133,7 +1139,7 @@ enable_prefix_caching: false
 prefix_caching_hbm_byte: 10_000_000_000 # 10 GB
 prefix_caching_dram_byte: 100_000_000_000 # 100 GB
 
-# This is a temporary flag that will be removed soon after the fix lands in TE
+# This is a temporary flag that will be removed soon after the fix lands in Transformer Engine
 enable_padding_causal_mask: true
 
 # Llama4-specific

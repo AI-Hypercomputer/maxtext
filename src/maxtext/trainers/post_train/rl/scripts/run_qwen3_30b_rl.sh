@@ -7,8 +7,7 @@ set -e
 
 # --- Environment Setup ---
 if ! pip show xpk &> /dev/null; then
-    echo "xpk not found in the environment. Please install it by running:"
-    echo "uv pip install -e .[runner] --resolution=lowest"
+    echo "xpk not found in the environment. Please install maxtext[runner] before running this script."
     exit 1
 fi
 
@@ -24,28 +23,28 @@ export WORKLOAD_NAME="rl-$(date +%Y%m%d-%H%M)"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
-    echo "Error: PROJECT_ID is not set. Please set it in the script or as an environment variable."
+    echo "Error: PROJECT_ID is not set. Please set it as an environment variable."
     exit 1
 fi
 if [ -z "$CLUSTER_NAME" ]; then
-    echo "Error: CLUSTER_NAME is not set. Please set it in the script or as an environment variable."
+    echo "Error: CLUSTER_NAME is not set. Please set it as an environment variable."
     exit 1
 fi
 if [ -z "$ZONE" ]; then
-    echo "Error: ZONE is not set. Please set it in the script or as an environment variable."
+    echo "Error: ZONE is not set. Please set it as an environment variable."
     exit 1
 fi
 if [ -z "$BASE_OUTPUT_DIRECTORY" ]; then
-    echo "Error: BASE_OUTPUT_DIRECTORY is not set. Please set it in the script or as an environment variable."
+    echo "Error: BASE_OUTPUT_DIRECTORY is not set. Please set it as an environment variable."
     exit 1
 fi
 if [ -z "$DOCKER_IMAGE" ]; then
-    echo "Error: DOCKER_IMAGE is not set. Please set it in the script or as an environment variable."
+    echo "Error: DOCKER_IMAGE is not set. Please set it as an environment variable."
     exit 1
 fi
 
 if [ -z "$MAXTEXT_CKPT_PATH" ]; then
-    echo "MAXTEXT_CKPT_PATH is not set. Please set it in the script or as an environment variable."
+    echo "MAXTEXT_CKPT_PATH is not set. Please set it as an environment variable."
     exit 1
 fi
 

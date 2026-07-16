@@ -260,6 +260,36 @@ class GmmTest(parameterized.TestCase):
 
   @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
+      batch_size=[128, 256],
+      in_size=[512],
+      out_size=[512],
+      num_groups=[4],
+      group_offset=[0],
+  )
+  def test_gmm_partial_sum(self, batch_size, in_size, out_size, num_groups, group_offset):
+    """Test GMM with partial sum accumulation and memory aliasing."""
+    num_local_groups = num_groups - group_offset
+    key = jax.random.key(0)
+    k0, k1, k2 = jax.random.split(key, 3)
+
+    lhs = jax.random.normal(k0, (batch_size, in_size), dtype=jnp.bfloat16)
+    rhs = jax.random.normal(k1, (num_local_groups, in_size, out_size), dtype=jnp.bfloat16)
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    group_offset = jnp.array(group_offset, dtype=jnp.int32)
+    ps = jax.random.normal(k2, (batch_size, out_size), dtype=jnp.bfloat16)
+
+    expected = reference_gmm(lhs, rhs, group_sizes, partial_sum=ps, group_offset=group_offset)
+    actual = gmm_backend.gmm_v2(
+        lhs,
+        rhs,
+        group_sizes,
+        partial_sum=ps,
+        group_offset=group_offset,
+    )
+    assert_arrays_all_close(actual, expected)
+
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
+  @parameterized.product(
       batch_size=[128, 1024],
       in_size=[512, 1024],
       out_size=[512, 1024],
@@ -413,6 +443,51 @@ class GmmTest(parameterized.TestCase):
         grad,
         group_sizes,
         num_local_groups,
+        group_offset=group_offset,
+        preferred_element_type=jnp.bfloat16,
+    )
+    self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
+    assert_arrays_all_close(actual, expected)
+
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
+  @parameterized.product(
+      batch_size=[256],
+      in_size=[512],
+      out_size=[512],
+      num_groups=[4],
+      group_offset=[0],
+      empty_group_index=[0, 1, 2, 3],
+  )
+  def test_tgmm_empty_group_with_partial_sum(
+      self,
+      batch_size,
+      in_size,
+      out_size,
+      num_groups,
+      group_offset,
+      empty_group_index,
+  ):
+    """Test that TGMM correctly preserves partial sum for empty groups."""
+    num_local_groups = num_groups - group_offset
+    key = jax.random.key(0)
+    key1, key2, key3 = jax.random.split(key, 3)
+    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
+    grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16)
+    ps = jax.random.normal(key3, (num_local_groups, in_size, out_size), dtype=jnp.bfloat16)
+
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    group_sizes = group_sizes.at[-1].add(group_sizes[empty_group_index])
+    group_sizes = group_sizes.at[empty_group_index].set(0)
+    group_offset = jnp.array(group_offset, dtype=jnp.int32)
+
+    lhs_t = lhs.swapaxes(0, 1)
+    expected = reference_tgmm(lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset, partial_sum=ps)
+    actual = tgmm_backend.tgmm_v2(
+        lhs,
+        grad,
+        group_sizes,
+        num_local_groups,
+        partial_sum=ps,
         group_offset=group_offset,
         preferred_element_type=jnp.bfloat16,
     )

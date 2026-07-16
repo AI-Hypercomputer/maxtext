@@ -36,6 +36,7 @@ class MetricLoggerAbortTest(unittest.TestCase):
         metrics_file="/tmp/fake_metrics.jsonl",
         gcs_metrics=True,
         managed_mldiagnostics=True,
+        enable_wandb=False,
     )
     return logger
 
@@ -97,6 +98,31 @@ class MetricLoggerAbortTest(unittest.TestCase):
         mock.patch("jax.process_index", return_value=1),
     ):
       logger.write_metrics(self._metrics(np.nan), step=1, metric_type="train")
+
+
+class MetricLoggerWandbTest(unittest.TestCase):
+  """Tests for MetricLogger wandb metric writing."""
+
+  def test_write_metrics_to_wandb_flattens_scalars_and_scalars(self):
+    logger = MetricLogger.__new__(MetricLogger)  # skip __init__
+    metrics = {
+        "scalar": {"learning/loss": 1.5},
+        "scalars": {"perf": {"step_time": 0.25, "tflops_per_device": 100.0}},
+    }
+
+    fake_wandb = mock.MagicMock()
+    # wandb is lazily imported inside write_metrics_to_wandb, so inject a fake module.
+    with mock.patch.dict("sys.modules", {"wandb": fake_wandb}):
+      logger.write_metrics_to_wandb(metrics, step=7)
+
+    fake_wandb.log.assert_called_once_with(
+        {
+            "learning/loss": 1.5,
+            "perf/step_time": 0.25,
+            "perf/tflops_per_device": 100.0,
+        },
+        step=7,
+    )
 
 
 class MetricLoggerMetadataTest(unittest.TestCase):

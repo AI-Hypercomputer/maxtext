@@ -78,7 +78,7 @@ from google.cloud import storage
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT, HF_IDS
 from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
@@ -167,7 +167,7 @@ def compare_top_tokens(converted_tokens, golden_tokens):
   max_logging.log(table_str)
 
 
-def check_kl_divergence(model_logits, golden_logits, atol=0.02):
+def check_kl_divergence(model_logits, golden_logits, atol=0.02, clip_logits_epsilon=None):
   """
   Calculates KL divergence D_KL(P_golden || Q_model) over a batch of sequences.
 
@@ -189,7 +189,16 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
 
   # 3. Get the probability distributions.
   golden_probabilities = F.softmax(golden_logits_reshaped, dim=-1)
-  model_log_probabilities = F.log_softmax(model_logits_reshaped, dim=-1)
+
+  # Apply clipping and re-normalization to predicted probabilities ONLY
+  if clip_logits_epsilon is not None:
+    model_probabilities = F.softmax(model_logits_reshaped, dim=-1)
+    model_probabilities = torch.clamp(model_probabilities, min=clip_logits_epsilon)
+    model_probabilities = model_probabilities / model_probabilities.sum(dim=-1, keepdim=True)
+    # Compute manual log-probabilities of the model. Safe because of clamping.
+    model_log_probabilities = torch.log(model_probabilities)
+  else:
+    model_log_probabilities = F.log_softmax(model_logits_reshaped, dim=-1)
 
   # 4. Calculate avg KL divergence for all token distributions.
   # use 'batchmean'; the sum of the KL divergences for each token in the batch
@@ -223,13 +232,13 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
 
 def get_data(golden_data_point, config):
   """Get the golden data for the test indexed at golden_data_index"""
+  model_prefix = config.model_name.split("-")[0]
 
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
   if config.use_multimodal:
     assert "pixel_values" in golden_data_point, "no image found in golden data while use_multimodal=True"
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)
     max_logging.log(f"pixel_values.shape = {pixel_values.shape}")
-    model_prefix = config.model_name.split("-")[0]
     # Gemma3 and Gemma4 models expect (num_images, height, width, channels)
     if model_prefix in ["gemma3", "gemma4"]:
       if pixel_values.ndim == 2:
@@ -319,22 +328,28 @@ def main(config, test_args):  # pylint: disable=W0621
   # 1. Pre-loaded golden logits comparison (multimodal input)
   # 2. On-the-fly HuggingFace model comparison (text only input)
   hf_token = config.hf_access_token
-  try:
-    if test_args.hf_model_path:
-      max_logging.log(f"Loading tokenizer from {test_args.hf_model_path}.")
-      tokenizer = AutoTokenizer.from_pretrained(
-          test_args.hf_model_path, token=hf_token, trust_remote_code=test_args.trust_remote_code
-      )
-    else:
-      max_logging.log(f"Loading tokenizer from {config.tokenizer_path}.")
-      tokenizer = AutoTokenizer.from_pretrained(
-          config.tokenizer_path, token=hf_token, trust_remote_code=test_args.trust_remote_code
-      )
-  except Exception as e:  # pylint: disable=broad-except
-    max_logging.log(f"Tokenizer loading error: {e}.\nLoading tokenizer from {config.tokenizer_path}.")
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.tokenizer_path, token=hf_token, trust_remote_code=test_args.trust_remote_code
-    )
+  tokenizer_load_paths = []
+  if test_args.hf_model_path:
+    tokenizer_load_paths.append(test_args.hf_model_path)
+  tokenizer_load_paths.append(config.tokenizer_path)
+
+  hf_model_id = HF_IDS.get(config.model_name)
+  if hf_model_id:
+    tokenizer_load_paths.append(hf_model_id)
+
+  tokenizer = None
+  last_exception = None
+  for path in tokenizer_load_paths:
+    try:
+      max_logging.log(f"Loading tokenizer from {path}.")
+      tokenizer = AutoTokenizer.from_pretrained(path, token=hf_token, trust_remote_code=test_args.trust_remote_code)
+      break
+    except Exception as e:  # pylint: disable=broad-except,broad-exception-caught
+      last_exception = e
+      max_logging.log(f"Failed to load tokenizer from {path}: {e}")
+
+  if tokenizer is None:
+    raise last_exception
 
   if config.model_name.startswith(("llama3.1", "mixtral")):
     tokenizer.pad_token = tokenizer.eos_token
@@ -464,6 +479,9 @@ def main(config, test_args):  # pylint: disable=W0621
       if test_args.clip_logits_epsilon is not None:
         model_probabilities = jnp.clip(jax.nn.softmax(train_logits_slice, axis=-1), min=test_args.clip_logits_epsilon)
         golden_probabilities = jnp.clip(jax.nn.softmax(golden_logits_slice, axis=-1), min=test_args.clip_logits_epsilon)
+        # Re-normalize so probabilities sum to 1.
+        golden_probabilities = golden_probabilities / jnp.sum(golden_probabilities, axis=-1, keepdims=True)
+        model_probabilities = model_probabilities / jnp.sum(model_probabilities, axis=-1, keepdims=True)
       else:
         model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
         golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
@@ -661,6 +679,7 @@ def main(config, test_args):  # pylint: disable=W0621
           mt_logits_torch[0, start_index:].unsqueeze(0),
           hf_logits_torch[0, start_index:].unsqueeze(0),
           atol=test_args.max_kl_div,
+          clip_logits_epsilon=test_args.clip_logits_epsilon,
       )
       if jax.process_index() == 0 and test_args.output_logits_path:
         data_to_save = {
@@ -728,9 +747,6 @@ if __name__ == "__main__":
   assert (
       test_args.atol is not None or test_args.max_kl_div is not None
   ), "At least one of --atol or --max_kl_div must be specified to define the test criteria."
-
-  if test_args.run_hf_model and test_args.clip_logits_epsilon is not None:
-    raise ValueError("--clip_logits_epsilon is not supported when running HF model on-the-fly (run_hf_model=True).")
 
   if cfg.use_multimodal:
     assert not test_args.run_hf_model, (

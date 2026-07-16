@@ -5,7 +5,7 @@
  you may not use this file except in compliance with the License.
  You may obtain a copy of the License at
 
-      https://www.apache.org/licenses/LICENSE-2.0
+       https://www.apache.org/licenses/LICENSE-2.0
 
  Unless required by applicable law or agreed to in writing, software
  distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,10 +14,10 @@
  limitations under the License.
  -->
 
-# Reinforcement Learning with Qwen3-30b-a3b-base on Multi-Host TPUs
+# Reinforcement Learning with GPT-OSS 20B on Multi-Host TPUs
 
 This tutorial provides step-by-step instructions for setting up the environment
-and training the Qwen3-30b-a3b-base model on the [OpenMathInstruct-2 dataset](https://huggingface.co/datasets/nvidia/OpenMathInstruct-2) on Ironwood GKE cluster with `tpu7x-128` nodes.
+and training the GPT-OSS 20B model on the [GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k) on a GKE cluster with `v5p-64` nodes.
 
 ## Prerequisites
 
@@ -53,7 +53,7 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 ## Authenticate with Hugging Face
 
-To download the `qwen3-30b-a3b-base` model checkpoint from Hugging Face, you need to authenticate using your Hugging Face account credentials. Run the following command and follow the prompts to log in:
+To download the `gpt-oss-20b` model checkpoint from Hugging Face, you need to authenticate using your Hugging Face account credentials. Run the following command and follow the prompts to log in:
 
 ```bash
 hf auth login
@@ -72,13 +72,13 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ### Option 2: Converting from a Hugging Face checkpoint
 
-Refer to [Hugging Face to MaxText](hf-to-maxtext) to convert a Hugging Face checkpoint to MaxText format. You can find an example script to convert `qwen3-30b-a3b-base`model to MaxText format [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/30b/test_qwen3_to_mt.sh). After conversion finishes, set `MAXTEXT_CKPT_PATH` to the converted MaxText checkpoint path.
+Refer to [Hugging Face to MaxText](hf-to-maxtext) to convert a Hugging Face checkpoint to MaxText format. After conversion finishes, set `MAXTEXT_CKPT_PATH` to the converted MaxText checkpoint path.
 
 ```bash
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
-> **Note:** Converting the 30B model requires approximately 62 GB of free disk space to download its safetensors. Please verify you have sufficient space before running the conversion script.
+> **Note:** Converting the 20B model requires approximately 40 GB of free disk space to download its safetensors. Please verify you have sufficient space before running the conversion.
 
 ## Run RL Workload
 
@@ -94,7 +94,7 @@ export CLOUD_IMAGE_NAME=<IMAGE_NAME>
 export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 
 # Run the RL training script on your cluster
-run_tutorial maxtext/trainers/post_train/rl/scripts/run_qwen3_30b_rl.sh
+run_tutorial maxtext/trainers/post_train/rl/scripts/run_gptoss_20b_rl.sh
 ```
 
 ### Monitor your workload
@@ -133,6 +133,4 @@ For a complete list of collected metrics, see the [Tunix Metrics Documentation](
 
 ## Convert Checkpoint to Hugging Face Format
 
-## Convert Checkpoint to Hugging Face Format
-
-Refer to [MaxText to Hugging Face](maxtext-to-hf) to convert a MaxText checkpoint back to Hugging Face format. You can find an example script to convert `qwen3-30b-a3b-base`model to Hugging Face format [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/30b/test_qwen3_to_hf.sh).
+Refer to [MaxText to Hugging Face](maxtext-to-hf) to convert a MaxText checkpoint back to Hugging Face format.

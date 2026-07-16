@@ -328,6 +328,7 @@ class Decoder(nn.Module):
         "query_proj",
         "value_proj",
         "key_proj",
+        "kv_proj",
         "qkv_proj",
         "out_proj",
         "mlpwi_0",
@@ -378,6 +379,7 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "context",
             "out_proj",
@@ -387,6 +389,7 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
             "mlpwo",
@@ -396,6 +399,7 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
         )
@@ -404,12 +408,13 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
         )
       elif cfg.remat_policy == "qkv_proj_offloaded":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
+            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj", "kv_proj"],
             offload_src="device",
             offload_dst="pinned_host",
         )
@@ -421,6 +426,7 @@ class Decoder(nn.Module):
                 "query_proj",
                 "value_proj",
                 "key_proj",
+                "kv_proj",
                 "qkv_proj",
                 "out_proj",
                 "mlpwi_0",
@@ -1255,7 +1261,13 @@ class Decoder(nn.Module):
             if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
               visual_embeds = deepstack_visual_embeds[lyr]
               # Use bidirectional_mask to identify visual token positions
-              bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+              bidirectional_mask_value = None
+              if multimodal_input is not None:
+                bidirectional_mask_value = (
+                    multimodal_input.bidirectional_mask
+                    if multimodal_input.bidirectional_mask is not None
+                    else multimodal_input.bidirectional_mask_video
+                )
               if bidirectional_mask_value is not None and visual_embeds is not None:
                 y = deepstack_process(y, bidirectional_mask_value, visual_embeds)
 

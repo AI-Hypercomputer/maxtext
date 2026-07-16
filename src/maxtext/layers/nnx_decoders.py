@@ -1140,6 +1140,7 @@ class NNXDecoder(nnx.Module):
         "query_proj",
         "value_proj",
         "key_proj",
+        "kv_proj",
         "qkv_proj",
         "out_proj",
         "mlpwi_0",
@@ -1187,6 +1188,7 @@ class NNXDecoder(nnx.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "context",
             "out_proj",
@@ -1196,6 +1198,7 @@ class NNXDecoder(nnx.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
             "mlpwo",
@@ -1205,6 +1208,7 @@ class NNXDecoder(nnx.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
         )
@@ -1213,6 +1217,7 @@ class NNXDecoder(nnx.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
         )
       elif cfg.remat_policy == "qkv_proj_offloaded":
@@ -1222,6 +1227,7 @@ class NNXDecoder(nnx.Module):
                 "query_proj",
                 "value_proj",
                 "key_proj",
+                "kv_proj",
             ],
             offload_src="device",
             offload_dst="pinned_host",
@@ -1233,6 +1239,7 @@ class NNXDecoder(nnx.Module):
                 "query_proj",
                 "value_proj",
                 "key_proj",
+                "kv_proj",
                 "qkv_proj",
                 "out_proj",
                 "mlpwi_0",
@@ -1590,7 +1597,13 @@ class NNXDecoder(nnx.Module):
 
     layer_kwargs = {}
     # Extract the bidirectional mask locally for layer configurations
-    bidirectional_mask = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+    bidirectional_mask = None
+    if multimodal_input is not None:
+      bidirectional_mask = (
+          multimodal_input.bidirectional_mask
+          if multimodal_input.bidirectional_mask is not None
+          else multimodal_input.bidirectional_mask_video
+      )
 
     if cfg.decoder_block in {DecoderBlockType.GEMMA3, DecoderBlockType.GEMMA4}:
       layer_kwargs["bidirectional_mask"] = bidirectional_mask

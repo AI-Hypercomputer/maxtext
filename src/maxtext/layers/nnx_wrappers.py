@@ -529,12 +529,8 @@ class ToLinen(linen.Module):
       )
 
       # Filter out unknown paths so we don't try to assign them to static attributes
-      filtered_state_flat = {
-          k: v for k, v in new_state_flat.items() if k not in unknown_state_flat
-      }
-      new_state = nnx.State(
-          nnx.traversals.unflatten_mapping(filtered_state_flat)
-      )
+      filtered_state_flat = {k: v for k, v in new_state_flat.items() if k not in unknown_state_flat}
+      new_state = nnx.State(nnx.traversals.unflatten_mapping(filtered_state_flat))
 
     # Rebind the module to the current trace via split / update / merge.
     # nnx.update directly on the live module can leave stale tracers.

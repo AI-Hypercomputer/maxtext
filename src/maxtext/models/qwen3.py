@@ -1885,8 +1885,8 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
 
     attention_mask = None
     if video_mask is not None:
-      patch_mask = video_mask[:, 0, :: self.temporal_patch_size, :: self.patch_size, :: self.patch_size]
-      attention_mask = patch_mask.reshape(video_mask.shape[0], -1).astype(jnp.int32)
+      mask_patch_elements = self.temporal_patch_size * self.patch_size * self.patch_size
+      attention_mask = video_mask.reshape(video_mask.shape[0], -1, mask_patch_elements).max(axis=-1).astype(jnp.int32)
 
     return hidden_states, attention_mask
 
@@ -1941,6 +1941,8 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
       num_frames: int,
       height: int,
       width: int,
+      attention_mask: Array | None = None,
+      valid_grid: tuple[int, int, int] | None = None,
       deterministic: bool = True,
   ) -> Array:
     """
@@ -1949,6 +1951,8 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
         num_frames: Number of temporal frames (static)
         height: Height in patches (static)
         width: Width in patches (static)
+        attention_mask: Optional mask identifying valid tokens in the padded sequence.
+        valid_grid: Optional unpadded `(frames, height, width)` grid used for vision RoPE.
         deterministic: Whether to use deterministic mode (disable dropout)
 
     Returns:
@@ -1959,11 +1963,14 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
         "num_frames": num_frames,
         "height": height,
         "width": width,
+        "token_mask": attention_mask,
+        "valid_grid": valid_grid,
     }
     output, _ = self.attn(
         inputs_q=hidden_states,
         inputs_kv=hidden_states,
         deterministic=deterministic,
+        decoder_segment_ids=attention_mask,
         rope_kwargs=rope_kwargs,
     )
 
@@ -2016,6 +2023,8 @@ class Qwen3OmniMoeVisionBlock(nnx.Module):
       num_frames: int,
       height: int,
       width: int,
+      attention_mask: Array | None = None,
+      valid_grid: tuple[int, int, int] | None = None,
   ) -> Array:
     """
     Args:
@@ -2027,7 +2036,14 @@ class Qwen3OmniMoeVisionBlock(nnx.Module):
     Returns:
         Output tensor of shape (batch, T*H*W, hidden_size)
     """
-    x = x + self.attn(self.ln1(x), num_frames=num_frames, height=height, width=width)
+    x = x + self.attn(
+        self.ln1(x),
+        num_frames=num_frames,
+        height=height,
+        width=width,
+        attention_mask=attention_mask,
+        valid_grid=valid_grid,
+    )
     y = self.ln2(x)
     y = self.mlp(y)
     y = jax.nn.gelu(y)
@@ -2088,6 +2104,8 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
   def __call__(
       self,
       hidden_states: Array,
+      video_mask: Array | None = None,
+      video_grid_thw: Array | tuple[int, int, int] | None = None,
       deterministic: bool = True,
   ):
     """
@@ -2104,6 +2122,12 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
     num_frames = num_frames // self.config.temporal_patch_size_for_vit
     height = height // self.config.patch_size_for_vit
     width = width // self.config.patch_size_for_vit
+    attention_mask = None
+    if video_mask is not None:
+      mask_patch_elements = (
+          self.config.temporal_patch_size_for_vit * self.config.patch_size_for_vit * self.config.patch_size_for_vit
+      )
+      attention_mask = video_mask.reshape(batch_size, -1, mask_patch_elements).max(axis=-1).astype(jnp.int32)
     hidden_states = hidden_states.reshape(
         -1,
         self.config.num_channels_for_vit,
@@ -2114,7 +2138,19 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
 
     x, _ = self.patch_embed(hidden_states)
     x = x.reshape(batch_size, -1, self.config.hidden_size_for_vit)
+    valid_grid = None
+    if attention_mask is not None and video_grid_thw is None:
+      raise ValueError("video_grid_thw is required when video_mask is provided.")
+    if attention_mask is not None and batch_size != 1:
+      raise ValueError("Padded Qwen3-Omni vision encoding currently supports batch size one.")
+    if video_grid_thw is not None:
+      grid = video_grid_thw[0] if getattr(video_grid_thw, "ndim", 1) == 2 else video_grid_thw
+      valid_grid = tuple(int(dim) for dim in grid)
     pos = self.pos_embed_interpolate(num_frames, height, width)
+    if attention_mask is not None and valid_grid is not None:
+      valid_pos = self.pos_embed_interpolate(*valid_grid)
+      valid_indices = jnp.nonzero(attention_mask[0], size=math.prod(valid_grid))[0]
+      pos = jnp.zeros_like(pos).at[valid_indices].set(valid_pos)
 
     pos = pos[jnp.newaxis, :, :]
     x = x + pos
@@ -2123,7 +2159,14 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
     for i in range(self.depth):
       block_name = f"blocks_{i}"
       blk = getattr(self, block_name)
-      x = blk(x, num_frames=num_frames, height=height, width=width)
+      x = blk(
+          x,
+          num_frames=num_frames,
+          height=height,
+          width=width,
+          attention_mask=attention_mask,
+          valid_grid=valid_grid,
+      )
       h_traj.append(x)
 
     deep_feats = []
