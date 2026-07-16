@@ -1,0 +1,83 @@
+--- pallas_mosaic_tpu_v2_gmm_kernel.py
++++ pallas_mosaic_tpu_v2_gmm_kernel.py
+@@ -274,6 +314,16 @@ class IndexMaps:
+ 
+     return (pl.ds(row_start, row_size), 0, k_id)
+ 
++  def lhs_scale_index_map(
++      self, _: jax.Array, gm_id: jax.Array, k_id: jax.Array
++  ):
++    # Per-tensor scale: a single [1, 1] value shared across every tile, so the
++    # block always reads index 0. Extension point: when the scale is per-channel
++    # or sub-channel, tile the row axis like `lhs_index_map` (using gm_id) and
++    # index the K-block axis from `k_id`.
++    del gm_id, k_id
++    return (0, 0)
++
+   def rhs_weight_index_map(
+       self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array
+   ):
+@@ -311,7 +361,7 @@ class IndexMaps:
+ 
+ def generate_block_specs(
+     metadata_ref: MetadataRef, cfgs: GmmConfigs
+-) -> Tuple[Tuple[pl.BlockSpec, WeightsRef], pl.BlockSpec]:
++) -> Tuple[Tuple[LhsRef, WeightsRef], pl.BlockSpec]:
+   """Generates block specs for the given lhs, rhs, and out refs."""
+ 
+   index_map = IndexMaps(metadata_ref, cfgs)
+@@ -905,8 +978,12 @@ def kernel_main(
+   )
+ 
+   # Bounded slice requires second last dim to be aligned to the sublane size.
+-  # rhs_ref uses static tiling thus reshape is not needed.
+-  lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
++  # rhs_ref uses static tiling thus reshape is not needed. The lhs quant scale
++  # (when present) is small and statically tiled, so it is passed through as-is.
++  lhs_value_in = lhs_ref.value.reshape(
++      -1, cfgs.dims.size_lhs_sublane, lhs_ref.value.shape[-1]
++  )
++  lhs_in = LhsRef(value=lhs_value_in, scale=lhs_ref.scale)
+   out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.shape[-1])
+   scratches = [partial_out_ref, acc_ref, metadata_ref]
+   pipeline_fn(lhs_in, rhs_ref, out_in, scratches=scratches)
+@@ -1154,11 +1248,20 @@ def make_gmm_configs(
+     maybe_quantize_lhs: bool,
+     zero_initialize: bool,
+     fuse_act: str | None = None,
++    lhs_scale: jax.Array | None = None,
+ ):
+   """Fills the GMM config for the GMM kernel."""
+ 
+   dims = validate_inputs(
+-      lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset, fuse_act
++      lhs,
++      rhs,
++      rhs_scale,
++      rhs_bias,
++      group_sizes,
++      group_offset,
++      fuse_act,
++      maybe_quantize_lhs,
++      lhs_scale,
+   )
+ 
+   if rhs_scale is not None:
+@@ -1416,7 +1545,10 @@ def gmm_v2(
+       grid_spec=pltpu.PrefetchScalarGridSpec(
+           num_scalar_prefetch=2,
+           in_specs=[
+-              pl.BlockSpec(memory_space=pltpu.HBM),
++              LhsRef(
++                  value=pl.BlockSpec(memory_space=pltpu.HBM),
++                  scale=lhs_scale_spec,
++              ),
+               WeightsRef(
+                   weight=pl.BlockSpec(memory_space=pltpu.HBM),
+                   scale=rhs_scale_spec,
+@@ -1433,4 +1565,4 @@ def gmm_v2(
+       name=get_scope_name(cfgs),
+       cost_estimate=get_cost_estimate(cfgs),
+       metadata=get_metadata(cfgs),
+-  )(group_sizes, group_offset, lhs, rhs_weights)[:, : cfgs.out_size_n]
++  )(group_sizes, group_offset, lhs_in, rhs_weights)[:, : cfgs.out_size_n]
