@@ -796,8 +796,8 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "base_mlp_dim=256",
             "dtype=float32",
             "weight_dtype=float32",
-            "hidden_size_per_layer_input=128",
-            "vocab_size_per_layer_input=256",
+            "hidden_size_per_layer_input=128",#
+            "vocab_size_per_layer_input=256",#
             "vocab_size=256",
         ],
         override_model_config=True,
