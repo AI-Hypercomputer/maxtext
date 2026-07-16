@@ -1900,7 +1900,9 @@ class NNXDecoder(nnx.Module):
                 moe_idx = lyr - cfg.first_num_dense_layers
                 setattr(self, f"moe_layers_{moe_idx}", new_layer)
             else:
-              if hasattr(self, "layers") and self.layers:
+              if hasattr(self, f"layers_{lyr}"):
+                setattr(self, f"layers_{lyr}", new_layer)
+              elif hasattr(self, "layers") and self.layers:
                 self.layers[lyr] = new_layer
               else:
                 setattr(self, f"layers_{lyr}", new_layer)
