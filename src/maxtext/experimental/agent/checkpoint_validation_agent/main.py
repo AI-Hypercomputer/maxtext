@@ -24,23 +24,33 @@ from maxtext.utils import max_logging as logger
 
 
 def upload_to_gcs(local_path, gcs_dir):
-  """Uploads a local file to a GCS directory using gsutil."""
+  """Uploads a local file to a GCS directory using google.cloud.storage."""
   if not gcs_dir.startswith("gs://"):
     logger.error(f"GCS path must start with gs://, got: {gcs_dir}")
     return
 
-  # Ensure the directory path ends with a slash for proper gsutil copying
-  if not gcs_dir.endswith("/"):
-    gcs_dir += "/"
-    
-  gcs_dest = f"{gcs_dir}{os.path.basename(local_path)}"
-  logger.info(f"Uploading report to {gcs_dest}...")
-  
   try:
-    subprocess.run(["gsutil", "cp", local_path, gcs_dest], check=True, capture_output=True, text=True)
+    from google.cloud import storage  # pylint: disable=import-outside-toplevel
+
+    # parse gs://bucket-name/path/to/dir
+    gcs_dir_stripped = gcs_dir[5:]  # remove gs://
+    parts = gcs_dir_stripped.split("/", 1)
+    bucket_name = parts[0]
+    prefix = parts[1] if len(parts) > 1 else ""
+    if prefix and not prefix.endswith("/"):
+      prefix += "/"
+
+    blob_name = f"{prefix}{os.path.basename(local_path)}"
+    logger.info(f"Uploading report to gs://{bucket_name}/{blob_name}...")
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(local_path)
+
     logger.info("GCS Upload successful.")
-  except subprocess.CalledProcessError as e:
-    logger.error(f"Failed to upload report to GCS: {e.stderr}")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.error(f"Failed to upload report to GCS: {e}")
 
 
 def validate_checkpoint(json_config_path):

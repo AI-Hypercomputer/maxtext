@@ -19,6 +19,7 @@ from unittest.mock import patch, mock_open, MagicMock
 import json
 from src.maxtext.experimental.agent.checkpoint_validation_agent.main import (
     validate_checkpoint,
+    upload_to_gcs,
 )
 
 
@@ -85,21 +86,28 @@ class TestCheckpointValidationAgent(unittest.TestCase):
       self.assertIn("scan_layers=False", executed_command)
       self.assertIn("per_device_batch_size=16.0", executed_command)
 
-  @patch("src.maxtext.experimental.agent.checkpoint_validation_agent.main.subprocess.run")
-  def test_upload_to_gcs(self, mock_subprocess):
-    """test that upload_to_gcs correctly calls gsutil."""
-    from src.maxtext.experimental.agent.checkpoint_validation_agent.main import upload_to_gcs
-    upload_to_gcs("/local/report.json", "gs://my-bucket/reports")
-    mock_subprocess.assert_called_once()
-    executed_command = mock_subprocess.call_args[0][0]
-    self.assertEqual(executed_command, ["gsutil", "cp", "/local/report.json", "gs://my-bucket/reports/report.json"])
+  @patch("google.cloud.storage.Client")
+  def test_upload_to_gcs(self, mock_client_class):
+    """test that upload_to_gcs correctly calls google.cloud.storage."""
+    mock_client = MagicMock()
+    mock_client_class.return_value = mock_client
+    mock_bucket = MagicMock()
+    mock_client.bucket.return_value = mock_bucket
+    mock_blob = MagicMock()
+    mock_bucket.blob.return_value = mock_blob
 
-  @patch("src.maxtext.experimental.agent.checkpoint_validation_agent.main.subprocess.run")
-  def test_upload_to_gcs_invalid_path(self, mock_subprocess):
-    """test that upload_to_gcs rejects invalid paths without running gsutil."""
-    from src.maxtext.experimental.agent.checkpoint_validation_agent.main import upload_to_gcs
+    upload_to_gcs("/local/report.json", "gs://my-bucket/reports")
+
+    mock_client_class.assert_called_once()
+    mock_client.bucket.assert_called_once_with("my-bucket")
+    mock_bucket.blob.assert_called_once_with("reports/report.json")
+    mock_blob.upload_from_filename.assert_called_once_with("/local/report.json")
+
+  @patch("google.cloud.storage.Client")
+  def test_upload_to_gcs_invalid_path(self, mock_client_class):
+    """test that upload_to_gcs rejects invalid paths without running gcs client."""
     upload_to_gcs("/local/report.json", "https://invalid/path")
-    mock_subprocess.assert_not_called()
+    mock_client_class.assert_not_called()
 
 
 if __name__ == "__main__":

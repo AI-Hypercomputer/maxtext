@@ -15,6 +15,8 @@
 """Mock tensor dry-run to validate checkpoint architecture stability."""
 
 import sys
+import json
+import time
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -41,7 +43,7 @@ def run_mock_forward(checkpoint_path, model_name, *overrides):
 
   print(f"Loading model from {checkpoint_path}...")
   # create a dummy 1-device hardware mesh using pod's single CPU
-  dummy_mesh = Mesh(np.array(jax.devices()), ('data',))
+  dummy_mesh = Mesh(np.array(jax.devices()), ("data",))
   # pass dummy_mesh instead of None
   model = transformer_as_linen(config, mesh=dummy_mesh, quant=None)
 
@@ -69,7 +71,74 @@ def run_mock_forward(checkpoint_path, model_name, *overrides):
   out_shape = jax.eval_shape(model.apply, abstract_variables, mock_input, mock_positions, mock_segment_ids)
 
   print(f"SUCCESS: Model architecture is stable. Output shape: {out_shape}")
+  return out_shape
+
+
+def upload_to_gcs(report_data, gcs_dir):
+  """Uploads the JSON report to the specified GCS directory."""
+  if not gcs_dir:
+    return
+
+  if not gcs_dir.startswith("gs://"):
+    print(f"GCS path must start with gs://, got: {gcs_dir}")
+    return
+
+  filename = f"mock_tensor_report_{int(time.time())}.json"
+  local_path = f"/tmp/{filename}"
+
+  with open(local_path, "w", encoding="utf-8") as f:
+    json.dump(report_data, f, indent=2)
+
+  try:
+    from google.cloud import storage  # pylint: disable=import-outside-toplevel
+
+    # parse gs://bucket-name/path/to/dir
+    gcs_dir_stripped = gcs_dir[5:]  # remove gs://
+    parts = gcs_dir_stripped.split("/", 1)
+    bucket_name = parts[0]
+    prefix = parts[1] if len(parts) > 1 else ""
+    if prefix and not prefix.endswith("/"):
+      prefix += "/"
+
+    blob_name = f"{prefix}{filename}"
+    print(f"Uploading report to gs://{bucket_name}/{blob_name}...")
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(local_path)
+
+    print("Upload successful.")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    print(f"Failed to upload report to GCS: {e}")
+
 
 if __name__ == "__main__":
   # sys.argv[1] is checkpoint, sys.argv[2] is model_name, sys.argv[3:] captures any overrides
-  run_mock_forward(sys.argv[1], sys.argv[2], *sys.argv[3:])
+  _checkpoint = sys.argv[1]
+  _model_name = sys.argv[2]
+  _overrides = []
+  report_gcs_dir = ""
+
+  for arg in sys.argv[3:]:
+    if arg.startswith("--report_gcs_dir="):
+      report_gcs_dir = arg.split("=")[1]
+    else:
+      _overrides.append(arg)
+
+  report = {
+      "task": "mock_tensor_validation",
+      "timestamp": time.time(),
+      "status": "SUCCESS",
+  }
+
+  try:
+    _out_shape = run_mock_forward(_checkpoint, _model_name, *_overrides)
+    report["output_shape"] = str(_out_shape)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    report["status"] = "FAILURE"
+    report["error_message"] = str(e)
+    upload_to_gcs(report, report_gcs_dir)
+    raise e
+
+  upload_to_gcs(report, report_gcs_dir)
