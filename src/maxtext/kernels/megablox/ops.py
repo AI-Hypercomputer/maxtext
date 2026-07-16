@@ -467,7 +467,7 @@ def _gmm_bwd(
           implementation="mosaic",
           **dlhs_kwargs,
       )
-    if not use_gmm_v2_dlhs and use_gmm_v2_fwd:
+    elif not use_gmm_v2_dlhs and use_gmm_v2_fwd:
       # TOKAMAX DLHS GMM 1 (with tile passing inside scheme 2+1+2)
       dlhs = tokamax_backend.gmm(
           lhs=dlhs_dout,

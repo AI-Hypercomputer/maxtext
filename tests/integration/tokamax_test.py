@@ -26,6 +26,7 @@ gettempdir = tempfile.gettempdir
 
 # TODO: revert before merge
 from absl import logging
+
 logging.set_verbosity(logging.INFO)
 
 
@@ -93,7 +94,7 @@ class Train(parameterized.TestCase):
       ici_expert_parallelism: int,
   ):
     """Smoke train with small config."""
-    sharding_tolerance=0.22 if ici_expert_parallelism > 1 else 2e-2
+    sharding_tolerance = 0.22 if ici_expert_parallelism > 1 else 2e-2
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
@@ -147,7 +148,7 @@ class Train(parameterized.TestCase):
         "use_tokamax_splash=False",
         # quantization
         f"quantization={quantization}",
-        f"use_qwix_quantization={quantization != ""}",
+        f"use_qwix_quantization={quantization != ''}",
         "weight_quantization_calibration_method=fixed,-224,224",
         "act_quantization_calibration_method=fixed,-224,224",
         "bwd_quantization_calibration_method=absmax",
