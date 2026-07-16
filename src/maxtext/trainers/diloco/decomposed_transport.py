@@ -16,6 +16,13 @@
 
 import queue
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+import traceback
+import jax
+import jax.numpy as jnp
+from jax.experimental import colocated_python
+from maxtext.utils import max_logging
+
 
 
 class ThreadedTransportManager:
@@ -73,15 +80,57 @@ class ThreadedTransportManager:
 class LearnerTransport:
   """Wrapper for learner threads to communicate with the syncer."""
 
-  def __init__(self, manager: ThreadedTransportManager, learner_idx: int):
+  def __init__(
+      self,
+      manager: ThreadedTransportManager,
+      learner_idx: int,
+      local_cpu_mesh: jax.sharding.Mesh,
+  ):
     self.manager = manager
     self.learner_idx = learner_idx
+    self.local_cpu_mesh = local_cpu_mesh
+    self._executor = ThreadPoolExecutor(max_workers=1)
+
+  def send_to_syncer_async(self, step: int, fragment_id: int, data: Any):
+    """Asynchronously offloads TPU data to local CPU mesh and sends to syncer."""
+    # 1. Asynchronously offload to CPU colocated mesh (non-blocking on main thread)
+    cpu_sharding = jax.tree_util.tree_map(
+        lambda s: jax.sharding.NamedSharding(self.local_cpu_mesh, s.spec),
+        jax.tree_util.tree_map(lambda x: x.sharding, data),
+    )
+    frag_cpu = jax.device_put(data, cpu_sharding)
+
+    # 2. Block and send in the background executor thread
+    def _send():
+      try:
+        max_logging.log(f"Learner {self.learner_idx}: async send starting for step {step} frag {fragment_id}")
+        jax.block_until_ready(frag_cpu)
+        max_logging.log(f"Learner {self.learner_idx}: async send block_until_ready done")
+        self.manager.send_to_syncer(self.learner_idx, step, fragment_id, frag_cpu)
+        max_logging.log(f"Learner {self.learner_idx}: async send sent to syncer")
+      except Exception as e:
+        max_logging.error(f"Learner {self.learner_idx}: async send failed: {e}")
+        max_logging.error(traceback.format_exc())
+        raise e
+
+    self._executor.submit(_send)
 
   def send_to_syncer(self, step: int, fragment_id: int, data: Any):
-    self.manager.send_to_syncer(self.learner_idx, step, fragment_id, data)
+    """Synchronously offloads TPU data to local CPU mesh and sends to syncer."""
+    cpu_sharding = jax.tree_util.tree_map(
+        lambda s: jax.sharding.NamedSharding(self.local_cpu_mesh, s.spec),
+        jax.tree_util.tree_map(lambda x: x.sharding, data),
+    )
+    frag_cpu = jax.device_put(data, cpu_sharding)
+    jax.block_until_ready(frag_cpu)
+    self.manager.send_to_syncer(self.learner_idx, step, fragment_id, frag_cpu)
 
   def recv_from_syncer(self, step: int, fragment_id: int) -> Any:
     return self.manager.recv_from_syncer(self.learner_idx, step, fragment_id)
+
+  def close(self):
+    """Shutdown background thread executor."""
+    self._executor.shutdown(wait=True)
 
 
 class SyncerTransport:
@@ -95,3 +144,5 @@ class SyncerTransport:
 
   def recv_from_learner(self, learner_idx: int, step: int, fragment_id: int) -> Any:
     return self.manager.recv_from_learner(learner_idx, step, fragment_id)
+
+
