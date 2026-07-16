@@ -46,18 +46,12 @@ import jax.numpy as jnp
 
 from maxtext.common.common_types import DEFAULT_MASK_VALUE
 
-# jax.experimental.pallas.triton.dot was added after jax 0.10.0 (the repo's
-# pinned floor); jax.experimental.pallas.dot is the pre-move, still-working
-# (if deprecated on newer jax) alias, so prefer triton.dot but fall back.
+# pl.dot moved to pallas.triton.dot in newer jax; prefer it, fall back to the alias.
 _dot = getattr(plgpu, "dot", None) or pl.dot
 
 
 def _shape_dtype_like(x):
-  """jax.ShapeDtypeStruct.like equivalent; the classmethod postdates jax 0.10.0 (the repo's pinned floor).
-
-  Only the per-shard shape and dtype matter for a pallas_call out_shape, so the
-  fallback drops the sharding that .like would otherwise copy.
-  """
+  """ShapeDtypeStruct with x's shape and dtype (jax.ShapeDtypeStruct.like where available)."""
   like = getattr(jax.ShapeDtypeStruct, "like", None)
   return like(x) if like is not None else jax.ShapeDtypeStruct(x.shape, x.dtype)
 

@@ -972,10 +972,9 @@ class AttentionOp(nnx.Module):
   def _shard_mapped_gpu_flash(self, kernel_fn, query, key, value, decoder_segment_ids):
     """Runs a per-shard GPU flash kernel under shard_map.
 
-    pallas_call / FFI custom calls are opaque to GSPMD: without shard_map,
-    sharded activations get all-gathered around the kernel. Both kernels
-    compute masks from shard-local positions, so sequence sharding of the
-    query (context parallelism) is not supported here.
+    shard_map keeps GSPMD from all-gathering sharded activations around the
+    opaque pallas/FFI call. The kernels mask from shard-local positions, so
+    context parallelism (sequence-sharded queries) is not supported.
     """
     if self.mesh.shape[self.config.context_sharding] > 1:
       raise ValueError(
@@ -1039,10 +1038,9 @@ class AttentionOp(nnx.Module):
   def _gpu_flash_backend_dispatch(self, query, key, value, decoder_segment_ids, model_mode):
     """Selects and runs a fused GPU flash backend (CUTLASS FA2 or pallas).
 
-    FA2 is preferred where eligible (fastest fused kernel on A100) but requires
-    half-precision inputs, head_dim <= 256, no logit soft cap, and, for packed
-    inputs, a positive max_segments_per_seq; everything else runs on the pallas
-    kernel, which supports all of those.
+    FA2 is used when eligible (half precision, head_dim <= 256, no soft cap, and
+    a set max_segments_per_seq when packed); everything else uses the pallas
+    kernel.
     """
     window = self._gpu_flash_window(key)
     soft_cap = self.attn_logits_soft_cap if self.attn_logits_soft_cap else None
@@ -1168,10 +1166,8 @@ class AttentionOp(nnx.Module):
           out = self._gpu_flash_backend_dispatch(query, key, value, decoder_segment_ids, model_mode)
           return out, None, None
     elif self.attention_kernel == "cutlass_flash":
-      # FlashAttention-2 CUTLASS kernels (via flash-attn-jax FFI). Fastest fused
-      # option on A100 for head_dim <= 256; native GQA and sliding window, and
-      # sequence packing lowered to FA2's varlen kernel. Layers FA2 cannot run
-      # (head_dim > 256) use the pallas kernel via the shared dispatch.
+      # FlashAttention-2 (flash-attn-jax FFI) with native GQA, sliding window and
+      # varlen packing; layers FA2 cannot run (head_dim > 256) fall to pallas.
       validate_gpu_flash_attention(sinks, record_max_logits)
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -1877,10 +1873,10 @@ class AttentionOp(nnx.Module):
   def _segment_ids_to_seqlens_offsets(self, decoder_segment_ids: Array) -> tuple[Array, Array]:
     """Converts packed segment ids to cuDNN SDPA per-segment seqlens/offsets.
 
-    Expects maxtext packing conventions: segment ids are contiguous runs
-    numbered 1..max_segments_per_seq within each row, 0 marks padding.
-    Returns (seqlens [B, M], offsets [B, M+1]) with -1 filling absent segments,
-    as required by jax cudnn dot_product_attention's q_seqlen/q_offsets.
+    Segment ids are contiguous runs numbered 1..max_segments_per_seq within each
+    row, with 0 marking padding. Returns (seqlens [B, M], offsets [B, M+1]) with
+    -1 filling absent segments, as required by jax cudnn dot_product_attention's
+    q_seqlen/q_offsets.
     """
     max_segments = max(1, self.config.max_segments_per_seq)
     ids = decoder_segment_ids.astype(jnp.int32)
