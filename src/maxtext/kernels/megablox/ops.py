@@ -62,7 +62,7 @@ def gmm(
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
-    interpret: bool = False,
+    interpret: bool | None = None,
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     use_qwix_quantization: bool = False,
@@ -77,6 +77,10 @@ def gmm(
     partial_sum: jnp.ndarray | None = None,
 ):
   """Grouped matrix multiplication operation."""
+  if interpret is None:
+    # Fallback to Pallas interpreter mode on non-TPU hardware (e.g. CPU tests)
+    # because the Megablox Pallas kernel requires TPU.
+    interpret = jax.devices()[0].platform == "cpu"
   quantization_rule = None
   if use_qwix_quantization:
     # get_current_rule has to be called outside of the _gmm_fwd function.
