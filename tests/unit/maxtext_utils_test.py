@@ -17,6 +17,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import functools
+from types import SimpleNamespace
 from typing import Any, Sequence
 import unittest
 from unittest.mock import MagicMock, Mock, patch
@@ -1728,6 +1729,47 @@ class TestKVCacheScanHelpers(unittest.TestCase):
     returned_kv_cache = [(jnp.array([10.0]), jnp.array([20.0]))]
     with self.assertRaises(TypeError):
       maxtext_utils.update_kv_caches_after_scan(kv_caches_tuple, returned_kv_cache, scan_length=1, block_len=2)
+
+
+class TestGetOffloadRematNames(unittest.TestCase):
+  """Tests for maxtext_utils.get_offload_remat_names."""
+
+  @staticmethod
+  def _cfg(remat_policy, tensors_on_device=None, tensors_to_offload=None):
+    return SimpleNamespace(
+        remat_policy=remat_policy,
+        tensors_on_device=tensors_on_device,
+        tensors_to_offload=tensors_to_offload,
+    )
+
+  def test_named_preset_matches_equivalent_custom(self):
+    """qkv_proj_offloaded resolves identically to custom with the same offloads."""
+    preset = maxtext_utils.get_offload_remat_names(self._cfg("qkv_proj_offloaded"))
+    custom = maxtext_utils.get_offload_remat_names(
+        self._cfg("custom", tensors_on_device=[], tensors_to_offload=["query_proj", "value_proj", "key_proj", "kv_proj"])
+    )
+    self.assertEqual(preset, custom)
+
+  def test_kv_proj_retained_in_offload_presets(self):
+    """Regression guard: kv_proj must stay in the offload presets (it is a real checkpoint name)."""
+    _, qkv_offload = maxtext_utils.get_offload_remat_names(self._cfg("qkv_proj_offloaded"))
+    _, minimal_offload = maxtext_utils.get_offload_remat_names(self._cfg("minimal_offloaded"))
+    self.assertIn("kv_proj", qkv_offload)
+    self.assertIn("kv_proj", minimal_offload)
+
+  def test_custom_reads_config_lists(self):
+    save, offload = maxtext_utils.get_offload_remat_names(
+        self._cfg("custom", tensors_on_device=["context"], tensors_to_offload=["out_proj"])
+    )
+    self.assertEqual(save, ["context"])
+    self.assertEqual(offload, ["out_proj"])
+
+  def test_custom_handles_none_lists(self):
+    self.assertEqual(maxtext_utils.get_offload_remat_names(self._cfg("custom")), ([], []))
+
+  def test_non_offloading_policies_return_none(self):
+    for policy in ("full", "minimal", "save_out_proj", "save_qkv_proj", "none"):
+      self.assertIsNone(maxtext_utils.get_offload_remat_names(self._cfg(policy)))
 
 
 if __name__ == "__main__":
