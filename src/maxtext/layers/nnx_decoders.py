@@ -2181,6 +2181,14 @@ class NNXDecoder(nnx.Module):
 
     return y, kv_caches
 
+  def __getattr__(self, name):
+    if name == "layers" and hasattr(self, "layers_0"):
+      return [getattr(self, f"layers_{i}") for i in range(self.config.num_decoder_layers) if hasattr(self, f"layers_{i}")]
+    if hasattr(super(), "__getattr__"):
+      return super().__getattr__(name)
+    raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+
 
 def decoder_as_linen(
     config: Config,
