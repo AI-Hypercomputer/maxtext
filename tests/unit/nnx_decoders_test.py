@@ -799,6 +799,7 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "hidden_size_per_layer_input=128",
             "vocab_size_per_layer_input=256",
             "vocab_size=256",
+            "max_target_length=128",
         ],
         override_model_config=True,
     )
@@ -872,6 +873,7 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "hidden_size_per_layer_input=128",
             "vocab_size_per_layer_input=256",
             "vocab_size=256",
+            "max_target_length=128",
         ],
         override_model_config=True,
     )
