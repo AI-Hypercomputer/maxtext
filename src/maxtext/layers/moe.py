@@ -24,6 +24,7 @@ from typing import Iterable, Optional, Tuple, Union
 from aqt.jax.v2 import aqt_tensor as aqt
 from flax import nnx
 from flax import struct
+import flax.linen as nn
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental import xla_metadata
@@ -533,53 +534,68 @@ class RoutedMoE(nnx.Module):
       self.wo = jnp.zeros((num_experts, intermediate_dim, self.moe_expert_input_dim))
     elif self.config.prefuse_moe_weights:
       self.wi = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim * 2),
-              weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
+          nn.with_logical_constraint(
+              self.kernel_init(
+                  self.rngs.params(),
+                  (num_experts, self.moe_expert_input_dim, moe_intermediate_dim * 2),
+                  weight_dtype,
+                  kernel_in_axis,
+                  kernel_out_axis,
+              ),
+              self.wi_kernel_axes,
           ),
           out_sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (self.num_experts, self.intermediate_dim, self.moe_expert_input_dim),
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
+          nn.with_logical_constraint(
+              self.kernel_init(
+                  self.rngs.params(),
+                  (self.num_experts, self.intermediate_dim, self.moe_expert_input_dim),
+                  self.weight_dtype,
+                  kernel_in_axis,
+                  kernel_out_axis,
+              ),
+              self.wo_kernel_axes,
           ),
           out_sharding=self.wo_kernel_axes,
       )
     else:
       self.wi_0 = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
-              weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
+          nn.with_logical_constraint(
+              self.kernel_init(
+                  self.rngs.params(),
+                  (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
+                  weight_dtype,
+                  kernel_in_axis,
+                  kernel_out_axis,
+              ),
+              self.wi_kernel_axes,
           ),
           out_sharding=self.wi_kernel_axes,
       )
       self.wi_1 = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
-              weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
+          nn.with_logical_constraint(
+              self.kernel_init(
+                  self.rngs.params(),
+                  (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
+                  weight_dtype,
+                  kernel_in_axis,
+                  kernel_out_axis,
+              ),
+              self.wi_kernel_axes,
           ),
           out_sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (self.num_experts, self.intermediate_dim, self.moe_expert_input_dim),
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
+          nn.with_logical_constraint(
+              self.kernel_init(
+                  self.rngs.params(),
+                  (self.num_experts, self.intermediate_dim, self.moe_expert_input_dim),
+                  self.weight_dtype,
+                  kernel_in_axis,
+                  kernel_out_axis,
+              ),
+              self.wo_kernel_axes,
           ),
           out_sharding=self.wo_kernel_axes,
       )

@@ -210,6 +210,35 @@ class TestMaxTextUtilsNNX(unittest.TestCase):
     self.assertEqual(broadcast_state["raw_scalar"].shape, (length,))
     self.assertEqual(broadcast_state["raw_array"].shape, (10,))
 
+  def test_skip_random_init(self):
+    """Test that skip_random_init context manager bypasses random initialization."""
+    from maxtext.layers import initializers
+    from flax import linen as nn
+
+    # Define a variance scaling initializer
+    init_fn = initializers.nd_dense_init(1.0, "fan_in", "truncated_normal")
+
+    # Outside the context manager, it should be random (i.e. not all zeros)
+    key = jax.random.PRNGKey(42)
+    val_normal = init_fn(key, (10, 10), jnp.float32, 0, 1)
+    self.assertFalse(jnp.all(val_normal == 0.0))
+
+    # Inside the context manager, it should return all zeros
+    with initializers.skip_random_init():
+      val_zeros = init_fn(key, (10, 10), jnp.float32, 0, 1)
+      self.assertTrue(jnp.all(val_zeros == 0.0))
+
+      # Flax initializers should also be patched
+      val_flax_normal = nn.initializers.normal()(key, (10, 10), dtype=jnp.float32)
+      self.assertTrue(jnp.all(val_flax_normal == 0.0))
+
+      val_flax_uniform = nn.initializers.uniform()(key, (10, 10), dtype=jnp.float32)
+      self.assertTrue(jnp.all(val_flax_uniform == 0.0))
+
+    # Outside the context manager again, it should be random
+    val_normal_again = init_fn(key, (10, 10), jnp.float32, 0, 1)
+    self.assertFalse(jnp.all(val_normal_again == 0.0))
+
 
 if __name__ == "__main__":
   unittest.main()

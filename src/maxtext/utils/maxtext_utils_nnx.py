@@ -144,6 +144,7 @@ def create_nnx_sharded_model(
     init_fn: Callable,
     mesh: Mesh | None = None,
     named_sharding: nnx.State | None = None,
+    logical_axis_rules: list | None = None,
 ) -> nnx.Module:
   """
   Create the model with the given sharding.
@@ -153,10 +154,13 @@ def create_nnx_sharded_model(
     init_fn: the model init function
     mesh: the device mesh
     named_sharding: the given sharding
+    logical_axis_rules: rules for mapping logical axes to physical mesh axes
 
   Returns:
     The initialized sharded model
   """
+  from flax import linen as nn
+
   graphdef, abstract_state = nnx.split(abstract_model)
   if named_sharding is None:
     # The state leaf is of type jax.ShapeDtypeStruct(shape, dtype, sharding)
@@ -171,12 +175,20 @@ def create_nnx_sharded_model(
   # avoiding a large intermediate allocation on a single device.
   @partial(jax.jit, out_shardings=named_sharding)
   def create_sharded_state():
-    model = init_fn()
+    if logical_axis_rules is not None:
+      with nn.logical_axis_rules(logical_axis_rules):
+        model = init_fn()
+    else:
+      model = init_fn()
     return jax.lax.with_sharding_constraint(nnx.state(model), named_sharding)
 
   # Create the model with sharded parameters.
   with jax.set_mesh(mesh):
-    sharded_state = create_sharded_state()
+    if logical_axis_rules is not None:
+      with nn.logical_axis_rules(logical_axis_rules):
+        sharded_state = create_sharded_state()
+    else:
+      sharded_state = create_sharded_state()
   return nnx.merge(graphdef, sharded_state)
 
 

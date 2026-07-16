@@ -915,17 +915,28 @@ def from_pretrained(
   # We invoke create_nnx_abstract_model once (a lightweight abstract trace with no physical memory cost)
   # both to initialize pure NNX sharded models and to cleanly extract the logical PartitionSpec tree
   # (e.g., axis names like "kv_heads", "mlp_moe") required by _align_checkpoint_to_model_shapes.
-  _create_model, abstract_model = create_nnx_abstract_model(
-      config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
-  )
-  _, _abs_state_for_specs = nnx.split(abstract_model)
-  specs = nnx.get_partition_spec(_abs_state_for_specs)
+  from maxtext.layers import initializers
+  import contextlib
 
-  if config.pure_nnx:
-    model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
-    # TODO: print debug_sharding info
+  if config.load_parameters_path:
+    init_context = initializers.skip_random_init()
   else:
-    model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
+    init_context = contextlib.nullcontext()
+
+  with init_context:
+    _create_model, abstract_model = create_nnx_abstract_model(
+        config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
+    )
+    _, _abs_state_for_specs = nnx.split(abstract_model)
+    specs = nnx.get_partition_spec(_abs_state_for_specs)
+
+    if config.pure_nnx:
+      model = maxtext_utils_nnx.create_nnx_sharded_model(
+          abstract_model, _create_model, mesh=mesh, logical_axis_rules=config.logical_axis_rules
+      )
+      # TODO: print debug_sharding info
+    else:
+      model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
 
   sharded_state = nnx.state(model)
 

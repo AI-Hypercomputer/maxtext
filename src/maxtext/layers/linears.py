@@ -162,12 +162,15 @@ class DenseGeneral(nnx.Module):
 
     if not quantizations.in_serve_mode(self.quant):
       self.kernel = nnx.Param(
-          self.kernel_init(
-              rngs.params(),
-              kernel_shape,
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
+          nn.with_logical_constraint(
+              self.kernel_init(
+                  rngs.params(),
+                  kernel_shape,
+                  self.weight_dtype,
+                  kernel_in_axis,
+                  kernel_out_axis,
+              ),
+              self.kernel_axes,
           ),
           sharding=self.kernel_axes,
       )
@@ -176,7 +179,10 @@ class DenseGeneral(nnx.Module):
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       self.bias = nnx.Param(
-          default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+          nn.with_logical_constraint(
+              default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+              bias_axes,
+          ),
           sharding=bias_axes,
       )
     else:

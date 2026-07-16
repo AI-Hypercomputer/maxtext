@@ -28,7 +28,72 @@ Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = int | tuple[int, ...]
 NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array]
 
-default_embed_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
+import contextlib
+
+_skip_random_init = False
+
+
+@contextlib.contextmanager
+def skip_random_init():
+  """Context manager to temporarily bypass random parameter initialization.
+
+  This is a memory and compile-time optimization. When loading parameters from
+  a checkpoint, the initial random weight values are immediately discarded and
+  overwritten. Bypassing random number generation avoids allocating massive
+  temporary RNG state arrays (e.g., u32 bit generator inputs) on the devices
+  and eliminates substantial compiler overhead, preventing CompileTimeHbmOom.
+  """
+  global _skip_random_init
+  orig_skip = _skip_random_init
+  _skip_random_init = True
+
+  import jax.nn.initializers as jax_inits
+  import flax.linen.initializers as flax_inits
+
+  # Save original initializers
+  orig_jax_inits = {}
+  orig_flax_inits = {}
+
+  # A zero initializer factory
+  def zero_init_factory(*args, **kwargs):
+    def init_fn(key, shape, dtype=jax.numpy.float32, *args_inner, **kwargs_inner):
+      return jax.nn.initializers.zeros(key, shape, dtype)
+    return init_fn
+
+  # List of random initializers to patch
+  inits_to_patch = [
+      "normal", "uniform", "variance_scaling",
+      "glorot_normal", "glorot_uniform",
+      "he_normal", "he_uniform",
+      "lecun_normal", "lecun_uniform",
+      "orthogonal"
+  ]
+
+  for name in inits_to_patch:
+    if hasattr(jax_inits, name):
+      orig_jax_inits[name] = getattr(jax_inits, name)
+      setattr(jax_inits, name, zero_init_factory)
+    if hasattr(flax_inits, name):
+      orig_flax_inits[name] = getattr(flax_inits, name)
+      setattr(flax_inits, name, zero_init_factory)
+
+  try:
+    yield
+  finally:
+    _skip_random_init = orig_skip
+    for name, orig_fn in orig_jax_inits.items():
+      setattr(jax_inits, name, orig_fn)
+    for name, orig_fn in orig_flax_inits.items():
+      setattr(flax_inits, name, orig_fn)
+
+
+def _wrapped_embed_init(key, shape, dtype):
+  if _skip_random_init:
+    return jax.nn.initializers.zeros(key, shape, dtype)
+  return nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)(key, shape, dtype)
+
+
+default_embed_init = _wrapped_embed_init
 
 default_bias_init = jax.nn.initializers.constant(0.0)
 default_scalar_init = jax.nn.initializers.constant(0.01)
@@ -54,6 +119,8 @@ def nd_dense_init(scale, mode, distribution):
 
   def init_fn(key, shape, dtype, in_axis, out_axis):
     """Initializes an array using variance scaling with specified axes."""
+    if _skip_random_init:
+      return jax.nn.initializers.zeros(key, shape, dtype)
     fn = jax.nn.initializers.variance_scaling(scale, mode, distribution, in_axis, out_axis)
     return fn(key, shape, dtype)
 
