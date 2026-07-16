@@ -46,7 +46,9 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 from __future__ import annotations
 import contextlib
 import importlib
+import importlib.metadata
 import inspect
+import json
 import subprocess
 from functools import wraps
 from typing import Any, Optional, Sequence
@@ -56,7 +58,6 @@ import grain
 import jax
 import jax.numpy as jnp
 import jax.sharding as xs
-import json
 import logging
 import os
 import pathwaysutils
@@ -524,13 +525,17 @@ def create_rl_components(
   for pkg in ["maxtext", "tpu_inference", "tunix", "vllm"]:
     try:
       mod = importlib.import_module(pkg)
-      pkg_dir = os.path.dirname(getattr(mod, "__file__", ""))
+      pkg_file = getattr(mod, "__file__", "")
+      pkg_dir = os.path.dirname(pkg_file) if pkg_file else ""
       live_hash = ""
-      if pkg_dir and os.path.exists(pkg_dir):
-        for candidate_dir in [pkg_dir, os.path.dirname(pkg_dir)]:
+
+      # 1. Search parent directories for .git repository
+      curr = pkg_dir
+      while curr and curr != "/":
+        if os.path.exists(os.path.join(curr, ".git")):
           res = subprocess.run(
               ["git", "rev-parse", "HEAD"],
-              cwd=candidate_dir,
+              cwd=curr,
               capture_output=True,
               text=True,
               check=False,
@@ -538,6 +543,23 @@ def create_rl_components(
           if res.returncode == 0 and res.stdout.strip():
             live_hash = res.stdout.strip()
             break
+        curr = os.path.dirname(curr)
+
+      # 2. Inspect pip direct_url.json metadata
+      if not live_hash:
+        try:
+          dist_name = pkg.replace("_", "-")
+          dist = importlib.metadata.distribution(dist_name)
+          direct_url = dist.read_text("direct_url.json")
+          if direct_url:
+            data = json.loads(direct_url)
+            live_hash = data.get("vcs_info", {}).get("commit_id") or data.get("url", "").split("/")[-1].replace(
+                ".zip", ""
+            )
+        except (importlib.metadata.PackageNotFoundError, ValueError, KeyError, OSError):
+          pass
+
+      # 3. Fallback to module dunder attributes or version
       if not live_hash:
         live_hash = (
             getattr(mod, "__githash__", None)
