@@ -2189,7 +2189,6 @@ class NNXDecoder(nnx.Module):
     raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
 
-
 def decoder_as_linen(
     config: Config,
     mesh: Mesh,
