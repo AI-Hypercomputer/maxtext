@@ -5,7 +5,11 @@ import sys
 import yaml
 
 manifest_file = sys.argv[1]
-built_image = sys.argv[2] if (len(sys.argv) > 2 and sys.argv[2] != "") else None
+built_image = (
+    sys.argv[2]
+    if (len(sys.argv) > 2 and sys.argv[2] != "")
+    else "gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:07152026-clean-v4"
+)
 kube_dns_ip = sys.argv[3] if (len(sys.argv) > 3 and sys.argv[3] != "") else "34.118.224.10"
 workload_name = sys.argv[4] if (len(sys.argv) > 4 and sys.argv[4] != "") else "unknown"
 gke_nodepool = sys.argv[5] if (len(sys.argv) > 5 and sys.argv[5] != "") else None
@@ -21,23 +25,16 @@ for doc in data:
     startup_policy["startupPolicyOrder"] = "AnyOrder"
     print("Set startupPolicyOrder to AnyOrder.")
 
-    # Swap order of replicated jobs so worker starts before pathways-head
-    worker_job = None
-    head_job = None
-    for job in replicated_jobs:
-      if job.get("name") == "worker":
-        worker_job = job
-      elif job.get("name") == "pathways-head":
-        head_job = job
-    if worker_job and head_job:
-      replicated_jobs.remove(worker_job)
-      replicated_jobs.insert(0, worker_job)
-      print("Swapped replicatedJobs order: 'worker' will start before 'pathways-head'.")
-
     for job in replicated_jobs:
       pod_template = job.get("template", {}).get("spec", {}).get("template", {})
       pod_spec = pod_template.setdefault("spec", {})
       pod_spec["priorityClassName"] = "super-high"
+
+      if job.get("name") == "pathways-head":
+        node_selector = pod_spec.setdefault("nodeSelector", {})
+        if "cloud.google.com/gke-nodepool" in node_selector:
+          del node_selector["cloud.google.com/gke-nodepool"]
+          print("Removed cloud.google.com/gke-nodepool from pathways-head nodeSelector.")
 
       if job.get("name") == "worker":
         metadata = pod_template.setdefault("metadata", {})
@@ -55,6 +52,7 @@ for doc in data:
         if "cloud.google.com/gke-tpu-topology" in node_selector:
           topology = node_selector["cloud.google.com/gke-tpu-topology"]
           annotations["cloud.google.com/gke-tpu-slice-topology"] = topology
+          del node_selector["cloud.google.com/gke-tpu-topology"]
           print(
               f"Moved cloud.google.com/gke-tpu-topology={topology} "
               "to annotations as cloud.google.com/gke-tpu-slice-topology."
@@ -73,15 +71,15 @@ for doc in data:
                     "get",
                     "nodes",
                     "-l",
-                    "cloud.google.com/gke-tpu-accelerator=tpu7x",
+                    "cloud.google.com/gke-nodepool=forrest-ss-e2e-np2",
                     "-o",
                     "jsonpath={.items[0].metadata.labels.cloud\\.google\\.com/reservation-name}",
                 ],
                 text=True,
             ).strip()
-            res_name = res if res else "cloudtpu-20260710003900-159478293"
+            res_name = res if res else "ghostfish-bk33tcf1hfazr"
           except (subprocess.SubprocessError, OSError, ValueError):
-            res_name = "cloudtpu-20260710003900-159478293"
+            res_name = "ghostfish-bk33tcf1hfazr"
           node_selector["cloud.google.com/reservation-name"] = res_name
           print(f"Injected cloud.google.com/reservation-name={res_name} into nodeSelector.")
         elif accelerator == "tpu-v5p-slice":
@@ -94,10 +92,10 @@ for doc in data:
         pod_spec["dnsConfig"] = {"nameservers": [kube_dns_ip, "8.8.8.8"]}
         print(f"Injected dnsConfig nameservers: [{kube_dns_ip}, 8.8.8.8] to worker pod spec.")
 
-        # 3.6 Inject gke-nodepool if provided
-        if gke_nodepool:
-          node_selector["cloud.google.com/gke-nodepool"] = gke_nodepool
-          print(f"Injected cloud.google.com/gke-nodepool={gke_nodepool} to worker nodeSelector.")
+        # 3.6 Inject gke-nodepool to target real TPU nodepool forrest-ss-e2e-np2
+        nodepool_to_use = gke_nodepool if gke_nodepool else "forrest-ss-e2e-np2"
+        node_selector["cloud.google.com/gke-nodepool"] = nodepool_to_use
+        print(f"Injected cloud.google.com/gke-nodepool={nodepool_to_use} to worker nodeSelector.")
 
         # 5. Add connection handshake timeout and VLLM_TORCH_PROFILER_DIR to pathways-worker container
         containers = pod_spec.setdefault("containers", [])
@@ -131,25 +129,35 @@ for doc in data:
             resources = container.setdefault("resources", {})
             limits = resources.setdefault("limits", {})
             requests = resources.setdefault("requests", {})
-            limits["memory"] = "600G"
-            requests["memory"] = "600G"
-            print("Boosted jax-tpu container memory limit and request to 600G.")
+            limits["memory"] = "200G"
+            requests["memory"] = "200G"
+            print("Set jax-tpu container memory limit and request to 200G.")
             if built_image:
               container["image"] = built_image
-              print(f"Replaced placeholder image with built image: {built_image}")
+              print(f"Replaced placeholder image for jax-tpu with built image: {built_image}")
             command = container.get("command", [])
             if len(command) >= 3 and "python3 scripts/patch_vllm_sampler.py;" in command[2]:
               with open("scripts/patch_vllm_sampler.py", "r", encoding="utf-8") as pf:
                 patch_content = pf.read()
-              injected_patch = f"cat << 'EOF' > scripts/patch_vllm_sampler.py\n{patch_content}EOF\npython3 scripts/patch_vllm_sampler.py;"  # pylint: disable=line-too-long
+              injected_patch = f"mkdir -p scripts && cat << 'EOF' > scripts/patch_vllm_sampler.py\n{patch_content}EOF\npython3 scripts/patch_vllm_sampler.py;"  # pylint: disable=line-too-long
               command[2] = command[2].replace("python3 scripts/patch_vllm_sampler.py;", injected_patch)
-              print("Injected local scripts/patch_vllm_sampler.py into pathways-head command.")
+              print("Injected local scripts/patch_vllm_sampler.py into pathways-head jax-tpu container command.")
             elif len(command) >= 3 and "bash scripts/run_all.sh" in command[2]:
               with open("scripts/run_all.sh", "r", encoding="utf-8") as rf:
                 run_all_content = rf.read()
               injected_script = f"mkdir -p scripts && cat << 'EOF' > scripts/run_all.sh\n{run_all_content}EOF\nchmod +x scripts/run_all.sh;"  # pylint: disable=line-too-long
               command[2] = command[2].replace("bash scripts/run_all.sh", f"{injected_script} bash scripts/run_all.sh")
               print("Injected local scripts/run_all.sh into pathways-head command.")
+
+        init_containers = pod_spec.setdefault("initContainers", [])
+        for container in init_containers:
+          if container.get("name") == "pathways-proxy":
+            resources = container.setdefault("resources", {})
+            limits = resources.setdefault("limits", {})
+            requests = resources.setdefault("requests", {})
+            limits["memory"] = "50G"
+            requests["memory"] = "50G"
+            print("Reduced pathways-proxy container memory limit and request to 50G.")
 
 with open(manifest_file, "w", encoding="utf-8") as f:
   yaml.dump_all(data, f)

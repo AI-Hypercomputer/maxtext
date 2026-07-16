@@ -2052,6 +2052,18 @@ class RL(BaseModel):
       0,
       description="Threshold for request submissions in vLLM server mode.",
   )
+  kv_cache_metrics: bool = Field(
+      True,
+      description="Whether to collect KV cache metrics in Tunix/vLLM rollout.",
+  )
+  disable_log_stats: bool = Field(
+      False,
+      description="Whether to disable log stats in vLLM sampler.",
+  )
+  rollout_vllm_server_mode_submission_timeout_s: float = Field(
+      5.0,
+      description="Timeout in seconds for request submissions in vLLM server mode.",
+  )
 
 
 class RLDataset(BaseModel):
@@ -2065,6 +2077,7 @@ class RLDataset(BaseModel):
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
   rollout_micro_batch_size: int = Field(-1, description="Micro batch size for rollout.")
+  compute_logps_micro_batch_size: int = Field(-1, description="Micro batch size for computing log probabilities.")
   dataset_processor_path: str = Field(
       "",
       description=(

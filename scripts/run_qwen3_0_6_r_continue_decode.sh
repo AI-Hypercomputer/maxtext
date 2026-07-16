@@ -13,14 +13,15 @@ if ! /usr/local/google/home/mohitkhatwani/max_venv/bin/pip show xpk &> /dev/null
 fi
 
 # --- Environment Variables ---
-export PROJECT_ID="${PROJECT_ID:-cloud-tpu-shared-capacity}" # GCP project ID where the Ironwood cluster is deployed
-export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-nap}" # Name of your Ironwood cluster
-export ZONE="${ZONE:-us-central1}" # Zone where your Ironwood cluster is deployed
-export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
-export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:agentic}" # Base Docker image
+export PROJECT_ID="${PROJECT_ID:-gke-aishared-gsc-dev}" # GCP project ID where the cluster is deployed
+export CLUSTER_NAME="${CLUSTER_NAME:-forrest-ss-e2e-cluster}" # Name of your cluster
+export ZONE="${ZONE:-us-central1-c}" # Zone where your cluster is deployed
+export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://mohitkhatwani_multipods/maxtext_logs}" # GCS bucket path for outputs
+export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/maxtext/maxtext_base_image:latest}" # Base Docker image
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="${TPU_TYPE:-tpu7x-128}"
 export WORKLOAD_NAME="mohit-rl-qwen3-$RANDOM"
+export RPA_D_BLOCK_SIZES="1,8192,1,8192"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
@@ -104,9 +105,12 @@ base_output_directory=$BASE_OUTPUT_DIRECTORY \
 chips_per_vm=8 \
 num_batches=20 \
 num_test_batches=0 \
-profiler=xplane \
-skip_first_n_steps_for_profiler=1 \
-profiler_steps=1 \
+skip_first_n_steps_for_profiler=115 \
+profiler_steps=5 \
+trainer_profiler=xplane \
+trainer_skip_first_n_steps_for_profiler=115 \
+trainer_profiler_steps=5 \
+rl.use_agentic_rollout=true \
 rl.num_generations=8 \
 rl.grpo_beta=0.05 \
 rl.grpo_epsilon=0.2 \
@@ -115,6 +119,8 @@ decode_sampling_temperature=0.8 \
 decode_sampling_top_k=50 \
 decode_sampling_nucleus_p=0.95 \
 dataset_name=nvidia/OpenMathInstruct-2 \
+remat_policy=save_dot_except_mlp \
+attention=flash \
 hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet \
 train_split=train_1M \
 max_target_length=24576 \
@@ -122,6 +128,7 @@ max_prefill_predict_length=16384 \
 learning_rate=1e-6 \
 batch_size=480 \
 train_micro_batch_size=8 \
+compute_logps_micro_batch_size=8 \
 rollout_micro_batch_size=480 \
 rollout_data_parallelism=32 \
 rollout_tensor_parallelism=2 \
@@ -134,8 +141,8 @@ allow_split_physical_axes=True \
 enable_tunix_perf_metrics=True \
 checkpoint_period=100 \
 max_num_checkpoints_to_keep=1000 \
-enable_checkpointing=true \
-load_parameters_path=$MAXTEXT_CKPT_PATH \
+enable_checkpointing=false \
+load_parameters_path="''" \
 rollout_vllm_init_with_random_weights=True \
 vllm_additional_config='{\"enable_continue_decode\": true, \"max_decode_steps\": 128}'"
 # vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \

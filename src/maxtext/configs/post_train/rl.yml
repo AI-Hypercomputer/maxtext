@@ -80,6 +80,12 @@ rl:
   return_logprobs: null
   # Threshold for request submissions in vLLM server mode (e.g. rollout_micro_batch_size * num_generations).
   rollout_vllm_server_mode_submission_threshold: 0
+  # Whether to collect KV cache metrics in Tunix/vLLM rollout.
+  kv_cache_metrics: true
+  # Whether to disable log stats in vLLM sampler.
+  disable_log_stats: false
+  # Timeout in seconds for request submissions in vLLM server mode.
+  rollout_vllm_server_mode_submission_timeout_s: 5
 
 
 # ====== Models ======

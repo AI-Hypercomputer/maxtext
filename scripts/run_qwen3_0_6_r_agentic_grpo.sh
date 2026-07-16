@@ -15,11 +15,11 @@ if ! /usr/local/google/home/mohitkhatwani/max_venv/bin/pip show xpk &> /dev/null
 fi
 
 # --- Environment Variables ---
-export PROJECT_ID="${PROJECT_ID:-cloud-tpu-shared-capacity}" # GCP project ID where the Ironwood cluster is deployed
-export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-nap}" # Name of your Ironwood cluster
-export ZONE="${ZONE:-us-central1}" # Zone where your Ironwood cluster is deployed
-export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
-export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:agentic}" # Base Docker image
+export PROJECT_ID="${PROJECT_ID:-gke-aishared-gsc-dev}" # GCP project ID where the cluster is deployed
+export CLUSTER_NAME="${CLUSTER_NAME:-forrest-ss-e2e-cluster}" # Name of your cluster
+export ZONE="${ZONE:-us-central1-c}" # Zone where your cluster is deployed
+export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://mohitkhatwani_multipods/maxtext_logs}" # GCS bucket path for outputs
+export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:07152026-clean-v4}" # Base Docker image
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="${TPU_TYPE:-tpu7x-128}"
 export WORKLOAD_NAME="mohit-rl-agentic-$RANDOM"
@@ -140,7 +140,10 @@ rl.use_agentic_rollout=True \
 rl.max_concurrency=64 \
 rl.return_logprobs=False \
 rl.use_rollout_logps=False \
-rl.rollout_vllm_server_mode_submission_threshold=64"
+rl.rollout_vllm_server_mode_submission_threshold=64 \
+rl.kv_cache_metrics=True \
+rl.disable_log_stats=False \
+rl.rollout_vllm_server_mode_submission_timeout_s=5"
 
 # 1. Run live submit to compile and upload the container image with local changes
 echo "Compiling and uploading container image via xpk..."
@@ -184,7 +187,7 @@ rm -f xpk_build.log
   --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
   --custom-pathways-server-args="" \
   --env RPA_D_BLOCK_SIZES="1,4096,1,4096" \
-  --command="cd /app; pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git --no-deps; python3 scripts/patch_vllm_sampler.py; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
+  --command="pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git --no-deps; python3 scripts/patch_vllm_sampler.py; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
 

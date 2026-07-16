@@ -1,0 +1,8 @@
+FROM gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:07152026
+ENV VLLM_TARGET_DEVICE=tpu
+COPY src/dependencies/extra_deps/post_train_github_deps.txt /tmp/post_train_github_deps.txt
+RUN pip install --no-build-isolation --no-deps --force-reinstall -r /tmp/post_train_github_deps.txt
+COPY src/dependencies/extra_deps/tunix /tmp/tunix
+RUN pip install --no-build-isolation --no-deps --force-reinstall /tmp/tunix
+COPY src/ /deps/src/maxtext/src/
+COPY src/ /app/src/
