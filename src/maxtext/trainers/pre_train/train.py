@@ -65,6 +65,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import model_creation_utils
 from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
@@ -920,6 +921,15 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   train_utils.validate_train_config(config)
+  # Pre-flight scan_layers against the checkpoint this run will resume from, before any
+  # model is built: the run's own latest checkpoint wins (the emergency manager also
+  # restores from checkpoint_dir), else load_parameters_path / load_full_state_path.
+  resume_step_dir = (
+      checkpointing.latest_checkpoint_step_dir(config.checkpoint_dir)
+      if config.enable_checkpointing or config.enable_emergency_checkpoint
+      else None
+  )
+  config = model_creation_utils.verify_and_sync_scan_layers(config, checkpoint_path=resume_step_dir)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""

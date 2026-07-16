@@ -308,7 +308,7 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
 class CheckpointMetadataTest(parameterized.TestCase):
   """Tests for loading checkpoint custom metadata."""
 
-  @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
+  @mock.patch.object(checkpointing.ocp, "Checkpointer")
   def test_load_checkpoint_metadata(self, mock_checkpointer_cls):
     mock_ckptr = mock_checkpointer_cls.return_value
     mock_metadata = mock.MagicMock()
@@ -319,7 +319,7 @@ class CheckpointMetadataTest(parameterized.TestCase):
     self.assertEqual(loaded_metadata.get("lora"), {"lora_rank": 8, "lora_alpha": 16.0})
     mock_ckptr.metadata.assert_called_once()
 
-  @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
+  @mock.patch.object(checkpointing.ocp, "Checkpointer")
   def test_load_checkpoint_metadata_handles_exceptions(self, mock_checkpointer_cls):
     mock_ckptr = mock_checkpointer_cls.return_value
     mock_ckptr.metadata.side_effect = Exception("Checkpoint read error")

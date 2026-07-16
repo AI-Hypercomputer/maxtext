@@ -791,12 +791,27 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
   return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
 
 
-def verify_and_sync_scan_layers(config):
-  """Verify and sync scan_layers based on checkpoint metadata."""
-  if not config.load_parameters_path:
+def verify_and_sync_scan_layers(config, checkpoint_path=None):
+  """Verifies and syncs `config.scan_layers` against checkpoint metadata.
+
+  The config-level pre-flight for checkpoint restores, run before the model is
+  built: reads the `scan_layers` value the checkpoint was saved with (Orbax
+  custom_metadata). An explicitly-set conflicting value raises a "Configuration
+  mismatch" error here; an unset one is synced to the checkpoint's value so the
+  model is built to match. Weight-level problems metadata can't see are caught
+  after restore by `checkpointing._raise_on_weight_mismatch`.
+
+  Args:
+    config: The run config; `scan_layers` may differ on the returned copy.
+    checkpoint_path: Checkpoint directory to read metadata from. Defaults to
+      `config.load_parameters_path` or `config.load_full_state_path`. Pass a
+      step directory explicitly when resuming from a run's own checkpoints.
+  """
+  checkpoint_path = checkpoint_path or config.load_parameters_path or config.load_full_state_path
+  if not checkpoint_path:
     return config
 
-  custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
+  custom_metadata = checkpointing.load_checkpoint_metadata(checkpoint_path)
   saved_scan_layers = custom_metadata.get("scan_layers")
   if not isinstance(saved_scan_layers, bool):
     return config

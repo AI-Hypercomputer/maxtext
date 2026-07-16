@@ -174,7 +174,8 @@ def _weight_mismatches(want, have, path=()):
 
   A weight is wrong if the checkpoint didn't carry it -- absent, or left by Orbax as an
   unmaterialized ShapeDtypeStruct -- or carried it at a different shape. Only the shape can
-  disagree: Orbax casts a restored array to the target's dtype.
+  disagree: Orbax casts a restored array to the target's dtype. `have` accepts stored
+  *metadata* leaves too (anything with a `.shape`), so this also works pre-restore.
   """
   if isinstance(want, dict):
     out = []
@@ -208,7 +209,8 @@ def _raise_on_weight_mismatch(want, have):
   checkpoint doesn't carry as an unmaterialized ShapeDtypeStruct, and Orbax restores a stored
   array at its own shape rather than the target's. Either way it reaches the model as an
   untrained init value (a silent accuracy loss) or fails much later, deep in the first step,
-  without naming the weight.
+  without naming the weight. Complements the config-level `verify_and_sync_scan_layers`
+  pre-flight.
   """
   problems = _weight_mismatches(want, have)
   if not problems:
@@ -219,6 +221,33 @@ def _raise_on_weight_mismatch(want, have):
       f"{lines}\n"
       "Verify the checkpoint matches the model architecture (emb_dim, mlp_dim, num layers, scan_layers)."
   )
+
+
+def _stored_metadata_tree(read_tree):
+  """Best-effort read of a checkpoint's stored item-metadata tree for pre-restore checks.
+
+  Returns None on any failure so the check is skipped -- a metadata problem must not block
+  a restore that Orbax's own validation might still complete.
+  """
+  try:
+    tree = read_tree()
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.log(f"Warning: skipping pre-restore weight check: {e}")
+    return None
+  return tree if isinstance(tree, dict) else None
+
+
+def _pre_restore_weight_check(want, have):
+  """Runs the weight check against stored metadata, but only when `have` was located.
+
+  An empty `have` means the params collection wasn't found where this layout expects it
+  (an unfamiliar on-disk nesting), not that the checkpoint is missing every weight -- so
+  skip rather than hard-fail a valid restore with a "missing" for every weight. A real
+  partial mismatch leaves the other weights in `have`, so it still raises here; a
+  genuinely empty checkpoint is caught after restore.
+  """
+  if isinstance(have, dict) and have:
+    _raise_on_weight_mismatch(want, have)
 
 
 def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
@@ -801,6 +830,12 @@ def load_state_if_possible(
         linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_unboxed_pre_state)
         restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
         checkpoint_args = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
+        # Pre-restore check against stored metadata: names the offending weight, which
+        # Orbax's own strict shape error would not.
+        # ("items" must be indexed, not attribute-accessed: Composite.items is a method.)
+        stored_tree = _stored_metadata_tree(lambda: checkpoint_manager.item_metadata(step)["items"].tree)
+        if stored_tree is not None:
+          _pre_restore_weight_check(*_expected_and_restored_params(abstract_unboxed_pre_state, stored_tree))
         if (
             dataset_type == "grain"
             and data_iterator
@@ -966,6 +1001,13 @@ def load_params_from_path(
       )
   )
 
+  # Pre-restore check against stored metadata, so a mismatch fails before the weights
+  # are downloaded.
+  stored_tree = _stored_metadata_tree(lambda: ckptr.metadata(epath.Path(load_parameters_from_path)).item_metadata.tree)
+  if stored_tree is not None:
+    stored_collection = stored_tree.get("params", {})
+    _pre_restore_weight_check(want, stored_collection.get("params", {}) if is_nnx else stored_collection)
+
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint
@@ -978,10 +1020,9 @@ def load_params_from_path(
       restore_args={"params": restore_args},
   )
   restored_collection = restored["params"]
-  # `transforms={}` lets Orbax return an unmaterialized leaf for a weight the checkpoint lacks,
-  # and a stored array at its own shape rather than the target's. Either reaches the model and
-  # fails much later without naming the weight, so check here -- the params-only load
-  # (load_parameters_path, e.g. SFT) has no init state to fall back on.
+  # `transforms={}` lets Orbax return an unmaterialized leaf for a weight the checkpoint
+  # lacks, and a stored array at its own shape; either would reach the model unnoticed --
+  # the params-only load (load_parameters_path, e.g. SFT) has no init state to fall back on.
   _raise_on_weight_mismatch(want, restored_collection["params"] if is_nnx else restored_collection)
   if is_nnx:
     nnx.replace_by_pure_dict(abstract_unboxed_params, restored_collection["params"])
@@ -1009,13 +1050,39 @@ def load_checkpoint_metadata(checkpoint_dir_path: str) -> dict[str, Any]:
     present or loading fails.
   """
   checkpoint_dir = epath.Path(checkpoint_dir_path)
+  # CheckpointManager saves write custom_metadata at the step directory, one level above
+  # the `items` dir that load_parameters_path conventionally points at -- read there first.
+  lookup_dirs = [checkpoint_dir.parent, checkpoint_dir] if checkpoint_dir.name == "items" else [checkpoint_dir]
+  ckptr = ocp.Checkpointer(ocp.StandardCheckpointHandler())
   try:
-    ckptr = ocp.StandardCheckpointer()
-    metadata = ckptr.metadata(checkpoint_dir)
-    return metadata.custom_metadata or {}
+    for lookup_dir in lookup_dirs:
+      custom_metadata = ckptr.metadata(lookup_dir).custom_metadata or {}
+      if custom_metadata:
+        return custom_metadata
+    return {}
   except Exception as e:  # pylint: disable=broad-except
     max_logging.log(f"Warning: Failed to load checkpoint metadata: {e}")
     return {}
+  finally:
+    ckptr.close()
+
+
+def latest_checkpoint_step_dir(checkpoint_dir: str) -> Optional[epath.Path]:
+  """Returns the step directory of the newest checkpoint under `checkpoint_dir`, or None.
+
+  Lets a run pre-flight the checkpoint it would resume from before the CheckpointManager
+  -- and the model -- exist. Handles prefixed step-directory names (e.g. `checkpoint_100`).
+  """
+  if not checkpoint_dir:
+    return None
+  try:
+    step_paths = ocp.utils.checkpoint_steps_paths(epath.Path(checkpoint_dir))
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.log(f"Warning: could not list checkpoint steps under {checkpoint_dir}: {e}")
+    return None
+  if not step_paths:
+    return None
+  return max(step_paths, key=lambda p: ocp.utils.step_from_checkpoint_name(p.name))
 
 
 def _uses_local_checkpoint_period(config):
