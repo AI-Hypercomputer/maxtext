@@ -28,6 +28,8 @@ import jax
 import jax.numpy as jnp
 from orbax import checkpoint as ocp
 import qwix
+from qwix._src.core.qarray import QArray
+from qwix._src.providers.ptq import WithAux
 
 from maxtext.common import checkpointing
 from maxtext.configs import pyconfig
@@ -607,37 +609,36 @@ def apply_lora_to_model(
   )
 
   if mesh is not None:
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-      graph_def, state = nnx.split(lora_model)
+    graph_def, state = nnx.split(lora_model)
 
-      # We handle explicit replication for LoRA to ensure safety and efficiency.
-      state = jax.tree_util.tree_map(
-          lambda x: x.replace(sharding=jax.sharding.PartitionSpec(), out_sharding=None, sharding_names=None)
-          if isinstance(x, nnx.LoRAParam)
-          else x,
-          state,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
-      )
+    # We handle explicit replication for LoRA to ensure safety and efficiency.
+    state = jax.tree_util.tree_map(
+        lambda x: x.replace(sharding=jax.sharding.PartitionSpec(), out_sharding=None, sharding_names=None)
+        if isinstance(x, nnx.LoRAParam)
+        else x,
+        state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
 
-      # Use logical_to_mesh_sharding to correctly map logical axes like 'embed'
-      # to physical mesh axes.
-      dst_shardings = nn.logical_to_mesh_sharding(nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules)
+    # Use logical_to_mesh_sharding to correctly map logical axes like 'embed'
+    # to physical mesh axes.
+    dst_shardings = nn.logical_to_mesh_sharding(nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules)
 
-      def _safe_reshard(var, sharding_spec):
-        if not isinstance(var, nnx.Variable) or not isinstance(sharding_spec, jax.sharding.Sharding):
-          return var
-        val = var.get_value()
-        if not isinstance(val, jax.Array):
-          return var
-        # make_array_from_callback natively constructs a globally sharded array
-        # from the local host arrays, bypassing backend-specific device_put issues
-        # on both Pathways and McJAX.
-        resharded_val = jax.make_array_from_callback(val.shape, sharding_spec, lambda idx: val[idx])
-        return var.replace(value=resharded_val)
+    def _safe_reshard(var, sharding_spec):
+      if not isinstance(var, nnx.Variable) or not isinstance(sharding_spec, jax.sharding.Sharding):
+        return var
+      val = var.get_value()
+      if not isinstance(val, jax.Array):
+        return var
+      # make_array_from_callback natively constructs a globally sharded array
+      # from the local host arrays, bypassing backend-specific device_put issues
+      # on both Pathways and McJAX.
+      resharded_val = jax.make_array_from_callback(val.shape, sharding_spec, lambda idx: val[idx])
+      return var.replace(value=resharded_val)
 
-      state = jax.tree_util.tree_map(_safe_reshard, state, dst_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
+    state = jax.tree_util.tree_map(_safe_reshard, state, dst_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
-      lora_model = nnx.merge(graph_def, state)
+    lora_model = nnx.merge(graph_def, state)
 
   _verify_lora_parameters(lora_model, mt_config)
 
@@ -699,8 +700,16 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
     max_logging.log(f"Guided restore failed: {e}. Falling back to basic restore.")
     restored_lora_params = ocp.PyTreeCheckpointer().restore(lora_restore_path)
 
+  # If restoring from a full TrainState checkpoint, navigate into the model sub-tree
+  if isinstance(restored_lora_params, dict) and "model" in restored_lora_params:
+    restored_lora_params = restored_lora_params["model"]
+  elif hasattr(restored_lora_params, "model"):
+    restored_lora_params = getattr(restored_lora_params, "model")
+  restored_count = 0
+
   # Post processing
   def _map_to_state(path, variable):
+    nonlocal restored_count
     if not isinstance(variable, nnx.Variable):
       return
 
@@ -708,14 +717,19 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
 
     curr = restored_lora_params
     for p in str_path:
-      if isinstance(curr, dict) and p in curr:
-        curr = curr[p]
+      if isinstance(curr, Mapping):
+        if p in curr:
+          curr = curr[p]
+        elif p.isdigit() and int(p) in curr:
+          curr = curr[int(p)]
+        else:
+          return
       elif hasattr(curr, p):
         curr = getattr(curr, p)
       else:
         return
 
-    if isinstance(curr, dict) and "value" in curr:
+    if isinstance(curr, Mapping) and "value" in curr:
       matched_val = curr["value"]
     elif hasattr(curr, "value"):
       matched_val = getattr(curr, "value")
@@ -723,12 +737,16 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
       matched_val = curr
 
     variable.value = matched_val
+    restored_count += 1
 
   jax.tree_util.tree_map_with_path(
       _map_to_state,
       abstract_lora_params,
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
+
+  if restored_count == 0:
+    raise ValueError(f"No LoRA/adapter parameters were successfully restored from checkpoint at '{lora_restore_path}'.")
 
   nnx.update(model, abstract_lora_params)
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
@@ -918,3 +936,26 @@ def get_lora_abstract_state_nnx(base_abstract_params, lora_config):
       opt_state={},
   )
   return unboxed_abstract_lora_state, lora_state_mesh_annotations
+
+
+def restore_qlora_base_weights(val):
+  """Restores qwix custom quantized types from nnx.State representation."""
+  if isinstance(val, nnx.State):
+    pure_dict = {k: restore_qlora_base_weights(v) for k, v in val.items()}
+    if "array" in pure_dict:
+      return WithAux(array=pure_dict["array"], how=None)
+    elif "qvalue" in pure_dict and "scale" in pure_dict:
+      return QArray(
+          qvalue=pure_dict["qvalue"],
+          scale=pure_dict["scale"],
+          zero_point=pure_dict.get("zero_point", None),
+          qtype=None,
+      )
+    else:
+      return pure_dict
+  elif isinstance(val, nnx.Variable):
+    return restore_qlora_base_weights(val.get_value())
+  elif isinstance(val, dict):
+    return {k: restore_qlora_base_weights(v) for k, v in val.items()}
+  else:
+    return val

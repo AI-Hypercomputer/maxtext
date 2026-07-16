@@ -1688,6 +1688,20 @@ def setup_initial_state(
         # didn't carry is still an unmaterialized placeholder. Fill those from the fresh init: a
         # present leaf comes from the checkpoint, an absent one keeps its init value.
         overlay = restored if is_emergency else restored["items"]
+
+        if getattr(config, "lora", None) and getattr(config.lora, "enable_lora", False):
+          path_to_load = config.load_parameters_path or config.load_full_state_path
+          if path_to_load:
+            _, base_params, _ = nnx.split_state(state.model, nnx.LoRAParam, nnx.Param, ...)
+            loaded_base_params = checkpointing.load_params_from_path(
+                path_to_load,
+                base_params,
+                config.checkpoint_storage_concurrent_gb,
+                use_ocdbt=config.checkpoint_storage_use_ocdbt,
+                use_zarr3=config.checkpoint_storage_use_zarr3,
+            )
+            nnx.update(state.model, loaded_base_params)
+
         merged = jax.tree.map(
             lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
             overlay.to_pure_dict(),
@@ -1733,6 +1747,27 @@ def setup_initial_state(
             state = state.replace(params=merged_params)
           else:
             state = state.replace(params=raw_params)
+  if config.pure_nnx and getattr(config, "lora", None) and getattr(config.lora, "enable_lora", False):
+    # pylint: disable=import-outside-toplevel
+    from maxtext.utils import lora_utils
+
+    def _convert_var(v):
+      if isinstance(v, nnx.Variable):
+        raw_val = v.get_value() if hasattr(v, "get_value") else v.value
+        if isinstance(raw_val, nnx.State):
+          restored_val = lora_utils.restore_qlora_base_weights(raw_val)
+          if hasattr(v, "_raw_value"):
+            # pylint: disable=protected-access
+            v._raw_value = restored_val
+          v.set_value(restored_val)
+      return v
+
+    if hasattr(state, "model"):
+      model_to_convert = state.model
+      if isinstance(model_to_convert, nnx.Module):
+        model_to_convert = nnx.state(model_to_convert)
+      jax.tree_util.tree_map(_convert_var, model_to_convert, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
   if not config.pure_nnx:
     state = max_utils.unbox_logicallypartioned(state)
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored

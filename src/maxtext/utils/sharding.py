@@ -598,19 +598,25 @@ def maybe_update_params_sharding_with_opt_nnx(
   # In TrainStateNNX, parameters are under 'model'
   model_shardings = state_mesh_shardings.model
 
+  wrt = (
+      nnx.LoRAParam
+      if (hasattr(config, "lora") and config.lora and getattr(config.lora, "enable_lora", False))
+      else nnx.Param
+  )
+
   def _extract_param_only(state):
-    """Recursively extract nnx.Param variables from an nnx.State into a nested plain dict.
+    """Recursively extract trainable parameters from an nnx.State into a nested plain dict.
 
     Constructs nnx.State({'key': nested_dict, ...}) which produces the same pytree
-    structure as nnx.split(model, nnx.Param, ...)[1], enabling jax.tree.map
-    to work correctly between ga_params (Param-only) and params_shardings.
+    structure as nnx.split(model, wrt, ...)[1], enabling jax.tree.map
+    to work correctly between ga_params (wrt-only) and params_shardings.
     """
     result = {}
     for k, v in state.items():
-      if isinstance(v, nnx.Param):
+      if isinstance(v, wrt):
         result[k] = v
       elif isinstance(v, nnx.Variable):
-        pass  # skip non-Param variables (RngKey, RngCount, OptVariable, etc.)
+        pass  # skip non-trainable variables (RngKey, RngCount, OptVariable, etc.)
       elif hasattr(v, "items"):
         sub = _extract_param_only(v)
         if sub:
@@ -618,7 +624,7 @@ def maybe_update_params_sharding_with_opt_nnx(
     return result
 
   # prev_params_shardings must match the pytree structure of ga_params from
-  # nnx.split(model, nnx.Param, ...) — Param variables only, no rngs.
+  # nnx.split(model, wrt, ...) — trainable variables only, no rngs.
   prev_params_shardings = nnx.State(_extract_param_only(model_shardings))
 
   if not config.shard_optimizer_over_data:

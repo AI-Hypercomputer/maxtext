@@ -36,6 +36,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
+from maxtext.utils import lora_utils
 from maxtext.utils.rampup_batch import create_rampup_manager
 
 
@@ -241,7 +242,11 @@ def setup_train_loop(config, recorder, devices=None):
       # For NNX, the train state is wrapped in the TrainStateNNX module.
       def create_train_state_fn():
         model = _create_model_partial()
-        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+        wrt = nnx.Param
+        if config.lora.enable_lora:
+          model = lora_utils.apply_lora_to_model(model, mesh, config)
+          wrt = nnx.LoRAParam
+        optimizer = nnx.Optimizer(model, tx, wrt=wrt)
         return train_state_nnx.TrainStateNNX(model, optimizer)
 
       init_state_fn = create_train_state_fn
@@ -325,8 +330,6 @@ def setup_train_loop(config, recorder, devices=None):
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
         state_mesh_shardings = diloco.DiLoCoTrainState(
             inner_state_shardings,
-            # Match the outer params' pure-dict structure (build_diloco_state stores
-            # outer_params via to_pure_dict), so the sharding tree matches the state tree.
             state_mesh_shardings_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
             if config.pure_nnx
             else state_mesh_shardings_params,
@@ -363,6 +366,12 @@ def setup_train_loop(config, recorder, devices=None):
     else:
       train_state = nnx.merge(state_graphdef, state)  # pyrefly: ignore[unbound-name]
       model = train_state.model
+
+      # Restore external pre-trained LoRA adapter weights if starting a new run
+      if config.lora.enable_lora and config.lora.lora_restore_path:
+        checkpoint_step = checkpoint_manager.latest_step() if checkpoint_manager is not None else None
+        if checkpoint_step is None:
+          lora_utils.restore_lora_from_path(model, config)
   else:
     train_state = state
 
@@ -386,6 +395,13 @@ def validate_train_config(config):
 
   if getattr(config, "use_dpo", False):
     raise ValueError("Legacy DPO implementation in train.py is removed. Please use post-training train_dpo.py instead.")
+
+  if getattr(config, "lora", None) and getattr(config.lora, "enable_lora", False):
+    if not getattr(config, "pure_nnx", False):
+      raise ValueError(
+          "LoRA/PEFT training in the native trainer (train.py) is only"
+          " supported when running a fully NNX model (pure_nnx=True)."
+      )
 
   assert config.run_name, "Erroring out, need a real run_name"
   if config.dataset_path and not config.dataset_path.startswith("gs://"):

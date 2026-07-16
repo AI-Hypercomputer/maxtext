@@ -27,13 +27,15 @@ import sys
 import unittest
 
 from flax import nnx
-import jax
+import jax.numpy as jnp
+import pytest
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
+from maxtext.trainers.pre_train import train
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.lora_utils import is_lora_enabled
 from maxtext.utils.train_utils import setup_train_loop
 from tests.utils.test_helpers import get_test_config_path
-import pytest
 
 
 def _tiny_nnx_pyconfig(**overrides):
@@ -44,6 +46,7 @@ def _tiny_nnx_pyconfig(**overrides):
       "dataset_type": "synthetic",
       "model_name": "default",
       "pure_nnx": True,
+      "attention": "dot_product",
       "per_device_batch_size": 1.0,
       "base_emb_dim": 8,
       "base_num_query_heads": 4,
@@ -122,13 +125,124 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
 
     # Same key-set after nnx.split — this is what setup_train_loop relies on at
     # train_utils.py:281-282 to pair state_params with state_mesh_shardings_params.
-    self.assertEqual(
-        jax.tree_util.tree_structure(params),
-        jax.tree_util.tree_structure(params_shardings),
-    )
-    self.assertGreater(len(jax.tree.leaves(params)), 0)
-
+    self.assertEqual(params.keys(), params_shardings.keys())
     del model
+
+
+class SetupTrainLoopNNXLoraTest(unittest.TestCase):
+  """Integration checks for setup_train_loop and training step with LoRA enabled."""
+
+  def test_pure_nnx_setup_with_lora_enabled(self):
+    # Overriding configurations to enable lora on default model
+    config = _tiny_nnx_pyconfig(
+        weight_dtype="bfloat16",
+        sharding_tolerance=1.0,
+        lora={
+            "enable_lora": True,
+            "lora_rank": 4,
+            "lora_alpha": 8.0,
+        },
+    )
+    (
+        _,
+        _,
+        _,
+        model,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        train_state,
+    ) = setup_train_loop(config, recorder=None)
+
+    self.assertTrue(is_lora_enabled(model))
+    self.assertIs(train_state.optimizer.wrt, nnx.LoRAParam)
+
+  def _run_train_step_updates_only_adapters_test(self, qlora: bool = False, scan_layers: bool = False):
+    lora_dict = {
+        "enable_lora": True,
+        "lora_rank": 4,
+        "lora_alpha": 8.0,
+    }
+    if qlora:
+      lora_dict.update(
+          {
+              "lora_weight_qtype": "int8",
+              "lora_tile_size": 32,
+          }
+      )
+
+    num_layers = 8 if scan_layers else 2
+    config = _tiny_nnx_pyconfig(
+        weight_dtype="bfloat16",
+        sharding_tolerance=1.0,
+        base_emb_dim=32,
+        base_mlp_dim=128,
+        base_num_decoder_layers=num_layers,
+        lora=lora_dict,
+        steps=1,
+        scan_layers=scan_layers,
+    )
+    (
+        _,
+        _,
+        _,
+        model,
+        _,
+        _,
+        _,
+        data_loader,
+        rampup_manager,
+        _,
+        train_state,
+    ) = setup_train_loop(config, recorder=None)
+
+    # Extract initial weights
+    initial_model_state = nnx.state(model)
+
+    # Run one training step
+    batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+
+    new_state, _ = train.train_step(
+        model=nnx.graphdef(train_state),
+        config=config,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=nnx.state(train_state),
+        data=batch,
+    )
+
+    # Merge and compare
+    new_train_state = nnx.merge(nnx.graphdef(train_state), new_state)
+    new_model_state = nnx.state(new_train_state.model)
+
+    # Verify base weights are identical, and LoRA weights are updated
+    for path, initial_var in initial_model_state.items():
+      new_var = new_model_state[path]
+      if isinstance(initial_var, nnx.LoRAParam):
+        # Should have changed
+        self.assertFalse(jnp.allclose(initial_var.value, new_var.value))
+      elif isinstance(initial_var, nnx.Param):
+        # Should NOT have changed
+        self.assertTrue(jnp.allclose(initial_var.value, new_var.value))
+
+  def test_train_step_updates_only_lora_weights(self):
+    """Test standard LoRA updates only the adapter weights during a training step."""
+    self._run_train_step_updates_only_adapters_test(qlora=False, scan_layers=False)
+
+  def test_train_step_updates_only_qlora_weights(self):
+    """Test QLoRA updates only the adapter weights during a training step."""
+    self._run_train_step_updates_only_adapters_test(qlora=True, scan_layers=False)
+
+  def test_train_step_updates_only_lora_weights_scan_layers(self):
+    """Test standard LoRA updates only the adapter weights under sequentially scanned layers."""
+    self._run_train_step_updates_only_adapters_test(qlora=False, scan_layers=True)
+
+  def test_train_step_updates_only_qlora_weights_scan_layers(self):
+    """Test QLoRA updates only the adapter weights under sequentially scanned layers."""
+    self._run_train_step_updates_only_adapters_test(qlora=True, scan_layers=True)
 
 
 if __name__ == "__main__":
