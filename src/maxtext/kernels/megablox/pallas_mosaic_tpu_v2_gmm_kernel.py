@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Forked from:
-# https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_gmm_kernel.py
+# https://github.com/openxla/tokamax/blob/a1105e7513c4cc8604bad5627d099dcf09430ca1/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_gmm_kernel.py
 """GMM kernel implemented using Pallas."""
 
 from abc import ABC, abstractmethod
@@ -279,18 +279,15 @@ class IndexMaps:
 
     return (pl.ds(row_start, row_size), 0, k_id)
 
-# TODO
-# +  def lhs_scale_index_map(
-# +      self, _: jax.Array, gm_id: jax.Array, k_id: jax.Array
-# +  ):
-# +    # Per-tensor scale: a single [1, 1] value shared across every tile, so the
-# +    # block always reads index 0. Extension point: when the scale is per-channel
-# +    # or sub-channel, tile the row axis like `lhs_index_map` (using gm_id) and
-# +    # index the K-block axis from `k_id`.
-# +    del gm_id, k_id
-# +    return (0, 0)
-# +
-
+  def lhs_scale_index_map(
+      self, _: jax.Array, gm_id: jax.Array, k_id: jax.Array
+  ):
+    # Per-tensor scale: a single [1, 1] value shared across every tile, so the
+    # block always reads index 0. Extension point: when the scale is per-channel
+    # or sub-channel, tile the row axis like `lhs_index_map` (using gm_id) and
+    # index the K-block axis from `k_id`.
+    del gm_id, k_id
+    return (0, 0)
 
   def rhs_weight_index_map(self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array):
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
@@ -336,13 +333,7 @@ class IndexMaps:
 
 def generate_block_specs(
     metadata_ref: MetadataRef, cfgs: GmmConfigs
-) -> Tuple[Tuple[pl.BlockSpec, WeightsRef, pl.BlockSpec | None], pl.BlockSpec]:
-
-# TODO: rej
-# -) -> Tuple[Tuple[pl.BlockSpec, WeightsRef], pl.BlockSpec]:
-# +) -> Tuple[Tuple[LhsRef, WeightsRef], pl.BlockSpec]:
-
-
+) -> Tuple[Tuple[LhsRef, WeightsRef, pl.BlockSpec | None], pl.BlockSpec]:
   """Generates block specs for the given lhs, rhs, and out refs."""
 
   index_map = IndexMaps(metadata_ref, cfgs)
@@ -937,18 +928,14 @@ def kernel_main(
   )
 
   # Bounded slice requires second last dim to be aligned to the sublane size.
-  # rhs_ref uses static tiling thus reshape is not needed.
 
-# TODO: rej
-# -  # rhs_ref uses static tiling thus reshape is not needed.
-# -  lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
-# +  # rhs_ref uses static tiling thus reshape is not needed. The lhs quant scale
-# +  # (when present) is small and statically tiled, so it is passed through as-is.
-# +  lhs_value_in = lhs_ref.value.reshape(
-# +      -1, cfgs.dims.size_lhs_sublane, lhs_ref.value.shape[-1]
-# +  )
-# +  lhs_in = LhsRef(value=lhs_value_in, scale=lhs_ref.scale)
-  lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
+  # rhs_ref uses static tiling thus reshape is not needed. The lhs quant scale
+  # (when present) is small and statically tiled, so it is passed through as-is.
+  lhs_value_in = lhs_ref.value.reshape(
+    -1, cfgs.dims.size_lhs_sublane, lhs_ref.value.shape[-1]
+  )
+  lhs_in = LhsRef(value=lhs_value_in, scale=lhs_ref.scale)
+
   ps_in = None
   if cfgs.has_partial_sum:
     ps_in = partial_sum_ref.reshape(-1, cfgs.dims.size_lhs_sublane, partial_sum_ref.shape[-1])
@@ -966,8 +953,6 @@ def calculate_tiling(
     rhs_cfgs: InputConfigs,
     vmem_limit_bytes: int,
     fuse_act: str | None = None,
-    # TODO: rej
-    # +    lhs_scale: jax.Array | None = None,
     has_partial_sum: bool = False,
 ) -> TileSizes:
   """Calculate optimal tile sizes for GMM kernel."""
@@ -1201,22 +1186,21 @@ def make_gmm_configs(
     maybe_quantize_lhs: bool,
     zero_initialize: bool,
     fuse_act: str | None = None,
+    lhs_scale: jax.Array | None = None,
 ):
   """Fills the GMM config for the GMM kernel."""
 
-  dims = validate_inputs(lhs, rhs, rhs_scale, rhs_bias, partial_sum, group_sizes, group_offset, fuse_act)
-
-# TODO: rej
-#   -      lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset, fuse_act
-# +      lhs,
-# +      rhs,
-# +      rhs_scale,
-# +      rhs_bias,
-# +      group_sizes,
-# +      group_offset,
-# +      fuse_act,
-# +      maybe_quantize_lhs,
-# +      lhs_scale,
+  dims = validate_inputs(
+      lhs,
+      rhs,
+      rhs_scale,
+      rhs_bias,
+      group_sizes,
+      group_offset,
+      fuse_act,
+      maybe_quantize_lhs,
+      lhs_scale,
+  )
 
   if rhs_scale is not None:
     has_scale = True
@@ -1484,10 +1468,11 @@ def gmm_v2(
     in_specs.append(pl.BlockSpec(memory_space=pltpu.HBM))
     partial_sum_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
-
-
   in_specs = [
-      pl.BlockSpec(memory_space=pltpu.HBM),  # lhs
+      LhsRef(
+          value=pl.BlockSpec(memory_space=pltpu.HBM),
+          scale=lhs_scale_spec,
+      ),
       WeightsRef(
           weight=pl.BlockSpec(memory_space=pltpu.HBM),
           scale=rhs_scale_spec,
@@ -1495,13 +1480,6 @@ def gmm_v2(
       ),  # rhs_weights
       partial_sum_spec,  # partial_sum
   ]
-
-# TODO: rej
-#   -              pl.BlockSpec(memory_space=pltpu.HBM),
-# +              LhsRef(
-# +                  value=pl.BlockSpec(memory_space=pltpu.HBM),
-# +                  scale=lhs_scale_spec,
-# +              ),
 
   input_output_aliases = {}
   if partial_sum is not None:
@@ -1527,8 +1505,4 @@ def gmm_v2(
       cost_estimate=get_cost_estimate(cfgs),
       metadata=get_metadata(cfgs),
       input_output_aliases=input_output_aliases,
-  )(group_sizes, group_offset, lhs, rhs_weights, partial_sum)[:, : cfgs.out_size_n]
-
-# TODO: rej
-# -  )(group_sizes, group_offset, lhs, rhs_weights)[:, : cfgs.out_size_n]
-# +  )(group_sizes, group_offset, lhs_in, rhs_weights)[:, : cfgs.out_size_n]
+  )(group_sizes, group_offset, lhs_in, rhs_weights, partial_sum)[:, : cfgs.out_size_n]
