@@ -195,18 +195,26 @@ def should_prevent_cse_in_remat(config):
   return True
 
 
-def get_offload_remat_names(config):
-  """Returns ``(save_names, offload_names)`` for offloading remat policies, else ``None``.
+def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
+  """Returns the ``(save_names, offload_names)`` split for remat policies built via
+  ``jax.checkpoint_policies.save_and_offload_only_these_names``.
 
-  Single source of truth for which checkpointed tensors a remat policy saves on
-  device vs. offloads to pinned host. Shared by ``Decoder.get_remat_policy`` (which
-  builds the save-and-offload policy) and by models that must convert an offload
-  into a device-save at a scan boundary that cannot carry pinned-host residuals
-  (e.g. Gemma4's global-layer trip-count-one scan). Keeping both callers on this
-  helper ensures ``remat_policy=qkv_proj_offloaded`` and ``remat_policy=custom``
-  with the same tensors marked ``offload`` resolve to identical name sets.
+  ``save_names`` are checkpointed tensors kept in device HBM; ``offload_names`` are moved to
+  pinned host. This is the single source of truth shared by ``Decoder.get_remat_policy`` (which
+  builds the save-and-offload policy) and by models that use custom ways to handle offload (
+  e.g. Gemma4's global-layer with scan). It also makes ``remat_policy=custom`` with tensors marked
+  ``offload`` resolve to the same name sets as the named presets.
 
-  Returns ``None`` for non-offloading policies.
+  Returns a ``(save_names, offload_names)`` tuple:
+    * ``custom``: ``(config.tensors_on_device, config.tensors_to_offload)`` -- the per-tensor
+      assignments. Either list may be empty: all tensors set to ``device`` gives an empty offload
+      list, all set to ``remat`` gives ``([], [])``.
+    * ``qkv_proj_offloaded`` / ``minimal_offloaded``: ``([], <hardcoded offload names>)`` -- presets
+      that only offload and save nothing on device.
+    * any other policy (``full``, ``minimal``, ``save_*``, ``none``, ...): ``([], [])`` -- these do
+      not use ``save_and_offload_only_these_names``, so they contribute no names to this split.
+      Note ``([], [])`` here means "no names for this split", not that the policy saves nothing
+      overall (e.g. ``save_out_proj`` still saves ``out_proj`` via ``save_only_these_names``).
   """
   if config.remat_policy == "qkv_proj_offloaded":
     return [], ["query_proj", "value_proj", "key_proj", "kv_proj"]
@@ -225,7 +233,7 @@ def get_offload_remat_names(config):
     ]
   if config.remat_policy == "custom":
     return list(config.tensors_on_device or []), list(config.tensors_to_offload or [])
-  return None
+  return [], []
 
 
 def load_compiled(config, partial_train, state, execution_devices):

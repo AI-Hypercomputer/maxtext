@@ -1731,8 +1731,9 @@ class TestKVCacheScanHelpers(unittest.TestCase):
       maxtext_utils.update_kv_caches_after_scan(kv_caches_tuple, returned_kv_cache, scan_length=1, block_len=2)
 
 
-class TestGetOffloadRematNames(unittest.TestCase):
-  """Tests for maxtext_utils.get_offload_remat_names."""
+@pytest.mark.cpu_only
+class TestGetSaveAndOffloadNames(unittest.TestCase):
+  """Tests for maxtext_utils.get_save_and_offload_names (pure config logic, no device needed)."""
 
   @staticmethod
   def _cfg(remat_policy, tensors_on_device=None, tensors_to_offload=None):
@@ -1743,33 +1744,42 @@ class TestGetOffloadRematNames(unittest.TestCase):
     )
 
   def test_named_preset_matches_equivalent_custom(self):
-    """qkv_proj_offloaded resolves identically to custom with the same offloads."""
-    preset = maxtext_utils.get_offload_remat_names(self._cfg("qkv_proj_offloaded"))
-    custom = maxtext_utils.get_offload_remat_names(
-        self._cfg("custom", tensors_on_device=[], tensors_to_offload=["query_proj", "value_proj", "key_proj", "kv_proj"])
+    """qkv_proj_offloaded's offload names resolve identically to an equivalent custom config.
+
+    A real custom config keeps decoder_layer_input on device by default, so its full tuple
+    differs from the preset by that (benign, boundary) save entry -- assert only the offload halves.
+    """
+    _, preset_offload = maxtext_utils.get_save_and_offload_names(self._cfg("qkv_proj_offloaded"))
+    _, custom_offload = maxtext_utils.get_save_and_offload_names(
+        self._cfg(
+            "custom",
+            tensors_on_device=["decoder_layer_input"],
+            tensors_to_offload=["query_proj", "value_proj", "key_proj", "kv_proj"],
+        )
     )
-    self.assertEqual(preset, custom)
+    self.assertEqual(custom_offload, preset_offload)
 
   def test_kv_proj_retained_in_offload_presets(self):
     """Regression guard: kv_proj must stay in the offload presets (it is a real checkpoint name)."""
-    _, qkv_offload = maxtext_utils.get_offload_remat_names(self._cfg("qkv_proj_offloaded"))
-    _, minimal_offload = maxtext_utils.get_offload_remat_names(self._cfg("minimal_offloaded"))
+    _, qkv_offload = maxtext_utils.get_save_and_offload_names(self._cfg("qkv_proj_offloaded"))
+    _, minimal_offload = maxtext_utils.get_save_and_offload_names(self._cfg("minimal_offloaded"))
     self.assertIn("kv_proj", qkv_offload)
     self.assertIn("kv_proj", minimal_offload)
 
   def test_custom_reads_config_lists(self):
-    save, offload = maxtext_utils.get_offload_remat_names(
+    save, offload = maxtext_utils.get_save_and_offload_names(
         self._cfg("custom", tensors_on_device=["context"], tensors_to_offload=["out_proj"])
     )
     self.assertEqual(save, ["context"])
     self.assertEqual(offload, ["out_proj"])
 
   def test_custom_handles_none_lists(self):
-    self.assertEqual(maxtext_utils.get_offload_remat_names(self._cfg("custom")), ([], []))
+    self.assertEqual(maxtext_utils.get_save_and_offload_names(self._cfg("custom")), ([], []))
 
-  def test_non_offloading_policies_return_none(self):
+  def test_non_offloading_policies_return_empty(self):
+    """Policies that don't use the save/offload split contribute no names to it."""
     for policy in ("full", "minimal", "save_out_proj", "save_qkv_proj", "none"):
-      self.assertIsNone(maxtext_utils.get_offload_remat_names(self._cfg(policy)))
+      self.assertEqual(maxtext_utils.get_save_and_offload_names(self._cfg(policy)), ([], []))
 
 
 if __name__ == "__main__":
