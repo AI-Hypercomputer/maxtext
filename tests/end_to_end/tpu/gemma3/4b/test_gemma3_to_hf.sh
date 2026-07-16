@@ -22,10 +22,30 @@ else
     scan_status="unscanned"
 fi
 
-python3 -m maxtext.checkpoint_conversion.to_huggingface \
-    model_name=${MODEL_NAME} \
-    tokenizer_type="huggingface" \
-    load_parameters_path=${CKPT_PATH} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
-    use_multimodal=${USE_MULTIMODAL} \
-    scan_layers=$SCAN_LAYERS
+if [[ "${CKPT_PATH,,}" == *lora* ]]; then
+    
+    LORA_RESTORE_PATH="${CKPT_PATH}"
+
+    BASE_MODEL_CKPT="${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items"
+
+    python3 -m maxtext.checkpoint_conversion.to_huggingface \
+        model_name=${MODEL_NAME} \
+        tokenizer_type="huggingface" \
+        load_parameters_path=${BASE_MODEL_CKPT} \
+        lora.lora_restore_path=${LORA_RESTORE_PATH} \
+        base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
+        use_multimodal=${USE_MULTIMODAL} \
+        scan_layers=${SCAN_LAYERS} \
+        enable_nnx=True \
+        pure_nnx_decoder=True
+
+else
+    python3 -m maxtext.checkpoint_conversion.to_huggingface \
+        model_name=${MODEL_NAME} \
+        tokenizer_type="huggingface" \
+        load_parameters_path=${CKPT_PATH} \
+        base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
+        use_multimodal=${USE_MULTIMODAL} \
+        scan_layers=${SCAN_LAYERS}
+
+fi

@@ -37,22 +37,42 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false \
-    hardware=cpu skip_jax_distributed_system=True \
-    checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
     --lazy_load_tensors=False \
     --eager_load_method='transformers'
 
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id}/0/items
 echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
 
-# Step 2.b: Convert to scanned checkpoint (for training)
+# Step 2.b: Convert to scanned multimodal checkpoint (for multimodal training)
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned_multimodal/${run_id} \
+    use_multimodal=true \
+    scan_layers=true \
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    --lazy_load_tensors=False \
+    --eager_load_method='transformers'
+
+MULTIMODAL_SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned_multimodal/${run_id}/0/items
+echo "Multimodal Scanned checkpoint path: ${MULTIMODAL_SCANNED_CKPT_PATH}"
+
+# Step 2.c: Convert to scanned checkpoint (for training)
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=true \
-    hardware=cpu skip_jax_distributed_system=True \
-    checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
     --lazy_load_tensors=False \
     --eager_load_method='transformers'
 
@@ -71,5 +91,6 @@ if [ "${USE_MULTIMODAL}" = "false" ]; then
         --hf_model_path=${HF_GOLDEN_MODEL} \
         --max_kl_div=0.03 \
         --run_hf_model=true \
-        hardware=cpu skip_jax_distributed_system=True
+        hardware=cpu \
+        skip_jax_distributed_system=True
 fi

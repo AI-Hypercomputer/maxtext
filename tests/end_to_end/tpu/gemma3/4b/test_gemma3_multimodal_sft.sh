@@ -18,11 +18,13 @@
 set -ex
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
+use_pathways=${2:-false}
 MODEL_NAME='gemma3-4b'
 
 # Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you have the scanned and unscanned checkpoints stored
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
+MULTIMODAL_SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned_multimodal/${run_id}/0/items
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
 # Step 1: Install google-jetstream
@@ -31,35 +33,43 @@ python3 -m pip install google-jetstream@https://github.com/AI-Hypercomputer/JetS
 # Step 2: Run inference on the original checkpoint converted from Hugging Face
 python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    load_parameters_path=${MULTIMODAL_SCANNED_CKPT_PATH} \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_prefill_predict_length=272 \
     max_target_length=300 \
     steps=1 \
     async_checkpointing=false \
-    scan_layers=false \
+    scan_layers=true \
     use_multimodal=True \
     tokenizer_type=huggingface \
     prompt=\'Describe\ image\ \<start_of_image\>\' \
     image_path=\'tests/assets/test_image.jpg\' \
-    attention=\'dot_product\' skip_jax_distributed_system=True
+    attention=\'dot_product\' \
+    skip_jax_distributed_system=True
 
 # Step 3: Run SFT on the MaxText checkpoint on ChartQA dataset
 python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/post_train/sft-vision-chartqa.yml \
     run_name=${run_id} \
     model_name=${MODEL_NAME} \
     per_device_batch_size=1 \
-    max_prefill_predict_length=1024 max_target_length=2048 \
+    max_prefill_predict_length=1024 \
+    max_target_length=2048 \
     steps=5 \
-    scan_layers=false async_checkpointing=False \
-    attention=dot_product \
+    scan_layers=true \
+    async_checkpointing=False \
+    attention=\'dot_product\' \
     dataset_type=hf hf_path=parquet \
     hf_train_files=gs://aireenmei-multipod/dataset/hf/chartqa/train-* \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/multimodal/sft \
-    load_parameters_path=${UNSCANNED_CKPT_PATH} \
-    dtype=bfloat16 weight_dtype=bfloat16 sharding_tolerance=0.05 \
-    checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
+    load_parameters_path=${MULTIMODAL_SCANNED_CKPT_PATH} \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    sharding_tolerance=0.05 \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    enable_single_controller=${use_pathways} \
+    grain_worker_count=0
 
 # Step 4: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.decode \
@@ -71,10 +81,9 @@ python3 -m maxtext.inference.decode \
     max_target_length=300 \
     steps=1 \
     async_checkpointing=false \
-    scan_layers=false \
+    scan_layers=true \
     use_multimodal=true \
     tokenizer_type=huggingface \
     prompt=\'Describe\ image\ \<start_of_image\>\' \
     image_path=\'tests/assets/test_image.jpg\' \
-    attention=\'dot_product\'
-
+    attention=\'dot_product\' skip_jax_distributed_system=True
