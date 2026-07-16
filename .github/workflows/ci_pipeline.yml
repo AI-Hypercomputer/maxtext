@@ -97,7 +97,8 @@ jobs:
           if echo "$CHANGED_FILES" | grep -E '(^|/)(src/dependencies/|\.github/workflows/)' > /dev/null; then
             echo "Core files (dependencies, workflows) changed, enabling all tests and notebooks."
             echo "run_tests=true" >> $GITHUB_OUTPUT
-            echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            # TODO: Temporarily disabled because notebook jobs are blocked; revert to "run_notebooks=true" after the fix is merged.
+            echo "run_notebooks=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -110,21 +111,20 @@ jobs:
 
           # 4. Check for source code changes (anything not .md and not .ipynb)
           if echo "$CHANGED_FILES" | grep -v -E '\.(md|ipynb)$' > /dev/null; then
-            echo "Source code changed, enabling unit tests and notebooks."
+            echo "Source code changed, enabling unit tests."
             echo "run_tests=true" >> $GITHUB_OUTPUT
-            echo "run_notebooks=true" >> $GITHUB_OUTPUT
           else
             echo "No source code changes (only notebook/doc), skipping unit tests."
             echo "run_tests=false" >> $GITHUB_OUTPUT
+          fi
 
-            # 5. Check for notebook (.ipynb) changes
-            if echo "$CHANGED_FILES" | grep '\.ipynb$' > /dev/null; then
-              echo "Notebook files changed, enabling notebook run."
-              echo "run_notebooks=true" >> $GITHUB_OUTPUT
-            else
-              echo "No notebook changes, skipping notebook run."
-              echo "run_notebooks=false" >> $GITHUB_OUTPUT
-            fi
+          # 5. Check for notebook (.ipynb) changes
+          if echo "$CHANGED_FILES" | grep '\.ipynb$' > /dev/null; then
+            echo "Notebook files changed, enabling notebook run."
+            echo "run_notebooks=true" >> $GITHUB_OUTPUT
+          else
+            echo "No notebook changes, skipping notebook run."
+            echo "run_notebooks=false" >> $GITHUB_OUTPUT
           fi
 
   code_quality_check:

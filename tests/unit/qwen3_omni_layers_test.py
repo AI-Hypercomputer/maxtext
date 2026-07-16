@@ -483,6 +483,30 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
     self.assertEqual(padded_values.shape[4], cfg.video_max_grid_w * cfg.patch_size_for_vit)
     np.testing.assert_array_equal(padded_grid, video_grid_thw)  # Grid should not change
 
+  def test_video_mask_downsamples_to_projected_tokens(self):
+    """Pixel padding mask becomes one validity value per projected video token."""
+    cfg = pyconfig.initialize(
+        ["", base_config_path],
+        model_name="qwen3-vl-2b",
+        video_max_grid_t=3,
+        video_max_grid_h=4,
+        video_max_grid_w=4,
+        patch_size_for_vit=16,
+        temporal_patch_size_for_vit=2,
+        spatial_merge_size_for_vit=2,
+        scan_layers=False,
+    )
+    raw_grid = np.asarray([[2, 2, 4]], dtype=np.int32)
+    raw_video = np.ones((1, 3, 4, 32, 64), dtype=np.float32)
+    _, _, pixel_mask = maybe_pad_video_values_to_max_grid(raw_video, raw_grid, cfg)
+
+    token_mask = mm_processor.downsample_video_mask_to_tokens(jnp.asarray(pixel_mask), cfg)
+
+    self.assertEqual(token_mask.shape, (1, 12))
+    self.assertEqual(int(jnp.sum(token_mask)), 4)
+    np.testing.assert_array_equal(np.asarray(token_mask[0, :4]), np.ones(4, dtype=np.int32))
+    np.testing.assert_array_equal(np.asarray(token_mask[0, 4:]), np.zeros(8, dtype=np.int32))
+
   def test_patch_embed_is_jittable(self):
     """Test that patch embed is JIT-compilable."""
 

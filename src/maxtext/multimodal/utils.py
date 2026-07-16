@@ -161,9 +161,19 @@ def merge_mm_embeddings(
       # This handles cases where token_masks is already (B, ...)
       flat_tile_masks = token_masks.reshape(batch_size, -1)
 
-    # Expand the tile-level mask to a token-level mask to match the embeddings.
-    # A mask of shape (B, N*T) becomes (B, N*T*K) by repeating each element K times.
-    flat_token_masks_processed = jnp.repeat(flat_tile_masks, repeats=num_toks_per_token, axis=1)
+    if flat_tile_masks.shape[1] == flat_multimodal_embeddings.shape[1]:
+      # Qwen padded video supplies one validity value per projected token.
+      flat_token_masks_processed = flat_tile_masks
+    else:
+      # Tiled image models supply one validity value per tile. Expand each tile
+      # validity value over the tokens produced by that tile.
+      expected_tile_count = flat_multimodal_embeddings.shape[1] // num_toks_per_token
+      if flat_tile_masks.shape[1] != expected_tile_count:
+        raise ValueError(
+            "token_masks must contain either one value per multimodal token or one value per tile. "
+            f"Got {flat_tile_masks.shape[1]} mask values for {flat_multimodal_embeddings.shape[1]} embeddings."
+        )
+      flat_token_masks_processed = jnp.repeat(flat_tile_masks, repeats=num_toks_per_token, axis=1)
 
   # Vmap the inner merge function over the batch dimension
   return jax.vmap(
@@ -545,7 +555,9 @@ def hertz_to_mel(freq: Union[float, np.ndarray], mel_scale: str = "htk") -> Unio
 
   if isinstance(freq, np.ndarray):
     log_region = freq >= min_log_hertz
-    mels[log_region] = min_log_mel + np.log(freq[log_region] / min_log_hertz) * logstep  # pyrefly: ignore[unsupported-operation]
+    mels[log_region] = (
+        min_log_mel + np.log(freq[log_region] / min_log_hertz) * logstep
+    )  # pyrefly: ignore[unsupported-operation]
   elif freq >= min_log_hertz:
     mels = min_log_mel + np.log(freq / min_log_hertz) * logstep
 
@@ -603,7 +615,9 @@ def mel_to_hertz(mels: Union[float, np.ndarray], mel_scale: str = "htk") -> Unio
 
   if isinstance(mels, np.ndarray):
     log_region = mels >= min_log_mel
-    freq[log_region] = min_log_hertz * np.exp(logstep * (mels[log_region] - min_log_mel))  # pyrefly: ignore[unsupported-operation]
+    freq[log_region] = min_log_hertz * np.exp(
+        logstep * (mels[log_region] - min_log_mel)
+    )  # pyrefly: ignore[unsupported-operation]
   elif mels >= min_log_mel:
     freq = min_log_hertz * np.exp(logstep * (mels - min_log_mel))
 

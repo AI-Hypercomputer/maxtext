@@ -607,7 +607,9 @@ def tgmm(
     group_offset = jnp.array([0], dtype=jnp.int32)
   else:
     group_offset = group_offset[None]
-  group_sizes = _validate_args(lhs=lhs, rhs=rhs, group_sizes=group_sizes, expected_rhs_dims=2)  # pyrefly: ignore[bad-argument-type]
+  group_sizes = _validate_args(
+      lhs=lhs, rhs=rhs, group_sizes=group_sizes, expected_rhs_dims=2
+  )  # pyrefly: ignore[bad-argument-type]
 
   # Gather shape information.
   k, m, n = (lhs.shape[0], lhs.shape[1], rhs.shape[1])

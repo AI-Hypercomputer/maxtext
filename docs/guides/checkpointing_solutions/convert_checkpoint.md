@@ -86,6 +86,8 @@ You can find your converted checkpoint files under `${BASE_OUTPUT_DIRECTORY}/0/i
 - `--hf_model_path` (Optional): Specifies a customized remote directory or local directory containing the model weights. If unspecified, we use the [default Hugging Face repository ID](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py) (e.g., openai/gpt-oss-20b). This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
 - `--save_dtype` (Optional): Specifies the data type of saved model weights. Default to `bfloat16` to save memory.
 
+(maxtext-to-hf)=
+
 ## MaxText to Hugging Face
 
 Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugging Face format. This is useful for sharing your models or integrating them with the Hugging Face ecosystem.
