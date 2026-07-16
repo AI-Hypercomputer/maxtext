@@ -1077,6 +1077,8 @@ class MLA(Attention):
 
     # Aggregate heads: [b, h, t, s] -> [b, t, s]
     attention_probs = jnp.sum(attention_probs, axis=1)
+    # Force materialization and prevent fusion across this point to reuse the intermediate tensor
+    attention_probs = jax.lax.optimization_barrier(attention_probs)
     # L1 normalize aggregated target distribution
     attention_probs = attention_probs / (jnp.sum(attention_probs, axis=-1, keepdims=True) + EPS)
 
