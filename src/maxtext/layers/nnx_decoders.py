@@ -998,13 +998,9 @@ class NNXDecoder(nnx.Module):
       final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
       returned_kv_stacked = None
 
-      # Ensure metadata rank matches the stacked values
-      scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, "layers", 0)
-
-      if scan_axis != 0:
-        new_params, new_rest = scanned_state.split(nnx.Param, ...)
-        new_params = maxtext_utils_nnx.nnx_sync_moveaxis(new_params, 0, scan_axis)
-        scanned_state = nnx.merge_state(new_params, new_rest)
+      # Move the scan axis to each variable's param_scan_axis and restore its name
+      # in the sharding metadata. jax.lax.scan emits it at position 0.
+      scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, "layers")
 
       returned_kv_stacked = None
 
