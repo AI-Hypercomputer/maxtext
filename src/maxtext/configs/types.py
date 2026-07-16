@@ -1711,6 +1711,14 @@ class Profiling(BaseModel):
   """Configuration for performance profiling."""
 
   profiler: ProfilerType = Field(ProfilerType.NONE, description="Profiler to use ('xplane', 'nsys').")
+  trainer_profiler: str = Field("", description="Profiler for trainer ('xplane', 'nsys').")
+  trainer_skip_first_n_steps_for_profiler: int = Field(
+      -1, description="Steps to skip for trainer profiling (-1 uses default)."
+  )
+  trainer_profiler_steps: int = Field(-1, description="Steps to profile for trainer (-1 uses default).")
+  sampler_profiler: str = Field("", description="Profiler for sampler ('xplane', 'nsys').")
+  sampler_skip_first_n_steps_for_profiler: int = Field(-1, description="Steps to skip for sampler profiling.")
+  sampler_profiler_steps: int = Field(-1, description="Steps to profile for sampler.")
   upload_all_profiler_results: bool = Field(False, description="Upload profiler results from all hosts.")
   skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")
   profiler_steps: int = Field(5, description="Number of steps to profile.")

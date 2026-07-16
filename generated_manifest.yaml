@@ -4,10 +4,10 @@ metadata:
   annotations:
     alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-tpu-slice
   labels:
-    cloud.google.com/slice-prefix: mohit-rl-qwen3-30924
+    cloud.google.com/slice-prefix: mohit-rl-qwen3-14054
     kueue.x-k8s.io/queue-name: tpu-queue
-    xpk.google.com/workload: mohit-rl-qwen3-30924
-  name: mohit-rl-qwen3-30924
+    xpk.google.com/workload: mohit-rl-qwen3-14054
+  name: mohit-rl-qwen3-14054
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -37,7 +37,7 @@ spec:
               cloud.google.com/skip-tpu-webhook-check: 'true'
             labels:
               kueue.x-k8s.io/podset: worker
-              xpk.google.com/workload: mohit-rl-qwen3-30924
+              xpk.google.com/workload: mohit-rl-qwen3-14054
           spec:
             containers:
             - args:
@@ -81,7 +81,7 @@ spec:
               - name: RPA_D_BLOCK_SIZES
                 value: 1,4096,1,4096
               - name: VLLM_TORCH_PROFILER_DIR
-                value: gs://runner-maxtext-logs/mohit-rl-qwen3-30924/tensorboard/sampler_tpu_profile
+                value: gs://runner-maxtext-logs/mohit-rl-qwen3-14054/tensorboard/sampler_tpu_profile
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260623-jax_0.10.1
               imagePullPolicy: Always
               name: pathways-worker
@@ -286,11 +286,12 @@ spec:
                 \ JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1\
                 \ PYTHONPATH=/deps/maxtext/src:/deps/maxtext:/deps:/maxtext/src:/maxtext:/app/src:$PYTHONPATH\
                 \ python3 -m maxtext.trainers.post_train.rl.train_rl model_name=qwen3-0.6b\
-                \ tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-qwen3-30924 checkpoint_storage_use_ocdbt=False\
+                \ tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-qwen3-14054 checkpoint_storage_use_ocdbt=False\
                 \ async_scheduling=False base_output_directory=gs://mohitkhatwani_multipods/maxtext_logs/\
                 \ chips_per_vm=8 num_batches=20 num_test_batches=0 profiler=xplane\
-                \ skip_first_n_steps_for_profiler=1 profiler_steps=1 rl.num_generations=8\
-                \ rl.grpo_beta=0.05 rl.grpo_epsilon=0.2 rl.rollout_vllm_server_mode_submission_threshold=10\
+                \ skip_first_n_steps_for_profiler=1 trainer_profiler=xplane trainer_skip_first_n_steps_for_profiler=1\
+                \ trainer_profiler_steps=5 rl.num_generations=8 rl.grpo_beta=0.05\
+                \ rl.grpo_epsilon=0.2 rl.rollout_vllm_server_mode_submission_threshold=10\
                 \ gradient_clipping_threshold=1.0 decode_sampling_temperature=0.8\
                 \ decode_sampling_top_k=50 decode_sampling_nucleus_p=0.95 dataset_name=nvidia/OpenMathInstruct-2\
                 \ hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet\

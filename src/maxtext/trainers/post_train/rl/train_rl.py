@@ -412,13 +412,28 @@ def create_rl_components(
   )
 
   profiler_options = None
-  if trainer_config.profiler == "xplane":
+  trainer_prof_type = (
+      trainer_config.trainer_profiler
+      if trainer_config.trainer_profiler
+      else (trainer_config.profiler.value if hasattr(trainer_config.profiler, "value") else trainer_config.profiler)
+  )
+  if trainer_prof_type == "xplane":
     num_hosts = jax.device_count() // trainer_config.chips_per_vm
     sig = inspect.signature(profiler.ProfilerOptions)
+    skip_steps = (
+        trainer_config.trainer_skip_first_n_steps_for_profiler
+        if trainer_config.trainer_skip_first_n_steps_for_profiler >= 0
+        else trainer_config.skip_first_n_steps_for_profiler
+    )
+    prof_steps = (
+        trainer_config.trainer_profiler_steps
+        if trainer_config.trainer_profiler_steps >= 0
+        else trainer_config.profiler_steps
+    )
     profiler_kwargs = {
         "log_dir": trainer_config.tensorboard_dir,
-        "skip_first_n_steps": trainer_config.skip_first_n_steps_for_profiler,
-        "profiler_steps": trainer_config.profiler_steps,
+        "skip_first_n_steps": skip_steps,
+        "profiler_steps": prof_steps,
         "set_profile_options": False,
     }
     if "max_num_hosts" in sig.parameters:

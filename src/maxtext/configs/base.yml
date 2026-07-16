@@ -824,6 +824,12 @@ upload_all_profiler_results: false
 skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
+trainer_profiler: ""
+trainer_skip_first_n_steps_for_profiler: -1
+trainer_profiler_steps: -1
+sampler_profiler: ""
+sampler_skip_first_n_steps_for_profiler: -1
+sampler_profiler_steps: -1
 hide_profiler_step_metric: false
 profile_cleanly: true # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.
