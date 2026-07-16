@@ -13,7 +13,7 @@
 #  limitations under the License.
 
 # pylint: disable=protected-access
-"""Non-SPMD, multi-threaded streaming DiLoCo implementation."""
+"""Non-SPMD, multi-threaded streaming DiLoCo implementation with single client Pathways."""
 
 import copy
 import datetime
@@ -28,6 +28,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental import colocated_python
+import numpy as np
 import optax
 
 from maxtext.common import checkpointing, profiler, metric_logger
@@ -40,7 +41,16 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
-from maxtext.utils.sharding import partition_mesh_by_diloco_axis
+from maxtext.utils.mesh_utils import partition_mesh_by_diloco_axis, stack_across_meshes_pytree, unstack_across_meshes_pytree
+
+
+@jax.jit
+def mix_frags(i_frag, o_frag, alpha):
+  return jax.tree_util.tree_map(lambda x, y: alpha * x + (1 - alpha) * y, i_frag, o_frag)
+
+
+def cpu_clone(x):
+  return jnp.copy(x)
 
 
 class SyncerState(struct.PyTreeNode):
@@ -138,38 +148,8 @@ def get_abstract_syncer_state(config, local_cpu_mesh):
   return abstract_params, abstract_opt_state
 
 
-def average_learner_frags(learner_frags, local_cpu_mesh, submeshes, flat_params_shardings):
-  """Averages parameter fragments collected from all active learners."""
-  max_logging.log("Syncer: average_learner_frags starting")
-  num_learners = len(learner_frags)
-
-  sharding_tree = {
-      k: jax.sharding.NamedSharding(local_cpu_mesh, flat_params_shardings[k].spec) for k in learner_frags[0].keys()
-  }
-
-  @functools.partial(jax.jit, in_shardings=tuple([sharding_tree] * num_learners))
-  def _avg(*trees):
-    return jax.tree_util.tree_map(lambda *args: sum(args) / len(args), *trees)
-
-  first_key = list(learner_frags[0].keys())[0]
-  max_logging.log(f"DEBUG: first_key = {first_key}")
-  max_logging.log(f"DEBUG: flat_params_shardings[first_key] = {flat_params_shardings[first_key]}")
-  max_logging.log(f"DEBUG: sharding_tree[first_key] = {sharding_tree[first_key]}")
-  max_logging.log(f"DEBUG: learner_frags[0][first_key] shape = {learner_frags[0][first_key].shape}")
-  max_logging.log(f"DEBUG: learner_frags[0][first_key] sharding = {learner_frags[0][first_key].sharding}")
-  try:
-    max_logging.log(f"DEBUG: learner_frags[0][first_key] layout = {learner_frags[0][first_key].layout}")
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    max_logging.log(f"DEBUG: failed to get layout: {e}")
-
-  averaged_frag = _avg(*learner_frags)
-
-  max_logging.log("Syncer: average_learner_frags finished")
-  return averaged_frag
-
-
 def _run_learner_loop(
-    learner_idx, config, submesh, local_cpu_mesh, transport, recorder, train_step, eval_step, init_lock=None
+    learner_idx, config, submesh, local_cpu_mesh, transport, recorder, train_step, eval_step, init_lock
 ):
   """Runs the main training and communication loop for a single learner replica."""
   max_logging.log(f"Learner {learner_idx}: Starting loop")
@@ -179,22 +159,7 @@ def _run_learner_loop(
   with jax.set_mesh(submesh), submesh, nn_partitioning.axis_rules(learner_config.logical_axis_rules):
     learner_config._flat_config["checkpoint_dir"] = config.checkpoint_dir + f"/learner_{learner_idx}"
 
-    if init_lock is not None:
-      with init_lock:
-        (
-            init_rng,
-            checkpoint_manager,
-            state_mesh_shardings,
-            model,
-            mesh,
-            learning_rate_schedule,
-            data_iterator,
-            data_loader,
-            rampup_manager,
-            eval_data_iterator,
-            state,
-        ) = train_utils.setup_train_loop(learner_config, recorder, mesh=submesh)
-    else:
+    with init_lock:
       (
           init_rng,
           checkpoint_manager,
@@ -239,15 +204,8 @@ def _run_learner_loop(
       if start_step == 0:
         if learner_idx == 0:
           params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-          cpu_sharding = jax.tree_util.tree_map(
-              lambda s: jax.sharding.NamedSharding(local_cpu_mesh, s.spec), params_shardings
-          )
-          params_cpu = jax.device_put(params, cpu_sharding)
-          # with jax.set_mesh(local_cpu_mesh):
-          # params_cpu = jax.tree_util.tree_map(cpu_clone, params_cpu)
-          jax.block_until_ready(params_cpu)
           max_logging.log(f"Learner {learner_idx}: sending init params")
-          transport.send_to_syncer(step=0, fragment_id=-1, data=params_cpu)
+          transport.send_to_syncer(step=0, fragment_id=-1, data=params)
           max_logging.log(f"Learner {learner_idx}: waiting for init params")
           initial_params = transport.recv_from_syncer(step=0, fragment_id=-1)
           max_logging.log(f"Learner {learner_idx}: received init params")
@@ -293,30 +251,6 @@ def _run_learner_loop(
     manipulator = FragmentedTreeManipulator.create(params_template, learner_config)
     num_fragments = manipulator.num_fragments
 
-    async_sender = ThreadPoolExecutor(max_workers=1)
-
-    def send_async(step_val, f_idx, frag_data):
-      def _send():
-        try:
-          max_logging.log(f"Learner {learner_idx}: send_async starting for step {step_val} frag {f_idx}")
-          cpu_sharding = jax.tree_util.tree_map(
-              lambda s: jax.sharding.NamedSharding(local_cpu_mesh, s.spec),
-              jax.tree_util.tree_map(lambda x: x.sharding, frag_data),
-          )
-          max_logging.log(f"Learner {learner_idx}: send_async sharding created")
-          frag_cpu = jax.device_put(frag_data, cpu_sharding)
-          max_logging.log(f"Learner {learner_idx}: send_async device_put done")
-          jax.block_until_ready(frag_cpu)
-          max_logging.log(f"Learner {learner_idx}: send_async block_until_ready done")
-          transport.send_to_syncer(step_val, f_idx, frag_cpu)
-          max_logging.log(f"Learner {learner_idx}: send_async sent to syncer")
-        except Exception as e:
-          max_logging.error(f"Learner {learner_idx}: send_async failed: {e}")
-          max_logging.error(traceback.format_exc())
-          raise e
-
-      async_sender.submit(_send)
-
     tau = learner_config.num_communication_overlapping_steps
     alpha = learner_config.communication_overlapping_alpha
 
@@ -329,6 +263,12 @@ def _run_learner_loop(
         config=learner_config, learning_rate_schedule=learning_rate_schedule
     )
     metric_logger_instance.write_setup_info_to_tensorboard(params_template)
+
+    # Pre-compile the mix function for each fragment to avoid concurrent compilation crashes
+    with init_lock:
+      for f_idx in range(num_fragments):
+        dummy_frag = manipulator.get_flat_fragment(params_template, f_idx)
+        _ = mix_frags(dummy_frag, dummy_frag, alpha)
 
     try:
       last_step_completion = datetime.datetime.now()
@@ -347,7 +287,22 @@ def _run_learner_loop(
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               if learner_config.shard_optimizer_over_data and isinstance(model, nn.Module):
                 state = sharding.maybe_shard_with_name(state, state_mesh_shardings, learner_config.shard_mode)
+              # DEBUG
+              state_leaves, _ = jax.tree_util.tree_flatten(state)
+              batch_leaves, _ = jax.tree_util.tree_flatten(example_batch)
+              print(
+                  f"DEBUG_DEVICES: Learner {learner_idx} step {step} before train_step state leaves devices: {[set(x.devices()) for x in state_leaves]}",
+                  flush=True,
+              )
+              print(
+                  f"DEBUG_DEVICES: Learner {learner_idx} step {step} before train_step batch leaves devices: {[set(x.devices()) for x in batch_leaves]}",
+                  flush=True,
+              )
               state, metrics = p_train_step(state, example_batch, *step_rng_args)
+              # Force block to catch async errors immediately
+              for leaf in jax.tree_util.tree_flatten((state, metrics))[0]:
+                if hasattr(leaf, "block_until_ready"):
+                  leaf.block_until_ready()
 
           max_logging.log(f"Learner {learner_idx}: Step {step} finished")
           step_time_delta = datetime.datetime.now() - last_step_completion
@@ -358,7 +313,7 @@ def _run_learner_loop(
             frag_idx = (completed_step % period) // steps_between_syncs_plus_1
             params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
             frag_data = manipulator.get_flat_fragment(params, frag_idx)
-            send_async(completed_step, frag_idx, frag_data)
+            transport.send_to_syncer_async(completed_step, frag_idx, frag_data)
 
           if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
             frag_idx = ((completed_step - tau) % period) // steps_between_syncs_plus_1
@@ -372,12 +327,34 @@ def _run_learner_loop(
             params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
             inner_frag = manipulator.get_flat_fragment(params, frag_idx)
 
-            @jax.jit
-            def mix_frags(i_frag, o_frag):
-              return jax.tree_util.tree_map(lambda x, y: alpha * x + (1 - alpha) * y, i_frag, o_frag)
+            # DEBUG
+            print(
+                f"DEBUG_DEVICES: Learner {learner_idx} step {step} mix_frags check start. Keys in fragment: {list(inner_frag.keys())}",
+                flush=True,
+            )
+            for k in inner_frag.keys():
+              l_leaf = inner_frag[k]
+              s_leaf = received_frag_tpu[k]
+              l_devs = set(l_leaf.devices())
+              s_devs = set(s_leaf.devices())
+              print(f"DEBUG_DEVICES:   key {k}: shape={l_leaf.shape}")
+              print(f"DEBUG_DEVICES:     inner_frag sharding={l_leaf.sharding}, devices={l_devs}")
+              print(f"DEBUG_DEVICES:     received_frag_tpu sharding={s_leaf.sharding}, devices={s_devs}")
+              if l_devs != s_devs:
+                print(f"DEBUG_DEVICES: MISMATCH for key {k}:", flush=True)
+                print(f"DEBUG_DEVICES:   inner_frag devices: {l_devs}", flush=True)
+                print(f"DEBUG_DEVICES:   received_frag_tpu devices: {s_devs}", flush=True)
+                print(f"DEBUG_DEVICES:   received_frag devices: {set(received_frag[k].devices())}", flush=True)
+            print(f"DEBUG_DEVICES: Learner {learner_idx} step {step} mix_frags check end", flush=True)
 
-            mixed_frag = mix_frags(inner_frag, received_frag_tpu)
+            mixed_frag = mix_frags(inner_frag, received_frag_tpu, alpha)
             new_params = manipulator.apply_flat_fragment(params, frag_idx, mixed_frag)
+            # DEBUG
+            new_params_leaves, _ = jax.tree_util.tree_flatten(new_params)
+            print(
+                f"DEBUG_DEVICES: Learner {learner_idx} step {step} new_params leaves devices: {[set(x.devices()) for x in new_params_leaves]}",
+                flush=True,
+            )
 
             if learner_config.pure_nnx:
               non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
@@ -428,12 +405,10 @@ def _run_learner_loop(
       max_logging.log(f"Learner {learner_idx} training stopped: {str(e)}")
     finally:
       metric_logger_instance.flush_metrics_and_cleanup()
-      async_sender.shutdown(wait=True)
+      transport.close()
 
 
-def learner_loop(
-    learner_idx, config, submesh, local_cpu_mesh, transport, recorder, train_step, eval_step, init_lock=None
-):
+def learner_loop(learner_idx, config, submesh, local_cpu_mesh, transport, recorder, train_step, eval_step, init_lock):
   """Wrapper to run the learner loop and handle/log top-level exceptions."""
   try:
     _run_learner_loop(learner_idx, config, submesh, local_cpu_mesh, transport, recorder, train_step, eval_step, init_lock)
@@ -443,47 +418,64 @@ def learner_loop(
     raise e
 
 
-def syncer_loop(config, global_cpu_mesh, submeshes, transport, recorder, abstract_params=None, abstract_opt_state=None):
+def syncer_loop(
+    config, global_cpu_mesh, cpu_submeshes, transport, recorder, abstract_params=None, abstract_opt_state=None
+):
   """Wrapper to run the syncer loop and handle/log top-level exceptions."""
   try:
-    _run_syncer_loop(config, global_cpu_mesh, submeshes, transport, recorder, abstract_params, abstract_opt_state)
+    _run_syncer_loop(config, global_cpu_mesh, cpu_submeshes, transport, recorder, abstract_params, abstract_opt_state)
   except Exception as e:
     max_logging.error(f"Syncer crashed: {e}")
     max_logging.error(traceback.format_exc())
     raise e
 
 
-def make_step_fns(local_cpu_mesh, flat_params_shardings, frag_keys, outer_optimizer):
+def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, outer_optimizer, num_learners):
   """Creates JIT-compiled functions for computing gradients and applying outer steps."""
-  sharding_tree = {
-      k: jax.sharding.NamedSharding(local_cpu_mesh, flat_params_shardings[k].spec)
+  global_sharding_tree = {
+      k: jax.sharding.NamedSharding(global_cpu_mesh, flat_params_shardings[k].spec) for k in frag_keys
+  }
+  stacked_sharding_tree = {
+      k: jax.sharding.NamedSharding(global_cpu_mesh, jax.sharding.PartitionSpec("diloco", *flat_params_shardings[k].spec))
       for k in frag_keys
   }
-  opt_state_sharding_tree = (optax.TraceState(trace=sharding_tree), optax.EmptyState())
+  opt_state_sharding_tree = (optax.TraceState(trace=global_sharding_tree), optax.EmptyState())
 
   @functools.partial(
       jax.jit,
-      in_shardings=(sharding_tree, sharding_tree),
-      out_shardings=sharding_tree,
+      in_shardings=(global_sharding_tree, stacked_sharding_tree),
+      out_shardings=global_sharding_tree,
   )
-  def compute_grad(o_frag, i_frag):
-    return jax.tree_util.tree_map(lambda x, y: x - y, o_frag, i_frag)
+  def compute_grad(o_frag, stacked_i_frag):
+    averaged_i_frag = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), stacked_i_frag)
+    return jax.tree_util.tree_map(lambda x, y: x - y, o_frag, averaged_i_frag)
 
   @functools.partial(
       jax.jit,
-      in_shardings=(sharding_tree, opt_state_sharding_tree, sharding_tree),
-      out_shardings=(sharding_tree, opt_state_sharding_tree),
+      in_shardings=(global_sharding_tree, opt_state_sharding_tree, global_sharding_tree),
+      out_shardings=(global_sharding_tree, opt_state_sharding_tree),
   )
   def apply_outer_step(g_frag, o_state_frag, p_frag):
     updates_frag, new_o_state_frag = outer_optimizer.update(g_frag, o_state_frag, params=p_frag)
     new_p_frag = optax.apply_updates(p_frag, updates_frag)
     return new_p_frag, new_o_state_frag
 
-  return compute_grad, apply_outer_step
+  @functools.partial(
+      jax.jit,
+      in_shardings=(global_sharding_tree,),
+      out_shardings=stacked_sharding_tree,
+  )
+  def broadcast_frag(frag):
+    return jax.tree_util.tree_map(
+        lambda x: jnp.broadcast_to(jnp.expand_dims(x, axis=0), (num_learners,) + x.shape),
+        frag
+    )
+
+  return compute_grad, apply_outer_step, broadcast_frag
 
 
 def _run_syncer_loop(
-    config, local_cpu_mesh, submeshes, transport, recorder, abstract_params=None, abstract_opt_state=None
+    config, global_cpu_mesh, cpu_submeshes, transport, recorder, abstract_params=None, abstract_opt_state=None
 ):
   """Runs the main syncer loop that coordinates parameter averaging and outer optimization."""
   max_logging.log("Syncer: Starting loop")
@@ -491,12 +483,13 @@ def _run_syncer_loop(
   num_learners = config.num_diloco_replicas
 
   if abstract_params is None or abstract_opt_state is None:
-    abstract_params, abstract_opt_state = get_abstract_syncer_state(config, local_cpu_mesh)
+    abstract_params, abstract_opt_state = get_abstract_syncer_state(config, global_cpu_mesh)
   abstract_step = jax.ShapeDtypeStruct(
-      (), jnp.int32, sharding=jax.sharding.NamedSharding(local_cpu_mesh, jax.sharding.PartitionSpec())
+      (), jnp.int32, sharding=jax.sharding.NamedSharding(global_cpu_mesh, jax.sharding.PartitionSpec())
   )
   abstract_syncer_state = SyncerState(params=abstract_params, opt_state=abstract_opt_state, step=abstract_step)
 
+  # Init(1): Loading checkpoints
   logger = checkpointing.setup_checkpoint_logger(config)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
@@ -531,18 +524,18 @@ def _run_syncer_loop(
       use_zarr3=config.checkpoint_storage_use_zarr3,
   )
 
+  # Get abstract shardings for params and opt_state
   params_shardings = jax.tree_util.tree_map(lambda x: x.sharding, abstract_params)
   flat_params_shardings = {
       jax.tree_util.keystr(k): v for k, v in jax.tree_util.tree_flatten_with_path(params_shardings)[0]
   }
 
-  if restored_state is None:  # Checkpoint for outer non-existing, start from scratch
+  if restored_state is None:  # (1,a) No checkpoint found, start from scratch
     max_logging.log("Syncer: waiting for init params from Learner 0")
     initial_params_l0 = transport.recv_from_learner(learner_idx=0, step=0, fragment_id=-1)
     max_logging.log("Syncer: received init params from Learner 0")
-    with jax.set_mesh(local_cpu_mesh):
+    with jax.set_mesh(global_cpu_mesh):
       global_params = jax.device_put(initial_params_l0, params_shardings)
-      # global_params = jax.tree_util.tree_map(cpu_clone, global_params)
       outer_optimizer = optax.sgd(
           learning_rate=config.diloco_outer_lr,
           momentum=config.diloco_outer_momentum,
@@ -553,44 +546,37 @@ def _run_syncer_loop(
     syncer_state = SyncerState(params=global_params, opt_state=outer_opt_state, step=0)
     start_step = 0
 
-    # Broadcast initial params to all learners
-    for i in range(num_learners):
-      learner_devices = submeshes[i].devices.flat
-      is_local = any(d in jax.local_devices() for d in learner_devices)
-      if is_local:
-        local_cpu_mesh_i = colocated_python.colocated_cpu_devices(submeshes[i])
-        local_shardings = jax.tree_util.tree_map(
-            lambda s, mesh=local_cpu_mesh_i: jax.sharding.NamedSharding(mesh, s.spec), params_shardings
-        )
-        params_local = jax.device_put(syncer_state.params, local_shardings)
-        # with jax.set_mesh(local_cpu_mesh_i):
-        #   params_local = jax.tree_util.tree_map(cpu_clone, params_local)
-        max_logging.log(f"Syncer: sending init params to Learner {i} (local)")
-        transport.send_to_learner(learner_idx=i, step=0, fragment_id=-1, data=params_local)
-        max_logging.log(f"Syncer: sent init params to Learner {i} (local)")
-      else:
-        max_logging.log(f"Syncer: sending init params to Learner {i} (remote)")
-        transport.send_to_learner(learner_idx=i, step=0, fragment_id=-1, data=syncer_state.params)
-        max_logging.log(f"Syncer: sent init params to Learner {i} (remote)")
   else:  # loading checkpoints successfully
     syncer_state = restored_state["items"]
     start_step = int(syncer_state.step)
     max_logging.log(f"Syncer restored from step {start_step}")
 
-    # Broadcast params to all learners
-    # TODO: might be problematic. As the learners should have their own layout
-    for i in range(num_learners):
-      learner_devices = submeshes[i].devices.flat
-      is_local = any(d in jax.local_devices() for d in learner_devices)
-      if is_local:
-        local_cpu_mesh_i = colocated_python.colocated_cpu_devices(submeshes[i])
-        local_shardings = jax.tree_util.tree_map(
-            lambda s, mesh=local_cpu_mesh_i: jax.sharding.NamedSharding(mesh, s.spec), params_shardings
-        )
-        params_local = jax.device_put(syncer_state.params, local_shardings)
-        transport.send_to_learner(learner_idx=i, step=start_step, fragment_id=-1, data=params_local)
-      else:
-        transport.send_to_learner(learner_idx=i, step=start_step, fragment_id=-1, data=syncer_state.params)
+  # Init (2): broadcast initial params to all learners
+  stacked_params_sharding_tree = jax.tree_util.tree_map(
+      lambda s: jax.sharding.NamedSharding(global_cpu_mesh, jax.sharding.PartitionSpec("diloco", *s.spec)),
+      params_shardings
+  )
+
+  @functools.partial(
+      jax.jit,
+      in_shardings=(params_shardings,),
+      out_shardings=stacked_params_sharding_tree,
+  )
+  def broadcast_params(params):
+    return jax.tree_util.tree_map(
+        lambda x: jnp.broadcast_to(jnp.expand_dims(x, axis=0), (num_learners,) + x.shape),
+        params
+    )
+
+  with jax.set_mesh(global_cpu_mesh):
+    stacked_params = broadcast_params(syncer_state.params)
+
+  local_params_list = unstack_across_meshes_pytree(stacked_params, cpu_submeshes, "diloco")
+
+  for i in range(num_learners):
+    max_logging.log(f"Syncer: sending params to Learner {i} at step {start_step}")
+    transport.send_to_learner(learner_idx=i, step=start_step, fragment_id=-1, data=local_params_list[i])
+    max_logging.log(f"Syncer: sent params to Learner {i} at step {start_step}")
 
   manipulator = FragmentedTreeManipulator.create(syncer_state.params, config)
   num_fragments = manipulator.num_fragments
@@ -605,69 +591,75 @@ def _run_syncer_loop(
       nesterov=True,
   )
 
+  # steps that syncing is happening
   sync_steps = [step for step in range(start_step + 1, config.steps + 1) if step % steps_between_syncs_plus_1 == 0]
 
   # Pre-build JIT step functions for each fragment index to avoid late-binding cell-var-from-loop warning
   step_fns_by_frag = {}
-  with jax.set_mesh(local_cpu_mesh):
+  with jax.set_mesh(global_cpu_mesh):
     for f_idx in range(num_fragments):
       frag_dict = manipulator.get_flat_fragment(syncer_state.params, f_idx)
-      step_fns_by_frag[f_idx] = make_step_fns(local_cpu_mesh, flat_params_shardings, frag_dict, outer_optimizer)
+      step_fns_by_frag[f_idx] = make_step_fns(
+          global_cpu_mesh, flat_params_shardings, frag_dict, outer_optimizer, num_learners
+      )
 
   # Start main syncer loop
-  for completed_step in sync_steps:
-    max_logging.log(f"Syncer: Step {completed_step} sync starting")
-    frag_idx = (completed_step % period) // steps_between_syncs_plus_1
+  for step in sync_steps:  # e.g. 50, 100, 150... if sync_period=50
+    max_logging.log(f"Syncer: Step {step} sync starting")
+    frag_idx = (step % period) // steps_between_syncs_plus_1
 
     learner_frags = []
+
+    # receive the fragment of the current step from each learner.
     for i in range(num_learners):
-      frag_i = transport.recv_from_learner(learner_idx=i, step=completed_step, fragment_id=frag_idx)
-      frag_i = jax.device_put(frag_i, local_cpu_mesh)
+      frag_i = transport.recv_from_learner(learner_idx=i, step=step, fragment_id=frag_idx)
       learner_frags.append(frag_i)
-    max_logging.log(f"Syncer: received all fragments for step {completed_step}")
+    max_logging.log(f"Syncer: received all fragments for step {step}")
 
-    with jax.set_mesh(local_cpu_mesh):
-      averaged_inner_frag = average_learner_frags(learner_frags, local_cpu_mesh, submeshes, flat_params_shardings)
-      max_logging.log(f"Syncer: Step {completed_step} averaging done")
+    stacked_inner_frag = stack_across_meshes_pytree(learner_frags, global_cpu_mesh, "diloco")
+    max_logging.log(f"Syncer: Step {step} stacking done")
 
+    with jax.set_mesh(global_cpu_mesh):
       outer_params_frag = manipulator.get_flat_fragment(syncer_state.params, frag_idx)
 
-      compute_grad, apply_outer_step = step_fns_by_frag[frag_idx]
+      compute_grad, apply_outer_step, broadcast_frag = step_fns_by_frag[frag_idx]
 
-      pseudo_grad_frag = compute_grad(outer_params_frag, averaged_inner_frag)
+      pseudo_grad_frag = compute_grad(outer_params_frag, stacked_inner_frag)
 
       trace_frag = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx)
       opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
 
       new_outer_params_frag, new_opt_state_frag = apply_outer_step(pseudo_grad_frag, opt_state_frag, outer_params_frag)
 
+      new_outer_params_frag_for_broadcast = jax.tree_util.tree_map(cpu_clone, new_outer_params_frag)
+
+      # Debug prints
+      first_key = list(new_outer_params_frag_for_broadcast.keys())[0]
+      max_logging.log(f"DEBUG_SHARD: first_key={first_key}")
+      val_global = new_outer_params_frag_for_broadcast[first_key]
+      max_logging.log(f"DEBUG_SHARD: global val sharding={val_global.sharding}")
+      for i, shard in enumerate(val_global.addressable_shards):
+        max_logging.log(f"DEBUG_SHARD:   global shard {i}: device={shard.device}")
+
+      # Broadcast the fragment to all learners
+      stacked_new_outer_params_frag = broadcast_frag(new_outer_params_frag_for_broadcast)
+
       new_params = manipulator.apply_flat_fragment(syncer_state.params, frag_idx, new_outer_params_frag)
       new_trace = manipulator.apply_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, new_opt_state_frag[0].trace)
       new_opt_state = (optax.TraceState(trace=new_trace), syncer_state.opt_state[1])
 
-      syncer_state = syncer_state.replace(params=new_params, opt_state=new_opt_state, step=completed_step)
-    max_logging.log(f"Syncer: Step {completed_step} outer step applied")
+      syncer_state = syncer_state.replace(params=new_params, opt_state=new_opt_state, step=step)
+    max_logging.log(f"Syncer: Step {step} outer step applied")
+
+    local_frags = unstack_across_meshes_pytree(stacked_new_outer_params_frag, cpu_submeshes, "diloco")
 
     for i in range(num_learners):
-      learner_devices = submeshes[i].devices.flat
-      is_local = any(d in jax.local_devices() for d in learner_devices)
-      if is_local:
-        local_cpu_mesh_i = colocated_python.colocated_cpu_devices(submeshes[i])
-
-        frag_spec = {k: flat_params_shardings[k] for k in new_outer_params_frag.keys()}
-        local_frag_shardings = jax.tree_util.tree_map(
-            lambda s, mesh=local_cpu_mesh_i: jax.sharding.NamedSharding(mesh, s.spec), frag_spec
-        )
-
-        frag_local = jax.device_put(new_outer_params_frag, local_frag_shardings)
-        transport.send_to_learner(learner_idx=i, step=completed_step, fragment_id=frag_idx, data=frag_local)
-      else:
-        transport.send_to_learner(learner_idx=i, step=completed_step, fragment_id=frag_idx, data=new_outer_params_frag)
+      transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=local_frags[i])
 
     checkpointing.maybe_save_checkpoint(
-        checkpoint_manager=checkpoint_manager, state=syncer_state, config=config, data_iterator=None, step=completed_step
+        checkpoint_manager=checkpoint_manager, state=syncer_state, config=config, data_iterator=None, step=step
     )
-    max_logging.log(f"Syncer: Step {completed_step} sync finished")
+    max_logging.log(f"Syncer: Step {step} sync finished")
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
@@ -681,26 +673,15 @@ def run_threaded_diloco(config, recorder, train_step, eval_step):
   max_logging.log("Creating global mesh")
   global_mesh = maxtext_utils.get_mesh_from_config(config)
   max_logging.log("Partitioning global mesh")
-  submeshes = partition_mesh_by_diloco_axis(global_mesh, num_learners)
+  tpu_submeshes = partition_mesh_by_diloco_axis(global_mesh, num_learners)
+  cpu_submeshes = [colocated_python.colocated_cpu_devices(submesh) for submesh in tpu_submeshes]
+  global_cpu_mesh = colocated_python.colocated_cpu_devices(global_mesh)
+
   transport_manager = ThreadedTransportManager(num_learners)
-
-  # Find first local learner to create local CPU mesh for syncer
-  local_learner_idx = -1
-  for i in range(num_learners):
-    learner_devices = submeshes[i].devices.flat
-    if any(d in jax.local_devices() for d in learner_devices):
-      local_learner_idx = i
-      break
-
-  if local_learner_idx == -1:
-    raise ValueError("Process has no local learners")
-
-  max_logging.log(f"Creating local CPU mesh for syncer (using learner {local_learner_idx} submesh)")
-  local_cpu_mesh = colocated_python.colocated_cpu_devices(submeshes[local_learner_idx])
 
   # Get abstract syncer state first, on main thread, before spawning learner threads.
   max_logging.log("Getting abstract syncer state")
-  abstract_params, abstract_opt_state = get_abstract_syncer_state(config, local_cpu_mesh)
+  abstract_params, abstract_opt_state = get_abstract_syncer_state(config, global_cpu_mesh)
   max_logging.log("Got abstract syncer state")
 
   init_lock = threading.Lock()
@@ -710,20 +691,19 @@ def run_threaded_diloco(config, recorder, train_step, eval_step):
     futures = []
     for i in range(num_learners):
       # Determine if this learner should run on this process
-      learner_devices = submeshes[i].devices.flat
+      learner_devices = tpu_submeshes[i].devices.flat
       should_run = any(d in jax.local_devices() for d in learner_devices)
 
       if should_run:
-        learner_transport = LearnerTransport(transport_manager, i)
-        local_cpu_mesh_i = colocated_python.colocated_cpu_devices(submeshes[i])
+        learner_transport = LearnerTransport(transport_manager, i, cpu_submeshes[i])
 
         futures.append(
             executor.submit(
                 learner_loop,
                 i,
                 config,
-                submeshes[i],
-                local_cpu_mesh_i,
+                tpu_submeshes[i],  # each learner will only see its local TPU submesh
+                cpu_submeshes[i],
                 learner_transport,
                 recorder,
                 train_step,
@@ -738,8 +718,8 @@ def run_threaded_diloco(config, recorder, train_step, eval_step):
     max_logging.log("Starting syncer loop")
     syncer_loop(
         config,
-        local_cpu_mesh,
-        submeshes,
+        global_cpu_mesh,
+        cpu_submeshes,
         syncer_transport,
         recorder,
         abstract_params=abstract_params,
