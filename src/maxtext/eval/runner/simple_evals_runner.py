@@ -546,7 +546,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
       ),
   )
   parser.add_argument("--max_tokens", type=int, default=2048, help="Max tokens per generation.")
-  parser.add_argument("--temperature", type=float, default=0.5, help="Sampling temperature (upstream default: 0.5).")
+  parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (upstream default: 0.0).")
   parser.add_argument(
       "--concurrency",
       type=int,
