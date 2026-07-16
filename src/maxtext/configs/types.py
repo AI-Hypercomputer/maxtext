@@ -2050,7 +2050,11 @@ class RL(BaseModel):
   )
   rollout_vllm_server_mode_submission_threshold: int = Field(
       0,
-      description="Threshold for request submissions in vLLM server mode.",
+      description="Submission threshold for vLLM server mode rollout.",
+  )
+  rollout_vllm_server_mode_submission_timeout_s: float = Field(
+      5.0,
+      description="Submission timeout in seconds for vLLM server mode rollout.",
   )
 
 

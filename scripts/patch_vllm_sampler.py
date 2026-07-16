@@ -224,7 +224,3 @@ if os.path.exists(p5):
       print("Warning: target string not found in tpu_runner.py.")
 else:
   print("Warning: tpu_runner.py path not found.")
-
-
-# --- Patch 6: tunix/rl/rl_cluster.py (DISABLED) ---
-# print("Patch 6 (tunix/rl/rl_cluster.py) is disabled. We rely on Trainer's profiling to capture Sampler.")

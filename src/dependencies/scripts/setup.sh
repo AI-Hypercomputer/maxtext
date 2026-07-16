@@ -236,7 +236,7 @@ install_post_training_deps() {
 
     dep_name='src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt'
     echo "Installing requirements from $dep_name"
-    UV_TORCH_BACKEND=cpu python3 -m uv pip install --resolution=lowest -r "$dep_name"
+    UV_TORCH_BACKEND=cpu python3 -m uv pip install --resolution=lowest -r "$dep_name" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
     python3 -m src.dependencies.scripts.install_post_train_extra_deps
 }
 

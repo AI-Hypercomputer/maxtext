@@ -80,7 +80,7 @@ docker_build_args=(
 run_docker_build() {
   local dockerfile_path="$1"
   shift 1 # Move past the first argument, the rest are build-args
-  docker build --network host $(printf -- '--build-arg %q ' "$@") -f "$dockerfile_path" -t "$LOCAL_IMAGE_NAME" .
+  docker build --network host ${DOCKER_BUILD_FLAGS} $(printf -- '--build-arg %q ' "$@") -f "$dockerfile_path" -t "$LOCAL_IMAGE_NAME" .
 }
 
 # Function to build image for GPUs

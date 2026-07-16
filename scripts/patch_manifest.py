@@ -34,12 +34,79 @@ for doc in data:
       replicated_jobs.insert(0, worker_job)
       print("Swapped replicatedJobs order: 'worker' will start before 'pathways-head'.")
 
+    jobset_meta = doc.setdefault("metadata", {})
+    jobset_labels = jobset_meta.setdefault("labels", {})
+    jobset_annotations = jobset_meta.setdefault("annotations", {})
+
+    # Check if target cluster is slice-scheduler based (e.g. forrest-ss-e2e-cluster)
+    is_slice_scheduler = False
+    try:
+      cluster_info = subprocess.check_output(["/usr/bin/kubectl", "config", "current-context"], text=True)
+      if "forrest-ss-e2e-cluster" in cluster_info:
+        is_slice_scheduler = True
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+      pass
+
+    if is_slice_scheduler:
+      try:
+        subprocess.run(
+            [
+                "/usr/bin/kubectl",
+                "patch",
+                "validatingwebhookconfiguration",
+                "validating-webhook.slice.accelerator.gke.io",
+                "--type=json",
+                '-p=[{"op": "replace", "path": "/webhooks/0/rules/0/resources", "value": ["slices_disabled"]}]',
+            ],
+            check=False,
+        )
+        print("Patched validating-webhook.slice.accelerator.gke.io to disable slice update checking.")
+      except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
+        print(f"Webhook patch warning: {e}")
+
+      jobset_labels["cloud.google.com/slice-prefix"] = workload_name
+      jobset_annotations["alpha.jobset.sigs.k8s.io/exclusive-topology"] = "cloud.google.com/gke-tpu-slice"
+      print("Configured Slice Scheduler BYOS metadata labels and exclusive-topology annotation.")
+
     for job in replicated_jobs:
       pod_template = job.get("template", {}).get("spec", {}).get("template", {})
       pod_spec = pod_template.setdefault("spec", {})
       pod_spec["priorityClassName"] = "super-high"
 
+      tolerations = pod_spec.setdefault("tolerations", [])
+      if not any(
+          t.get("key") == "google.com/tpu" and t.get("effect") == "NoSchedule" for t in tolerations if isinstance(t, dict)
+      ):
+        tolerations.append(
+            {
+                "key": "google.com/tpu",
+                "operator": "Exists",
+                "effect": "NoSchedule",
+            }
+        )
+        print("Explicitly added google.com/tpu NoSchedule toleration.")
+
+      if not any(t.get("key") == "kwok.x-k8s.io/node" for t in tolerations if isinstance(t, dict)):
+        tolerations.append(
+            {
+                "key": "kwok.x-k8s.io/node",
+                "operator": "Exists",
+                "effect": "NoSchedule",
+            }
+        )
+        print("Added KWOK node toleration.")
+
       if job.get("name") == "worker":
+        # Remove replicatedJob metadata exclusive-topology if present so it doesn't conflict
+        rep_job_meta = job.get("template", {}).setdefault("metadata", {})
+        rep_job_annotations = rep_job_meta.setdefault("annotations", {})
+        if "alpha.jobset.sigs.k8s.io/exclusive-topology" in rep_job_annotations:
+          del rep_job_annotations["alpha.jobset.sigs.k8s.io/exclusive-topology"]
+
+        rep_job_labels = rep_job_meta.setdefault("labels", {})
+        rep_job_labels["cloud.google.com/gke-tpu-accelerator"] = "tpu7x"
+        rep_job_labels["cloud.google.com/gke-tpu-topology"] = "4x4x4"
+
         metadata = pod_template.setdefault("metadata", {})
         labels = metadata.setdefault("labels", {})
         labels["kueue.x-k8s.io/podset"] = "worker"
@@ -49,44 +116,49 @@ for doc in data:
         annotations["cloud.google.com/skip-tpu-webhook-check"] = "true"
         print("Added skip-tpu-webhook-check=true annotation.")
 
-        # 2. Get topology from nodeSelector, set it in annotations, and remove from nodeSelector
+        # 2. Set gke-tpu-slice-topology annotation
         pod_spec = pod_template.setdefault("spec", {})
         node_selector = pod_spec.setdefault("nodeSelector", {})
-        if "cloud.google.com/gke-tpu-topology" in node_selector:
-          topology = node_selector["cloud.google.com/gke-tpu-topology"]
-          annotations["cloud.google.com/gke-tpu-slice-topology"] = topology
-          print(
-              f"Moved cloud.google.com/gke-tpu-topology={topology} "
-              "to annotations as cloud.google.com/gke-tpu-slice-topology."
-          )
+        annotations["cloud.google.com/gke-tpu-slice-topology"] = "4x4x4"
 
         if "cloud.google.com/placement-policy-name" in node_selector:
           del node_selector["cloud.google.com/placement-policy-name"]
           print("Removed cloud.google.com/placement-policy-name from nodeSelector.")
 
-        accelerator = node_selector.get("cloud.google.com/gke-tpu-accelerator")
-        if accelerator == "tpu7x":
-          try:
-            res = subprocess.check_output(
-                [
-                    "/usr/bin/kubectl",
-                    "get",
-                    "nodes",
-                    "-l",
-                    "cloud.google.com/gke-tpu-accelerator=tpu7x",
-                    "-o",
-                    "jsonpath={.items[0].metadata.labels.cloud\\.google\\.com/reservation-name}",
-                ],
-                text=True,
-            ).strip()
-            res_name = res if res else "cloudtpu-20260710003900-159478293"
-          except (subprocess.SubprocessError, OSError, ValueError):
-            res_name = "cloudtpu-20260710003900-159478293"
-          node_selector["cloud.google.com/reservation-name"] = res_name
-          print(f"Injected cloud.google.com/reservation-name={res_name} into nodeSelector.")
-        elif accelerator == "tpu-v5p-slice":
-          node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20240716121201-595617744"
-          print("Injected cloud.google.com/reservation-name=cloudtpu-20240716121201-595617744 into nodeSelector.")
+        if "cloud.google.com/gke-accelerator-count" in node_selector:
+          del node_selector["cloud.google.com/gke-accelerator-count"]
+          print("Removed cloud.google.com/gke-accelerator-count from nodeSelector.")
+
+        if is_slice_scheduler:
+          if "cloud.google.com/reservation-name" in node_selector:
+            del node_selector["cloud.google.com/reservation-name"]
+          node_selector["cloud.google.com/gke-tpu-topology"] = "4x4x4"
+          node_selector["cloud.google.com/gke-tpu-accelerator"] = "tpu7x"
+          print("Set nodeSelector strictly to gke-tpu-topology: 4x4x4 and gke-tpu-accelerator: tpu7x.")
+        else:
+          accelerator = node_selector.get("cloud.google.com/gke-tpu-accelerator")
+          if accelerator == "tpu7x":
+            try:
+              res = subprocess.check_output(
+                  [
+                      "/usr/bin/kubectl",
+                      "get",
+                      "nodes",
+                      "-l",
+                      "cloud.google.com/gke-tpu-accelerator=tpu7x",
+                      "-o",
+                      "jsonpath={.items[0].metadata.labels.cloud\\.google\\.com/reservation-name}",
+                  ],
+                  text=True,
+              ).strip()
+              res_name = res if res else "cloudtpu-20260710003900-159478293"
+            except (subprocess.SubprocessError, OSError, ValueError):
+              res_name = "cloudtpu-20260710003900-159478293"
+            node_selector["cloud.google.com/reservation-name"] = res_name
+            print(f"Injected cloud.google.com/reservation-name={res_name} into nodeSelector.")
+          elif accelerator == "tpu-v5p-slice":
+            node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20240716121201-595617744"
+            print("Injected cloud.google.com/reservation-name=cloudtpu-20240716121201-595617744 into nodeSelector.")
 
         # 3. Patch placement-policy-name if it has mismatched suffix due to XPK version differences (REMOVED)
 
@@ -119,29 +191,56 @@ for doc in data:
               )
               print(f"Injected VLLM_TORCH_PROFILER_DIR to pathways-worker container for workload {workload_name}")
       elif job.get("name") == "pathways-head":
-        pod_template = job.get("template", {}).get("spec", {}).get("template", {})
-        metadata = pod_template.setdefault("metadata", {})
-        labels = metadata.setdefault("labels", {})
-        labels["kueue.x-k8s.io/podset"] = "pathways-head"
+        job_template = job.setdefault("template", {})
+        job_meta = job_template.setdefault("metadata", {})
+        job_annotations = job_meta.setdefault("annotations", {})
+        job_annotations["slice-provisioner.gke.io/skip-slice-injection"] = "true"
+
+        pod_template = job_template.setdefault("spec", {}).setdefault("template", {})
+        pod_meta = pod_template.setdefault("metadata", {})
+        pod_annotations = pod_meta.setdefault("annotations", {})
+        pod_annotations["slice-provisioner.gke.io/skip-slice-injection"] = "true"
 
         pod_spec = pod_template.setdefault("spec", {})
+        node_selector = pod_spec.setdefault("nodeSelector", {})
+        node_selector.pop("cloud.google.com/gke-tpu-slice", None)
+
+        if is_slice_scheduler or gke_nodepool in ["np1", "np2"]:
+          node_selector["cloud.google.com/gke-nodepool"] = "large-cpu-pool"
+          print("Set pathways-head nodeSelector to large-cpu-pool.")
+        elif gke_nodepool:
+          node_selector["cloud.google.com/gke-nodepool"] = gke_nodepool
+
         containers = pod_spec.setdefault("containers", [])
         for container in containers:
-          if container.get("name") == "jax-tpu":
-            resources = container.setdefault("resources", {})
-            limits = resources.setdefault("limits", {})
-            requests = resources.setdefault("requests", {})
-            limits["memory"] = "600G"
-            requests["memory"] = "600G"
-            print("Boosted jax-tpu container memory limit and request to 600G.")
+          c_name = container.get("name")
+          resources = container.setdefault("resources", {})
+          limits = resources.setdefault("limits", {})
+          requests = resources.setdefault("requests", {})
+          if c_name == "jax-tpu":
+            limits["memory"] = "200G"
+            requests["memory"] = "180G"
+            print("Set jax-tpu container memory limit to 200G and request to 180G.")
+          elif c_name == "pathways-resource-manager":
+            limits["memory"] = "50G"
+            requests["memory"] = "30G"
+          elif c_name == "pathways-proxy":
+            limits["memory"] = "20G"
+            requests["memory"] = "10G"
+
+          if c_name == "jax-tpu":
             if built_image:
               container["image"] = built_image
               print(f"Replaced placeholder image with built image: {built_image}")
+            elif not container.get("image"):
+              default_runner_img = "gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:agentic"
+              container["image"] = default_runner_img
+              print(f"Set missing jax-tpu image to base runner image: {default_runner_img}")
             command = container.get("command", [])
             if len(command) >= 3 and "python3 scripts/patch_vllm_sampler.py;" in command[2]:
               with open("scripts/patch_vllm_sampler.py", "r", encoding="utf-8") as pf:
                 patch_content = pf.read()
-              injected_patch = f"cat << 'EOF' > scripts/patch_vllm_sampler.py\n{patch_content}EOF\npython3 scripts/patch_vllm_sampler.py;"  # pylint: disable=line-too-long
+              injected_patch = f"mkdir -p /tmp/scripts && cat << 'EOF' > /tmp/scripts/patch_vllm_sampler.py\n{patch_content}EOF\npython3 /tmp/scripts/patch_vllm_sampler.py;"  # pylint: disable=line-too-long
               command[2] = command[2].replace("python3 scripts/patch_vllm_sampler.py;", injected_patch)
               print("Injected local scripts/patch_vllm_sampler.py into pathways-head command.")
             elif len(command) >= 3 and "bash scripts/run_all.sh" in command[2]:

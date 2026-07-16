@@ -45,7 +45,9 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 
 from __future__ import annotations
 import contextlib
+import importlib
 import inspect
+import subprocess
 from functools import wraps
 from typing import Any, Optional, Sequence
 
@@ -503,7 +505,9 @@ def create_rl_components(
               "detokenize": trainer_config.stop_strings is not None,
               "include_stop_str_in_output": trainer_config.stop_strings is not None,
           },
-          rollout_vllm_server_mode_submission_threshold=trainer_config.rl.rollout_vllm_server_mode_submission_threshold,
+          rollout_vllm_server_mode_submission_threshold=getattr(
+              trainer_config.rl, "rollout_vllm_server_mode_submission_threshold", 0
+          ),
           rollout_vllm_server_mode_submission_timeout_s=getattr(
               trainer_config.rl, "rollout_vllm_server_mode_submission_timeout_s", 5.0
           ),
@@ -516,6 +520,33 @@ def create_rl_components(
 
   # Create RL cluster
   max_logging.log("Creating RL cluster...")
+  # Log dynamic runtime container repository hashes to Cloud Logging
+  for pkg in ["maxtext", "tpu_inference", "tunix", "vllm"]:
+    try:
+      mod = importlib.import_module(pkg)
+      pkg_dir = os.path.dirname(getattr(mod, "__file__", ""))
+      live_hash = ""
+      if pkg_dir and os.path.exists(pkg_dir):
+        for candidate_dir in [pkg_dir, os.path.dirname(pkg_dir)]:
+          res = subprocess.run(
+              ["git", "rev-parse", "HEAD"],
+              cwd=candidate_dir,
+              capture_output=True,
+              text=True,
+              check=False,
+          )
+          if res.returncode == 0 and res.stdout.strip():
+            live_hash = res.stdout.strip()
+            break
+      if not live_hash:
+        live_hash = (
+            getattr(mod, "__githash__", None)
+            or getattr(mod, "__commit__", None)
+            or getattr(mod, "__version__", "unknown")
+        )
+      max_logging.log(f"[REPOSITORY HASHES] Container package {pkg} runtime hash: {live_hash}")
+    except (ImportError, AttributeError, subprocess.SubprocessError, OSError) as err:
+      max_logging.log(f"[REPOSITORY HASHES] Container package {pkg} detection warning: {err}")
   rl_cluster_kwargs = {}
   if trainer_config.enable_tunix_perf_metrics:
     try:

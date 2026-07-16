@@ -16,8 +16,8 @@ fi
 export PROJECT_ID="${PROJECT_ID:-cloud-tpu-shared-capacity}" # GCP project ID where the Ironwood cluster is deployed
 export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-nap}" # Name of your Ironwood cluster
 export ZONE="${ZONE:-us-central1}" # Zone where your Ironwood cluster is deployed
-export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
-export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:agentic}" # Base Docker image
+export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://mohitkhatwani_multipods/maxtext_logs/}" # GCS bucket path for outputs
+export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:07152026-clean-v4}" # Base Docker image
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="${TPU_TYPE:-tpu7x-128}"
 export WORKLOAD_NAME="mohit-rl-qwen3-$RANDOM"
@@ -78,7 +78,11 @@ XLA_FLAGS="--xla_tpu_dvfs_p_state=7 \
 --xla_tpu_pcie_bandwidth_multiplier=0.03 \
 --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true \
 --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
---xla_tpu_enable_3d_reduce_scatter_decomposer=false"
+--xla_tpu_enable_3d_reduce_scatter_decomposer=false \
+--xla_tpu_all_gather_collective_matmul_mode=post_spmd_conservative \
+--xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd_conservative \
+--xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes=67108864 \
+--xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes=67108864"
 
 # VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 # MaxText command
@@ -93,7 +97,7 @@ JAX_PLATFORMS=proxy,cpu \
 NUM_PRECOMPILE_WORKERS=1 \
 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
 ENABLE_PATHWAYS_PERSISTENCE=1 \
-PYTHONPATH=/app/src \
+PYTHONPATH=/deps/maxtext/src:/deps/maxtext:/deps:/maxtext/src:/maxtext:/app/src:\$PYTHONPATH \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
 model_name=qwen3-0.6b \
 tokenizer_path=Qwen/Qwen3-0.6B \
@@ -110,6 +114,7 @@ profiler_steps=1 \
 rl.num_generations=8 \
 rl.grpo_beta=0.05 \
 rl.grpo_epsilon=0.2 \
+rl.rollout_vllm_server_mode_submission_threshold=10 \
 gradient_clipping_threshold=1.0 \
 decode_sampling_temperature=0.8 \
 decode_sampling_top_k=50 \
@@ -159,13 +164,16 @@ echo "Compiling and uploading container image via xpk..."
   --command="echo build-stage" 2>&1 | tee xpk_build.log
 
 # 2. Extract the dynamically built container tag
-BUILT_IMAGE=$(grep -o -E "gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:[a-zA-Z0-9._-]+" xpk_build.log | tail -n 1)
-echo "Successfully built and uploaded image: ${BUILT_IMAGE}"
+cat xpk_build.log | grep -i "image" || true
+BUILT_IMAGE=$(grep -o -E "gcr.io/[^/]+/mohitkhatwani-runner:[a-zA-Z0-9._-]+" xpk_build.log | tail -n 1)
+if [ -z "${BUILT_IMAGE}" ]; then
+    BUILT_IMAGE=$(grep -o -E "[a-zA-Z0-9._/-]+mohitkhatwani-runner:[a-zA-Z0-9._-]+" xpk_build.log | tail -n 1)
+fi
+echo "Successfully built and uploaded image: '${BUILT_IMAGE}'"
 
 # 3. Immediately clean up the build workload in GKE
 echo "Cleaning up build workload..."
 kubectl delete jobset "${WORKLOAD_NAME}-build" || true
-rm -f xpk_build.log
 
 # Workload Creation (dry-run to generate manifest with built image)
 /usr/local/google/home/mohitkhatwani/max_venv/bin/xpk workload create-pathways \
@@ -176,14 +184,14 @@ rm -f xpk_build.log
   --max-restarts=0 \
   --tpu-type=$TPU_TYPE \
   --num-slices=1 \
-  --docker-image="${BUILT_IMAGE}" \
+  --docker-image="${BUILT_IMAGE:-$BASE_DOCKER_IMAGE}" \
   --server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260623-jax_0.10.1" \
   --proxy-server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260623-jax_0.10.1" \
   --workload="${WORKLOAD_NAME}" \
   --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
   --custom-pathways-server-args="" \
   --env RPA_D_BLOCK_SIZES="1,4096,1,4096" \
-  --command="cd /app; pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git --no-deps; python3 scripts/patch_vllm_sampler.py; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
+  --command="pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git --no-deps; python3 scripts/patch_vllm_sampler.py; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
 
@@ -193,7 +201,7 @@ GKE_NODEPOOL=$(/usr/bin/kubectl get nodes -l cloud.google.com/gke-tpu-accelerato
 echo "Detected GKE TPU Nodepool: ${GKE_NODEPOOL:-none (will auto-provision)}"
 
 echo "Applying Warden webhook bypass patch to generated_manifest.yaml..."
-python3 scripts/patch_manifest.py generated_manifest.yaml "" "" "${WORKLOAD_NAME}" ""
+python3 scripts/patch_manifest.py generated_manifest.yaml "${BUILT_IMAGE:-$BASE_DOCKER_IMAGE}" "" "${WORKLOAD_NAME}" ""
 
 echo "Auto-detecting Kueue LocalQueue..."
 LOCAL_QUEUE=$(/usr/bin/kubectl get localqueues.kueue.x-k8s.io -n default -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "multislice-queue")

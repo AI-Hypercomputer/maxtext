@@ -56,6 +56,7 @@ def main():
       str(github_deps_path),
       "--no-deps",
       "--no-build-isolation",
+      "-v",
   ]
 
   local_vllm_install_command = [
