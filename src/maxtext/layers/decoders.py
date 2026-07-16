@@ -411,7 +411,12 @@ class Decoder(nn.Module):
             "kv_proj",
             "qkv_proj",
         )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
+      elif cfg.remat_policy in ("qkv_proj_offloaded", "minimal_offloaded", "custom"):
+        # minimal_offloaded offloads all except context. All three share a single
+        # source of truth for their save/offload name lists (see
+        # maxtext_utils.get_save_and_offload_names) so that offloading configured via
+        # `custom` resolves identically to the named presets.
+        save_names, offload_names = maxtext_utils.get_save_and_offload_names(cfg)
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
             names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj", "kv_proj"],
