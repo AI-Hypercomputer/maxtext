@@ -715,6 +715,7 @@ class Decoder(nn.Module):
             "qwen3-omni-30b-a3b",
             "qwen3-vl-2b",
             "qwen3-vl-4b",
+            "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
         ]:
@@ -729,7 +730,14 @@ class Decoder(nn.Module):
           raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
       if video_embeddings is not None and cfg.use_multimodal:
-        if cfg.model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+        if cfg.model_name in [
+            "qwen3-omni-30b-a3b",
+            "qwen3-vl-2b",
+            "qwen3-vl-4b",
+            "qwen3-vl-30b-a3b",
+            "qwen3.5-35b-a3b",
+            "qwen3.5-397b-a17b",
+        ]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=video_embeddings,

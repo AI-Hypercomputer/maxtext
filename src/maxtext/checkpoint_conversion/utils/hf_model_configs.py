@@ -1698,6 +1698,70 @@ qwen3_vl_2b_dict = {
 }
 qwen3_vl_2b_config = PTConfig(**qwen3_vl_2b_dict)
 
+qwen3_vl_30b_a3b_dict = {
+    "architectures": ["Qwen3VLMoeForConditionalGeneration"],
+    "image_token_id": 151655,
+    "model_type": "qwen3_vl_moe",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 151643,
+        "decoder_sparse_step": 1,
+        "dtype": "bfloat16",
+        "eos_token_id": 151645,
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 2048,
+        "initializer_range": 0.02,
+        "intermediate_size": 6144,
+        "max_position_embeddings": 262144,
+        "mlp_only_layers": [],
+        "model_type": "qwen3_vl_moe_text",
+        "moe_intermediate_size": 768,
+        "norm_topk_prob": True,
+        "num_attention_heads": 32,
+        "num_experts_per_tok": 8,
+        "num_hidden_layers": 48,
+        "num_key_value_heads": 4,
+        "num_local_experts": 128,
+        "pad_token_id": None,
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+            "mrope_interleaved": True,
+            "mrope_section": [24, 20, 20],
+            "rope_theta": 5000000,
+            "rope_type": "default",
+        },
+        "router_aux_loss_coef": 0.001,
+        "sliding_window": None,
+        "tie_word_embeddings": True,
+        "use_cache": True,
+        "vocab_size": 151936,
+    },
+    "tie_word_embeddings": False,
+    "transformers_version": "5.12.1",
+    "video_token_id": 151656,
+    "vision_config": {
+        "deepstack_visual_indexes": [8, 16, 24],
+        "depth": 27,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 1152,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 4304,
+        "model_type": "qwen3_vl_moe_vision",
+        "num_heads": 16,
+        "num_position_embeddings": 2304,
+        "out_hidden_size": 2048,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+    },
+    "vision_end_token_id": 151653,
+    "vision_start_token_id": 151652,
+}
+qwen3_vl_30b_a3b_config = PTConfig(**qwen3_vl_30b_a3b_dict)
+
 
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
@@ -1727,6 +1791,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-32b": qwen3_32b_config,
     "qwen3-vl-2b": qwen3_vl_2b_config,
     "qwen3-vl-4b": qwen3_vl_4b_config,
+    "qwen3-vl-30b-a3b": qwen3_vl_30b_a3b_config,
     "llama3.1-8b": llama31_8b_config,
     "llama3.1-8b-Instruct": llama31_8b_config,
     "llama3.1-70b": llama31_70b_config,
