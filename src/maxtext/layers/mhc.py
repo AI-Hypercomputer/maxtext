@@ -26,6 +26,8 @@ from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import variable_to_logically_partitioned
 
 
 def get_permutation_matrices(k: int) -> Array:
@@ -62,20 +64,18 @@ def sinkhorn(t, iters=20):
   initial_dtype = t.dtype
   t = t.astype(jnp.float32)
 
-  # Column-wise normalization (axis=-2) - positive and sum up to 1 across columns
-  # Equivalent to t = exp(t) / jnp.sum(jnp.exp(t), axis=-2)
-  t = jax.nn.softmax(t, axis=-2)
+  eps = 1e-5
+
+  t = jax.nn.softmax(t, axis=-1) + eps
+  t = t / (jnp.sum(t, axis=-2, keepdims=True) + eps)
 
   def body_fun(i, val):
-    # L1 Normalization: val / sum(val) with clipping of denominator
-    # Normalize rows (axis -1)
-    val = val / jnp.clip(jnp.sum(val, axis=-1, keepdims=True), min=1e-12)
-    # Normalize columns (axis -2)
-    val = val / jnp.clip(jnp.sum(val, axis=-2, keepdims=True), min=1e-12)
+    val = val / (jnp.sum(val, axis=-1, keepdims=True) + eps)
+    val = val / (jnp.sum(val, axis=-2, keepdims=True) + eps)
     return val
 
   # Use lax.fori_loop for an efficient, JIT-friendly loop
-  t = jax.lax.fori_loop(0, iters, body_fun, t)
+  t = jax.lax.fori_loop(0, iters - 1, body_fun, t)
   return t.astype(initial_dtype)
 
 
@@ -224,7 +224,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       output = sinkhorn(intermediate, self.sinkhorn_iterations)
       return output
 
-  def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: int):
+  def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: float, eps: float = 0.0):
     """Helper function for both pre and post mappings."""
     # In MaxText, we match weight precision to activations before Matmul
     alpha = jnp.asarray(alpha, self.dtype)
@@ -233,7 +233,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # Apply projection: (b, s, k*d) @ (k*d, k) -> (b, s, k)
     h = jnp.einsum("bsm,mk -> bsk", x, alpha, precision=self.matmul_precision)
     intermediate = alpha_scale * h + beta[None, None, :]
-    output = scale * jax.nn.sigmoid(intermediate)
+    output = scale * jax.nn.sigmoid(intermediate) + eps
     return output
 
   def __call__(
@@ -269,6 +269,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         self.pre_alpha[...],
         self.pre_beta[...],
         1.0,
+        eps=1e-5,
     )
     layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
 
@@ -307,3 +308,88 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     res_mapping = self.res_mapping(norm_x)
     res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
     return res_out + post_out, metadata
+  
+
+class HyperHead(nnx.Module):
+  """Final HC-stream collapse; used before the final shared RMSNorm and LM Head."""
+
+  def __init__(
+      self,
+      config: Config,
+      dim: int,
+      mesh: Mesh,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.k = config.mhc_expansion_rate
+    self.dim = dim
+    self.rngs = rngs
+    self.mesh = mesh
+    self.dtype = config.dtype
+    self.weight_dtype = config.weight_dtype
+    self.matmul_precision = jax.lax.Precision(config.matmul_precision)
+
+    # V4 uses an Unweighted RMSNorm here
+    self.input_norm = RMSNorm(
+        num_features=self.k * self.dim,
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        epsilon=self.config.normalization_layer_epsilon,
+        with_scale=False,
+        kernel_axes=("norm",),
+        rngs=self.rngs,
+    )
+
+    self.eps = 1e-6
+
+    self.hc_scale = nnx.Param(
+        default_scalar_init(self.rngs.params(), (1,), self.weight_dtype),
+        out_sharding=(None,),
+    )
+    
+    self.hc_base = nnx.Param(
+        default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
+        out_sharding=(None,),
+    )
+
+    scale_init = nd_dense_init(1.0, "fan_in", "normal")
+    self.hc_fn = nnx.Param(
+        scale_init(
+            self.rngs.params(),
+            (self.k * self.dim, self.k),
+            self.weight_dtype,
+            in_axis=0,
+            out_axis=1,
+        ),
+        out_sharding=("activation_embed", None),
+    )
+
+  def __call__(self, x: Array) -> Array:
+    """Collapses the multi-stream residual back to a single stream."""
+    b, s, k, d = x.shape
+    
+    # 1. Cast x to float32 BEFORE the norm to match PyTorch
+    flat_f32 = jnp.reshape(x, (b, s, k * d)).astype(jnp.float32)
+    flat = self.input_norm(flat_f32) # Norm operates on float32
+
+    # 2. Extract parameters in float32
+    hc_fn = jnp.asarray(self.hc_fn[...], jnp.float32)
+    hc_scale = jnp.asarray(self.hc_scale[...], jnp.float32)
+    hc_base = jnp.asarray(self.hc_base[...], jnp.float32)
+
+    # 3. Linear projection and gate in float32
+    mixes = jnp.einsum("bsm,mk -> bsk", flat, hc_fn, precision=self.matmul_precision)
+    pre = jax.nn.sigmoid(mixes * hc_scale + hc_base) + self.eps
+
+    # 4. Cast the gate back to the activation dtype for the final collapse
+    pre_dtype = pre.astype(self.dtype)
+
+    # 5. Collapse via weighted sum in native dtype (e.g., bfloat16)
+    collapsed = jnp.einsum("bskd,bsk -> bsd", x, pre_dtype, precision=self.matmul_precision)
+    return collapsed
+
+# Wrap it for Linen so it can be used easily in decoders.py
+HyperHeadToLinen = nnx_wrappers.to_linen_class(
+    HyperHead,
+    base_metadata_fn=variable_to_logically_partitioned,
+)

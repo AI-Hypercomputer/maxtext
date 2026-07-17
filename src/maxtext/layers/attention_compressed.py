@@ -321,8 +321,10 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
     compressed_len = compressed_kv.shape[1]
 
     # Skip causal mask generation during decoding (seq_len == 1) or if no blocks were pooled
-    if seq_len == 1 or compressed_len == 0:
+    if seq_len == 1:
       return compressed_kv, None
+    if compressed_len == 0:
+      return compressed_kv, jnp.zeros((batch_size, 1, seq_len, 0), dtype=self.dtype)
 
     # Construct a causal mask preventing early queries from attending to future compressed blocks
     entry_indices = jnp.arange(compressed_len)
@@ -858,11 +860,17 @@ class CompressedAttention(Attention):
     # CSA / HCA layers use compressed_rope_max_timescale (160000).
     # Sliding window prefix layers use rope_max_timescale (10000).
     rope_theta = self.config.compressed_rope_max_timescale if self.compress_ratio > 0 else self.config.rope_max_timescale
+    use_yarn = (self.compress_ratio > 0)
     self.rotary_embedding = DeepSeekV4RotaryEmbedding(
         head_dim=self.config.head_dim,
         partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
         rope_theta=rope_theta,
         fprop_dtype=self.dtype,
+        use_yarn=use_yarn,
+        original_max_position_embeddings=self.config.original_max_position_embeddings,
+        max_position_embeddings=self.config.max_position_embeddings,
+        beta_fast=self.config.beta_fast,
+        beta_slow=self.config.beta_slow,
     )
 
     if self.compress_ratio > 4:
