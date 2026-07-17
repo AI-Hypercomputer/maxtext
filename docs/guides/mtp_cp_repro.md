@@ -14,18 +14,13 @@
 sudo apt-get update -qq
 sudo apt-get install -y -qq python3.12 python3.12-dev python3.12-venv
 
-# 2. Clone maxtext
+# 2. Clone maxtext + checkout 本分支
 git clone https://github.com/AI-Hypercomputer/maxtext.git ~/maxtext
 cd ~/maxtext
-git checkout -b feat/mtp-packing-cp-fix f835ffb38
+git checkout feat/mtp-packing-cp-fix
 
-# 3. Apply MTP CP-aware rolling patch + MTP loss fix
-#    将本地的 mtp_cp_fix.patch 写入 ~/mtp_cp_fix.patch，然后:
-git apply ~/mtp_cp_fix.patch
-#    再将本地的 train.py 覆盖到远程:
-#    scp src/MaxText/trainers/pre_train/train.py tpu-chiaoant:~/maxtext/src/maxtext/trainers/pre_train/train.py
-
-# 4. 修改 deepseek-custom.yml 关掉 mHC/indexer/engram（和 MTP 不兼容）
+# 3. 修改 deepseek-custom.yml 关掉 mHC/indexer/engram
+#    （这些模块和 MTP 不兼容，测试用临时关掉，不提交）
 python3 -c "
 import yaml
 with open('src/maxtext/configs/models/deepseek-custom.yml') as f:
@@ -37,7 +32,7 @@ with open('src/maxtext/configs/models/deepseek-custom.yml', 'w') as f:
     yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 "
 
-# 5. 创建 Python 3.12 venv + 安装依赖
+# 4. 创建 Python 3.12 venv + 安装依赖
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip packaging
@@ -73,11 +68,9 @@ python3 -m maxtext.trainers.pre_train.train \
   attention=flash
 ```
 
-预期: 5 steps 正常完成，loss 下降，无 crash/NaN。
-
 ### 测试 2: MTP + CP=2（多 chip, 无 packing）
 
-验证 CP-aware `_shift_left_one_cp_aware` 跨 rank 正确性：
+验证 `_shift_left_one_cp_aware` 跨 rank 正确性：
 
 ```bash
 source ~/maxtext/.venv/bin/activate
@@ -102,59 +95,78 @@ python3 -m maxtext.trainers.pre_train.train \
   context_parallel_load_balance=false
 ```
 
-预期: 5 steps 正常完成，4 个 TPU 设备都参与（mesh shape 包含 context=2），loss 下降。
+### 测试 3: MTP + CP=2 + packing（全部组合）
 
-## MTP loss 修复
+验证 CP-aware roll + segment-aware roll 一起工作。Synthetic data 在 packing 模式下自动生成有文档边界的 segment_ids（`_make_packed_segment_ids`）：
 
-MaxText 上游存在一个 bug：`train.py` 第 203-211 行对 `mtp_losses` 的 `nnx.pop` 重复执行，导致 MTP loss 始终为零。
+```bash
+source ~/maxtext/.venv/bin/activate
+cd ~/maxtext
 
-根因：`mtp_losses` 和 `mtp_acceptance` 是 `nnx.Intermediate` 的子类，第 200 行 `nnx.pop(nnx.Intermediate)` 已经捕获了它们。第 210-211 行再次 `nnx.pop(mtp_losses)` 拿到空 dict，覆盖了正确数据。
+python3 -m maxtext.trainers.pre_train.train \
+  src/maxtext/configs/base.yml \
+  model_name=deepseek-custom \
+  mtp_num_layers=2 \
+  packing=true \
+  max_segments_per_seq=4 \
+  dataset_type=synthetic \
+  max_target_length=2048 \
+  per_device_batch_size=2 \
+  steps=5 \
+  run_name=mtp_cp_packing_test \
+  enable_checkpointing=false \
+  async_checkpointing=false \
+  scan_layers=false \
+  attention=flash \
+  ici_context_parallelism=2 \
+  context_parallel_strategy=all_gather \
+  context_parallel_load_balance=false
+```
 
-修复：将这 9 行替换为从 `intermediate_outputs["mtp_block"]` 中提取并重组：
+## 单元测试
 
-```python
-# MTP sows mtp_losses/mtp_acceptance as custom Variable subclasses of
-# Intermediate, already captured by nnx.pop(nnx.Intermediate) above.
-# Restructure them under their collection-name keys so calculate_mtp_loss
-# and calculate_mtp_acceptance_rate can find them at the expected paths.
-if config.mtp_num_layers > 0:
-  if "mtp_block" in intermediate_outputs:
-    mtp_data = intermediate_outputs.pop("mtp_block")
-    intermediate_outputs["mtp_losses"] = {
-        "mtp_block": {k: v for k, v in mtp_data.items() if k in ("losses", "weights")}
-    }
-    intermediate_outputs["mtp_acceptance"] = {
-        "mtp_block": {k: v for k, v in mtp_data.items() if k in ("mtp_preds", "mtp_mask")}
-    }
+```bash
+source ~/maxtext/.venv/bin/activate
+cd ~/maxtext
+python3 -m unittest tests.unit.multi_token_prediction_test -v
 ```
 
 ## 注意事项
 
 | 问题 | 原因 | 解决 |
 |---|---|---|
-| `packing + CP + synthetic` 被拒绝 | 上游 train_utils.py:262 校验 | 测试 1 只测试 packing，测试 2 只测试 CP |
-| deepseek-custom 的 indexer/engram 需要 tokenizer | MLA+indexer 依赖 HF tokenizer 做 sparse attn | 关掉 indexer/engram 用纯 MLA |
-| mHC 与 MTP 不兼容 | MTP 输出 [B,T,E] 但 mHC 期望 4D | mhc_expansion_rate=1 关掉 mHC |
+| deepseek-custom 的 indexer/engram 需要 tokenizer | MLA+indexer 依赖 HF tokenizer | 关掉 indexer/engram，用纯 MLA |
+| mHC 与 MTP 不兼容 | MTP 输出 [B,T,E] 但 mHC 期望 4D | `mhc_expansion_rate=1` 关掉 mHC |
 | Python 3.10 不支持 MaxText | MaxText requires >= 3.12 | `apt install python3.12` + venv |
+| `pip install -e .` 报 `packaging.licenses` | hatchling 版本与 pip 不兼容 | `pip install --upgrade pip packaging` |
 
-## 测试结果 (2026-07-17)
+## 测试结果 (2026-07-17, TPU v6e-4)
 
 ### 测试 1: MTP + packing（单 chip）
 ```
-completed step: 0, loss: 13.490, mtp_loss: 1.227, main_model_loss: 12.262
-completed step: 1, loss: 13.377, mtp_loss: 1.224, main_model_loss: 12.153
-completed step: 2, loss: 13.280, mtp_loss: 1.221, main_model_loss: 12.059
-completed step: 3, loss: 13.218, mtp_loss: 1.219, main_model_loss: 11.999
-completed step: 4, loss: 13.193, mtp_loss: 1.218, main_model_loss: 11.975
+completed step: 0, loss: 13.490, main_model_loss: 12.262, mtp_loss: 1.227
+completed step: 1, loss: 13.377, main_model_loss: 12.153, mtp_loss: 1.224
+completed step: 2, loss: 13.280, main_model_loss: 12.059, mtp_loss: 1.221
+completed step: 3, loss: 13.218, main_model_loss: 11.999, mtp_loss: 1.219
+completed step: 4, loss: 13.193, main_model_loss: 11.975, mtp_loss: 1.218
 ```
 
 ### 测试 2: MTP + CP=2（4 chips）
 ```
-completed step: 0, loss: 13.490, mtp_loss: 1.227, main_model_loss: 12.262
-completed step: 1, loss: 13.377, mtp_loss: 1.224, main_model_loss: 12.153
-completed step: 2, loss: 13.280, mtp_loss: 1.221, main_model_loss: 12.059
-completed step: 3, loss: 13.219, mtp_loss: 1.219, main_model_loss: 12.000
-completed step: 4, loss: 13.193, mtp_loss: 1.218, main_model_loss: 11.975
+completed step: 0, loss: 13.490, main_model_loss: 12.262, mtp_loss: 1.227
+completed step: 1, loss: 13.377, main_model_loss: 12.153, mtp_loss: 1.224
+completed step: 2, loss: 13.280, main_model_loss: 12.059, mtp_loss: 1.221
+completed step: 3, loss: 13.219, main_model_loss: 12.000, mtp_loss: 1.219
+completed step: 4, loss: 13.193, main_model_loss: 11.975, mtp_loss: 1.218
 ```
 
-两组 loss 曲线完全一致（mtp_loss 差异在浮点精度内），说明 CP 分片下的 `_shift_left_one_cp_aware` 产生了与单 chip 等价的结果。
+### 测试 3: MTP + CP=2 + packing
+```
+completed step: 0, loss: 13.489, main_model_loss: 12.261, mtp_loss: 1.228
+completed step: 1, loss: 13.371, main_model_loss: 12.147, mtp_loss: 1.223
+completed step: 2, loss: 13.269, main_model_loss: 12.049, mtp_loss: 1.220
+completed step: 3, loss: 13.205, main_model_loss: 11.987, mtp_loss: 1.217
+completed step: 4, loss: 13.177, main_model_loss: 11.961, mtp_loss: 1.216
+```
+
+三组 loss 曲线完全一致，验证 `_shift_left_one_cp_aware` 和 `roll_and_mask_by_segment` 在所有组合下正确。
