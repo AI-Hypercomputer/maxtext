@@ -32,9 +32,8 @@ for doc in data:
 
       if job.get("name") == "pathways-head":
         node_selector = pod_spec.setdefault("nodeSelector", {})
-        if "cloud.google.com/gke-nodepool" in node_selector:
-          del node_selector["cloud.google.com/gke-nodepool"]
-          print("Removed cloud.google.com/gke-nodepool from pathways-head nodeSelector.")
+        node_selector["cloud.google.com/gke-nodepool"] = "cpu-np"
+        print("Set pathways-head nodeSelector to cpu-np.")
 
       if job.get("name") == "worker":
         metadata = pod_template.setdefault("metadata", {})
@@ -64,24 +63,33 @@ for doc in data:
 
         accelerator = node_selector.get("cloud.google.com/gke-tpu-accelerator")
         if accelerator == "tpu7x":
-          try:
-            res = subprocess.check_output(
-                [
-                    "/usr/bin/kubectl",
-                    "get",
-                    "nodes",
-                    "-l",
-                    "cloud.google.com/gke-nodepool=forrest-ss-e2e-np2",
-                    "-o",
-                    "jsonpath={.items[0].metadata.labels.cloud\\.google\\.com/reservation-name}",
-                ],
-                text=True,
-            ).strip()
-            res_name = res if res else "ghostfish-bk33tcf1hfazr"
-          except (subprocess.SubprocessError, OSError, ValueError):
-            res_name = "ghostfish-bk33tcf1hfazr"
-          node_selector["cloud.google.com/reservation-name"] = res_name
-          print(f"Injected cloud.google.com/reservation-name={res_name} into nodeSelector.")
+          if gke_nodepool:
+            try:
+              res = subprocess.check_output(
+                  [
+                      "/usr/bin/kubectl",
+                      "get",
+                      "nodes",
+                      "-l",
+                      f"cloud.google.com/gke-nodepool={gke_nodepool}",
+                      "-o",
+                      "jsonpath={.items[0].metadata.labels.cloud\\.google\\.com/reservation-name}",
+                  ],
+                  text=True,
+              ).strip()
+              res_name = res if res else "ghostfish-bk33tcf1hfazr"
+            except (subprocess.SubprocessError, OSError, ValueError):
+              res_name = "ghostfish-bk33tcf1hfazr"
+            node_selector["cloud.google.com/reservation-name"] = res_name
+            node_selector["cloud.google.com/gke-nodepool"] = gke_nodepool
+            print(
+                f"Injected cloud.google.com/reservation-name={res_name} and gke-nodepool={gke_nodepool} into worker nodeSelector."  # pylint: disable=line-too-long
+            )
+          else:
+            node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20260317203000-769538580"
+            if "cloud.google.com/gke-nodepool" in node_selector:
+              del node_selector["cloud.google.com/gke-nodepool"]
+            print("Injected cloud.google.com/reservation-name=cloudtpu-20260317203000-769538580 for NAP cluster.")
         elif accelerator == "tpu-v5p-slice":
           node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20240716121201-595617744"
           print("Injected cloud.google.com/reservation-name=cloudtpu-20240716121201-595617744 into nodeSelector.")
@@ -91,11 +99,6 @@ for doc in data:
         # 3.5 Inject dnsConfig to resolve internal pods DNS and external googleapis.com DNS over hostNetwork
         pod_spec["dnsConfig"] = {"nameservers": [kube_dns_ip, "8.8.8.8"]}
         print(f"Injected dnsConfig nameservers: [{kube_dns_ip}, 8.8.8.8] to worker pod spec.")
-
-        # 3.6 Inject gke-nodepool to target real TPU nodepool forrest-ss-e2e-np2
-        nodepool_to_use = gke_nodepool if gke_nodepool else "forrest-ss-e2e-np2"
-        node_selector["cloud.google.com/gke-nodepool"] = nodepool_to_use
-        print(f"Injected cloud.google.com/gke-nodepool={nodepool_to_use} to worker nodeSelector.")
 
         # 5. Add connection handshake timeout and VLLM_TORCH_PROFILER_DIR to pathways-worker container
         containers = pod_spec.setdefault("containers", [])

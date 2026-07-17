@@ -13,15 +13,15 @@ if ! /usr/local/google/home/mohitkhatwani/max_venv/bin/pip show xpk &> /dev/null
 fi
 
 # --- Environment Variables ---
-export PROJECT_ID="${PROJECT_ID:-gke-aishared-gsc-dev}" # GCP project ID where the cluster is deployed
-export CLUSTER_NAME="${CLUSTER_NAME:-forrest-ss-e2e-cluster}" # Name of your cluster
-export ZONE="${ZONE:-us-central1-c}" # Zone where your cluster is deployed
+export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where the cluster is deployed
+export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-auto-nap2}" # Name of your cluster
+export ZONE="${ZONE:-us-central1}" # Zone where your cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://mohitkhatwani_multipods/maxtext_logs}" # GCS bucket path for outputs
-export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/maxtext/maxtext_base_image:latest}" # Base Docker image
+export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:07152026-clean-v4}" # Base Docker image
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="${TPU_TYPE:-tpu7x-128}"
-export WORKLOAD_NAME="mohit-rl-qwen3-$RANDOM"
-export RPA_D_BLOCK_SIZES="1,8192,1,8192"
+export WORKLOAD_NAME="mohit-rl-cd-$RANDOM"
+export RPA_D_BLOCK_SIZES="1,4096,1,4096"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
@@ -105,11 +105,9 @@ base_output_directory=$BASE_OUTPUT_DIRECTORY \
 chips_per_vm=8 \
 num_batches=20 \
 num_test_batches=0 \
-skip_first_n_steps_for_profiler=115 \
+profiler=xplane \
+skip_first_n_steps_for_profiler=2 \
 profiler_steps=5 \
-trainer_profiler=xplane \
-trainer_skip_first_n_steps_for_profiler=115 \
-trainer_profiler_steps=5 \
 rl.use_agentic_rollout=true \
 rl.num_generations=8 \
 rl.grpo_beta=0.05 \
@@ -126,27 +124,32 @@ train_split=train_1M \
 max_target_length=24576 \
 max_prefill_predict_length=16384 \
 learning_rate=1e-6 \
-batch_size=480 \
+batch_size=8 \
 train_micro_batch_size=8 \
 compute_logps_micro_batch_size=8 \
-rollout_micro_batch_size=480 \
+rollout_micro_batch_size=8 \
 rollout_data_parallelism=32 \
 rollout_tensor_parallelism=2 \
 enable_dp_attention=false \
 hbm_utilization_vllm=0.6 \
-max_num_seqs=480 \
+max_num_seqs=64 \
 max_num_batched_tokens=24832 \
 scan_layers=True \
 allow_split_physical_axes=True \
 enable_tunix_perf_metrics=True \
 checkpoint_period=100 \
 max_num_checkpoints_to_keep=1000 \
-enable_checkpointing=false \
-load_parameters_path="''" \
+enable_checkpointing=true \
+load_parameters_path=$MAXTEXT_CKPT_PATH \
 rollout_vllm_init_with_random_weights=True \
+rl.max_concurrency=64 \
+rl.return_logprobs=False \
+rl.use_rollout_logps=False \
+rl.rollout_vllm_server_mode_submission_threshold=64 \
+rl.kv_cache_metrics=True \
+rl.disable_log_stats=False \
+rl.rollout_vllm_server_mode_submission_timeout_s=5 \
 vllm_additional_config='{\"enable_continue_decode\": true, \"max_decode_steps\": 128}'"
-# vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
-# vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
 # 1. Run live submit to compile and upload the container image with local changes
 echo "Compiling and uploading container image via xpk..."
@@ -183,27 +186,24 @@ rm -f xpk_build.log
   --max-restarts=0 \
   --tpu-type=$TPU_TYPE \
   --num-slices=1 \
-  --docker-image="${BUILT_IMAGE}" \
+  --docker-image="${BUILT_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:07152026-clean-v4}" \
   --server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260623-jax_0.10.1" \
   --proxy-server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260623-jax_0.10.1" \
   --workload="${WORKLOAD_NAME}" \
   --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
   --custom-pathways-server-args="" \
   --env RPA_D_BLOCK_SIZES="1,4096,1,4096" \
-  --command="cd /app; pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git --no-deps; python3 scripts/patch_vllm_sampler.py; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
+  --command="pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git --no-deps; python3 scripts/patch_vllm_sampler.py; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
 
 
-echo "Detecting GKE TPU Nodepool..."
-GKE_NODEPOOL=$(/usr/bin/kubectl get nodes -l cloud.google.com/gke-tpu-accelerator=tpu7x -o jsonpath='{.items[0].metadata.labels.cloud\.google\.com/gke-nodepool}' 2>/dev/null || true)
-echo "Detected GKE TPU Nodepool: ${GKE_NODEPOOL:-none (will auto-provision)}"
-
 echo "Applying Warden webhook bypass patch to generated_manifest.yaml..."
-python3 scripts/patch_manifest.py generated_manifest.yaml "" "" "${WORKLOAD_NAME}" ""
+python3 scripts/patch_manifest.py generated_manifest.yaml "${BUILT_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:07152026-clean-v4}" "" "${WORKLOAD_NAME}" ""
 
 echo "Auto-detecting Kueue LocalQueue..."
-LOCAL_QUEUE=$(/usr/bin/kubectl get localqueues.kueue.x-k8s.io -n default -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "multislice-queue")
+LOCAL_QUEUE=$(/usr/bin/kubectl get localqueues.kueue.x-k8s.io -n default -o jsonpath='{.items[?(@.metadata.name=="user-queue-4x4x4")].metadata.name}' 2>/dev/null || true)
+LOCAL_QUEUE=${LOCAL_QUEUE:-multislice-queue}
 echo "Patching queue to ${LOCAL_QUEUE}..."
 sed -i "s/multislice-queue/${LOCAL_QUEUE}/g" generated_manifest.yaml
 

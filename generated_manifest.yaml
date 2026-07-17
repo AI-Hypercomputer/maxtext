@@ -2,9 +2,9 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   labels:
-    kueue.x-k8s.io/queue-name: tpu-queue
-    xpk.google.com/workload: mohit-rl-agentic-11189
-  name: mohit-rl-agentic-11189
+    kueue.x-k8s.io/queue-name: user-queue-4x4x4
+    xpk.google.com/workload: mohit-rl-cd-1234
+  name: mohit-rl-cd-1234
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -174,26 +174,28 @@ spec:
                 \ TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0\
                 \ JAX_PLATFORMS=proxy,cpu NUM_PRECOMPILE_WORKERS=1 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\
                 \ ENABLE_PATHWAYS_PERSISTENCE=1 PYTHONPATH=/app/src python3 -m maxtext.trainers.post_train.rl.train_rl\
-                \ model_name=qwen3-0.6b tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-agentic-11189\
-                \ checkpoint_storage_use_ocdbt=False async_scheduling=True base_output_directory=gs://mohitkhatwani_multipods/maxtext_logs\
-                \ chips_per_vm=8 num_batches=20 num_test_batches=0 rl.num_generations=8\
-                \ rl.grpo_beta=0.05 rl.grpo_epsilon=0.2 gradient_clipping_threshold=1.0\
+                \ model_name=qwen3-0.6b tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-cd-1234\
+                \ checkpoint_storage_use_ocdbt=False async_scheduling=False base_output_directory=gs://mohitkhatwani_multipods/maxtext_logs\
+                \ chips_per_vm=8 num_batches=20 num_test_batches=0 profiler=xplane\
+                \ skip_first_n_steps_for_profiler=2 profiler_steps=5 rl.use_agentic_rollout=true\
+                \ rl.num_generations=8 rl.grpo_beta=0.05 rl.grpo_epsilon=0.2 gradient_clipping_threshold=1.0\
                 \ decode_sampling_temperature=0.8 decode_sampling_top_k=50 decode_sampling_nucleus_p=0.95\
-                \ dataset_name=nvidia/OpenMathInstruct-2 hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet\
+                \ dataset_name=nvidia/OpenMathInstruct-2 remat_policy=save_dot_except_mlp\
+                \ attention=flash hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet\
                 \ train_split=train_1M max_target_length=24576 max_prefill_predict_length=16384\
-                \ learning_rate=1e-6 batch_size=480 train_micro_batch_size=8 rollout_micro_batch_size=480\
-                \ rollout_data_parallelism=32 rollout_tensor_parallelism=2 enable_dp_attention=false\
-                \ hbm_utilization_vllm=0.6 max_num_seqs=480 max_num_batched_tokens=24832\
-                \ scan_layers=True allow_split_physical_axes=True enable_tunix_perf_metrics=True\
-                \ checkpoint_period=100 max_num_checkpoints_to_keep=1000 enable_checkpointing=true\
-                \ load_parameters_path=gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items\
-                \ rollout_vllm_init_with_random_weights=True rl.use_agentic_rollout=True\
-                \ rl.max_concurrency=64 rl.return_logprobs=False rl.use_rollout_logps=False\
-                \ rl.rollout_vllm_server_mode_submission_threshold=64 rl.kv_cache_metrics=True\
-                \ rl.disable_log_stats=False rl.rollout_vllm_server_mode_submission_timeout_s=5)\
-                \ & PID=$!;\nwhile kill -0 $PID 2>/dev/null;\n    do sleep 5;\ndone;\n\
-                wait $PID;\nEXIT_CODE=$?;\n\necho XPK End: $(date);\necho EXIT_CODE=$EXIT_CODE;\n\
-                \n\nexit $EXIT_CODE\n"
+                \ learning_rate=1e-6 batch_size=8 train_micro_batch_size=8 compute_logps_micro_batch_size=8\
+                \ rollout_micro_batch_size=8 rollout_data_parallelism=32 rollout_tensor_parallelism=2\
+                \ enable_dp_attention=false hbm_utilization_vllm=0.6 max_num_seqs=64\
+                \ max_num_batched_tokens=24832 scan_layers=True allow_split_physical_axes=True\
+                \ enable_tunix_perf_metrics=True checkpoint_period=100 max_num_checkpoints_to_keep=1000\
+                \ enable_checkpointing=true load_parameters_path=gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items\
+                \ rollout_vllm_init_with_random_weights=True rl.max_concurrency=64\
+                \ rl.return_logprobs=False rl.use_rollout_logps=False rl.rollout_vllm_server_mode_submission_threshold=64\
+                \ rl.kv_cache_metrics=True rl.disable_log_stats=False rl.rollout_vllm_server_mode_submission_timeout_s=5\
+                \ vllm_additional_config='{\"enable_continue_decode\": true, \"max_decode_steps\"\
+                : 128}') & PID=$!;\nwhile kill -0 $PID 2>/dev/null;\n    do sleep\
+                \ 5;\ndone;\nwait $PID;\nEXIT_CODE=$?;\n\necho XPK End: $(date);\n\
+                echo EXIT_CODE=$EXIT_CODE;\n\n\nexit $EXIT_CODE\n"
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:
@@ -317,7 +319,8 @@ spec:
                   cpu: '8'
                   memory: 32G
               restartPolicy: Always
-            nodeSelector: {}
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
             priorityClassName: super-high
             restartPolicy: Never
             volumes:
@@ -343,7 +346,7 @@ spec:
               cloud.google.com/skip-tpu-webhook-check: 'true'
             labels:
               kueue.x-k8s.io/podset: worker
-              xpk.google.com/workload: mohit-rl-agentic-11189
+              xpk.google.com/workload: mohit-rl-cd-1234
           spec:
             containers:
             - args:
@@ -387,7 +390,7 @@ spec:
               - name: RPA_D_BLOCK_SIZES
                 value: 1,4096,1,4096
               - name: VLLM_TORCH_PROFILER_DIR
-                value: gs://runner-maxtext-logs/mohit-rl-agentic-11189/tensorboard/sampler_tpu_profile
+                value: gs://runner-maxtext-logs/mohit-rl-cd-1234/tensorboard/sampler_tpu_profile
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260623-jax_0.10.1
               imagePullPolicy: Always
               name: pathways-worker
@@ -413,9 +416,8 @@ spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             nodeSelector:
-              cloud.google.com/gke-nodepool: forrest-ss-e2e-np2
               cloud.google.com/gke-tpu-accelerator: tpu7x
-              cloud.google.com/reservation-name: ghostfish-bk33tcf1hfazr
+              cloud.google.com/reservation-name: cloudtpu-20260317203000-769538580
             priorityClassName: super-high
             restartPolicy: OnFailure
             terminationGracePeriodSeconds: 30
