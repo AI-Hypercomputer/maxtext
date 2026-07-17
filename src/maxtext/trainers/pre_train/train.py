@@ -200,15 +200,19 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     intermediates = nnx.pop(model, nnx.Intermediate)
     intermediate_outputs = intermediates.to_pure_dict()
 
-    # MTP sows mtp_losses/mtp_acceptance as custom Variable subclasses, not
-    # Intermediate, so the nnx.pop above misses them. Pop them here under their
-    # collection names so calculate_mtp_loss / calculate_mtp_acceptance_rate
-    # find them. Otherwise the MTP loss is silently zeroed. They are also
-    # excluded from the returned state below so they don't leak into
-    # out_shardings.
+    # MTP sows mtp_losses/mtp_acceptance as custom Variable subclasses of
+    # Intermediate, already captured by nnx.pop(nnx.Intermediate) above.
+    # Restructure them under their collection-name keys so calculate_mtp_loss
+    # and calculate_mtp_acceptance_rate can find them at the expected paths.
     if config.mtp_num_layers > 0:
-      intermediate_outputs["mtp_losses"] = nnx.pop(model, mtp_losses).to_pure_dict()
-      intermediate_outputs["mtp_acceptance"] = nnx.pop(model, mtp_acceptance).to_pure_dict()
+      if "mtp_block" in intermediate_outputs:
+        mtp_data = intermediate_outputs.pop("mtp_block")
+        intermediate_outputs["mtp_losses"] = {
+            "mtp_block": {k: v for k, v in mtp_data.items() if k in ("losses", "weights")}
+        }
+        intermediate_outputs["mtp_acceptance"] = {
+            "mtp_block": {k: v for k, v in mtp_data.items() if k in ("mtp_preds", "mtp_mask")}
+        }
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.

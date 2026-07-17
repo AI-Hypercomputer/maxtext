@@ -28,6 +28,42 @@ from maxtext.configs import pyconfig
 from maxtext.utils import sharding
 
 
+def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq: int) -> jnp.ndarray:
+  """Creates synthetic segment IDs simulating packed sequences.
+
+  Splits each sequence into a random number (2..max_segments_per_seq) of
+  varying-length segments, assigning each a sequential integer segment ID
+  starting from 1. Segment boundaries are randomized per row so the same
+  segment IDs can be reused across the batch dimension without cross-row
+  correlation.
+
+  Args:
+    batch_size: Number of sequences.
+    seq_len: Total sequence length.
+    max_segments_per_seq: Maximum number of segments per sequence (>= 2).
+
+  Returns:
+    Integer array [batch_size, seq_len] where 0 = padding.
+  """
+  if max_segments_per_seq < 2:
+    return jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+  key = jax.random.PRNGKey(42)
+  segments = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+  for b in range(batch_size):
+    key, subkey = jax.random.split(key)
+    n_segs = jax.random.randint(subkey, (1,), 2, max_segments_per_seq + 1)[0]
+    # Random split points (sorted) in range [1, seq_len-1)
+    key, subkey = jax.random.split(key)
+    splits = jax.random.randint(subkey, (n_segs - 1,), 1, seq_len)
+    splits = jnp.sort(splits)
+    splits = jnp.concatenate([jnp.array([0], dtype=jnp.int32), splits, jnp.array([seq_len], dtype=jnp.int32)])
+    seg_ids = jnp.arange(1, n_segs + 1)
+    row = jnp.repeat(seg_ids, splits[1:] - splits[:-1], total_repeat_length=seq_len)
+    segments = segments.at[b].set(row)
+  return segments
+
+
 class SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
 
@@ -53,7 +89,14 @@ class SyntheticDataIterator:
     batch_positions = jnp.broadcast_to(
         sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1)
     )
-    segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
+    if config.packing:
+      segmentation = _make_packed_segment_ids(
+          config.global_batch_size_to_load,
+          config.max_target_length,
+          config.max_segments_per_seq,
+      )
+    else:
+      segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
     self.data = (tokens, batch_positions, segmentation)
 
   def reset(self):

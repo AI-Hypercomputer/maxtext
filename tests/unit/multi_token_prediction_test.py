@@ -326,8 +326,6 @@ class TestRollAndMask(unittest.TestCase):
     # Shape: [4, 8]
     input_tensor = jnp.arange(batch_size * seq_len, dtype=jnp.int32).reshape((batch_size, seq_len))
 
-    # print(input_tensor)
-
     # --- Test Case 1: Default left shift by 1 ---
     # This is the most common operation inside the MTP loop.
     rolled_by_1 = multi_token_prediction.roll_and_mask(input_tensor, shift=-1)
@@ -381,6 +379,91 @@ class TestRollAndMask(unittest.TestCase):
     # This should result in no change to the tensor.
     rolled_by_0 = multi_token_prediction.roll_and_mask(input_tensor, shift=0)
     self.assertTrue(jnp.array_equal(rolled_by_0, input_tensor), "A shift of 0 should be a no-op.")
+
+
+class TestRollAndMaskBySegment(unittest.TestCase):
+  """Unit tests for roll_and_mask_by_segment."""
+
+  def setUp(self):
+    super().setUp()
+    self.seq_len = 8
+
+  def _make_data(self, values, dtype=jnp.int32):
+    return jnp.array(values, dtype=dtype).reshape((1, -1))
+
+  def test_no_segment_ids_falls_back_to_roll_and_mask(self):
+    """When segment_ids is None, behaves exactly like roll_and_mask."""
+    x = self._make_data([10, 20, 30, 40, 50, 60, 70, 80])
+    result = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=None)
+    expected = multi_token_prediction.roll_and_mask(x, shift=-1)
+    self.assertTrue(jnp.array_equal(result, expected))
+
+  def test_single_segment_no_boundaries(self):
+    """With a single segment, only the last position is masked (same as no-packing)."""
+    x = self._make_data([10, 20, 30, 40, 50, 60, 70, 80])
+    seg = self._make_data([1, 1, 1, 1, 1, 1, 1, 1])
+    result = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg)
+    expected = self._make_data([20, 30, 40, 50, 60, 70, 80, 0])
+    self.assertTrue(jnp.array_equal(result, expected), f"Got {result}")
+
+  def test_two_segments_masks_boundary(self):
+    """Cross-segment boundary positions are zeroed out."""
+    # Doc A: positions 0-3, Doc B: positions 4-7
+    x = self._make_data([10, 20, 30, 40, 50, 60, 70, 80])
+    seg = self._make_data([1, 1, 1, 1, 2, 2, 2, 2])
+    result = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg)
+    # Position 3 (end of doc A) should be 0 because next token is cross-doc.
+    # Position 7 (end of doc B) should be 0 because it's the last position.
+    expected = self._make_data([20, 30, 40, 0, 60, 70, 80, 0])
+    self.assertTrue(jnp.array_equal(result, expected), f"Got {result}")
+
+  def test_padding_segment_masked(self):
+    """Positions with segment_id == 0 (padding) are masked."""
+    x = self._make_data([10, 20, 30, 40, 0, 0, 0, 0])
+    seg = self._make_data([1, 1, 1, 1, 0, 0, 0, 0])
+    result = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg)
+    # Position 3 (end of doc) → 0; positions 4-6 (padding) → 0
+    expected = self._make_data([20, 30, 40, 0, 0, 0, 0, 0])
+    self.assertTrue(jnp.array_equal(result, expected), f"Got {result}")
+
+  def test_three_segments_boundaries(self):
+    """Three segments: boundaries at doc ends are all masked."""
+    x = self._make_data([10, 20, 30, 40, 50, 60, 70, 80])
+    seg = self._make_data([1, 1, 2, 2, 2, 3, 3, 3])
+    result = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg)
+    # Boundaries at positions 1 (end of seg 1), 4 (end of seg 2), 7 (end of seg 3)
+    expected = self._make_data([20, 0, 40, 50, 0, 70, 80, 0])
+    self.assertTrue(jnp.array_equal(result, expected), f"Got {result}")
+
+  def test_2d_tensor_shape_preserved(self):
+    """Shape is preserved after segment-aware roll."""
+    batch, seq = 3, 16
+    x = jnp.arange(batch * seq).reshape((batch, seq))
+    seg = jnp.ones((batch, seq), dtype=jnp.int32)
+    seg = seg.at[:, 8:].set(2)  # split each row into two segments
+    result = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg)
+    self.assertEqual(result.shape, (batch, seq))
+
+  def test_3d_tensor_shape_preserved(self):
+    """3D tensors (e.g., embeddings) are handled correctly."""
+    batch, seq, feat = 2, 10, 4
+    x = jnp.arange(batch * seq * feat, dtype=jnp.float32).reshape((batch, seq, feat))
+    seg = jnp.ones((batch, seq), dtype=jnp.int32)
+    seg = seg.at[:, 5:].set(2)
+    result = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg)
+    self.assertEqual(result.shape, (batch, seq, feat))
+    # Boundary positions should be all-zero.
+    self.assertTrue(jnp.all(result[:, 4, :] == 0), "Cross-segment boundary should be zero")
+    self.assertTrue(jnp.all(result[:, 9, :] == 0), "Last position should be zero")
+    # Non-boundary positions should be non-zero (shifted).
+    self.assertTrue(jnp.all(result[:, 0, :] != 0), "First position should not be masked")
+
+  def test_shift_not_minus_one_raises(self):
+    """Only shift=-1 is supported."""
+    x = self._make_data([10, 20, 30, 40])
+    seg = self._make_data([1, 1, 1, 1])
+    with self.assertRaises(AssertionError):
+      multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg, shift=-2)
 
 
 if __name__ == "__main__":
