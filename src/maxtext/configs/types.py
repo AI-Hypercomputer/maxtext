@@ -263,6 +263,7 @@ ModelName = Literal[
     "qwen3-480b-a35b",
     "qwen3-vl-2b",
     "qwen3-vl-4b",
+    "cosmos3-nano-reasoner",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
@@ -3304,6 +3305,7 @@ class MaxTextConfig(
           "qwen3-vl-4b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
+          "cosmos3-nano-reasoner",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")

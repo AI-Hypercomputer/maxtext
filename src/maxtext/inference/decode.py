@@ -224,6 +224,7 @@ def main(argv: Sequence[str]) -> None:
   # Get results
   for i in range(_NUM_STREAMS):
     results = [t.get_result_at_slot(i).tokens.item() for t in sampled_tokens_list]
+    print(f"DEBUG: raw token ids for stream {i}: {results}")
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
 

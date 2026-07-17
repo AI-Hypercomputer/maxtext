@@ -105,6 +105,32 @@ class ParamMappingTest(unittest.TestCase):
     mapping = param_mapping.QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
     self.assertIn("params-decoder-layers-layer_0-input_layernorm-scale", mapping)
 
+  def test_cosmos3_text_mapping(self):
+    config = {
+        "text_config": {"num_hidden_layers": 2, "hidden_size": 256},
+    }
+    maxtext_config = mock.Mock()
+    mapping = param_mapping.COSMOS3_TEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertEqual(mapping["params-decoder-layers_0-self_attention-query-kernel"], "layers.0.self_attn.to_q.weight")
+
+  def test_cosmos3_text_mapping_scanned(self):
+    config = {
+        "text_config": {"num_hidden_layers": 4, "hidden_size": 256},
+    }
+    maxtext_config = mock.Mock()
+    mapping = param_mapping.COSMOS3_TEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    self.assertIn("params-decoder-layers-self_attention-query-kernel", mapping)
+    self.assertEqual(
+        mapping["params-decoder-layers-self_attention-query-kernel"],
+        [
+            "layers.0.self_attn.to_q.weight",
+            "layers.1.self_attn.to_q.weight",
+            "layers.2.self_attn.to_q.weight",
+            "layers.3.self_attn.to_q.weight",
+        ],
+    )
+
   def test_deepseek_mapping(self):
     config = {
         "num_hidden_layers": 4,
