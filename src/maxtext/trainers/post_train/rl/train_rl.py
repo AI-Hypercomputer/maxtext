@@ -44,11 +44,6 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 """
 
 from __future__ import annotations
-import multiprocessing
-try:
-  multiprocessing.set_start_method("spawn", force=True)
-except Exception:
-  pass
 import contextlib
 from functools import wraps
 from typing import Any, Callable, Optional, Sequence
@@ -122,14 +117,11 @@ os.environ["TOKENIZERS_PARALLELISM"] = "0"
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
-import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
 from maxtext.utils import max_logging, max_utils, model_creation_utils
 
-# Register MaxText Adapter for vLLM
-adapter.register()
 
 
 def get_dataset(
@@ -735,10 +727,10 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
 
   if trainer_config.debug.rl:
     max_logging.log("Reference Model initialized successfully")
-    # nnx.display(reference_model)
+    nnx.display(reference_model)
     max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
     max_logging.log("Policy Model initialized successfully")
-    # nnx.display(actor_model)
+    nnx.display(actor_model)
     max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
     max_logging.log(f"Rollout_mesh shape: {rollout_mesh.shape}")
 
