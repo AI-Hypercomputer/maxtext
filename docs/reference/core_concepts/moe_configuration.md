@@ -64,7 +64,12 @@ Dropping:
 
 `routed_bias`: If enabled, adds a learnable bias term to the gate logits to facilitate load balancing.
 
-`routed_bias_update_rate`: Defines the update rate to routed bias term above. Applicable only to the DeepSeek decoder block.
+`routed_bias_update_rate`: Defines the update rate to the routed bias term above. Applicable only to the DeepSeek decoder block. For DeepSeek V4, this enables a specialized, auxiliary-loss-free routing bias mechanism. This implementation utilizes a pure `nnx.Variable` (`MoEBiasVar`) instead of a standard `nnx.Param`, which completely isolates the bias update step from the global model optimizer state. The bias is updated directly at the end of the routing step to balance the token distribution mathematically across experts without compromising language modeling convergence.
+
+#### DeepSeek V4 Auxiliary-Loss-Free & Sequence-Wise Load Balancing
+MaxText implements an exact, paper-aligned version of DeepSeek V4's load balancing strategies (as specified in [the DeepSeek-V4 technical report](https://arxiv.org/html/2606.19348v1)). The architecture employs two distinct mechanisms:
+1. **Auxiliary-Loss-Free Strategy**: Handled via `MoEBiasVar`, this implementation utilizes a pure `nnx.Variable` instead of a standard `nnx.Param`. This strictly isolates the bias update step from the global model optimizer state. Unlike the Hugging Face reference implementation—which deviates from the paper by keeping the bias parameters coupled to the global optimizer—our implementation ensures the routing bias balances token distribution mathematically across experts without polluting the main model gradients.
+2. **Sequence-Wise Balance Loss**: An augmenting auxiliary loss (`load_balance_loss_weight`) applied to prevent extreme routing imbalance within individual sequences.
 
 `routed_score_func`: Defines the scoring function for the router.
 
