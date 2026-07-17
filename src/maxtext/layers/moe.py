@@ -691,7 +691,7 @@ class RoutedMoE(nnx.Module):
       if rngs is None:
         raise ValueError("The random key cannot be None for random routing.")
       # Reuse the 'params' RNG stream to ensure random routing
-      rng = rngs.params()
+      rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
       top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
       return top_k_weights, top_k_indices
 
@@ -1949,16 +1949,9 @@ class RoutedMoE(nnx.Module):
       expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
 
       chunk_dim = embed_dim // self.config.num_moe_emb_chunks
-      chunk_rngs = (
-          jax.random.split(rngs.params(), self.config.num_moe_emb_chunks)
-          if self.config.use_random_routing
-          and rngs is not None
-          and hasattr(rngs, "params")
-          and callable(getattr(rngs, "params"))
-          else [rngs] * self.config.num_moe_emb_chunks
+      chunk_rngs_key = (
+          rngs.params() if rngs is not None and hasattr(rngs, "params") and callable(getattr(rngs, "params")) else None
       )
-      if rngs is not None:
-        chunk_rngs = jax.random.split(rngs.params(), self.config.num_moe_emb_chunks)
 
       first_x_unrouted = jax.lax.dynamic_slice_in_dim(x, 0, chunk_dim, axis=2)
       cur_x_chunk, routing, route_metadata = roe_ag_and_route(
@@ -1967,7 +1960,7 @@ class RoutedMoE(nnx.Module):
           pre_bias_logits,
           num_ep,
           expert_shard_id,
-          nnx.Rngs(params=chunk_rngs[0]) if chunk_rngs is not None else None,
+          chunk_rngs_key,
           input_ids=sharded_input_ids,
       )
 
@@ -2001,7 +1994,7 @@ class RoutedMoE(nnx.Module):
             pre_bias_logits,
             num_ep,
             expert_shard_id,
-            nnx.Rngs(params=chunk_rngs[chunk_idx + 1]) if chunk_rngs is not None else None,
+            chunk_rngs_key,
             input_ids=sharded_input_ids,
         )
         return (next_x, next_ps0, next_ps1, chunk_idx + 1), None
