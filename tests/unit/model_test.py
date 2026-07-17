@@ -18,6 +18,7 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
@@ -42,19 +43,22 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Init pyconfig."""
+    default_kwargs = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "base_num_decoder_layers": 2,
+        "attention": "dot_product",
+        "max_target_length": 16,
+        "base_emb_dim": 32,
+        "base_num_query_heads": 2,
+        "base_num_kv_heads": 2,
+        "max_prefill_predict_length": 4,
+    }
+    default_kwargs.update(kwargs)
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        base_num_decoder_layers=2,
-        attention="dot_product",
-        max_target_length=16,
-        base_emb_dim=32,
-        base_num_query_heads=2,
-        base_num_kv_heads=2,
-        max_prefill_predict_length=4,
-        **kwargs,
+        **default_kwargs,
     )
     return config
 
@@ -195,6 +199,88 @@ class TestModel(unittest.TestCase):
           atol=1e-01,
           equal_nan=False,
       )
+
+  def test_gemma4_model(self):
+    """Test pure-NNX model execution with a scanned Gemma4 block."""
+    new_config = self.init_pyconfig(
+        decoder_block="gemma4",
+        share_kv_projections=True,
+        use_post_attn_norm=True,
+        use_post_ffw_norm=True,
+        base_num_decoder_layers=12,
+        scan_layers=True,
+        enable_nnx=True,
+        pure_nnx=True,
+        pure_nnx_decoder=True,
+    )
+    devices_array = maxtext_utils.create_device_mesh(new_config)
+    mesh = Mesh(devices_array, new_config.mesh_axes)
+    model = models.Transformer(
+        config=new_config,
+        mesh=mesh,
+        quant=None,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=nnx.Rngs(0),
+    )
+
+    shape = (new_config.global_batch_size_to_train_on, new_config.max_target_length)
+    ids = jax.random.randint(self.rng, shape, 0, new_config.vocab_size)
+    decoder_segment_ids = jnp.full(shape, DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    decoder_positions = jnp.broadcast_to(jnp.arange(new_config.max_target_length, dtype=jnp.int32), shape)
+
+    logits = model(
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(logits.shape, (new_config.global_batch_size_to_train_on, new_config.max_target_length, new_config.vocab_size))
+
+  def test_gemma4_model_linen(self):
+    """Test the shared Gemma4 scannable block on the linen (ToLinen) path.
+
+    The block is shared with the pure-NNX path. On the linen path it is driven
+    through nn.scan + the ToLinen wrapper with apply_internal_remat=True (the
+    block rematerializes its own layers; no block-level remat), exercising the
+    nested transform stack and guarding against nnx-migration regressions.
+    """
+    new_config = self.init_pyconfig(
+        decoder_block="gemma4",
+        share_kv_projections=True,
+        use_post_attn_norm=True,
+        use_post_ffw_norm=True,
+        base_num_decoder_layers=12,
+        scan_layers=True,
+        remat_policy="minimal",
+    )
+    devices_array = maxtext_utils.create_device_mesh(new_config)
+    mesh = Mesh(devices_array, new_config.mesh_axes)
+    model = models.transformer_as_linen(config=new_config, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+
+    shape = (new_config.global_batch_size_to_train_on, new_config.max_target_length)
+    ids = jax.random.randint(self.rng, shape, 0, new_config.vocab_size)
+    decoder_segment_ids = jnp.full(shape, DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    decoder_positions = jnp.broadcast_to(jnp.arange(new_config.max_target_length, dtype=jnp.int32), shape)
+
+    transformer_vars = model.init(
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+    )
+    logits = model.apply(
+        transformer_vars,
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+    logits = logits[0] if isinstance(logits, tuple) else logits
+    self.assertEqual(logits.shape, (new_config.global_batch_size_to_train_on, new_config.max_target_length, new_config.vocab_size))
 
 
 if __name__ == "__main__":

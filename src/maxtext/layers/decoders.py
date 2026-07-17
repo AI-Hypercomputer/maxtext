@@ -411,36 +411,15 @@ class Decoder(nn.Module):
             "kv_proj",
             "qkv_proj",
         )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
+      elif cfg.remat_policy in ("qkv_proj_offloaded", "minimal_offloaded", "custom"):
+        # minimal_offloaded offloads all except context. All three share a single
+        # source of truth for their save/offload name lists (see
+        # maxtext_utils.get_offload_remat_names) so that offloading configured via
+        # `custom` resolves identically to the named presets.
+        save_names, offload_names = maxtext_utils.get_offload_remat_names(cfg)
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj", "kv_proj"],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "minimal_offloaded":
-        # offload all except context
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=[
-                "query_proj",
-                "value_proj",
-                "key_proj",
-                "kv_proj",
-                "qkv_proj",
-                "out_proj",
-                "mlpwi_0",
-                "mlpwi_1",
-                "mlpwi",
-                "mlpwo",
-            ],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "custom":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=cfg.tensors_to_offload,
+            names_which_can_be_saved=save_names,
+            names_which_can_be_offloaded=offload_names,
             offload_src="device",
             offload_dst="pinned_host",
         )
@@ -1439,7 +1418,12 @@ class Decoder(nn.Module):
     if num_full_blocks > 0:
       ScannableBlockToLinen = gemma4.Gemma4ScannableBlockToLinen
       policy = self.get_remat_policy()
-      RemattedGemma4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
+      # Gemma4ScannableBlock rematerializes its own local (scanned) and global
+      # layers when apply_internal_remat=True, so we do NOT wrap it in
+      # block-level remat here (that would double-rematerialize and make XLA
+      # treat the whole block as one unit). Unrolling the block scan lets XLA
+      # free each block's activations across iterations instead of keeping the
+      # block live as a unit.
 
       kv_cache_scanned = maxtext_utils.prepare_kv_caches_for_scan(
           kv_caches, num_full_blocks, block_pattern_len, stack=True
@@ -1462,7 +1446,7 @@ class Decoder(nn.Module):
 
       # For a fully scanned block, apply it inside a nn.scan over the calculated number of full blocks
       y, returned_kv_cache = nn.scan(
-          RemattedGemma4Block,
+          ScannableBlockToLinen,
           variable_axes={
               "params": cfg.param_scan_axis,
               "cache": 0,
@@ -1473,6 +1457,7 @@ class Decoder(nn.Module):
           split_rngs={"params": True, "dropout": cfg.enable_dropout},
           in_axes=in_axes_tuple,
           length=num_full_blocks,
+          unroll=num_full_blocks,
           metadata_params={
               nn.PARTITION_NAME: "layers",
               "abstract_init": False,
@@ -1483,6 +1468,8 @@ class Decoder(nn.Module):
           quant=self.quant,
           model_mode=model_mode,
           num_of_layers=block_pattern_len,
+          remat_policy_fn=policy,
+          apply_internal_remat=True,
           name="scanned_blocks",
       )(
           y, *broadcast_args
