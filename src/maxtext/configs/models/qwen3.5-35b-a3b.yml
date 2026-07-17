@@ -50,6 +50,7 @@ partial_rotary_factor: 0.25
 enable_dropout: False
 
 # Vision Encoder Configuration (need to set use_multimodal=true)
+vision_encoder_block: "qwen3_5"
 # Based on Qwen3.5 MoE Vision Model Config
 image_size_for_vit: 768
 hidden_size_for_vit: 1152
