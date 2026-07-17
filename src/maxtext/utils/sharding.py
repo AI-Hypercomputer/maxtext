@@ -919,3 +919,10 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
+
+
+def strip_fsdp_from_spec(spec):
+  """Strip FSDP mesh axes from partition spec."""
+  if spec is None:
+    return None
+  return P(*(None if axis in ("fsdp", "fsdp_transpose") else axis for axis in spec))
