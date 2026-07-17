@@ -559,7 +559,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
@@ -606,6 +606,17 @@ class Attention(BaseModel):
   )
   sliding_window_size: NonNegativeInt = Field(0, description="The size of the sliding window for local attention.")
   chunk_attn_window_size: NonNegativeInt = Field(0, description="The window size for chunked attention.")
+  enable_block_diffusion: bool = Field(
+      False,
+      description=(
+          "If True, use block-diffusion attention: bidirectional within a block of `bd_size` tokens "
+          "and block-causal across blocks (Fast_dLLM / Diffusion-GR2). Weight-preserving."
+      ),
+  )
+  bd_size: int = Field(32, description="Block size for block-diffusion attention. Must be > 0 when enabled.")
+  mask_id: int = Field(
+      151669, description="Token id of the [MASK] token used by block-diffusion. Must be < vocab_size when enabled."
+  )
   attn_logits_soft_cap: None | NonNegativeFloat = Field(
       None, description="Soft-cap value for attention logits. None means no cap."
   )
@@ -3508,5 +3519,30 @@ class MaxTextConfig(
         raise ValueError(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
+        )
+    return self
+
+  @model_validator(mode="after")
+  def _validate_block_diffusion(self) -> "MaxTextConfig":
+    """Validates block-diffusion attention settings.
+
+    Only enforced when `enable_block_diffusion` is True, because the block-diffusion
+    defaults (e.g. `mask_id`) are intentionally out of range for the default vocab.
+    Defined after `set_derived_and_validate_values`; `vocab_size` and
+    `max_target_length` are never mutated by that validator, so their final values
+    are visible here regardless of validator ordering.
+    """
+    if self.enable_block_diffusion:
+      if not isinstance(self.bd_size, int) or self.bd_size <= 0:
+        raise ValueError("`bd_size` must be an integer > 0 when `enable_block_diffusion` is True.")
+      if self.mask_id >= self.vocab_size:
+        raise ValueError(
+            f"`mask_id` ({self.mask_id}) must be < `vocab_size` ({self.vocab_size}) "
+            "when `enable_block_diffusion` is True."
+        )
+      if self.max_target_length % self.bd_size != 0:
+        raise ValueError(
+            f"`max_target_length` ({self.max_target_length}) must be divisible by `bd_size` "
+            f"({self.bd_size}) when `enable_block_diffusion` is True."
         )
     return self

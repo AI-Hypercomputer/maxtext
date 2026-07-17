@@ -197,5 +197,94 @@ class TestModel(unittest.TestCase):
       )
 
 
+class Qwen3BlockDiffusionForwardTest(unittest.TestCase):
+  """End-to-end CPU forward of a tiny Qwen3 with block-diffusion attention.
+
+  Block diffusion is weight-preserving: only the attention mask changes, not the
+  weights. This test applies the *same* parameters through both a block-diffusion
+  Qwen3 and a causal (global) Qwen3 and asserts (1) the parameter tree is shared
+  by both (weight-preserving) and (2) the logits differ, proving the
+  `enable_block_diffusion` flag is wired into the Qwen3 forward pass.
+  """
+
+  def _init_qwen3_config(self, enable_block_diffusion):
+    """Builds a tiny, CPU-friendly Qwen3 config (dot_product attention)."""
+    return pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        model_name="qwen3-0.6b",
+        override_model_config=True,
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        base_num_decoder_layers=2,
+        attention="dot_product",
+        max_target_length=16,
+        base_emb_dim=64,
+        base_num_query_heads=2,
+        base_num_kv_heads=1,
+        head_dim=32,
+        vocab_size=256,
+        max_prefill_predict_length=4,
+        dataset_type="synthetic",
+        enable_block_diffusion=enable_block_diffusion,
+        bd_size=4,
+        mask_id=100,
+    )
+
+  def test_block_diffusion_changes_forward_and_is_weight_preserving(self):
+    rng = jax.random.PRNGKey(0)
+    cfg_bd = self._init_qwen3_config(enable_block_diffusion=True)
+    cfg_causal = self._init_qwen3_config(enable_block_diffusion=False)
+    self.assertTrue(cfg_bd.enable_block_diffusion)
+    self.assertFalse(cfg_causal.enable_block_diffusion)
+
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg_bd), cfg_bd.mesh_axes)
+    model_bd = models.transformer_as_linen(config=cfg_bd, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+    model_causal = models.transformer_as_linen(config=cfg_causal, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+
+    shape = (cfg_bd.global_batch_size_to_train_on, cfg_bd.max_target_length)
+    ids = jax.random.randint(rng, shape, 0, cfg_bd.vocab_size)
+    decoder_segment_ids = jnp.zeros(shape) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+    decoder_positions = jnp.stack(
+        [jnp.arange(cfg_bd.max_target_length, dtype=jnp.int32) for _ in range(cfg_bd.global_batch_size_to_train_on)]
+    )
+
+    # Weight-preserving: initialize once, then apply the same params through both models.
+    params = model_causal.init(
+        {"params": rng, "aqt": rng, "dropout": rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+    )
+    out_causal = np.asarray(
+        model_causal.apply(
+            params,
+            ids,
+            decoder_positions,
+            decoder_segment_ids,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_TRAIN,
+            rngs={"aqt": rng},
+        )
+    )
+    out_bd = np.asarray(
+        model_bd.apply(
+            params,
+            ids,
+            decoder_positions,
+            decoder_segment_ids,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_TRAIN,
+            rngs={"aqt": rng},
+        )
+    )
+
+    self.assertEqual(out_bd.shape, (shape[0], shape[1], cfg_bd.vocab_size))
+    # The block-diffusion mask (bidirectional within a block) differs from the
+    # causal mask, so identical weights must yield different logits.
+    self.assertFalse(np.allclose(out_causal, out_bd))
+
+
 if __name__ == "__main__":
   unittest.main()

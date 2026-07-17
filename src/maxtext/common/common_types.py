@@ -123,6 +123,7 @@ class AttentionType(enum.Enum):
   MLA = "mla"
   COMPRESSED = "compressed"
   FULL = "full"
+  BLOCK_DIFFUSION = "block_diffusion"
 
 
 class ShardMode(enum.Enum):
