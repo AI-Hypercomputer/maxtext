@@ -56,6 +56,7 @@ from maxtext.common.common_types import (
     DType,
     D_KV,
     HEAD,
+    KV_HEAD,
     KV_LENGTH,
     LENGTH,
     MODEL_MODE_AUTOREGRESSIVE,
@@ -382,7 +383,7 @@ class AttentionOp(nnx.Module):
       max_prefill_predict_length: int = -1,
       float32_logits: bool = False,
       flash_axis_names_q: AxisNames = (BATCH_ATTN, HEAD, LENGTH, D_KV),
-      flash_axis_names_kv: AxisNames = (BATCH_ATTN, HEAD, KV_LENGTH, D_KV),
+      flash_axis_names_kv: AxisNames = (BATCH_ATTN, KV_HEAD, KV_LENGTH, D_KV),
       flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH),
       prefill_cache_logical_axis_names: AxisNames = (
           CACHE_BATCH_PREFILL,
@@ -1020,7 +1021,8 @@ class AttentionOp(nnx.Module):
       query: Array,
       key: Array | KVTensor,
       value: Array | KVTensor,
-      decoder_segment_ids: Array | None,
+      decoder_segment_ids_q: Array | None,
+      decoder_segment_ids_kv: Array | None,
       segment_positions: Array | None,
       lengths: Array | None,
       model_mode: str,
@@ -1048,7 +1050,7 @@ class AttentionOp(nnx.Module):
 
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       if lengths is None:
-        lengths = jnp.sum(decoder_segment_ids, axis=-1)
+        lengths = jnp.sum(decoder_segment_ids_q, axis=-1)
 
       if target_hardware == "tpu":
         impl = self.tpu_ragged_attention
@@ -1075,7 +1077,7 @@ class AttentionOp(nnx.Module):
           query,
           key,
           value,
-          decoder_segment_ids,
+          decoder_segment_ids_q,
           model_mode,
           previous_chunk,
           segment_positions=segment_positions,
@@ -1104,7 +1106,8 @@ class AttentionOp(nnx.Module):
             query,
             key,
             value,
-            decoder_segment_ids,
+            decoder_segment_ids_q,
+            decoder_segment_ids_kv,
             self.attn_logits_soft_cap,
             sinks,
             indexer_mask=indexer_mask,
@@ -1112,6 +1115,7 @@ class AttentionOp(nnx.Module):
             previous_chunk=previous_chunk,
             bidirectional_mask=bidirectional_mask,
             use_ragged_attention=use_ragged_attention,
+            compressed_mask=compressed_mask,
             record_max_logits=record_max_logits,
         )
         if max_logits is not None:
@@ -1289,7 +1293,8 @@ class AttentionOp(nnx.Module):
       query: Array,
       key: Array,
       value: Array,
-      decoder_segment_ids: Array | None,
+      decoder_segment_ids_q: Array | None,
+      decoder_segment_ids_kv: Array | None,
       attn_logits_soft_cap: float | None = None,
       sinks: Array | None = None,
       indexer_mask: Array | None = None,
@@ -1297,11 +1302,70 @@ class AttentionOp(nnx.Module):
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
       use_ragged_attention: bool = False,
+      compressed_mask: Array | None = None,
       record_max_logits: bool = False,
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
     use_tokamax_ring = tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
+
+    def create_csa_mask_info_jax(top_k_indices, s_len, c_len, sliding_window_size, block_shape=(128, 128)):
+      from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info
+
+      block_q, block_kv = block_shape
+      q_len = top_k_indices.shape[0]
+      k = top_k_indices.shape[1]
+      kv_len = s_len + c_len
+
+      q_blocks_count = q_len // block_q
+      kv_blocks_count = kv_len // block_kv
+
+      q_b = jnp.arange(q_blocks_count)[:, None]
+      kv_b = jnp.arange(kv_blocks_count)[None, :]
+      min_q, max_q = q_b * block_q, q_b * block_q + block_q - 1
+      min_kv, max_kv = kv_b * block_kv, kv_b * block_kv + block_kv - 1
+
+      sliding_window_size = sliding_window_size if sliding_window_size is not None else s_len
+      all_local = (max_kv <= min_q) & (min_kv > max_q - sliding_window_size) & (max_kv < s_len)
+      any_local = (min_kv <= max_q) & (max_kv > min_q - sliding_window_size) & (min_kv < s_len)
+
+      block_mask = jnp.zeros((q_blocks_count, kv_blocks_count + 1), dtype=jnp.int32)
+      block_mask = block_mask.at[:, :-1].set(jnp.where(all_local, 2, jnp.where(any_local, 1, 0)))
+
+      top_k = top_k_indices
+      q_indices = jnp.arange(q_len) // block_q
+      valid = top_k >= 0
+      kv_indices = (s_len + top_k) // block_kv
+
+      flat_q = jnp.broadcast_to(q_indices[:, None], (q_len, k)).flatten()
+      flat_kv = jnp.where(valid, kv_indices, kv_blocks_count).flatten()
+
+      block_mask = block_mask.at[flat_q, flat_kv].set(1)
+      block_mask = block_mask[:, :-1]
+
+      block_ids = jnp.arange(block_mask.size, dtype=jnp.int32).reshape(block_mask.shape)
+      active_mask = block_mask > 0
+      num_active_blocks = active_mask.flatten().sum(keepdims=True)
+      active_indices = jnp.argwhere(active_mask, size=active_mask.size, fill_value=-1)
+      active_rows = active_indices[:, 0].astype(np.int32)
+      active_cols = active_indices[:, 1].astype(np.int32)
+
+      block_mask_flat = block_mask[active_rows, active_cols]
+      mask_next = block_ids.at[active_rows, active_cols].get(wrap_negative_indices=False)
+      mask_next = jnp.where(block_mask_flat == 1, mask_next, 0)
+
+      mask = (jnp.arange(block_mask.size) < num_active_blocks).astype(np.int32)
+      block_mask_flat = (block_mask_flat * mask).astype(np.int8)
+
+      return splash_attention_mask_info.MaskInfo(
+          mask_next=mask_next,
+          active_rows=active_rows,
+          active_cols=active_cols,
+          num_active_blocks=num_active_blocks,
+          block_mask=block_mask_flat,
+          block_shape=block_shape,
+      )
+
     cp_size = self.mesh.shape.get(self.config.context_sharding, 1)
     load_balanced_context_parallel = self.config.context_parallel_load_balance
     if use_tokamax_ring:
@@ -1322,7 +1386,7 @@ class AttentionOp(nnx.Module):
     segment_axis_names_q = None
     segment_axis_names_kv = None
     sink_axis_names = self._logical_to_mesh_axes((HEAD,))
-    if decoder_segment_ids is not None:
+    if decoder_segment_ids_q is not None:
       segment_axis_names_q = self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH))
       segment_axis_names_kv = self._logical_to_mesh_axes((BATCH_ATTN, KV_LENGTH))
 
@@ -1690,8 +1754,8 @@ class AttentionOp(nnx.Module):
     query = self._maybe_shard_with_pspec(query, axis_names_q)
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
     value = self._maybe_shard_with_pspec(value, axis_names_kv)
-    decoder_segment_ids_q = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
-    decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
+    decoder_segment_ids_q = self._maybe_shard_with_pspec(decoder_segment_ids_q, segment_axis_names_q)
+    decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids_kv, segment_axis_names_kv)
     sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
     indexer_mask = self._maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
 
@@ -2252,7 +2316,8 @@ class AttentionOp(nnx.Module):
       query,
       key,
       value,
-      decoder_segment_ids,
+      decoder_segment_ids_q,
+      decoder_segment_ids_kv,
       inputs_positions,
       model_mode,
       cached_values=None,
@@ -2270,7 +2335,7 @@ class AttentionOp(nnx.Module):
       prefill_kv_cache, ar_kv_cache = cached_values[0], cached_values[1]
     if model_mode != MODEL_MODE_TRAIN:
       assert prefill_kv_cache
-      key, value, decoder_segment_ids = prefill_kv_cache
+      key, value, decoder_segment_ids_kv = prefill_kv_cache
 
     indexer_mask_prefill = None
     indexer_mask_ar = None
@@ -2284,7 +2349,8 @@ class AttentionOp(nnx.Module):
         query=query,
         key=key,
         value=value,
-        decoder_segment_ids=decoder_segment_ids,
+        decoder_segment_ids_q=decoder_segment_ids_q,
+        decoder_segment_ids_kv=decoder_segment_ids_kv,
         segment_positions=inputs_positions,
         lengths=None,
         model_mode=model_mode,

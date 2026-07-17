@@ -70,3 +70,14 @@ rope_max_timescale: 10000                  # Main RoPE theta
 compressed_rope_max_timescale: 160000      # Compressed RoPE theta
 max_position_embeddings: 1048576
 original_max_position_embeddings: 65536
+
+# --- MLA Sharding Fix ---
+# DeepSeek-V4 uses Multi-head Latent Attention with only 1 KV head.
+# We override the default sharding rules to prevent the partitioner from attempting
+# to slice the single KV head across tensor parallel chips.
+logical_axis_rules: [
+  ['activation_kv_heads', []],
+  ['kv_heads', []],
+  ['activation_kv', []],
+  ['kv', []]
+]

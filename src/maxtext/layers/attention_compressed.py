@@ -96,36 +96,36 @@ def csa_overlap_pooling(
 
   n_windows = chunk_kv.shape[1] // compress_rate
 
-  # Reshape flat sequence into discrete compression windows
-  # -> [batch, n_windows, compress_rate, 2 * head_dim]
-  chunk_kv = chunk_kv.reshape((batch_size, n_windows, compress_rate, 2 * head_dim))
-  chunk_gate = chunk_gate.reshape((batch_size, n_windows, compress_rate, 2 * head_dim)) + position_bias
+  # DIPAK - OPTIMIZATION
+  # Split features immediately on the 3D sequence tensor to keep memory contiguous.
+  # Pad the sequence at the beginning by exactly one compress_rate window, then truncate the end.
+  # This replaces the 4D block concatenation with a highly contiguous 1D sequence slice, improving layout.
 
-  # Split the projections into Ca and Cb components for overlapping
-  # 2x [batch, n_windows, compress_rate, head_dim]
+  # Split features immediately on the 3D sequence tensor to keep memory contiguous
   a_kv, b_kv = jnp.split(chunk_kv, 2, axis=-1)
   a_gate, b_gate = jnp.split(chunk_gate, 2, axis=-1)
 
-  # Shift Ca forward by one window to align with the next Cb
+  # Pad the sequence at the beginning by exactly one compress_rate window, then truncate the end
+  # This replaces the 4D block concatenation with a highly contiguous 1D sequence slice
   a_kv_shifted = jnp.concatenate(
-      [
-          jnp.zeros((batch_size, 1, compress_rate, head_dim), dtype=a_kv.dtype),
-          a_kv[:, :-1],
-      ],
-      axis=1,
+      [jnp.zeros((batch_size, compress_rate, head_dim), dtype=a_kv.dtype), a_kv[:, :-compress_rate]], axis=1
   )
   a_gate_shifted = jnp.concatenate(
-      [
-          jnp.full((batch_size, 1, compress_rate, head_dim), -jnp.inf, dtype=a_gate.dtype),
-          a_gate[:, :-1],
-      ],
-      axis=1,
+      [jnp.full((batch_size, compress_rate, head_dim), -jnp.inf, dtype=a_gate.dtype), a_gate[:, :-compress_rate]], axis=1
   )
 
-  # Concatenate shifted Ca and unshifted Cb to form the final overlapping window
+  # Reshape into windows
+  a_kv_windows = a_kv_shifted.reshape((batch_size, n_windows, compress_rate, head_dim))
+  b_kv_windows = b_kv.reshape((batch_size, n_windows, compress_rate, head_dim))
+
+  # Add position bias during reshape to fuse the operations
+  a_gate_windows = a_gate_shifted.reshape((batch_size, n_windows, compress_rate, head_dim)) + position_bias[:, :head_dim]
+  b_gate_windows = b_gate.reshape((batch_size, n_windows, compress_rate, head_dim)) + position_bias[:, head_dim:]
+
+  # Concatenate within the window
   # -> [batch, n_windows, 2 * compress_rate, head_dim]
-  new_kv = jnp.concatenate([a_kv_shifted, b_kv], axis=2)
-  new_gate = jnp.concatenate([a_gate_shifted, b_gate], axis=2)
+  new_kv = jnp.concatenate([a_kv_windows, b_kv_windows], axis=2)
+  new_gate = jnp.concatenate([a_gate_windows, b_gate_windows], axis=2)
 
   # Apply softmax gating and sum across the overlapping window dimension
   gate_weights = jax.nn.softmax(new_gate, axis=2).astype(new_kv.dtype)
@@ -482,30 +482,24 @@ class DeepseekV4Indexer(nnx.Module):
           dtype=jnp.int32,
       )
 
-    # Broadcast the compressed KV representations across all indexer heads
-    # -> [batch, 1, n_windows, index_head_dim]
-    compressed_kv = jnp.expand_dims(compressed, axis=1)
-    # -> [batch, index_n_heads, n_windows, index_head_dim]
-    compressed_kv = jnp.broadcast_to(
-        compressed_kv,
-        (batch_size, self.index_n_heads, compressed_len, self.index_head_dim),
-    )
+    # OPTIMIZATION DIPAK: Removed jnp.expand_dims and jnp.broadcast_to on compressed_kv to save memory.
 
     # Project the latent query to match the Indexer's dimensions
     # [batch, seq_len, index_n_heads * index_head_dim] -> [batch, seq_len, index_n_heads, index_head_dim]
     q = self.q_proj(q_latent).reshape((batch_size, seq_len, self.index_n_heads, self.index_head_dim))
-    # -> [batch, index_n_heads, seq_len, index_head_dim]
-    q = jnp.transpose(q, (0, 2, 1, 3))
+
+    # OPTIMIZATION DIPAK: Removed jnp.transpose on q to maintain bshd layout for fused einsum.
 
     # Apply standard Rotary Positional Embeddings to queries
-    q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
+    # OPTIMIZATION DIPAK: Adjusted unsqueeze_dim for bshd layout
+    q = self.rotary_emb(q, position_ids, unsqueeze_dim=2)
 
     q = q.astype(jnp.float32)
-    compressed_kv = compressed_kv.astype(jnp.float32)
+    compressed_kv = compressed.astype(jnp.float32)
 
     # Compute dot product between Queries and Compressed KV Blocks
-    # -> [batch, index_n_heads, seq_len, n_windows]
-    scores = jnp.einsum("bhsd,bhwd->bhsw", q, compressed_kv)
+    # OPTIMIZATION DIPAK: Native aligned einsum. q is [b, s, h, d], compressed_kv is [b, w, d]
+    scores = jnp.einsum("bshd,bwd->bshw", q, compressed_kv)
     scores = jax.nn.relu(scores) * self.softmax_scale
 
     # Compute routing weights to combine scores across indexer heads
@@ -514,7 +508,7 @@ class DeepseekV4Indexer(nnx.Module):
 
     # Combine individual head scores according to routing weights
     # -> [batch, seq_len, n_windows]
-    index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights)
+    index_scores = jnp.einsum("bshw,bsh->bsw", scores, weights)
 
     k = min(self.index_topk, compressed_len)
 
@@ -523,18 +517,22 @@ class DeepseekV4Indexer(nnx.Module):
     entry_indices = jnp.arange(compressed_len)
     future_mask = entry_indices[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
 
-    index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
+    # OPTIMIZATION DIPAK: Additive causal mask to avoid full_like tensor allocation
+    causal_mask = jnp.where(future_mask, -jnp.inf, 0.0)
+    index_scores += causal_mask
 
     # Apply standard segment attention mask (additive 0 and -inf)
     if attention_mask is not None:
       index_scores += attention_mask[:, :, :compressed_len]
 
     # Retrieve the top-k highest scoring block indices for each token
-    top_k_indices = jax.lax.top_k(index_scores, k)[1]
+    # OPTIMIZATION DIPAK: Replaced slow top_k with hardware-friendly approx_max_k
+    top_k_indices = jax.lax.approx_max_k(index_scores, k)[1]
 
     # Invalidate any top-k selections that point to future blocks (edge case safety)
     invalid = top_k_indices >= jnp.expand_dims(causal_threshold, axis=-1)
-    top_k_indices = jnp.where(invalid, jnp.full_like(top_k_indices, -1), top_k_indices)
+    # OPTIMIZATION DIPAK: Removed full_like in top_k_indices invalidation
+    top_k_indices = jnp.where(invalid, -1, top_k_indices)
 
     return top_k_indices
 
@@ -654,12 +652,10 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
 
     # Only compute and apply the complex block mask if top-k selections exist
     if k > 0:
-      valid = top_k_indices >= 0
-      entry_indices = jnp.arange(compressed_len)[None, None, :]
-      is_in_topk = jnp.expand_dims(top_k_indices, axis=-1) == entry_indices[None, ...]
-      is_valid_and_in_topk = is_in_topk & jnp.expand_dims(valid, axis=-1)
-
-      is_selected = jnp.any(is_valid_and_in_topk, axis=2)
+      # OPTIMIZATION DIPAK: Replaced memory-heavy 4D broadcast with boolean one_hot scatter.
+      # JAX natively maps -1 (padding) to all False in boolean one_hot, avoiding explicit validity checks.
+      one_hot = jax.nn.one_hot(top_k_indices, compressed_len, dtype=jnp.bool_)
+      is_selected = jnp.any(one_hot, axis=2)
       is_selected = jnp.expand_dims(is_selected, axis=1)
 
       compressed_mask = jnp.where(is_selected, 0.0, DEFAULT_MASK_VALUE).astype(self.dtype)
@@ -1053,8 +1049,20 @@ class CompressedAttention(Attention):
       )
 
     # Extend local KV tensors with the compressed blocks
+    decoder_segment_ids_q = decoder_segment_ids
+    decoder_segment_ids_kv = decoder_segment_ids
+
     if compressed_kv is not None:
       kv = jnp.concatenate([kv, compressed_kv], axis=1)
+      if decoder_segment_ids is not None:
+        # Pad segment IDs to match the new KV sequence length.
+        # We pad with 0 because the actual masking for compressed blocks is
+        # explicitly handled by the compressed_mask boolean logic.
+        segment_padding = jnp.zeros(
+            (decoder_segment_ids.shape[0], compressed_kv.shape[1]),
+            dtype=decoder_segment_ids.dtype,
+        )
+        decoder_segment_ids_kv = jnp.concatenate([decoder_segment_ids, segment_padding], axis=1)
 
     kv = checkpoint_name(kv, "kv_proj")
 
@@ -1072,7 +1080,8 @@ class CompressedAttention(Attention):
         q,
         kv,
         kv,
-        decoder_segment_ids,
+        decoder_segment_ids_q,
+        decoder_segment_ids_kv,
         inputs_positions,
         model_mode,
         sinks=self.sinks.value,
