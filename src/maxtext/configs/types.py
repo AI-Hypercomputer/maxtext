@@ -687,6 +687,14 @@ class AttentionIndexer(BaseModel):
       False, description="Whether to use approximate top-k selection for the indexer on TPU."
   )
   indexer_approx_top_k_recall: float = Field(0.95, description="Recall target for approximate top-k selection.")
+  indexer_mask_exact_topk: bool = Field(
+      True,
+      description=(
+          "When True, enforces that exactly k elements are unmasked by the indexer under boundary ties."
+          " When False, uses raw thresholding which is faster but may unmask > k elements"
+          " during ties."
+      ),
+  )
 
 
 class Llama4Attention(BaseModel):
