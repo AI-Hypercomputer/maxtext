@@ -363,6 +363,7 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         "enable_multi_tier_checkpointing": False,
         "local_checkpoint_period": 0,
         "enable_autocheckpoint": False,
+        "elastic_enabled": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -597,6 +598,26 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     mgr.reached_preemption.assert_called_once_with(5)
     to_checkpoint_dict_mock.assert_called_once_with(state)
     save_checkpoint_mock.assert_called_once()
+
+  def test_maybe_save_checkpoint_checks_scale_up_after_unsaved_dispatch(self):
+    """Elastic scale-up is checked after save dispatch even when no checkpoint was saved."""
+    state = mock.Mock()
+    config = self._config(checkpoint_period=1, elastic_enabled=True)
+    mgr = mock.MagicMock()
+    mgr.latest_step.return_value = None
+    mgr.reached_preemption.return_value = False
+    save_checkpoint_mock = mock.MagicMock(return_value=False)
+
+    with (
+        mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock),
+        mock.patch.object(train_state_nnx, "to_checkpoint_dict", return_value={}) as to_checkpoint_dict_mock,
+        mock.patch.object(checkpointing.elastic_utils, "maybe_elastic_scale_up") as mock_maybe_scale_up,
+    ):
+      checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=5)
+
+    to_checkpoint_dict_mock.assert_called_once_with(state)
+    save_checkpoint_mock.assert_called_once()
+    mock_maybe_scale_up.assert_called_once_with(config, mgr)
 
 
 class TestLinenCheckpointFormatConverters(unittest.TestCase):
