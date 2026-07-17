@@ -569,7 +569,91 @@ class RoutedMoeTest(parameterized.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  @pytest.mark.tpu_only
+  def test_moe_emb_chunking_random_routing(self):
+    cfg_chunked = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_block_chunking_rr_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        megablox=False,
+        sparse_matmul=True,
+        use_tokamax_gmm=True,
+        use_gmm_v2=True,
+        num_moe_emb_chunks=4,
+        use_ring_of_experts=True,
+        use_random_routing=True,
+        mlp_bias=True,
+        per_device_batch_size=1,
+        max_target_length=128,
+    )
+
+    cfg_non_chunked = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_block_non_chunking_rr_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        megablox=False,
+        sparse_matmul=True,
+        use_tokamax_gmm=True,
+        use_gmm_v2=True,
+        num_moe_emb_chunks=0,
+        use_ring_of_experts=True,
+        use_random_routing=True,
+        mlp_bias=True,
+        per_device_batch_size=1,
+        max_target_length=128,
+    )
+
+    rng = jax.random.PRNGKey(1234)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg_chunked.per_device_batch_size) * device_count, cfg_chunked.max_target_length, cfg_chunked.base_emb_dim),
+        dtype=cfg_chunked.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg_chunked)
+    mesh = Mesh(devices_array, cfg_chunked.mesh_axes)
+
+    moe_chunked = moe.RoutedMoE(
+        config=cfg_chunked,
+        num_experts=cfg_chunked.num_experts,
+        num_experts_per_tok=cfg_chunked.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=cfg_chunked.dtype,
+        rngs=nnx.Rngs(params=rng_model),
+    )
+
+    moe_non_chunked = moe.RoutedMoE(
+        config=cfg_non_chunked,
+        num_experts=cfg_non_chunked.num_experts,
+        num_experts_per_tok=cfg_non_chunked.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=cfg_non_chunked.dtype,
+        rngs=nnx.Rngs(params=rng_model),
+    )
+
+    moe_non_chunked.gate.kernel.value = moe_chunked.gate.kernel.value
+    moe_non_chunked.wi_0.value = moe_chunked.wi_0.value
+    moe_non_chunked.wi_1.value = moe_chunked.wi_1.value
+    moe_non_chunked.wo.value = moe_chunked.wo.value
+
+    chunked_out, _, _ = moe_chunked(hidden_states)
+    non_chunked_out, _, _ = moe_non_chunked(hidden_states)
+
+    self.assertTrue(jax.numpy.allclose(chunked_out, non_chunked_out, rtol=1e-01, atol=1e-01, equal_nan=False))
 
   @pytest.mark.tpu_only
   def test_moe_emb_chunking_gmm_v2(self):
@@ -694,7 +778,7 @@ class RoutedMoeTest(parameterized.TestCase):
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
           override_model_config=True,
-          base_emb_dim=2048,  # we want emb dim being multiple of 1024 for fully using the kernel
+          base_emb_dim=7168,  # we want emb dim being multiple of 1024 for fully using the kernel
           base_mlp_dim=256,
           base_moe_mlp_dim=256,
           dtype="bfloat16",

@@ -195,6 +195,47 @@ def should_prevent_cse_in_remat(config):
   return True
 
 
+def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
+  """Returns the ``(save_names, offload_names)`` split for remat policies built via
+  ``jax.checkpoint_policies.save_and_offload_only_these_names``.
+
+  ``save_names`` are checkpointed tensors kept in device HBM; ``offload_names`` are moved to
+  pinned host. This is the single source of truth shared by ``Decoder.get_remat_policy`` (which
+  builds the save-and-offload policy) and by models that use custom ways to handle offload (
+  e.g. Gemma4's global-layer with scan). It also makes ``remat_policy=custom`` with tensors marked
+  ``offload`` resolve to the same name sets as the named presets.
+
+  Returns a ``(save_names, offload_names)`` tuple:
+    * ``custom``: ``(config.tensors_on_device, config.tensors_to_offload)`` -- the per-tensor
+      assignments. Either list may be empty: all tensors set to ``device`` gives an empty offload
+      list, all set to ``remat`` gives ``([], [])``.
+    * ``qkv_proj_offloaded`` / ``minimal_offloaded``: ``([], <hardcoded offload names>)`` -- presets
+      that only offload and save nothing on device.
+    * any other policy (``full``, ``minimal``, ``save_*``, ``none``, ...): ``([], [])`` -- these do
+      not use ``save_and_offload_only_these_names``, so they contribute no names to this split.
+      Note ``([], [])`` here means "no names for this split", not that the policy saves nothing
+      overall (e.g. ``save_out_proj`` still saves ``out_proj`` via ``save_only_these_names``).
+  """
+  if config.remat_policy == "qkv_proj_offloaded":
+    return [], ["query_proj", "value_proj", "key_proj", "kv_proj"]
+  if config.remat_policy == "minimal_offloaded":
+    return [], [
+        "query_proj",
+        "value_proj",
+        "key_proj",
+        "kv_proj",
+        "qkv_proj",
+        "out_proj",
+        "mlpwi_0",
+        "mlpwi_1",
+        "mlpwi",
+        "mlpwo",
+    ]
+  if config.remat_policy == "custom":
+    return list(config.tensors_on_device or []), list(config.tensors_to_offload or [])
+  return [], []
+
+
 def load_compiled(config, partial_train, state, execution_devices):
   """# Loading a serialized compiled train step function."""
 

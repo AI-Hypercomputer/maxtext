@@ -1,14 +1,13 @@
 #!/bin/bash
 
 # This script launches a Reinforcement Learning (RL) training workload for the
-# Qwen3-30B-A3B model on a GKE cluster using XPK.
+# GPT-OSS 20B model on a GKE cluster using XPK.
 
 set -e
 
 # --- Environment Setup ---
 if ! pip show xpk &> /dev/null; then
-    echo "xpk not found in the environment. Please install it by running:"
-    echo "uv pip install -e .[runner] --resolution=lowest"
+    echo "xpk not found in the environment. Please install maxtext[runner] before running this script."
     exit 1
 fi
 
@@ -19,33 +18,33 @@ export ZONE="${ZONE:-}" # Zone where your Ironwood cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-}" # GCS bucket path for outputs (e.g., gs://my-bucket/outputs)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-}" # GCS path of the MaxText checkpoint you want to fine-tune from (e.g., gs://my-bucket/checkpoints/maxtext-ckpt)
-export TPU_TYPE="tpu7x-128"
+export TPU_TYPE="v5p-64"
 export WORKLOAD_NAME="rl-$(date +%Y%m%d-%H%M)"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
-    echo "Error: PROJECT_ID is not set. Please set it in the script or as an environment variable."
+    echo "Error: PROJECT_ID is not set. Please set it as an environment variable."
     exit 1
 fi
 if [ -z "$CLUSTER_NAME" ]; then
-    echo "Error: CLUSTER_NAME is not set. Please set it in the script or as an environment variable."
+    echo "Error: CLUSTER_NAME is not set. Please set it as an environment variable."
     exit 1
 fi
 if [ -z "$ZONE" ]; then
-    echo "Error: ZONE is not set. Please set it in the script or as an environment variable."
+    echo "Error: ZONE is not set. Please set it as an environment variable."
     exit 1
 fi
 if [ -z "$BASE_OUTPUT_DIRECTORY" ]; then
-    echo "Error: BASE_OUTPUT_DIRECTORY is not set. Please set it in the script or as an environment variable."
+    echo "Error: BASE_OUTPUT_DIRECTORY is not set. Please set it as an environment variable."
     exit 1
 fi
 if [ -z "$DOCKER_IMAGE" ]; then
-    echo "Error: DOCKER_IMAGE is not set. Please set it in the script or as an environment variable."
+    echo "Error: DOCKER_IMAGE is not set. Please set it as an environment variable."
     exit 1
 fi
 
 if [ -z "$MAXTEXT_CKPT_PATH" ]; then
-    echo "MAXTEXT_CKPT_PATH is not set. Please set it in the script or as an environment variable."
+    echo "MAXTEXT_CKPT_PATH is not set. Please set it as an environment variable."
     exit 1
 fi
 
@@ -80,63 +79,43 @@ XLA_FLAGS="--xla_tpu_dvfs_p_state=7 \
 --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
 --xla_tpu_enable_3d_reduce_scatter_decomposer=false"
 
-# MaxText command
-MAXTEXT_COMMAND="JAX_RANDOM_WEIGHTS=1 \
-VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-SKIP_JAX_PRECOMPILE=1 \
-NEW_MODEL_DESIGN=1 \
-TPU_MIN_LOG_LEVEL=0 \
-TF_CPP_MIN_LOG_LEVEL=0 \
-TPU_STDERR_LOG_LEVEL=0 \
-JAX_PLATFORMS=proxy,cpu \
-JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
-ENABLE_PATHWAYS_PERSISTENCE=1 \
-python3 -m maxtext.trainers.post_train.rl.train_rl \
-model_name=qwen3-30b-a3b-base \
-tokenizer_path=Qwen/Qwen3-30B-A3B-Base \
-run_name=$WORKLOAD_NAME \
-async_scheduling=True \
-base_output_directory=$BASE_OUTPUT_DIRECTORY \
-chips_per_vm=8 \
-num_batches=500 \
-num_test_batches=10 \
-rl.num_generations=8 \
-rl.grpo_beta=0.05 \
-rl.grpo_epsilon=0.2 \
-gradient_clipping_threshold=1.0 \
-decode_sampling_temperature=0.8 \
-decode_sampling_top_k=50 \
-decode_sampling_nucleus_p=0.95 \
-dataset_name=nvidia/OpenMathInstruct-2 \
-hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet \
-train_split=train_1M \
-eval_dataset_name=nvidia/OpenMathInstruct-2 \
-eval_mode=pass_at_1 \
-num_eval_passes=4 \
-max_target_length=8192 \
-max_prefill_predict_length=512 \
-learning_rate=1e-6 \
-batch_size=128 \
-train_micro_batch_size=32 \
-rollout_micro_batch_size=128 \
-rollout_data_parallelism=16 \
-rollout_tensor_parallelism=4 \
-enable_dp_attention=True \
-hbm_utilization_vllm=0.75 \
-max_num_seqs=256 \
-max_num_batched_tokens=8192 \
-scan_layers=True \
-allow_split_physical_axes=True \
-enable_tunix_perf_metrics=True \
-checkpoint_period=2 \
-max_num_checkpoints_to_keep=1000 \
-enable_checkpointing=true \
-load_parameters_path=$MAXTEXT_CKPT_PATH \
-profiler=xplane \
-skip_first_n_steps_for_profiler=5 \
-profiler_steps=2 \
-vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
-vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-30b-a3b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
+MAXTEXT_COMMAND="MODEL_IMPL_TYPE=flax_nnx \
+  GRPC_ENABLE_FORK_SUPPORT=0 \
+  JAX_RANDOM_WEIGHTS=1 \
+  VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+  SKIP_JAX_PRECOMPILE=1 \
+  NEW_MODEL_DESIGN=0 \
+  TPU_MIN_LOG_LEVEL=0 \
+  TF_CPP_MIN_LOG_LEVEL=0 \
+  TPU_STDERR_LOG_LEVEL=0 \
+  JAX_PLATFORMS=proxy,cpu \
+  JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
+  ENABLE_PATHWAYS_PERSISTENCE=1 \
+  python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml  \
+  model_name=gpt-oss-20b  \
+  tokenizer_path=unsloth/gpt-oss-20b-BF16   \
+  load_parameters_path=${MAXTEXT_CKPT_PATH}  \
+  run_name=${WORKLOAD_NAME}  \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY}  \
+  checkpoint_storage_use_ocdbt=False \
+  checkpoint_storage_use_zarr3=False \
+  rollout_data_parallelism=2 \
+  rollout_tensor_parallelism=8 \
+  hbm_utilization_vllm=0.8 \
+  batch_size=8 profiler=xplane \
+  profiler_steps=2 \
+  num_batches=500 \
+  base_emb_dim=2880 \
+  vocab_size=201088 \
+  batch_size=16 \
+  train_micro_batch_size=16 \
+  rollout_micro_batch_size=16 \
+  enable_dp_attention=False \
+  async_scheduling=True \
+  chips_per_vm=4 \
+  chat_template_path=maxtext/examples/chat_templates/gpt_oss_rl.json \
+  enable_tunix_perf_metrics=True \
+"
 
 # Workload Creation
 xpk workload create-pathways \
@@ -151,3 +130,4 @@ xpk workload create-pathways \
   --workload="${WORKLOAD_NAME}" \
   --custom-pathways-proxy-server-args='${XLA_FLAGS}' \
   --command="${MAXTEXT_COMMAND}"
+

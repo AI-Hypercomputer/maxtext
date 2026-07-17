@@ -433,6 +433,7 @@ indexer_n_heads: 64
 indexer_topk: 2048
 indexer_use_approx_top_k: false
 indexer_approx_top_k_recall: 0.95
+indexer_mask_exact_topk: true
 # Determines the training strategy for the indexer:
 # - false (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
 # - true (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
@@ -1131,6 +1132,8 @@ local_sa_v_layout: None  # inherits from sa_v_layout if None
 local_use_splash_scheduler: None  # inherits from use_splash_scheduler if None
 local_sa_fuse_reciprocal: None  # inherits from sa_fuse_reciprocal if None
 local_sa_use_base2_exp: None  # inherits from sa_use_base2_exp if None
+experimental_sa_quant_q_fp8: False # Experimental flag: If enabled, the Q tensor in splash attention is quantized to jnp.float8_e4m3fn, without scaling factors.
+experimental_sa_quant_k_fp8: False # Experimental flag: If enabled, the K tensor in splash attention is quantized to jnp.float8_e4m3fn, without scaling factors.
 use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
 cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)

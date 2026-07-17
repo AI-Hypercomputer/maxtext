@@ -871,9 +871,13 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   if seq_len % (cp_size * 2) != 0:
     raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
 
-  # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-  # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+  seq_dim = seq_dim % tensor.ndim
   ori_tensor_shape = tensor.shape
+
+  # Generic transformation: Isolates the target sequence dimension into `2 * cp_size` discrete chunks.
+  # Note: The shape walkthrough below uses [b, s, h, d] with seq_dim=1 as an illustrative example,
+  # but actual dimensions depend on the input tensor (e.g., [s, b, h, d], [b, t, d], etc.):
+  # [b, s, h, d] -> [b, 2*cp_size, group_size, h, d]
   reshaped = tensor.reshape(
       *ori_tensor_shape[:seq_dim],
       2 * cp_size,
@@ -881,36 +885,29 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
       *ori_tensor_shape[seq_dim + 1 :],
   )
 
+  # Swap target seq_dim with axis 0 to perform slicing/concat easily:
+  # e.g., [b, 2*cp_size, group_size, h, d] -> [2*cp_size, b, group_size, h, d]
+  swapped = jnp.swapaxes(reshaped, 0, seq_dim)
+
   if not to_contiguous:
-    # Create first and second halves
-    first_half = jnp.arange(cp_size)
-    second_half = jnp.arange(2 * cp_size - 1, cp_size - 1, -1)
-
-    # Stack and reshape to interleave
-    src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
-
+    # Split along axis 0 into halves: each [cp_size, b, group_size, h, d]
+    first_half, second_half = jnp.split(swapped, 2, axis=0)
+    second_half_reversed = second_half[::-1, ...]
+    # Stack along axis 1 to interleave: [cp_size, 2, b, group_size, h, d]
+    stacked = jnp.stack([first_half, second_half_reversed], axis=1)
+    # Reshape squashes the [cp_size, 2] pair dimensions back into [2*cp_size]: [2*cp_size, b, group_size, h, d]
+    permuted = stacked.reshape(2 * cp_size, *swapped.shape[1:])
   else:
+    # Strided slice extracts every other chunk natively: each [cp_size, b, group_size, h, d]
+    first_half = swapped[0::2, ...]
+    second_half_reversed = swapped[1::2, ...]
+    second_half = second_half_reversed[::-1, ...]
+    # Concatenate along axis 0: [2*cp_size, b, group_size, h, d]
+    permuted = jnp.concatenate([first_half, second_half], axis=0)
 
-    half = cp_size // 2
-
-    # Build the 1st and 2nd groups of contiguous‑pair indices:
-    first_pair = [4 * r for r in range(half)]  # [0, 4, 8, …]
-    second_pair = [4 * r + 2 for r in range(half)]  # [2, 6, 10, …]
-    third_pair = [2 * cp_size - 1 - 4 * r for r in range(half)]  # [2*cp_size-1, 2*cp_size-5, …]
-    fourth_pair = [i - 2 for i in third_pair]  # [2*cp_size-3, 2*cp_size-7, …]
-
-    # Concatenate so each rank’s two indices sit next to each other:
-    # e.g. [0,2, 4,6, …, (2cp‑1),(2cp‑3), …]
-    first_block = first_pair + third_pair
-    second_block = second_pair + fourth_pair
-
-    # Stack into shape (2*cp_size//2, 2) → then flatten → length=2*cp_size
-    src_indices = jnp.stack([jnp.array(first_block), jnp.array(second_block)], axis=1).reshape(-1)
-
-  # One gather and one reshape
-  reordered = jnp.take(reshaped, src_indices, axis=seq_dim)
-
-  # Reshape back to original dimensions
+  # Swap axis 0 back to seq_dim: e.g., [b, 2*cp_size, group_size, h, d]
+  reordered = jnp.swapaxes(permuted, 0, seq_dim)
+  # Restore original tensor shape: e.g., [b, s, h, d]
   return reordered.reshape(ori_tensor_shape)
 
 
@@ -1245,5 +1242,9 @@ def maybe_pad(inputs, tile_size):
   padding_amount = 0
   if inputs_dim % tile_size:
     padding_amount = tile_size - inputs_dim % tile_size
-    inputs = jax.lax.pad(inputs, jnp.array(0.0, dtype=inputs.dtype), [(0, padding_amount, 0), (0, 0, 0)])
+    inputs = jax.lax.pad(
+        inputs,
+        jnp.array(0.0, dtype=inputs.dtype),
+        [(0, padding_amount, 0), (0, 0, 0)],
+    )
   return inputs, padding_amount

@@ -198,6 +198,27 @@ def maybe_pad_video_values_to_max_grid(
   return padded_video_values, video_grid_thw, video_mask
 
 
+def downsample_video_mask_to_tokens(video_mask, config):
+  """Reduces a Qwen3 pixel mask to the post-projector video-token mask.
+
+  Example: with patch size `(2, 16, 16)`, spatial merge size `2`, and padded
+  grid `(3, 4, 4)`, a pixel mask `[1, 1, 6, 64, 64]` becomes 48 patch-mask
+  values and then 12 projected-token-mask values. A valid grid `(2, 2, 4)`
+  marks the first `2 * 2 * 4 / 2**2 = 4` projected tokens as valid.
+  """
+  if video_mask is None:
+    return None
+
+  patch_elements = config.temporal_patch_size_for_vit * config.patch_size_for_vit**2
+  patch_mask = video_mask.reshape(video_mask.shape[0], -1, patch_elements).max(axis=-1)
+  merge_elements = config.spatial_merge_size_for_vit**2
+  if patch_mask.shape[-1] % merge_elements:
+    raise ValueError(
+        f"Video patch-mask length {patch_mask.shape[-1]} must be divisible by spatial merge area {merge_elements}."
+    )
+  return patch_mask.reshape(patch_mask.shape[0], -1, merge_elements).max(axis=-1).astype(jnp.int32)
+
+
 def smart_resize(
     height: int,
     width: int,

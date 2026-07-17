@@ -149,11 +149,15 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
   if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_gemma3(tokens, max_num_images=processor_output.num_images)  # pyrefly: ignore[missing-attribute]
+    return add_extra_tokens_for_images_gemma3(
+        tokens, max_num_images=processor_output.num_images
+    )  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import add_extra_tokens_for_images_gemma4  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_gemma4(tokens, max_num_images=processor_output.num_images)  # pyrefly: ignore[missing-attribute]
+    return add_extra_tokens_for_images_gemma4(
+        tokens, max_num_images=processor_output.num_images
+    )  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     from maxtext.multimodal.processor_llama4 import add_extra_tokens_for_images_llama4  # pylint: disable=import-outside-toplevel
 
@@ -245,3 +249,16 @@ def get_bidirectional_mask_audio(config, decoder_input_tokens):
     # Create bidirectional_mask for audio token merging
     bidirectional_mask_audio = decoder_input_tokens == tokens.audio_pad
   return bidirectional_mask_audio
+
+
+def downsample_video_mask_to_tokens(video_mask, config):
+  """Routes video-mask reduction to the model-specific multimodal processor."""
+  if video_mask is None:
+    return None
+  if config.model_name.startswith(("qwen3")):
+    from maxtext.multimodal.processor_qwen3_omni import (  # pylint: disable=import-outside-toplevel
+        downsample_video_mask_to_tokens as downsample_qwen3_video_mask,
+    )
+
+    return downsample_qwen3_video_mask(video_mask, config)
+  raise ValueError(f"Model {config.model_name} does not support padded video-mask reduction.")

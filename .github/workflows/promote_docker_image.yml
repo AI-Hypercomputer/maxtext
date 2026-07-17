@@ -25,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   handle_result:
@@ -32,13 +33,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Report DAG result
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE: ${{ github.event.client_payload.state }}
+          DAG_ID: ${{ github.event.client_payload.dag_id }}
+          DAG_RUN_ID: ${{ github.event.client_payload.dag_run_id }}
+          SHA: ${{ github.event.client_payload.sha }}
+          GITHUB_RUN_ID: ${{ github.event.client_payload.github_run_id }}
         run: |
-          STATE="${{ github.event.client_payload.state }}"
-          DAG_ID="${{ github.event.client_payload.dag_id }}"
-          DAG_RUN_ID="${{ github.event.client_payload.dag_run_id }}"
-          SHA="${{ github.event.client_payload.sha }}"
-          GITHUB_RUN_ID="${{ github.event.client_payload.github_run_id }}"
-
           echo "================================"
           echo "Github Run ID: ${GITHUB_RUN_ID}"
           echo "DAG ID:        ${DAG_ID}"
@@ -52,6 +54,14 @@ jobs:
             failed|upstream_failed) echo "E2E tests FAILED."; exit 1 ;;
             *) echo "DAG ended with unexpected state: ${STATE}"; exit 1 ;;
           esac
+
+          if [ -n "$GITHUB_RUN_ID" ]; then
+            echo "Checking nightly build status for run: $GITHUB_RUN_ID"
+            gh run watch "$GITHUB_RUN_ID" --exit-status --interval 60 --repo "$GITHUB_REPOSITORY"
+          else
+            echo "Error: No Github Run ID provided. Cannot verify nightly build status."
+            exit 1
+          fi
 
   tag_docker_image:
     name: Promote ${{ matrix.image_name }} Docker Image
@@ -71,9 +81,10 @@ jobs:
         run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
       - name: Add tags to Docker image
         shell: bash
+        env:
+          GITHUB_RUN_ID: ${{ github.event.client_payload.github_run_id }}
         run: |
           SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${{ matrix.image_name }}"
-          GITHUB_RUN_ID="${{ github.event.client_payload.github_run_id }}"
 
           # Add the traceability tag to confirm it passed validation suite
           gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \

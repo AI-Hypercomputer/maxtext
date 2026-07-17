@@ -439,7 +439,10 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     for name, value in aux.items():
       if name not in self._buffered_train_metrics.additional_metrics:
-        self._buffered_train_metrics.additional_metrics[name] = ([], distillation_utils.weighted_mean)  # pyrefly: ignore[unsupported-operation]
+        self._buffered_train_metrics.additional_metrics[name] = (
+            [],
+            distillation_utils.weighted_mean,
+        )  # pyrefly: ignore[unsupported-operation]
 
       self._buffered_train_metrics.additional_metrics[name][0].append(value)  # pyrefly: ignore[bad-argument-type]
 
