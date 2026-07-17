@@ -51,6 +51,9 @@ shared_experts: 1
 routed_score_func: "sqrtsoftplus"
 norm_topk_prob: true
 routed_bias: true
+routed_bias_update_rate: 0.001
+load_balance_loss_weight: 0.0001
+adamw_mask: [".*gate.*bias.*"]
 routed_scaling_factor: 1.5
 
 

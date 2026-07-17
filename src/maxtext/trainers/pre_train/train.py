@@ -36,7 +36,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
-from flax import linen as nn, nnx
+from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
@@ -533,10 +533,37 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       state.apply_gradients(grads)
     new_state = state
 
+    bias_metrics = {}
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
-    if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
-      target_bias = new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
-      target_bias.value = target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
+    if config.routed_bias and config.routed_bias_update_rate > 0.0:
+      if config.model_name.startswith("deepseek4"):
+        max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
+        flat_intermediates = traverse_util.flatten_dict(aux.get("intermediate_outputs", {}))
+        for path, update in flat_intermediates.items():
+          if path[-1] != "moe_bias_updates":
+            continue
+          target = new_state.model
+          prefix = path[1:-1] if path[0] == "intermediates" else path[:-1]
+          for key in prefix:
+            if hasattr(target, key):
+              target = getattr(target, key)
+            elif isinstance(target, dict) and key in target:
+              target = target[key]
+            else:
+              target = None
+              break
+          if target is None:
+            continue
+          for _, node in nnx.iter_graph(target):
+            if type(node).__name__ == "GateLogit" and hasattr(node, "bias") and node.bias is not None:
+              update_val = update[0] if isinstance(update, (tuple, list)) else update
+              name_prefix = "-".join(map(str, prefix))
+              bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(node.bias.value)
+              node.bias.value = node.bias.value + jnp.array(update_val)
+              bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
+      elif moe_bias_updates is not None:
+        target_bias = new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
+        target_bias.value = target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
 
   lm_loss = xent_sum / (total_weights + EPS)
   scalar_metrics = {
@@ -549,6 +576,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
+  scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
     if isinstance(model, nn.Module):
       new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)
