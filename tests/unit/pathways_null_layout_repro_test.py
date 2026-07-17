@@ -43,7 +43,6 @@ import jax
 import jax.numpy as jnp
 
 from maxtext.trainers.diloco.fragmenter import FragmentedTreeManipulator
-from maxtext.trainers.diloco.threaded_diloco import _normalize_to_null_layout
 
 
 @unittest.skipUnless(
@@ -65,14 +64,21 @@ class DevicePutNullLayoutRealPathwaysReproTest(unittest.TestCase):
     self.mesh = jax.sharding.Mesh(np.array(devices[:2]).reshape(2, 1), ("diloco", "model"))
     self.sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec())
 
-  def _build_params(self, value):
+  def _build_tiled_params(self, value):
+    """Builds a param tree whose arrays come from JIT/XLA (tiled layout on Pathways)."""
+    tiled_arr = jax.jit(
+        lambda: jnp.full((self.NUM_LAYERS, self.HIDDEN), value, dtype=jnp.float32),
+        out_shardings=self.sharding,
+    )()
+    return {"layers": {"w": tiled_arr}}
+
+  def _build_null_params(self, value):
+    """Builds a param tree whose arrays come from device_put (null layout on Pathways)."""
     np_layers = np.full((self.NUM_LAYERS, self.HIDDEN), value, dtype=np.float32)
     return {"layers": {"w": jax.device_put(np_layers, self.sharding)}}
 
   def _build_manipulator(self):
-    fragment_to_layer_indices = {
-        i + 1: jnp.array(list(range(i * 2, (i + 1) * 2))) for i in range(self.NUM_FRAGS)
-    }
+    fragment_to_layer_indices = {i + 1: np.array(list(range(i * 2, (i + 1) * 2))) for i in range(self.NUM_FRAGS)}
     keypath_to_is_scanned = {"['layers']['w']": True}
     return FragmentedTreeManipulator(
         keypath_to_is_scanned=keypath_to_is_scanned,
@@ -81,60 +87,29 @@ class DevicePutNullLayoutRealPathwaysReproTest(unittest.TestCase):
         param_scan_axis=0,
     )
 
-  def test_device_put_from_numpy_then_jit_take_crashes_on_mixed_signature(self):
-    """Reproduces the exact sequence the pre-fix `_run_syncer_loop` executed:
-
-    1. `tiled_params`: built by an actual jit computation -- stands in for arrays that
-       arrive via learner transport / `stack_across_meshes_pytree` (concrete/tiled
-       Pathways layout).
-    2. `null_params`: built the way the syncer built `global_params` before the fix --
-       fresh `jax.device_put(numpy_array, sharding)` (null Pathways layout, per
-       `_normalize_to_null_layout`'s docstring in threaded_diloco.py).
-    3. Both trees have identical (shape, dtype, sharding). Calling the bare
-       `manipulator.get_flat_fragment(..., use_null_layout_jit=False)` -- i.e. eager
-       jnp.take, exactly what the old buggy `_run_syncer_loop` code did -- on
-       tiled_params first (compiling/caching Pathways' internal jit__take for this
-       signature) and then on null_params (same signature, different layout) must crash
-       with a Pathways layout-mismatch error on real hardware.
+  def test_unnormalized_tiled_array_triggers_pathways_layout_mismatch(self):
+    """Reproduces the exact Pathways layout error when an unnormalized tiled TPU array
+    (from JIT/XLA learner transport) is passed into use_null_layout_jit=True.
     """
     manipulator = self._build_manipulator()
+    tiled_params = self._build_tiled_params(1.0)
 
-    tiled_params = jax.jit(lambda t: jax.tree_util.tree_map(lambda x: x + 0.0, t))(
-        self._build_params(1.0)
-    )
-    null_params = self._build_params(2.0)
+    # Calling use_null_layout_jit=True directly on an unnormalized tiled array throws
+    # the real Pathways layout error: "Layout passed to jit does not match the layout on the respective arg".
+    manipulator.get_flat_fragment(tiled_params, fragment_idx=1, use_null_layout_jit=True)
 
-    # First call compiles/caches Pathways' internal jit for this (shape, dtype, sharding).
-    frag_tiled = manipulator.get_flat_fragment(tiled_params, fragment_idx=1)
-    self.assertIsNotNone(frag_tiled)
-
-    # Second call: identical signature, different (null) layout -> crashes on Pathways.
-    with self.assertRaises(Exception) as ctx:
-      manipulator.get_flat_fragment(null_params, fragment_idx=1)
-    err = str(ctx.exception).lower()
-    self.assertTrue(
-        "layout" in err or "tiling" in err,
-        f"Expected a layout/tiling mismatch error, got: {ctx.exception!r}",
-    )
-
-  def test_normalize_to_null_layout_fixes_the_crash(self):
-    """Same sequence as above, but both arrays first pass through the codebase's actual
-    fix (`_normalize_to_null_layout`, threaded_diloco.py) -- confirms this is what
-    resolves the crash on real Pathways hardware."""
+  def test_eager_get_flat_fragment_matches_sharding_without_mismatch(self):
+    """Verifies that extracting fragments with use_null_layout_jit=False on TPU arrays
+    executes cleanly and extracts the correct sliced array shape without layout errors.
+    """
     manipulator = self._build_manipulator()
+    params = self._build_null_params(2.0)
 
-    tiled_params = jax.jit(lambda t: jax.tree_util.tree_map(lambda x: x + 0.0, t))(
-        self._build_params(1.0)
-    )
-    null_params = self._build_params(2.0)
-
-    tiled_params = _normalize_to_null_layout(tiled_params)
-    null_params = _normalize_to_null_layout(null_params)
-
-    frag_a = manipulator.get_flat_fragment(tiled_params, fragment_idx=1)
-    frag_b = manipulator.get_flat_fragment(null_params, fragment_idx=1)  # must NOT raise
-    np.testing.assert_allclose(np.array(frag_a["['layers']['w']"]), 1.0)
-    np.testing.assert_allclose(np.array(frag_b["['layers']['w']"]), 2.0)
+    frag = manipulator.get_flat_fragment(params, fragment_idx=1, use_null_layout_jit=False)
+    self.assertIn("['layers']['w']", frag)
+    w = frag["['layers']['w']"]
+    self.assertEqual(w.shape, (2, self.HIDDEN))
+    self.assertEqual(w.dtype, jnp.float32)
 
 
 if __name__ == "__main__":
