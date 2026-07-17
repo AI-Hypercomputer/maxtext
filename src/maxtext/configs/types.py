@@ -1489,6 +1489,26 @@ class Distillation(BaseModel):
       "The other parameters will be frozen if this attribute is non empty)",
   )
 
+  # --- On-policy distillation (OPD) for block-diffusion --
+  opd_on_policy: bool = Field(
+      False,
+      description=(
+          "If True, run on-policy block-diffusion distillation: the student generates its own completion "
+          "by block-diffusion denoising, the frozen teacher scores that sequence, and forward-KL is applied "
+          "only at the committed positions. Requires enable_block_diffusion on the student. When False, "
+          "distillation is unchanged (off-policy)."
+      ),
+  )
+  opd_threshold: float = Field(
+      0.9, description="Confidence threshold for committing a denoised position during the on-policy rollout."
+  )
+  opd_temperature: float = Field(
+      0.0, description="Softmax temperature for the on-policy commit step (0.0 = greedy/argmax)."
+  )
+  opd_max_denoise_steps: int = Field(
+      0, description="Per-block denoise iteration cap for the on-policy rollout; <= 0 means use bd_size."
+  )
+
 
 class TrainingLoop(BaseModel):
   """Configuration for the main training loop, evaluation, and reproducibility."""

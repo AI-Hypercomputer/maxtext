@@ -384,6 +384,11 @@ chunk_attn_window_size: 0
 enable_block_diffusion: false
 bd_size: 32 # Block size for block-diffusion attention (must be > 0 when enabled; max_target_length must be divisible by it)
 mask_id: 151669 # Token id of the [MASK] token used by block-diffusion (must be < vocab_size when enabled)
+# On-policy distillation (OPD): the block-diffusion student generates its own completion by denoising, the frozen teacher scores it, and forward-KL is applied at the committed positions. Requires enable_block_diffusion on the student.
+opd_on_policy: false
+opd_threshold: 0.9 # Confidence threshold for committing a denoised position during the on-policy rollout.
+opd_temperature: 0.0 # Softmax temperature for the on-policy commit step (0.0 = greedy/argmax).
+opd_max_denoise_steps: 0 # Per-block denoise iteration cap for the on-policy rollout; <= 0 means use bd_size.
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 z_loss_multiplier: 0.0

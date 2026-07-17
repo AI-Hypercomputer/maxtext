@@ -55,7 +55,7 @@ from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.layers.learn_to_init_layer import apply_lti_model_update
 from maxtext.optimizers import optimizers
-from maxtext.trainers.post_train.distillation import distillation_utils, lti_utils
+from maxtext.trainers.post_train.distillation import diffusion_generate, distillation_utils, lti_utils
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -234,6 +234,28 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     self.strategy = strategy
     self.checkpoint_manager: distillation_utils.MaxTextCheckpointManager = None
 
+    # On-policy distillation (OPD) for block-diffusion. When enabled, the student
+    # generates its own completion by block-diffusion denoising before the loss is
+    # computed (see `_run_on_policy_rollout`); when disabled the trainer is the
+    # standard (off-policy) distiller and `_train_step` is unchanged.
+    self.opd_on_policy = getattr(student_config, "opd_on_policy", False)
+    self.opd_bd_size = getattr(student_config, "bd_size", 32)
+    self.opd_mask_id = getattr(student_config, "mask_id", 151669)
+    self.opd_threshold = getattr(student_config, "opd_threshold", 0.9)
+    self.opd_temperature = getattr(student_config, "opd_temperature", 0.0)
+    self.opd_max_denoise_steps = getattr(student_config, "opd_max_denoise_steps", 0)
+    if self.opd_on_policy:
+      max_logging.log(
+          "On-policy distillation (OPD) ENABLED: block-diffusion student rollout "
+          f"(bd_size={self.opd_bd_size}, mask_id={self.opd_mask_id}, threshold={self.opd_threshold}, "
+          f"temperature={self.opd_temperature}, max_denoise_steps={self.opd_max_denoise_steps})."
+      )
+      if not getattr(student_config, "enable_block_diffusion", False):
+        max_logging.log(
+            "WARNING: opd_on_policy=True but enable_block_diffusion=False; the student rollout assumes "
+            "block-diffusion attention. Set enable_block_diffusion=True for the student."
+        )
+
     # Per-step per-device TFLOPs (constants for the run): student fwd+bwd + teacher fwd-only.
     (
         self._tflops_combined,
@@ -290,6 +312,15 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     teacher = model.teacher_model
     current_step = model.training_step[...]
 
+    # On-policy distillation (OPD): the student generates its own completion by
+    # block-diffusion denoising and the batch is rewritten so both teacher and
+    # student are scored on that generated sequence, with the forward-KL applied
+    # only at the committed (generated) positions. Run BEFORE teacher_output and
+    # OUTSIDE value_and_grad, exactly like the frozen teacher — generation is off
+    # the student gradient path.
+    if self.opd_on_policy:
+      batch = self._run_on_policy_rollout(batch, student)
+
     # Run teacher inference outside of value_and_grad.
     # The teacher is frozen (stop_gradient), so its output is a constant
     # from the perspective of the student gradient computation.
@@ -344,6 +375,79 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     if tunix_expects_grad_norm:
       return loss, aux, optax.global_norm(grads)
     return loss, aux
+
+  def _run_on_policy_rollout(self, batch: dict, student: nnx.Module) -> dict:
+    """Rewrites `batch` with the student's own on-policy block-diffusion completion.
+
+    The student is a block-diffusion model (`enable_block_diffusion` on). Given the
+    batch prompts, it denoises its own completion via
+    `diffusion_generate.diffusion_generate` (seed canvas -> student forward ->
+    shifted logits -> threshold-commit + forced argmax -> advance block by block).
+    The batch is then rewritten so that:
+
+      * `input_tokens` / `targets` = prompt ⊕ student_completion (aligned), so both
+        the frozen teacher and the student are scored on the generated sequence;
+      * `targets_segmentation` = the committed-position mask, so the reused
+        forward-KL loss (`compute_loss`) applies ONLY at the committed positions.
+
+    Generation is OFF the student gradient path: it is run here (outside
+    `value_and_grad`, before the teacher forward) and the outputs are wrapped in
+    `jax.lax.stop_gradient`. The committed tokens are argmax indices, which are
+    non-differentiable regardless.
+
+    Args:
+      batch: the input dict produced by `gen_model_input_fn`.
+      student: the (block-diffusion) student module.
+
+    Returns:
+      A new batch dict with `input_tokens`, `targets`, and `targets_segmentation`
+      replaced by the on-policy rollout.
+    """
+    input_tokens = batch["input_tokens"]
+    positions = batch["positions"]
+    decoder_segment_ids = batch.get("decoder_segment_ids")
+
+    # Completion span = where the student should generate. Prompt (and padding)
+    # carry targets_segmentation == 0 and are held fixed. Fall back to non-pad
+    # tokens when no segmentation is available.
+    seg = batch.get("targets_segmentation")
+    if seg is not None:
+      gen_mask = seg != 0
+    else:
+      gen_mask = input_tokens != self.strategy.pad_id
+
+    def gen_forward_fn(tokens, pos):
+      # Direct cacheless student forward; block-diffusion attention is active via
+      # enable_block_diffusion. No dropout / feature / MoE collection during rollout.
+      return student(
+          decoder_input_tokens=tokens,
+          decoder_positions=pos,
+          decoder_segment_ids=decoder_segment_ids,
+          enable_dropout=False,
+      )
+
+    gen_tokens, committed_mask = diffusion_generate.diffusion_generate(
+        gen_forward_fn,
+        input_tokens,
+        positions,
+        gen_mask,
+        mask_id=self.opd_mask_id,
+        bd_size=self.opd_bd_size,
+        threshold=self.opd_threshold,
+        temperature=self.opd_temperature,
+        max_denoise_steps=self.opd_max_denoise_steps,
+    )
+    # Generation is a constant w.r.t. the student gradient.
+    gen_tokens = jax.lax.stop_gradient(gen_tokens)
+    committed_mask = jax.lax.stop_gradient(committed_mask)
+
+    new_batch = dict(batch)
+    new_batch["input_tokens"] = gen_tokens
+    # Aligned targets = the student-generated tokens; the committed-position mask
+    # (written into targets_segmentation) is what gates the forward-KL loss.
+    new_batch["targets"] = gen_tokens
+    new_batch["targets_segmentation"] = committed_mask.astype(input_tokens.dtype)
+    return new_batch
 
   def _eval_step(self, model, inputs):
     """Evaluation only needs the student."""
