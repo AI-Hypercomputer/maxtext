@@ -1064,6 +1064,10 @@ class HardwareAndMesh(BaseModel):
       CustomRule.DEFAULT,
       description="Customized mesh and logical rules for granularity.",
   )
+  custom_mesh_and_rule_for_eval: CustomRule = Field(
+      CustomRule.DEFAULT,
+      description="Customized mesh and logical rules for evaluation.",
+  )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   enable_nnx: bool = Field(True, description="Whether to use NNX for model definition.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
@@ -1080,6 +1084,9 @@ class LayoutAndSharding(BaseModel):
   """Configuration for data and model sharding rules."""
 
   logical_axis_rules: Any = Field([], description="Rules for mapping logical axes to physical mesh axes.")
+  logical_axis_rules_for_eval: Any = Field(
+      [], description="Rules for mapping logical axes to physical mesh axes during evaluation."
+  )
   data_sharding: Any = Field([], description="Sharding for input data.")
   context_sharding: str = Field("context", description="Physical axis name for context parallelism.")
   input_data_sharding_logical_axes: list[str] = Field(
@@ -2697,31 +2704,46 @@ class MaxTextConfig(
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
         )
 
+  @staticmethod
+  def _load_mesh_config_from_yaml(rule_value: str) -> dict:
+    """Helper to load and parse custom mesh YAML configurations."""
+    custom_mesh_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "custom_mesh_and_rule",
+        f"{rule_value}.yml",
+    )
+
+    if not os.path.exists(custom_mesh_path):
+      # ValueError is more semantically correct for validation errors than NotImplementedError
+      raise ValueError(f"Custom mesh config file not found at {custom_mesh_path}")
+
+    # Explicitly setting encoding removes the need for the pylint disable comment
+    with open(custom_mesh_path, "r", encoding="utf-8") as f:
+      return yaml.safe_load(f) or {}
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
     Computes all derived values and runs all cross-field validations after initial parsing.
     This logic is ported from the legacy pyconfig_deprecated.py system and adapted for Pydantic.
     """
+    # Handle primary custom mesh and rule
     if self.custom_mesh_and_rule is not CustomRule.DEFAULT:
-      custom_mesh_path = os.path.join(
-          os.path.dirname(os.path.abspath(__file__)),
-          "custom_mesh_and_rule",
-          f"{self.custom_mesh_and_rule.value}.yml",
-      )
-      if os.path.exists(custom_mesh_path):
-        with open(custom_mesh_path, "r") as f:  # pylint: disable=unspecified-encoding
-          custom_mesh_config = yaml.safe_load(f)
-          if "mesh_axes" in custom_mesh_config:
-            self.mesh_axes = custom_mesh_config["mesh_axes"]
-          if "logical_axis_rules" in custom_mesh_config:
-            self.logical_axis_rules = custom_mesh_config["logical_axis_rules"]
-          if "data_sharding" in custom_mesh_config:
-            self.data_sharding = custom_mesh_config["data_sharding"]
-          if "context_sharding" in custom_mesh_config:
-            self.context_sharding = custom_mesh_config["context_sharding"]
-      else:
-        raise NotImplementedError(f"Custom mesh config file not found at {custom_mesh_path}")
+      mesh_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule.value)
+
+      # Use setattr to dynamically apply attributes, keeping code compact
+      for field in ("mesh_axes", "logical_axis_rules", "data_sharding", "context_sharding"):
+        if field in mesh_config:
+          setattr(self, field, mesh_config[field])
+
+    # Handle eval custom mesh and rule
+    if self.custom_mesh_and_rule_for_eval is CustomRule.DEFAULT:
+      # Fallback to primary rule if eval is DEFAULT
+      self.custom_mesh_and_rule_for_eval = self.custom_mesh_and_rule
+      self.logical_axis_rules_for_eval = self.logical_axis_rules
+    else:
+      eval_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_eval.value)
+      self.logical_axis_rules_for_eval = eval_config.get("logical_axis_rules", self.logical_axis_rules)
 
     # A. SET RUN NAME AND PATHS
     # If run_name is not set, generate one from the JOBSET_NAME environment variable (if available)

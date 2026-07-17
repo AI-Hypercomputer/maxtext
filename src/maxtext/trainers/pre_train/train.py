@@ -663,7 +663,8 @@ def training_loop_iteration(
 
   # Unpack immutable_data
   config = immutable_data["config"]  # for helpers
-  logical_axis_rules = immutable_data["logical_axis_rules"]
+  logical_axis_rules_for_train = immutable_data["logical_axis_rules_for_train"]
+  logical_axis_rules_for_eval = immutable_data["logical_axis_rules_for_eval"]
   shard_optimizer_over_data = immutable_data["shard_optimizer_over_data"]
   shard_mode = immutable_data["shard_mode"]
   eval_interval = immutable_data["eval_interval"]
@@ -692,7 +693,7 @@ def training_loop_iteration(
     else:
       step_rng_args = ()
     with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules):
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_train):
         if shard_optimizer_over_data and isinstance(model, nn.Module):
           state = sharding.maybe_shard_with_name(state, state_mesh_shardings, shard_mode)
         state, metrics = p_train_step(state, example_batch, *step_rng_args)
@@ -724,10 +725,12 @@ def training_loop_iteration(
     # pylint: disable=not-callable
     for eval_batch in eval_data_iterator:
       # Shard input eval data
-      eval_batch = jax.device_put(eval_batch, sharding.get_input_data_sharding(config, mesh))
+      eval_batch = jax.device_put(
+          eval_batch, sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+      )
       if 0 < eval_steps <= eval_step_count:
         break
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules):
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_eval):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
       eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
       last_eval_step_completion = datetime.datetime.now()
@@ -857,7 +860,8 @@ def train_loop(config, recorder, state=None):
 
   immutable_data = {
       "config": config,
-      "logical_axis_rules": config.logical_axis_rules,
+      "logical_axis_rules_for_train": config.logical_axis_rules,
+      "logical_axis_rules_for_eval": config.logical_axis_rules_for_eval,
       "shard_optimizer_over_data": config.shard_optimizer_over_data,
       "shard_mode": config.shard_mode,
       "steps": config.steps,

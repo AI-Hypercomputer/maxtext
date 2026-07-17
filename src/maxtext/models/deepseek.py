@@ -42,6 +42,7 @@ from maxtext.models import deepseek_batchsplit_fp8
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.sharding import maybe_shard_with_logical
+from maxtext.utils.sharding import get_logical_axis_rules_from_config
 
 import transformers
 
@@ -189,7 +190,7 @@ class DeepSeekGenericLayer(nnx.Module):
         shard_mode=self.config.shard_mode,
         debug_sharding=self.config.debug_sharding,
         extra_stack_level=1,
-        rules=self.config.logical_axis_rules,
+        rules=get_logical_axis_rules_from_config(self.config),
     )
 
   def dropout_op(self, x, deterministic):
