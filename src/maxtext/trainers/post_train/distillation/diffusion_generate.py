@@ -81,6 +81,34 @@ def _shifted_logit_indices(seq_len: int) -> jax.Array:
   return jnp.maximum(jnp.arange(seq_len, dtype=jnp.int32) - 1, 0)
 
 
+def _selective_log_softmax(logits: jax.Array, tokens: jax.Array) -> jax.Array:
+  """Log-prob of ``tokens`` under ``logits`` (pure-jax; no tunix dependency).
+
+  ``logits`` is ``(..., L, V)`` and ``tokens`` is ``(..., L)``; returns ``(..., L)``
+  where entry ``p`` is ``log softmax(logits[..., p, :])[tokens[..., p]]``. Mirrors
+  ``tunix.rl.common.selective_log_softmax`` so the diffusion logprob and the AR
+  logprob agree numerically on the extraction step.
+  """
+  logits = logits.astype(jnp.float32)
+  target = jnp.take_along_axis(logits, tokens[..., None], axis=-1).squeeze(-1)
+  normalizer = jax.nn.logsumexp(logits, axis=-1)
+  return target - normalizer
+
+
+def _positions_from_mask(mask: jax.Array) -> jax.Array:
+  """Absolute positions from a validity mask (RoPE), pure-jax.
+
+  Reimplements ``tunix.sft.utils.build_positions_from_mask``
+  (``cumsum(mask) - (cumsum(mask) >= 1)``) so this module stays jax-only: pad
+  positions and the first real token share position ``0`` and real tokens then
+  count ``0, 1, 2, ...``. Block-diffusion blocks are ``position // bd_size``, so
+  using the SAME position convention as the AR path keeps the two logprob paths
+  aligned.
+  """
+  positions = jnp.cumsum(mask.astype(jnp.int32), axis=-1)
+  return positions - (positions >= 1).astype(jnp.int32)
+
+
 def diffusion_commit(
     logits: jax.Array,
     mask: jax.Array,
@@ -241,3 +269,96 @@ def diffusion_generate(
 
   canvas, committed = jax.lax.fori_loop(0, num_blocks, block_body, (canvas0, committed0))
   return canvas, committed
+
+
+def diffusion_per_token_logps(
+    model_apply: ForwardFn,
+    prompt_tokens: jax.Array,
+    completion_tokens: jax.Array,
+    completion_mask: jax.Array | None = None,
+    *,
+    bd_size: int,
+    pad_id: int = 0,
+    temperature: float = 1.0,
+    stop_gradient: bool = False,
+) -> jax.Array:
+  """Block-diffusion (TraceRL-style) per-token log-probability of a completion.
+
+  THE single source of truth for the GRPO/DAPO importance ratio when the policy
+  is a block-diffusion model. It is invoked at BOTH sites of the ratio — the
+  rollout's old-policy logps (``MaxTextDiffusionRollout.get_per_token_logps``)
+  and the loss's new-policy logps (the tunix ``per_token_logps_fn`` hook) — so the
+  two are guaranteed identical and the ratio is unbiased. Do NOT reimplement the
+  math at either call site; both must funnel through this function.
+
+  Unlike an autoregressive next-token logprob, the score comes from a single
+  block-diffusion forward over the whole committed sequence: each position attends
+  bidirectionally within its block of ``bd_size`` tokens and block-causally across
+  blocks (the model applies this mask internally when ``enable_block_diffusion`` is
+  on; ``model_apply`` just forwards the full sequence). The completed sequence is
+  then scored with the same shifted-logit convention the rollout generated it under
+  (``_shifted_logit_indices``: ``shifted[:, p] = logits[:, p - 1]``, so the
+  post-shift logits at position ``p`` predict token ``p`` — matching
+  ``diffusion_generate``'s commit rule, which argmaxes ``logits[p - 1]`` onto token
+  ``p``). Scoring under the generation rule is what makes the old-policy logp equal
+  the probability the token was drawn with.
+
+  Args:
+    model_apply: cacheless block-diffusion forward ``(tokens[B, T], positions[B,
+      T]) -> logits[B, T, V]`` (same signature/injection as ``diffusion_generate``,
+      so it is exercisable on CPU with a stub).
+    prompt_tokens: ``[B, P]`` int prompt ids (may be left-padded with ``pad_id``).
+    completion_tokens: ``[B, C]`` int completion ids (may be right-padded).
+    completion_mask: optional ``[B, C]`` mask; when provided the returned logps are
+      zeroed outside it and it also defines completion validity for positions.
+    bd_size: block size; ``P + C`` must be divisible by it (block-diffusion
+      contract, matching ``diffusion_generate`` and the config validator).
+    pad_id: pad id used to derive the prompt validity mask for positions.
+    temperature: divides the logits before the softmax when not ``0.0``/``1.0``
+      (matches ``tunix.rl.common.compute_per_token_logps``).
+    stop_gradient: when True the result is wrapped in ``jax.lax.stop_gradient``
+      (used for the rollout's old-policy logps; the loss passes ``False`` so the
+      policy gradient flows).
+
+  Returns:
+    ``[B, C]`` per-token log-probabilities for the completion positions.
+  """
+  prompt_tokens = jnp.asarray(prompt_tokens, dtype=jnp.int32)
+  completion_tokens = jnp.asarray(completion_tokens, dtype=jnp.int32)
+  if bd_size <= 0:
+    raise ValueError(f"bd_size must be > 0, got {bd_size}")
+
+  prompt_len = prompt_tokens.shape[1]
+  full_tokens = jnp.concatenate([prompt_tokens, completion_tokens], axis=1)  # [B, T]
+  seq_len = full_tokens.shape[1]
+  if seq_len % bd_size != 0:
+    raise ValueError(f"prompt+completion length ({seq_len}) must be divisible by bd_size ({bd_size})")
+
+  # Validity mask -> RoPE positions (block index = position // bd_size). Prompt
+  # validity comes from pad_id; completion validity from completion_mask (or
+  # non-pad when absent), matching the AR path so both logprob paths align.
+  prompt_mask = prompt_tokens != pad_id
+  if completion_mask is None:
+    completion_valid = completion_tokens != pad_id
+  else:
+    completion_valid = completion_mask.astype(bool)
+  full_mask = jnp.concatenate([prompt_mask, completion_valid], axis=1)
+  positions = _positions_from_mask(full_mask)  # [B, T]
+
+  # Single block-diffusion forward over the committed sequence.
+  logits = model_apply(full_tokens, positions).astype(jnp.float32)  # [B, T, V]
+
+  # Shifted-logit convention (reuse M3): post-shift logits at p predict token p.
+  shift_idx = _shifted_logit_indices(seq_len)  # [T]
+  shifted = logits[:, shift_idx, :]  # [B, T, V]
+  if temperature != 0.0 and temperature != 1.0:
+    shifted = shifted / temperature
+
+  logps_full = _selective_log_softmax(shifted, full_tokens)  # [B, T]
+  completion_logps = logps_full[:, prompt_len:]  # [B, C]
+
+  if completion_mask is not None:
+    completion_logps = completion_logps * completion_mask.astype(completion_logps.dtype)
+  if stop_gradient:
+    completion_logps = jax.lax.stop_gradient(completion_logps)
+  return completion_logps

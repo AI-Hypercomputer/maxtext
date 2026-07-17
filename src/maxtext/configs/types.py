@@ -2204,6 +2204,21 @@ class RL(BaseModel):
           "If None, no chunking is applied, which may lead to OOM errors if tensors are too large."
       ),
   )
+  rl_diffusion_rollout: bool = Field(
+      False,
+      description=(
+          "If True, the policy is a block-diffusion model: rollouts generate by block-diffusion "
+          "denoising (MaxTextDiffusionRollout) and the GRPO/DAPO importance ratio uses the shared "
+          "block-diffusion (TraceRL-style) per-token logprob instead of the AR next-token logprob. "
+          "Requires enable_block_diffusion=True. When False, RL is autoregressive and unchanged."
+      ),
+  )
+  rl_diffusion_threshold: float = Field(
+      0.9, description="Confidence threshold for committing a denoised position during the RL diffusion rollout."
+  )
+  rl_diffusion_max_denoise_steps: int = Field(
+      0, description="Per-block denoise iteration cap for the RL diffusion rollout; <= 0 means use bd_size."
+  )
 
 
 class RLDataset(BaseModel):
