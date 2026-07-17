@@ -67,8 +67,8 @@ def gmm(
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
     interpret: bool = False,
-    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
-    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
+    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     use_qwix_quantization: bool = False,
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
@@ -255,7 +255,7 @@ def _gmm_fwd(
           lhs,
           quantization_rule.act_qtype,
           channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-          calibration_method=quantization_rule.act_calibration_method,
+          calibration_method=quantization_rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
       )
     if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
       if not use_manual_quantization:
@@ -480,6 +480,7 @@ def _gmm_bwd(
           transpose_rhs=not transpose_rhs,
           interpret=interpret,
           input_buffer_count=input_buffer_count[1],
+          **dlhs_kwargs,
       )
     else:  # TOKAMAX DLHS GMM 2
       # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs

@@ -444,7 +444,7 @@ class Quantization(BaseModel):
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
       False,
-      description="Whether to use manual quantization for batch split. Only used if use_batch_split_schedule is True.",
+      description="Whether to use manual quantization for batch split. Only used if `use_batch_split_schedule=True`.",
   )
   weight_quantization_calibration_method: str = Field(
       "absmax",
@@ -2642,6 +2642,7 @@ class MaxTextConfig(
     Validates that num_moe_emb_chunks is used with supported settings.
     """
     if self.num_moe_emb_chunks > 0:
+      # TODO: update self.use_gmm_v2
       if not self.use_gmm_v2 or not self.use_ring_of_experts:
         raise ValueError(
             f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
@@ -3472,6 +3473,9 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
+
+    if self.use_manual_quantization and not self.use_batch_split_schedule:
+      raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
 
     if (self.use_gmm_v2_fwd or self.use_gmm_v2_dlhs or self.use_gmm_v2_drhs) and not self.use_tokamax_gmm:
       raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
