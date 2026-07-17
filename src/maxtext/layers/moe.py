@@ -919,6 +919,9 @@ class RoutedMoE(nnx.Module):
           local_num_experts,
           axis=0,
       )
+      # Clamp local_group_size to buffer_size to ensure we don't exceed buffer
+      # capacity by leveraging the helper _truncate_matrix.
+      local_group_size = _truncate_matrix(local_group_size[:, None], buffer_size)[:, 0]
       expert_indices = jnp.arange(local_num_experts)
       sorted_experts = jnp.repeat(
           expert_indices,

@@ -1099,8 +1099,8 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       )
       first_generated_tokens.append(first_generated_token)
       if self.config.return_log_prob:
-        # pytype: disable=attribute-error
-        token_logps.append(inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token))
+        p = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
+        token_logps.append(p)  # pytype: disable=attribute-error
     first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
     if self.config.return_log_prob:
       token_logps = jnp.concatenate(token_logps, axis=0)

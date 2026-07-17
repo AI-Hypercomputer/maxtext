@@ -328,10 +328,10 @@ def _gmm_fwd(
           rhs=rhs_operand,
           group_sizes=group_sizes,
           rhs_scale=rhs_scale,
-          group_offset=group_offset,
           tile_info=custom_fwd_tiling,
           preferred_element_type=preferred_element_type,
           partial_sum=partial_sum,
+          group_offset=group_offset,
       )
 
   else:
@@ -499,9 +499,9 @@ def _gmm_bwd(
           group_sizes=group_sizes,
           # rhs scale is already in dlhs_lhs
           rhs_scale=None,
-          group_offset=group_offset,
           tile_info=custom_dlhs_tiling,
           preferred_element_type=lhs_dtype,
+          group_offset=group_offset,
       )
 
       if isinstance(dlhs_dout, qpl.QArray):
