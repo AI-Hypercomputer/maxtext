@@ -236,6 +236,68 @@ class ParamMappingTest(unittest.TestCase):
     expected_output = np.array([1, 3, 2, 4], dtype=np.float32)
     np.testing.assert_allclose(output, expected_output)
 
+  def test_qwen3_vl_fused_moe_hook(self):
+    config = {
+        "text_config": {"num_hidden_layers": 1, "num_local_experts": 2},
+        "vision_config": {"depth": 1, "hidden_size": 128},
+    }
+    maxtext_config = mock.Mock()
+    # Test saving to HF
+    hooks_to_hf = param_mapping.QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=False, saving_to_hf=True
+    )
+    composite_key = ("params-decoder-layers_0-moe_block-wi_0", "params-decoder-layers_0-moe_block-wi_1")
+    self.assertIn(composite_key, hooks_to_hf)
+    fused_hook_to_hf = hooks_to_hf[composite_key]
+
+    wi_0 = np.array([[1, 2], [3, 4]], dtype=np.float32)
+    wi_1 = np.array([[5, 6], [7, 8]], dtype=np.float32)
+
+    output_hf = fused_hook_to_hf((wi_0, wi_1), None)
+    # Expected: concatenate along last axis
+    expected_hf = np.array([[1, 2, 5, 6], [3, 4, 7, 8]], dtype=np.float32)
+    np.testing.assert_allclose(output_hf, expected_hf)
+
+    # Test loading to MaxText
+    hooks_to_mt = param_mapping.QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=False, saving_to_hf=False
+    )
+    self.assertIn(composite_key, hooks_to_mt)
+    fused_hook_to_mt = hooks_to_mt[composite_key]
+
+    fused_hf = np.array([[1, 2, 5, 6], [3, 4, 7, 8]], dtype=np.float32)
+    output_mt = fused_hook_to_mt(fused_hf, None)
+    # Expected: split along last axis, and stack along a new final axis
+    expected_mt = np.stack([wi_0, wi_1], axis=-1)
+    np.testing.assert_allclose(output_mt, expected_mt)
+
+  def test_qwen3_vl_mapping(self):
+    config = {
+        "text_config": {"num_hidden_layers": 1, "num_local_experts": 2},
+        "vision_config": {"depth": 1, "hidden_size": 128},
+    }
+    maxtext_config = mock.Mock()
+    mapping = param_mapping.QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+
+    # Check text keys (replaced prefix)
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertEqual(
+        mapping["params-token_embedder-embedding"],
+        "model.language_model.embed_tokens.weight",
+    )
+
+    # Check MoE keys
+    composite_key = ("params-decoder-layers_0-moe_block-wi_0", "params-decoder-layers_0-moe_block-wi_1")
+    self.assertIn(composite_key, mapping)
+    self.assertEqual(mapping[composite_key], "model.language_model.layers.0.mlp.experts.gate_up_proj")
+
+    # Check vision keys
+    self.assertIn("params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-kernel", mapping)
+    self.assertEqual(
+        mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-kernel"],
+        "model.visual.patch_embed.proj.weight",
+    )
+
 
 if __name__ == "__main__":
   unittest.main()
