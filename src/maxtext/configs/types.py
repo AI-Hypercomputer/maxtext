@@ -29,7 +29,7 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
@@ -2022,6 +2022,10 @@ class MultimodalGeneral(BaseModel):
 
   use_multimodal: bool = Field(False, description="Enable multimodal capabilities.")
   attention_for_vit: str = Field("dot_product", description="The attention algorithm to use for vision encoder.")
+  vision_encoder_block: VisionEncoderBlockType = Field(
+      VisionEncoderBlockType.NONE,
+      description="The style of VisionEncoderBlock to use (e.g., 'gemma3', 'llama4').",
+  )
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")

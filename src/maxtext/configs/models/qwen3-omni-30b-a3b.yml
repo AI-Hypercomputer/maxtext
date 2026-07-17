@@ -42,6 +42,7 @@ enable_dropout: false
 scan_layers: false  # deepstack does not support scan_layers
 
 # Vision Encoder Configuration
+vision_encoder_block: "qwen3_omni"
 # Based on https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_omni_moe/configuration_qwen3_omni_moe.py
 image_size_for_vit: 768
 hidden_size_for_vit: 1152

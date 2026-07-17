@@ -18,7 +18,7 @@ import jax
 from flax import nnx
 from jax.sharding import Mesh
 
-from maxtext.common.common_types import Config
+from maxtext.common.common_types import Config, VisionEncoderBlockType
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import initializers
 
@@ -34,7 +34,9 @@ class VisionEncoder(nnx.Module):
 
   def _setup_vision_encoder_layers(self):
     """Setup vision encoder layers specific to the model, instantiate NNX modules."""
-    if self.config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+    self.vision_encoder_block = self.config.vision_encoder_block
+
+    if self.vision_encoder_block == VisionEncoderBlockType.GEMMA3:
       from maxtext.models import gemma3  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Gemma3VisionEncoderLayer_0"
@@ -42,7 +44,7 @@ class VisionEncoder(nnx.Module):
       setattr(self, encoder_name, gemma3.Gemma3VisionEncoderLayer(config=self.config, mesh=self.mesh, rngs=self.rngs))
       setattr(self, projector_name, gemma3.VisionEmbedder(config=self.config, mesh=self.mesh, rngs=self.rngs))
       return encoder_name, projector_name
-    elif self.config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+    elif self.vision_encoder_block == VisionEncoderBlockType.LLAMA4:
       from maxtext.models import llama4  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Llama4VisionModel_0"
@@ -50,7 +52,7 @@ class VisionEncoder(nnx.Module):
       setattr(self, encoder_name, llama4.Llama4VisionModel(config=self.config, mesh=self.mesh, rngs=self.rngs))
       setattr(self, projector_name, llama4.Llama4MultiModalProjector(config=self.config, mesh=self.mesh, rngs=self.rngs))
       return encoder_name, projector_name
-    elif self.config.model_name in ["qwen3-omni-30b-a3b"]:
+    elif self.vision_encoder_block == VisionEncoderBlockType.QWEN3_OMNI:
       from maxtext.models import qwen3  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Qwen3OmniMoeVisionEncoder_0"
@@ -58,7 +60,7 @@ class VisionEncoder(nnx.Module):
       setattr(self, encoder_name, qwen3.Qwen3OmniMoeVisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs))
       setattr(self, projector_name, qwen3.Qwen3OmniMoeVisionProjector(config=self.config, rngs=self.rngs))
       return encoder_name, projector_name
-    elif self.config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
+    elif self.vision_encoder_block == VisionEncoderBlockType.GEMMA4:
       from maxtext.models import gemma4_vision  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Gemma4VisionEncoderLayer_0"
@@ -70,7 +72,7 @@ class VisionEncoder(nnx.Module):
           self, projector_name, gemma4_vision.Gemma4VisionProjector(config=self.config, mesh=self.mesh, rngs=self.rngs)
       )
       return encoder_name, projector_name
-    elif self.config.model_name in ["qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+    elif self.vision_encoder_block == VisionEncoderBlockType.QWEN3_5:
       from maxtext.models import qwen3_5_vision  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Qwen3_5MoeVisionEncoder_0"
@@ -80,7 +82,7 @@ class VisionEncoder(nnx.Module):
       )
       setattr(self, projector_name, qwen3_5_vision.Qwen3_5MoeVisionProjector(config=self.config, rngs=self.rngs))
       return encoder_name, projector_name
-    elif self.config.model_name in ["qwen3-vl-4b", "qwen3-vl-2b"]:
+    elif self.vision_encoder_block == VisionEncoderBlockType.QWEN3_VL:
       from maxtext.models import qwen3_vl_vision  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Qwen3VLVisionEncoder_0"
@@ -91,12 +93,16 @@ class VisionEncoder(nnx.Module):
       setattr(self, projector_name, qwen3_vl_vision.Qwen3VLVisionProjector(config=self.config, rngs=self.rngs))
       return encoder_name, projector_name
     else:
-      raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
+      supported_blocks = [block.value for block in VisionEncoderBlockType if block != VisionEncoderBlockType.NONE]
+      raise ValueError(
+          f"Unsupported vision_encoder_block={self.vision_encoder_block.value!r} "
+          f"for model_name={self.config.model_name!r}. Supported values are: {supported_blocks}."
+      )
 
   def __call__(self, input_images, input_masks=None, video_grid_thw=None, deterministic=False):
     # vision encoder output, frozen params in many cases
     encoder = getattr(self, self.encoder_name)
-    if self.config.model_name.startswith("qwen3") and input_masks is not None:
+    if self.vision_encoder_block.value.startswith("qwen3") and input_masks is not None:
       encoder_output = encoder(
           input_images, video_mask=input_masks, video_grid_thw=video_grid_thw, deterministic=deterministic
       )
