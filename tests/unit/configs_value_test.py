@@ -278,6 +278,17 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_elastic_backup_kind_validation(self):
+    """Tests that elastic_backup_kind must be either 'snapshot' or 'checkpoint'."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "elastic_backup_kind=invalid_backup_kind",
+    ]
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv)
+
 
 if __name__ == "__main__":
   absltest.main()
