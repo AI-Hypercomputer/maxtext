@@ -204,6 +204,7 @@ def _gmm_fwd(
         ),
         preferred_element_type=preferred_element_type,
         partial_sum=partial_sum,
+        group_offset=group_offset,
     )
   elif use_tokamax_backend:
     # manual_axis_type is for gmm with shard_map check_vma=True, needs tokamax > 0.0.12
@@ -331,6 +332,7 @@ def _gmm_bwd(
               tile_n=tiling[5],
           ),
           preferred_element_type=lhs_dtype,
+          group_offset=group_offset,
       )
 
       # tgmm_v2_op requires lhs and rhs to have the same dtype.
