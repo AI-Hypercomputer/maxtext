@@ -987,6 +987,95 @@ class ShiftData(grain.MapTransform):
 
 
 @dataclasses.dataclass
+class BlockDiffusionMasking(grain.RandomMapTransform):
+  """Masked-diffusion (conversion fine-tuning / CFT) corruption for block-diffusion SFT.
+
+  Turns an autoregressive SFT batch into a masked-diffusion training example
+  (Fast_dLLM / Diffusion-GR2). For each example a random subset of the RESPONSE
+  tokens is corrupted by replacing them with ``mask_id`` in ``inputs``; the clean
+  tokens are kept as ``targets`` ALIGNED (NOT next-token shifted); and
+  ``targets_segmentation`` is set to 1 only at the masked positions. MaxText's loss
+  already gates the per-position cross-entropy on ``targets_segmentation != 0``, so
+  writing the "predict-here" mask into ``targets_segmentation`` makes the loss
+  compute exactly (and only) at the masked positions with NO loss-side change.
+  ``inputs_segmentation`` (the attention mask) is left untouched so attention still
+  sees every real prompt+response token, including the masked ones being denoised.
+
+  This transform REPLACES ``ShiftData`` in the block-diffusion pipeline: block
+  diffusion predicts each masked position from the (bidirectional-within-block)
+  context at the SAME position, so targets must stay aligned rather than shifted.
+
+  Response span: the maskable span is exactly the completion tokens, identified as
+  ``targets_segmentation != 0`` on the incoming (post ``PadOrTrimToMaxLength``,
+  pre-shift) batch. With ``sft_train_on_completion_only=True`` this is the
+  assistant/completion span (prompt and padding have ``targets_segmentation == 0``
+  and are never masked); with completion-only disabled (or non-SFT) it is every
+  real token, matching a LLaDA-style whole-sequence masked-diffusion objective.
+
+  Masking scheme (v1, per-block; matches the Fast_dLLM reference): the sequence is
+  split into contiguous blocks of ``bd_size`` tokens, aligned to position 0 so the
+  blocks coincide with the block-diffusion attention blocks (``position // bd_size``).
+  For each block a ratio ``t ~ U(0, 1)`` is drawn and the per-token mask probability
+  is ``p = (1 - eps) * t + eps``. The ``eps`` floor (1e-3) keeps ``p`` strictly
+  positive so a block is never guaranteed fully unmasked. Every RESPONSE position in
+  the block is then masked independently with probability ``p``. Drawing ``t``
+  per-block (rather than one ratio for the whole sequence) gives a mix of lightly and
+  heavily corrupted blocks within a single example, which is what the block-diffusion
+  decoder sees at inference (block-by-block denoising).
+
+  Randomness uses grain's per-record RNG (``grain.RandomMapTransform``) so each batch
+  draws a fresh, reproducible mask; masks for the examples within a batch are drawn
+  independently. For a fixed ``rng`` the output is deterministic.
+
+  TODO(block-diffusion): add the optional complementary-mask pass from the Fast_dLLM
+  reference (also train on the un-masked response tokens using the complement of the
+  sampled mask) for a lower-variance objective. Skipped in v1.
+  """
+
+  def __init__(self, bd_size, mask_id, eps=1e-3, axis=1):
+    if bd_size <= 0:
+      raise ValueError(f"bd_size must be positive, got {bd_size}")
+    self.bd_size = bd_size
+    self.mask_id = mask_id
+    self.eps = eps
+    self.axis = axis
+
+  def random_map(self, element, rng: np.random.Generator):
+    inputs = element["inputs"]
+    targets = element["targets"]
+    targets_segmentation = element["targets_segmentation"]
+
+    seq_len = inputs.shape[self.axis]
+    if seq_len % self.bd_size != 0:
+      raise ValueError(f"sequence length ({seq_len}) must be divisible by bd_size ({self.bd_size})")
+    num_blocks = seq_len // self.bd_size
+
+    # Maskable span = completion tokens (targets_segmentation != 0). Prompt and
+    # padding carry targets_segmentation == 0 and are therefore never masked.
+    response = targets_segmentation != 0
+
+    # Per-block ratio t ~ U(0,1) -> per-token mask probability p = (1-eps)*t + eps,
+    # broadcast from one value per block to every position in that block.
+    block_shape = list(inputs.shape)
+    block_shape[self.axis] = num_blocks
+    t = rng.random(size=tuple(block_shape))
+    p_block = (1.0 - self.eps) * t + self.eps
+    p_pos = np.repeat(p_block, self.bd_size, axis=self.axis)
+
+    mask = (rng.random(size=inputs.shape) < p_pos) & response
+
+    element["inputs"] = np.where(mask, inputs.dtype.type(self.mask_id), inputs)
+    # targets stay aligned to inputs (clean tokens, no shift). Values outside the
+    # masked positions are ignored by the loss (targets_segmentation == 0 there).
+    element["targets"] = targets
+    # Loss is computed exactly at the masked positions.
+    element["targets_segmentation"] = mask.astype(targets_segmentation.dtype)
+    # inputs_segmentation / *_position are intentionally left unchanged: attention
+    # must still cover every real prompt+response token, including masked ones.
+    return element
+
+
+@dataclasses.dataclass
 class ComputeQwen3OmniPositions(grain.MapTransform):
   """Computes 3D position IDs for Qwen3-Omni multimodal sequences.
 

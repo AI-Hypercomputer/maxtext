@@ -118,6 +118,80 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.attention_type, "chunk")
     self.assertTrue(config.context_parallel_load_balance)
 
+  def test_block_diffusion_valid_config(self):
+    """A valid block-diffusion config loads and exposes the new fields."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "attention_type=block_diffusion",
+        "enable_block_diffusion=True",
+        "bd_size=32",
+        "max_target_length=2048",
+        "vocab_size=151936",
+        "mask_id=151669",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.enable_block_diffusion)
+    self.assertEqual(config.attention_type, "block_diffusion")
+    self.assertEqual(config.bd_size, 32)
+    self.assertEqual(config.mask_id, 151669)
+
+  def test_block_diffusion_invalid_configs_raise(self):
+    """The block-diffusion validator rejects bad bd_size, mask_id, and non-divisible length."""
+    base = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "enable_block_diffusion=True",
+        "vocab_size=151936",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    bad_overrides = [
+        ["bd_size=0", "max_target_length=2048", "mask_id=100"],  # bd_size must be > 0
+        ["bd_size=32", "max_target_length=2048", "mask_id=999999"],  # mask_id >= vocab_size
+        ["bd_size=7", "max_target_length=2048", "mask_id=100"],  # max_target_length % bd_size != 0
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for overrides in bad_overrides:
+      with self.assertRaises(pydantic.ValidationError):
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
+          pyconfig.initialize(base + overrides)
+
+  def test_block_diffusion_disabled_skips_validation(self):
+    """When disabled, the (deliberately out-of-range) block-diffusion defaults do not error."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "enable_block_diffusion=False",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    # The default mask_id (151669) exceeds the default vocab_size (32000) but is
+    # not validated because block diffusion is disabled.
+    self.assertFalse(config.enable_block_diffusion)
+    self.assertGreater(config.mask_id, config.vocab_size)
+
   @unittest.mock.patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_env_override(self):
     """Tests that environment variables override YAML values."""

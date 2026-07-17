@@ -72,6 +72,17 @@ rl:
   # If null, the entire model is resharded at once.
   reshard_chunk_size: null
 
+  # ====== Block-diffusion RL rollout (Fast_dLLM / Diffusion-GR2, TraceRL-style) ======
+  # If true, the policy is a block-diffusion model: rollouts generate by block-diffusion
+  # denoising (MaxTextDiffusionRollout) and the GRPO/DAPO importance ratio uses the shared
+  # block-diffusion per-token logprob instead of the AR next-token logprob. Requires
+  # enable_block_diffusion=true (top level). When false, RL is autoregressive and unchanged.
+  rl_diffusion_rollout: false
+  # Confidence threshold for committing a denoised position during the diffusion rollout.
+  rl_diffusion_threshold: 0.9
+  # Per-block denoise iteration cap for the diffusion rollout; <= 0 means use bd_size.
+  rl_diffusion_max_denoise_steps: 0
+
 
 # ====== Models ======
 # for MaxText

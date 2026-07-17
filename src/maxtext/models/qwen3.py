@@ -1407,6 +1407,7 @@ class AttentionWithNorm(nnx.Module):
         max_target_length=config.max_target_length,
         max_prefill_predict_length=config.max_prefill_predict_length,
         attention_kernel=config.attention,
+        attention_type=AttentionType.BLOCK_DIFFUSION if config.enable_block_diffusion else AttentionType.GLOBAL,
         inputs_q_shape=dummy_inputs_shape,
         inputs_kv_shape=dummy_inputs_shape,
         mesh=mesh,

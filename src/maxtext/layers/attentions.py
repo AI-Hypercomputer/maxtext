@@ -462,6 +462,7 @@ class Attention(nnx.Module):
         attn_logits_soft_cap=self.attn_logits_soft_cap,
         sliding_window_size=self.sliding_window_size,
         chunk_attn_window_size=self.config.chunk_attn_window_size,
+        bd_size=self.config.bd_size,
         use_ragged_attention=self.use_ragged_attention,
         ragged_block_size=self.ragged_block_size,
         rngs=self.rngs,

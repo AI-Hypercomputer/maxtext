@@ -117,6 +117,10 @@ os.environ["TOKENIZERS_PARALLELISM"] = "0"
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
+from maxtext.integration.vllm.maxtext_diffusion_rollout import (
+    MaxTextDiffusionRollout,
+    make_diffusion_per_token_logps_fn,
+)
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
@@ -450,11 +454,25 @@ def create_rl_components(
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
-  rl_rollout_engine = (
-      functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
-      if trainer_config.use_standalone_converter
-      else "vllm"
-  )
+  # Block-diffusion RL (Fast_dLLM / Diffusion-GR2, TraceRL-style): the policy
+  # generates by block-diffusion denoising and the importance ratio uses the shared
+  # block-diffusion per-token logprob. Gated behind `rl.rl_diffusion_rollout` so AR
+  # RL (vLLM or standalone converter) is entirely unchanged when it is off. The
+  # matching new-policy logprob is injected into the GRPO learner below via
+  # `per_token_logps_fn` so both sides of the ratio use the SAME function.
+  use_diffusion_rollout = getattr(trainer_config.rl, "rl_diffusion_rollout", False)
+  if use_diffusion_rollout:
+    if not trainer_config.enable_block_diffusion:
+      raise ValueError(
+          "rl.rl_diffusion_rollout=True requires enable_block_diffusion=True: the "
+          "diffusion rollout denoises a block-diffusion canvas and scores it with "
+          "block-diffusion attention."
+      )
+    rl_rollout_engine = functools.partial(MaxTextDiffusionRollout, maxtext_config=trainer_config)
+  elif trainer_config.use_standalone_converter:
+    rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
+  else:
+    rl_rollout_engine = "vllm"
 
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
@@ -608,10 +626,20 @@ def create_rl_components(
         loss_algo=trainer_config.rl.loss_algo,
         loss_agg_mode=trainer_config.rl.loss_agg_mode,
     )
+    # When the diffusion rollout is active, override the new-policy per-token
+    # logprob with the SAME shared block-diffusion fn the rollout uses for the
+    # old-policy logps (the P0 invariant); otherwise the learner keeps the default
+    # AR `common.compute_per_token_logps` and AR RL is unchanged.
+    diffusion_per_token_logps_fn = (
+        make_diffusion_per_token_logps_fn(trainer_config.bd_size, trainer_config.mask_id)
+        if use_diffusion_rollout
+        else None
+    )
     rl_trainer = GrpoLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         algo_config=grpo_config,
+        per_token_logps_fn=diffusion_per_token_logps_fn,
     )
 
   return rl_cluster, rl_trainer, optimizer, reward_fns

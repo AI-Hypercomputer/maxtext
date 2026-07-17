@@ -562,7 +562,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
@@ -609,6 +609,17 @@ class Attention(BaseModel):
   )
   sliding_window_size: NonNegativeInt = Field(0, description="The size of the sliding window for local attention.")
   chunk_attn_window_size: NonNegativeInt = Field(0, description="The window size for chunked attention.")
+  enable_block_diffusion: bool = Field(
+      False,
+      description=(
+          "If True, use block-diffusion attention: bidirectional within a block of `bd_size` tokens "
+          "and block-causal across blocks (Fast_dLLM / Diffusion-GR2). Weight-preserving."
+      ),
+  )
+  bd_size: int = Field(32, description="Block size for block-diffusion attention. Must be > 0 when enabled.")
+  mask_id: int = Field(
+      151669, description="Token id of the [MASK] token used by block-diffusion. Must be < vocab_size when enabled."
+  )
   attn_logits_soft_cap: None | NonNegativeFloat = Field(
       None, description="Soft-cap value for attention logits. None means no cap."
   )
@@ -1532,6 +1543,26 @@ class Distillation(BaseModel):
       "The other parameters will be frozen if this attribute is non empty)",
   )
 
+  # --- On-policy distillation (OPD) for block-diffusion --
+  opd_on_policy: bool = Field(
+      False,
+      description=(
+          "If True, run on-policy block-diffusion distillation: the student generates its own completion "
+          "by block-diffusion denoising, the frozen teacher scores that sequence, and forward-KL is applied "
+          "only at the committed positions. Requires enable_block_diffusion on the student. When False, "
+          "distillation is unchanged (off-policy)."
+      ),
+  )
+  opd_threshold: float = Field(
+      0.9, description="Confidence threshold for committing a denoised position during the on-policy rollout."
+  )
+  opd_temperature: float = Field(
+      0.0, description="Softmax temperature for the on-policy commit step (0.0 = greedy/argmax)."
+  )
+  opd_max_denoise_steps: int = Field(
+      0, description="Per-block denoise iteration cap for the on-policy rollout; <= 0 means use bd_size."
+  )
+
 
 class TrainingLoop(BaseModel):
   """Configuration for the main training loop, evaluation, and reproducibility."""
@@ -2232,6 +2263,21 @@ class RL(BaseModel):
           "Number of model keys to chunk for resharding tensors between trainer and rollout devices."
           "If None, no chunking is applied, which may lead to OOM errors if tensors are too large."
       ),
+  )
+  rl_diffusion_rollout: bool = Field(
+      False,
+      description=(
+          "If True, the policy is a block-diffusion model: rollouts generate by block-diffusion "
+          "denoising (MaxTextDiffusionRollout) and the GRPO/DAPO importance ratio uses the shared "
+          "block-diffusion (TraceRL-style) per-token logprob instead of the AR next-token logprob. "
+          "Requires enable_block_diffusion=True. When False, RL is autoregressive and unchanged."
+      ),
+  )
+  rl_diffusion_threshold: float = Field(
+      0.9, description="Confidence threshold for committing a denoised position during the RL diffusion rollout."
+  )
+  rl_diffusion_max_denoise_steps: int = Field(
+      0, description="Per-block denoise iteration cap for the RL diffusion rollout; <= 0 means use bd_size."
   )
 
 
@@ -3601,5 +3647,30 @@ class MaxTextConfig(
         raise ValueError(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
+        )
+    return self
+
+  @model_validator(mode="after")
+  def _validate_block_diffusion(self) -> "MaxTextConfig":
+    """Validates block-diffusion attention settings.
+
+    Only enforced when `enable_block_diffusion` is True, because the block-diffusion
+    defaults (e.g. `mask_id`) are intentionally out of range for the default vocab.
+    Defined after `set_derived_and_validate_values`; `vocab_size` and
+    `max_target_length` are never mutated by that validator, so their final values
+    are visible here regardless of validator ordering.
+    """
+    if self.enable_block_diffusion:
+      if not isinstance(self.bd_size, int) or self.bd_size <= 0:
+        raise ValueError("`bd_size` must be an integer > 0 when `enable_block_diffusion` is True.")
+      if self.mask_id >= self.vocab_size:
+        raise ValueError(
+            f"`mask_id` ({self.mask_id}) must be < `vocab_size` ({self.vocab_size}) "
+            "when `enable_block_diffusion` is True."
+        )
+      if self.max_target_length % self.bd_size != 0:
+        raise ValueError(
+            f"`max_target_length` ({self.max_target_length}) must be divisible by `bd_size` "
+            f"({self.bd_size}) when `enable_block_diffusion` is True."
         )
     return self

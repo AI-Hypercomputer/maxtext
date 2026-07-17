@@ -380,12 +380,21 @@ param_scan_axis: 1
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
+attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla, full, compressed, block_diffusion
 share_kv_projections: false # Note: Not compatible with attention_type='mla'
 attention_bias: false # If true, adds a learnable bias to the query, key, and value projections
 attention_sink: false
 sliding_window_size: 0
 chunk_attn_window_size: 0
+# Block-diffusion attention (Fast_dLLM / Diffusion-GR2): bidirectional within a block of bd_size tokens, block-causal across blocks. Weight-preserving.
+enable_block_diffusion: false
+bd_size: 32 # Block size for block-diffusion attention (must be > 0 when enabled; max_target_length must be divisible by it)
+mask_id: 151669 # Token id of the [MASK] token used by block-diffusion (must be < vocab_size when enabled)
+# On-policy distillation (OPD): the block-diffusion student generates its own completion by denoising, the frozen teacher scores it, and forward-KL is applied at the committed positions. Requires enable_block_diffusion on the student.
+opd_on_policy: false
+opd_threshold: 0.9 # Confidence threshold for committing a denoised position during the on-policy rollout.
+opd_temperature: 0.0 # Softmax temperature for the on-policy commit step (0.0 = greedy/argmax).
+opd_max_denoise_steps: 0 # Per-block denoise iteration cap for the on-policy rollout; <= 0 means use bd_size.
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 z_loss_multiplier: 0.0

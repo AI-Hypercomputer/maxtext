@@ -203,6 +203,71 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
     )
 
 
+# TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
+class BlockDiffusionMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
+  """Lazy block-diffusion mask.
+
+  Attention is bidirectional within each block of `bd_size` tokens and causal
+  across blocks: query position i attends key position j iff
+  ``(i // bd_size) >= (j // bd_size)``. This converts a causal LM into a
+  block-diffusion LM (Fast_dLLM / Diffusion-GR2). It is weight-preserving: only
+  the attention mask changes, not the model weights.
+
+  This mask class inherits from splash_attention_mask._ComputableMask and is
+  designed to be used with Splash Attention. It computes the mask logic
+  on-the-fly, avoiding materializing the full (seq_len, seq_len) boolean array.
+  """
+
+  #: The size of each bidirectional block.
+  bd_size: int
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      bd_size: int,
+      shard_count: int = 1,
+  ):
+    if bd_size <= 0:
+      raise ValueError("bd_size must be positive")
+    self.bd_size = bd_size
+
+    # Define the mask function for block-diffusion attention.
+    def block_diffusion_mask_function(q_ids, kv_ids):
+      """Computes the mask logic for the given slice indices."""
+      if q_ids.size == 0 or kv_ids.size == 0:
+        return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
+
+      # Bidirectional within a block, causal across blocks: attend iff the query
+      # block index is at or after the key block index.
+      return (q_ids // self.bd_size) >= (kv_ids // self.bd_size)
+
+    # Initialize the parent ComputableMask with this function
+    super().__init__(
+        shape=shape,
+        mask_function=block_diffusion_mask_function,
+        shard_count=shard_count,
+    )
+
+  # Implement equality and hashing based on relevant attributes
+  def __eq__(self, other: object):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+    # Compare shape, bd_size, and the underlying q_sequence array
+    return (
+        self.shape == other.shape and self.bd_size == other.bd_size and np.array_equal(self.q_sequence, other.q_sequence)
+    )
+
+  def __hash__(self):
+    return hash(
+        (
+            type(self),
+            self.shape,
+            self.bd_size,
+            self.q_sequence.tobytes() if self.q_sequence is not None else None,
+        )
+    )
+
+
 def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
   """Generates an explicit boolean mask for chunked causal attention.
 
@@ -322,6 +387,7 @@ def attention_op_as_linen(
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
     chunk_attn_window_size: int | None = None,
+    bd_size: int | None = None,
     use_ragged_attention: bool = False,
     ragged_block_size: int = 256,
 ):
@@ -360,6 +426,7 @@ def attention_op_as_linen(
       attn_logits_soft_cap=attn_logits_soft_cap,
       sliding_window_size=sliding_window_size,
       chunk_attn_window_size=chunk_attn_window_size,
+      bd_size=bd_size,
       use_ragged_attention=use_ragged_attention,
       ragged_block_size=ragged_block_size,
       metadata_fn=variable_to_logically_partitioned,
@@ -419,6 +486,7 @@ class AttentionOp(nnx.Module):
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
       chunk_attn_window_size: int | None = None,
+      bd_size: int | None = None,
       use_ragged_attention: bool = False,
       ragged_block_size: int = 256,
       rngs: nnx.Rngs | None = None,
@@ -516,6 +584,7 @@ class AttentionOp(nnx.Module):
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.chunk_attn_window_size = chunk_attn_window_size
+    self.bd_size = bd_size
     self.use_ragged_attention = use_ragged_attention
     self.ragged_block_size = ragged_block_size
     self.rngs = rngs
@@ -729,6 +798,7 @@ class AttentionOp(nnx.Module):
     if model_mode != MODEL_MODE_AUTOREGRESSIVE and self.attention_type not in (
         AttentionType.FULL,
         AttentionType.COMPRESSED,
+        AttentionType.BLOCK_DIFFUSION,
     ):
       if use_segment_positions:
         causal_mask = (position_col_ids <= position_row_ids)[:, None, None, :, :]
@@ -807,6 +877,24 @@ class AttentionOp(nnx.Module):
             q_offset=next_pos,
         )
       output_mask = chunk_mask * output_mask
+
+    elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
+      if self.bd_size is None:
+        raise ValueError("bd_size must be set for block_diffusion attention type")
+      # Block-diffusion: bidirectional within a block of `bd_size` tokens and
+      # causal across blocks. Query i attends key j iff (i // bd) >= (j // bd),
+      # i.e. (col_ids // bd) <= (row_ids // bd). The standard causal_mask was
+      # skipped above (guarded like FULL/COMPRESSED), so it is intentionally NOT
+      # ANDed in here; the block mask itself provides cross-block causality.
+      if use_segment_positions:
+        block_mask = ((position_col_ids // self.bd_size) <= (position_row_ids // self.bd_size))[:, None, None, :, :]
+      else:
+        mask_shape = (q_seq_len, kv_seq_len)
+        row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0) + next_pos
+        col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+        block_mask = ((col_ids // self.bd_size) <= (row_ids // self.bd_size))[None, None, None, :, :]
+      # Combine only with the segment/packing mask (if present), never with causal.
+      output_mask = block_mask if output_mask is None else (block_mask & output_mask)
 
     if bidirectional_mask is not None:
       image_mask = _make_bidirectional_block_mask(bidirectional_mask)
@@ -1301,11 +1389,17 @@ class AttentionOp(nnx.Module):
     mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
     if self.attention_type == AttentionType.FULL:
       mask = mask_module.FullMask(mask_shape)
+    elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
+      if self.bd_size is None:
+        raise ValueError("bd_size must be set for block_diffusion attention type")
+      # Base mask is the block-diffusion mask itself (bidirectional within block,
+      # causal across blocks). Do NOT intersect with CausalMask below.
+      mask = BlockDiffusionMask(shape=mask_shape, bd_size=self.bd_size)
     else:
       mask = mask_module.CausalMask(shape=mask_shape)
 
     use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
-    if use_load_balanced_cp and self.attention_type != AttentionType.FULL:
+    if use_load_balanced_cp and self.attention_type not in (AttentionType.FULL, AttentionType.BLOCK_DIFFUSION):
       mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
 
     # Apply local masking if local sliding attention is enabled.

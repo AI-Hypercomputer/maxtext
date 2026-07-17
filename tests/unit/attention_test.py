@@ -42,6 +42,7 @@ from maxtext.layers.attention_mla import MLA
 from maxtext.layers import attention_op
 from maxtext.layers.attention_op import (
     AttentionOp,
+    BlockDiffusionMask,
     ChunkedCausalMask,
     _generate_chunk_attention_mask,
     _make_bidirectional_block_mask,
@@ -326,6 +327,106 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       # pylint: disable=protected-access
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
+
+
+class BlockDiffusionMaskTest(unittest.TestCase):
+  """Tests for block-diffusion attention.
+
+  Block-diffusion attention is bidirectional within a block of `bd` tokens and
+  block-causal across blocks: query position i attends key position j iff
+  ``(i // bd) >= (j // bd)`` (full attention within the same block and to all
+  earlier blocks, nothing in later blocks).
+  """
+
+  def _expected_block_diffusion(self, q_len, kv_len, bd):
+    expected = np.zeros((q_len, kv_len), dtype=np.bool_)
+    for r in range(q_len):
+      for c in range(kv_len):
+        if r // bd >= c // bd:
+          expected[r, c] = True
+    return expected
+
+  def test_splash_mask_matches_expected(self):
+    """The splash BlockDiffusionMask yields True iff (i // bd) >= (j // bd)."""
+    seq_len = 12
+    bd = 4
+    mask = BlockDiffusionMask(shape=(seq_len, seq_len), bd_size=bd)
+    expected = self._expected_block_diffusion(seq_len, seq_len, bd)
+    np.testing.assert_array_equal(mask[:, :], expected)
+
+  def test_bidirectional_within_block_and_block_causal(self):
+    """Full within-block (incl. future positions), full earlier blocks, no later blocks."""
+    seq_len = 12
+    bd = 4
+    mask = np.asarray(BlockDiffusionMask(shape=(seq_len, seq_len), bd_size=bd)[:, :])
+    # Query 1 (block 0) attends future position 3 in the same block (bidirectional).
+    self.assertTrue(mask[1, 3])
+    # Query 0 attends only its own block (positions 0-3).
+    np.testing.assert_array_equal(mask[0], np.array([1] * 4 + [0] * 8, dtype=bool))
+    # Query 4 (block 1) attends all of blocks 0 and 1, none of block 2.
+    np.testing.assert_array_equal(mask[4], np.array([1] * 8 + [0] * 4, dtype=bool))
+    # The last query attends everything.
+    np.testing.assert_array_equal(mask[seq_len - 1], np.ones(seq_len, dtype=bool))
+
+  def test_non_square_shape(self):
+    """Works with different query and key sequence lengths."""
+    q_len, kv_len, bd = 6, 8, 2
+    mask = BlockDiffusionMask(shape=(q_len, kv_len), bd_size=bd)
+    expected = self._expected_block_diffusion(q_len, kv_len, bd)
+    np.testing.assert_array_equal(mask[:, :], expected)
+
+  def test_mask_function_matches_dense_path(self):
+    """(a) dense generate_attention_mask and (b) BlockDiffusionMask.mask_function agree."""
+    seq_len = 12
+    bd = 4
+    expected = self._expected_block_diffusion(seq_len, seq_len, bd)
+
+    # (b) splash mask_function on broadcastable index grids.
+    q_ids = np.arange(seq_len)[:, None]
+    kv_ids = np.arange(seq_len)[None, :]
+    fn_mask = np.asarray(BlockDiffusionMask(shape=(seq_len, seq_len), bd_size=bd).mask_function(q_ids, kv_ids))
+    np.testing.assert_array_equal(fn_mask, expected)
+
+    # (a) dense path via AttentionOp.generate_attention_mask (dot_product kernel).
+    config = types.SimpleNamespace(context_parallel_load_balance=False, context_sharding="context")
+    mesh = types.SimpleNamespace(shape={})
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=seq_len,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.BLOCK_DIFFUSION,
+        bd_size=bd,
+    )
+    query = jnp.zeros((1, seq_len, 1, 8))
+    key = jnp.zeros((1, seq_len, 1, 8))
+    decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
+    dense = op.generate_attention_mask(query, key, decoder_segment_ids, MODEL_MODE_TRAIN)
+    dense_allow = np.asarray(dense == 0.0)[0, 0, 0]
+    np.testing.assert_array_equal(dense_allow, expected)
+    # Dense path and splash mask_function agree.
+    np.testing.assert_array_equal(dense_allow, fn_mask)
+    # And it is intentionally NOT a plain causal mask (proves bidirectionality within a block).
+    causal = np.tril(np.ones((seq_len, seq_len), dtype=np.bool_))
+    self.assertFalse(np.array_equal(dense_allow, causal))
+
+  def test_equality_and_hash(self):
+    """__eq__/__hash__ depend on shape, bd_size, and q_sequence."""
+    a = BlockDiffusionMask(shape=(8, 8), bd_size=4)
+    b = BlockDiffusionMask(shape=(8, 8), bd_size=4)
+    c = BlockDiffusionMask(shape=(8, 8), bd_size=2)
+    self.assertEqual(a, b)
+    self.assertEqual(hash(a), hash(b))
+    self.assertNotEqual(a, c)
+
+  def test_value_error_on_non_positive_bd_size(self):
+    """A ValueError is raised for bd_size <= 0."""
+    with self.assertRaises(ValueError):
+      BlockDiffusionMask(shape=(4, 4), bd_size=0)
+    with self.assertRaises(ValueError):
+      BlockDiffusionMask(shape=(4, 4), bd_size=-3)
 
 
 class LoadBalancedMaskTest(unittest.TestCase):
