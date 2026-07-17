@@ -41,7 +41,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
-from maxtext.utils.mesh_utils import partition_mesh_by_diloco_axis, stack_across_meshes_pytree, unstack_across_meshes_pytree
+from maxtext.utils.mesh_utils import partition_mesh_by_diloco_axis, stack_across_meshes_pytree
 
 
 @jax.jit
@@ -49,8 +49,28 @@ def mix_frags(i_frag, o_frag, alpha):
   return jax.tree_util.tree_map(lambda x, y: alpha * x + (1 - alpha) * y, i_frag, o_frag)
 
 
-def cpu_clone(x):
-  return jnp.copy(x)
+def _normalize_to_null_layout(tree):
+  """Rebuild every JAX array from raw shard data to ensure a consistent null layout.
+
+  Pathways caches internal jits (jit__take, jit_scatter, etc.) by (shape, dtype, sharding)
+  WITHOUT layout. When syncer params have mixed layouts across tensors that share the same
+  (shape, dtype, sharding) — e.g. some tiled from learner transport, others null from
+  device_put — the second call to the same cached jit fails with a layout mismatch.
+
+  Rebuilding via make_array_from_single_device_arrays is metadata-only for CPU arrays:
+  np.asarray(shard.data) accesses existing CPU memory with no copy, and
+  device_put(numpy, SingleDeviceSharding(cpu)) creates a fresh null-layout IFRT buffer.
+  """
+  def normalize_leaf(x):
+    if not isinstance(x, jax.Array) or not hasattr(x, "addressable_shards"):
+      return x
+    local_arrays = [
+        jax.device_put(np.asarray(shard.data), jax.sharding.SingleDeviceSharding(shard.device))
+        for shard in x.addressable_shards
+    ]
+    return jax.make_array_from_single_device_arrays(x.shape, x.sharding, local_arrays)
+
+  return jax.tree_util.tree_map(normalize_leaf, tree)
 
 
 class SyncerState(struct.PyTreeNode):
@@ -159,20 +179,21 @@ def _run_learner_loop(
   with jax.set_mesh(submesh), submesh, nn_partitioning.axis_rules(learner_config.logical_axis_rules):
     learner_config._flat_config["checkpoint_dir"] = config.checkpoint_dir + f"/learner_{learner_idx}"
 
-    with init_lock:
-      (
-          init_rng,
-          checkpoint_manager,
-          state_mesh_shardings,
-          model,
-          mesh,
-          learning_rate_schedule,
-          data_iterator,
-          data_loader,
-          rampup_manager,
-          eval_data_iterator,
-          state,
-      ) = train_utils.setup_train_loop(learner_config, recorder, mesh=submesh)
+    max_logging.log(f"Learner {learner_idx}: setup_train_loop starting")
+    (
+        init_rng,
+        checkpoint_manager,
+        state_mesh_shardings,
+        model,
+        mesh,
+        learning_rate_schedule,
+        data_iterator,
+        data_loader,
+        rampup_manager,
+        eval_data_iterator,
+        state,
+    ) = train_utils.setup_train_loop(learner_config, recorder, mesh=submesh)
+    max_logging.log(f"Learner {learner_idx}: setup_train_loop done")
 
     params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(
         learner_config, state_mesh_shardings
@@ -287,17 +308,6 @@ def _run_learner_loop(
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               if learner_config.shard_optimizer_over_data and isinstance(model, nn.Module):
                 state = sharding.maybe_shard_with_name(state, state_mesh_shardings, learner_config.shard_mode)
-              # DEBUG
-              state_leaves, _ = jax.tree_util.tree_flatten(state)
-              batch_leaves, _ = jax.tree_util.tree_flatten(example_batch)
-              print(
-                  f"DEBUG_DEVICES: Learner {learner_idx} step {step} before train_step state leaves devices: {[set(x.devices()) for x in state_leaves]}",
-                  flush=True,
-              )
-              print(
-                  f"DEBUG_DEVICES: Learner {learner_idx} step {step} before train_step batch leaves devices: {[set(x.devices()) for x in batch_leaves]}",
-                  flush=True,
-              )
               state, metrics = p_train_step(state, example_batch, *step_rng_args)
               # Force block to catch async errors immediately
               for leaf in jax.tree_util.tree_flatten((state, metrics))[0]:
@@ -327,34 +337,8 @@ def _run_learner_loop(
             params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
             inner_frag = manipulator.get_flat_fragment(params, frag_idx)
 
-            # DEBUG
-            print(
-                f"DEBUG_DEVICES: Learner {learner_idx} step {step} mix_frags check start. Keys in fragment: {list(inner_frag.keys())}",
-                flush=True,
-            )
-            for k in inner_frag.keys():
-              l_leaf = inner_frag[k]
-              s_leaf = received_frag_tpu[k]
-              l_devs = set(l_leaf.devices())
-              s_devs = set(s_leaf.devices())
-              print(f"DEBUG_DEVICES:   key {k}: shape={l_leaf.shape}")
-              print(f"DEBUG_DEVICES:     inner_frag sharding={l_leaf.sharding}, devices={l_devs}")
-              print(f"DEBUG_DEVICES:     received_frag_tpu sharding={s_leaf.sharding}, devices={s_devs}")
-              if l_devs != s_devs:
-                print(f"DEBUG_DEVICES: MISMATCH for key {k}:", flush=True)
-                print(f"DEBUG_DEVICES:   inner_frag devices: {l_devs}", flush=True)
-                print(f"DEBUG_DEVICES:   received_frag_tpu devices: {s_devs}", flush=True)
-                print(f"DEBUG_DEVICES:   received_frag devices: {set(received_frag[k].devices())}", flush=True)
-            print(f"DEBUG_DEVICES: Learner {learner_idx} step {step} mix_frags check end", flush=True)
-
             mixed_frag = mix_frags(inner_frag, received_frag_tpu, alpha)
             new_params = manipulator.apply_flat_fragment(params, frag_idx, mixed_frag)
-            # DEBUG
-            new_params_leaves, _ = jax.tree_util.tree_flatten(new_params)
-            print(
-                f"DEBUG_DEVICES: Learner {learner_idx} step {step} new_params leaves devices: {[set(x.devices()) for x in new_params_leaves]}",
-                flush=True,
-            )
 
             if learner_config.pure_nnx:
               non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
@@ -430,7 +414,7 @@ def syncer_loop(
     raise e
 
 
-def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, outer_optimizer, num_learners):
+def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, trace_keys, outer_optimizer):
   """Creates JIT-compiled functions for computing gradients and applying outer steps."""
   global_sharding_tree = {
       k: jax.sharding.NamedSharding(global_cpu_mesh, flat_params_shardings[k].spec) for k in frag_keys
@@ -441,6 +425,11 @@ def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, outer_optim
   }
   opt_state_sharding_tree = (optax.TraceState(trace=global_sharding_tree), optax.EmptyState())
 
+  # Use plain NamedSharding (no Format/layout constraint) for all in_shardings.
+  # Syncer params come from learner transport with tiled layout and remain tiled throughout
+  # (device_put to NamedSharding is a no-op in Pathways when sharding matches).
+  # Constraining in_shardings to null-layout Format causes mismatches when tiled arrays
+  # are passed. Plain NamedSharding lets JAX accept whatever layout the actual inputs have.
   @functools.partial(
       jax.jit,
       in_shardings=(global_sharding_tree, stacked_sharding_tree),
@@ -460,18 +449,7 @@ def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, outer_optim
     new_p_frag = optax.apply_updates(p_frag, updates_frag)
     return new_p_frag, new_o_state_frag
 
-  @functools.partial(
-      jax.jit,
-      in_shardings=(global_sharding_tree,),
-      out_shardings=stacked_sharding_tree,
-  )
-  def broadcast_frag(frag):
-    return jax.tree_util.tree_map(
-        lambda x: jnp.broadcast_to(jnp.expand_dims(x, axis=0), (num_learners,) + x.shape),
-        frag
-    )
-
-  return compute_grad, apply_outer_step, broadcast_frag
+  return compute_grad, apply_outer_step
 
 
 def _run_syncer_loop(
@@ -536,12 +514,17 @@ def _run_syncer_loop(
     max_logging.log("Syncer: received init params from Learner 0")
     with jax.set_mesh(global_cpu_mesh):
       global_params = jax.device_put(initial_params_l0, params_shardings)
+      # Normalize to null layout: learner transport delivers tiled params, and different
+      # tensors may have mixed layouts. Consistent null layout prevents jit__take /
+      # jit__scatter from seeing layout mismatches across params with the same signature.
+      global_params = _normalize_to_null_layout(global_params)
       outer_optimizer = optax.sgd(
           learning_rate=config.diloco_outer_lr,
           momentum=config.diloco_outer_momentum,
           nesterov=True,
       )
       outer_opt_state = outer_optimizer.init(global_params)
+      outer_opt_state = _normalize_to_null_layout(outer_opt_state)
 
     syncer_state = SyncerState(params=global_params, opt_state=outer_opt_state, step=0)
     start_step = 0
@@ -551,31 +534,18 @@ def _run_syncer_loop(
     start_step = int(syncer_state.step)
     max_logging.log(f"Syncer restored from step {start_step}")
 
-  # Init (2): broadcast initial params to all learners
-  stacked_params_sharding_tree = jax.tree_util.tree_map(
-      lambda s: jax.sharding.NamedSharding(global_cpu_mesh, jax.sharding.PartitionSpec("diloco", *s.spec)),
-      params_shardings
-  )
-
-  @functools.partial(
-      jax.jit,
-      in_shardings=(params_shardings,),
-      out_shardings=stacked_params_sharding_tree,
-  )
-  def broadcast_params(params):
-    return jax.tree_util.tree_map(
-        lambda x: jnp.broadcast_to(jnp.expand_dims(x, axis=0), (num_learners,) + x.shape),
-        params
+  # Init (2): send initial params to each learner directly.
+  # Params on global_cpu_mesh have no diloco axis in their spec, so they are replicated
+  # across all diloco slices. Rebinding to each cpu_submesh is a metadata-only operation
+  # that avoids the jit-level layout checking that caused Pathways layout mismatches.
+  for i, submesh in enumerate(cpu_submeshes):
+    local_sharding = jax.tree_util.tree_map(
+        lambda s: jax.sharding.NamedSharding(submesh, s.spec),
+        params_shardings,
     )
-
-  with jax.set_mesh(global_cpu_mesh):
-    stacked_params = broadcast_params(syncer_state.params)
-
-  local_params_list = unstack_across_meshes_pytree(stacked_params, cpu_submeshes, "diloco")
-
-  for i in range(num_learners):
+    local_params = jax.device_put(syncer_state.params, local_sharding)
     max_logging.log(f"Syncer: sending params to Learner {i} at step {start_step}")
-    transport.send_to_learner(learner_idx=i, step=start_step, fragment_id=-1, data=local_params_list[i])
+    transport.send_to_learner(learner_idx=i, step=start_step, fragment_id=-1, data=local_params)
     max_logging.log(f"Syncer: sent params to Learner {i} at step {start_step}")
 
   manipulator = FragmentedTreeManipulator.create(syncer_state.params, config)
@@ -594,13 +564,42 @@ def _run_syncer_loop(
   # steps that syncing is happening
   sync_steps = [step for step in range(start_step + 1, config.steps + 1) if step % steps_between_syncs_plus_1 == 0]
 
-  # Pre-build JIT step functions for each fragment index to avoid late-binding cell-var-from-loop warning
+  # Sharding for the full params tree on the global CPU mesh (used for null-layout resets).
+  params_full_sharding = jax.tree_util.tree_map(
+      lambda s: jax.sharding.NamedSharding(global_cpu_mesh, s.spec), params_shardings
+  )
+
+  # Pre-build JIT step functions for each fragment index.
+  # Fragment 0 (non-scanned params): call get_flat_fragment directly — no jnp.take, safe.
+  # Fragment >0 (scanned layer slices): avoid eager jnp.take by computing abstract shapes from
+  # the full scanned arrays. ShapeDtypeStruct has .shape so null_format rank derivation works.
   step_fns_by_frag = {}
   with jax.set_mesh(global_cpu_mesh):
     for f_idx in range(num_fragments):
-      frag_dict = manipulator.get_flat_fragment(syncer_state.params, f_idx)
+      if f_idx == 0:
+        frag_dict = manipulator.get_flat_fragment(syncer_state.params, f_idx)
+        trace_dict = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, f_idx)
+      else:
+        indices = manipulator.fragment_to_layer_indices[f_idx]
+        num_layer_indices = len(indices)
+        frag_dict = {}
+        trace_dict = {}
+        for keystr, v in [
+            (jax.tree_util.keystr(k), v)
+            for k, v in jax.tree_util.tree_flatten_with_path(syncer_state.params)[0]
+        ]:
+          if manipulator.keypath_to_is_scanned.get(keystr, False):
+            frag_shape = (num_layer_indices,) + v.shape[1:]
+            frag_dict[keystr] = jax.ShapeDtypeStruct(frag_shape, v.dtype)
+        for keystr, v in [
+            (jax.tree_util.keystr(k), v)
+            for k, v in jax.tree_util.tree_flatten_with_path(syncer_state.opt_state[0].trace)[0]
+        ]:
+          if manipulator.keypath_to_is_scanned.get(keystr, False):
+            frag_shape = (num_layer_indices,) + v.shape[1:]
+            trace_dict[keystr] = jax.ShapeDtypeStruct(frag_shape, v.dtype)
       step_fns_by_frag[f_idx] = make_step_fns(
-          global_cpu_mesh, flat_params_shardings, frag_dict, outer_optimizer, num_learners
+          global_cpu_mesh, flat_params_shardings, frag_dict, trace_dict, outer_optimizer
       )
 
   # Start main syncer loop
@@ -617,47 +616,61 @@ def _run_syncer_loop(
     max_logging.log(f"Syncer: received all fragments for step {step}")
 
     stacked_inner_frag = stack_across_meshes_pytree(learner_frags, global_cpu_mesh, "diloco")
+    # Normalize stacked fragment: concatenate_by_mesh_axis output layout is non-deterministic.
+    stacked_inner_frag = _normalize_to_null_layout(stacked_inner_frag)
     max_logging.log(f"Syncer: Step {step} stacking done")
 
     with jax.set_mesh(global_cpu_mesh):
-      outer_params_frag = manipulator.get_flat_fragment(syncer_state.params, frag_idx)
-
-      compute_grad, apply_outer_step, broadcast_frag = step_fns_by_frag[frag_idx]
-
-      pseudo_grad_frag = compute_grad(outer_params_frag, stacked_inner_frag)
-
-      trace_frag = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx)
+      # use_null_layout_jit=True avoids the eager jnp.take Pathways rejects for scanned
+      # fragments; normalize afterwards since concatenate/jit outputs can still vary.
+      outer_params_frag = _normalize_to_null_layout(
+          manipulator.get_flat_fragment(syncer_state.params, frag_idx, use_null_layout_jit=True)
+      )
+      trace_frag = _normalize_to_null_layout(
+          manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, use_null_layout_jit=True)
+      )
       opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
 
+      compute_grad, apply_outer_step = step_fns_by_frag[frag_idx]
+
+      pseudo_grad_frag = _normalize_to_null_layout(compute_grad(outer_params_frag, stacked_inner_frag))
+
       new_outer_params_frag, new_opt_state_frag = apply_outer_step(pseudo_grad_frag, opt_state_frag, outer_params_frag)
+      # Normalize jit outputs before scatter so v.at[].set(frag) always sees null-layout frag.
+      new_outer_params_frag = _normalize_to_null_layout(new_outer_params_frag)
+      new_opt_state_trace = _normalize_to_null_layout(new_opt_state_frag[0].trace)
 
-      new_outer_params_frag_for_broadcast = jax.tree_util.tree_map(cpu_clone, new_outer_params_frag)
+      new_params = manipulator.apply_flat_fragment(
+          syncer_state.params, frag_idx, new_outer_params_frag, use_null_layout_jit=True
+      )
+      new_params = _normalize_to_null_layout(jax.device_put(new_params, params_full_sharding))
 
-      # Debug prints
-      first_key = list(new_outer_params_frag_for_broadcast.keys())[0]
-      max_logging.log(f"DEBUG_SHARD: first_key={first_key}")
-      val_global = new_outer_params_frag_for_broadcast[first_key]
-      max_logging.log(f"DEBUG_SHARD: global val sharding={val_global.sharding}")
-      for i, shard in enumerate(val_global.addressable_shards):
-        max_logging.log(f"DEBUG_SHARD:   global shard {i}: device={shard.device}")
+      new_trace = manipulator.apply_flat_fragment(
+          syncer_state.opt_state[0].trace, frag_idx, new_opt_state_trace, use_null_layout_jit=True
+      )
+      new_trace = _normalize_to_null_layout(jax.device_put(new_trace, params_full_sharding))
 
-      # Broadcast the fragment to all learners
-      stacked_new_outer_params_frag = broadcast_frag(new_outer_params_frag_for_broadcast)
-
-      new_params = manipulator.apply_flat_fragment(syncer_state.params, frag_idx, new_outer_params_frag)
-      new_trace = manipulator.apply_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, new_opt_state_frag[0].trace)
       new_opt_state = (optax.TraceState(trace=new_trace), syncer_state.opt_state[1])
 
       syncer_state = syncer_state.replace(params=new_params, opt_state=new_opt_state, step=step)
     max_logging.log(f"Syncer: Step {step} outer step applied")
 
-    local_frags = unstack_across_meshes_pytree(stacked_new_outer_params_frag, cpu_submeshes, "diloco")
+    # Send updated fragment directly to each learner's submesh via device_put.
+    # new_outer_params_frag has no diloco axis in its sharding (replicated across slices),
+    # so rebinding to each cpu_submesh is a metadata-only operation with no layout checking.
+    for i, submesh in enumerate(cpu_submeshes):
+      frag_local_sharding = {
+          k: jax.sharding.NamedSharding(submesh, flat_params_shardings[k].spec)
+          for k in new_outer_params_frag
+      }
+      local_frag = jax.device_put(new_outer_params_frag, frag_local_sharding)
+      transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=local_frag)
 
-    for i in range(num_learners):
-      transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=local_frags[i])
-
+    # SyncerState is a plain PyTreeNode, not a NNX TrainState — force the Linen save path.
+    syncer_ckpt_config = copy.copy(config)
+    syncer_ckpt_config._flat_config["pure_nnx"] = False
     checkpointing.maybe_save_checkpoint(
-        checkpoint_manager=checkpoint_manager, state=syncer_state, config=config, data_iterator=None, step=step
+        checkpoint_manager=checkpoint_manager, state=syncer_state, config=syncer_ckpt_config, data_iterator=None, step=step
     )
     max_logging.log(f"Syncer: Step {step} sync finished")
 
