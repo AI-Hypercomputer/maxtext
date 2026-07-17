@@ -39,6 +39,7 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
 )
 from maxtext.layers.attention_mla import MLA
+from maxtext.layers.attention_compressed import CompressedAttention
 from maxtext.layers import attention_op
 from maxtext.layers.attention_op import (
     AttentionOp,
@@ -2424,6 +2425,106 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     np.testing.assert_allclose(mask_np[:, s_len], DEFAULT_MASK_VALUE)
     np.testing.assert_allclose(mask_np[:, s_len + 1], 0.0)
     print("Mask logic for uncompressed & compressed attention passed perfectly.")
+
+
+class CompressedAttentionTest(parameterized.TestCase):
+  """Parity and compilation tests for CompressedAttention (DeepSeek-V4)."""
+
+  def setUp(self):
+    super().setUp()
+    if not is_decoupled():
+      jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+
+  @parameterized.named_parameters(
+      {"testcase_name": "csa_ratio4_dot_product", "compress_ratio": 4, "attention_kernel": "dot_product"},
+      {"testcase_name": "hca_ratio128_dot_product", "compress_ratio": 128, "attention_kernel": "dot_product"},
+  )
+  def test_compressed_attention_run(self, compress_ratio, attention_kernel):
+    self._run_compressed_attention(compress_ratio, attention_kernel)
+
+  @parameterized.named_parameters(
+      {"testcase_name": "csa_ratio4_flash", "compress_ratio": 4, "attention_kernel": "flash"},
+      {"testcase_name": "hca_ratio128_flash", "compress_ratio": 128, "attention_kernel": "flash"},
+  )
+  @pytest.mark.tpu_only
+  def test_compressed_attention_flash(self, compress_ratio, attention_kernel):
+    self._run_compressed_attention(compress_ratio, attention_kernel)
+
+  def _run_compressed_attention(self, compress_ratio, attention_kernel):
+    # Setup test config
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test_compressed",
+        "enable_checkpointing": False,
+        "max_target_length": 128,
+        "max_prefill_predict_length": 64,
+        "attention_type": AttentionType.COMPRESSED.value,
+        "head_dim": 128,
+        "q_lora_rank": 256,
+        "kv_lora_rank": 256,
+        "dtype": "float32",
+        "use_tokamax_splash": True,
+        "o_groups": 2,
+        "o_lora_rank": 256,
+        "compressed_rope_max_timescale": 160000,
+        "rope_max_timescale": 10000,
+        "qk_rope_head_dim": 64,
+        "base_num_kv_heads": 1,
+        "base_num_query_heads": 16,
+    }
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **config_arguments,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    batch_size = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    embed_dim = cfg.base_emb_dim
+
+    # Inputs shape: [batch, seq_len, embed_dim]
+    lnx = jax.random.normal(
+        jax.random.PRNGKey(0),
+        shape=(batch_size, seq_len, embed_dim),
+        dtype=jnp.float32,
+    )
+    decoder_positions = jnp.stack(
+        [jnp.arange(seq_len, dtype=jnp.int32) for _ in range(batch_size)]
+    )
+    decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+    # Instantiate CompressedAttention
+    attn = CompressedAttention(
+        config=cfg,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        head_dim=cfg.head_dim,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        mesh=mesh,
+        attention_kernel=attention_kernel,
+        dtype=cfg.dtype,
+        dropout_rate=cfg.dropout_rate,
+        attention_type=AttentionType(cfg.attention_type),
+        q_lora_rank=cfg.q_lora_rank,
+        compress_ratio=compress_ratio,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+
+    # Run forward pass (train mode)
+    output, _ = attn(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertEqual(output.shape, (batch_size, seq_len, embed_dim))
 
 
 if __name__ == "__main__":
