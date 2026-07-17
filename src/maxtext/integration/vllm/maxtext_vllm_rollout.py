@@ -38,17 +38,20 @@ from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO
 
 def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
   """Instantiate the converter for a MaxText model name."""
-  # Convert model_name to the key used in _MODEL_TO_CONVERSION_RULES
-  if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b"}:
-    key = "qwen3_moe"
-  elif model_name in {"qwen3.5-35b-a3b"}:
-    key = "qwen3.5_moe"
-  elif model_name.startswith("qwen3-"):
-    key = "qwen3"
-  else:
-    key = model_name
-
-  return WeightConverter(rules=_MODEL_TO_CONVERSION_RULES.get(key, []))
+  if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b", "qwen3.5-35b-a3b"} or model_name.startswith("qwen3-"):
+    tp = getattr(config, 'rollout_tensor_parallelism', 1)
+    if hasattr(config, 'rollout_tensor_parallelism'):
+      tp = config.rollout_tensor_parallelism
+    elif hasattr(config, 'tensor_parallelism'):
+      tp = config.tensor_parallelism
+    elif hasattr(config, 'ici_tensor_parallelism'):
+      tp = config.ici_tensor_parallelism
+    # Use empty rules to omit HuggingFace renaming. The dynamic crawler inside 
+    # WeightConverter will perfectly map MaxText to MaxText and trigger MoE fusion!
+    return WeightConverter(rules=[], tp=tp)
+  
+  # For all other models, return None to fallback to git main/master branch behaviors
+  return None
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
@@ -92,6 +95,16 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         model=rollout_actor,
         backend="vllm_jax",
     )
+    
+    # Safely extract and parse vllm_additional_config from maxtext_config
+    additional_config = rollout_config.rollout_vllm_additional_config
+    if not additional_config and hasattr(maxtext_config, 'vllm_additional_config'):
+        if type(maxtext_config.vllm_additional_config).__name__ == "DictConfig":
+            from omegaconf import OmegaConf
+            additional_config = OmegaConf.to_container(maxtext_config.vllm_additional_config, resolve=True)
+        elif isinstance(maxtext_config.vllm_additional_config, dict):
+            additional_config = maxtext_config.vllm_additional_config
+
     self._sampler = VllmSampler(
         tokenizer=tokenizer,
         config=VllmConfig(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
@@ -105,12 +118,17 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
+            additional_config=additional_config,  # <-- Fix: Pass the safely parsed config!
             engine_kwargs={
-                "max_model_len": cache_config_or_size,
                 "model": rollout_config.rollout_vllm_model_version,
-                # Async scheduling causes KeyError in dp_scheduler on slow models
-                # (30B+) where inference latency exceeds the scheduler's window.
+                "max_model_len": cache_config_or_size,
                 "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
+                "max_num_batched_tokens": getattr(rollout_config, "rollout_vllm_max_num_batched_tokens", None),
+                "max_num_seqs": getattr(rollout_config, "rollout_vllm_max_num_seqs", None),
+                "hf_config_path": getattr(rollout_config, "rollout_vllm_hf_config_path", None),
+                "max_logprobs": 1,
+                "logprobs_mode": getattr(rollout_config, "rollout_vllm_logprobs_mode", "processed_logprobs"),
+                **rollout_config.rollout_vllm_kwargs,
             },
         ),
         converter=converter,
