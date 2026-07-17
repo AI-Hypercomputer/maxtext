@@ -136,7 +136,7 @@ This configuration manages a `multi-tiered checkpointing` system designed for bo
 
 | Flag                                               | Description                                                                                                                                                                                                      | Type      | Default |
 | :------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------- | :------ |
-| `enable_checkpointing`                             | A master switch to enable (`True`) or disable (`False`) saving checkpoints during the training run.                                                                                                              | `boolean` | `False` |
+| `enable_checkpointing`                             | A master switch to enable (`True`) or disable (`False`) saving checkpoints during the training run.                                                                                                              | `boolean` | `True`  |
 | `enable_multi_tier_checkpointing`                  | When set to (`True`), this flag enables the multi-tier checkpointing feature on maxtext level.                                                                                                                   | `boolean` | `False` |
 | `local_checkpoint_directory`                       | The high-speed local filesystem path(i.e. ramdisk) where **Multi-tier checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the Multi-tier Checkpointing feature. | `string`  | `""`    |
 | `local_checkpoint_period`                          | The interval, in training steps, for how often a **Multi-tier checkpoint** is saved in local ramdisks.                                                                                                           | `integer` | `0`     |
@@ -187,4 +187,74 @@ The flags below would give the user access to the ramdisk in their workload:
    --ramdisk-directory=${RAMDISK_DIRECTORY?} \
    --mtc-enabled  \
    --command "python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PEROID?} enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=/${RAMDISK_DIRECTORY?} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN?}"
+   ```
+
+## Deploying MTC on Pathways using Cluster Toolkit
+
+To run a Pathways workload with Multi-Tier Checkpointing, use Cluster Toolkit with an MTC-enabled GKE cluster. The following Cluster Toolkit flags enable MTC for the workload:
+
+| Flag                                                | Description                                                                                               |
+| :-------------------------------------------------- | :-------------------------------------------------------------------------------------------------------- |
+| `--pathways-mtc-enabled`                            | Configures the MTC service and mounts the ramdisk on the workload pods.                                   |
+| `--pathways-ramdisk-directory=<path>`               | Specifies the ramdisk mount path. This must match the MaxText `local_checkpoint_directory` configuration. |
+| `--pathways-colocated-python-sidecar-image=<image>` | Specifies the Colocated Python sidecar image used for worker-local checkpoint operations.                 |
+
+### Example Cluster Toolkit workload submission
+
+1. **Set up environment variables:**
+
+   ```bash
+   JOB_NAME="<job-name>"
+   COMPUTE_TYPE="<tpu-type>"
+   TOPOLOGY="<tpu-topology>"
+   NUM_SLICES="<number-of-slices>"
+   OUTPUT_PATH="gs://<bucket>"
+   MAXTEXT_IMAGE="<maxtext-head-image>"
+   COLOCATED_PYTHON_IMAGE="<maxtext-colocated-python-image>"
+   MAXTEXT_CONFIG="/deps/src/maxtext/configs/base.yml"
+   RAMDISK_DIRECTORY="/tmp/mtc_checkpoints"
+   LOCAL_CHECKPOINT_PERIOD=10
+   BACKUP_INTERVAL_MINUTES=30
+   TRAINING_ARGS="<model-and-dataset-specific-MaxText-arguments>"
+   OPTIONAL_ELASTICITY_ARGS=""
+   ```
+
+   To enable elastic replica resizing, set `OPTIONAL_ELASTICITY_ARGS` to the appropriate MaxText elasticity flags and configure the corresponding Pathways elastic slice settings. See [Elastic training with Pathways](../../run_maxtext/run_maxtext_elastic_training.md) for configuration details.
+
+   ```{warning}
+   **Use compatible MaxText head and Colocated Python sidecar images.** Pathways MTC uses [Colocated Python](https://docs.jax.dev/en/latest/notebooks/colocated-python.html) for worker-local checkpoint operations. Both images must use compatible MaxText and Orbax revisions and exactly the same `jax` and `jaxlib` versions. Version skew can cause initialization or restore failures.
+   ```
+
+2. **Define the MaxText command:**
+
+   ```bash
+   COMMAND="python3 -m maxtext.trainers.pre_train.train ${MAXTEXT_CONFIG} \
+   ${TRAINING_ARGS} \
+   run_name=${JOB_NAME} \
+   base_output_directory=${OUTPUT_PATH} \
+   num_slices=${NUM_SLICES} \
+   enable_single_controller=True \
+   enable_multi_tier_checkpointing=True \
+   colocated_python_checkpointing=True \
+   local_checkpoint_directory=${RAMDISK_DIRECTORY} \
+   local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD} \
+   multi_tier_checkpointing_backup_interval_minutes=${BACKUP_INTERVAL_MINUTES} \
+   ${OPTIONAL_ELASTICITY_ARGS}"
+   ```
+
+3. **Submit the workload:**
+
+   ```bash
+   ./gcluster job submit \
+     --name="${JOB_NAME}" \
+     --pathways \
+     --compute-type="${COMPUTE_TYPE}" \
+     --topology="${TOPOLOGY}" \
+     --num-slices="${NUM_SLICES}" \
+     --image="${MAXTEXT_IMAGE}" \
+     --pathways-colocated-python-sidecar-image="${COLOCATED_PYTHON_IMAGE}" \
+     --pathways-gcs-location="${OUTPUT_PATH}" \
+     --pathways-mtc-enabled \
+     --pathways-ramdisk-directory="${RAMDISK_DIRECTORY}" \
+     --command="${COMMAND}"
    ```
