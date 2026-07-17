@@ -357,7 +357,19 @@ def preprocessing_pipeline(
       operations.append(input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
     operations.append(grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder))
 
-  if shift and not use_dpo:
+  if config.enable_block_diffusion and not use_dpo:
+    # Masked-diffusion (CFT) corruption for block-diffusion SFT (Fast_dLLM / Diffusion-GR2).
+    # Replaces ShiftData: block-diffusion targets are aligned, not next-token shifted.
+    if packing:
+      raise ValueError("enable_block_diffusion is not supported with packing=True; set packing=False.")
+    operations.append(
+        input_pipeline_utils.BlockDiffusionMasking(
+            bd_size=config.bd_size,
+            mask_id=config.mask_id,
+            axis=1,
+        )
+    )
+  elif shift and not use_dpo:
     operations.append(input_pipeline_utils.ShiftData(ignored_ids=[pad_id, tokenizer.bos_token_id], axis=1))
 
   # Since HuggingFace IterableDataset does not support access through index
