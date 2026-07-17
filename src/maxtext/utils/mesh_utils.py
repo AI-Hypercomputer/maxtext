@@ -12,15 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Mesh utilities for DiLoCo stack/unstack operations across submeshes."""
+"""Mesh utilities for DiLoCo stack operations across submeshes."""
 
 from typing import Any
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 from pathwaysutils.experimental.concatenate_by_mesh_axis import concatenate_by_mesh_axis
-from pathwaysutils.experimental.split_by_mesh_axis import split_by_mesh_axis
 
 
 def partition_mesh_by_diloco_axis(
@@ -54,25 +52,34 @@ def _expand_array_dims_with_mesh(
     axis_name: str,
 ) -> jax.Array:
   """Expands array dimensions by introducing a new dim-1 at index 0 and expanding its mesh."""
-  # TODO: verify the correctness of this function. compare to the g3 implementation.
-  # 1. Expand the array shape natively to prepending a size-1 dimension
-  expanded_x = jnp.expand_dims(x, axis=0)
-
-  # 2. Get original sharding
   sharding = x.sharding
   assert isinstance(sharding, jax.sharding.NamedSharding)
   submesh = sharding.mesh
 
-  # 3. Build expanded mesh (with axis_name of size 1 at the beginning)
   expanded_devices = np.expand_dims(np.array(submesh.devices), axis=0)
   expanded_mesh = jax.sharding.Mesh(expanded_devices, axis_names=(axis_name,) + submesh.axis_names)
-
-  # 4. Build expanded NamedSharding and reshard (metadata-only operation in JAX)
   expanded_sharding = jax.sharding.NamedSharding(
       expanded_mesh, jax.sharding.PartitionSpec(axis_name, *sharding.spec), memory_kind=sharding.memory_kind
   )
 
-  return jax.device_put(expanded_x, expanded_sharding)
+  # Pathways caches all jit-compiled ops (expand_dims, device_put_reshard) keyed by
+  # shape/dtype/sharding WITHOUT layout. Different learner slices or jnp.take outputs
+  # can produce arrays with different layouts (null vs tiled) for the same logical tensor,
+  # causing the cached jit to reject the second layout variant.
+  # Shard-level construction avoids every layout-sensitive jit entirely: np.expand_dims
+  # is a pure-numpy op and make_array_from_single_device_arrays is a metadata operation.
+  local_arrays = [
+      jax.device_put(
+          np.expand_dims(np.asarray(shard.data), axis=0),
+          jax.sharding.SingleDeviceSharding(shard.device),
+      )
+      for shard in x.addressable_shards
+  ]
+  return jax.make_array_from_single_device_arrays(
+      shape=(1,) + x.shape,
+      sharding=expanded_sharding,
+      arrays=local_arrays,
+  )
 
 
 def stack_across_meshes_pytree(trees: list[Any], global_mesh: jax.sharding.Mesh, axis_name: str) -> Any:
@@ -85,27 +92,3 @@ def stack_across_meshes_pytree(trees: list[Any], global_mesh: jax.sharding.Mesh,
 
   # 2. Concatenate along the mesh axis using pathwaysutils
   return concatenate_by_mesh_axis(expanded_trees, mesh_axis=axis_name)
-
-
-def unstack_across_meshes_pytree(
-    global_tree: Any,
-    submeshes: list[jax.sharding.Mesh],
-    axis_name: str,
-) -> list[Any]:
-  """Unstacks/splits a global PyTree into a list of submesh-local PyTrees."""
-  num_replicas = len(submeshes)
-  # 1. Split the global PyTree along the mesh axis using pathwaysutils
-  split_trees = split_by_mesh_axis(global_tree, mesh_axis=axis_name)
-
-  # 2. Squeeze out the leading size-1 axis and reshard each split tree to its submesh
-  def squeeze_and_reshard_tree(tree, submesh):
-    def squeeze_leaf(x):
-      # Squeeze leading size-1 dimension
-      squeezed = x[0]
-      # Reshard to target submesh
-      submesh_sharding = jax.sharding.NamedSharding(submesh, squeezed.sharding.spec)
-      return jax.device_put(squeezed, submesh_sharding)
-
-    return jax.tree_util.tree_map(squeeze_leaf, tree)
-
-  return [squeeze_and_reshard_tree(split_trees[i], submeshes[i]) for i in range(num_replicas)]
