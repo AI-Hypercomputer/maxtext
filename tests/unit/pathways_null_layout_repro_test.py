@@ -42,7 +42,9 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from jax.experimental import colocated_python
 from maxtext.trainers.diloco.fragmenter import FragmentedTreeManipulator
+from maxtext.trainers.diloco.threaded_diloco import _normalize_to_null_layout
 
 
 @unittest.skipUnless(
@@ -65,11 +67,12 @@ class DevicePutNullLayoutRealPathwaysReproTest(unittest.TestCase):
     self.sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec())
 
   def _build_tiled_params(self, value):
-    """Builds a param tree whose arrays come from JIT/XLA (tiled layout on Pathways)."""
+    """Builds a param tree whose arrays come from JIT/XLA on TPU (tiled layout on Pathways)."""
     tiled_arr = jax.jit(
         lambda: jnp.full((self.NUM_LAYERS, self.HIDDEN), value, dtype=jnp.float32),
         out_shardings=self.sharding,
     )()
+    jax.block_until_ready(tiled_arr)
     return {"layers": {"w": tiled_arr}}
 
   def _build_null_params(self, value):
@@ -94,9 +97,35 @@ class DevicePutNullLayoutRealPathwaysReproTest(unittest.TestCase):
     manipulator = self._build_manipulator()
     tiled_params = self._build_tiled_params(1.0)
 
-    # Calling use_null_layout_jit=True directly on an unnormalized tiled array throws
+    # Calling use_null_layout_jit=True directly on an unnormalized tiled TPU array throws
     # the real Pathways layout error: "Layout passed to jit does not match the layout on the respective arg".
     manipulator.get_flat_fragment(tiled_params, fragment_idx=1, use_null_layout_jit=True)
+
+  def test_tpu_tiled_array_device_put_to_colocated_cpu_becomes_null_layout(self):
+    """Proves that when a tiled JAX array on TPU is placed via device_put onto colocated
+    CPU devices with normalization, its layout becomes Null (tiling=None), executing cleanly
+    against null-layout JIT functions without raising any layout mismatch error.
+    """
+    cpu_mesh = colocated_python.colocated_cpu_devices(self.mesh)
+    cpu_sharding = jax.sharding.NamedSharding(cpu_mesh, jax.sharding.PartitionSpec())
+
+    manipulator = self._build_manipulator()
+
+    # 1. Start with a tiled JAX array produced by JIT on TPU mesh
+    tpu_tiled_params = self._build_tiled_params(1.0)
+
+    # 2. Placing that exact TPU JAX array onto colocated CPU devices with null layout normalization
+    # strips the TPU tiled layout and converts it to a Null layout (tiling=None).
+    cpu_params = _normalize_to_null_layout(
+        jax.tree_util.tree_map(lambda x: jax.device_put(x, cpu_sharding), tpu_tiled_params)
+    )
+
+    # 3. The CPU-normalized array now executes cleanly with use_null_layout_jit=True
+    cpu_frag = manipulator.get_flat_fragment(cpu_params, fragment_idx=1, use_null_layout_jit=True)
+    self.assertIn("['layers']['w']", cpu_frag)
+    w = cpu_frag["['layers']['w']"]
+    self.assertEqual(w.shape, (2, self.HIDDEN))
+    self.assertEqual(w.dtype, jnp.float32)
 
   def test_eager_get_flat_fragment_matches_sharding_without_mismatch(self):
     """Verifies that extracting fragments with use_null_layout_jit=False on TPU arrays
