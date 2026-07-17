@@ -1374,18 +1374,19 @@ class Decoder(nn.Module):
         start_idx = scan_length * attention_pattern_length
         remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
 
-      y_and_kv = layer(
-          y,
+      remainder_args = (
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
-          previous_chunk=previous_chunk,
-          slot=slot,
-          bidirectional_mask=bidirectional_mask,
-          kv_cache=remainder_kv,
-          attention_metadata=attention_metadata,
+          slot,
+          None,  # page_state
+          previous_chunk,
+          bidirectional_mask,
+          remainder_kv,
+          attention_metadata,
       )
+      y_and_kv = layer(y, *remainder_args)
 
       if isinstance(y_and_kv, tuple):
         y = y_and_kv[0]
