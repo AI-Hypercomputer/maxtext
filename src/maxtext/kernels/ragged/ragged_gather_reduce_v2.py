@@ -650,8 +650,13 @@ def ragged_gather_reduce(
     Reduced output, ``(input_size // reduce_group_size, hidden_size)``.
   """
   # Step 1: Choose the implementation (TensorCore fallback or SparseCore).
+  # Guard against eager initialization on non-TPU hardware (e.g. during CPU tests).
+  # pltpu.get_tpu_info() expects TPU hardware and will crash if executed on CPU.
+  if enforce_fallback or jax.devices()[0].platform != "tpu":
+    return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
+
   sc_info = pltpu.get_tpu_info().sparse_core
-  if sc_info is None or enforce_fallback:
+  if sc_info is None:
     return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
 
   # For a small {input + output} both likely fit in TensorCore VMEM, where a
