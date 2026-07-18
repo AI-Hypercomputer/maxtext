@@ -770,6 +770,17 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
   def test_document_packing_masking(self, attention_kernel, check_norm=False):
     self._run_e2e_test("heavily_compressed_attention", is_packed=True, attention_kernel=attention_kernel, check_norm=check_norm)
 
+  def test_document_packing_unaligned(self):
+    """Verifies HCA Flash Attention document packing compiles and runs on unaligned sequence bounds."""
+    old_seq_len = self.seq_len
+    # 3968 is divisible by 8 (compress rate) but not by 512 (default block size)
+    self.seq_len = 3968
+    try:
+      self._run_e2e_test("heavily_compressed_attention", is_packed=True, attention_kernel="flash", check_norm=True)
+    finally:
+      self.seq_len = old_seq_len
+
+
   def test_forward_csa_flash_unaligned(self):
     """Verifies CSA Flash Attention compiles and runs on sequence bounds that are not multiples of block sizes."""
     old_seq_len = self.seq_len

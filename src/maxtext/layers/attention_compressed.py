@@ -1053,8 +1053,17 @@ class CompressedAttention(Attention):
       )
 
     # Extend local KV tensors with the compressed blocks
+    decoder_segment_ids_kv = decoder_segment_ids
     if compressed_kv is not None:
       kv = jnp.concatenate([kv, compressed_kv], axis=1)
+
+      if decoder_segment_ids is not None:
+        padding_len = compressed_kv.shape[1]
+        compress_rate = self.compress_ratio
+        usable = padding_len * compress_rate
+        chunked_segment_ids = decoder_segment_ids[:, :usable].reshape((decoder_segment_ids.shape[0], padding_len, compress_rate))
+        compressed_segment_ids = jnp.max(chunked_segment_ids, axis=-1)
+        decoder_segment_ids_kv = jnp.concatenate([decoder_segment_ids, compressed_segment_ids], axis=1)
 
     kv = checkpoint_name(kv, "kv_proj")
 
@@ -1074,9 +1083,19 @@ class CompressedAttention(Attention):
           comp_kv = kv[:, -c_len:]
           comp_kv_padded = jnp.pad(comp_kv, ((0, 0), (pad_kv_total, 0), (0, 0), (0, 0)))
           kv = jnp.concatenate([local_kv, comp_kv_padded], axis=1)
+
+          if decoder_segment_ids_kv is not None:
+            local_seg = decoder_segment_ids_kv[:, :-c_len]
+            comp_seg = decoder_segment_ids_kv[:, -c_len:]
+            comp_seg_padded = jnp.pad(comp_seg, ((0, 0), (pad_kv_total, 0)), constant_values=-1)
+            decoder_segment_ids_kv = jnp.concatenate([local_seg, comp_seg_padded], axis=1)
         else:
           # Fallback: Pad at the end if no compressed blocks exist
           kv = jnp.pad(kv, ((0, 0), (0, pad_kv_total), (0, 0), (0, 0)))
+          if decoder_segment_ids_kv is not None:
+            decoder_segment_ids_kv = jnp.pad(
+                decoder_segment_ids_kv, ((0, 0), (0, pad_kv_total)), constant_values=-1
+            )
 
     # Prepare the mask shape for the underlying AttentionOp
     if compressed_mask is not None:
@@ -1114,6 +1133,7 @@ class CompressedAttention(Attention):
         sinks=self.sinks.value,
         compressed_mask=compressed_mask,
         indexer_mask=indexer_mask,
+        decoder_segment_ids_kv=decoder_segment_ids_kv,
     )
 
     # Reverse RoPE on Values

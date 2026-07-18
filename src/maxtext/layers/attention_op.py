@@ -972,6 +972,7 @@ class AttentionOp(nnx.Module):
       indexer_mask: Array | None = None,
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
+      decoder_segment_ids_kv: Optional[Array] = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1044,6 +1045,7 @@ class AttentionOp(nnx.Module):
             sinks,
             indexer_mask,
             record_max_logits=record_max_logits,
+            decoder_segment_ids_kv=decoder_segment_ids_kv,
         )
         if max_logits is not None:
           self.max_logits = nnx.Intermediate(max_logits)
@@ -1225,6 +1227,7 @@ class AttentionOp(nnx.Module):
       sinks: Array | None = None,
       indexer_mask: Array | None = None,
       record_max_logits: bool = False,
+      decoder_segment_ids_kv: Array | None = None,
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
@@ -1595,7 +1598,8 @@ class AttentionOp(nnx.Module):
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
     value = self._maybe_shard_with_pspec(value, axis_names_kv)
     decoder_segment_ids_q = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
-    decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
+    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+    decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids_kv_in, segment_axis_names_kv)
     sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
     indexer_mask = self._maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
 
@@ -2167,6 +2171,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       slot: Optional[int] = None,
       record_max_logits: bool = False,
+      decoder_segment_ids_kv: Optional[Array] = None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -2201,6 +2206,7 @@ class AttentionOp(nnx.Module):
         record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
+        decoder_segment_ids_kv=decoder_segment_ids_kv,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
