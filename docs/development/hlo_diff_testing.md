@@ -44,9 +44,12 @@ ______________________________________________________________________
 
 When intended architectures transformations alter graph lowering, reference file baselines require updates.
 
-> [!IMPORTANT]\
-> While running the update script locally is not the end of the world, **relying on local execution can cause remote CI tests to fail.**
-> The PR verification pipelines run the tests in a strictly locked GitHub Actions environment. The smallest discrepancies in local library installations will introduce slight backend lowering graph deviations. If your local execution leads to a remote CI check failure, rely on the GitHub Action trigger described below to generate environment-matching baselines.
+```{important}
+
+While running the update script locally is not the end of the world, **relying on local execution can cause remote CI tests to fail.**
+
+The PR verification pipelines run the tests in a strictly locked GitHub Actions environment. The smallest discrepancies in local library installations will introduce slight backend lowering graph deviations. If your local execution leads to a remote CI check failure, rely on the GitHub Action trigger described below to generate environment-matching baselines.
+```
 
 ### Method 1: Run the manual GitHub Action Workflow (Highly Recommended)
 
@@ -66,13 +69,14 @@ Alternatively, you can trigger the remote workflow via terminal CLI execution:
 gh workflow run update_reference_hlo.yml --ref <branch>
 ```
 
-> [!NOTE]
-> A successful run of the manual update workflow will add a new commit to your Pull Request branch. Once complete, you must:
->
-> 1. Pull the new commit from remote.
-> 2. Squash the commits in your branch once again to keep your PR history clean.
-> 3. Push the squashed commit to remote.
-> 4. Retry the `tpu-integration` workflow to verify tests pass on your PR.
+```{note}
+A successful run of the manual update workflow will add a new commit to your Pull Request branch. Once complete, you must:
+
+1. Pull the new commit from remote.
+2. Squash the commits in your branch once again to keep your PR history clean.
+3. Push the squashed commit to remote.
+4. Retry the `tpu-integration` workflow to verify tests pass on your PR.
+```
 
 ### Method 2: Local Execution
 
