@@ -1,0 +1,65 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow runs code quality checks using pre-commit on pull requests.
+
+name: Code Quality
+
+on:
+  workflow_call:
+    inputs:
+      maxtext_sha:
+        description: 'The specific MaxText commit SHA.'
+        required: false
+        type: string
+
+jobs:
+  qa:
+    name: "Static code-quality checkers"
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        ref: ${{ inputs.maxtext_sha || github.sha }}
+
+    - name: Install uv and set the Python version
+      uses: astral-sh/setup-uv@v7
+      with:
+        python-version: '3.12'
+        enable-cache: true
+
+    - name: Set venv
+      run: uv venv --python 3.12 "$GITHUB_WORKSPACE"/venv
+
+    - name: Install `pre-commit`
+      run: . "$GITHUB_WORKSPACE"/venv/bin/activate && uv pip install pre-commit
+
+    - name: Cache pre-commit environments
+      uses: actions/cache@v4
+      with:
+         path: ~/.cache/pre-commit
+         key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+    - name: Run pre-commit checks on just the files that have changed
+      run: |
+        . "$GITHUB_WORKSPACE"/venv/bin/activate
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          git fetch origin "$GITHUB_BASE_REF":"$GITHUB_BASE_REF"
+          git branch "$GITHUB_HEAD_REF"
+          pre-commit run --from-ref "$GITHUB_BASE_REF" --to-ref "$GITHUB_HEAD_REF" --show-diff-on-failure
+        else
+          echo "Not a pull request event (${{ github.event_name }}), checking all files."
+          pre-commit run --all-files --show-diff-on-failure
+        fi

@@ -1,0 +1,57 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Model config for Qwen/Qwen3-VL-2B-Instruct
+
+# Core Architectural Parameters
+decoder_block: "qwen3"
+base_emb_dim: 2048
+base_mlp_dim: 6144
+base_num_query_heads: 16
+base_num_kv_heads: 8
+base_num_decoder_layers: 28
+head_dim: 128
+mlp_activations: ["silu", "linear"]
+vocab_size: 151936
+normalization_layer_epsilon: 1.0e-6
+use_qk_norm: true
+logits_via_embedding: true
+normalize_embedding_logits: false
+
+# RoPE Settings
+rope_max_timescale: 5000000
+
+# General Model Settings
+enable_dropout: false
+
+# Vision Encoder Configuration
+vision_encoder_block: "qwen3_vl"
+# Based on HuggingFace AutoConfig for Qwen/Qwen3-VL-2B-Instruct
+use_multimodal: true
+image_size_for_vit: 768
+hidden_size_for_vit: 1024
+intermediate_size_for_vit: 4096
+num_attention_heads_for_vit: 16
+num_hidden_layers_for_vit: 24
+num_channels_for_vit: 3
+patch_size_for_vit: 16
+temporal_patch_size_for_vit: 2
+spatial_merge_size_for_vit: 2
+out_hidden_size_for_vit: 2048
+num_position_embeddings_for_vit: 2304
+deepstack_visual_indexes_for_vit: [5, 11, 17]
+
+# MRoPE Settings
+use_mrope: true
+mrope_section: [24, 20, 20]

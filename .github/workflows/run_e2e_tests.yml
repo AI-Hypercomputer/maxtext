@@ -1,0 +1,78 @@
+# Copyright 2023-2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow will trigger the MaxText E2E Airflow DAG to run the E2E tests.
+
+name: MaxText E2E Airflow Tests
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: 'Build mode: stable or nightly'
+        required: true
+        type: string
+      run_id:
+        description: 'GitHub workflow run_id to be passed to the Airflow DAG run.'
+        required: true
+        type: string
+      maxtext_sha:
+        description: 'GitHub SHA of MaxText to be passed to the Airflow DAG run.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  e2e_airflow_tests:
+    name: E2E Airflow Tests
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    steps:
+      - name: Get Airflow URI
+        id: info
+        run: |
+          AIRFLOW_URI=$(gcloud composer environments describe ml-automation-solutions \
+            --location us-central1 \
+            --project cloud-ml-auto-solutions \
+            --format "value(config.airflowUri)")
+          echo "airflow_uri=${AIRFLOW_URI}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger DAG
+        run: |
+          IAP_TOKEN=$(gcloud auth print-access-token)
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ steps.info.outputs.airflow_uri }}/api/v1/dags/maxtext_e2e_tests/dagRuns" \
+            -H "Authorization: Bearer ${IAP_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"conf\": {
+                \"build_mode\": \"${{ inputs.mode }}\",
+                \"maxtext_sha\": \"${{ inputs.maxtext_sha }}\",
+                \"github_run_id\": \"${{ inputs.run_id }}\",
+                \"github_repo\": \"${{ github.repository }}\",
+                \"github_callback_token\": \"${{ secrets.AIRFLOW_CALLBACK_TOKEN }}\"
+              }
+            }")
+
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "Response body: ${BODY}"
+
+          if [ "${HTTP_STATUS}" -lt 200 ] || [ "${HTTP_STATUS}" -ge 300 ]; then
+            echo "Error: Airflow API returned HTTP ${HTTP_STATUS}"
+            exit 1
+          fi

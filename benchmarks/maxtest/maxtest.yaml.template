@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: headless-svc-${JOB_NAME}
+spec:
+  clusterIP: None
+  selector:
+    job-name: ${JOB_NAME}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+spec:
+  backoffLimit: 0
+  completions: ${COMPLETIONS}
+  parallelism: ${COMPLETIONS}
+  completionMode: Indexed
+  template:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: ${NODEPOOL}
+        cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
+        cloud.google.com/gke-tpu-accelerator: ${TPU_ACCELERATOR}
+      hostNetwork: false
+      subdomain: headless-svc-${JOB_NAME}
+      restartPolicy: Never
+      containers:
+      - name: tpu-job
+        image: ${DOCKER_IMAGE}
+        ports:
+        - containerPort: 8471
+        - containerPort: 8431
+        securityContext:
+          privileged: true
+        env:
+        command:
+        - bash
+        - -c
+        - |
+          printenv
+          _sigterm() (kill -SIGTERM $! 2>/dev/null;);
+          trap _sigterm SIGTERM;
+
+          (export TPU_STDERR_LOG_LEVEL=0 && export TPU_MIN_LOG_LEVEL=0 && export TF_CPP_MIN_LOG_LEVEL=0 && echo LIBTPU_INIT_ARGS='$LIBTPU_ARGS' && export LIBTPU_INIT_ARGS='$LIBTPU_ARGS' && python3 -m benchmarks.benchmark_runner healthscan --device_type=$TPU_ACCELERATOR_TYPE --base_output_directory=gke-healthscan-output --num_steps=5) & PID=$1;
+
+          while kill -0 $PID 2>/dev/null;
+              do sleep 5;
+          done;
+          wait $PID;
+          EXIT_CODE=$?;
+
+          echo Job End: $(date);
+          echo EXIT_CODE=$EXIT_CODE;
+
+           if [ "$EXIT_CODE" = 143 ]; then
+            exit $EXIT_CODE
+          fi
+        resources:
+          requests:
+            memory: ${MEMORY_PER_HOST}
+            google.com/tpu: ${TPU_CHIPS_PER_HOST}
+          limits:
+            memory: ${MEMORY_PER_HOST}
+            google.com/tpu: ${TPU_CHIPS_PER_HOST}

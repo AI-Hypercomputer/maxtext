@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling", "hatch-requirements-txt"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/maxtext/__init__.py"
+
+[project]
+name = "maxtext"
+description = "MaxText is a simple, performant and scalable Jax LLM!"
+dynamic = ["version", "optional-dependencies"]
+requires-python = ">=3.12"
+readme = "README.md"
+license = "Apache-2.0"
+keywords = ["llm", "jax", "llama", "mistral", "mixtral", "gemma", "deepseek"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: ML",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+tpu = ["src/dependencies/requirements/generated_requirements/tpu-requirements.txt"]
+tpu-post-train = ["src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt"]
+cuda12 = ["src/dependencies/requirements/generated_requirements/cuda12-requirements.txt"]
+runner = ["src/dependencies/requirements/generated_requirements/runner-requirements.txt"]
+docs = ["src/dependencies/requirements/requirements_docs.txt"]
+
+[project.urls]
+Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
+"Bug Tracker" = "https://github.com/AI-Hypercomputer/maxtext/issues"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/maxtext", "src/dependencies"]
+
+[project.scripts]
+install_tpu_pre_train_extra_deps = "dependencies.scripts.install_pre_train_extra_deps:main"
+install_cuda12_pre_train_extra_deps = "dependencies.scripts.install_pre_train_extra_deps:main"
+install_tpu_post_train_extra_deps = "dependencies.scripts.install_post_train_extra_deps:main"
+build_maxtext_docker_image = "dependencies.scripts.build_maxtext_docker_image:main"
+upload_maxtext_docker_image = "dependencies.scripts.upload_maxtext_docker_image:main"
+run_tutorial = "dependencies.scripts.run_tutorial:main"

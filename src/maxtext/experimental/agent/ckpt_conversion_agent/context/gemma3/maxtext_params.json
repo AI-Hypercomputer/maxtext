@@ -1,0 +1,3383 @@
+{
+  "params-decoder-decoder_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_0-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_0-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_0-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_0-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_0-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_0-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_0-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_0-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_0-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_0-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_0-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_0-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_0-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_1-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_1-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_1-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_1-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_1-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_1-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_1-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_1-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_1-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_1-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_1-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_1-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_1-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_10-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_10-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_10-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_10-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_10-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_10-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_10-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_10-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_10-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_10-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_10-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_10-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_10-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_11-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_11-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_11-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_11-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_11-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_11-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_11-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_11-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_11-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_11-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_11-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_11-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_11-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_12-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_12-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_12-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_12-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_12-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_12-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_12-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_12-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_12-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_12-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_12-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_12-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_12-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_13-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_13-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_13-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_13-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_13-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_13-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_13-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_13-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_13-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_13-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_13-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_13-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_13-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_14-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_14-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_14-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_14-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_14-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_14-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_14-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_14-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_14-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_14-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_14-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_14-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_14-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_15-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_15-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_15-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_15-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_15-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_15-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_15-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_15-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_15-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_15-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_15-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_15-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_15-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_16-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_16-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_16-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_16-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_16-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_16-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_16-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_16-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_16-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_16-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_16-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_16-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_16-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_17-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_17-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_17-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_17-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_17-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_17-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_17-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_17-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_17-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_17-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_17-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_17-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_17-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_18-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_18-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_18-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_18-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_18-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_18-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_18-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_18-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_18-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_18-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_18-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_18-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_18-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_19-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_19-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_19-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_19-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_19-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_19-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_19-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_19-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_19-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_19-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_19-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_19-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_19-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_2-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_2-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_2-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_2-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_2-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_2-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_2-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_2-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_2-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_2-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_2-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_2-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_2-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_20-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_20-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_20-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_20-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_20-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_20-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_20-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_20-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_20-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_20-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_20-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_20-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_20-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_21-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_21-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_21-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_21-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_21-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_21-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_21-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_21-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_21-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_21-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_21-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_21-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_21-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_22-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_22-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_22-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_22-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_22-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_22-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_22-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_22-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_22-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_22-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_22-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_22-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_22-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_23-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_23-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_23-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_23-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_23-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_23-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_23-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_23-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_23-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_23-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_23-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_23-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_23-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_24-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_24-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_24-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_24-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_24-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_24-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_24-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_24-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_24-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_24-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_24-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_24-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_24-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_25-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_25-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_25-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_25-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_25-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_25-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_25-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_25-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_25-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_25-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_25-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_25-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_25-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_26-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_26-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_26-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_26-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_26-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_26-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_26-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_26-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_26-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_26-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_26-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_26-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_26-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_27-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_27-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_27-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_27-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_27-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_27-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_27-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_27-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_27-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_27-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_27-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_27-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_27-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_28-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_28-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_28-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_28-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_28-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_28-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_28-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_28-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_28-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_28-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_28-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_28-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_28-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_29-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_29-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_29-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_29-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_29-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_29-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_29-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_29-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_29-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_29-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_29-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_29-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_29-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_3-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_3-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_3-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_3-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_3-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_3-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_3-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_3-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_3-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_3-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_3-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_3-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_3-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_30-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_30-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_30-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_30-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_30-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_30-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_30-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_30-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_30-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_30-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_30-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_30-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_30-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_31-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_31-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_31-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_31-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_31-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_31-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_31-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_31-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_31-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_31-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_31-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_31-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_31-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_32-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_32-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_32-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_32-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_32-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_32-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_32-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_32-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_32-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_32-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_32-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_32-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_32-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_33-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_33-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_33-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_33-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_33-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_33-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_33-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_33-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_33-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_33-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_33-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_33-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_33-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_4-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_4-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_4-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_4-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_4-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_4-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_4-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_4-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_4-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_4-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_4-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_4-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_4-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_5-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_5-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_5-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_5-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_5-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_5-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_5-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_5-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_5-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_5-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_5-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_5-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_5-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_6-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_6-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_6-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_6-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_6-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_6-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_6-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_6-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_6-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_6-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_6-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_6-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_6-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_7-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_7-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_7-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_7-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_7-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_7-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_7-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_7-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_7-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_7-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_7-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_7-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_7-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_8-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_8-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_8-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_8-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_8-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_8-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_8-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_8-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_8-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_8-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_8-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_8-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_8-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_9-mlp-wi_0-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_9-mlp-wi_1-kernel": [
+    2560,
+    10240
+  ],
+  "params-decoder-layers_9-mlp-wo-kernel": [
+    10240,
+    2560
+  ],
+  "params-decoder-layers_9-post_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_9-post_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_9-pre_ffw_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_9-pre_self_attention_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_9-self_attention-key-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-decoder-layers_9-self_attention-key_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_9-self_attention-out-kernel": [
+    8,
+    256,
+    2560
+  ],
+  "params-decoder-layers_9-self_attention-query-kernel": [
+    2560,
+    8,
+    256
+  ],
+  "params-decoder-layers_9-self_attention-query_norm-scale": [
+    256
+  ],
+  "params-decoder-layers_9-self_attention-value-kernel": [
+    2560,
+    4,
+    256
+  ],
+  "params-token_embedder-embedding": [
+    262144,
+    2560
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_0-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_1-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_10-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_11-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_12-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_13-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_14-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_15-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_16-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_17-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_18-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_19-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_2-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_20-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_21-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_22-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_23-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_24-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_25-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_26-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_3-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_4-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_5-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_6-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_7-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_8-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-LayerNorm_0-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-LayerNorm_0-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-LayerNorm_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-LayerNorm_1-scale": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MlpBlockViT_0-Dense_0-bias": [
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MlpBlockViT_0-Dense_0-kernel": [
+    1152,
+    4304
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MlpBlockViT_0-Dense_1-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MlpBlockViT_0-Dense_1-kernel": [
+    4304,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MultiHeadDotProductAttention_0-key-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MultiHeadDotProductAttention_0-key-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MultiHeadDotProductAttention_0-out-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MultiHeadDotProductAttention_0-out-kernel": [
+    16,
+    72,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MultiHeadDotProductAttention_0-query-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MultiHeadDotProductAttention_0-query-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MultiHeadDotProductAttention_0-value-bias": [
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_9-MultiHeadDotProductAttention_0-value-kernel": [
+    1152,
+    16,
+    72
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-bias": [
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-kernel": [
+    14,
+    14,
+    3,
+    1152
+  ],
+  "params-vision_encoder-Gemma3VisionEncoderLayer_0-pos_embedding": [
+    1,
+    4096,
+    1152
+  ],
+  "params-vision_encoder-VisionEmbedder_0-mm_input_projection-w": [
+    1152,
+    2560
+  ],
+  "params-vision_encoder-VisionEmbedder_0-mm_soft_embedding_norm-scale": [
+    1152
+  ]
+}

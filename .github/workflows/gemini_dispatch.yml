@@ -1,0 +1,227 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow acts as a central dispatcher for handling Gemini-related commands
+# issued via PR comments, review comments, or issue comments.
+# Depending on the command, it routes the request to the appropriate workflow for processing.
+
+name: 'Gemini Dispatch'
+
+on:
+  # Trigger when a comment is added to a specific line of code
+  pull_request_review_comment:
+    types: ['created']
+
+  # Trigger a comment is submitted in review summary box
+  pull_request_review:
+    types: ['submitted']
+
+  # Trigger when a comment is added to the main conversation of a PR/Issue
+  issue_comment:
+    types: ['created']
+
+  # Trigger when any label is attached to the PR
+  pull_request:
+    types: ['labeled']
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  debugger:
+    # Debug mode: with a repository variable called DEBUG to true
+    if: |-
+     ${{ fromJSON(vars.DEBUG || vars.ACTIONS_STEP_DEBUG || false) }}
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Print context for debugging'
+        env:
+          DEBUG_event_name: '${{ github.event_name }}'
+          DEBUG_event__action: '${{ github.event.action }}'
+          DEBUG_event__comment__author_association: '${{ github.event.comment.author_association }}'
+          DEBUG_event__issue__author_association: '${{ github.event.issue.author_association }}'
+          DEBUG_event__pull_request__author_association: '${{ github.event.pull_request.author_association }}'
+          DEBUG_event__review__author_association: '${{ github.event.review.author_association }}'
+          DEBUG_event: '${{ toJSON(github.event) }}'
+        run: |-
+          env | grep '^DEBUG_'
+
+  dispatch:
+    # For PRs: only if not from a fork
+    # For comments: only if user types @gemini-cli and is OWNER/MEMBER/COLLABORATOR
+    if: |-
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.fork == false &&
+        github.event.action == 'labeled' &&
+        (contains(github.event.label.name, 'gemini-review') || contains(github.event.label.name, 'gemini-investigate'))
+      ) || (
+        github.event.sender.type == 'User' &&
+        startsWith(github.event.comment.body || github.event.review.body || github.event.issue.body, '@gemini-cli') &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association || github.event.review.author_association || github.event.issue.author_association)
+      )
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+      issues: 'write'
+      pull-requests: 'write'
+    outputs:
+      command: '${{ steps.extract_command.outputs.command }}'
+      request: '${{ steps.extract_command.outputs.request }}'
+      additional_context: '${{ steps.extract_command.outputs.additional_context }}'
+      failed_run_id: '${{ steps.extract_command.outputs.failed_run_id }}'
+      issue_number: '${{ github.event.pull_request.number || github.event.issue.number }}'
+    steps:
+      - name: 'Mint identity token'
+        id: 'mint_identity_token'
+        if: |-
+          ${{ vars.APP_ID }}
+        uses: 'actions/create-github-app-token@v2'
+        with:
+          app-id: '${{ vars.APP_ID }}'
+          private-key: '${{ secrets.APP_PRIVATE_KEY }}'
+          permission-contents: 'read'
+          permission-issues: 'write'
+          permission-pull-requests: 'write'
+
+      - name: 'Extract command'
+        id: 'extract_command'
+        uses: 'actions/github-script@v8'
+        env:
+          EVENT_TYPE: '${{ github.event_name }}.${{ github.event.action }}'
+          REQUEST: '${{ github.event.comment.body || github.event.review.body || github.event.issue.body }}'
+        with:
+          script: |
+            const eventType = process.env.EVENT_TYPE;
+            const request = (process.env.REQUEST || '').trim();
+            const payload = context.payload;
+            core.setOutput('request', request);
+
+            if (payload.action === 'labeled' && payload.label && payload.label.name.includes('gemini-review')) {
+              core.setOutput('command', 'review');
+            } else if (payload.action === 'labeled' && payload.label && payload.label.name.includes('gemini-investigate')) {
+              core.setOutput('command', 'investigate');
+            } else if (request.startsWith("@gemini-cli /review")) {
+              core.setOutput('command', 'review');
+              core.setOutput('additional_context', '');
+            } else if (request.startsWith("@gemini-cli /investigate")) {
+              core.setOutput('command', 'investigate');
+              const parts = request.split(/\s+/);
+              const failedRunId = parts.length > 2 ? parts[2] : '';
+              core.setOutput('failed_run_id', failedRunId);
+              core.setOutput('additional_context', '');
+            } else if (request.startsWith("@gemini-cli")) {
+              const additionalContext = request.replace(/^@gemini-cli/, '').trim();
+              core.setOutput('command', 'invoke');
+              core.setOutput('additional_context', additionalContext);
+            } else {
+              core.setOutput('command', 'fallthrough');
+            }
+
+      - name: 'Acknowledge request'
+        env:
+          GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          ISSUE_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          MESSAGE: |-
+            🤖 Hi @${{ github.actor }}, I've received your request, and I'm working on it now! You can track my progress [in the logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for more details.
+          REPOSITORY: '${{ github.repository }}'
+        run: |-
+          gh issue comment "${ISSUE_NUMBER}" \
+            --body "${MESSAGE}" \
+            --repo "${REPOSITORY}"
+
+  review:
+    needs: 'dispatch'
+    if: |-
+      ${{ needs.dispatch.outputs.command == 'review' }}
+    uses: './.github/workflows/gemini_review.yml'
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+    with:
+      additional_context: '${{ needs.dispatch.outputs.additional_context }}'
+    secrets: 'inherit'
+
+  invoke:
+    needs: 'dispatch'
+    if: |-
+      ${{ needs.dispatch.outputs.command == 'invoke' }}
+    uses: './.github/workflows/gemini_invoke.yml'
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+    with:
+      additional_context: '${{ needs.dispatch.outputs.additional_context }}'
+    secrets: 'inherit'
+
+  investigate:
+    needs: 'dispatch'
+    if: |-
+      ${{ needs.dispatch.outputs.command == 'investigate' }}
+    uses: './.github/workflows/gemini_investigate.yml'
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+      actions: 'read'
+    with:
+      additional_context: '${{ needs.dispatch.outputs.additional_context }}'
+      failed_run_id: '${{ needs.dispatch.outputs.failed_run_id }}'
+    secrets: 'inherit'
+
+  fallthrough:
+    needs:
+      - 'dispatch'
+      - 'review'
+      - 'invoke'
+      - 'investigate'
+    if: |-
+      ${{ always() && !cancelled() && (failure() || needs.dispatch.outputs.command == 'fallthrough') }}
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+      issues: 'write'
+      pull-requests: 'write'
+    steps:
+      - name: 'Mint identity token'
+        id: 'mint_identity_token'
+        if: |-
+          ${{ vars.APP_ID }}
+        uses: 'actions/create-github-app-token@v2'
+        with:
+          app-id: '${{ vars.APP_ID }}'
+          private-key: '${{ secrets.APP_PRIVATE_KEY }}'
+          permission-contents: 'read'
+          permission-issues: 'write'
+          permission-pull-requests: 'write'
+
+      - name: 'Send failure comment'
+        env:
+          GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          ISSUE_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          MESSAGE: |-
+            🤖 I'm sorry @${{ github.actor }}, but I was unable to process your request. Please [see the logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for more details.
+          REPOSITORY: '${{ github.repository }}'
+        run: |-
+          gh issue comment "${ISSUE_NUMBER}" \
+            --body "${MESSAGE}" \
+            --repo "${REPOSITORY}"

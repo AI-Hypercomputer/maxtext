@@ -1,0 +1,132 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow automatically adds a "pull ready" label to a PR
+# when it has received at least 2 approving reviews and all checks have passed.
+# It runs on pull request review events, workflow run completion events for the "MaxText Package Tests" workflow,
+# and can also be triggered manually via workflow dispatch.
+
+name: Add Pull Ready Label
+
+on:
+  workflow_run:
+    workflows: ["MaxText Package Tests"]
+    types: [completed]
+  pull_request_review:
+  pull_request_review_comment:
+  workflow_dispatch:
+
+jobs:
+  AddPullReady:
+    permissions:
+      checks: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Add Pull Request Label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let pull_number = -1
+            if (context.payload.pull_request !== undefined) {
+              pull_number = context.payload.pull_request.number
+            } else if (context.payload.workflow_run !== undefined) {
+              if (context.payload.workflow_run.pull_requests.length === 0) {
+                core.setFailed("This workflow is NOT running within a PR's context")
+                return
+              }
+              console.log(context.payload.workflow_run.pull_requests)
+              pull_number = context.payload.workflow_run.pull_requests[0].number
+            } else {
+              core.setFailed("This workflow is running within an invalid context")
+              return
+            }
+
+            const decision_query = `
+              query($owner: String!, $repo: String!, $pull_number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $pull_number) {
+                    reviewDecision # Fetches the overall review status
+                    reviews(last: 100) {
+                      nodes {
+                        state
+                        author { login }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const decision_result = await github.graphql(decision_query, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pull_number
+            });
+
+            const pullRequest = decision_result.repository.pullRequest;
+            const uniqueApprovers = new Set(
+              pullRequest.reviews.nodes
+                .filter(r => r.state === 'APPROVED')
+                .map(r => r.author.login)
+            );
+
+            if (pullRequest.reviewDecision !== 'APPROVED' || uniqueApprovers.size < 2) {
+              core.info(`PR is not ready. Decision: ${pullRequest.reviewDecision}, Approvals: ${uniqueApprovers.size}`);
+              return;
+            }
+
+            const commits = await github.rest.pulls.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pull_number,
+              per_page: 100,
+            })
+            // Check that the number of commits in the PR is 1.
+            if (commits.data.length !== 1) {
+              core.setFailed("Not adding pull ready because the PR has more than one commit. Please squash your commits.")
+              return
+            }
+
+            const last_commit_sha = commits.data.slice(-1)[0].sha
+
+            const { data: checkRuns } = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: last_commit_sha,
+            });
+
+            if (checkRuns.check_runs.length === 0) {
+              core.info("Not adding pull ready because no check runs are associated with the last commit: " + last_commit_sha)
+              return
+            }
+
+            for (const checkRun of checkRuns.check_runs) {
+              // Ignore the current running workflow
+              if (checkRun.name.endsWith(context.job)) continue
+
+              if (checkRun.status !== 'completed' || !['success', 'skipped'].includes(checkRun.conclusion)) {
+                core.info(`Waiting for check: ${checkRun.name} (Status: ${checkRun.status}, Conclusion: ${checkRun.conclusion})`);
+                return; // Exit without failing
+              }
+            }
+
+            console.log("Adding pull ready label because the PR is approved AND all the check runs have passed")
+            await github.rest.issues.addLabels({
+              issue_number: pull_number,
+              labels: ["pull ready"],
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            })

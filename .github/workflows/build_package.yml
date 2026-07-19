@@ -1,0 +1,70 @@
+# Copyright 2023-2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow builds and uploads MaxText package
+# based on the pyproject.toml at the current github workspace.
+
+name: Build and Upload MaxText Package
+
+on:
+  workflow_call:
+    inputs:
+      device_type:
+        required: true
+        type: string
+      device_name:
+        required: true
+        type: string
+      cloud_runner:
+        required: false
+        type: string
+      maxtext_sha:
+        required: false
+        type: string
+    outputs:
+      maxtext_sha:
+        description: "MaxText short SHA used for the build"
+        value: ${{ jobs.build_and_upload.outputs.maxtext_sha }}
+
+permissions:
+  contents: read
+jobs:
+  build_and_upload:
+    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    container: python:3.12.3-slim-bullseye
+    outputs:
+      maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
+    steps:
+      - name: Checkout MaxText
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.maxtext_sha || github.sha }}
+      - name: Get metadata
+        id: vars
+        shell: bash
+        run: |
+          # MaxText SHA used to build the package
+          MAXTEXT_SHA="${{ inputs.maxtext_sha || github.sha }}"
+          echo "maxtext_sha=${MAXTEXT_SHA}" >> $GITHUB_OUTPUT
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip build uv
+      - name: Build maxtext wheel
+        run: |
+          uv build --wheel
+      - name: Upload the built maxtext wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maxtext-wheel
+          path: dist/*

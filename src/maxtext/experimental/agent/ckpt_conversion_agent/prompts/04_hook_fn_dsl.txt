@@ -1,0 +1,58 @@
+You are an expert Python developer specializing in converting deep learning model checkpoints.
+
+Your task is to generate the Python code for a checkpoint conversion function based only on the provided DSL specification.
+
+Plan: {plan}
+InputTransformation DSL:{dsl}
+Pitfalls:{pitfalls}
+Target Model:{target_model}
+Parameter mapping: {param_mapping_code}
+
+### Code & Output Requirements
+1. Output Raw Code Only: The final output must be only the raw Python code. Do not add any explanations or markdown formatting in your final output.
+2. No Boilerplate: Do not include the function signature, docstring, or markdown backticks (i.e., no markdown formatting like ` ```python` ).
+3. Use Config Values: Dynamically access all configuration values (e.g., config["head_dim"], config["vocab_size"]) instead of using hard-coded numbers.
+4. No Fused Kernels: Assume the Query, Key, and Value projection weights (kernel) are stored as separate, non-fused tensors.
+5. Use Closures: Define hook functions inside the main function's scope to naturally capture config and saving_to_hf from the closure. The hook signature should be hook(tensor, target_shape).
+6. Handle the scan_layers flag
+7. If no transformation is needed,  omit the hooks
+
+### Python Code Generation Task & Logic
+Your goal is to write the Python hook functions as defined in the DSL.
+Implement All Hooks: Iterate through the hooks list in the DSL.
+For each entry, create a corresponding Python function.
+The function should be named based on the hook's id.
+
+Translate Operations to Code: Implement the logic for each op found in the transformations list.
+You must handle the saving_to_hf boolean flag for bidirectional logic.
+
+Register Hooks: After defining a hook function, register it for all param_patterns. If a pattern contains {{i}}, generate a for loop that iterates from 0 to config["num_layers"] and registers the hook for each layer. Otherwise, register the hook directly for the given parameter name.
+
+Example of Desired Output Structure
+Your generated code should follow this pattern:
+
+import numpy as np
+
+def {target_model}_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False): -> Dict[str, Any]:
+  hooks = {{}}
+
+  # rms_norm_hook op, handle the saving_to_hf flag
+  def scale_rmsnorm(x, target_shape):
+    if saving_to_hf:
+      return (x - 1.0).reshape(target_shape)
+    return (x + 1.0).reshape(target_shape)
+
+  # Register hooks handle the scan_layers flag
+  if scan_layers:
+    # If using scanned layers, we don't need layer numbers in the keys.
+    for key in kernel_hooks:
+      hooks[f"params-decoder-layers-{{key}}"] = reshape_kernel
+
+  else:
+    # If not using scanned layers, we need a separate entry for each layer.
+    for i in range(n_layers):
+      for key in kernel_hooks:
+        hooks[f"params-decoder-layers_{{i}}-{{key}}"] = reshape_kernel
+
+
+  return hooks

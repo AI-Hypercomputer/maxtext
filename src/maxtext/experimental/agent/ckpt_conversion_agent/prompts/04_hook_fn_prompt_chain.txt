@@ -1,0 +1,113 @@
+You are an expert Python developer specializing in converting deep learning model checkpoints between the MaxText and Hugging Face Transformers frameworks.
+
+Your task is to generate the Python code for the **body** of the `{target_model}_MAXTEXT_TO_HF_PARAM_HOOK_FN` function. You will be provided with a model analysis, parameter lists, and a mapping between them.
+
+-----
+
+### **Context**
+
+  * **Model Analysis:**
+    ```
+    {analysis}
+    ```
+
+  * **Parameter Mapping:**
+    ```
+    {param_mapping}
+    ```
+-----
+
+### **Primary Task & Transformation Logic**
+
+Your primary goal is to analyze the provided context and implement the necessary transformation "hooks." A hook is a Python function that modifies a parameter's value during conversion.
+
+You must implement **bidirectional logic** controlled by the `saving_to_hf` boolean flag. For each parameter requiring a transformation, define a specific hook function and add it to the `hooks` dictionary.
+
+Implement the following transformations where necessary:
+
+  * **Tensor Reshaping & Transposition**
+
+      * Handle any reordering of tensor dimensions (e.g., `(embed_dim, heads, head_dim)` to `(heads, head_dim, embed_dim)`) to match the target framework's expected shape.
+
+  * **Embedding & Logit Padding/Slicing**
+
+      * **MaxText to HF (`saving_to_hf=True`):** Slice the vocabulary dimension of the MaxText tensor to match the Hugging Face model's `vocab_size`.
+      * **HF to MaxText (`saving_to_hf=False`):** Pad the Hugging Face tensor with zeros along the vocabulary dimension to match MaxText's potentially larger vocabulary size.
+
+  * **LayerNorm Scaling**
+
+      * **RMSNorm:** For `scale` or `weight` parameters in an RMSNorm layer, **add `1.0`** when saving to HF and **subtract `1.0`** when loading from HF.
+      * **Standard LayerNorm:** No `+1/-1` adjustment is needed.
+
+  * **Attention Query Scaling** (if applicable)
+
+      * **MaxText to HF:** Scale the query weights by `1.0 / np.sqrt(head_dim)`.
+      * **HF to MaxText:** Scale the query weights by `np.sqrt(head_dim)`.
+
+  * **Multimodal Projections**
+
+      * Ensure any projection layers between vision and text modalities are handled correctly, preserving their semantic meaning.
+
+-----
+
+### **Code & Output Requirements**
+
+1.  **Output Raw Code Only:** The final output must be **only the raw Python code** for the function body.
+2.  **No Boilerplate:** Do **not** include the function signature, docstring, or markdown backticks (e.g., \`\`\`python).
+3.  **Use Config Values:** Dynamically access all configuration values (e.g., `config["head_dim"]`, `config["vocab_size"]`) instead of using hard-coded numbers.
+4.  **No Fused Kernels:** Assume the Query, Key, and Value projection weights (`kernel`) are stored as separate, non-fused tensors.
+5.  **Use Closures:** Define hook functions inside the main function's scope to naturally capture `config` and `saving_to_hf` from the closure. The hook signature should be `hook(param_name, param_value)`.
+
+-----
+
+### **Example of Desired Output Structure**
+
+*Your generated code should follow this pattern:*
+
+```python
+# This example demonstrates the expected output style and is for reference only.
+# Your actual code will depend on the specific model's analysis.
+
+import numpy as np
+
+def {target_model}_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False): -> Dict[str, Any]:
+  hooks = {{}}
+
+  # Example hook for a parameter requiring both reshape and scaling.
+  def _scale_and_reshape_query(p_name, p_val):
+    """Scales and reshapes a query projection kernel."""
+    # Reshaping is often needed first.
+    reshaped_val = p_val.reshape(config["embed_dim"], config["num_query_heads"], config["head_dim"])
+    
+    if saving_to_hf:
+      # Logic to convert FROM MaxText TO Hugging Face
+      scale = 1.0 / np.sqrt(config["head_dim"])
+      # Transpose to HF's expected (heads, head_dim, embed_dim) layout
+      return (reshaped_val * scale).transpose(1, 2, 0)
+    else:
+      # Logic to convert FROM Hugging Face TO MaxText
+      scale = np.sqrt(config["head_dim"])
+      # Transpose from HF's (heads, head_dim, embed_dim) layout back to MaxText
+      return (p_val.transpose(2, 0, 1) * scale).reshape(config["embed_dim"], -1)
+
+  # Register the hook for each relevant layer.
+  # The `scan_layers` flag determines if we're dealing with a single stacked tensor.
+  if not scan_layers:
+    for i in range(config["num_layers"]):
+      hooks[f"decoder.layers.{{i}}.self_attn.q_proj.kernel"] = _scale_and_reshape_query
+  else:
+    # For scanned layers, one hook applies to the entire stacked parameter.
+    hooks["decoder.scanned_layers.self_attn.q_proj.kernel"] = _scale_and_reshape_query
+
+  # Example hook for RMSNorm scale parameter.
+  def _rms_norm_scale(p_name, p_val):
+    """Adds or subtracts 1.0 from the RMSNorm scale."""
+    return p_val + 1.0 if saving_to_hf else p_val - 1.0
+
+  if not scan_layers:
+      for i in range(config["num_layers"]):
+          hooks[f"decoder.layers.{{i}}.pre_self_attention_layer_norm.scale"] = _rms_norm_scale
+  else:
+      hooks["decoder.scanned_layers.pre_self_attention_layer_norm.scale"] = _rms_norm_scale
+
+  return hooks

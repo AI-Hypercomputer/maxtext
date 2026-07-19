@@ -1,0 +1,150 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow handles Gemini review commands issued via PR comments, review comments, or issue comments.
+
+name: 'Gemini Review'
+
+on:
+  workflow_call:
+    inputs:
+      additional_context:
+        type: 'string'
+        description: 'Any additional context from the request'
+        required: false
+
+concurrency:
+  # any single pull request, only one review runs at a time
+  group: '${{ github.workflow }}-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}'
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  review:
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+    steps:
+      - name: 'Mint identity token'
+        id: 'mint_identity_token'
+        if: |-
+          ${{ vars.APP_ID }}
+        uses: 'actions/create-github-app-token@v2'
+        with:
+          app-id: '${{ vars.APP_ID }}'
+          private-key: '${{ secrets.APP_PRIVATE_KEY }}'
+          permission-contents: 'read'
+          permission-issues: 'write'
+          permission-pull-requests: 'write'
+
+      - name: 'Checkout repository'
+        # downloads the code to be analyzed
+        uses: 'actions/checkout@v6'
+        with:
+          persist-credentials: 'false'
+
+      - name: 'Prepare prompt context'
+        shell: 'bash'
+        run: |-
+          mkdir -p .gemini
+          jq -n \
+            --arg repo "${REPOSITORY}" \
+            --arg pr "${PULL_REQUEST_NUMBER}" \
+            --arg context "${ADDITIONAL_CONTEXT}" \
+            '{repository: $repo, pull_request_number: $pr, additional_context: $context}' > .gemini/context.json
+        env:
+          REPOSITORY: '${{ github.repository }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          ADDITIONAL_CONTEXT: '${{ inputs.additional_context }}'
+
+      - name: 'Run Gemini pull request review'
+        # reviews code with detailed set of instructions for the Gemini
+        uses: 'google-github-actions/run-gemini-cli@v0'
+        id: 'gemini_pr_review'
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+          GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          ISSUE_TITLE: '${{ github.event.pull_request.title || github.event.issue.title }}'
+          ISSUE_BODY: '${{ github.event.pull_request.body || github.event.issue.body }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          REPOSITORY: '${{ github.repository }}'
+          ADDITIONAL_CONTEXT: '${{ inputs.additional_context }}'
+        with:
+          gcp_location: '${{ vars.GOOGLE_CLOUD_LOCATION }}'
+          gcp_project_id: '${{ vars.GOOGLE_CLOUD_PROJECT }}'
+          gcp_service_account: '${{ vars.SERVICE_ACCOUNT_EMAIL }}'
+          gcp_workload_identity_provider: '${{ vars.GCP_WIF_PROVIDER }}'
+          gemini_api_key: '${{ secrets.GEMINI_API_KEY }}'
+          gemini_cli_version: '${{ vars.GEMINI_CLI_VERSION }}'
+          gemini_debug: '${{ fromJSON(vars.DEBUG || vars.ACTIONS_STEP_DEBUG || false) }}'
+          gemini_model: '${{ vars.GEMINI_MODEL }}'
+          google_api_key: '${{ secrets.GOOGLE_API_KEY }}'
+          use_gemini_code_assist: '${{ vars.GOOGLE_GENAI_USE_GCA }}'
+          use_vertex_ai: '${{ vars.GOOGLE_GENAI_USE_VERTEXAI }}'
+          workflow_name: 'gemini-review'
+          settings: |-
+            {
+              "model": {
+                "maxSessionTurns": 25
+              },
+              "telemetry": {
+                "enabled": false,
+                "target": "gcp"
+              },
+              "mcpServers": {
+                "github": {
+                  "command": "docker",
+                  "args": [
+                    "run",
+                    "-i",
+                    "--rm",
+                    "-e",
+                    "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "ghcr.io/github/github-mcp-server:v0.27.0"
+                  ],
+                  "includeTools": [
+                    "add_comment_to_pending_review",
+                    "pull_request_read",
+                    "pull_request_review_write"
+                  ],
+                  "env": {
+                    "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+                  }
+                }
+              },
+              "tools": {
+                "shell": {
+                  "allowEnv": [
+                    "ISSUE_TITLE",
+                    "ISSUE_BODY",
+                    "PULL_REQUEST_NUMBER",
+                    "REPOSITORY",
+                    "ADDITIONAL_CONTEXT"
+                  ],
+                  "allowCommands": ["cat", "echo", "grep", "head", "tail"]
+                }
+              }
+            }
+          extensions: |
+            [
+              "https://github.com/gemini-cli-extensions/code-review"
+            ]
+          prompt: '/gemini-review'

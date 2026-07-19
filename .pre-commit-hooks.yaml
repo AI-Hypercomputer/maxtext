@@ -1,0 +1,40 @@
+- id: codespell
+  name: codespell
+  description: Checks for common misspellings in text files.
+  entry: codespell
+  language: python
+  exclude: '^\.[^/]*(cache|assets|uv|venv)/.*'
+  types: [ text ]
+
+- id: pyink
+  name: pyink
+  description: Run pyink Python code formatter.
+  entry: pyink
+  language: python
+  types:
+    - python
+    - text
+
+# - id: pytype
+#   name: Pytype
+#   description: A static type analyzer for Python code.
+#   entry: pytype
+#   language: system
+#   types: [ python ]
+
+- id: pylint
+  name: pylint
+  description: Checks for errors, enforces a coding standard, looks for code smells.
+  entry: pylint
+  language: system
+  types: [ python ]
+
+# - id: validate-pyproject
+#   name: check toml
+#   description: checks pyproject.toml file
+#   types:
+#     - python
+#     - text
+#     - toml
+#   files: '^pyproject\.toml$'
+#   entry: validate-pyproject

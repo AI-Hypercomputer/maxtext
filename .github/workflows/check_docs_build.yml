@@ -1,0 +1,89 @@
+# Copyright 2023-2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow checks if the documentation build is successful.
+
+name: Check the Documentation Build
+
+on:
+  workflow_call:
+    inputs:
+      maxtext_sha:
+        description: 'The specific MaxText commit SHA.'
+        required: false
+        type: string
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.maxtext_sha || github.sha }}
+
+      - name: Check if only documentation changed
+        id: check
+        run: |
+          # Force build_docs=true for non-pull-request events
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request, enabling docs build."
+            echo "build_docs=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git fetch origin ${GITHUB_BASE_REF}
+          CHANGED_FILES=$(git diff --name-only origin/${GITHUB_BASE_REF}...HEAD)
+
+          # Check for documentation changes
+          if echo "$CHANGED_FILES" | grep -E '\.(md)$|^docs/' > /dev/null; then
+            echo "Documentation files changed, enabling docs build."
+            echo "build_docs=true" >> $GITHUB_OUTPUT
+          else
+            echo "No documentation changes, skipping docs build."
+            echo "build_docs=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install uv and set the Python version
+        if: steps.check.outputs.build_docs == 'true'
+        uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c  # v7.0.0
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Set venv
+        if: steps.check.outputs.build_docs == 'true'
+        run: uv venv --python 3.12 $GITHUB_WORKSPACE/venv
+
+      - name: Install dependencies
+        if: steps.check.outputs.build_docs == 'true'
+        run: . $GITHUB_WORKSPACE/venv/bin/activate && uv pip install -r src/dependencies/requirements/requirements_docs.txt
+
+      - name: Build documentation
+        if: steps.check.outputs.build_docs == 'true'
+        run: |
+          . $GITHUB_WORKSPACE/venv/bin/activate
+          uv pip install -e . --no-deps
+          uv pip install torch
+          # generates the actual website
+          sphinx-build -b html docs docs/_build/html
+        env:
+          JAX_PLATFORMS: cpu
+          CUDA_VISIBLE_DEVICES: ""

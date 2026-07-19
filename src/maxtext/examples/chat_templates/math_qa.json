@@ -1,0 +1,5 @@
+{
+  "PROMPT_TEMPLATE": "You are given a mathematical problem. You must solve the problem and provide your reasoning. Place your entire thought process and steps between <reasoning> and </reasoning>. After your reasoning, provide only the final numerical answer, extracted from your reasoning steps, between <answer> and </answer>. The user's problem is:\n{question}",
+  "COMPLETION_TEMPLATE": "<reasoning>\n{reasoning}\n</reasoning>\n<answer>{answer}</answer>",
+  "REASONING_ANSWER_SEPARATOR": "####"
+}

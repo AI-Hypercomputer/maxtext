@@ -1,0 +1,1593 @@
+{
+  "params-decoder-decoder_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_0-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_0-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_0-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_0-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_0-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_0-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_0-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_0-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_0-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_0-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_0-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_1-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_1-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_1-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_1-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_1-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_1-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_1-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_1-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_1-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_1-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_1-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_10-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_10-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_10-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_10-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_10-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_10-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_10-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_10-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_10-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_10-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_10-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_11-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_11-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_11-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_11-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_11-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_11-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_11-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_11-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_11-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_11-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_11-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_12-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_12-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_12-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_12-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_12-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_12-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_12-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_12-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_12-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_12-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_12-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_13-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_13-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_13-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_13-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_13-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_13-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_13-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_13-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_13-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_13-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_13-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_14-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_14-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_14-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_14-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_14-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_14-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_14-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_14-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_14-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_14-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_14-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_15-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_15-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_15-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_15-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_15-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_15-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_15-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_15-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_15-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_15-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_15-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_16-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_16-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_16-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_16-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_16-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_16-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_16-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_16-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_16-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_16-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_16-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_17-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_17-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_17-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_17-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_17-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_17-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_17-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_17-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_17-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_17-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_17-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_18-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_18-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_18-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_18-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_18-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_18-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_18-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_18-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_18-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_18-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_18-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_19-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_19-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_19-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_19-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_19-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_19-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_19-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_19-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_19-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_19-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_19-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_2-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_2-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_2-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_2-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_2-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_2-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_2-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_2-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_2-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_2-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_2-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_20-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_20-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_20-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_20-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_20-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_20-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_20-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_20-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_20-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_20-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_20-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_21-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_21-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_21-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_21-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_21-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_21-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_21-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_21-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_21-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_21-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_21-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_22-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_22-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_22-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_22-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_22-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_22-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_22-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_22-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_22-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_22-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_22-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_23-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_23-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_23-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_23-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_23-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_23-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_23-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_23-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_23-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_23-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_23-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_24-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_24-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_24-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_24-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_24-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_24-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_24-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_24-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_24-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_24-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_24-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_25-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_25-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_25-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_25-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_25-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_25-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_25-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_25-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_25-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_25-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_25-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_26-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_26-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_26-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_26-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_26-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_26-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_26-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_26-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_26-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_26-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_26-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_27-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_27-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_27-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_27-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_27-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_27-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_27-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_27-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_27-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_27-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_27-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_28-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_28-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_28-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_28-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_28-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_28-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_28-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_28-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_28-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_28-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_28-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_29-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_29-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_29-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_29-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_29-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_29-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_29-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_29-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_29-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_29-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_29-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_3-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_3-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_3-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_3-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_3-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_3-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_3-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_3-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_3-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_3-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_3-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_30-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_30-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_30-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_30-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_30-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_30-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_30-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_30-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_30-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_30-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_30-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_31-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_31-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_31-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_31-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_31-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_31-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_31-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_31-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_31-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_31-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_31-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_32-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_32-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_32-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_32-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_32-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_32-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_32-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_32-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_32-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_32-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_32-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_33-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_33-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_33-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_33-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_33-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_33-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_33-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_33-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_33-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_33-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_33-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_34-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_34-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_34-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_34-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_34-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_34-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_34-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_34-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_34-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_34-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_34-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_35-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_35-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_35-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_35-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_35-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_35-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_35-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_35-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_35-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_35-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_35-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_4-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_4-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_4-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_4-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_4-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_4-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_4-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_4-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_4-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_4-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_4-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_5-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_5-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_5-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_5-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_5-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_5-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_5-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_5-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_5-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_5-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_5-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_6-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_6-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_6-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_6-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_6-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_6-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_6-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_6-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_6-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_6-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_6-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_7-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_7-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_7-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_7-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_7-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_7-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_7-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_7-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_7-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_7-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_7-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_8-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_8-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_8-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_8-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_8-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_8-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_8-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_8-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_8-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_8-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_8-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_9-mlp-wi_0-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_9-mlp-wi_1-kernel": [
+    2560,
+    9728
+  ],
+  "params-decoder-layers_9-mlp-wo-kernel": [
+    9728,
+    2560
+  ],
+  "params-decoder-layers_9-post_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_9-pre_self_attention_layer_norm-scale": [
+    2560
+  ],
+  "params-decoder-layers_9-self_attention-key-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-decoder-layers_9-self_attention-key_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_9-self_attention-out-kernel": [
+    32,
+    128,
+    2560
+  ],
+  "params-decoder-layers_9-self_attention-query-kernel": [
+    2560,
+    32,
+    128
+  ],
+  "params-decoder-layers_9-self_attention-query_norm-scale": [
+    128
+  ],
+  "params-decoder-layers_9-self_attention-value-kernel": [
+    2560,
+    8,
+    128
+  ],
+  "params-token_embedder-embedding": [
+    151936,
+    2560
+  ]
+}

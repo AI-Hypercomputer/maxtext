@@ -1,0 +1,94 @@
+# Copyright 2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow acts as the final gate in the CI/CD pipeline for MaxText Docker images.
+# Triggered by: Airflow DAG completion (repository_dispatch)
+# 1. Validates the result of the triggered Airflow DAG (E2E tests).
+# 2. If the DAG succeeded, it promotes the Docker images by tagging the artifact with the latest tag.
+
+name: Promote MaxText Docker Image
+
+on:
+  repository_dispatch:
+    types: [airflow-dag-complete]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  handle_result:
+    name: Handle Airflow DAG Result
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report DAG result
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE: ${{ github.event.client_payload.state }}
+          DAG_ID: ${{ github.event.client_payload.dag_id }}
+          DAG_RUN_ID: ${{ github.event.client_payload.dag_run_id }}
+          SHA: ${{ github.event.client_payload.sha }}
+          GITHUB_RUN_ID: ${{ github.event.client_payload.github_run_id }}
+        run: |
+          echo "================================"
+          echo "Github Run ID: ${GITHUB_RUN_ID}"
+          echo "DAG ID:        ${DAG_ID}"
+          echo "DAG Run ID:    ${DAG_RUN_ID}"
+          echo "Commit SHA:    ${SHA}"
+          echo "State:         ${STATE}"
+          echo "================================"
+
+          case "$STATE" in
+            success) echo "E2E tests PASSED." ;;
+            failed|upstream_failed) echo "E2E tests FAILED."; exit 1 ;;
+            *) echo "DAG ended with unexpected state: ${STATE}"; exit 1 ;;
+          esac
+
+          if [ -n "$GITHUB_RUN_ID" ]; then
+            echo "Checking nightly build status for run: $GITHUB_RUN_ID"
+            gh run watch "$GITHUB_RUN_ID" --exit-status --interval 60 --repo "$GITHUB_REPOSITORY"
+          else
+            echo "Error: No Github Run ID provided. Cannot verify nightly build status."
+            exit 1
+          fi
+
+  tag_docker_image:
+    name: Promote ${{ matrix.image_name }} Docker Image
+    needs: handle_result
+    if: needs.handle_result.result == 'success'
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        image_name:
+          - maxtext_jax_nightly
+          - maxtext_gpu_jax_nightly
+          - maxtext_post_training_nightly
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+      - name: Add tags to Docker image
+        shell: bash
+        env:
+          GITHUB_RUN_ID: ${{ github.event.client_payload.github_run_id }}
+        run: |
+          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${{ matrix.image_name }}"
+
+          # Add the traceability tag to confirm it passed validation suite
+          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
+            "${SOURCE_IMAGE}:verified-${GITHUB_RUN_ID}" --quiet
+
+          # Add "latest" tag
+          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" "${SOURCE_IMAGE}:latest" --quiet

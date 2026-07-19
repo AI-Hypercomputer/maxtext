@@ -1,0 +1,8 @@
+extends: relaxed
+rules:
+  line-length: disable
+  comments: disable
+  indentation: disable
+  commas: disable
+  colons: disable
+  empty-lines: disable

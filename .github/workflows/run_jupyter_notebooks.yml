@@ -1,0 +1,136 @@
+# Copyright 2023-2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow runs jupyter notebooks against the built MaxText package.
+
+name: Run Jupyter Notebooks
+
+on:
+  workflow_call:
+    inputs:
+      device_type:
+        required: true
+        type: string
+      device_name:
+        required: true
+        type: string
+      base_image:
+        required: true
+        type: string
+      cloud_runner:
+        required: false
+        type: string
+      maxtext_sha:
+        required: false
+        type: string
+      # Flag to skip source checkout and wheel installation
+      maxtext_installed:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      HF_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    container:
+      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }}
+      env:
+        VLLM_TARGET_DEVICE: "tpu"
+        UV_TORCH_BACKEND: "cpu"
+    steps:
+      - name: Checkout MaxText
+        if: ${{ !inputs.maxtext_installed }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.maxtext_sha }}
+      - name: Download the MaxText wheel
+        if: ${{ !inputs.maxtext_installed }}
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: maxtext-wheel
+      - name: Install MaxText and Dependencies
+        if: ${{ !inputs.maxtext_installed }}
+        shell: bash
+        run: |
+          # 1. Create virtual environment
+          python3 -m uv venv --seed
+          source .venv/bin/activate
+          maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
+
+          # 2. Install MaxText package and all the post training dependencies
+          uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
+          install_tpu_post_train_extra_deps
+
+          python3 -m pip freeze
+      - name: Run Post-Training Notebooks
+        shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
+          # TODO: Fix evaluation in sft_qwen3_demo.ipynb and remove this env variable
+          RUN_EVALUATION: "false"
+        run: |
+          if [ "${MAXTEXT_INSTALLED}" == "true" ]; then
+            # Move to the directory where code is baked into the image. See the Dockerfile.
+            # This is necessary because GHA sets an empty workspace by default.
+            cd /deps
+            PYTHON_EXE="python3"
+            PAPERMILL_EXE="papermill"
+          else
+            PYTHON_EXE=".venv/bin/python3"
+            PAPERMILL_EXE=".venv/bin/papermill"
+            source .venv/bin/activate
+          fi
+          export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+          export MAXTEXT_REPO_ROOT=$(pwd)
+          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
+          export MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+
+          # Register maxtext_venv as a selectable kernel in Jupyter
+          $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
+
+          # Run Hugging Face authentication
+          hf auth login --token "$HF_TOKEN"
+
+          for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/*.ipynb; do
+            filename=$(basename "$notebook")
+            if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" || "$filename" == "demo_decoding.ipynb" || "$filename" == "dpo_qwen3_demo.ipynb" ]]; then
+              echo "Skipping $filename"
+              continue
+            fi
+            output_name="${filename%.ipynb}_output.ipynb"
+
+            echo "------------------------------------------------------"
+            echo "Running $filename ..."
+            echo "------------------------------------------------------"
+
+            $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
+
+            # Clean up any checkpoint directories created by the notebook to avoid filling up disk space
+            echo "Post-notebook disk cleanup for $filename ..."
+            rm -rf "$MAXTEXT_PKG_DIR"/*_output
+            rm -rf "$HOME/.cache/huggingface/hub"
+          done
+      - name: Upload Outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notebook-outputs-${{ inputs.device_name }}
+          path: ./*_output.ipynb

@@ -1,0 +1,8 @@
+1. Check the transformation plan for EVERY parameter or parameter group mentioned in "Shared Mapping Patterns" and "One-off Transformations" in analysis. Ignore Unmapped Parameters.
+2. Use Placeholders for Repeated Layers
+
+If all above checks passed, only answer 'yes'
+If no, point out the uncovered parameters
+
+* **Analysis:** {analysis}
+* **Transformation Plan:** `{plan}`

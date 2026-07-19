@@ -1,0 +1,19 @@
+base_config: "base.yml"
+
+run_name: "gpu_train_test"
+# Args coming from the NVIDIA spreadsheet http://shortn/_AhULYn1mX4.
+hardware: "gpu"
+steps: 30
+model_name: "llama2-70b"
+enable_checkpointing: false
+attention: "cudnn_flash_te"
+remat_policy: "full"
+use_iota_embed: true
+scan_layers: true
+dataset_type: "synthetic"
+async_checkpointing: false
+logits_dot_in_fp32: false
+
+per_device_batch_size: 6
+max_target_length: 4096
+max_segments_per_seq: 32

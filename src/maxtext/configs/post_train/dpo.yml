@@ -1,0 +1,33 @@
+base_config: "base.yml"
+
+use_dpo: true
+dpo:
+  algo: 'dpo'
+  orpo_lambda: 0.1
+  dpo_label_smoothing: 0.0
+  dpo_beta: 0.1
+  max_prompt_length: null
+packing: false
+
+per_device_batch_size: 2.0
+steps: 10
+max_target_length: 512
+eval_interval: 5  # test eval once, in the middle of 10 training steps
+eval_steps: 2
+
+# Some reasonable defaults for running DPO without extra config params.
+model_name: "qwen3-0.6b"
+tokenizer_path: "src/maxtext/assets/tokenizers/qwen3-tokenizer"
+tokenizer_type: "huggingface"
+dataset_type: hf
+hf_path: 'Anthropic/hh-rlhf'
+train_data_columns: ['chosen', 'rejected']
+eval_data_columns: ['chosen', 'rejected']
+hf_eval_split: 'test'
+
+gradient_clipping_threshold: 10.0
+learning_rate: 5.0e-7
+
+enable_goodput_recording: false
+monitor_goodput: false
+enable_checkpointing: true

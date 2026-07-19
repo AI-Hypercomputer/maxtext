@@ -1,0 +1,35 @@
+---
+name: Documentation
+description: Suggest improvements to the documentation.
+labels:
+- documentation
+
+body:
+- type: markdown
+  attributes:
+    value: >
+      Issue Type (please use labels): bug / feature request / documentation
+
+      Please provide relevant information for your request. While all information is optional, providing details will help us correctly prioritize the issue.
+
+      Note: if you’re working with a Google account team, please ALSO contact them directly to have an internal tracking bug created for prioritization.
+
+- type: textarea
+  attributes:
+    label: Documentation
+    description: >
+      URL or Section: which feature or part of the repo you’d like better documented ?
+
+      Describe the problem or improvement you’d like.
+
+      Suggested text (optional)
+  validations:
+    required: false
+
+- type: textarea
+  attributes:
+    label: Additional Context
+    description: >
+      Which organization / company / university are you from ?
+  validations:
+    required: false

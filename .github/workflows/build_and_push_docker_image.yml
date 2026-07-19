@@ -1,0 +1,197 @@
+# Copyright 2023-2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow will build and push MaxText Docker image to GCR.
+
+name: Build and Push MaxText Docker Images
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        required: true
+        type: string
+      device:
+        required: true
+        type: string
+      build_mode:
+        required: true
+        type: string
+      dockerfile:
+        required: true
+        type: string
+      maxtext_sha:
+        required: true
+        type: string
+      workflow:
+        required: false
+        type: string
+        default: 'pre-training'
+      include_test_assets:
+        required: false
+        type: boolean
+        default: false
+      run_tests:
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      build_result:
+        description: 'The result of build_and_push job.'
+        value: ${{ jobs.build_and_push.result }}
+    secrets:
+      HF_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  pre_build_check:
+    name: Pre-build Check
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check if build should run
+        id: check
+        shell: bash
+        run: |
+          EVENT_NAME="${{ github.event_name }}"
+          # Default to 'all' if the input is null/empty
+          TARGET_DEVICE="${{ github.event.inputs.target_device || 'all' }}"
+          INPUT_DEVICE="${{ inputs.device }}"
+
+          SHOULD_RUN="false"
+          if [[ "$EVENT_NAME" == "release" || "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "pull_request" ]]; then
+            SHOULD_RUN="true"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$TARGET_DEVICE" == "all" || "$TARGET_DEVICE" == "$INPUT_DEVICE" ]]; then
+              SHOULD_RUN="true"
+            fi
+          fi
+
+          if [[ "$SHOULD_RUN" == "true" ]]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "Building ${{ inputs.image_name }} for device: ${{ inputs.device }} in ${{ inputs.build_mode }} mode."
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "Skipping ${{ inputs.image_name }} build for device: ${{ inputs.device }} in ${{ inputs.build_mode }} mode."
+          fi
+
+  build_and_push:
+    name: Build and Push Docker Image
+    needs: pre_build_check
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    if: needs.pre_build_check.outputs.should_run == 'true'
+    steps:
+      - name: Matrix Debugger
+        run: |
+          echo "device: ${{ inputs.device }}"
+          echo "workflow: ${{ inputs.workflow }}"
+          echo "build_mode: ${{ inputs.build_mode }}"
+          echo "image_name: ${{ inputs.image_name }}"
+          echo "dockerfile: ${{ inputs.dockerfile }}"
+
+      - name: Checkout MaxText
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.maxtext_sha }}
+
+      - name: Mark git repositories as safe
+        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+
+      - name: Set up Docker BuildX
+        uses: docker/setup-buildx-action@v3.11.1
+        with:
+          driver: remote
+          endpoint: tcp://localhost:1234
+
+      - name: Download MaxText wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: maxtext-wheel
+          path: .
+
+      - name: Install uv and set Python version
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Install MaxText wheel
+        shell: bash
+        run: |
+          uv venv --seed
+          source .venv/bin/activate
+          maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
+          uv pip install ${maxtext_wheel}[runner] --resolution=lowest
+
+      - name: Copy tests assets to package directory
+        if: inputs.include_test_assets == true
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          cp -r ${PWD}/tests .venv/lib/python3.12/site-packages/
+          cp ${PWD}/pytest.ini .venv/lib/python3.12/site-packages/
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          context: .
+          file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
+          tags: gcr.io/${{ vars.PROJECT_NAME }}/${{ inputs.image_name }}:${{ github.run_id }}
+          cache-from: type=gha
+          outputs: type=image,compression=zstd,force-compression=true
+          build-args: |
+            DEVICE=${{ inputs.device }}
+            MODE=${{ inputs.build_mode }}
+            WORKFLOW=${{ inputs.workflow }}
+            PACKAGE_DIR=.venv/lib/python3.12/site-packages
+            INCLUDE_TEST_ASSETS=${{ inputs.include_test_assets }}
+
+      - name: Add tags to Docker image
+        shell: bash
+        run: |
+          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${INPUTS_IMAGE_NAME}"
+          TEMP_IMG="${SOURCE_IMAGE}:${{ github.run_id }}"
+
+          # Add date tag
+          IMAGE_DATE="$(date +%Y-%m-%d)"
+          gcloud container images add-tag "${TEMP_IMG}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
+
+          # Convert date to YYYYMMDD format
+          clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
+
+          # Add MaxText tag
+          MAXTEXT_SHA=$(git rev-parse --short HEAD)
+          gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
+        env:
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+
+  run_ci_tests:
+    name: Run Unit and Integration Tests
+    needs: [pre_build_check, build_and_push]
+    if: needs.pre_build_check.outputs.should_run == 'true' && inputs.include_test_assets == true && inputs.run_tests == true
+    uses: ./.github/workflows/run_ci_tests.yml
+    with:
+      image_name: ${{ inputs.image_name }}
+      image_tag: ${{ github.run_id }}
+      device: ${{ inputs.device }}
+      workflow: ${{ inputs.workflow }}
