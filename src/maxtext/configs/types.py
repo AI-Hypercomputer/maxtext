@@ -3409,7 +3409,10 @@ class MaxTextConfig(
       if self.packing:
         raise ValueError("TPU Tokamax ring attention does not support packing yet.")
       if self.context_parallel_load_balance:
-        raise ValueError("TPU Tokamax ring attention does not support context_parallel_load_balance yet.")
+        if context_parallel_size % 2 != 0:
+          raise ValueError("TPU Tokamax ring load balancing requires an even context_parallel_size.")
+        if self.mtp_num_layers > 0:
+          raise ValueError("TPU Tokamax ring attention with context_parallel_load_balance=True does not support MTP.")
       if self.use_ragged_attention:
         raise ValueError("TPU Tokamax ring attention does not support ragged attention.")
       if self.attention_sink:

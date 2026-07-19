@@ -78,6 +78,9 @@ class MaskInfo(NamedTuple):
     q_sequence: A i32[q_sequence_length] NumPy array. When using causal masking,
       this contains the list of indices that correspond to q tokens. For plain
       causal this is just np.arange(q_sequence_length).
+    kv_sequence: A i32[kv_sequence_length] NumPy array. When set, this contains
+      the original-token indices that correspond to KV tokens. For plain causal
+      masks this is left unset and KV indices are derived from physical columns.
   """
 
   mask_next: np.ndarray | jax.Array | None
@@ -87,6 +90,7 @@ class MaskInfo(NamedTuple):
   num_active_blocks: np.ndarray | jax.Array | None
   partial_mask_blocks: np.ndarray | jax.Array | None
   q_sequence: np.ndarray | None
+  kv_sequence: np.ndarray | None
 
 
 def _downcast_to_small_type(array: np.ndarray) -> np.ndarray:
@@ -237,10 +241,17 @@ def _causal_state_grid(
   q_seq_len, kv_seq_len = mask.shape
   q_blocks_count = q_seq_len // q_block_size
   kv_blocks_count = kv_seq_len // kv_block_size
-  q_block_min = np.arange(q_blocks_count, dtype=np.int32) * q_block_size
-  q_block_max = q_block_min + q_block_size - 1
-  kv_block_min = np.arange(kv_blocks_count, dtype=np.int32) * kv_block_size
-  kv_block_max = kv_block_min + kv_block_size - 1
+
+  q_sequence = mask.q_sequence.reshape(q_blocks_count, q_block_size)
+  q_block_min = np.min(q_sequence, axis=1)
+  q_block_max = np.max(q_sequence, axis=1)
+
+  kv_sequence = mask.kv_sequence
+  if kv_sequence is None:
+    kv_sequence = np.arange(kv_seq_len, dtype=np.int32)
+  kv_sequence = kv_sequence.reshape(kv_blocks_count, kv_block_size)
+  kv_block_min = np.min(kv_sequence, axis=1)
+  kv_block_max = np.max(kv_sequence, axis=1)
 
   empty = q_block_max[:, None] + mask.offset < kv_block_min[None, :]
   full = q_block_min[:, None] + mask.offset >= kv_block_max[None, :]
@@ -359,6 +370,7 @@ def _process_dynamic_mask(
       num_active_blocks=num_active_blocks,
       partial_mask_blocks=mask_blocks,
       q_sequence=None,
+      kv_sequence=None,
   )
 
 
@@ -443,9 +455,10 @@ def _process_mask(
   # partial_mask_blocks are left undefined and not used in the kernel.
   if hasattr(mask, "q_sequence") and hasattr(mask, "mask_function"):
     q_sequence = mask.q_sequence
+    kv_sequence = getattr(mask, "kv_sequence", None)
     mask_function = mask.mask_function
   else:
-    q_sequence = mask_function = None
+    q_sequence = kv_sequence = mask_function = None
 
   if isinstance(mask, mask_lib.CausalMask):
     state_grid = _causal_state_grid(mask, q_block_size, kv_block_size)
@@ -462,6 +475,7 @@ def _process_mask(
               num_active_blocks=None,
               partial_mask_blocks=None,
               q_sequence=None,
+              kv_sequence=None,
           ),
           None,
       )
@@ -511,6 +525,7 @@ def _process_mask(
               num_active_blocks=None,
               partial_mask_blocks=None,
               q_sequence=None,
+              kv_sequence=None,
           ),
           None,
       )
@@ -595,6 +610,7 @@ def _process_mask(
           num_active_blocks=num_active_blocks,
           partial_mask_blocks=partial_mask_blocks if mask_function is None else None,
           q_sequence=q_sequence,
+          kv_sequence=kv_sequence,
       ),
       mask_function,
   )
