@@ -310,7 +310,7 @@ class ElasticUtilsTest(parameterized.TestCase):
       def __init__(self):
         self.wait_called = False
 
-      def wait_until_finished(self):
+      def wait(self):
         self.wait_called = True
 
     cm = FakeCheckpointManager()

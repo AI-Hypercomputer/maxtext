@@ -89,7 +89,6 @@ class TestLoadStateIfPossibleNNX(unittest.TestCase):
         checkpoint_manager,
         14,
         _abstract_dropout_state(),
-        lambda leaf: ocp.type_handlers.ArrayRestoreArgs(global_shape=leaf.shape, dtype=leaf.dtype),
     )
     restored = restored.to_pure_dict()
 

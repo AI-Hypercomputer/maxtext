@@ -31,6 +31,7 @@ from typing import Any, Literal, NewType, Optional
 import jax
 from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType
 from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
@@ -347,7 +348,10 @@ class Checkpointing(BaseModel):
       description="Set to True if reading from a saved AQT quantized checkpoint.",
   )
   save_quantized_params_path: PathStr = Field("", description="Path to save params quantized on the fly.")
-  enable_orbax_v1: bool = Field(False, description="Bool flag for enabling Orbax v1.")
+  # TODO: b/529622681 - Remove deprecated settings.
+  enable_orbax_v1: bool = Field(
+      False, description="DEPRECATED: Orbax v1 is always used for checkpointing; this flag is ignored."
+  )
   checkpoint_conversion_fn: None | str = Field(None, description="Function for processing loaded checkpoint dict.")
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
@@ -2945,6 +2949,13 @@ class MaxTextConfig(
             "WARNING: AQT quantization is deprecated and will be removed in a future release. "
             "Please migrate to Qwix by setting use_qwix_quantization=True."
         )
+
+    # Deprecated no-op: Orbax v1 is now the only checkpointing path.
+    if self.enable_orbax_v1:
+      max_logging.log(
+          "WARNING: enable_orbax_v1 is deprecated and ignored — Orbax v1 is now always used for "
+          "checkpointing. Remove the flag from your config; it will be deleted in a future release."
+      )
 
     # Default quantization sharding count to number of local devices if not set.
     if self.quantization_local_shard_count == -1:

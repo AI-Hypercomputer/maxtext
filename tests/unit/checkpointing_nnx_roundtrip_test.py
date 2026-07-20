@@ -158,7 +158,7 @@ class TestNNXCheckpointRoundTrip(unittest.TestCase):
 
   def _save(self, manager, state, step=1):
     checkpointing.maybe_save_checkpoint(manager, nnx.state(state), _config(), data_iterator=None, step=step)
-    manager.wait_until_finished()
+    checkpointing.wait_until_finished(manager)
 
   def _init_state(self, model_cls, seed=123):
     """A fresh concrete init state (real weights/rng, optimizer zeros) for `model_cls`."""

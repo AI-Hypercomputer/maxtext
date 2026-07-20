@@ -14,8 +14,6 @@
 
 """Unit tests for the checkpointing components."""
 
-import asyncio
-import json
 import os
 from unittest import mock
 
@@ -32,6 +30,7 @@ from maxtext.checkpoint_conversion.utils.tensor_handling import (
     get_hf_loading_function,
 )
 from maxtext.common import checkpointing
+import orbax.checkpoint as ocp_v0
 import numpy as np
 import optax
 import safetensors.numpy
@@ -295,7 +294,6 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
         load_full_state_from_path="",
         checkpoint_storage_concurrent_gb=1,
         abstract_unboxed_pre_state=abstract_state,
-        enable_orbax_v1=True,
         source_checkpoint_layout="safetensors_dynamic",
         maxtext_config=config,
     )
@@ -311,176 +309,119 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
 class CheckpointMetadataTest(parameterized.TestCase):
   """Tests for loading checkpoint custom metadata."""
 
-  @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
-  def test_load_checkpoint_metadata(self, mock_checkpointer_cls):
-    mock_ckptr = mock_checkpointer_cls.return_value
+  @mock.patch.object(checkpointing.ocp, "checkpointables_metadata")
+  def test_load_checkpoint_metadata(self, mock_metadata_fn):
     mock_metadata = mock.MagicMock()
     mock_metadata.custom_metadata = {"lora": {"lora_rank": 8, "lora_alpha": 16.0}}
-    mock_ckptr.metadata.return_value = mock_metadata
+    mock_metadata_fn.return_value = mock_metadata
 
     loaded_metadata = checkpointing.load_checkpoint_metadata("dummy/path")
     self.assertEqual(loaded_metadata.get("lora"), {"lora_rank": 8, "lora_alpha": 16.0})
-    mock_ckptr.metadata.assert_called_once()
+    mock_metadata_fn.assert_called_once()
 
-  @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
-  def test_load_checkpoint_metadata_handles_exceptions(self, mock_checkpointer_cls):
-    mock_ckptr = mock_checkpointer_cls.return_value
-    mock_ckptr.metadata.side_effect = Exception("Checkpoint read error")
+  @mock.patch.object(checkpointing.ocp, "checkpointables_metadata")
+  def test_load_checkpoint_metadata_strips_pytree_suffix(self, mock_metadata_fn):
+    mock_metadata = mock.MagicMock()
+    mock_metadata.custom_metadata = {"scan_layers": True}
+    mock_metadata_fn.return_value = mock_metadata
+
+    loaded_metadata = checkpointing.load_checkpoint_metadata("gs://bucket/ckpt/0/items")
+    self.assertEqual(loaded_metadata, {"scan_layers": True})
+    (called_path,) = mock_metadata_fn.call_args.args
+    self.assertEqual(called_path, epath.Path("gs://bucket/ckpt/0"))
+
+  @mock.patch.object(checkpointing.ocp, "checkpointables_metadata")
+  def test_load_checkpoint_metadata_handles_exceptions(self, mock_metadata_fn):
+    mock_metadata_fn.side_effect = Exception("Checkpoint read error")
 
     loaded_metadata = checkpointing.load_checkpoint_metadata("corrupt/path")
     self.assertEqual(loaded_metadata, {})
-    mock_ckptr.metadata.assert_called_once()
+    mock_metadata_fn.assert_called_once()
 
 
-class GrainCheckpointableEquivalenceTest(parameterized.TestCase):
-  """Tests to ensure GrainCheckpointable is equivalent to GrainCheckpointHandler."""
+class LoadParamsLayoutCompatTest(parameterized.TestCase):
+  """load_params_from_path must read every historical params-checkpoint layout."""
 
   def setUp(self):
     super().setUp()
     self.tmp_dir = epath.Path(self.create_tempdir().full_path)
+    self.params = {"dense": {"kernel": jnp.arange(4.0).reshape(2, 2)}}
+    self.abstract = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), self.params)
 
-  def test_save_restore_equivalence_single_item(self):
-    class FakeIterator:
-      """A fake iterator for testing serialization."""
+  def test_flat_v0_params_checkpoint(self):
+    """v0 save_params_to_path wrote the pytree FLAT at the directory (no items/ subdir)."""
+    path = self.tmp_dir / "quantized"
+    ocp_v0.PyTreeCheckpointer().save(path, {"params": self.params})
 
-      def __init__(self, state=0):
-        self.state = state
+    restored = checkpointing.load_params_from_path(str(path), self.abstract, 8)
 
-      def get_state(self):
-        return json.dumps({"state": self.state}).encode()
+    np.testing.assert_allclose(restored["dense"]["kernel"], self.params["dense"]["kernel"])
 
-      def set_state(self, state):
-        self.state = json.loads(state.decode())["state"]
+  def test_step_root_and_items_suffixed_paths(self):
+    """v1-written step roots load both as the root and as the v0-documented .../items form."""
+    root = self.tmp_dir / "0"
+    checkpointing.save_params_to_path(str(root), self.params)
 
-      def __next__(self):
-        self.state += 1
-        return self.state
+    for path in (str(root), str(root / "items"), str(root / "items") + "/"):
+      restored = checkpointing.load_params_from_path(path, self.abstract, 8)
+      np.testing.assert_allclose(restored["dense"]["kernel"], self.params["dense"]["kernel"])
 
-    iterator_v0 = FakeIterator(10)
-    iterator_v1 = FakeIterator(10)
 
-    step = 100
-    v0_path = self.tmp_dir / str(step) / "iter_v0"
-    v1_path = self.tmp_dir / str(step) / "iter_v1"
+class SaveCheckpointStepExistsTest(parameterized.TestCase):
+  """v0 parity: saving a step that already exists is silently skipped, not fatal."""
 
-    # v0 Save
-    handler = checkpointing.GrainCheckpointHandler()
-    v0_path.mkdir(parents=True, exist_ok=True)
-    handler.save(v0_path, item=iterator_v0)
+  def test_existing_step_returns_false(self):
+    manager = mock.Mock()
+    manager.use_async = False
+    manager.save_checkpointables.side_effect = FileExistsError("step 5 already exists")
 
-    # v1 Save
-    wrapper = checkpointing.GrainCheckpointable(save_args=checkpointing.GrainCheckpointSave(item=iterator_v1))
+    saved = checkpointing.save_checkpoint(manager, 5, {"w": 1})
 
-    class MockDirectory:
-      """Mock directory for testing checkpointing."""
+    self.assertFalse(saved)
 
-      async def await_creation(self):
-        v1_path.mkdir(parents=True, exist_ok=True)
-        return v1_path
+  def test_existing_step_async_returns_false(self):
+    manager = mock.Mock()
+    manager.use_async = True
+    manager.save_checkpointables_async.side_effect = FileExistsError("step 5 already exists")
 
-    commit_func = asyncio.run(wrapper.save(MockDirectory()))
-    if commit_func:
-      asyncio.run(commit_func)
+    saved = checkpointing.save_checkpoint(manager, 5, {"w": 1})
 
-    # Verify files are identical
-    v0_file = v0_path / "process_0-of-1.json"
-    v1_file = v1_path / "process_0-of-1.json"
+    self.assertFalse(saved)
 
-    self.assertTrue(v0_file.exists())
-    self.assertTrue(v1_file.exists())
-    self.assertEqual(v0_file.read_text(), v1_file.read_text())
 
-    # v0 Restore
-    restored_iterator_v0 = FakeIterator(0)
-    args_v0 = checkpointing.GrainCheckpointRestore(item=restored_iterator_v0)
-    handler.restore(v0_path, args=args_v0)
-    self.assertEqual(restored_iterator_v0.state, 10)
+class SaveCheckpointAsyncTest(parameterized.TestCase):
+  """save_checkpoint must honor the manager's use_async flag (v0 async parity)."""
 
-    # v1 Restore
-    restored_iterator_v1 = FakeIterator(0)
-    wrapper_restore = checkpointing.GrainCheckpointable(
-        restore_args=checkpointing.GrainCheckpointRestore(item=restored_iterator_v1)
-    )
+  def test_async_manager_uses_async_save(self):
+    manager = mock.Mock()
+    manager.use_async = True
+    manager.save_checkpointables_async.return_value = mock.Mock()  # AsyncResponse
 
-    load_func = asyncio.run(wrapper_restore.load(v1_path))
-    asyncio.run(load_func)
-    self.assertEqual(restored_iterator_v1.state, 10)
+    saved = checkpointing.save_checkpoint(manager, 5, {"w": 1})
 
-  def test_save_restore_equivalence_list_item(self):
-    class FakeIterator:
-      """A fake iterator for testing serialization."""
+    self.assertTrue(saved)
+    manager.save_checkpointables_async.assert_called_once()
+    manager.save_checkpointables.assert_not_called()
 
-      def __init__(self, state=0):
-        self.state = state
+  def test_async_manager_declined_save_returns_false(self):
+    manager = mock.Mock()
+    manager.use_async = True
+    manager.save_checkpointables_async.return_value = None  # decision policy declined
 
-      def get_state(self):
-        return json.dumps({"state": self.state}).encode()
+    saved = checkpointing.save_checkpoint(manager, 5, {"w": 1})
 
-      def set_state(self, state):
-        self.state = json.loads(state.decode())["state"]
+    self.assertFalse(saved)
 
-    iterator_a = FakeIterator(10)
-    iterator_b = FakeIterator(20)
+  def test_sync_manager_uses_blocking_save(self):
+    manager = mock.Mock()
+    manager.use_async = False
+    manager.save_checkpointables.return_value = True
 
-    item_v0 = [(iterator_a, 0, 2), (iterator_b, 1, 2)]
-    item_v1 = [(iterator_a, 0, 2), (iterator_b, 1, 2)]
+    saved = checkpointing.save_checkpoint(manager, 5, {"w": 1})
 
-    step = 100
-    v0_path = self.tmp_dir / str(step) / "iter_v0"
-    v1_path = self.tmp_dir / str(step) / "iter_v1"
-
-    # v0 Save
-    handler = checkpointing.GrainCheckpointHandler()
-    v0_path.mkdir(parents=True, exist_ok=True)
-    handler.save(v0_path, item=item_v0)
-
-    # v1 Save
-    wrapper = checkpointing.GrainCheckpointable(save_args=checkpointing.GrainCheckpointSave(item=item_v1))
-
-    class MockDirectory:
-      """Mock directory for testing checkpointing."""
-
-      async def await_creation(self):
-        v1_path.mkdir(parents=True, exist_ok=True)
-        return v1_path
-
-    commit_func = asyncio.run(wrapper.save(MockDirectory()))
-    if commit_func:
-      asyncio.run(commit_func)
-
-    # Verify files are identical
-    v0_file_0 = v0_path / "process_0-of-2.json"
-    v1_file_0 = v1_path / "process_0-of-2.json"
-    v0_file_1 = v0_path / "process_1-of-2.json"
-    v1_file_1 = v1_path / "process_1-of-2.json"
-
-    self.assertTrue(v0_file_0.exists())
-    self.assertTrue(v1_file_0.exists())
-    self.assertEqual(v0_file_0.read_text(), v1_file_0.read_text())
-
-    self.assertTrue(v0_file_1.exists())
-    self.assertTrue(v1_file_1.exists())
-    self.assertEqual(v0_file_1.read_text(), v1_file_1.read_text())
-
-    # v0 Restore
-    iterators_restore_v0 = [FakeIterator(0), FakeIterator(0)]
-    args_v0 = checkpointing.GrainCheckpointRestore(item=iterators_restore_v0, process_index=[0, 1], process_count=2)
-    handler.restore(v0_path, args=args_v0)
-
-    self.assertEqual(iterators_restore_v0[0].state, 10)
-    self.assertEqual(iterators_restore_v0[1].state, 20)
-
-    # v1 Restore
-    iterators_restore_v1 = [FakeIterator(0), FakeIterator(0)]
-    wrapper_restore = checkpointing.GrainCheckpointable(
-        restore_args=checkpointing.GrainCheckpointRestore(
-            item=iterators_restore_v1, process_index=[0, 1], process_count=2
-        )
-    )
-    load_func = asyncio.run(wrapper_restore.load(v1_path))
-    asyncio.run(load_func)
-    self.assertEqual(iterators_restore_v1[0].state, 10)
-    self.assertEqual(iterators_restore_v1[1].state, 20)
+    self.assertTrue(saved)
+    manager.save_checkpointables.assert_called_once()
+    manager.save_checkpointables_async.assert_not_called()
 
 
 if __name__ == "__main__":
