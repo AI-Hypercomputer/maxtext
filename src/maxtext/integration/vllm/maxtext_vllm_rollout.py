@@ -38,21 +38,16 @@ from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO
 
 def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
   """Instantiate the converter for a MaxText model name."""
-  if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b", "qwen3.5-35b-a3b"} or model_name.startswith("qwen3-"):
-    tp = getattr(config, 'rollout_tensor_parallelism', 1)
-    if hasattr(config, 'rollout_tensor_parallelism'):
-      tp = config.rollout_tensor_parallelism
-    elif hasattr(config, 'tensor_parallelism'):
-      tp = config.tensor_parallelism
-    elif hasattr(config, 'ici_tensor_parallelism'):
-      tp = config.ici_tensor_parallelism
-    # Use empty rules to omit HuggingFace renaming. The dynamic crawler inside 
-    # WeightConverter will perfectly map MaxText to MaxText and trigger MoE fusion!
-    return WeightConverter(rules=[], tp=tp)
+  tp = config.rollout_tensor_parallelism
+  if model_name in {"qwen3-0.6b"}:
+    rules = _MODEL_TO_CONVERSION_RULES.get("qwen3", [])
+    return WeightConverter(rules=rules, tp=tp)
+  if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b", "qwen3.5-35b-a3b"}:
+    rules = _MODEL_TO_CONVERSION_RULES.get("qwen3_moe", [])
+    return WeightConverter(rules=rules, tp=tp)
   
-  # For all other models, return None to fallback to git main/master branch behaviors
+  # For all other models, return None to fallback to transfer_state_with_mappings()
   return None
-
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
   """VllmRollout that uses VllmSampler with WeightConverter for weight sync.

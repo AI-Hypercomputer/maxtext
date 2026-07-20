@@ -82,8 +82,10 @@ class Transpose(Operation):
         else:
             return jnp.transpose(tensors, self.axes)
 
+# interleaving logic as _make_attn_compute() in qwen3_moe.py
 class FuseQwen3MoEGateUp(Operation):
     def __init__(self, tp: int): 
+        # tp is config.rollout_tensor_parallelism
         self.tp = tp
         
     def __call__(self, tensors):
@@ -109,6 +111,7 @@ class FuseQwen3MoEGateUp(Operation):
         fused = combined.reshape(num_experts, 2 * padded_chunk_size * self.tp, d_model)
         return jnp.transpose(fused, (0, 2, 1))
 
+# logic as _make_fuse_all() in qwen3_moe.py
 class FuseQwen3MoEQKV(Operation):
     def __init__(self, tp: int): 
         self.tp = tp
@@ -124,13 +127,9 @@ class FuseQwen3MoEQKV(Operation):
         k = jnp.transpose(k, (1, 2, 0))
         v = jnp.transpose(v, (1, 2, 0))
 
-        # Use self.tp, but if it doesn't cleanly divide KV heads (e.g. tp=4, KV=2), 
-        # vLLM expects repeating KV heads. However, since MaxText's dummy test 
-        # ran with Self Attention, we must handle it cleanly.
-        # Usually self.tp divides num_kv_heads gracefully, but if not we fallback
-        tp = self.tp
-        if num_kv_heads < tp:
-            tp = num_kv_heads
+        # Attention caps TP to the number of KV Heads
+        # different from moe gate
+        tp = min(self.tp, num_kv_heads)
             
         q_per_tp = num_q_heads // tp
         kv_per_tp = num_kv_heads // tp
@@ -189,6 +188,25 @@ class WeightConverter(abc.ABC):
         self.tp = tp
 
     def convert(self, src_pytree: Any, target_state: Any = None) -> Dict[str, Any]:
+        if target_state is not None:
+            # Attempt to dynamically extract maximum tp from target_state's sharding mesh
+            try:
+                from flax.traverse_util import flatten_dict
+                ts_dict = target_state.to_pure_dict() if hasattr(target_state, "to_pure_dict") else dict(target_state)
+                flat_ts = flatten_dict(ts_dict)
+                max_tp = self.tp
+                for k, v in flat_ts.items():
+                    if hasattr(v, "sharding") and hasattr(v.sharding, "mesh") and hasattr(v.sharding.mesh, "shape"):
+                        mesh_shape = v.sharding.mesh.shape
+                        if "tensor" in mesh_shape:
+                            max_tp = max(max_tp, mesh_shape["tensor"])
+                
+                if max_tp != self.tp:
+                    self.tp = max_tp
+                    print(f"DEBUG: Dynamically extracted tp={self.tp} from target_state sharding max.")
+            except Exception as e:
+                print(f"DEBUG: Failed to extract tp from target_state: {e}")
+
         if hasattr(src_pytree, 'to_pure_dict'):
             src_pytree = src_pytree.to_pure_dict()
             
@@ -220,7 +238,7 @@ class WeightConverter(abc.ABC):
         dst_dict = {}
         
         rules_to_apply = list(self.rules)
-        if target_state is not None:
+        if target_state is not None and not self.rules:
             direct_rules = build_converter_rules(src_pytree, target_state)
             print(f"DEBUG: Generated {len(direct_rules)} direct rules.")
             if len(direct_rules) > 0:
@@ -274,6 +292,7 @@ class WeightConverter(abc.ABC):
                         # Apply operations
                         result = tensors
                         for op in rule.operations:
+                            # inject the correct tp, override the default tp=0
                             if (isinstance(op, FuseQwen3MoEGateUp) or isinstance(op, FuseQwen3MoEQKV)) and op.tp == 0:
                                 op.tp = self.tp
                             result = op(result)
@@ -352,7 +371,7 @@ _MODEL_TO_CONVERSION_RULES = {
                 r"decoder\.layers_(\d+)\.moe_block\.wi_1(?:\.kernel)?"
             ],
             target_pattern="model.layers.{}.mlp.experts.w13_weight",
-            operations=[FuseQwen3MoEGateUp(tp=0)]
+            operations=[FuseQwen3MoEGateUp(tp=0)] # tp is dynamically injected after this
         )
     ]
 }
@@ -364,8 +383,8 @@ def _shapes_are_repeatable(candidate_shape, tgt_shape):
         if s > t or t % s != 0: return False
     return True
 
-# To replace the legacy transfer_state_directly()
-# This is an dynamic automatical tree clawer to compute padding, sharding, or concatenation on-the-fly
+# inspects the shapes to perform routine dimensional adjustments  
+# (padding, repeating, and sharding) dynamically to fit the target mesh
 def build_converter_rules(src_pytree, target_state) -> list:
     # Unwrap Source
     if isinstance(src_pytree, dict) and 'base' in src_pytree:
@@ -467,79 +486,9 @@ def build_converter_rules(src_pytree, target_state) -> list:
                 found_src_tuple = cand
                 break
         
-        # Fallbacks for fused weights
-        src_keys_to_fuse = None
-        if not found_src_tuple and tgt_key_tuple[-1] == 'wi':
-            for cand in candidate_key_tuples:
-                wi_0_cand = tuple(list(cand[:-1]) + ['wi_0'])
-                wi_1_cand = tuple(list(cand[:-1]) + ['wi_1'])
-                if wi_0_cand in src_flat and wi_1_cand in src_flat:
-                    src_keys_to_fuse = [wi_0_cand, wi_1_cand]
-                    break
-        elif not found_src_tuple and tgt_key_tuple[-2:] == ('qkv_proj', 'weight'):
-            for cand in candidate_key_tuples:
-                prefix = list(cand[:-2])
-                wq = tuple(prefix + ['wq', 'kernel'])
-                wk = tuple(prefix + ['wk', 'kernel'])
-                wv = tuple(prefix + ['wv', 'kernel'])
-                if wq in src_flat and wk in src_flat and wv in src_flat:
-                    src_keys_to_fuse = [wq, wk, wv]
-                    break
-        elif not found_src_tuple and tgt_key_tuple[-2:] == ('gate_up_proj', 'weight'):
-            for cand in candidate_key_tuples:
-                prefix = list(cand[:-2])
-                wi_0 = tuple(prefix + ['wi_0', 'kernel'])
-                wi_1 = tuple(prefix + ['wi_1', 'kernel'])
-                if wi_0 in src_flat and wi_1 in src_flat:
-                    src_keys_to_fuse = [wi_0, wi_1]
-                    break
-
         operations = []
         
-        # If we need to fuse
-        if src_keys_to_fuse:
-            src_val_shape = src_flat[src_keys_to_fuse[0]].shape
-            if match_index != -1 and len(src_val_shape) == len(tgt_val.shape) + 1:
-                # Scanned! We slice first!
-                scan_axis = 0 # simple assumption
-                operations.append(SliceAxis(axis=scan_axis, index=layer_idx))
-                src_val_shape = src_val_shape[:scan_axis] + src_val_shape[scan_axis+1:]
-                
-            dim = len(src_val_shape) - 1
-            operations.append(Concatenate(dim=dim))
-            # new shape after concat
-            src_val_shape = list(src_val_shape)
-            src_val_shape[dim] *= len(src_keys_to_fuse)
-            src_val_shape = tuple(src_val_shape)
-            
-            # Align shapes
-            if src_val_shape != tgt_val.shape:
-                mismatches = []
-                for axis, (s, t) in enumerate(zip(src_val_shape, tgt_val.shape)):
-                    if s != t: mismatches.append((axis, s, t))
-                
-                # wi is MoE MLP weight -> pad
-                tgt_sharding = getattr(tgt_val, 'sharding', None)
-                if hasattr(tgt_sharding, 'mesh'):
-                    pad_specs = []
-                    for axis, s, t in mismatches:
-                        n_shards = get_partition_size(get_sharding_spec(tgt_sharding, axis), tgt_sharding.mesh)
-                        pad_specs.append((axis, n_shards, (t - s) // n_shards))
-                    operations.append(InterleavedPadAxes(pad_specs))
-                else:
-                    pad_specs = [(axis, 1, t - s) for axis, s, t in mismatches]
-                    operations.append(PadAxes(pad_specs))
-                    
-            if getattr(src_flat[src_keys_to_fuse[0]], 'dtype', None) != tgt_val.dtype:
-                operations.append(Cast(tgt_val.dtype))
-                
-            rules.append(ExactMultiWeightRule(
-                source_keys=['.'.join(str(k) for k in sk) for sk in src_keys_to_fuse],
-                target_key=tgt_key_str,
-                operations=operations
-            ))
-            
-        elif found_src_tuple:
+        if found_src_tuple:
             src_val = src_flat[found_src_tuple]
             src_shape = src_val.shape
             
