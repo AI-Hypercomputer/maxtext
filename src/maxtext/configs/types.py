@@ -29,7 +29,7 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
@@ -228,6 +228,7 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
+    "deepseek4-tiny",
     "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
@@ -779,6 +780,30 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
   )
+  num_moe_token_chunks: PositiveInt = Field(
+      1,
+      description=(
+          "Number of token chunks for the ring-of-experts MoE pipeline. 1"
+          " disables chunking (identical to baseline). >1 splits the per-shard"
+          " tokens along the sequence dimension so each chunk's EP all-gather /"
+          " reduce-scatter overlaps the previous chunk's GMM compute. Requires"
+          " use_ring_of_experts=True."
+      ),
+  )
+  moe_chunk_barrier: bool = Field(
+      False,
+      description=(
+          "Diagnostic (profiling, not production). When True, chain the chunked"
+          " ring-of-experts MoE loop so each chunk's input is fenced with"
+          " jax.lax.optimization_barrier on the previous chunk's output,"
+          " forcing XLA to run the chunks sequentially (no interleave/fusion)."
+          " Math is unchanged (barrier is identity), so loss stays bit-exact."
+          " Used to test whether the token-AG/RS chunks overlap at all today."
+          " Requires num_moe_token_chunks>1 and use_ring_of_experts=True to have any"
+          " effect."
+      ),
+  )
+
   moe_expert_input_dim: int = Field(
       -1,
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
@@ -879,6 +904,12 @@ class MoEGeneral(BaseModel):
       description="Whether to fuse the expert scaling factors into the expert weights. "
       "This can improve inference performance.",
   )
+
+  @model_validator(mode="after")
+  def validate_moe_chunks(self) -> "MoEGeneral":
+    if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
+      raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
+    return self
 
 
 class MoEKernels(BaseModel):
@@ -2030,6 +2061,10 @@ class MultimodalGeneral(BaseModel):
 
   use_multimodal: bool = Field(False, description="Enable multimodal capabilities.")
   attention_for_vit: str = Field("dot_product", description="The attention algorithm to use for vision encoder.")
+  vision_encoder_block: VisionEncoderBlockType = Field(
+      VisionEncoderBlockType.NONE,
+      description="The style of VisionEncoderBlock to use (e.g., 'gemma3', 'llama4').",
+  )
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
@@ -3593,6 +3628,13 @@ class MaxTextConfig(
         raise ValueError("`num_kv_shared_layers > 0` is not compatible with `fused_qkv`.")
       if self.share_kv_projections:
         raise ValueError("`num_kv_shared_layers > 0` is not compatible with `share_kv_projections`.")
+
+    if self.num_moe_token_chunks > 1:
+      if self.max_target_length % self.num_moe_token_chunks != 0:
+        raise ValueError(
+            f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
+            f"max_target_length={self.max_target_length}."
+        )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {

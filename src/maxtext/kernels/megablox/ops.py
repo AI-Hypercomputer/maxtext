@@ -66,7 +66,7 @@ def gmm(
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
-    interpret: bool = False,
+    interpret: bool | None = None,
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     use_qwix_quantization: bool = False,
@@ -83,6 +83,13 @@ def gmm(
     partial_sum: jnp.ndarray | None = None,
 ):
   """Grouped matrix multiplication operation."""
+  if interpret is None:
+    # Default to native (TPU) lowering. `jax.devices()[0]` is NOT the compile TARGET:
+    # during train_compile the local backend is CPU (JAX_PLATFORMS=cpu) while the mesh
+    # targets tpu7x, and interpret-mode there breaks check_vma (exposes the kernel's
+    # internal dynamic_slice VMA) and balloons HBM temporaries. Callers that genuinely
+    # run off-TPU (e.g. equiv_chunk_test) pass interpret based on their target mesh.
+    interpret = False
   quantization_rule = None
   if use_qwix_quantization:
     # 1. for non-batchsplit, retrieve rule ("gmm") via qwix interception

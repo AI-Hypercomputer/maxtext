@@ -11,13 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# Model config for DeepSeek-V4-Flash 284B (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
+# Test Model config for DeepSeek-V4-Flash 284B (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
 
 base_emb_dim: 4096
 base_num_query_heads: 64
 base_num_kv_heads: 1
-base_num_decoder_layers: 43
+base_num_decoder_layers: 7
 base_mlp_dim: 2048
 base_moe_mlp_dim: 2048
 vocab_size: 129280
@@ -37,25 +36,26 @@ indexer_n_heads: 64
 indexer_topk: 512
 
 # Note: Layers (0, 1, 2) are prefix layers as `first_num_hash_layers=3`.
-# The 44th layer (MTP module with compress_ratio=0) has been explicitly dropped for now.
-# This leaves exactly 43 layers: 3 prefix [0,0,4] + 40 scanned.
+# The 6th layer (MTP module with compress_ratio=0) has been explicitly dropped for now.
+# This leaves exactly 7 layers: 3 prefix [0,0,4] + 4 scanned.
 # `compress_ratio=0` uses sliding window attention. In this case, layer (0, 1).
-compress_ratios: [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4]
+# This is a tiny version of deepseek4 with fewer layers and less experts for debugging.
+compress_ratios: [0, 0, 4, 128, 4, 128, 4]
 
 # --- MoE configuration ---
 mlp_activations: ["silu", "linear"]
-num_experts: 256
-num_experts_per_tok: 6
+num_experts: 8
+num_experts_per_tok: 3
 mlp_activations_limit: 10
 shared_experts: 1
 routed_score_func: "sqrtsoftplus"
-norm_topk_prob: true
 routed_bias: true
 routed_scaling_factor: 1.5
 
 
 # --- Attention configuration ---
 attention_type: 'compressed'
+attention: 'dot_product'
 q_lora_rank: 1024
 o_groups: 8
 o_lora_rank: 1024
@@ -67,3 +67,4 @@ rope_max_timescale: 10000                  # Main RoPE theta
 compressed_rope_max_timescale: 160000      # Compressed RoPE theta
 max_position_embeddings: 1048576
 original_max_position_embeddings: 65536
+
