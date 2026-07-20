@@ -356,6 +356,24 @@ class TestLlama4PostProcessing(unittest.TestCase):
     np.testing.assert_array_equal(merged[0, 0], text_embeddings[0, 0])
     np.testing.assert_array_equal(merged_null[0, 0], text_embeddings[0, 0])
 
+  def test_merge_mm_embeddings_with_token_level_video_mask(self):
+    """A projected-token mask packs only valid padded video embeddings."""
+    text_embeddings = np.arange(1 * 8 * 2, dtype=np.float32).reshape(1, 8, 2)
+    video_embeddings = np.arange(1 * 6 * 2, dtype=np.float32).reshape(1, 6, 2) + 100.0
+    placeholder_mask = np.zeros((1, 8), dtype=np.int32)
+    placeholder_mask[:, 2:5] = 1
+    video_token_mask = np.asarray([[1, 1, 1, 0, 0, 0]], dtype=np.int32)
+
+    merged = mm_utils.merge_mm_embeddings(
+        text_embeddings,
+        video_embeddings,
+        placeholder_mask,
+        video_token_mask,
+    )
+
+    np.testing.assert_array_equal(merged[0, 2:5], video_embeddings[0, :3])
+    np.testing.assert_array_equal(merged[0, 5:], text_embeddings[0, 5:])
+
 
 if __name__ == "__main__":
   unittest.main()

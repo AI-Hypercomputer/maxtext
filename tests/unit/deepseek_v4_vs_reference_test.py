@@ -44,6 +44,7 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4HashRouter as DeepseekV4HashRouter_PT,
     DeepseekV4TopKRouter as DeepseekV4TopKRouter_PT,
     DeepseekV4Experts as DeepseekV4Experts_PT,
+    DeepseekV4HyperHead as DeepseekV4HyperHead_PT,
     apply_rotary_pos_emb as ref_apply_rotary_pos_emb,
 )
 
@@ -1014,6 +1015,567 @@ class DeepSeekV4SwiGLUClampTest(unittest.TestCase):
 
     # Validate that both clamped outputs match identically
     np.testing.assert_allclose(mx_out, pt_out.numpy(), rtol=1e-5, atol=1e-5)
+
+
+
+class DeepSeekV4ProductionMoERouterTest(unittest.TestCase):
+
+  def setUp(self):
+    self.batch_size = 2
+    self.seq_len = 32
+    self.hidden_dim = 4096
+    self.num_experts = 8
+    self.num_experts_per_tok = 3
+    self.vocab_size = 129280
+
+    self.pt_config = DeepseekV4Config(
+        hidden_size=self.hidden_dim,
+        num_local_experts=self.num_experts,
+        num_experts_per_tok=self.num_experts_per_tok,
+        routed_scaling_factor=2.0,
+        scoring_func="sqrtsoftplus",
+        vocab_size=self.vocab_size,
+    )
+
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "base_emb_dim": self.hidden_dim,
+        "num_experts": self.num_experts,
+        "topk_routing_group": self.num_experts_per_tok,
+        "routed_scaling_factor": 2.0,
+        "routed_score_func": "sqrtsoftplus",
+        "routed_bias": True,
+        "n_routing_groups": -1,
+        "vocab_size": self.vocab_size,
+        "first_num_hash_layers": 3,
+        "decoder_block": "deepseek4",
+        "model_name": "deepseek4-284b",
+        "attention": "dot_product",
+        "base_mlp_dim": 256,
+        "base_moe_mlp_dim": 256,
+        "override_model_config": True,
+        "skip_jax_distributed_system": True,
+    }
+    argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
+    self.mx_config = pyconfig.initialize(argv, **config_arguments)
+
+    devices = np.array(jax.devices()[:1])
+    self.mesh = jax.sharding.Mesh(devices, ("tensor",))
+    self.rngs = nnx.Rngs(0)
+
+  def test_hash_router(self):
+    pt_router = DeepseekV4HashRouter_PT(self.pt_config)
+    # Explicitly initialize PyTorch weights since torch.empty leaves garbage in memory,
+    # which causes NaN/Inf drift between PyTorch and MaxText/XLA execution.
+    torch.nn.init.normal_(pt_router.weight, std=0.02)
+
+    # Hash Router operates deterministically based on input_ids via a frozen tid2eid lookup table.
+    # In practice, this table is pre-computed (e.g. by K-Means on the dataset) and loaded statically.
+    # For this parity test, we randomly initialize the lookup table on the PyTorch side
+    # and explicitly sync it to the MaxText side to ensure both routers route the exact same way.
+    pt_tid2eid = torch.randint(0, self.num_experts, (self.vocab_size, self.num_experts_per_tok))
+    pt_router.tid2eid.copy_(pt_tid2eid)
+
+    mx_moe = RoutedMoE(
+        config=self.mx_config,
+        num_experts=self.num_experts,
+        num_experts_per_tok=self.num_experts_per_tok,
+        mesh=self.mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed_moe", "mlp_moe", None),
+        rngs=self.rngs,
+        is_hash_routing=True,  # Hash layer
+    )
+
+    # Sync weights
+    mx_moe.tid2eid.value = jnp.array(pt_router.tid2eid.numpy(), dtype=jnp.float32)
+    mx_moe.gate.kernel.value = jnp.array(pt_router.weight.detach().numpy()).T
+
+    hidden_states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)
+    input_ids = torch.randint(0, self.vocab_size, (self.batch_size, self.seq_len))
+
+    # PT forward
+    _, pt_weights, pt_indices = pt_router(hidden_states, input_ids)
+
+    # MaxText forward
+    gate_logits, pre_bias_logits = mx_moe.gate(jnp.array(hidden_states.numpy()))
+    mx_weights, mx_indices = mx_moe.get_topk(
+        gate_logits, pre_bias_logits, rngs=self.rngs, input_ids=jnp.array(input_ids.numpy())
+    )
+
+    # --- Assertion Logic for Hash Router ---
+    # PyTorch returns flat tensors: (batch * seq_len, top_k)
+    # MaxText returns structured tensors: (batch, seq_len, top_k)
+    # We must explicitly reshape PyTorch outputs to match MaxText's nested sequence structure.
+    pt_indices_reshaped = pt_indices.numpy().reshape(self.batch_size, self.seq_len, -1)
+    pt_weights_reshaped = pt_weights.detach().numpy().reshape(self.batch_size, self.seq_len, -1)
+    weights_max_diff = np.max(np.abs(mx_weights - pt_weights_reshaped))
+    weights_mean_diff = np.mean(np.abs(mx_weights - pt_weights_reshaped))
+    print(
+        f"MOE HASH ROUTER WEIGHTS PARITY - MAX ABS DIFF: {weights_max_diff:.6e}, MEAN ABS DIFF: {weights_mean_diff:.6e}"
+    )
+    np.testing.assert_allclose(mx_indices, pt_indices_reshaped, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(mx_weights, pt_weights_reshaped, rtol=1e-2, atol=1e-2)
+
+  def test_topk_router(self):
+    pt_router = DeepseekV4TopKRouter_PT(self.pt_config)
+
+    # Explicitly initialize PyTorch weights since torch.empty leaves garbage in memory,
+    # which causes NaN/Inf drift between PyTorch and MaxText/XLA execution.
+    torch.nn.init.normal_(pt_router.weight, std=0.02)
+    torch.nn.init.normal_(pt_router.e_score_correction_bias, std=0.02)
+
+    mx_moe = RoutedMoE(
+        config=self.mx_config,
+        num_experts=self.num_experts,
+        num_experts_per_tok=self.num_experts_per_tok,
+        mesh=self.mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed_moe", "mlp_moe", None),
+        rngs=self.rngs,
+        is_hash_routing=False,  # TopK layer
+    )
+
+    # Sync weights
+    mx_moe.gate.kernel.value = jnp.array(pt_router.weight.detach().numpy()).T
+    mx_moe.gate.bias.value = jnp.array(pt_router.e_score_correction_bias.detach().numpy())
+
+    hidden_states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)
+
+    # PT forward
+    _, pt_weights, pt_indices = pt_router(hidden_states)
+
+    # MaxText forward
+    gate_logits, pre_bias_logits = mx_moe.gate(jnp.array(hidden_states.numpy()))
+    mx_weights, mx_indices = mx_moe.get_topk(gate_logits, pre_bias_logits, rngs=self.rngs)
+
+    # --- Assertion Logic for TopK Router ---
+    # PyTorch returns flat tensors: (batch * seq_len, top_k)
+    # MaxText returns structured tensors: (batch, seq_len, top_k)
+    # 1. Reshape PyTorch outputs to match MaxText's nested sequence structure.
+    pt_indices_reshaped = pt_indices.numpy().reshape(self.batch_size, self.seq_len, -1)
+    pt_weights_reshaped = pt_weights.detach().numpy().reshape(self.batch_size, self.seq_len, -1)
+
+    # 2. Sort both by indices so they can be compared directly.
+    # jax.lax.top_k and torch.topk resolve exact-value ties differently.
+    # Because TopK routing weights are summed commutatively during the MoE forward pass,
+    # only the mathematical *set* of selected experts matters, not their strict sorted order.
+    mx_sort_idx = np.argsort(mx_indices, axis=-1)
+    pt_sort_idx = np.argsort(pt_indices_reshaped, axis=-1)
+
+    mx_indices_sorted = np.take_along_axis(np.array(mx_indices), mx_sort_idx, axis=-1)
+    mx_weights_sorted = np.take_along_axis(np.array(mx_weights), mx_sort_idx, axis=-1)
+
+    pt_indices_sorted = np.take_along_axis(pt_indices_reshaped, pt_sort_idx, axis=-1)
+    pt_weights_sorted = np.take_along_axis(pt_weights_reshaped, pt_sort_idx, axis=-1)
+
+    weights_max_diff = np.max(np.abs(mx_weights_sorted - pt_weights_sorted))
+    weights_mean_diff = np.mean(np.abs(mx_weights_sorted - pt_weights_sorted))
+    print(
+        f"MOE TOPK ROUTER WEIGHTS PARITY - MAX ABS DIFF: {weights_max_diff:.6e}, MEAN ABS DIFF: {weights_mean_diff:.6e}"
+    )
+    np.testing.assert_allclose(mx_indices_sorted, pt_indices_sorted, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(mx_weights_sorted, pt_weights_sorted, rtol=1e-2, atol=1e-2)
+
+
+class DeepSeekV4ProductionSwiGLUClampTest(unittest.TestCase):
+
+  def test_swiglu_clamp(self):
+    limit = 10.0
+    pt_config = DeepseekV4Config(
+        hidden_size=4096,
+        num_local_experts=8,
+        num_experts_per_tok=3,
+        intermediate_size=256,
+        swiglu_limit=limit,
+    )
+
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "base_emb_dim": 4096,
+        "num_experts": 8,
+        "topk_routing_group": 3,
+        "mlp_activations_limit": limit,
+        "decoder_block": "deepseek4",
+        "model_name": "deepseek4-284b",
+        "attention": "dot_product",
+        "base_mlp_dim": 256,
+        "base_moe_mlp_dim": 256,
+        "override_model_config": True,
+        "matmul_precision": "highest",
+        "skip_jax_distributed_system": True,
+    }
+    argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
+    mx_config = pyconfig.initialize(argv, **config_arguments)
+
+    pt_experts = DeepseekV4Experts_PT(pt_config)
+
+    devices = np.array(jax.devices()[:1])
+    mesh = jax.sharding.Mesh(devices, ("tensor",))
+    rngs = nnx.Rngs(0)
+
+    mx_moe = RoutedMoE(
+        config=mx_config,
+        num_experts=2,
+        num_experts_per_tok=1,
+        mesh=mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed_moe", "mlp_moe", None),
+        rngs=rngs,
+    )
+
+    # Gate & Up merged matrix in PT
+    gate_up = torch.randn(1, 4, 256 * 2) * 20.0  # Force large values to trigger the clamping mechanism
+
+    # PyTorch reference executes the standard SwiGLU followed by clamping
+    # to self.config.swiglu_limit (which translates to mlp_activations_limit in MaxText)
+    pt_out = pt_experts._apply_gate(gate_up)  # pylint: disable=protected-access
+
+    # In MaxText, the gate and up projections are separated mathematically.
+    # apply_ffn_activation executes the swiglu limit internally during the activation phase.
+    gate, up = gate_up.chunk(2, dim=-1)
+    mx_out = mx_moe.apply_ffn_activation(jnp.array(gate.numpy()), jnp.array(up.numpy()))
+
+    # Validate that both clamped outputs match identically
+    max_diff = np.max(np.abs(mx_out - pt_out.numpy()))
+    mean_diff = np.mean(np.abs(mx_out - pt_out.numpy()))
+    print(f"SWIGLU CLAMP PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
+    np.testing.assert_allclose(mx_out, pt_out.numpy(), rtol=1e-5, atol=1e-5)
+
+
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4DecoderLayer as DeepseekV4DecoderLayer_PT
+from maxtext.models.deepseek4 import DeepSeek4DecoderLayer
+from maxtext.layers.mhc import DeepSeek4HyperHead
+
+
+class DeepSeekV4ConversionMappingTest(unittest.TestCase):
+  """Tests to validate weight conversion mappings from PARAM_MAPPING."""
+
+  def setUp(self):
+    self.batch_size = 2
+    self.seq_len = 32
+    self.hidden_dim = 4096
+    self.num_heads = 64
+    self.head_dim = 512
+    self.q_lora_rank = 1024
+    self.o_groups = 8
+    self.o_lora_rank = 1024
+    self.qk_rope_head_dim = 64
+    self.partial_rotary_factor = self.qk_rope_head_dim / self.head_dim
+    self.vocab_size = 129280
+
+    self.pt_config = DeepseekV4Config(
+        hidden_size=self.hidden_dim,
+        num_attention_heads=self.num_heads,
+        num_key_value_heads=1,
+        head_dim=self.head_dim,
+        q_lora_rank=self.q_lora_rank,
+        kv_lora_rank=self.head_dim,
+        o_groups=self.o_groups,
+        o_lora_rank=self.o_lora_rank,
+        layer_types=[
+            "sliding_attention",
+            "sliding_attention",
+            "compressed_sparse_attention",
+            "heavily_compressed_attention",
+            "compressed_sparse_attention",
+            "heavily_compressed_attention",
+            "compressed_sparse_attention",
+        ],
+        num_hidden_layers=7,
+        num_nextn_predict_layers=0,
+        num_local_experts=8,
+        num_experts_per_tok=3,
+        vocab_size=self.vocab_size,
+    )
+
+    config_arguments = {
+        "model_name": "deepseek4-tiny",
+        "override_model_config": True,
+        "per_device_batch_size": 1,
+        "matmul_precision": "highest",
+        "megablox": False,
+        "sparse_matmul": False,
+        "dtype": "float32",
+        "weight_dtype": "float32",
+        "skip_jax_distributed_system": True,
+    }
+    argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
+    self.mx_config = pyconfig.initialize(argv, **config_arguments)
+
+    self.rngs = nnx.Rngs(0)
+    devices = np.array(jax.devices()[:1])
+    self.mesh = jax.sharding.Mesh(devices, ("tensor",))
+
+  def _apply_param_mapping(self, mt_layer, pt_layer, l):
+    """Maps PT weights to MaxText layer."""
+    from maxtext.checkpoint_conversion.utils.param_mapping import (
+        DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING,
+        DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    )
+
+    pt_config_dict = self.pt_config.to_dict()
+    PARAM_MAPPING = DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(pt_config_dict, self.mx_config, scan_layers=False)
+    HOOK_FNS = DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        pt_config_dict, self.mx_config, scan_layers=False, saving_to_hf=False
+    )
+
+    def get_attr(obj, path):
+      """Helper function to fetch nested attributes."""
+      if path is None:
+        return None
+      if "mlp.experts." in path:
+        parts = path.split(".")
+        idx_exp = parts.index("experts")
+        expert_idx = int(parts[idx_exp + 1])
+        w_name = parts[idx_exp + 2]
+
+        experts_obj = obj
+        for p in parts[: idx_exp + 1]:
+          experts_obj = getattr(experts_obj, p)
+
+        if w_name == "w1":
+          intermediate_dim = experts_obj.intermediate_dim
+          return experts_obj.gate_up_proj[expert_idx, :intermediate_dim, :]
+        elif w_name == "w3":
+          intermediate_dim = experts_obj.intermediate_dim
+          return experts_obj.gate_up_proj[expert_idx, intermediate_dim:, :]
+        elif w_name == "w2":
+          return experts_obj.down_proj[expert_idx]
+        else:
+          raise ValueError(f"Unknown weight name {w_name} in experts path: {path}")
+
+      for part in path.split("."):
+        if part.isdigit():
+          obj = obj[int(part)]
+        elif hasattr(obj, part):
+          obj = getattr(obj, part)
+        elif isinstance(obj, dict):
+          obj = obj[part]
+        else:
+          return None
+      return obj
+
+    pt_prefix = f"model.layers.{l}."
+    for mt_key, hf_key in PARAM_MAPPING.items():
+      if f"layers_{l}" in mt_key:
+        if "Tid2EidVar" in mt_key:
+          prefix = f"Tid2EidVar-decoder-layers_{l}-"
+        else:
+          prefix = f"params-decoder-layers_{l}-"
+
+        nnx_subpath = mt_key.replace(prefix, "").replace("-", ".")
+        mt_path = nnx_subpath + ".value"
+
+        parts = mt_path.split(".")
+        obj = mt_layer
+        valid = True
+        for part in parts[:-1]:
+          if hasattr(obj, part):
+            obj = getattr(obj, part)
+          else:
+            valid = False
+            break
+        if not valid:
+          continue
+
+        target_shape = obj.value.shape
+        hook_fn = HOOK_FNS.get(mt_key, lambda x, target_shape=None: x)
+
+        if hf_key is None:
+          pt_val = None
+          val = hook_fn(pt_val, target_shape=target_shape)
+        elif isinstance(hf_key, list):
+          pt_vals = [get_attr(pt_layer, k.replace(pt_prefix, "")).detach().numpy() for k in hf_key]
+          slice_shape = target_shape[1:]
+          processed_vals = [hook_fn(v, target_shape=slice_shape) for v in pt_vals]
+          val = np.stack(processed_vals, axis=0)
+        else:
+          pt_val = get_attr(pt_layer, hf_key.replace(pt_prefix, "")).detach().numpy()
+          val = hook_fn(pt_val, target_shape=target_shape)
+
+        setattr(obj, "value", jnp.array(val))
+
+  def _run_layer_parity_test(self, layer_idx, layer_type):
+    # self.pt_config.layer_types = ["sliding_attention"] * 7
+    # self.pt_config.layer_types[layer_idx] = layer_type
+    compress_ratios = [0, 0, 4, 128, 4, 128, 4]
+
+    torch.manual_seed(42)
+    pt_layer = DeepseekV4DecoderLayer_PT(self.pt_config, layer_idx=layer_idx)
+
+    # Explicitly initialize PyTorch weights with random values to prevent torch.empty
+    # from yielding zero/garbage values that could mask parity differences.
+    for p in pt_layer.parameters():
+      if p.dim() >= 1:
+        torch.nn.init.normal_(p.data, mean=0.0, std=0.02)
+      else:
+        torch.nn.init.constant_(p.data, 0.02)
+
+    if layer_idx < self.mx_config.first_num_hash_layers:
+      pt_tid2eid = torch.randint(
+          0, self.pt_config.num_local_experts, (self.vocab_size, self.pt_config.num_experts_per_tok)
+      )
+      pt_layer.mlp.gate.tid2eid.copy_(pt_tid2eid)
+
+    if layer_type == "compressed_sparse_attention" and self.pt_config.index_topk == 2:
+      for p in pt_layer.self_attn.compressor.indexer.parameters():
+        p.data = torch.abs(p.data) + 0.1
+
+    mt_layer = DeepSeek4DecoderLayer(
+        config=self.mx_config,
+        model_mode="train",
+        mesh=self.mesh,
+        rngs=self.rngs,
+        layer_idx=layer_idx,
+        compress_ratio=compress_ratios[layer_idx],
+        is_hash_routing=(layer_idx < self.mx_config.first_num_hash_layers),
+    )
+
+    self._apply_param_mapping(mt_layer, pt_layer, layer_idx)
+
+    np.random.seed(42)
+    x_np = np.random.uniform(
+        0.1, 1.0, size=(self.batch_size, self.seq_len, self.pt_config.hc_mult, self.hidden_dim)
+    ).astype(np.float32)
+    pos_np = np.arange(self.seq_len)[None, :].repeat(self.batch_size, axis=0)
+    input_ids_np = np.random.randint(0, self.vocab_size, size=(self.batch_size, self.seq_len))
+
+    x_pt = torch.tensor(x_np)
+    pos_pt = torch.tensor(pos_np, dtype=torch.long)
+    input_ids_pt = torch.tensor(input_ids_np, dtype=torch.long)
+
+    pt_mask = _prepare_4d_causal_attention_mask(
+        None, (self.batch_size, self.seq_len), x_pt, 0, self.pt_config.sliding_window
+    )
+
+    rope_main = PTRope(self.pt_config)
+    rope_compress = PTRope(self.pt_config)
+    dummy_x_main = torch.zeros(self.batch_size, self.seq_len, 1)
+    cos_main, sin_main = rope_main(dummy_x_main, pos_pt, "main")
+    cos_comp, sin_comp = rope_compress(dummy_x_main, pos_pt, "compress")
+    pt_positions = {"main": (cos_main, sin_main), "compress": (cos_comp, sin_comp)}
+
+    pt_out = pt_layer(
+        hidden_states=x_pt,
+        input_ids=input_ids_pt,
+        attention_mask=pt_mask,
+        position_ids=pos_pt,
+        position_embeddings=pt_positions,
+    )
+
+    x_mt = jnp.array(x_np)
+    pos_mt = jnp.array(pos_np)
+    input_ids_mt = jnp.array(input_ids_np)
+    segs_mt = jnp.ones_like(pos_mt, dtype=jnp.int32)
+
+    mt_out, _ = mt_layer(
+        inputs=x_mt,
+        decoder_segment_ids=segs_mt,
+        decoder_positions=pos_mt,
+        deterministic=True,
+        model_mode="train",
+        decoder_input_tokens=input_ids_mt,
+    )
+
+    pt_out_tensor = pt_out[0] if isinstance(pt_out, tuple) else pt_out
+    pt_out_np = pt_out_tensor.detach().numpy()
+    mt_out_np = np.array(mt_out)
+    max_diff = np.max(np.abs(mt_out_np - pt_out_np))
+    mean_diff = np.mean(np.abs(mt_out_np - pt_out_np))
+    print(
+        f"LAYER PARITY layer_idx={layer_idx} layer_type={layer_type} - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}"
+    )
+    np.testing.assert_allclose(mt_out_np, pt_out_np, rtol=5e-2, atol=5e-2)
+
+  def test_layer_0_sliding_hash(self):
+    self._run_layer_parity_test(0, "sliding_attention")
+
+  def test_layer_2_csa_hash(self):
+    self._run_layer_parity_test(2, "compressed_sparse_attention")
+
+  def test_layer_3_hca_standard(self):
+    self._run_layer_parity_test(3, "heavily_compressed_attention")
+
+  def test_layer_4_csa_standard(self):
+    self._run_layer_parity_test(4, "compressed_sparse_attention")
+
+
+class DeepSeekV4HyperHeadTest(unittest.TestCase):
+  """Tests to validate MaxText HyperHead implementation against PyTorch reference."""
+
+  def setUp(self):
+    self.batch_size = 2
+    self.seq_len = 16
+    self.hc_mult = 4
+    self.hidden_dim = 4096
+
+    self.config_pt = DeepseekV4Config(
+        hidden_size=self.hidden_dim,
+        hc_mult=self.hc_mult,
+        rms_norm_eps=1e-6,
+        hc_eps=1e-6,
+    )
+
+    # Initialize PyTorch module
+    torch.manual_seed(42)
+    self.pt_head = DeepseekV4HyperHead_PT(self.config_pt)
+    # Initialize weights with standard values
+    for p in self.pt_head.parameters():
+      torch.nn.init.normal_(p.data, mean=0.0, std=0.02)
+
+    # Create dummy mesh/rngs for MaxText
+    devices = mesh_utils.create_device_mesh((1,), devices=jax.local_devices()[:1])
+    self.mesh = Mesh(devices, ("x",))
+    self.rngs = nnx.Rngs(0)
+
+    # Build MaxText config dictionary
+    argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-tiny"]
+    config_arguments = {
+        "attention": "dot_product",
+        "dtype": "float32",
+        "weight_dtype": "float32",
+        "mhc_expansion_rate": self.hc_mult,
+        "emb_dim": self.hidden_dim,
+        "normalization_layer_epsilon": 1e-6,
+        "skip_jax_distributed_system": True,
+    }
+    self.mx_config = pyconfig.initialize(argv, **config_arguments)
+
+  def test_hyper_head_parity(self):
+    mt_head = DeepSeek4HyperHead(
+        config=self.mx_config,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+
+    # Map parameters from PyTorch to MaxText
+    mt_head.hc_fn.value = jnp.array(self.pt_head.hc_fn.detach().numpy().T)
+    mt_head.hc_base.value = jnp.array(self.pt_head.hc_base.detach().numpy())
+    mt_head.hc_scale.value = jnp.array(self.pt_head.hc_scale.detach().numpy())
+
+    # Inputs
+    np.random.seed(42)
+    x_np = np.random.uniform(0.1, 1.0, size=(self.batch_size, self.seq_len, self.hc_mult, self.hidden_dim)).astype(
+        np.float32
+    )
+
+    x_pt = torch.tensor(x_np)
+    pt_out = self.pt_head(x_pt).detach().numpy()
+
+    x_mt = jnp.array(x_np)
+    mt_out = np.array(mt_head(x_mt))
+
+    max_diff = np.max(np.abs(mt_out - pt_out))
+    mean_diff = np.mean(np.abs(mt_out - pt_out))
+    print(f"HYPER HEAD PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
+    np.testing.assert_allclose(mt_out, pt_out, rtol=5e-5, atol=5e-5)
+
+
 
 if __name__ == "__main__":
   unittest.main()

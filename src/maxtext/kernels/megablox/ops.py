@@ -62,7 +62,7 @@ def gmm(
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
-    interpret: bool = False,
+    interpret: bool | None = None,
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     use_qwix_quantization: bool = False,
@@ -77,6 +77,13 @@ def gmm(
     partial_sum: jnp.ndarray | None = None,
 ):
   """Grouped matrix multiplication operation."""
+  if interpret is None:
+    # Default to native (TPU) lowering. `jax.devices()[0]` is NOT the compile TARGET:
+    # during train_compile the local backend is CPU (JAX_PLATFORMS=cpu) while the mesh
+    # targets tpu7x, and interpret-mode there breaks check_vma (exposes the kernel's
+    # internal dynamic_slice VMA) and balloons HBM temporaries. Callers that genuinely
+    # run off-TPU (e.g. equiv_chunk_test) pass interpret based on their target mesh.
+    interpret = False
   quantization_rule = None
   if use_qwix_quantization:
     # get_current_rule has to be called outside of the _gmm_fwd function.
@@ -204,6 +211,7 @@ def _gmm_fwd(
         ),
         preferred_element_type=preferred_element_type,
         partial_sum=partial_sum,
+        group_offset=group_offset,
     )
   elif use_tokamax_backend:
     # manual_axis_type is for gmm with shard_map check_vma=True, needs tokamax > 0.0.12
@@ -331,6 +339,7 @@ def _gmm_bwd(
               tile_n=tiling[5],
           ),
           preferred_element_type=lhs_dtype,
+          group_offset=group_offset,
       )
 
       # tgmm_v2_op requires lhs and rhs to have the same dtype.

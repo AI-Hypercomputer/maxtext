@@ -249,3 +249,16 @@ def get_bidirectional_mask_audio(config, decoder_input_tokens):
     # Create bidirectional_mask for audio token merging
     bidirectional_mask_audio = decoder_input_tokens == tokens.audio_pad
   return bidirectional_mask_audio
+
+
+def downsample_video_mask_to_tokens(video_mask, config):
+  """Routes video-mask reduction to the model-specific multimodal processor."""
+  if video_mask is None:
+    return None
+  if config.model_name.startswith(("qwen3")):
+    from maxtext.multimodal.processor_qwen3_omni import (  # pylint: disable=import-outside-toplevel
+        downsample_video_mask_to_tokens as downsample_qwen3_video_mask,
+    )
+
+    return downsample_qwen3_video_mask(video_mask, config)
+  raise ValueError(f"Model {config.model_name} does not support padded video-mask reduction.")

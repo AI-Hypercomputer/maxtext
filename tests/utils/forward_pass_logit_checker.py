@@ -78,7 +78,7 @@ from google.cloud import storage
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT, HF_IDS
 from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
@@ -232,13 +232,13 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02, clip_logits_epsi
 
 def get_data(golden_data_point, config):
   """Get the golden data for the test indexed at golden_data_index"""
+  model_prefix = config.model_name.split("-")[0]
 
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
   if config.use_multimodal:
     assert "pixel_values" in golden_data_point, "no image found in golden data while use_multimodal=True"
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)
     max_logging.log(f"pixel_values.shape = {pixel_values.shape}")
-    model_prefix = config.model_name.split("-")[0]
     # Gemma3 and Gemma4 models expect (num_images, height, width, channels)
     if model_prefix in ["gemma3", "gemma4"]:
       if pixel_values.ndim == 2:
@@ -328,22 +328,28 @@ def main(config, test_args):  # pylint: disable=W0621
   # 1. Pre-loaded golden logits comparison (multimodal input)
   # 2. On-the-fly HuggingFace model comparison (text only input)
   hf_token = config.hf_access_token
-  try:
-    if test_args.hf_model_path:
-      max_logging.log(f"Loading tokenizer from {test_args.hf_model_path}.")
-      tokenizer = AutoTokenizer.from_pretrained(
-          test_args.hf_model_path, token=hf_token, trust_remote_code=test_args.trust_remote_code
-      )
-    else:
-      max_logging.log(f"Loading tokenizer from {config.tokenizer_path}.")
-      tokenizer = AutoTokenizer.from_pretrained(
-          config.tokenizer_path, token=hf_token, trust_remote_code=test_args.trust_remote_code
-      )
-  except Exception as e:  # pylint: disable=broad-except
-    max_logging.log(f"Tokenizer loading error: {e}.\nLoading tokenizer from {config.tokenizer_path}.")
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.tokenizer_path, token=hf_token, trust_remote_code=test_args.trust_remote_code
-    )
+  tokenizer_load_paths = []
+  if test_args.hf_model_path:
+    tokenizer_load_paths.append(test_args.hf_model_path)
+  tokenizer_load_paths.append(config.tokenizer_path)
+
+  hf_model_id = HF_IDS.get(config.model_name)
+  if hf_model_id:
+    tokenizer_load_paths.append(hf_model_id)
+
+  tokenizer = None
+  last_exception = None
+  for path in tokenizer_load_paths:
+    try:
+      max_logging.log(f"Loading tokenizer from {path}.")
+      tokenizer = AutoTokenizer.from_pretrained(path, token=hf_token, trust_remote_code=test_args.trust_remote_code)
+      break
+    except Exception as e:  # pylint: disable=broad-except,broad-exception-caught
+      last_exception = e
+      max_logging.log(f"Failed to load tokenizer from {path}: {e}")
+
+  if tokenizer is None:
+    raise last_exception
 
   if config.model_name.startswith(("llama3.1", "mixtral")):
     tokenizer.pad_token = tokenizer.eos_token

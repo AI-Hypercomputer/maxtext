@@ -658,14 +658,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # vLLM PAGED STATE PATH: use tpu_inference fused conv + ragged delta-rule.
       # =========================================================================
       try:
-        # pylint: disable=import-outside-toplevel
-        # pytype: disable=import-error
-        from tpu_inference.layers.common.gdn_attention import GdnAttentionConfig, run_jax_gdn_attention  # pylint: disable=import-outside-toplevel
-        from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import RaggedGatedDeltaRuleImpl  # pylint: disable=import-outside-toplevel
-        from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel
-        from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding  # pylint: disable=import-outside-toplevel
-        from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel
-        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel
+        from tpu_inference.layers.common.gdn_attention import GdnAttentionConfig, run_jax_gdn_attention  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import RaggedGatedDeltaRuleImpl  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
       except ImportError as e:
         raise ImportError(
             "GDN attention kernel require the vllm-tpu package. Please install it with `pip install vllm-tpu`."

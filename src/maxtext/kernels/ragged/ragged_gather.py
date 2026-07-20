@@ -396,9 +396,14 @@ def ragged_gather(
 
   dtype = x.dtype
 
+  # Guard against eager initialization on non-TPU hardware (e.g. during CPU tests).
+  # pltpu.get_tpu_info() expects TPU hardware and will crash if executed on CPU.
+  if enforce_fallback or jax.devices()[0].platform != "tpu":
+    return _fallback_implementation(x, indices, weights, has_weights)
+
   sc_info = pltpu.get_tpu_info().sparse_core
-  if sc_info is None or enforce_fallback:
-    # Sparse core is not available or fallback is enforced. Use JAX reference.
+  if sc_info is None:
+    # Sparse core is not available. Use JAX reference.
     return _fallback_implementation(x, indices, weights, has_weights)
 
   hidden_size = x.shape[-1]

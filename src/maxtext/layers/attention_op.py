@@ -66,16 +66,17 @@ from maxtext.common.common_types import (
 )
 from maxtext.inference.kvcache import KVQuant, KVTensor
 from maxtext.kernels.attention import jax_flash_attention
+from maxtext.kernels.attention import tokamax_ring_attention
 from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha
+from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec
 import numpy as np
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
@@ -519,6 +520,51 @@ class AttentionOp(nnx.Module):
     self.use_ragged_attention = use_ragged_attention
     self.ragged_block_size = ragged_block_size
     self.rngs = rngs
+    if self.attention_kernel == "flash" and tokamax_ring_attention.is_context_parallel_ring_requested(self.config):
+      target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
+      if target_hardware == "tpu":
+        if not self.config.use_tokamax_splash:
+          raise ValueError("TPU Tokamax ring attention requires use_tokamax_splash=True.")
+        if self.config.use_jax_splash:
+          raise ValueError("TPU Tokamax ring attention requires use_jax_splash=False.")
+        if self.config.context_parallel_load_balance:
+          raise ValueError("TPU Tokamax ring attention does not support context_parallel_load_balance yet.")
+        if self.config.packing:
+          raise ValueError("TPU Tokamax ring attention does not support packing yet.")
+        if self.attention_type != AttentionType.GLOBAL:
+          raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
+
+        context_axis = self.config.context_sharding
+        axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
+        axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
+        axis_names_kv = tokamax_ring_attention.with_sequence_axis(
+            axis_names_kv,
+            context_axis,
+            sequence_dim=2,
+        )
+        tokamax_ring_attention.validate_ring_mesh_axis(
+            axis_names_q=axis_names_q,
+            axis_names_kv=axis_names_kv,
+            sequence_dim_q=2,
+            sequence_dim_kv=2,
+            mesh=self.mesh,
+            ring_axis=context_axis,
+        )
+        tokamax_ring_attention.validate_head_sharding(
+            axis_names_q=axis_names_q,
+            axis_names_kv=axis_names_kv,
+            mesh=self.mesh,
+            num_query_heads=self.num_query_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim_q=1,
+            head_dim_kv=1,
+        )
+        tokamax_ring_attention.validate_dkv_sharding(
+            axis_names_q=axis_names_q,
+            axis_names_kv=axis_names_kv,
+            dkv_dim_q=3,
+            dkv_dim_kv=3,
+        )
 
     def maybe_create_nnx(einsum, *args):
       if isinstance(einsum, nn.Module):
@@ -956,6 +1002,28 @@ class AttentionOp(nnx.Module):
     moba_mask = jax.vmap(self.generate_moba_mask_single_item, in_axes=(0, 0, None))(query, key, q_positions)
     return moba_mask
 
+  def _validate_tpu_tokamax_ring_runtime(
+      self,
+      *,
+      model_mode: str,
+      previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
+      sinks: Array | None = None,
+      indexer_mask: Array | None = None,
+      use_ragged_attention: bool = False,
+      record_max_logits: bool = False,
+  ) -> None:
+    """Validates runtime constraints for the TPU Tokamax ring path."""
+    tokamax_ring_attention.validate_tokamax_ring_runtime(
+        model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        sinks=sinks,
+        indexer_mask=indexer_mask,
+        use_ragged_attention=use_ragged_attention,
+        bidirectional_mask=bidirectional_mask,
+        record_max_logits=record_max_logits,
+    )
+
   def apply_attention(
       self,
       query: Array,
@@ -981,6 +1049,12 @@ class AttentionOp(nnx.Module):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
+    if (
+        target_hardware == "tpu"
+        and tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
+        and self.attention_kernel != "flash"
+    ):
+      raise ValueError("TPU Tokamax ring attention requires attention_kernel='flash'.")
 
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       if lengths is None:
@@ -1043,7 +1117,11 @@ class AttentionOp(nnx.Module):
             decoder_segment_ids,
             self.attn_logits_soft_cap,
             sinks,
-            indexer_mask,
+            indexer_mask=indexer_mask,
+            model_mode=model_mode,
+            previous_chunk=previous_chunk,
+            bidirectional_mask=bidirectional_mask,
+            use_ragged_attention=use_ragged_attention,
             record_max_logits=record_max_logits,
             decoder_segment_ids_kv=decoder_segment_ids_kv,
         )
@@ -1226,13 +1304,28 @@ class AttentionOp(nnx.Module):
       attn_logits_soft_cap: float | None = None,
       sinks: Array | None = None,
       indexer_mask: Array | None = None,
+      model_mode: str = MODEL_MODE_TRAIN,
+      previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
+      use_ragged_attention: bool = False,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Array | None = None,
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
+    use_tokamax_ring = tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
     cp_size = self.mesh.shape.get(self.config.context_sharding, 1)
     load_balanced_context_parallel = self.config.context_parallel_load_balance
+    if use_tokamax_ring:
+      self._validate_tpu_tokamax_ring_runtime(
+          model_mode=model_mode,
+          previous_chunk=previous_chunk,
+          bidirectional_mask=bidirectional_mask,
+          sinks=sinks,
+          indexer_mask=indexer_mask,
+          use_ragged_attention=use_ragged_attention,
+          record_max_logits=record_max_logits,
+      )
 
     # Transpose to ('batch', 'heads', 'length', 'kv')
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
@@ -1249,6 +1342,23 @@ class AttentionOp(nnx.Module):
     axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
     indexer_mask_axis_names = self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH, KV_LENGTH))
+    if use_tokamax_ring:
+      context_axis = self.config.context_sharding
+      segment_axis_names_q = tokamax_ring_attention.with_sequence_axis(
+          segment_axis_names_q,
+          context_axis,
+          sequence_dim=1,
+      )
+      axis_names_kv = tokamax_ring_attention.with_sequence_axis(
+          axis_names_kv,
+          context_axis,
+          sequence_dim=2,
+      )
+      segment_axis_names_kv = tokamax_ring_attention.with_sequence_axis(
+          segment_axis_names_kv,
+          context_axis,
+          sequence_dim=1,
+      )
 
     devices_in_data_fsdp = self.mesh.shape.get("data", 1) * self.mesh.shape.get("fsdp", 1)
     assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
@@ -1309,63 +1419,76 @@ class AttentionOp(nnx.Module):
         )
       return sa_config
 
-    sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
-    block_q = sa_config.block_q
-    block_kv = sa_config.block_kv
-    if self.attention_type == AttentionType.COMPRESSED and (
-        (query.shape[2] % block_q != 0) or (key.shape[2] % block_kv != 0)
-    ):
-      padded_q_len = ((query.shape[2] + block_q - 1) // block_q) * block_q
-      padded_kv_len = ((key.shape[2] + block_kv - 1) // block_kv) * block_kv
-      mask_shape = (padded_q_len, padded_kv_len)
+    if use_tokamax_ring:
+      sa_config, splash_kernel, segment_axis_names_splash_kernel = (
+          tokamax_ring_attention.make_sharded_ring_attention_kernel(
+              self.config,
+              query=query,
+              key=key,
+              context_parallel_size=cp_size,
+              ring_axis=self.config.context_sharding,
+              attn_logits_soft_cap=attn_logits_soft_cap,
+              maybe_shard_with_pspec=self._maybe_shard_with_pspec,
+          )
+      )
     else:
-      mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
-    mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
-
-    if self.attention_type == AttentionType.FULL:
-      mask = mask_module.FullMask(mask_shape)
-    else:
-      mask = mask_module.CausalMask(shape=mask_shape)
-
-    use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
-    if use_load_balanced_cp and self.attention_type != AttentionType.FULL:
-      mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
-
-    # Apply local masking if local sliding attention is enabled.
-    if self.attention_type == AttentionType.LOCAL_SLIDING:
-      if self.sliding_window_size is None:
-        raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
-      local_window_size = (self.sliding_window_size - 1, self.sliding_window_size)
-      if use_load_balanced_cp:
-        mask &= LoadBalancedLocalMask(
-            shape=mask_shape,
-            window_size=local_window_size,
-            offset=0,
-            cp_size=cp_size,
-        )
+      sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
+      block_q = sa_config.block_q
+      block_kv = sa_config.block_kv
+      if self.attention_type == AttentionType.COMPRESSED and (
+          (query.shape[2] % block_q != 0) or (key.shape[2] % block_kv != 0)
+      ):
+        padded_q_len = ((query.shape[2] + block_q - 1) // block_q) * block_q
+        padded_kv_len = ((key.shape[2] + block_kv - 1) // block_kv) * block_kv
+        mask_shape = (padded_q_len, padded_kv_len)
       else:
-        mask &= mask_module.LocalMask(
-            shape=mask_shape,
-            window_size=local_window_size,
-            offset=0,
-        )
-    elif self.attention_type == AttentionType.CHUNK:
-      if self.chunk_attn_window_size is None:
-        raise ValueError("chunk_attn_window_size must be set for chunk attention type")
+        mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
 
-      if use_load_balanced_cp:
-        mask &= LoadBalancedChunkedCausalMask(
-            shape=mask_shape,
-            chunk_size=self.chunk_attn_window_size,
-            cp_size=cp_size,
-        )
+      mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
+      if self.attention_type == AttentionType.FULL:
+        mask = mask_module.FullMask(mask_shape)
       else:
-        mask &= ChunkedCausalMask(
-            shape=mask_shape,
-            chunk_size=self.chunk_attn_window_size,
-        )
+        mask = mask_module.CausalMask(shape=mask_shape)
+
+      use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
+      if use_load_balanced_cp and self.attention_type != AttentionType.FULL:
+        mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
+
+      # Apply local masking if local sliding attention is enabled.
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        if self.sliding_window_size is None:
+          raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
+        local_window_size = (self.sliding_window_size - 1, self.sliding_window_size)
+        if use_load_balanced_cp:
+          mask &= LoadBalancedLocalMask(
+              shape=mask_shape,
+              window_size=local_window_size,
+              offset=0,
+              cp_size=cp_size,
+          )
+        else:
+          mask &= mask_module.LocalMask(
+              shape=mask_shape,
+              window_size=local_window_size,
+              offset=0,
+          )
+      elif self.attention_type == AttentionType.CHUNK:
+        if self.chunk_attn_window_size is None:
+          raise ValueError("chunk_attn_window_size must be set for chunk attention type")
+
+        if use_load_balanced_cp:
+          mask &= LoadBalancedChunkedCausalMask(
+              shape=mask_shape,
+              chunk_size=self.chunk_attn_window_size,
+              cp_size=cp_size,
+          )
+        else:
+          mask &= ChunkedCausalMask(
+              shape=mask_shape,
+              chunk_size=self.chunk_attn_window_size,
+          )
     max_logit_value = None
-    if self.config.use_tokamax_splash:
+    if not use_tokamax_ring and self.config.use_tokamax_splash:
       # Create mask
       single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads
       if self.config.use_max_logit_estimate > 0:
@@ -1378,7 +1501,7 @@ class AttentionOp(nnx.Module):
               "single_head_mask",
           ],
       )
-      def wrap_splash_kernel(single_head_mask):
+      def wrap_tokamax_splash_kernel(single_head_mask):
         splash_kernel = tokamax_splash_kernel.make_splash_mha(
             mask=single_head_mask,
             config=sa_config,
@@ -1388,15 +1511,15 @@ class AttentionOp(nnx.Module):
 
       segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
       if indexer_mask is None:
-        splash_kernel = wrap_splash_kernel(single_head_mask)
+        splash_kernel = wrap_tokamax_splash_kernel(single_head_mask)
         splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
       else:
         splash_kernel = None
-    elif self.config.use_jax_splash:
+    elif not use_tokamax_ring and self.config.use_jax_splash:
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
       segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH,))
-    else:
+    elif not use_tokamax_ring:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
 
@@ -1408,7 +1531,7 @@ class AttentionOp(nnx.Module):
               "shard_head_size",
           ],
       )
-      def wrap_splash_kernel(multi_head_mask, shard_head_size=1):
+      def wrap_jax_splash_kernel(multi_head_mask, shard_head_size=1):
         splash_kernel = splash_attention_kernel.make_splash_mha(
             mask=multi_head_mask,
             head_shards=shard_head_size,  # the size of the axis if sharding over heads
@@ -1422,7 +1545,7 @@ class AttentionOp(nnx.Module):
       head_physical_axes = logical_to_mesh_axes((HEAD,), self.mesh)[0]
       head_physical_axes = (head_physical_axes,) if isinstance(head_physical_axes, str) else (head_physical_axes or ())
       shard_head_size = math.prod(self.mesh.shape.get(ax, 1) for ax in head_physical_axes)
-      splash_kernel = wrap_splash_kernel(multi_head_mask, shard_head_size)
+      splash_kernel = wrap_jax_splash_kernel(multi_head_mask, shard_head_size)
       named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
       segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
       splash_kernel = jax.tree.map(
@@ -1432,14 +1555,10 @@ class AttentionOp(nnx.Module):
           is_leaf=lambda x: x is None,
       )
 
-    # Now call the function wrap_flash_attention which does the actual computation.
-    # The splash kernel is passed as a parameter to the function. Since we have the shard map
-    # decorating the wrap_flash_attention function, the data will be correctly sharded
-    # meaning q will be sharded over sequence aka context length but K and V will be duplicated
-    # The shardings are specified in the in_specs and out_specs of the shard_map decorator:
-    # 'segment_axis_names_q' maps to ['activation_q_length', ['context']] meaning that q is sharded over the context axis
-    #  'segment_axis_names_kv' maps to ['activation_kv_length', []] meaning that K and V are not sharded
-    # splash_kernel is sharded over (HEAD, LENGTH)
+    # wrap_flash_attention receives Q/K/V and mask metadata with the shardings
+    # specified in the shard_map in_specs below. For the all-gather path Q is
+    # sequence-sharded and K/V are replicated. For the Tokamax ring path Q, K,
+    # V, and segment IDs are all sequence-sharded over the context axis.
 
     if record_max_logits:
       # max_logits will share similar sharding as query but last dim is unrelated to model
@@ -1487,11 +1606,19 @@ class AttentionOp(nnx.Module):
         sinks,
         indexer_mask,
     ):
-      # If load_balanced_context_parallel is enabled, reorder the key and value tensors
-      # to ensure that they are contiguous in memory.
-      # This is necessary for the splash attention kernel to work correctly because it expects
-      # the K and V to be contiguous. Note that K and V are not sharded over the sequence aka context axis
-      # This was we get the unsharded unpermuted key and value tensors
+      if use_tokamax_ring:
+        attention_output = tokamax_ring_attention.call_ring_attention(
+            query,
+            key,
+            value,
+            decoder_segment_ids_q,
+            decoder_segment_ids_kv,
+            splash_kernel,
+        )
+        return attention_output, None
+
+      # The load-balanced all-gather path restores K/V to contiguous order
+      # before calling Splash attention.
       if cp_size > 1 and load_balanced_context_parallel:
         key = max_utils.reorder_sequence(tensor=key, cp_size=cp_size, seq_dim=2, to_contiguous=True)
         value = max_utils.reorder_sequence(tensor=value, cp_size=cp_size, seq_dim=2, to_contiguous=True)

@@ -322,7 +322,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
 
     # Skip causal mask generation during decoding (seq_len == 1) or if no blocks were pooled
     if seq_len == 1 or compressed_len == 0:
-      return compressed_kv, None
+      return compressed_kv, jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
 
     # Construct a causal mask preventing early queries from attending to future compressed blocks
     entry_indices = jnp.arange(compressed_len)
