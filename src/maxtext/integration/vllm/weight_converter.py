@@ -67,6 +67,13 @@ class RepeatAxes(Operation):
             res = jnp.repeat(res, rep, axis=axis)
         return res
 
+
+class TransposeSingle(Operation):
+    def __init__(self, axes): self.axes = axes
+    def __call__(self, tensors):
+        out = tensors[0] if isinstance(tensors, list) else tensors
+        return jnp.transpose(out, self.axes)
+
 class Transpose(Operation):
     def __init__(self, axes): self.axes = axes
     def __call__(self, tensors):
@@ -99,7 +106,8 @@ class FuseQwen3MoEGateUp(Operation):
             up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
             
         combined = jnp.stack([gate_chunks, up_chunks], axis=2)
-        return combined.reshape(num_experts, 2 * padded_chunk_size * self.tp, d_model)
+        fused = combined.reshape(num_experts, 2 * padded_chunk_size * self.tp, d_model)
+        return jnp.transpose(fused, (0, 2, 1))
 
 class FuseQwen3MoEQKV(Operation):
     def __init__(self, tp: int): 
@@ -332,18 +340,18 @@ _MODEL_TO_CONVERSION_RULES = {
         WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"decoder\.layers_(\d+)\.self_attention\.value\.kernel"], r"model.layers.{}.self_attn.qkv_proj.weight", [FuseQwen3MoEQKV(tp=0)]),
         WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.query_norm\.scale"], r"model.layers.{}.self_attn.q_norm.weight", [TransposeNorm()]),
         WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale"], r"model.layers.{}.self_attn.k_norm.weight", [TransposeNorm()]),
-        WeightRenaming(r"decoder\.layers_(\d+)\.moe_block\.gate\.kernel", r"model.layers.\1.mlp.gate.weight"),
+        WeightConverterRule([r"decoder\.layers_(\d+)\.moe_block\.gate\.kernel"], r"model.layers.{}.mlp.gate.weight", [TransposeSingle(axes=(1, 0))]),
         WeightConverterRule(
-            source_patterns=[r"decoder\.layers_(\d+)\.moe_block\.wo"],
-            target_pattern="model.layers.{}.mlp.experts.routed_experts.w2_weight",
-            operations=[Transpose(axes=(0, 2, 1))]
+            source_patterns=[r"decoder\.layers_(\d+)\.moe_block\.wo(?:\.kernel)?"],
+            target_pattern="model.layers.{}.mlp.experts.w2_weight",
+            operations=[]
         ),
         WeightConverterRule(
             source_patterns=[
-                r"decoder\.layers_(\d+)\.moe_block\.wi_0",
-                r"decoder\.layers_(\d+)\.moe_block\.wi_1"
+                r"decoder\.layers_(\d+)\.moe_block\.wi_0(?:\.kernel)?",
+                r"decoder\.layers_(\d+)\.moe_block\.wi_1(?:\.kernel)?"
             ],
-            target_pattern="model.layers.{}.mlp.experts.routed_experts.w13_weight",
+            target_pattern="model.layers.{}.mlp.experts.w13_weight",
             operations=[FuseQwen3MoEGateUp(tp=0)]
         )
     ]
