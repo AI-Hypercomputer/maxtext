@@ -275,6 +275,8 @@ def get_cost_estimate(
       auto-computing.  -1 (default) means auto-compute.
     bytes_accessed_override: If > 0, use this value as bytes_accessed instead
       of auto-computing.  -1 (default) means auto-compute.
+    use_single_sparsecore: Static bool flag. When True, launch the kernel
+      on 1 SparseCore instead of all SparseCores.
 
   Returns:
     A ``pl.CostEstimate`` suitable for XLA scheduling.
@@ -343,7 +345,14 @@ def calculate_col_size(hidden_size: int) -> int:
 
 
 @functools.partial(
-    jax.jit, static_argnames=("has_weights", "enforce_fallback", "flops_override", "bytes_accessed_override")
+    jax.jit,
+    static_argnames=(
+        "has_weights",
+        "enforce_fallback",
+        "flops_override",
+        "bytes_accessed_override",
+        "use_single_sparsecore",
+    ),
 )
 def ragged_gather(
     x: jax.Array,
@@ -355,6 +364,7 @@ def ragged_gather(
     enforce_fallback: bool = False,
     flops_override: int = -1,
     bytes_accessed_override: int = -1,
+    use_single_sparsecore: bool = False,
 ) -> jax.Array:
   """Perform gather on indices within dynamic array start and end.
 
@@ -375,6 +385,8 @@ def ragged_gather(
       auto-computing.  -1 (default) means auto-compute.
     bytes_accessed_override: If > 0, use this value as bytes_accessed instead
       of auto-computing.  -1 (default) means auto-compute.
+    use_single_sparsecore: Static bool flag. When True, launch the kernel
+      on 1 SparseCore instead of all SparseCores.
 
   Returns:
     Gathered output of shape ``(indices_size, hidden_size)``.
@@ -410,7 +422,8 @@ def ragged_gather(
   out_size = indices.size
 
   num_simd_lanes = sc_info.num_lanes
-  num_cores = sc_info.num_cores * sc_info.num_subcores
+  num_sc_cores = 1 if use_single_sparsecore else sc_info.num_cores
+  num_cores = num_sc_cores * sc_info.num_subcores
   block_size = num_simd_lanes * num_cores
   col_size = calculate_col_size(hidden_size)
 
@@ -427,7 +440,7 @@ def ragged_gather(
   aligned_hidden_size = pl.cdiv(hidden_size, col_size) * col_size
 
   vector_mesh = plsc.VectorSubcoreMesh(
-      num_cores=sc_info.num_cores,
+      num_cores=num_sc_cores,
       num_subcores=sc_info.num_subcores,
       core_axis_name="core",
       subcore_axis_name="subcore",
