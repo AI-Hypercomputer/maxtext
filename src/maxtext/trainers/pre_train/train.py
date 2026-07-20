@@ -669,6 +669,7 @@ def training_loop_iteration(
   eval_interval = immutable_data["eval_interval"]
   eval_steps = immutable_data["eval_steps"]
   start_step = immutable_data["start_step"]
+  eval_start_step = immutable_data["eval_start_step"]
 
   # HLO dump config
   dump_hlo = immutable_data["dump_hlo"]
@@ -712,7 +713,7 @@ def training_loop_iteration(
         all_host_upload=dump_hlo_upload_all,
     )
 
-  if eval_interval > 0 and step > start_step and (step + 1) % eval_interval == 0:
+  if eval_interval > 0 and step >= start_step and step >= eval_start_step and (step + 1) % eval_interval == 0:
     assert eval_data_iterator
     # Explicitly reset the eval iterator and counters before starting the eval loop
     eval_data_iterator.reset()
@@ -863,6 +864,7 @@ def train_loop(config, recorder, state=None):
       "steps": config.steps,
       "eval_interval": config.eval_interval,
       "eval_steps": config.eval_steps,
+      "eval_start_step": config.eval_start_step,
       "save_checkpoint_on_completion": config.save_checkpoint_on_completion,
       "start_step": start_step,
       "dump_hlo": config.dump_hlo,
