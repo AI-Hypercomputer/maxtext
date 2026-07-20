@@ -28,7 +28,10 @@ import gc
 import logging
 import time
 import jax
+import jax.numpy as jnp
 from flax import nnx
+from flax.traverse_util import flatten_dict, unflatten_dict
+
 from pathwaysutils.experimental import reshard as _experimental_reshard
 from tunix.generate import mappings
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
@@ -45,7 +48,83 @@ def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mes
   elif model_name in {"qwen3.5-35b-a3b"}:
     return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
 
-  raise ValueError(f"No MaxText->vLLM converter registered for model {model_name!r}.")
+  return None
+
+
+def unroll_gemma_scanned_weights(weights):
+  """Workaround for tunix unstacking bug with Gemma 3/4 scanned blocks.
+
+  tunix fails to map nested layers like `layers.layers_0` to `layers_X`.
+  We manually unroll them here if we detect the structure.
+  """
+  if not hasattr(weights, "to_pure_dict"):
+    return weights
+
+  flat_w = flatten_dict(weights.to_pure_dict(), sep="/")
+  new_flat_w = {}
+
+  # Check if this is actually a scanned Gemma 3/4 checkpoint
+  # by looking for the scanned nested structure.
+  is_gemma_scanned = any("decoder/layers/layers_0/" in k or "decoder/scanned_blocks/layers_0/" in k for k in flat_w)
+
+  if not is_gemma_scanned:
+    return weights
+
+  logging.info("MaxTextVllmSampler: Detected Gemma scanned weights structure. Unrolling along axis 1...")
+
+  # Determine attention pattern length and scan length
+  pattern_keys = set()
+  scan_length = 0
+  for k, v in flat_w.items():
+    if "decoder/layers/layers_" in k or "decoder/scanned_blocks/layers_" in k:
+      layer_sub_idx = k.split("layers_")[-1].split("/")[0]
+      pattern_keys.add(int(layer_sub_idx))
+      # In MaxText, Gemma uses param_scan_axis=1, so the scan dimension is at axis 1
+      if hasattr(v, "shape") and len(v.shape) > 1:
+        scan_length = max(scan_length, v.shape[1])
+
+  pattern_length = max(pattern_keys) + 1 if pattern_keys else 0
+  logging.info("MaxTextVllmSampler: Discovered scan_length=%d, pattern_length=%d", scan_length, pattern_length)
+
+  unrolled_count = 0
+  for k, v in flat_w.items():
+    if "decoder/layers/layers_" in k or "decoder/scanned_blocks/layers_" in k:
+      # Unstack the array along the 1st axis
+      if "decoder/scanned_blocks/layers_" in k:
+        parts = k.split("decoder/scanned_blocks/layers_")
+      else:
+        parts = k.split("decoder/layers/layers_")
+
+      layer_sub_idx = int(parts[1].split("/")[0])
+      suffix = "/" + "/".join(parts[1].split("/")[1:])
+
+      if hasattr(v, "shape") and len(v.shape) > 1:
+        v_swapped = jnp.swapaxes(v, 1, 0)
+        unstacked = [v_swapped[i] for i in range(scan_length)]
+      else:
+        unstacked = [v] * scan_length
+
+      for i in range(scan_length):
+        global_idx = i * pattern_length + layer_sub_idx
+        # Map back to nnx.List format which uses layers/X/ instead of layers_X
+        new_flat_w[f"decoder/layers/{global_idx}{suffix}"] = unstacked[i]
+        unrolled_count += 1
+
+    elif "decoder/layers_remainder/layers_" in k:
+      layer_sub_idx = int(k.split("decoder/layers_remainder/layers_")[1].split("/")[0])
+      suffix = "/" + "/".join(k.split("decoder/layers_remainder/layers_")[1].split("/")[1:])
+
+      global_idx = scan_length * pattern_length + layer_sub_idx
+      new_flat_w[f"decoder/layers/{global_idx}{suffix}"] = v
+      unrolled_count += 1
+    else:
+      new_flat_w[k] = v
+
+  logging.info(
+      "MaxTextVllmSampler: Successfully unrolled %d scanned tensor components into vLLM-compatible nnx.List format.",
+      unrolled_count,
+  )
+  return unflatten_dict(new_flat_w, sep="/")
 
 
 class MaxTextVllmSampler(VllmSampler):
@@ -73,6 +152,12 @@ class MaxTextVllmSampler(VllmSampler):
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
     if self._converter is None:
+      # --- Workaround for tunix unstacking bug with Gemma 3/4 scanned blocks ---
+      # tunix fails to map nested layers like `layers.layers_0` to `layers_X`.
+      # We manually unroll them here if we detect the structure.
+      updated_weights = unroll_gemma_scanned_weights(updated_weights)
+      # --- End Workaround ---
+
       super().update_params(updated_weights, filter_types)
       return None
 
@@ -182,6 +267,19 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         model=rollout_actor,
         backend="vllm_jax",
     )
+    engine_kwargs = {
+        "max_model_len": cache_config_or_size,
+        "model": rollout_config.rollout_vllm_model_version,
+        "swap_space": getattr(rollout_config, "rollout_vllm_swap_space_size_gb", maxtext_config.swap_space_vllm_gb),
+        # Async scheduling causes KeyError in dp_scheduler on slow models
+        # (30B+) where inference latency exceeds the scheduler's window.
+        "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
+    }
+
+    # Merge additional kwargs like dtype and hf_overrides provided by train_rl.py
+    if hasattr(rollout_config, "rollout_vllm_kwargs") and rollout_config.rollout_vllm_kwargs:
+      engine_kwargs.update(rollout_config.rollout_vllm_kwargs)
+
     self._sampler = MaxTextVllmSampler(
         tokenizer=tokenizer,
         config=VllmConfig(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
@@ -195,14 +293,8 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
-            engine_kwargs={
-                "max_model_len": cache_config_or_size,
-                "model": rollout_config.rollout_vllm_model_version,
-                "swap_space": rollout_config.rollout_vllm_swap_space_size_gb,
-                # Async scheduling causes KeyError in dp_scheduler on slow models
-                # (30B+) where inference latency exceeds the scheduler's window.
-                "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
-            },
+            engine_kwargs=engine_kwargs,
+            additional_config=getattr(rollout_config, "rollout_vllm_additional_config", None),
         ),
         converter=converter,
     )

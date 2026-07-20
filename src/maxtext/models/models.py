@@ -129,6 +129,7 @@ class TransformerLinenPure(nn.Module):
       encoder_image_masks: None | jnp.ndarray = None,
       encoder_videos: None | jnp.ndarray = None,
       encoder_video_masks: None | jnp.ndarray = None,
+      encoder_video_grid_thw: None | jnp.ndarray = None,
       encoder_audios: None | jnp.ndarray = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
@@ -172,8 +173,12 @@ class TransformerLinenPure(nn.Module):
 
     if self.config.use_multimodal and encoder_videos is not None:
       video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
-          input_images=encoder_videos, deterministic=not enable_dropout
+          input_images=encoder_videos,
+          input_masks=encoder_video_masks,
+          video_grid_thw=encoder_video_grid_thw,
+          deterministic=not enable_dropout,
       )
+      encoder_video_masks = mm_processor.downsample_video_mask_to_tokens(encoder_video_masks, self.config)
       bidirectional_mask_video = mm_processor.get_bidirectional_mask_vision(
           self.config, decoder_input_tokens, is_video=True
       )
@@ -442,6 +447,7 @@ class Transformer(nnx.Module):
       encoder_image_masks: jax.Array | None = None,
       encoder_videos: jax.Array | None = None,
       encoder_video_masks: jax.Array | None = None,
+      encoder_video_grid_thw: jax.Array | None = None,
       encoder_audios: jax.Array | None = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
@@ -499,8 +505,12 @@ class Transformer(nnx.Module):
 
     if self.config.use_multimodal and encoder_videos is not None:
       video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
-          input_images=encoder_videos, deterministic=not enable_dropout
+          input_images=encoder_videos,
+          input_masks=encoder_video_masks,
+          video_grid_thw=encoder_video_grid_thw,
+          deterministic=not enable_dropout,
       )
+      encoder_video_masks = mm_processor.downsample_video_mask_to_tokens(encoder_video_masks, self.config)
       bidirectional_mask_video = mm_processor.get_bidirectional_mask_vision(
           self.config, decoder_input_tokens, is_video=True
       )

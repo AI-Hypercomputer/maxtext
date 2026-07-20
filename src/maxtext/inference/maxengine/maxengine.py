@@ -212,6 +212,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       encoder_image_masks=None,
       encoder_videos=None,
       encoder_video_masks=None,
+      encoder_video_grid_thw=None,
       encoder_audios=None,
   ):
     """NNX equivalent of `model.apply(..., mutable=["cache"])`. Returns (logits, new_cache_dict)."""
@@ -219,7 +220,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     nnx.replace_by_pure_dict(cache_state, cache_dict)
     # copy=True avoids reusing Variable objects across traces (TraceContextError),
     # mirroring the workaround in train.py's diff_wrapper.
-    model = nnx.merge(self.graphdef, params, cache_state, self._nnx_rest_state, copy=True)  # pyrefly: ignore[no-matching-overload]
+    model = nnx.merge(
+        self.graphdef, params, cache_state, self._nnx_rest_state, copy=True
+    )  # pyrefly: ignore[no-matching-overload]
     logits = model(
         decoder_input_tokens,
         decoder_positions,
@@ -228,6 +231,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         encoder_image_masks=encoder_image_masks,
         encoder_videos=encoder_videos,
         encoder_video_masks=encoder_video_masks,
+        encoder_video_grid_thw=encoder_video_grid_thw,
         encoder_audios=encoder_audios,
         enable_dropout=enable_dropout,
         model_mode=model_mode,
@@ -280,7 +284,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if x.format == l:
         return x
       # Somehow this can be None sometimes.
-      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l  # pyrefly: ignore[missing-attribute]
+      dll = (
+          (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l
+      )  # pyrefly: ignore[missing-attribute]
       f = jax.jit(self._identity, out_shardings=Format(dll, s)).lower(x).compile(compiler_options=xla_flags)
       y = f(x)
       # Achieves donation of the input argument, but allows for different memory
@@ -409,7 +415,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       with nn_partitioning.axis_rules(self.config.logical_axis_rules):
         full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
       concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
-          self.model, self._create_model_fn, mesh=self._mesh, named_sharding=full_sharding  # pyrefly: ignore[bad-argument-type]
+          self.model,
+          self._create_model_fn,
+          mesh=self._mesh,
+          named_sharding=full_sharding,  # pyrefly: ignore[bad-argument-type]
       )
       graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       self.graphdef = graphdef
@@ -664,7 +673,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     )
 
   @functools.partial(
-      jax.jit, static_argnums=(0,), static_argnames=("return_prompt_logp", "algorithm", "topk", "nucleus_topp")
+      jax.jit,
+      static_argnums=(0,),
+      static_argnames=("video_grid_thw", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"),
   )
   def _prefill_jit(
       self,
@@ -678,6 +689,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       image_masks: jax.Array | None = None,
       videos: jax.Array | None = None,
       video_masks: jax.Array | None = None,
+      video_grid_thw: tuple[int, int, int] | None = None,
       audio_values: jax.Array | None = None,
       audio_masks: jax.Array | None = None,
       true_length: int,
@@ -785,6 +797,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
             encoder_image_masks=image_masks,
             encoder_videos=videos,
             encoder_video_masks=video_masks,
+            encoder_video_grid_thw=video_grid_thw,
             encoder_audios=audio_values,
             enable_dropout=False,
             model_mode=MODEL_MODE_PREFILL,
@@ -803,6 +816,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
             encoder_image_masks=image_masks,
             encoder_videos=videos,
             encoder_video_masks=video_masks,
+            encoder_video_grid_thw=video_grid_thw,
             encoder_audios=audio_values,
             decoder_segment_ids=sequence_indicator,
             enable_dropout=False,
@@ -887,6 +901,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       image_masks: jax.Array | None = None,
       videos: jax.Array | None = None,
       video_masks: jax.Array | None = None,
+      video_grid_thw: jax.Array | None = None,
       audio_values: jax.Array | None = None,
       audio_masks: jax.Array | None = None,
       true_length: int,
@@ -901,6 +916,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       temperature: float | None = None,
   ):  # returns (new_prefix, result_tokens)
     """Public API for prefill that updates page state outside JIT."""
+    if video_grid_thw is not None:
+      flat_video_grid = jax.device_get(video_grid_thw).reshape(-1)
+      if flat_video_grid.size != 3:
+        raise ValueError(f"Decode currently supports one video grid with 3 values, got shape {video_grid_thw.shape}.")
+      video_grid_thw = tuple(int(dim) for dim in flat_video_grid)
+
     # Update page state before JIT call
 
     # Sample rng before JIT call
@@ -920,6 +941,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         image_masks=image_masks,
         videos=videos,
         video_masks=video_masks,
+        video_grid_thw=video_grid_thw,
         audio_values=audio_values,
         audio_masks=audio_masks,
         sampler=sampler,
@@ -1077,8 +1099,8 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       )
       first_generated_tokens.append(first_generated_token)
       if self.config.return_log_prob:
-        # pytype: disable=attribute-error
-        token_logps.append(inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token))
+        p = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
+        token_logps.append(p)  # pytype: disable=attribute-error
     first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
     if self.config.return_log_prob:
       token_logps = jnp.concatenate(token_logps, axis=0)

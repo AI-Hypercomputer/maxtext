@@ -228,5 +228,9 @@ def test_scan_layers_mismatch_tpu():
   with pytest.raises(ValueError) as excinfo:
     train_main(mismatch_command)
 
-  assert "Configuration mismatch" in str(excinfo.value) or "Failed to restore checkpoint" in str(excinfo.value)
-  assert "scan_layers" in str(excinfo.value)
+  # The scanned checkpoint doesn't carry the unscanned model's per-layer weights, so the restore
+  # reports them as missing rather than leaving them at their init values.
+  message = str(excinfo.value)
+  assert "Checkpoint does not match the model" in message
+  assert "decoder/layers/0/" in message
+  assert "scan_layers" in message

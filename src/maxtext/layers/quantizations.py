@@ -387,7 +387,7 @@ class NANOOFp8Quantization(Quantization):
 
 
 def _get_int8_quant_config(config):
-  """Get int8 quantization configuration based on user config."""
+  """Get int8 quantization configuration."""
   drhs_bits = None
   drhs_accumulator_dtype = None
   drhs_local_aqt = None

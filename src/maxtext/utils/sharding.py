@@ -568,7 +568,9 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       # When quantization=fp8 is enabled the sharded_fp32_params
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
-    state_mesh_shardings = state_mesh_shardings.replace(params=dict(prev_params_shardings, **sharded_fp32_params))  # pyrefly: ignore[bad-unpacking]
+    state_mesh_shardings = state_mesh_shardings.replace(
+        params=dict(prev_params_shardings, **sharded_fp32_params)
+    )  # pyrefly: ignore[bad-unpacking]
   return prev_params_shardings, state_mesh_shardings
 
 

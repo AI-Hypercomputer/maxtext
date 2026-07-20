@@ -681,6 +681,8 @@ def training_loop_iteration(
   dump_hlo_upload_all = immutable_data["dump_hlo_upload_all"]
 
   prof.maybe_activate_profiler(step, state)
+  if config.elastic_enabled:
+    elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
 
   with jax.profiler.StepTraceAnnotation("train", step_num=step):
     example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)

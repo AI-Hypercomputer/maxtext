@@ -411,36 +411,15 @@ class Decoder(nn.Module):
             "kv_proj",
             "qkv_proj",
         )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
+      elif cfg.remat_policy in ("qkv_proj_offloaded", "minimal_offloaded", "custom"):
+        # minimal_offloaded offloads all except context. All three share a single
+        # source of truth for their save/offload name lists (see
+        # maxtext_utils.get_save_and_offload_names) so that offloading configured via
+        # `custom` resolves identically to the named presets.
+        save_names, offload_names = maxtext_utils.get_save_and_offload_names(cfg)
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj", "kv_proj"],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "minimal_offloaded":
-        # offload all except context
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=[
-                "query_proj",
-                "value_proj",
-                "key_proj",
-                "kv_proj",
-                "qkv_proj",
-                "out_proj",
-                "mlpwi_0",
-                "mlpwi_1",
-                "mlpwi",
-                "mlpwo",
-            ],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "custom":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=cfg.tensors_to_offload,
+            names_which_can_be_saved=save_names,
+            names_which_can_be_offloaded=offload_names,
             offload_src="device",
             offload_dst="pinned_host",
         )
@@ -1261,7 +1240,13 @@ class Decoder(nn.Module):
             if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
               visual_embeds = deepstack_visual_embeds[lyr]
               # Use bidirectional_mask to identify visual token positions
-              bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+              bidirectional_mask_value = None
+              if multimodal_input is not None:
+                bidirectional_mask_value = (
+                    multimodal_input.bidirectional_mask
+                    if multimodal_input.bidirectional_mask is not None
+                    else multimodal_input.bidirectional_mask_video
+                )
               if bidirectional_mask_value is not None and visual_embeds is not None:
                 y = deepstack_process(y, bidirectional_mask_value, visual_embeds)
 
@@ -1269,8 +1254,15 @@ class Decoder(nn.Module):
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     if cfg.mhc_expansion_rate > 1:
-      # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
-      hidden_state = mhc_reduce(y)
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+        hidden_state = mhc.DeepSeek4HyperHeadToLinen(
+            config=cfg,
+            mesh=mesh,
+            name="hc_head",
+        )(y)
+      else:
+        # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+        hidden_state = mhc_reduce(y)
     else:
       hidden_state = y
 
@@ -1380,18 +1372,19 @@ class Decoder(nn.Module):
         start_idx = scan_length * attention_pattern_length
         remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
 
-      y_and_kv = layer(
-          y,
+      remainder_args = (
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
-          previous_chunk=previous_chunk,
-          slot=slot,
-          bidirectional_mask=bidirectional_mask,
-          kv_cache=remainder_kv,
-          attention_metadata=attention_metadata,
+          slot,
+          None,  # page_state
+          previous_chunk,
+          bidirectional_mask,
+          remainder_kv,
+          attention_metadata,
       )
+      y_and_kv = layer(y, *remainder_args)
 
       if isinstance(y_and_kv, tuple):
         y = y_and_kv[0]

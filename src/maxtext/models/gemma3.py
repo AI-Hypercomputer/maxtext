@@ -216,6 +216,8 @@ class Gemma3DecoderLayer(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        slot=slot,
         bidirectional_mask=bidirectional_mask,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,

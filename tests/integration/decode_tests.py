@@ -181,16 +181,18 @@ class DecodeTests(unittest.TestCase):
   def test_decode_weighted_sampling(self):
     config = DecodeTests.CONFIGS["decode_sampling"] + DecodeTests.SAMPLING_STRATEGY_CONFIG["weighted"]
     captured_out = run_decoding(config)
-    expected_output = "Input `I love to` -> ` travel and I love to write"
-    assert expected_output in captured_out
+    expected_output_pre_v7x = "Input `I love to` -> ` travel and I love to write"
+    expected_output_v7x = "Input `I love to` -> ` travel. I love to explore new places,"
+    assert (expected_output_pre_v7x in captured_out) or (expected_output_v7x in captured_out)
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only
   def test_decode_nucleus_sampling(self):
     config = DecodeTests.CONFIGS["decode_sampling"] + DecodeTests.SAMPLING_STRATEGY_CONFIG["nucleus"]
     captured_out = run_decoding(config)
-    expected_output = "Input `I love to` -> ` travel and I love to write"
-    assert expected_output in captured_out
+    expected_output_pre_v7x = "Input `I love to` -> ` travel and I love to write"
+    expected_output_v7x = "Input `I love to` -> ` travel. I love to explore new places,"
+    assert (expected_output_pre_v7x in captured_out) or (expected_output_v7x in captured_out)
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only

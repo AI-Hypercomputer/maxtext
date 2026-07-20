@@ -148,6 +148,7 @@ jobs:
   run_e2e_tests:
     name: Run E2E tests
     needs: build_and_push_tpu_docker_images
+    if: github.event_name == 'schedule'
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
       mode: ${{ inputs.image_suffix != '' && format('{0}_{1}', 'nightly', inputs.image_suffix) || 'nightly' }}

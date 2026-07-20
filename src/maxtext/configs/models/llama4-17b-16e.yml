@@ -43,6 +43,7 @@ temperature_tuning: true
 chunk_attn_window_size: 8192
 
 # Multimodal flags (need to set use_multimodal=true)
+vision_encoder_block: "llama4"
 image_size_for_vit: 336
 num_channels_for_vit: 3
 patch_size_for_vit: 14

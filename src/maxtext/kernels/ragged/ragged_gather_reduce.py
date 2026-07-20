@@ -457,9 +457,14 @@ def ragged_gather_reduce(
   assert topk_weights.ndim == 1, "ragged_gather_reduce only supports 1d topk_weights."
   assert valid_rows_mask.ndim == 1, "ragged_gather_reduce only supports 1d valid_rows_mask."
 
+  # Guard against eager initialization on non-TPU hardware (e.g. during CPU tests).
+  # pltpu.get_tpu_info() expects TPU hardware and will crash if executed on CPU.
+  if enforce_fallback or jax.devices()[0].platform != "tpu":
+    return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
+
   sc_info = pltpu.get_tpu_info().sparse_core
-  if sc_info is None or enforce_fallback:
-    # Sparse core is not available or fallback is enforced. Use JAX reference.
+  if sc_info is None:
+    # Sparse core is not available. Use JAX reference.
     return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
 
   # Heuristic threshold on whether to fallback for small inputs.
