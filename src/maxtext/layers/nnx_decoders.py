@@ -358,8 +358,11 @@ class NNXScannedPipelineStage(nnx.Module):
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
       # Avoid returning and stacking read-only parameters inside the scan body.
       # This prevents huge unnecessary memory allocation.
-      _, _, updated_state = nnx.split(layer, nnx.Param, ...)
-      return new_carry, updated_state
+      if self.config.enable_nnx_scan_oom_fix:
+        _, _, updated_state = nnx.split(layer, nnx.Param, ...)
+        return new_carry, updated_state
+      else:
+        return new_carry, nnx.state(layer)
 
     final_carry, scanned_state = jax.lax.scan(layer_fn, inputs, (params, state))
 
@@ -868,20 +871,40 @@ class NNXDecoder(nnx.Module):
     layer_graphdef, _, _ = nnx.split(ref_layer, nnx.Param, ...)
     del ref_layer
 
-    def scan_body(carry, rng_state_slice):
-      layer_rngs = nnx.merge(rngs_graphdef, rng_state_slice)
-      layer = decoder_layer_class(
-          config=self.config,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-          rngs=layer_rngs,
-          **layer_kwargs,
-      )
-      _, params, rest = nnx.split(layer, nnx.Param, ...)
-      return carry, (params, rest)
+    if self.config.enable_nnx_scan_oom_fix:
+      params_list = []
+      rest_list = []
+      for i in range(length):
+        layer_rng_state = jax.tree.map(lambda x: x[i], rngs_state)
+        layer_rngs = nnx.merge(rngs_graphdef, layer_rng_state)
+        layer = decoder_layer_class(
+            config=self.config,
+            mesh=self.mesh,
+            quant=self.quant,
+            model_mode=self.model_mode,
+            rngs=layer_rngs,
+            **layer_kwargs,
+        )
+        _, params, rest = nnx.split(layer, nnx.Param, ...)
+        params_list.append(params)
+        rest_list.append(rest)
+      stacked_params = jax.tree.map(lambda *args: jnp.stack(args), *params_list)
+      stacked_rest = jax.tree.map(lambda *args: jnp.stack(args), *rest_list)
+    else:
+      def scan_body(carry, rng_state_slice):
+        layer_rngs = nnx.merge(rngs_graphdef, rng_state_slice)
+        layer = decoder_layer_class(
+            config=self.config,
+            mesh=self.mesh,
+            quant=self.quant,
+            model_mode=self.model_mode,
+            rngs=layer_rngs,
+            **layer_kwargs,
+        )
+        _, params, rest = nnx.split(layer, nnx.Param, ...)
+        return carry, (params, rest)
 
-    _, (stacked_params, stacked_rest) = jax.lax.scan(scan_body, None, rngs_state)
+      _, (stacked_params, stacked_rest) = jax.lax.scan(scan_body, None, rngs_state)
 
     if scan_axis != 0:
       stacked_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), stacked_params)
@@ -1037,8 +1060,11 @@ class NNXDecoder(nnx.Module):
       else:
         # Avoid returning and stacking read-only parameters inside the scan body.
         # This prevents huge unnecessary memory allocation.
-        _, _, updated_state = nnx.split(layer, nnx.Param, ...)
-        new_current_state = updated_state
+        if self.config.enable_nnx_scan_oom_fix:
+          _, _, updated_state = nnx.split(layer, nnx.Param, ...)
+          new_current_state = updated_state
+        else:
+          new_current_state = nnx.state(layer)
 
       if use_kv:
         return new_carry, (new_current_state, updated_kv)

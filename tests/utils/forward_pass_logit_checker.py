@@ -233,12 +233,12 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02, clip_logits_epsi
 def get_data(golden_data_point, config):
   """Get the golden data for the test indexed at golden_data_index"""
 
+  model_prefix = config.model_name.split("-")[0]
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
   if config.use_multimodal:
     assert "pixel_values" in golden_data_point, "no image found in golden data while use_multimodal=True"
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)
     max_logging.log(f"pixel_values.shape = {pixel_values.shape}")
-    model_prefix = config.model_name.split("-")[0]
     # Gemma3 and Gemma4 models expect (num_images, height, width, channels)
     if model_prefix in ["gemma3", "gemma4"]:
       if pixel_values.ndim == 2:

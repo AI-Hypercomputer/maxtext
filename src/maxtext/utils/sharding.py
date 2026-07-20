@@ -919,3 +919,25 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
+
+
+# Global references for monkey-patched nnx.Param initialization
+active_config = None
+active_mesh = None
+
+original_param_init = nnx.Param.__init__
+
+def patched_param_init(self, value, *args, **kwargs):
+  sharding_axes = kwargs.get('sharding') or kwargs.get('out_sharding')
+  if sharding_axes is not None:
+    if active_config is not None and active_mesh is not None:
+      value = maybe_shard_with_logical(
+          value,
+          sharding_axes,
+          active_mesh,
+          active_config.shard_mode,
+          rules=active_config.logical_axis_rules,
+      )
+  original_param_init(self, value, *args, **kwargs)
+
+nnx.Param.__init__ = patched_param_init

@@ -523,6 +523,9 @@ def from_config(
   """
   if mesh is None:
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
+  from maxtext.utils import sharding
+  sharding.active_config = config
+  sharding.active_mesh = mesh
   model = create_model(config, mesh, model_mode=model_mode, rngs=rngs, quant_mode_str=quant_mode_str)
 
   # Return only the model

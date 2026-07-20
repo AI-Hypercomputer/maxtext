@@ -1236,6 +1236,7 @@ subslice_shape: ""
 enable_nnx: true
 pure_nnx_decoder: true
 pure_nnx: true
+enable_nnx_scan_oom_fix: true
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net

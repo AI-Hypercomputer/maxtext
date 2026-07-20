@@ -1017,6 +1017,7 @@ class HardwareAndMesh(BaseModel):
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
   pure_nnx_decoder: bool = Field(True, description="Whether to enable pure NNX decoder.")
   pure_nnx: bool = Field(True, description="Whether to enable pure NNX mode.")
+  enable_nnx_scan_oom_fix: bool = Field(True, description="Whether to enable the OOM fix for NNX scanned decoder.")
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
