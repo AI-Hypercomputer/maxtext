@@ -344,11 +344,19 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
             update_blocks = jnp.pad(update_blocks, ((0, 0), (0, 0), (0, 0), (0, pad_amt)))
 
         operand = cache_key_var.get_value()
+        batch_axis = cache.prefill_cache_axis_order.index(0)
+        
+        # JETSTREAM FIX: Broadcast batch=1 prefill requests to fit the max_concurrent_decodes cache
+        if operand.shape[batch_axis] != update_blocks.shape[batch_axis]:
+            repeats = operand.shape[batch_axis] // update_blocks.shape[batch_axis]
+            update_blocks = jnp.repeat(update_blocks, repeats, axis=batch_axis)
         
         # Insert along the sequence axis (which is axis=0 in the transposed shape)
         cache_key_var.set_value(
             jax.lax.dynamic_update_slice_in_dim(operand, update_blocks, 0, axis=0)
         )
+        # JETSTREAM FIX: Ensure entry_count update matches the physical cache batch size
+        actual_batch = cache.entry_count.get_value().shape[0]
         cache.entry_count.set_value(jnp.full((batch_size, 1), compressed_len, dtype=jnp.int32))
 
     if seq_len == 1 or compressed_len == 0:
@@ -606,10 +614,19 @@ class DeepseekV4Indexer(nnx.Module):
           
           # 4. Insert along the Sequence axis (which is now axis=0)
           operand = cache_key_var.get_value()
+
+          batch_axis = cache.prefill_cache_axis_order.index(0)
+        
+          # JETSTREAM FIX: Broadcast batch=1 prefill requests to fit the max_concurrent_decodes cache
+          if operand.shape[batch_axis] != update_blocks.shape[batch_axis]:
+            repeats = operand.shape[batch_axis] // update_blocks.shape[batch_axis]
+            update_blocks = jnp.repeat(update_blocks, repeats, axis=batch_axis)
           
           cache_key_var.set_value(
               jax.lax.dynamic_update_slice_in_dim(operand, update_blocks, 0, axis=0)
           )
+          # JETSTREAM FIX: Ensure entry_count update matches the physical cache batch size
+          actual_batch = cache.entry_count.get_value().shape[0]
           cache.entry_count.set_value(jnp.full((batch_size, 1), compressed_len, dtype=jnp.int32))
           
           # Save the new trailing Ca slices to the overlap registers!
@@ -827,10 +844,18 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
           
           # Insert along the sequence axis (which is axis=0 in the transposed shape)
           operand = cache_key_var.get_value()
+          batch_axis = cache.prefill_cache_axis_order.index(0)
+        
+          # JETSTREAM FIX: Broadcast batch=1 prefill requests to fit the max_concurrent_decodes cache
+          if operand.shape[batch_axis] != update_blocks.shape[batch_axis]:
+            repeats = operand.shape[batch_axis] // update_blocks.shape[batch_axis]
+            update_blocks = jnp.repeat(update_blocks, repeats, axis=batch_axis)
           
           cache_key_var.set_value(
               jax.lax.dynamic_update_slice_in_dim(operand, update_blocks, 0, axis=0)
           )
+          # JETSTREAM FIX: Ensure entry_count update matches the physical cache batch size
+          actual_batch = cache.entry_count.get_value().shape[0]
           cache.entry_count.set_value(jnp.full((batch_size, 1), compressed_len, dtype=jnp.int32))
 
           cache.overlap_kv.set_value(jnp.transpose(next_prior_kv, (0, 2, 1, 3)))
