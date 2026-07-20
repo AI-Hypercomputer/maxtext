@@ -14,6 +14,7 @@
 
 """Mesh utilities for DiLoCo stack/unstack operations across submeshes."""
 
+import functools
 from typing import Any
 import jax
 import jax.numpy as jnp
@@ -21,6 +22,45 @@ import numpy as np
 
 from pathwaysutils.experimental.concatenate_by_mesh_axis import concatenate_by_mesh_axis
 from pathwaysutils.experimental.split_by_mesh_axis import split_by_mesh_axis
+
+
+def jit_with_layout_canonicalized_inputs(fun, *, in_shardings, out_shardings):
+  """JITs ``fun`` and relays arguments through its concrete input formats.
+
+  Logical shardings do not fully specify device-local physical layouts. On
+  TPU, compilation may select a tiled input such as ``T(256)`` while a
+  committed transfer/checkpoint value has a default or null layout. Compile
+  once, inspect the executable-selected formats, and explicitly place every
+  runtime argument into those formats before invoking the executable.
+  """
+  jitted = jax.jit(fun, in_shardings=in_shardings, out_shardings=out_shardings)
+  executable = None
+  input_formats = None
+
+  @functools.wraps(fun)
+  def call(*args):
+    nonlocal executable, input_formats
+    if executable is None:
+      executable = jitted.lower(*args).compile()
+      input_formats, keyword_formats = executable.input_formats
+      if keyword_formats:
+        raise ValueError("Layout-canonicalized JIT does not support keyword arguments")
+
+    formatted_args = jax.device_put(args, input_formats)
+    return executable(*formatted_args)
+
+  return call
+
+
+@functools.cache
+def _make_layout_safe_expand_dims(input_sharding, output_sharding, shape, dtype):
+  """Caches one layout-safe leading-dimension expansion per array signature."""
+  del shape, dtype  # These values specialize the cache/executable key.
+  return jit_with_layout_canonicalized_inputs(
+      lambda value: jnp.expand_dims(value, axis=0),
+      in_shardings=input_sharding,
+      out_shardings=output_sharding,
+  )
 
 
 def partition_mesh_by_diloco_axis(
@@ -54,25 +94,25 @@ def _expand_array_dims_with_mesh(
     axis_name: str,
 ) -> jax.Array:
   """Expands array dimensions by introducing a new dim-1 at index 0 and expanding its mesh."""
-  # TODO: verify the correctness of this function. compare to the g3 implementation.
-  # 1. Expand the array shape natively to prepending a size-1 dimension
-  expanded_x = jnp.expand_dims(x, axis=0)
-
-  # 2. Get original sharding
+  # 1. Get original sharding.
   sharding = x.sharding
   assert isinstance(sharding, jax.sharding.NamedSharding)
   submesh = sharding.mesh
 
-  # 3. Build expanded mesh (with axis_name of size 1 at the beginning)
+  # 2. Build expanded mesh (with axis_name of size 1 at the beginning).
   expanded_devices = np.expand_dims(np.array(submesh.devices), axis=0)
   expanded_mesh = jax.sharding.Mesh(expanded_devices, axis_names=(axis_name,) + submesh.axis_names)
 
-  # 4. Build expanded NamedSharding and reshard (metadata-only operation in JAX)
+  # 3. Build expanded NamedSharding.
   expanded_sharding = jax.sharding.NamedSharding(
       expanded_mesh, jax.sharding.PartitionSpec(axis_name, *sharding.spec), memory_kind=sharding.memory_kind
   )
 
-  return jax.device_put(expanded_x, expanded_sharding)
+  # 4. Expand through an executable-format adapter. A plain jnp.expand_dims is
+  # itself a compiled boundary and can otherwise reproduce the same default
+  # layout versus TPU tile mismatch as the removed broadcast JITs.
+  expand_dims = _make_layout_safe_expand_dims(sharding, expanded_sharding, x.shape, x.dtype)
+  return expand_dims(x)
 
 
 def stack_across_meshes_pytree(trees: list[Any], global_mesh: jax.sharding.Mesh, axis_name: str) -> Any:
@@ -149,3 +189,33 @@ def unstack_across_meshes_pytree(
     return jax.tree_util.tree_map(squeeze_leaf, tree)
 
   return [squeeze_and_reshard_tree(split_trees[i], submeshes[i]) for i in range(num_replicas)]
+
+
+def replicate_across_submeshes_pytree(global_tree: Any, submeshes: list[jax.sharding.Mesh]) -> list[Any]:
+  """Copies a global PyTree directly to every submesh without a broadcast JIT.
+
+  This deliberately uses eager ``device_put`` calls.  A jitted broadcast can
+  capture a TPU-specific physical tiling (for example ``T(256)``) in its input
+  executable ABI even when no ``in_shardings`` are specified.  Values restored
+  from checkpoints or transferred from TPU may have the same logical sharding
+  but a null physical layout, which makes that executable impossible to call.
+  """
+
+  def replicate_to_submesh(submesh):
+    def replicate_leaf(x):
+      if not isinstance(x, jax.Array):
+        return x
+      if not isinstance(x.sharding, jax.sharding.NamedSharding):
+        raise TypeError(f"Expected NamedSharding, got {type(x.sharding).__name__}")
+      target_sharding = jax.sharding.NamedSharding(
+          submesh,
+          x.sharding.spec,
+          memory_kind=x.sharding.memory_kind,
+      )
+      return jax.device_put(x, target_sharding, may_alias=False)
+
+    return jax.tree_util.tree_map(replicate_leaf, global_tree)
+
+  replicas = [replicate_to_submesh(submesh) for submesh in submeshes]
+  jax.block_until_ready(replicas)
+  return replicas

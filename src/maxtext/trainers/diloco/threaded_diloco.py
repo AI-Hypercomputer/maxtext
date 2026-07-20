@@ -41,7 +41,9 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
-from maxtext.utils.mesh_utils import partition_mesh_by_diloco_axis, stack_across_meshes_pytree, unstack_across_meshes_pytree
+from maxtext.utils.mesh_utils import partition_mesh_by_diloco_axis, replicate_across_submeshes_pytree
+from maxtext.utils.mesh_utils import stack_across_meshes_pytree
+from maxtext.utils.mesh_utils import jit_with_layout_canonicalized_inputs as _jit_with_layout_canonicalized_inputs
 
 
 @jax.jit
@@ -438,7 +440,7 @@ def syncer_loop(
     raise e
 
 
-def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, outer_optimizer, num_learners):
+def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, outer_optimizer):
   """Creates JIT-compiled functions for computing gradients and applying outer steps."""
   global_sharding_tree = {
       k: jax.sharding.NamedSharding(global_cpu_mesh, flat_params_shardings[k].spec) for k in frag_keys
@@ -449,51 +451,28 @@ def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, outer_optim
   }
   opt_state_sharding_tree = (optax.TraceState(trace=global_sharding_tree), optax.EmptyState())
 
-  @functools.partial(
-      jax.jit,
-      in_shardings=(global_sharding_tree, stacked_sharding_tree),
-      out_shardings=global_sharding_tree,
-  )
-  def compute_grad(o_frag, stacked_i_frag):
+  def compute_grad_impl(o_frag, stacked_i_frag):
     averaged_i_frag = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), stacked_i_frag)
     return jax.tree_util.tree_map(lambda x, y: x - y, o_frag, averaged_i_frag)
 
-  @functools.partial(
-      jax.jit,
-      in_shardings=(global_sharding_tree, opt_state_sharding_tree, global_sharding_tree),
-      out_shardings=(global_sharding_tree, opt_state_sharding_tree),
+  compute_grad = _jit_with_layout_canonicalized_inputs(
+      compute_grad_impl,
+      in_shardings=(global_sharding_tree, stacked_sharding_tree),
+      out_shardings=global_sharding_tree,
   )
-  def apply_outer_step(g_frag, o_state_frag, p_frag):
+
+  def apply_outer_step_impl(g_frag, o_state_frag, p_frag):
     updates_frag, new_o_state_frag = outer_optimizer.update(g_frag, o_state_frag, params=p_frag)
     new_p_frag = optax.apply_updates(p_frag, updates_frag)
     return new_p_frag, new_o_state_frag
 
-  @functools.partial(
-      jax.jit,
-      out_shardings=stacked_sharding_tree,
+  apply_outer_step = _jit_with_layout_canonicalized_inputs(
+      apply_outer_step_impl,
+      in_shardings=(global_sharding_tree, opt_state_sharding_tree, global_sharding_tree),
+      out_shardings=(global_sharding_tree, opt_state_sharding_tree),
   )
-  def broadcast_frag(frag):
-    return jax.tree_util.tree_map(
-        lambda x: jnp.broadcast_to(jnp.expand_dims(x, axis=0), (num_learners,) + x.shape),
-        frag
-    )
 
-  return compute_grad, apply_outer_step, broadcast_frag
-
-
-def make_broadcast_params_fn(stacked_params_shardings, num_learners):
-  """Builds the initial-parameter broadcast so it can be compiled in isolation."""
-
-  @functools.partial(
-      jax.jit,
-      out_shardings=stacked_params_shardings,
-  )
-  def broadcast_params(params):
-    return jax.tree_util.tree_map(
-        lambda x: jnp.broadcast_to(jnp.expand_dims(x, axis=0), (num_learners,) + x.shape), params
-    )
-
-  return broadcast_params
+  return compute_grad, apply_outer_step
 
 
 def _run_syncer_loop(
@@ -585,18 +564,11 @@ def _run_syncer_loop(
     jax.block_until_ready((syncer_params, syncer_opt_state))
     syncer_state = syncer_state.replace(params=syncer_params, opt_state=syncer_opt_state)
 
-  # Init (2): broadcast initial params to all learners
-  stacked_params_sharding_tree = jax.tree_util.tree_map(
-      lambda s: jax.sharding.NamedSharding(global_cpu_mesh, jax.sharding.PartitionSpec("diloco", *s.spec)),
-      params_shardings
-  )
-
-  broadcast_params = make_broadcast_params_fn(stacked_params_sharding_tree, num_learners)
-
-  with jax.set_mesh(global_cpu_mesh):
-    stacked_params = broadcast_params(syncer_state.params)
-
-  local_params_list = unstack_across_meshes_pytree(stacked_params, cpu_submeshes, "diloco")
+  # Init (2): copy initial params directly to every learner CPU submesh.  Do
+  # not route this through a broadcast JIT: on TPU that executable can capture
+  # a physical input tiling such as T(256), while a restored/transferred array
+  # with the same logical sharding can legitimately have a null layout.
+  local_params_list = replicate_across_submeshes_pytree(syncer_state.params, cpu_submeshes)
 
   for i in range(num_learners):
     max_logging.log(f"Syncer: sending params to Learner {i} at step {start_step}")
@@ -625,7 +597,7 @@ def _run_syncer_loop(
     for f_idx in range(num_fragments):
       frag_dict = manipulator.get_flat_fragment(syncer_state.params, f_idx)
       step_fns_by_frag[f_idx] = make_step_fns(
-          global_cpu_mesh, flat_params_shardings, frag_dict, outer_optimizer, num_learners
+          global_cpu_mesh, flat_params_shardings, frag_dict, outer_optimizer
       )
 
   # Start main syncer loop
@@ -647,7 +619,7 @@ def _run_syncer_loop(
     with jax.set_mesh(global_cpu_mesh):
       outer_params_frag = manipulator.get_flat_fragment(syncer_state.params, frag_idx)
 
-      compute_grad, apply_outer_step, broadcast_frag = step_fns_by_frag[frag_idx]
+      compute_grad, apply_outer_step = step_fns_by_frag[frag_idx]
 
       pseudo_grad_frag = compute_grad(outer_params_frag, stacked_inner_frag)
 
@@ -664,9 +636,6 @@ def _run_syncer_loop(
       for i, shard in enumerate(val_global.addressable_shards):
         max_logging.log(f"DEBUG_SHARD:   global shard {i}: device={shard.device}")
 
-      # Broadcast the fragment to all learners
-      stacked_new_outer_params_frag = broadcast_frag(new_outer_params_frag)
-
       new_params = manipulator.apply_flat_fragment(syncer_state.params, frag_idx, new_outer_params_frag)
       new_trace = manipulator.apply_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, new_opt_state_frag[0].trace)
       new_opt_state = (optax.TraceState(trace=new_trace), syncer_state.opt_state[1])
@@ -674,7 +643,9 @@ def _run_syncer_loop(
       syncer_state = syncer_state.replace(params=new_params, opt_state=new_opt_state, step=step)
     max_logging.log(f"Syncer: Step {step} outer step applied")
 
-    local_frags = unstack_across_meshes_pytree(stacked_new_outer_params_frag, cpu_submeshes, "diloco")
+    # As above, replicate directly so no fragment broadcast executable can
+    # acquire a shape-specific TPU input-layout ABI.
+    local_frags = replicate_across_submeshes_pytree(new_outer_params_frag, cpu_submeshes)
 
     for i in range(num_learners):
       transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=local_frags[i])
