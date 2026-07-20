@@ -32,7 +32,6 @@ import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax import nnx
-from jax._src.sharding_impls import GSPMDSharding  # pylint: disable=protected-access
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from maxtext.common.common_types import (
@@ -1287,9 +1286,7 @@ class TestNNXDecoderPrefetching(unittest.TestCase):
     nnx.pop(decoder, nnx.RngState, nnx.RngCount)
     graphdef, params, state = nnx.split(decoder, nnx.Param, ...)
 
-    s_dev = GSPMDSharding.get_replicated(
-        tuple(self.mesh.devices.flat) if hasattr(self.mesh.devices, "flat") else tuple(self.mesh.devices)
-    )
+    s_dev = NamedSharding(self.mesh, PartitionSpec())
     orig_getattr = getattr
 
     def _mock_getattr(obj, name, default=None):
