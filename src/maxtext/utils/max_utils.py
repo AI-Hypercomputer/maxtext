@@ -816,9 +816,12 @@ def print_compiled_memory_stats(compiled_stats):
   total_gb = output_gb + temp_gb + argument_gb - alias_gb
 
   max_logging.log(
-      f"Total memory size: {total_gb:.1f} GB, Output size: {output_gb:.1f} GB, Temp size: {temp_gb:.1f} GB, "
-      f"Argument size: {argument_gb:.1f} GB, Host temp size: {host_temp_gb:.1f} GB."
+      f"Total estimated memory size: {total_gb:.1f} GB, estimated output"
+      f" size: {output_gb:.1f} GB, estimated temp size: {temp_gb:.1f} GB, "
+      f"estimated argument size: {argument_gb:.1f} GB, Estimated host temp"
+      f" size: {host_temp_gb:.1f} GB."
   )
+  max_logging.log("Note that compiler could over-estimate the HBM usage.")
 
 
 def print_system_information():
