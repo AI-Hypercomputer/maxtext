@@ -77,6 +77,28 @@ def _expand_array_dims_with_mesh(
 
 def stack_across_meshes_pytree(trees: list[Any], global_mesh: jax.sharding.Mesh, axis_name: str) -> Any:
   """Stacks a list of PyTrees across submeshes into a single global PyTree."""
+  # pathwaysutils' concatenate primitive always donates its inputs and its CPU
+  # implementation is not safe when the source submeshes and destination mesh
+  # overlap in one PJRT client. Use ordinary non-donating JAX on CPU; TPU keeps
+  # the zero-copy Pathways mesh concatenation used in production.
+  if all(device.platform == "cpu" for device in global_mesh.devices.flat):
+
+    def stack_leaves(*leaves):
+      source_sharding = leaves[0].sharding
+      assert isinstance(source_sharding, jax.sharding.NamedSharding)
+      output_sharding = jax.sharding.NamedSharding(
+          global_mesh,
+          jax.sharding.PartitionSpec(axis_name, *source_sharding.spec),
+          memory_kind=source_sharding.memory_kind,
+      )
+
+      # A single jitted computation cannot accept arguments committed to
+      # disjoint CPU meshes. Materialize through host memory in the CPU-only
+      # fallback, then place the combined value on the global mesh.
+      return jax.device_put(np.stack([np.asarray(value) for value in leaves], axis=0), output_sharding)
+
+    return jax.tree_util.tree_map(stack_leaves, *trees)
+
   # 1. Expand dimensions of all arrays in all PyTrees manually
   expanded_trees = []
   for tree in trees:
@@ -94,6 +116,24 @@ def unstack_across_meshes_pytree(
 ) -> list[Any]:
   """Unstacks/splits a global PyTree into a list of submesh-local PyTrees."""
   num_replicas = len(submeshes)
+  first_leaf = jax.tree_util.tree_leaves(global_tree)[0]
+  if all(device.platform == "cpu" for device in first_leaf.sharding.device_set):
+
+    def slice_tree(replica_idx, submesh):
+      def slice_leaf(x):
+        assert isinstance(x.sharding, jax.sharding.NamedSharding)
+        target_sharding = jax.sharding.NamedSharding(
+            submesh,
+            jax.sharding.PartitionSpec(*x.sharding.spec[1:]),
+            memory_kind=x.sharding.memory_kind,
+        )
+
+        return jax.device_put(np.asarray(x)[replica_idx], target_sharding)
+
+      return jax.tree_util.tree_map(slice_leaf, global_tree)
+
+    return [slice_tree(i, submeshes[i]) for i in range(num_replicas)]
+
   # 1. Split the global PyTree along the mesh axis using pathwaysutils
   split_trees = split_by_mesh_axis(global_tree, mesh_axis=axis_name)
 

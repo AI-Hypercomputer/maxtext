@@ -18,6 +18,8 @@ import sys
 import unittest
 import threading
 import time
+import os
+import subprocess
 from maxtext.configs import pyconfig
 from maxtext.trainers.diloco.threaded_diloco import make_learner_config
 from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager
@@ -105,6 +107,63 @@ class ThreadedDilocoUnitTest(unittest.TestCase):
 
     self.assertFalse(t.is_alive())
     self.assertEqual(results['data'], "blocked_data")
+
+  def test_broadcast_params_compiles_on_multi_device_cpu(self):
+    """Compiles the syncer broadcast in a fresh two-device CPU process."""
+    script = r"""
+import numpy as np
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager, LearnerTransport
+from maxtext.trainers.diloco.threaded_diloco import make_broadcast_params_fn
+from maxtext.utils.mesh_utils import stack_across_meshes_pytree
+
+devices = jax.devices("cpu")
+assert len(devices) == 2, devices
+mesh = Mesh(np.asarray(devices), ("diloco",))
+stacked_shardings = {"weight": NamedSharding(mesh, P("diloco"))}
+broadcast = make_broadcast_params_fn(stacked_shardings, 2)
+incoming = {"weight": jnp.arange(8, dtype=jnp.float32)}
+lowered = broadcast.lower(incoming)
+result = lowered.compile()(incoming)
+
+np.testing.assert_array_equal(np.asarray(result["weight"]), np.stack([np.arange(8)] * 2))
+assert result["weight"].sharding.spec == P("diloco")
+assert all(device.platform == "cpu" for device in result["weight"].sharding.device_set)
+stablehlo = lowered.as_text()
+assert "stablehlo.broadcast_in_dim" in stablehlo
+signature = next(line for line in stablehlo.splitlines() if "func.func public @main" in line)
+parameter_abi = signature.split("func.func public @main(", 1)[1].split(") ->", 1)[0]
+output_abi = signature.split(") ->", 1)[1]
+assert "sdy.sharding" not in parameter_abi
+assert "sdy.sharding" in output_abi
+
+# Pathways concatenate always donates its inputs. Verify the transport owns a
+# distinct buffer even when learner and colocated meshes share CPU devices.
+submeshes = [Mesh(np.asarray(device), ()) for device in devices]
+manager = ThreadedTransportManager(2)
+transports = [LearnerTransport(manager, i, submeshes[i]) for i in range(2)]
+originals = []
+for i, transport in enumerate(transports):
+  original = jax.device_put(jnp.arange(8, dtype=jnp.float32), NamedSharding(submeshes[i], P()))
+  originals.append(original)
+  transport.send_to_syncer(step=1, fragment_id=0, data={"weight": original})
+fragments = [manager.recv_from_learner(i, step=1, fragment_id=0) for i in range(2)]
+stacked = stack_across_meshes_pytree(fragments, mesh, "diloco")
+jax.block_until_ready(stacked)
+consume = jax.jit(lambda value: value + 1, donate_argnums=0)
+for fragment in fragments:
+  consume(fragment["weight"]).block_until_ready()
+for original in originals:
+  np.testing.assert_array_equal(np.asarray(original), np.arange(8))
+for transport in transports:
+  transport.close()
+"""
+    env = os.environ.copy()
+    existing_flags = env.get("XLA_FLAGS", "")
+    env["XLA_FLAGS"] = f"{existing_flags} --xla_force_host_platform_device_count=2".strip()
+    subprocess.run([sys.executable, "-c", script], check=True, env=env, timeout=120)
 
 if __name__ == "__main__":
   unittest.main()

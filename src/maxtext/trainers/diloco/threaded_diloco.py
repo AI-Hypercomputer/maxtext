@@ -49,10 +49,6 @@ def mix_frags(i_frag, o_frag, alpha):
   return jax.tree_util.tree_map(lambda x, y: alpha * x + (1 - alpha) * y, i_frag, o_frag)
 
 
-def cpu_clone(x):
-  return jnp.copy(x)
-
-
 class SyncerState(struct.PyTreeNode):
   params: Any
   opt_state: optax.OptState
@@ -298,11 +294,20 @@ def _run_learner_loop(
                   f"DEBUG_DEVICES: Learner {learner_idx} step {step} before train_step batch leaves devices: {[set(x.devices()) for x in batch_leaves]}",
                   flush=True,
               )
-              state, metrics = p_train_step(state, example_batch, *step_rng_args)
-              # Force block to catch async errors immediately
-              for leaf in jax.tree_util.tree_flatten((state, metrics))[0]:
-                if hasattr(leaf, "block_until_ready"):
-                  leaf.block_until_ready()
+              def run_and_block_train_step(current_state):
+                next_state, step_metrics = p_train_step(current_state, example_batch, *step_rng_args)
+                # Force block to catch async errors and finish compilation
+                # before another learner enters its first call.
+                for leaf in jax.tree_util.tree_flatten((next_state, step_metrics))[0]:
+                  if hasattr(leaf, "block_until_ready"):
+                    leaf.block_until_ready()
+                return next_state, step_metrics
+
+              if step == start_step:
+                with init_lock:
+                  state, metrics = run_and_block_train_step(state)
+              else:
+                state, metrics = run_and_block_train_step(state)
 
           max_logging.log(f"Learner {learner_idx}: Step {step} finished")
           step_time_delta = datetime.datetime.now() - last_step_completion
@@ -315,7 +320,10 @@ def _run_learner_loop(
             frag_data = manipulator.get_flat_fragment(params, frag_idx)
             transport.send_to_syncer_async(completed_step, frag_idx, frag_data)
 
-          if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
+          # Messages in the overlap window are not checkpointed. On resume the
+          # full global-parameter broadcast supersedes any response at or
+          # before start_step, so only wait for newly produced responses.
+          if completed_step - tau > start_step and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
             frag_idx = ((completed_step - tau) % period) // steps_between_syncs_plus_1
             received_frag = transport.recv_from_syncer(completed_step - tau, frag_idx)
 
@@ -462,7 +470,6 @@ def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, outer_optim
 
   @functools.partial(
       jax.jit,
-      in_shardings=(global_sharding_tree,),
       out_shardings=stacked_sharding_tree,
   )
   def broadcast_frag(frag):
@@ -472,6 +479,21 @@ def make_step_fns(global_cpu_mesh, flat_params_shardings, frag_keys, outer_optim
     )
 
   return compute_grad, apply_outer_step, broadcast_frag
+
+
+def make_broadcast_params_fn(stacked_params_shardings, num_learners):
+  """Builds the initial-parameter broadcast so it can be compiled in isolation."""
+
+  @functools.partial(
+      jax.jit,
+      out_shardings=stacked_params_shardings,
+  )
+  def broadcast_params(params):
+    return jax.tree_util.tree_map(
+        lambda x: jnp.broadcast_to(jnp.expand_dims(x, axis=0), (num_learners,) + x.shape), params
+    )
+
+  return broadcast_params
 
 
 def _run_syncer_loop(
@@ -551,22 +573,25 @@ def _run_syncer_loop(
     start_step = int(syncer_state.step)
     max_logging.log(f"Syncer restored from step {start_step}")
 
+  # Checkpoint restore and TPU-to-CPU transfer are both placement boundaries.
+  # Canonicalize the complete syncer state onto the current colocated CPU mesh
+  # before compiling any consumer, and wait for the physical transfer/layout
+  # to be ready. may_alias=False also protects this state from downstream APIs
+  # which donate communication buffers.
+  opt_state_shardings = jax.tree_util.tree_map(lambda x: x.sharding, abstract_opt_state)
+  with jax.set_mesh(global_cpu_mesh):
+    syncer_params = jax.device_put(syncer_state.params, params_shardings, may_alias=False)
+    syncer_opt_state = jax.device_put(syncer_state.opt_state, opt_state_shardings, may_alias=False)
+    jax.block_until_ready((syncer_params, syncer_opt_state))
+    syncer_state = syncer_state.replace(params=syncer_params, opt_state=syncer_opt_state)
+
   # Init (2): broadcast initial params to all learners
   stacked_params_sharding_tree = jax.tree_util.tree_map(
       lambda s: jax.sharding.NamedSharding(global_cpu_mesh, jax.sharding.PartitionSpec("diloco", *s.spec)),
       params_shardings
   )
 
-  @functools.partial(
-      jax.jit,
-      in_shardings=(params_shardings,),
-      out_shardings=stacked_params_sharding_tree,
-  )
-  def broadcast_params(params):
-    return jax.tree_util.tree_map(
-        lambda x: jnp.broadcast_to(jnp.expand_dims(x, axis=0), (num_learners,) + x.shape),
-        params
-    )
+  broadcast_params = make_broadcast_params_fn(stacked_params_sharding_tree, num_learners)
 
   with jax.set_mesh(global_cpu_mesh):
     stacked_params = broadcast_params(syncer_state.params)
@@ -631,18 +656,16 @@ def _run_syncer_loop(
 
       new_outer_params_frag, new_opt_state_frag = apply_outer_step(pseudo_grad_frag, opt_state_frag, outer_params_frag)
 
-      new_outer_params_frag_for_broadcast = jax.tree_util.tree_map(cpu_clone, new_outer_params_frag)
-
       # Debug prints
-      first_key = list(new_outer_params_frag_for_broadcast.keys())[0]
+      first_key = list(new_outer_params_frag.keys())[0]
       max_logging.log(f"DEBUG_SHARD: first_key={first_key}")
-      val_global = new_outer_params_frag_for_broadcast[first_key]
+      val_global = new_outer_params_frag[first_key]
       max_logging.log(f"DEBUG_SHARD: global val sharding={val_global.sharding}")
       for i, shard in enumerate(val_global.addressable_shards):
         max_logging.log(f"DEBUG_SHARD:   global shard {i}: device={shard.device}")
 
       # Broadcast the fragment to all learners
-      stacked_new_outer_params_frag = broadcast_frag(new_outer_params_frag_for_broadcast)
+      stacked_new_outer_params_frag = broadcast_frag(new_outer_params_frag)
 
       new_params = manipulator.apply_flat_fragment(syncer_state.params, frag_idx, new_outer_params_frag)
       new_trace = manipulator.apply_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, new_opt_state_frag[0].trace)

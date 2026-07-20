@@ -15,6 +15,7 @@
 """Thread-safe transport layer for non-SPMD multi-threaded DiLoCo."""
 
 import queue
+import threading
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 import traceback
@@ -23,6 +24,8 @@ import jax.numpy as jnp
 from jax.experimental import colocated_python
 from maxtext.utils import max_logging
 
+
+_JAX_DISPATCH_LOCK = threading.Lock()
 
 
 class ThreadedTransportManager:
@@ -98,7 +101,14 @@ class LearnerTransport:
         lambda s: jax.sharding.NamedSharding(self.local_cpu_mesh, s.spec),
         jax.tree_util.tree_map(lambda x: x.sharding, data),
     )
-    frag_cpu = jax.device_put(data, cpu_sharding)
+    # concatenate_by_mesh_axis always donates its inputs.  Force this transfer
+    # to own its buffers so donation in the syncer cannot invalidate learner
+    # state when source and destination happen to share a backend (notably in
+    # multi-device CPU tests, where the "colocated CPU" is the learner CPU).
+    # Dispatching device_put concurrently from Python threads is unsafe on the
+    # CPU PJRT backend.  Only dispatch is serialized; completion remains async.
+    with _JAX_DISPATCH_LOCK:
+      frag_cpu = jax.device_put(data, cpu_sharding, may_alias=False)
 
     # 2. Block and send in the background executor thread
     def _send():
@@ -121,7 +131,8 @@ class LearnerTransport:
         lambda s: jax.sharding.NamedSharding(self.local_cpu_mesh, s.spec),
         jax.tree_util.tree_map(lambda x: x.sharding, data),
     )
-    frag_cpu = jax.device_put(data, cpu_sharding)
+    with _JAX_DISPATCH_LOCK:
+      frag_cpu = jax.device_put(data, cpu_sharding, may_alias=False)
     jax.block_until_ready(frag_cpu)
     self.manager.send_to_syncer(self.learner_idx, step, fragment_id, frag_cpu)
 
@@ -144,5 +155,3 @@ class SyncerTransport:
 
   def recv_from_learner(self, learner_idx: int, step: int, fragment_id: int) -> Any:
     return self.manager.recv_from_learner(learner_idx, step, fragment_id)
-
-

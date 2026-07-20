@@ -1033,7 +1033,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   if step is not None:
     actual_step = int(step)
   else:
-    if config.pure_nnx:
+    if config.pure_nnx and hasattr(state, "optimizer"):
       actual_step = int(state.optimizer.step) - 1
     else:
       # Linen TrainState has .step attribute
@@ -1043,7 +1043,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
-  if config.pure_nnx:
+  if config.pure_nnx and hasattr(state, "to_pure_dict"):
     # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
     state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
 

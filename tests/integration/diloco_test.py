@@ -17,7 +17,7 @@
 
 import os
 import unittest
-from tempfile import gettempdir
+from tempfile import gettempdir, TemporaryDirectory
 
 import chex
 from flax.experimental import nnx
@@ -371,6 +371,7 @@ class DiLoCoTest(unittest.TestCase):
         "dataset_type=synthetic",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
+        "enable_tensorboard=False",
         "enable_non_spmd_diloco=True",
         "pure_nnx=True",
         "num_diloco_fragments=2",
@@ -393,3 +394,46 @@ class DiLoCoTest(unittest.TestCase):
     ]
 
     train_main(argv)
+
+  @pytest.mark.cpu_only
+  def test_threaded_diloco_checkpoint_resume(self):
+    """Restores learner and syncer state before the initial broadcast."""
+    num_replicas = 2
+    if len(jax.devices()) < 4:
+      self.skipTest("Test requires four devices: two learners with two-way FSDP.")
+
+    with TemporaryDirectory(prefix="threaded_diloco_resume_") as output_directory:
+      common_argv = [
+          "",
+          get_test_config_path(),
+          f"base_output_directory={output_directory}",
+          "run_name=resume_run",
+          "dataset_type=synthetic",
+          "enable_checkpointing=True",
+          "async_checkpointing=False",
+          "checkpoint_period=1",
+          "enable_goodput_recording=False",
+          "enable_tensorboard=False",
+          "enable_non_spmd_diloco=True",
+          "pure_nnx=True",
+          "num_diloco_fragments=2",
+          f"num_diloco_replicas={num_replicas}",
+          "diloco_sync_period=2",
+          "num_communication_overlapping_steps=1",
+          "communication_overlapping_alpha=0.5",
+          "ici_diloco_parallelism=2",
+          "ici_fsdp_parallelism=2",
+          "ici_tensor_parallelism=1",
+          "ici_pipeline_parallelism=1",
+          "base_emb_dim=16",
+          "base_num_query_heads=1",
+          "base_num_kv_heads=1",
+          "base_mlp_dim=16",
+          "base_num_decoder_layers=2",
+          "head_dim=4",
+          "max_target_length=16",
+          "vocab_size=32",
+      ]
+
+      train_main(common_argv + ["steps=2"])
+      train_main(common_argv + ["steps=4"])
