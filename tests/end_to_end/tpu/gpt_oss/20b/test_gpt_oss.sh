@@ -39,10 +39,26 @@ if [ -z "${CKPT_DISK_LOCATION}" ]; then
 fi
 
 # 1.1 Convert checkpoint to `scanned` format, more suitable for training
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/scanned --model-size ${MODEL_NAME}
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    base_output_directory=${BASE_OUTPUT_PATH}/scanned \
+    scan_layers=true \
+    attention=dot_product \
+    hardware=cpu skip_jax_distributed_system=True \
+    --hf_model_path=${CKPT_DISK_LOCATION} \
+    --lazy_load_tensors=False \
+    --eager_load_method='safetensors'
 
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_unscanned_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned --model-size ${MODEL_NAME}
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    base_output_directory=${BASE_OUTPUT_PATH}/unscanned \
+    scan_layers=false \
+    attention=dot_product \
+    hardware=cpu skip_jax_distributed_system=True \
+    --hf_model_path=${CKPT_DISK_LOCATION} \
+    --lazy_load_tensors=False \
+    --eager_load_method='safetensors'
 
 # Step 2:
 # We define the checkpoint paths. This way it is easier to use these paths in the `train.py` and `decode.py` commands
