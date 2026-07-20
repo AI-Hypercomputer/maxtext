@@ -232,6 +232,10 @@ def vocab_tiling_linen_loss(
 
       # 1.0 since total_loss is sum of all individual chunked loss
       (grad_params_update, grad_hidden_chunk) = vjp_fn(1.0)
+      # Params offloaded to host yield host cotangents. Move them to device so the
+      # accumulation operands share the same memory space.
+      if config.parameter_memory_host_offload:
+        grad_params_update = jax.device_put(grad_params_update, max_utils.device_space())
       grad_hidden_chunk = _maybe_shard_with_name(grad_hidden_chunk, chunked_hidden_spec)
 
       grad_params_acc = jax.tree_util.tree_map(
@@ -252,6 +256,9 @@ def vocab_tiling_linen_loss(
     grad_params = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_params)
     # Cast cotangents back to each primal's dtype; custom_vjp requires dtype match.
     grad_params = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), gathered_params, grad_params)
+    # Move cotangents back to each primal's memory space; custom_vjp requires memory space match.
+    if config.parameter_memory_host_offload:
+      grad_params = jax.device_put(grad_params, max_utils.host_space())
     # Give back sharding constraint
     grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
     return (
