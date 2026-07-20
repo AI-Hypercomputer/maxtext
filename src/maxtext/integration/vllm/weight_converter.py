@@ -154,36 +154,23 @@ class TransposeNorm(Operation):
         return jnp.transpose(tensors[0] if isinstance(tensors, list) else tensors)
 
 # ==========================================
-# 2. Rules
+# 2. Rule
 # ==========================================
-class ExactWeightRule:
-    def __init__(self, source_key: str, target_key: str, operations: List[Operation] = None):
-        self.source_key = source_key
-        self.target_key = target_key
-        self.operations = operations or []
-
-class ExactMultiWeightRule:
-    def __init__(self, source_keys: List[str], target_key: str, operations: List[Operation] = None):
-        self.source_keys = source_keys
-        self.target_key = target_key
-        self.operations = operations or []
-
-class WeightRenaming:
-    def __init__(self, source_pattern: str, target_pattern: str):
-        self.source_pattern = source_pattern
+class Rule:
+    """Unified rule format for converting weights."""
+    def __init__(self, source_patterns: Union[str, List[str]], target_pattern: str, operations: List[Operation] = None):
+        if isinstance(source_patterns, str):
+            self.source_patterns = [source_patterns]
+        else:
+            self.source_patterns = source_patterns
         self.target_pattern = target_pattern
-
-class WeightConverterRule:
-    def __init__(self, source_patterns: List[str], target_pattern: str, operations: List[Operation]):
-        self.source_patterns = source_patterns
-        self.target_pattern = target_pattern
-        self.operations = operations
+        self.operations = operations or []
 
 # ==========================================
 # 3. Engine
 # ==========================================
 class WeightConverter(abc.ABC):
-    def __init__(self, rules: List[Union[WeightRenaming, WeightConverterRule]], tp: int = 1):
+    def __init__(self, rules: List[Rule], tp: int = 1):
         self.rules = rules
         self.tp = tp
 
@@ -246,60 +233,54 @@ class WeightConverter(abc.ABC):
             rules_to_apply.extend(direct_rules)
 
         for rule in rules_to_apply:
-            if isinstance(rule, ExactWeightRule):
-                if rule.source_key in flat_src:
-                    val = flat_src[rule.source_key]
-                    for op in rule.operations:
-                        val = op([val])
-                    dst_dict[rule.target_key] = val
-            elif isinstance(rule, ExactMultiWeightRule):
-                if all(k in flat_src for k in rule.source_keys):
-                    tensors = [flat_src[k] for k in rule.source_keys]
-                    for op in rule.operations:
-                        tensors = op(tensors)
-                    dst_dict[rule.target_key] = tensors
-            elif isinstance(rule, WeightRenaming):
-                # Compile the regex and handle simple string replacements
-                source_pattern = re.compile(rule.source_pattern)
+            import collections
+            matched_groups = collections.defaultdict(list)
+            
+            source_regexes = [re.compile(p) for p in rule.source_patterns]
+            
+            # Search for all keys matching each source pattern
+            for i, pattern in enumerate(source_regexes):
                 for src_key, src_val in flat_src.items():
-                    if source_pattern.search(src_key):
-                        target_key = source_pattern.sub(rule.target_pattern, src_key)
-                        dst_dict[target_key] = src_val
-            elif isinstance(rule, WeightConverterRule):
-                # Used r"layers\.\d+\.attention\.wq\.kernel"
-                # matched to target_pattern=r"layers.{}.attention.qkv_proj.weight".
-                import collections
-                matched_groups = collections.defaultdict(list)
-                
-                source_regexes = [re.compile(p) for p in rule.source_patterns]
-                
-                # Search for all keys matching each source pattern
-                for i, pattern in enumerate(source_regexes):
-                    for src_key, src_val in flat_src.items():
-                        m = pattern.search(src_key)
-                        if m:
-                            # Extract all digits to form a group key
-                            digits = tuple(re.findall(r'\d+', src_key))
-                            matched_groups[digits].append((i, src_val))
-                
-                for digits, matched_items in matched_groups.items():
-                    # Check if we have all required source patterns matched
-                    if len(matched_items) == len(rule.source_patterns):
-                        # Sort by index i to pass tensors in the correct order
-                        matched_items.sort(key=lambda x: x[0])
-                        tensors = [x[1] for x in matched_items]
-                        
-                        # Apply operations
-                        result = tensors
-                        for op in rule.operations:
-                            # inject the correct tp, override the default tp=0
-                            if (isinstance(op, FuseQwen3MoEGateUp) or isinstance(op, FuseQwen3MoEQKV)) and op.tp == 0:
-                                op.tp = self.tp
-                            result = op(result)
-                        
+                    m = pattern.search(src_key)
+                    if m:
+                        # Extract all digits to form a group key for matching multiple source patterns
+                        digits = tuple(re.findall(r'\d+', src_key))
+                        if len(rule.source_patterns) == 1:
+                            # For single source pattern without groups, just use the string as is to replace
+                            if not digits:
+                                target_key = pattern.sub(rule.target_pattern, src_key)
+                                dst_dict[target_key] = src_val
+                                break
+                            
+                        matched_groups[digits].append((i, src_val))
+            
+            for digits, matched_items in matched_groups.items():
+                # Check if we have all required source patterns matched
+                if len(matched_items) == len(rule.source_patterns):
+                    # Sort by index i to pass tensors in the correct order
+                    matched_items.sort(key=lambda x: x[0])
+                    tensors = [x[1] for x in matched_items]
+                    
+                    # Apply operations
+                    result = tensors
+                    for op in rule.operations:
+                        # inject the correct tp, override the default tp=0
+                        if (isinstance(op, FuseQwen3MoEGateUp) or isinstance(op, FuseQwen3MoEQKV)) and op.tp == 0:
+                            op.tp = self.tp
+                        result = op(result)
+                    
+                    if len(rule.source_patterns) == 1 and not rule.operations and digits:
+                        # Simple renaming with grouped strings e.g. "model.layers.\1.input_layernorm.weight"
+                        src_key = next(k for k in flat_src.keys() if source_regexes[0].search(k) and tuple(re.findall(r'\d+', k)) == digits)
+                        target_key = source_regexes[0].sub(rule.target_pattern, src_key)
+                    else:
                         # Format target pattern
-                        target_key = rule.target_pattern.format(*digits)
-                        dst_dict[target_key] = result
+                        if '{}' in rule.target_pattern:
+                            target_key = rule.target_pattern.format(*digits)
+                        else:
+                            target_key = rule.target_pattern
+                    
+                    dst_dict[target_key] = result[0] if isinstance(result, list) and len(result) == 1 else result
 
         target_tuple_map = {}
         if target_state is not None:
@@ -336,36 +317,36 @@ class WeightConverter(abc.ABC):
 # To replace the legacy transfer_state_with_mappings()
 _MODEL_TO_CONVERSION_RULES = {
     "qwen3": [
-        WeightRenaming(r"token_embedder\.embedding", "model.embed_tokens.weight"),
-        WeightRenaming(r"decoder\.decoder_norm\.scale", "model.norm.weight"),
-        WeightConverterRule([r"(?:decoder\.)?logits_dense\.kernel"], "lm_head.weight", [TransposeAttentionOut()]),
-        WeightRenaming(r"decoder\.layers_(\d+)\.pre_self_attention_layer_norm\.scale", r"model.layers.\1.input_layernorm.weight"),
-        WeightRenaming(r"decoder\.layers_(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.out\.kernel"], r"model.layers.{}.self_attn.o_proj.weight", [TransposeAttentionOut()]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.mlp\.wo(?:\.kernel)?"], r"model.layers.{}.mlp.down_proj.weight", [TransposeAttentionOut()]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"decoder\.layers_(\d+)\.self_attention\.value\.kernel"], r"model.layers.{}.self_attn.qkv_proj.weight", [FuseQwen3MoEQKV(tp=0)]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.query_norm\.scale"], r"model.layers.{}.self_attn.q_norm.weight", [TransposeNorm()]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale"], r"model.layers.{}.self_attn.k_norm.weight", [TransposeNorm()]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.mlp\.wi_0(?:\.kernel)?", r"decoder\.layers_(\d+)\.mlp\.wi_1(?:\.kernel)?"], r"model.layers.{}.mlp.gate_up_proj.weight", [Concatenate(dim=2)]),
+        Rule(r"token_embedder\.embedding", "model.embed_tokens.weight"),
+        Rule(r"decoder\.decoder_norm\.scale", "model.norm.weight"),
+        Rule([r"(?:decoder\.)?logits_dense\.kernel"], "lm_head.weight", [TransposeAttentionOut()]),
+        Rule(r"decoder\.layers_(\d+)\.pre_self_attention_layer_norm\.scale", r"model.layers.\1.input_layernorm.weight"),
+        Rule(r"decoder\.layers_(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.out\.kernel"], r"model.layers.{}.self_attn.o_proj.weight", [TransposeAttentionOut()]),
+        Rule([r"decoder\.layers_(\d+)\.mlp\.wo(?:\.kernel)?"], r"model.layers.{}.mlp.down_proj.weight", [TransposeAttentionOut()]),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"decoder\.layers_(\d+)\.self_attention\.value\.kernel"], r"model.layers.{}.self_attn.qkv_proj.weight", [FuseQwen3MoEQKV(tp=0)]),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.query_norm\.scale"], r"model.layers.{}.self_attn.q_norm.weight", [TransposeNorm()]),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale"], r"model.layers.{}.self_attn.k_norm.weight", [TransposeNorm()]),
+        Rule([r"decoder\.layers_(\d+)\.mlp\.wi_0(?:\.kernel)?", r"decoder\.layers_(\d+)\.mlp\.wi_1(?:\.kernel)?"], r"model.layers.{}.mlp.gate_up_proj.weight", [Concatenate(dim=2)]),
     ],
     "qwen3_moe": [
-        WeightRenaming(r"token_embedder\.embedding", "model.embed_tokens.weight"),
-        WeightRenaming(r"decoder\.decoder_norm\.scale", "model.norm.weight"),
-        WeightConverterRule([r"(?:decoder\.)?logits_dense\.kernel"], "lm_head.weight", [TransposeAttentionOut()]),
-        WeightRenaming(r"decoder\.layers_(\d+)\.pre_self_attention_layer_norm\.scale", r"model.layers.\1.input_layernorm.weight"),
-        WeightRenaming(r"decoder\.layers_(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.out\.kernel"], r"model.layers.{}.self_attn.o_proj.weight", [TransposeAttentionOut()]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.mlp\.wo(?:\.kernel)?"], r"model.layers.{}.mlp.down_proj.weight", [TransposeAttentionOut()]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"decoder\.layers_(\d+)\.self_attention\.value\.kernel"], r"model.layers.{}.self_attn.qkv_proj.weight", [FuseQwen3MoEQKV(tp=0)]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.query_norm\.scale"], r"model.layers.{}.self_attn.q_norm.weight", [TransposeNorm()]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale"], r"model.layers.{}.self_attn.k_norm.weight", [TransposeNorm()]),
-        WeightConverterRule([r"decoder\.layers_(\d+)\.moe_block\.gate\.kernel"], r"model.layers.{}.mlp.gate.weight", [TransposeSingle(axes=(1, 0))]),
-        WeightConverterRule(
+        Rule(r"token_embedder\.embedding", "model.embed_tokens.weight"),
+        Rule(r"decoder\.decoder_norm\.scale", "model.norm.weight"),
+        Rule([r"(?:decoder\.)?logits_dense\.kernel"], "lm_head.weight", [TransposeAttentionOut()]),
+        Rule(r"decoder\.layers_(\d+)\.pre_self_attention_layer_norm\.scale", r"model.layers.\1.input_layernorm.weight"),
+        Rule(r"decoder\.layers_(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.out\.kernel"], r"model.layers.{}.self_attn.o_proj.weight", [TransposeAttentionOut()]),
+        Rule([r"decoder\.layers_(\d+)\.mlp\.wo(?:\.kernel)?"], r"model.layers.{}.mlp.down_proj.weight", [TransposeAttentionOut()]),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"decoder\.layers_(\d+)\.self_attention\.value\.kernel"], r"model.layers.{}.self_attn.qkv_proj.weight", [FuseQwen3MoEQKV(tp=0)]),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.query_norm\.scale"], r"model.layers.{}.self_attn.q_norm.weight", [TransposeNorm()]),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale"], r"model.layers.{}.self_attn.k_norm.weight", [TransposeNorm()]),
+        Rule([r"decoder\.layers_(\d+)\.moe_block\.gate\.kernel"], r"model.layers.{}.mlp.gate.weight", [TransposeSingle(axes=(1, 0))]),
+        Rule(
             source_patterns=[r"decoder\.layers_(\d+)\.moe_block\.wo(?:\.kernel)?"],
             target_pattern="model.layers.{}.mlp.experts.w2_weight",
             operations=[]
         ),
-        WeightConverterRule(
+        Rule(
             source_patterns=[
                 r"decoder\.layers_(\d+)\.moe_block\.wi_0(?:\.kernel)?",
                 r"decoder\.layers_(\d+)\.moe_block\.wi_1(?:\.kernel)?"
@@ -531,9 +512,9 @@ def build_converter_rules(src_pytree, target_state) -> list:
             # Emit exact rule
             src_key_str = '.'.join(str(k) for k in found_src_tuple)
             
-            rules.append(ExactWeightRule(
-                source_key=src_key_str,
-                target_key=tgt_key_str,
+            rules.append(Rule(
+                source_patterns=src_key_str,
+                target_pattern=tgt_key_str,
                 operations=operations
             ))
             

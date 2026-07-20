@@ -36,14 +36,15 @@ from tunix.rl.rollout import base_rollout, vllm_rollout
 
 from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO_CONVERSION_RULES
 
-def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
+def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh, use_hf_mapping: bool = False):
   """Instantiate the converter for a MaxText model name."""
   tp = config.rollout_tensor_parallelism
   if model_name in {"qwen3-0.6b"}:
-    rules = _MODEL_TO_CONVERSION_RULES.get("qwen3", [])
+    rules = _MODEL_TO_CONVERSION_RULES.get("qwen3", []) if use_hf_mapping else []
     return WeightConverter(rules=rules, tp=tp)
-  if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b", "qwen3.5-35b-a3b"}:
-    rules = _MODEL_TO_CONVERSION_RULES.get("qwen3_moe", [])
+  if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b", "qwen3.5-35b-a3b"} or model_name.startswith("qwen3-"):
+    # Target state HuggingFace mapping
+    rules = _MODEL_TO_CONVERSION_RULES.get("qwen3_moe", []) if use_hf_mapping else []
     return WeightConverter(rules=rules, tp=tp)
   
   # For all other models, return None to fallback to transfer_state_with_mappings()
@@ -83,7 +84,8 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     if cache_config_or_size is None:
       cache_config_or_size = rollout_config.kv_cache_size
 
-    converter = _create_model_converter(maxtext_config.model_name, config=maxtext_config, mesh=mesh)
+    use_hf = bool(getattr(rollout_config, "rollout_mapping_config", None))
+    converter = _create_model_converter(maxtext_config.model_name, config=maxtext_config, mesh=mesh, use_hf_mapping=use_hf)
 
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,
