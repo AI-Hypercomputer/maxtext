@@ -203,24 +203,29 @@ class WeightConverter(abc.ABC):
         flat_src_tuples = traverse_util.flatten_dict(src_pytree)
         flat_src = {'.'.join(str(k) for k in keys): v for keys, v in flat_src_tuples.items()}
         
-        # Unroll scanned layers seamlessly
-        unrolled_src = {}
-        import numpy as np
-        for src_key, src_val in flat_src.items():
-            if "layers." in src_key and ".layers_" not in src_key:
-                # Scanned! We need to unstack
-                # MaxText scan parameters for Qwen3 appear at index 1 uniformly
-                layer_dim = 1
-                if hasattr(src_val, 'shape') and len(src_val.shape) > layer_dim:
-                    num_layers = src_val.shape[layer_dim]
-                    for i in range(num_layers):
-                        new_key = src_key.replace("layers.", f"layers_{i}.")
-                        unrolled_src[new_key] = src_val[:, i]
+        # Unroll scanned layers seamlessly ONLY for explicit rules (HF mode)
+        # If no explicit rules exist, we are doing dynamic target_state mapping, which handles scanning automatically.
+        if self.rules:
+            import numpy as np
+            unrolled_src = {}
+            for src_key, src_val in flat_src.items():
+                if "layers." in src_key and ".layers_" not in src_key:
+                    # Scanned! We need to unstack
+                    layer_dim = 1
+                    # fallback to 0 if dimension 1 doesn't make sense for a dense shape
+                    if hasattr(src_val, 'shape') and len(src_val.shape) <= 2:
+                        layer_dim = 0
+                    
+                    if hasattr(src_val, 'shape') and len(src_val.shape) > layer_dim:
+                        num_layers = src_val.shape[layer_dim]
+                        for i in range(num_layers):
+                            new_key = src_key.replace("layers.", f"layers_{i}.")
+                            unrolled_src[new_key] = np.take(src_val, i, axis=layer_dim)
+                    else:
+                        unrolled_src[src_key] = src_val
                 else:
                     unrolled_src[src_key] = src_val
-            else:
-                unrolled_src[src_key] = src_val
-        flat_src = unrolled_src
+            flat_src = unrolled_src
         
         dst_dict = {}
         
@@ -364,8 +369,8 @@ def _shapes_are_repeatable(candidate_shape, tgt_shape):
         if s > t or t % s != 0: return False
     return True
 
-# inspects the shapes to perform routine dimensional adjustments  
-# (padding, repeating, and sharding) dynamically to fit the target mesh
+# generate automatic Rule objects that inject routine matrix padding, repeating, 
+# or scan slice extraction (like transfer_state_directly) between src and tgt
 def build_converter_rules(src_pytree, target_state) -> list:
     # Unwrap Source
     if isinstance(src_pytree, dict) and 'base' in src_pytree:
@@ -408,23 +413,19 @@ def build_converter_rules(src_pytree, target_state) -> list:
             inner_tgt = inner_tgt[1:]
             candidate_key_tuples.append(inner_tgt)
 
-        if inner_tgt and inner_tgt[0] == 'model':
-            candidate_key_tuples.append(inner_tgt[1:])
-            candidate_key_tuples.append(('decoder',) + inner_tgt[1:])
-            
         # Scanned logic
         layer_idx = -1
         match_index = -1
         is_sequential = False
-        for i, part in enumerate(tgt_key_tuple):
+        for i, part in enumerate(inner_tgt):
             if isinstance(part, str) and part.startswith('layers_'):
                 m = re.match(r'^layers_(\d+)$', part)
                 if m:
                     layer_idx = int(m.group(1))
                     match_index = i
                     break
-            elif isinstance(part, str) and part == 'layers' and i + 1 < len(tgt_key_tuple):
-                next_part = tgt_key_tuple[i + 1]
+            elif isinstance(part, str) and part == 'layers' and i + 1 < len(inner_tgt):
+                next_part = inner_tgt[i + 1]
                 if isinstance(next_part, (int, str)) and str(next_part).isdigit():
                     layer_idx = int(next_part)
                     match_index = i
@@ -432,8 +433,8 @@ def build_converter_rules(src_pytree, target_state) -> list:
                     break
                     
         if match_index != -1:
-            cand_a_scanned = list(tgt_key_tuple)
-            cand_b_scanned = list(tgt_key_tuple)
+            cand_a_scanned = list(inner_tgt)
+            cand_b_scanned = list(inner_tgt)
             
             if is_sequential:
                 cand_a_scanned.pop(match_index + 1)
@@ -442,13 +443,12 @@ def build_converter_rules(src_pytree, target_state) -> list:
                 cand_a_scanned[match_index] = 'layers'
                 cand_b_scanned.pop(match_index)
                 
-            base_cands = [list(tgt_key_tuple), cand_a_scanned]
+            base_cands = [list(inner_tgt), cand_a_scanned]
             
             for cand in base_cands:
-                if tgt_key_tuple[0] == 'model':
-                    candidate_key_tuples.append(tuple(cand[1:]))
-                    candidate_key_tuples.append(('decoder',) + tuple(cand[1:]))
                 candidate_key_tuples.append(tuple(cand))
+                if tgt_key_tuple != inner_tgt: # If it was unwrapped from vllm_model
+                    candidate_key_tuples.append( (tgt_key_tuple[0],) + tuple(cand) )
             
         # Add .kernel and .scale fallback if target ends with .weight
         extended_candidates = []

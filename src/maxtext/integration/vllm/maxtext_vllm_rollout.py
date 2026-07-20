@@ -84,7 +84,9 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     if cache_config_or_size is None:
       cache_config_or_size = rollout_config.kv_cache_size
 
-    use_hf = bool(getattr(rollout_config, "rollout_mapping_config", None))
+    model_version = bool(getattr(rollout_config, "rollout_vllm_model_version", ""))
+    force_maxtext = "MaxTextForCausalLM" in str(getattr(rollout_config, "rollout_vllm_hf_overrides", ""))
+    use_hf = bool(model_version and not force_maxtext) 
     converter = _create_model_converter(maxtext_config.model_name, config=maxtext_config, mesh=mesh, use_hf_mapping=use_hf)
 
     mapping_config = mappings.MappingConfig.build(
