@@ -251,7 +251,7 @@ class TransformerLinenPure(nn.Module):
           model_mode=model_mode,
       )
 
-    if self.config.attention == "vllm_rpa":
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # In vLLM, logits are computed separately after updating the KV cache.
       return hidden_state, kv_caches
 
@@ -370,7 +370,7 @@ class Transformer(nnx.Module):
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
-    if self.config.attention == "vllm_rpa":
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       try:
         # pylint: disable=import-outside-toplevel
         from tpu_inference.layers.common.attention_metadata import AttentionMetadata  # pytype: disable=import-error
@@ -608,7 +608,7 @@ class Transformer(nnx.Module):
           model_mode=model_mode,
       )
 
-    if self.config.attention == "vllm_rpa":
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # In vLLM, logits are computed separately after updating the KV cache.
       return hidden_state, kv_caches
 

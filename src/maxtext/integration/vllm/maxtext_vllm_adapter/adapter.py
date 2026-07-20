@@ -90,6 +90,9 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       )
       overrides["load_parameters_path"] = None
 
+  if overrides.get("attention") == "vllm_batched_rpa" or overrides.get("use_batched_rpa", False):
+    os.environ["USE_BATCHED_RPA_KERNEL"] = "1"
+
   # Add base config path to positional args
   base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
   argv_list = ["", str(base_config_path)]
