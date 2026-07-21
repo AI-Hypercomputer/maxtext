@@ -1096,9 +1096,6 @@ class Decoder(nn.Module):
             current_broadcast_args.extend([None, None, None, attention_metadata])
             current_in_axes_tuple.extend([nn.broadcast] * 4)
 
-            max_logging.info(f"DEBUG: len(current_broadcast_args)={len(current_broadcast_args)}")
-            max_logging.info(f"DEBUG: current_broadcast_args={[type(a) for a in current_broadcast_args]}")
-
             final_carry, _ = self.scan_decoder_layers(
                 cfg,
                 RemattedBlockLayer,
