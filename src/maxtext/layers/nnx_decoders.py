@@ -502,13 +502,13 @@ class NNXDecoder(nnx.Module):
     else:
       self.num_dense_layers = config.first_num_dense_layers
       for i in range(self.num_dense_layers):
-        self._create_and_register_named_layer(dense_cls, rngs, "dense_layers", i)
+        self._create_and_register_layer(dense_cls, rngs, "dense_layers", i)
       self.num_moe_outside_pipeline = (
           config.num_decoder_layers - config.first_num_dense_layers
       ) - config.pipeline_parallel_layers
       if self.num_moe_outside_pipeline > 0:
         for i in range(self.num_moe_outside_pipeline):
-          self._create_and_register_named_layer(moe_cls, rngs, "moe_layers_outside_pipeline", i)
+          self._create_and_register_layer(moe_cls, rngs, "moe_layers_outside_pipeline", i)
 
   def _init_pipeline_generic(self, decoder_block_classes, rngs):
     """Initializes generic decoder layers outside pipeline."""
@@ -526,7 +526,7 @@ class NNXDecoder(nnx.Module):
       else:
         self.num_layers_outside_pipeline = remaining_layers
         for i in range(self.num_layers_outside_pipeline):
-          self._create_and_register_named_layer(base_cls, rngs, "layers_outside_pipeline", i)
+          self._create_and_register_layer(base_cls, rngs, "layers_outside_pipeline", i)
 
   def _init_scanned_layers(self, decoder_block_classes, rngs, mesh):
     """Initializes decoder layers with scanning (non-pipeline)."""
@@ -693,12 +693,9 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
           **layer_kwargs,
       )
-    else:
-      self.layers = nnx.List([])
 
   def _init_sequential_layers(self, decoder_block_classes, rngs):
     """Initializes decoder layers sequentially (no scanning)."""
-    self.layers = nnx.List([])
 
     if self.is_deepseek:
       self._init_sequential_deepseek(decoder_block_classes, rngs)
@@ -710,9 +707,9 @@ class NNXDecoder(nnx.Module):
     config = self.config
     dense_cls, moe_cls = decoder_block_classes
     for i in range(config.first_num_dense_layers):
-      self._create_and_register_layer(dense_cls, rngs, "dense_layer", i)
+      self._create_and_register_layer(dense_cls, rngs, "dense_layers", i)
     for i in range(config.num_decoder_layers - config.first_num_dense_layers):
-      self._create_and_register_layer(moe_cls, rngs, "moe_layer", i)
+      self._create_and_register_layer(moe_cls, rngs, "moe_layers", i)
 
   def _init_sequential_generic(self, decoder_block_classes, rngs):
     """Initializes sequential generic decoder layers with per-architecture layer_kwargs."""
@@ -753,7 +750,6 @@ class NNXDecoder(nnx.Module):
     ``_create_and_register_layer``.
     """
     cfg = self.config
-    self.layers = nnx.List([])
     # Only register the PLE submodule when it exists (mirrors the optional position_embedder
     # pattern); assigning None first would make nnx treat the attribute as static.
     if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
@@ -771,7 +767,6 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
       )
       setattr(self, f"layers_{lyr}", layer)
-      self.layers.append(layer)
 
   def _get_pipeline_stage_module(self, decoder_blocks, rngs):
     """Retrieves the wrapper module formatted for single pipeline stage execution."""
@@ -801,14 +796,7 @@ class NNXDecoder(nnx.Module):
     )
 
   def _create_and_register_layer(self, layer_cls, rngs, base_name, i, **layer_kwargs):
-    attr_name = f"{base_name}_{i}"
-    layer = self._create_single_layer(layer_cls, rngs, **layer_kwargs)
-    setattr(self, attr_name, layer)
-    self.layers.append(layer)
-
-  def _create_and_register_named_layer(self, layer_cls, rngs, base_name, i, **layer_kwargs):
-    """Creates a layer registered ONLY via named attribute. Used by pipeline-outside paths
-    to avoid double-registration when self.layers list is also tracked elsewhere."""
+    """Creates a layer registered ONLY via named attribute."""
     attr_name = f"{base_name}_{i}"
     layer = self._create_single_layer(layer_cls, rngs, **layer_kwargs)
     setattr(self, attr_name, layer)
@@ -1408,6 +1396,11 @@ class NNXDecoder(nnx.Module):
     decoder_input_tokens = kwargs.get("decoder_input_tokens")
     layer_kwargs = kwargs.get("layer_kwargs", {})
 
+    # Create a copy of layer_kwargs and pop decoder_input_tokens if it exists
+    # to avoid passing it twice (once explicitly and once via **layer_kwargs).
+    layer_kwargs = dict(layer_kwargs)
+    layer_kwargs.pop("decoder_input_tokens", None)
+
     out = layer(y, *args, decoder_input_tokens=decoder_input_tokens, **layer_kwargs)
     if isinstance(out, tuple):
       y = out[0]
@@ -1544,6 +1537,9 @@ class NNXDecoder(nnx.Module):
 
     if attention_metadata is not None:
       layer_kwargs["attention_metadata"] = attention_metadata
+
+    if cfg.engram_layers and decoder_input_tokens is not None:
+      layer_kwargs["decoder_input_tokens"] = decoder_input_tokens
 
     if getattr(cfg, "using_pipeline_parallelism", False):
       logical_partition_spec = (
@@ -1780,23 +1776,41 @@ class NNXDecoder(nnx.Module):
             )
       else:
         prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+        dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
 
-        # Hoisted function to preserve XLA cache ID
-        def pure_layer_fn(graphdef, state_in, y_in, kv_in):
-
+        def pure_layer_fn(graphdef_in, state_in, y_in, kv_in):
           if cfg.parameter_memory_host_offload:
             state_in = jax.tree.map(
                 lambda x: jax.device_put(x, max_utils.device_space()),
                 state_in,
             )
-
-          merged_layer = nnx.merge(graphdef, state_in)
+          merged_layer = nnx.merge(graphdef_in, state_in)
           out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
-          return out_y, out_kv, nnx.state(merged_layer)
+          state_out = nnx.state(merged_layer)
+
+          if dynamic_graph_init:
+            new_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
+            return out_y, out_kv, state_out, new_graphdef
+          else:
+            return out_y, out_kv, state_out, graphdef_in
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
-        for lyr, layer in enumerate(self.layers):
+        for lyr in range(cfg.num_decoder_layers):
+          if self.is_deepseek:
+            if lyr < cfg.first_num_dense_layers:
+              layer = getattr(self, f"dense_layers_{lyr}", None)
+            else:
+              moe_idx = lyr - cfg.first_num_dense_layers
+              layer = getattr(self, f"moe_layers_{moe_idx}", None)
+          else:
+            layer = getattr(self, f"layers_{lyr}", None)
+            if layer is None and hasattr(self, "layers") and self.layers:
+              layer = self.layers[lyr]
+
+          if layer is None:
+            raise AttributeError(f"Could not locate decoder layer at index {lyr} in {self.__class__.__name__}")
+
           graphdef, state = nnx.split(layer)
           if kv_caches is not None:
             if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
@@ -1812,12 +1826,23 @@ class NNXDecoder(nnx.Module):
           else:
             kv_cache = None
 
-          input_tokens = decoder_input_tokens if cfg.engram_layers else None
-          if input_tokens is not None:
-            layer_kwargs["decoder_input_tokens"] = input_tokens
+          if cfg.remat_policy != "none":
+            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache)
+          else:
+            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache)
 
-          y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache)
-          nnx.update(layer, new_state)
+          if dynamic_graph_init:
+            new_layer = nnx.merge(new_graphdef, new_state)
+            if self.is_deepseek:
+              if lyr < cfg.first_num_dense_layers:
+                setattr(self, f"dense_layers_{lyr}", new_layer)
+              else:
+                moe_idx = lyr - cfg.first_num_dense_layers
+                setattr(self, f"moe_layers_{moe_idx}", new_layer)
+            else:
+              setattr(self, f"layers_{lyr}", new_layer)
+          else:
+            nnx.update(layer, new_state)
 
           if kv_caches is not None and kv_cache is not None:
             if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
@@ -2024,7 +2049,7 @@ class NNXDecoder(nnx.Module):
     cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, num_kv_shared)
 
     for lyr in range(cfg.num_decoder_layers):
-      layer = self.layers[lyr]
+      layer = getattr(self, f"layers_{lyr}")
       donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
       is_donor = gemma4_small.is_kv_donor_layer(lyr, layer_types, num_kv_shared)
 
@@ -2068,6 +2093,63 @@ class NNXDecoder(nnx.Module):
         kv_caches[cache_idx] = kv_cache
 
     return y, kv_caches
+
+  def get_layers(self) -> list[nnx.Module]:
+    """Returns all decoder layer modules/blocks in their forward-pass execution order."""
+    layers = []
+    seen = set()
+
+    def _add(module):
+      if module is not None and id(module) not in seen:
+        seen.add(id(module))
+        layers.append(module)
+
+    def _append_unscanned(prefix):
+      i = 0
+      while hasattr(self, f"{prefix}_{i}"):
+        _add(getattr(self, f"{prefix}_{i}"))
+        i += 1
+
+    def _append_scanned(name):
+      if hasattr(self, name):
+        val = getattr(self, name)
+        if name == "layers_remainder" and getattr(val, "num_of_layers", 0) == 0:
+          return
+        if isinstance(val, (nnx.Module, list)):
+          _add(val)
+
+    if self.is_deepseek:
+      _append_scanned("dense_layers")
+      _append_unscanned("dense_layers")
+
+      _append_scanned("moe_layers")
+      _append_unscanned("moe_layers")
+
+      _append_scanned("moe_layers_outside_pipeline")
+      _append_unscanned("moe_layers_outside_pipeline")
+
+      if hasattr(self, "pipeline_module"):
+        _add(getattr(self.pipeline_module, "layers", None))
+    else:
+      if hasattr(self, "pipeline_module"):
+        _add(getattr(self.pipeline_module, "layers", None))
+
+      _append_scanned("scanned_blocks")  # Gemma 4
+      _append_scanned("layers")
+      _append_unscanned("layers")
+
+      _append_scanned("layers_remainder")  # Gemma 3/4
+
+      _append_scanned("layers_outside_pipeline")
+      _append_unscanned("layers_outside_pipeline")
+
+    # Fallback for dynamic/chunked layer attributes (e.g. Engram dense_layers_0_3)
+    if not layers:
+      for k, m in vars(self).items():
+        if k.startswith(("dense_layers", "moe_layers", "layers", "scanned_blocks")) and isinstance(m, (nnx.Module, list)):
+          _add(m)
+
+    return layers
 
 
 def decoder_as_linen(
