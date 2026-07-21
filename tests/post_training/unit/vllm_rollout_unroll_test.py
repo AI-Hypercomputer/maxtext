@@ -99,22 +99,24 @@ class GemmaScannedWeightsUnrollTest(unittest.TestCase):
     decoder_dict = unrolled["decoder"]
 
     # Should contain keys 0 to 6 under layers
-    self.assertIn("0", decoder_dict["layers"])
-    self.assertIn("1", decoder_dict["layers"])
-    self.assertIn("2", decoder_dict["layers"])
-    self.assertIn("3", decoder_dict["layers"])
-    self.assertIn("4", decoder_dict["layers"])
-    self.assertIn("5", decoder_dict["layers"])
-    self.assertIn("6", decoder_dict["layers"])
+    self.assertIn(0, decoder_dict["layers"])
+    self.assertIn(1, decoder_dict["layers"])
+    self.assertIn(2, decoder_dict["layers"])
+    self.assertIn(3, decoder_dict["layers"])
+    self.assertIn(4, decoder_dict["layers"])
+    self.assertIn(5, decoder_dict["layers"])
+    self.assertIn(6, decoder_dict["layers"])
+
+    self.assertIsInstance(list(decoder_dict["layers"].keys())[0], int)
 
     # Check that values are correctly sliced
-    np.testing.assert_array_equal(decoder_dict["layers"]["0"]["attn"]["wq"], np.array([[0], [0]]))
-    np.testing.assert_array_equal(decoder_dict["layers"]["1"]["attn"]["wq"], np.array([[1], [1]]))
-    np.testing.assert_array_equal(decoder_dict["layers"]["2"]["attn"]["wq"], np.array([[2], [2]]))
-    np.testing.assert_array_equal(decoder_dict["layers"]["3"]["attn"]["wq"], np.array([[3], [3]]))
-    np.testing.assert_array_equal(decoder_dict["layers"]["4"]["attn"]["wq"], np.array([[4], [4]]))
-    np.testing.assert_array_equal(decoder_dict["layers"]["5"]["attn"]["wq"], np.array([[5], [5]]))
-    np.testing.assert_array_equal(decoder_dict["layers"]["6"]["attn"]["wq"], np.array([[6], [6]]))
+    np.testing.assert_array_equal(decoder_dict["layers"][0]["attn"]["wq"], np.array([[0], [0]]))
+    np.testing.assert_array_equal(decoder_dict["layers"][1]["attn"]["wq"], np.array([[1], [1]]))
+    np.testing.assert_array_equal(decoder_dict["layers"][2]["attn"]["wq"], np.array([[2], [2]]))
+    np.testing.assert_array_equal(decoder_dict["layers"][3]["attn"]["wq"], np.array([[3], [3]]))
+    np.testing.assert_array_equal(decoder_dict["layers"][4]["attn"]["wq"], np.array([[4], [4]]))
+    np.testing.assert_array_equal(decoder_dict["layers"][5]["attn"]["wq"], np.array([[5], [5]]))
+    np.testing.assert_array_equal(decoder_dict["layers"][6]["attn"]["wq"], np.array([[6], [6]]))
 
   @pytest.mark.cpu_only
   def test_correctly_unrolls_gemma3_gemma4_scanned_blocks(self):
@@ -150,7 +152,8 @@ class GemmaScannedWeightsUnrollTest(unittest.TestCase):
     unrolled = unroll_gemma_scanned_weights(weights)
 
     decoder_dict = unrolled["decoder"]
-    self.assertIn("0", decoder_dict["layers"])
-    self.assertIn("6", decoder_dict["layers"])
-    np.testing.assert_array_equal(decoder_dict["layers"]["0"]["attn"]["wq"], np.array([[0], [0]]))
-    np.testing.assert_array_equal(decoder_dict["layers"]["6"]["attn"]["wq"], np.array([[6], [6]]))
+    self.assertIn(0, decoder_dict["layers"])
+    self.assertIn(6, decoder_dict["layers"])
+    self.assertIsInstance(list(decoder_dict["layers"].keys())[0], int)
+    np.testing.assert_array_equal(decoder_dict["layers"][0]["attn"]["wq"], np.array([[0], [0]]))
+    np.testing.assert_array_equal(decoder_dict["layers"][6]["attn"]["wq"], np.array([[6], [6]]))

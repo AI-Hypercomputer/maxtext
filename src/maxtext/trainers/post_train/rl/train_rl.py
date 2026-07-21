@@ -381,7 +381,7 @@ def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
   ]
 
 
-def create_rl_components(
+def create_rl_components(  # pylint: disable=too-many-positional-arguments
     trainer_config,
     sampler_config,
     sampler_devices,

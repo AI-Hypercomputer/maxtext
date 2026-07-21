@@ -51,21 +51,38 @@ def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mes
   return None
 
 
+def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_blocks", "layers_remainder")):
+  """Returns (container_idx, container_name) if a scanned layer structure is found, else (-1, None)."""
+  for name in container_names:
+    for i in range(len(key_tuple) - 1):
+      if key_tuple[i] == name and isinstance(key_tuple[i + 1], str) and key_tuple[i + 1].startswith("layers_"):
+        return i, name
+  return -1, None
+
+
 def unroll_gemma_scanned_weights(weights):
   """Workaround for tunix unstacking bug with Gemma 3/4 scanned blocks.
 
-  tunix fails to map nested layers like `layers.layers_0` to `layers_X`.
-  We manually unroll them here if we detect the structure.
+  tunix fails to map nested layers like `layers.layers_0` to `layers_X`
+  if the target expects integer keys (as in nnx.List).
+  We manually unroll them here, keeping the keys as tuples with integers.
   """
-  if not hasattr(weights, "to_pure_dict"):
+  if hasattr(weights, "to_pure_dict"):
+    pure_dict = weights.to_pure_dict()
+  elif hasattr(weights, "to_dict"):
+    pure_dict = weights.to_dict()
+  elif isinstance(weights, dict):
+    pure_dict = weights
+  else:
     return weights
 
-  flat_w = flatten_dict(weights.to_pure_dict(), sep="/")
+  flat_w = flatten_dict(pure_dict)
   new_flat_w = {}
 
+  logging.debug("MaxTextVllmSampler: First 5 keys in flat_w: %s", list(flat_w.keys())[:5])
+
   # Check if this is actually a scanned Gemma 3/4 checkpoint
-  # by looking for the scanned nested structure.
-  is_gemma_scanned = any("decoder/layers/layers_0/" in k or "decoder/scanned_blocks/layers_0/" in k for k in flat_w)
+  is_gemma_scanned = any(_find_scanned_layer_idx(k)[0] != -1 for k in flat_w)
 
   if not is_gemma_scanned:
     return weights
@@ -76,11 +93,11 @@ def unroll_gemma_scanned_weights(weights):
   pattern_keys = set()
   scan_length = 0
   for k, v in flat_w.items():
-    if "decoder/layers/layers_" in k or "decoder/scanned_blocks/layers_" in k:
-      layer_sub_idx = k.split("layers_")[-1].split("/")[0]
-      pattern_keys.add(int(layer_sub_idx))
-      # In MaxText, Gemma uses param_scan_axis=1, so the scan dimension is at axis 1
-      if hasattr(v, "shape") and len(v.shape) > 1:
+    container_idx, name = _find_scanned_layer_idx(k)
+    if container_idx != -1 and name != "layers_remainder":
+      layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
+      pattern_keys.add(layer_sub_idx)
+      if hasattr(v, "shape") and len(v.shape) >= 2:
         scan_length = max(scan_length, v.shape[1])
 
   pattern_length = max(pattern_keys) + 1 if pattern_keys else 0
@@ -88,15 +105,16 @@ def unroll_gemma_scanned_weights(weights):
 
   unrolled_count = 0
   for k, v in flat_w.items():
-    if "decoder/layers/layers_" in k or "decoder/scanned_blocks/layers_" in k:
-      # Unstack the array along the 1st axis
-      if "decoder/scanned_blocks/layers_" in k:
-        parts = k.split("decoder/scanned_blocks/layers_")
-      else:
-        parts = k.split("decoder/layers/layers_")
+    if "dropout" in k or "rngs" in k:
+      new_flat_w[k] = v
+      continue
 
-      layer_sub_idx = int(parts[1].split("/")[0])
-      suffix = "/" + "/".join(parts[1].split("/")[1:])
+    container_idx, container_name = _find_scanned_layer_idx(k)
+
+    if container_idx != -1 and container_name in ("layers", "scanned_blocks"):
+      layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
+      prefix = k[:container_idx] + ("layers",)
+      suffix = k[container_idx + 2 :]
 
       if hasattr(v, "shape") and len(v.shape) > 1:
         v_swapped = jnp.swapaxes(v, 1, 0)
@@ -106,25 +124,29 @@ def unroll_gemma_scanned_weights(weights):
 
       for i in range(scan_length):
         global_idx = i * pattern_length + layer_sub_idx
-        # Map back to nnx.List format which uses layers/X/ instead of layers_X
-        new_flat_w[f"decoder/layers/{global_idx}{suffix}"] = unstacked[i]
+        new_k = prefix + (global_idx,) + suffix
+        new_flat_w[new_k] = unstacked[i]
         unrolled_count += 1
 
-    elif "decoder/layers_remainder/layers_" in k:
-      layer_sub_idx = int(k.split("decoder/layers_remainder/layers_")[1].split("/")[0])
-      suffix = "/" + "/".join(k.split("decoder/layers_remainder/layers_")[1].split("/")[1:])
+    elif container_idx != -1 and container_name == "layers_remainder":
+      layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
+      prefix = k[:container_idx] + ("layers",)
+      suffix = k[container_idx + 2 :]
 
       global_idx = scan_length * pattern_length + layer_sub_idx
-      new_flat_w[f"decoder/layers/{global_idx}{suffix}"] = v
+      new_k = prefix + (global_idx,) + suffix
+      new_flat_w[new_k] = v
       unrolled_count += 1
     else:
       new_flat_w[k] = v
+
+  assert unrolled_count > 0, "MaxTextVllmSampler: Detected scanned structure, but failed to unroll any layers!"
 
   logging.info(
       "MaxTextVllmSampler: Successfully unrolled %d scanned tensor components into vLLM-compatible nnx.List format.",
       unrolled_count,
   )
-  return unflatten_dict(new_flat_w, sep="/")
+  return unflatten_dict(new_flat_w)
 
 
 class MaxTextVllmSampler(VllmSampler):
@@ -152,12 +174,7 @@ class MaxTextVllmSampler(VllmSampler):
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
     if self._converter is None:
-      # --- Workaround for tunix unstacking bug with Gemma 3/4 scanned blocks ---
-      # tunix fails to map nested layers like `layers.layers_0` to `layers_X`.
-      # We manually unroll them here if we detect the structure.
       updated_weights = unroll_gemma_scanned_weights(updated_weights)
-      # --- End Workaround ---
-
       super().update_params(updated_weights, filter_types)
       return None
 
