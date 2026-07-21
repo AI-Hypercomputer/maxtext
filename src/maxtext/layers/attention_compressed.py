@@ -1135,9 +1135,6 @@ class CompressedAttention(Attention):
     if self.model_mode != MODEL_MODE_TRAIN and self.compress_ratio > 0:
       batch_size, _ = max_utils.get_batch_seq_len_for_mode(self.config, MODEL_MODE_AUTOREGRESSIVE)
 
-      # ADD THIS PRINT: Now logging model_mode as well
-      print(f"\n[TRACE DEBUG] Initializing compressor_cache with batch_size: {batch_size} | model_mode: {self.model_mode}\n")
-
       max_prefill_comp = max(1, self.max_prefill_predict_length // self.compress_ratio)
       max_target_comp = max(max_prefill_comp + 1, self.max_target_length // self.compress_ratio)
 
