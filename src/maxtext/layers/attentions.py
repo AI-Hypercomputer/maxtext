@@ -556,6 +556,8 @@ class Attention(nnx.Module):
     )
 
   def _logical_to_mesh_axes(self, logical_name):
+    # Pipeline parallelism uses context managers for logical rules instead of the config,
+    # so pass None to ensure `logical_to_mesh_axes` defers to using the current Flax context manager
     logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
