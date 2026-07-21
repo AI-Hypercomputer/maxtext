@@ -38,7 +38,10 @@ import pytest
 def assert_moe_close(actual, expected, dtype):
   """Asserts that the actual and expected MoE outputs are close."""
   assert np.isfinite(actual).all(), "Actual output contains NaNs or Infs!"
-  if dtype == jnp.bfloat16:
+
+  if jax.default_backend() == "tpu" or dtype == jnp.bfloat16:
+    # TPU float32 (which is downcasted/accumulates differently) and bfloat16
+    # both exhibit accumulation drift, especially on newer hardware like v7x.
     rtol, atol = 2e-2, 1e-2
   else:
     rtol, atol = 1e-5, 1e-6
