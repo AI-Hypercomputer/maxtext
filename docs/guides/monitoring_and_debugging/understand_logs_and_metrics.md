@@ -159,10 +159,11 @@ Before executing training, the program analyzes the resource requirements for yo
 We first perform a "dry run" compilation of a training step to [analyze its memory requirement](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/train.py#L380-L382). This static analysis is performed by the XLA compiler. The log outputs [memory sizes](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/max_utils.py#L672-L690):
 
 ```none
-Total memory size: 100.4 GB, Output size: 44.5 GB, Temp size: 55.9 GB, Argument size: 44.5 GB, Host temp size: 0.0 GB.
+Total estimated memory size: 100.4 GB, estimated output size: 44.5 GB, estimated temp size: 55.9 GB, estimated argument size: 44.5 GB, Estimated host temp size: 0.0 GB.
+Note that compiler could over-estimate the HBM usage.
 ```
 
-The most important number is `Total memory size: 100.4 GB`. This is the total High Bandwidth Memory (HBM) the TPU device needs to execute the program. Here is a breakdown:
+The most important number is `Total estimated memory size: 100.4 GB`. This is the estimated total High Bandwidth Memory (HBM) the TPU device needs to execute the program. Note that the compiler could over-estimate the HBM usage. Here is a breakdown:
 
 - `Argument size: 44.5 GB`: This is the memory needed to hold the inputs for your function. This typically includes the batch of data, parameter (master copy), and optimizer state (e.g., moment).
 - `Output size: 44.5 GB`: This is the space required to store the results of the computation, such as the updated model weights and updated optimizer states.

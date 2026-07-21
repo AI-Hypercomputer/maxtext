@@ -17,7 +17,7 @@
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
-from maxtext.kernels.ragged.ragged_gather_reduce import ragged_gather_reduce
+from maxtext.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
 
 
 def ring_ragged_sort(
@@ -386,6 +386,10 @@ def ring_ragged_unsort(
           flops_override=gather_flops_override,
           bytes_accessed_override=gather_bytes_accessed_override,
       )
+      # Mask out gradients that correspond to elements outside the valid shard
+      # output range.
+      mask = (jnp.arange(n) >= shard_output_start) & (jnp.arange(n) < shard_output_end)
+      grad_sorted_tokens = jnp.where(mask[:, None], grad_sorted_tokens, 0.0)
     else:
       # Slice the inverse permutation to match the packed local buffer.
       padded_idx_inv = jnp.pad(idx_inv, (0, buffer_size))
@@ -405,6 +409,10 @@ def ring_ragged_unsort(
           flops_override=gather_flops_override,
           bytes_accessed_override=gather_bytes_accessed_override,
       )
+      # Mask out gradients for elements beyond the valid limit of the local buffer.
+      limit = jnp.minimum(shard_output_end - shard_output_start, buffer_size)
+      mask = jnp.arange(buffer_size) < limit
+      grad_sorted_tokens = jnp.where(mask[:, None], grad_sorted_tokens, 0.0)
     return grad_sorted_tokens, None, None, None
 
   _ring_ragged_unsort.defvjp(_ring_ragged_unsort_fwd, _ring_ragged_unsort_bwd)

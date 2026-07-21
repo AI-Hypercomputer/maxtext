@@ -29,7 +29,7 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
@@ -228,6 +228,7 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
+    "deepseek4-tiny",
     "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
@@ -687,6 +688,14 @@ class AttentionIndexer(BaseModel):
       False, description="Whether to use approximate top-k selection for the indexer on TPU."
   )
   indexer_approx_top_k_recall: float = Field(0.95, description="Recall target for approximate top-k selection.")
+  indexer_mask_exact_topk: bool = Field(
+      True,
+      description=(
+          "When True, enforces that exactly k elements are unmasked by the indexer under boundary ties."
+          " When False, uses raw thresholding which is faster but may unmask > k elements"
+          " during ties."
+      ),
+  )
 
 
 class Llama4Attention(BaseModel):
@@ -740,6 +749,20 @@ class SplashAttention(BaseModel):
   local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
   local_sa_fuse_reciprocal: bool | None = Field(None, description="Maps to local fuse_reciprocal in SplashConfig.")
   local_sa_use_base2_exp: bool | None = Field(None, description="Maps to local use_base2_exp in SplashConfig.")
+  experimental_sa_quant_q_fp8: bool | None = Field(
+      None,
+      description=(
+          "Experimental flag: If enabled, the Q tensor in splash attention is"
+          " quantized to jnp.float8_e4m3fn, without scaling factors."
+      ),
+  )
+  experimental_sa_quant_k_fp8: bool | None = Field(
+      None,
+      description=(
+          "Experimental flag: If enabled, the K tensor in splash attention is"
+          " quantized to jnp.float8_e4m3fn, without scaling factors."
+      ),
+  )
   use_max_logit_estimate: int = Field(
       -1,
       description="-1 means no estimate, any > 0 value will be used as max logit estimate",
@@ -770,6 +793,30 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
   )
+  num_moe_token_chunks: PositiveInt = Field(
+      1,
+      description=(
+          "Number of token chunks for the ring-of-experts MoE pipeline. 1"
+          " disables chunking (identical to baseline). >1 splits the per-shard"
+          " tokens along the sequence dimension so each chunk's EP all-gather /"
+          " reduce-scatter overlaps the previous chunk's GMM compute. Requires"
+          " use_ring_of_experts=True."
+      ),
+  )
+  moe_chunk_barrier: bool = Field(
+      False,
+      description=(
+          "Diagnostic (profiling, not production). When True, chain the chunked"
+          " ring-of-experts MoE loop so each chunk's input is fenced with"
+          " jax.lax.optimization_barrier on the previous chunk's output,"
+          " forcing XLA to run the chunks sequentially (no interleave/fusion)."
+          " Math is unchanged (barrier is identity), so loss stays bit-exact."
+          " Used to test whether the token-AG/RS chunks overlap at all today."
+          " Requires num_moe_token_chunks>1 and use_ring_of_experts=True to have any"
+          " effect."
+      ),
+  )
+
   moe_expert_input_dim: int = Field(
       -1,
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
@@ -870,6 +917,12 @@ class MoEGeneral(BaseModel):
       description="Whether to fuse the expert scaling factors into the expert weights. "
       "This can improve inference performance.",
   )
+
+  @model_validator(mode="after")
+  def validate_moe_chunks(self) -> "MoEGeneral":
+    if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
+      raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
+    return self
 
 
 class MoEKernels(BaseModel):
@@ -2000,6 +2053,10 @@ class MultimodalGeneral(BaseModel):
 
   use_multimodal: bool = Field(False, description="Enable multimodal capabilities.")
   attention_for_vit: str = Field("dot_product", description="The attention algorithm to use for vision encoder.")
+  vision_encoder_block: VisionEncoderBlockType = Field(
+      VisionEncoderBlockType.NONE,
+      description="The style of VisionEncoderBlock to use (e.g., 'gemma3', 'llama4').",
+  )
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
@@ -3319,15 +3376,60 @@ class MaxTextConfig(
     context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
-    if context_parallel_size > 1 and self.context_parallel_strategy.lower() == "ring":
-      if "gpu" not in self.hardware:
+    context_parallel_strategy = self.context_parallel_strategy.lower()
+    if (
+        context_parallel_strategy == "ring"
+        and "gpu" not in self.hardware
+        and "tpu" not in self.hardware
+        and context_parallel_size > 1
+    ):
+      raise ValueError(
+          "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs "
+          "or TPU with attention=flash and use_tokamax_splash=True."
+      )
+    if context_parallel_strategy == "ring" and "gpu" not in self.hardware and "tpu" in self.hardware:
+      if context_parallel_size <= 1:
+        raise ValueError("TPU Tokamax ring attention requires context_parallel_size > 1.")
+      if self.context_sharding != "context":
+        raise ValueError("TPU Tokamax ring attention requires context_sharding='context'.")
+      if self.dq_reduction_steps not in (0, 3):
+        raise ValueError("TPU Tokamax ring attention requires dq_reduction_steps to be 0 or 3.")
+      if self.max_target_length % (context_parallel_size * context_parallel_size) != 0:
         raise ValueError(
-            "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs."
+            "TPU Tokamax ring attention requires max_target_length to be divisible by context_parallel_size squared."
         )
+      if self.attention != "flash":
+        raise ValueError("TPU ring context parallelism requires attention=flash.")
+      if not self.use_tokamax_splash:
+        raise ValueError("TPU ring context parallelism requires use_tokamax_splash=True.")
+      if self.use_jax_splash:
+        raise ValueError("TPU ring context parallelism requires use_jax_splash=False.")
+      if self.attention_type != "global":
+        raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
+      if self.packing:
+        raise ValueError("TPU Tokamax ring attention does not support packing yet.")
+      if self.context_parallel_load_balance:
+        raise ValueError("TPU Tokamax ring attention does not support context_parallel_load_balance yet.")
+      if self.use_ragged_attention:
+        raise ValueError("TPU Tokamax ring attention does not support ragged attention.")
+      if self.attention_sink:
+        raise ValueError("TPU Tokamax ring attention does not support attention sinks.")
+      if self.use_indexer:
+        raise ValueError("TPU Tokamax ring attention does not support sparse indexer masks.")
+      if self.use_chunked_prefill:
+        raise ValueError("TPU Tokamax ring attention does not support chunked prefill yet.")
+      if self.moba:
+        raise ValueError("TPU Tokamax ring attention does not support MoBA.")
+      if self.use_multimodal:
+        raise ValueError("TPU Tokamax ring attention does not support multimodal attention.")
+      if self.use_qk_clip:
+        raise ValueError("TPU Tokamax ring attention does not support QK-Clip statistics yet.")
+      if self.enable_dropout and self.dropout_rate > 0.0:
+        raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
-    # The AUTO + packing case (which training resolves to STRIPED) is not validated here
-    # because test code paths may load the same config but use a different reorder path.
-    # Training's runtime path in max_utils.reorder_causal_load_balanced enforces this.
+    # The AUTO + packing case, which training resolves to STRIPED, is not
+    # validated here because test code paths may load the same config but use a
+    # different reorder path. Training's runtime path enforces this.
     if (
         context_parallel_size > 1
         and "gpu" not in self.hardware
@@ -3456,6 +3558,16 @@ class MaxTextConfig(
           "Please disable attn_logits_soft_cap when using use_qk_clip."
       )
 
+    if self.experimental_sa_quant_q_fp8 and self.attention_type != "mla":
+      raise ValueError(
+          "Q quantization is currently only supported with"
+          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
+      )
+    if self.experimental_sa_quant_k_fp8 and self.attention_type != "mla":
+      raise ValueError(
+          "K quantization is currently only supported with"
+          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
+      )
     if self.share_kv_projections and self.fused_qkv:
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
@@ -3478,6 +3590,13 @@ class MaxTextConfig(
         raise ValueError("`num_kv_shared_layers > 0` is not compatible with `fused_qkv`.")
       if self.share_kv_projections:
         raise ValueError("`num_kv_shared_layers > 0` is not compatible with `share_kv_projections`.")
+
+    if self.num_moe_token_chunks > 1:
+      if self.max_target_length % self.num_moe_token_chunks != 0:
+        raise ValueError(
+            f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
+            f"max_target_length={self.max_target_length}."
+        )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {

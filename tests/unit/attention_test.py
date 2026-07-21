@@ -23,6 +23,7 @@ from unittest import mock
 
 from absl.testing import parameterized
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
@@ -1140,6 +1141,172 @@ class AttentionTest(parameterized.TestCase):
     )
 
   @pytest.mark.tpu_only
+  def test_tpu_flash_attention_ring_context_parallel(self):
+    """Test equivalence between dot_product and flash attention + ring context parallelism"""
+
+    cfg_cp = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **self.config_arguments,
+        attention="flash",
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=False,
+        ici_context_parallelism=2,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        packing=False,
+        dtype="float32",
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_as_mha_generic = Attention(
+        config=self.cfg,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        rngs=self.nnx_rng,
+    )
+    mha_generic_output, _ = attention_as_mha_generic(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    generic_state = nnx.state(attention_as_mha_generic)
+
+    attention_as_mha_flash_cp = Attention(
+        config=cfg_cp,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=mesh_cp,
+        attention_kernel="flash",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=self.nnx_rng,
+    )
+    nnx.update(attention_as_mha_flash_cp, generic_state)
+
+    mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
+        cfg_cp,
+        mesh_cp,
+        attention_as_mha_flash_cp,
+        lnx,
+        decoder_segment_ids,
+        decoder_positions,
+    )
+
+    mha_generic_output = jax.device_get(mha_generic_output)
+    mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
+
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        msg="Logits from generic dot product and flash attention + ring context parallelism are not close.",
+    )
+
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_ring_context_parallel_grad(self):
+    """Test gradient equivalence between dot_product and flash attention + ring context parallelism"""
+
+    cfg_cp = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **self.config_arguments,
+        attention="flash",
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=False,
+        ici_context_parallelism=2,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        packing=False,
+        dtype="float32",
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_as_mha_generic = Attention(
+        config=self.cfg,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        rngs=self.nnx_rng,
+    )
+    generic_state = nnx.state(attention_as_mha_generic)
+
+    attention_as_mha_flash_cp = Attention(
+        config=cfg_cp,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=mesh_cp,
+        attention_kernel="flash",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=self.nnx_rng,
+    )
+    nnx.update(attention_as_mha_flash_cp, generic_state)
+
+    def generic_loss(lnx):
+      output, _ = attention_as_mha_generic(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    def ring_loss(lnx):
+      output, _ = attention_as_mha_flash_cp(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    generic_grad = jax.grad(generic_loss)(lnx)
+    with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      ring_grad = jax.grad(ring_loss)(lnx)
+    generic_grad = jax.device_get(generic_grad)
+    ring_grad = jax.device_get(ring_grad)
+
+    self.assertTrue(
+        jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
+        msg="Input gradients from generic dot product and flash attention + ring context parallelism are not close.",
+    )
+
+  @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
     all_axis_orders = tuple(itertools.permutations(range(4)))
     for axis_order in random.choices(all_axis_orders, k=2):
@@ -2011,8 +2178,8 @@ class MLATest(attention_test_util.MLATestBase):
     attention_mask = self.get_causal_mask_for_indexer(batch_size, q_len, kv_len)
     indexer_score += attention_mask
 
-    topk_indices = jnp.array([[[0, 1], [0, 1], [0, 1]], [[0, 1], [0, 1], [0, 1]]])
-    indexer_mask = mla.indexer.generate_mask(topk_indices, kv_len) + attention_mask
+    topk_values, _ = jax.lax.top_k(indexer_score, k=2)
+    indexer_mask = mla.indexer.generate_mask(indexer_score, topk_values) + attention_mask
 
     loss_dense = mla.calculate_indexer_loss(
         indexer_score=indexer_score,
@@ -2061,8 +2228,8 @@ class MLATest(attention_test_util.MLATestBase):
     # Indexer score matches the shape and is uniform
     indexer_score = jnp.zeros((batch_size, q_len, kv_len)) + attention_mask
 
-    topk_indices = jnp.array([[[0, 1], [0, 1], [0, 1]], [[0, 1], [0, 1], [0, 1]]])
-    indexer_mask = mla.indexer.generate_mask(topk_indices, kv_len) + attention_mask
+    topk_values, _ = jax.lax.top_k(indexer_score, k=2)
+    indexer_mask = mla.indexer.generate_mask(indexer_score, topk_values) + attention_mask
 
     loss = mla.calculate_indexer_loss(
         indexer_score=indexer_score,
@@ -2229,6 +2396,220 @@ class MLATest(attention_test_util.MLATestBase):
         self.assertTrue(jnp.all(grad_q == 0.0))
         self.assertTrue(jnp.all(grad_kv == 0.0))
         self.assertTrue(jnp.all(grad_low_rank_q == 0.0))
+
+  def old_generate_mask(self, topk_indices, s, dtype=jnp.float32):
+    """Old baseline implementation using pairwise broadcast comparison.
+
+    Retained exclusively in unit tests as a ground-truth reference for cross-checking mathematical equivalence.
+    """
+    is_topk = (jnp.arange(s) == topk_indices[..., None]).any(axis=-2)
+    val_true = jnp.array(0.0, dtype=dtype)
+    val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=dtype)
+    return jnp.where(is_topk, val_true, val_false)
+
+  def test_generate_mask_threshold_equivalence(self):
+    """Verifies that TPU-native threshold cutoff masking matches exact top-k selection when scores are unique."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_indexer"] = True
+    mla_config_args["indexer_topk"] = 64
+    mla_config_args["attention"] = "dot_product"
+
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    jax_rng = jax.random.PRNGKey(0)
+    b, t, s, k = 2, 128, 1024, 64
+    dtype = jnp.float32
+
+    scores = jax.random.normal(jax_rng, (b, t, s), dtype=dtype)
+    # Add tiny position-dependent epsilon so all scores are strictly unique (preventing sorting tie-breaker divergence)
+    scores = scores + jnp.arange(s, dtype=dtype) * (1e-6 / s)
+    topk_values, topk_indices = jax.lax.top_k(scores, k=k)
+
+    # Call original broadcast Indexer logic for cross-checking
+    mask_original = self.old_generate_mask(topk_indices, s, dtype=dtype)
+
+    # Call actual optimized Indexer logic
+    mask_threshold = mla.indexer.generate_mask(scores, topk_values)
+
+    self.assertTrue(jnp.allclose(mask_original, mask_threshold, atol=1e-5))
+
+  def test_generate_mask_threshold_ties_exact_k(self):
+    """Verifies that prefix-sum pruning guarantees exactly k unmasked tokens even with boundary ties."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_indexer"] = True
+    mla_config_args["indexer_topk"] = 3
+    mla_config_args["attention"] = "dot_product"
+    mla_config_args["indexer_mask_exact_topk"] = True
+
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    k = 3
+    dtype = jnp.float32
+    scores = jnp.array(
+        [
+            [
+                [0.9, 0.8, 0.5, 0.5, 0.1, 0.0, -1.0, -2.0, -3.0, -4.0],
+                [0.5, 0.5, 0.9, 0.8, 0.1, 0.0, -1.0, -2.0, -3.0, -4.0],
+            ]
+        ],
+        dtype=dtype,
+    )
+
+    topk_values, topk_indices = jax.lax.top_k(scores, k=k)
+    mask = mla.indexer.generate_mask(scores, topk_values)
+    mask_original = self.old_generate_mask(topk_indices, s=scores.shape[-1], dtype=dtype)
+
+    val_true = jnp.array(0.0, dtype=dtype)
+
+    self.assertFalse(jnp.isnan(mask).any())
+    self.assertEqual(jnp.sum(mask[0, 0] == val_true), 3)  # Exactly 3 tokens (exact k) unmasked
+    self.assertEqual(jnp.sum(mask[0, 1] == val_true), 3)  # Exactly 3 tokens (exact k) unmasked
+
+    # Assert equivalence to original broadcast baseline
+    self.assertTrue(jnp.allclose(mask_original, mask, atol=1e-5))
+
+    # Assert exact unmasked elements
+    np.testing.assert_array_equal(
+        mask[0, 0] == val_true,
+        [True, True, True, False, False, False, False, False, False, False],
+    )
+    np.testing.assert_array_equal(
+        mask[0, 1] == val_true,
+        [True, False, True, True, False, False, False, False, False, False],
+    )
+
+  def test_generate_mask_threshold_ties_unsorted(self):
+    """Verifies that elements strictly greater than cutoff are preserved even if they appear after ties."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_indexer"] = True
+    mla_config_args["indexer_topk"] = 3
+    mla_config_args["attention"] = "dot_product"
+    mla_config_args["indexer_mask_exact_topk"] = True
+
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    k = 3
+    dtype = jnp.float32
+    scores = jnp.array(
+        [
+            [
+                # 0.9 is strictly greater but appears after three 0.5s.
+                # If cumsum was used unconditionally on (score >= cutoff), 0.9 would get rank 4 and be masked out!
+                # Correct behavior: keep 0.9, and the first two 0.5s to reach exactly k=3.
+                [0.5, 0.5, 0.5, 0.9, 0.1, 0.0, -1.0, -2.0, -3.0, -4.0],
+            ]
+        ],
+        dtype=dtype,
+    )
+
+    topk_values, topk_indices = jax.lax.top_k(scores, k=k)
+    mask = mla.indexer.generate_mask(scores, topk_values)
+    mask_original = self.old_generate_mask(topk_indices, s=scores.shape[-1], dtype=dtype)
+
+    val_true = jnp.array(0.0, dtype=dtype)
+
+    self.assertFalse(jnp.isnan(mask).any())
+    self.assertEqual(jnp.sum(mask[0, 0] == val_true), 3)  # Exactly 3 tokens unmasked
+
+    # Assert equivalence to original broadcast baseline
+    self.assertTrue(jnp.allclose(mask_original, mask, atol=1e-5))
+
+    np.testing.assert_array_equal(
+        mask[0, 0] == val_true,
+        [True, True, False, True, False, False, False, False, False, False],
+    )
+
+  def test_generate_mask_approx_k_overflow(self):
+    """Verifies exact-k guarantee when approx_top_k underestimates the threshold."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_indexer"] = True
+    mla_config_args["indexer_topk"] = 3
+    mla_config_args["attention"] = "dot_product"
+    mla_config_args["indexer_mask_exact_topk"] = True
+
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    dtype = jnp.float32
+    scores = jnp.array(
+        [
+            [
+                # Simulating approx_max_k returning an underestimated threshold of 0.5.
+                # However, 0.9, 0.8, 0.7, 0.6 (4 elements) are strictly > 0.5.
+                [0.9, 0.8, 0.7, 0.6, 0.5, 0.0, -1.0, -2.0, -3.0, -4.0],
+            ]
+        ],
+        dtype=dtype,
+    )
+
+    # Artificially supply a threshold of 0.5 at the end
+    topk_values = jnp.array([[[1.0, 1.0, 0.5]]], dtype=dtype)
+    mask = mla.indexer.generate_mask(scores, topk_values)
+
+    val_true = jnp.array(0.0, dtype=dtype)
+
+    self.assertFalse(jnp.isnan(mask).any())
+    self.assertEqual(jnp.sum(mask[0, 0] == val_true), 3)  # Exactly 3 tokens unmasked
+
+    # It should keep the first 3 elements that are > 0.5 which are 0.9, 0.8, 0.7
+    np.testing.assert_array_equal(
+        mask[0, 0] == val_true,
+        [True, True, True, False, False, False, False, False, False, False],
+    )
+
+  def test_generate_mask_threshold_ties_raw(self):
+    """Verifies that raw thresholding allows more than k unmasked tokens under boundary ties."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_indexer"] = True
+    mla_config_args["indexer_topk"] = 3
+    mla_config_args["attention"] = "dot_product"
+    mla_config_args["indexer_mask_exact_topk"] = False
+
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    k = 3
+    dtype = jnp.float32
+    scores = jnp.array(
+        [
+            [
+                [0.9, 0.8, 0.5, 0.5, 0.1, 0.0, -1.0, -2.0, -3.0, -4.0],
+                [0.7, 0.6, 0.5, 0.2, 0.1, 0.0, -1.0, -2.0, -3.0, -4.0],
+            ]
+        ],
+        dtype=dtype,
+    )
+
+    topk_values, _ = jax.lax.top_k(scores, k=k)
+    mask = mla.indexer.generate_mask(scores, topk_values)
+
+    self.assertFalse(jnp.isnan(mask).any())
+    self.assertEqual(jnp.sum(mask[0, 0] == 0.0), 4)  # 4 tokens unmasked (tied >= 0.5)
+    self.assertEqual(jnp.sum(mask[0, 1] == 0.0), 3)  # Exactly 3 tokens unmasked (no boundary ties)
+
+  def test_generate_mask_sequence_smaller_than_k(self):
+    """Verifies that the indexer handles sequence length smaller than or equal to k by returning None."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_indexer"] = True
+    mla_config_args["indexer_topk"] = 10  # k = 10
+    mla_config_args["attention"] = "dot_product"
+
+    cfg, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    dtype = jnp.float32
+    inputs_q = jnp.zeros((1, 5, cfg.emb_dim), dtype=dtype)
+    inputs_kv = jnp.zeros((1, 5, cfg.emb_dim), dtype=dtype)  # s = 5 <= k
+    low_rank_q = jnp.zeros((1, 5, cfg.q_lora_rank), dtype=dtype)
+    inputs_positions = jnp.zeros((1, 5), dtype=jnp.int32)
+
+    mask, indices, score = mla.indexer(
+        inputs_q=inputs_q,
+        low_rank_q=low_rank_q,
+        inputs_kv=inputs_kv,
+        inputs_positions=inputs_positions,
+    )
+
+    self.assertIsNone(mask)
+    self.assertIsNone(indices)
+    self.assertIsNone(score)
 
 
 class Qwen3NextGatedDeltaNetTest(unittest.TestCase):

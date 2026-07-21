@@ -57,7 +57,17 @@ repos:
         args: ['--number']
         additional_dependencies: [mdformat-myst, mdformat-ruff]
         files: (docs/.)
-        exclude: docs/guides/checkpointing_solutions.md|docs/guides.md|docs/run_maxtext.md
+        # Exclude all files that use complex MyST directives that mdformat breaks
+        exclude: >
+          (?x)^(
+            docs/guides/checkpointing_solutions\.md|
+            docs/guides\.md|
+            docs/run_maxtext\.md|
+            docs/guides/monitoring_and_debugging\.md|
+            docs/reference/core_concepts.md|
+            docs/reference/architecture.md|
+            docs/reference/models.md
+          )$
 
   - repo: https://github.com/adrienverge/yamllint
     rev: v1.35.0
