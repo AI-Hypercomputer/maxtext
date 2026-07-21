@@ -44,6 +44,7 @@ from maxtext.models import (
     deepseek4,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
+    envy,
     gemma,
     gemma2,
     gemma3,
@@ -493,6 +494,9 @@ class Decoder(nn.Module):
         return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
       case DecoderBlockType.OLMO3:
         return [olmo3.Olmo3ScannableBlockToLinen] if self.config.scan_layers else [olmo3.Olmo3DecoderLayerToLinen]
+      case DecoderBlockType.ENVY:
+        return [envy.EnvyScannableBlockToLinen] if self.config.scan_layers else [envy.EnvyDecoderLayerToLinen]
+
 
       case _:
         # Default case to handle any unknown decoder block types.
@@ -528,6 +532,7 @@ class Decoder(nn.Module):
         DecoderBlockType.DEEPSEEK: [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer],
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
+        DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1078,6 +1083,11 @@ class Decoder(nn.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
+          if cfg.decoder_block == DecoderBlockType.ENVY:
+            layer_kwargs = {
+                "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
+            }
+
           # Update broadcast_args and in_axes_tuple for vLLM RPA
           in_axes_tuple = (nn.broadcast,) * len(broadcast_args)
           current_broadcast_args = list(broadcast_args)
@@ -1203,6 +1213,11 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
+            if cfg.decoder_block == DecoderBlockType.ENVY:
+              layer_kwargs = {
+                  "is_moe_layer": (lyr + 1) % self.config.interleave_moe_layer_step == 0,
+              }
+
             if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
               layer_kwargs = {"layer_idx": lyr}
             if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
