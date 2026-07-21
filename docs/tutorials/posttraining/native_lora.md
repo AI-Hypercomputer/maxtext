@@ -32,8 +32,8 @@ ______________________________________________________________________
 
 For interactive playground setups on Google Colab or local JupyterLab, we provide fully detailed demo notebooks:
 
-- **Qwen3 Native LoRA Demo**: [qwen3_native_lora_demo.ipynb](../../../src/maxtext/examples/qwen3_native_lora_demo.ipynb)
-- **Gemma4 Native LoRA Demo**: [gemma4_native_lora_demo.ipynb](../../../src/maxtext/examples/gemma4_native_lora_demo.ipynb)
+- **Qwen3 Native LoRA Demo**: [qwen3_native_lora_demo.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/qwen3_native_lora_demo.ipynb)
+- **Gemma4 Native LoRA Demo**: [gemma4_native_lora_demo.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/gemma4_native_lora_demo.ipynb)
 
 ______________________________________________________________________
 
