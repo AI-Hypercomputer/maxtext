@@ -59,7 +59,7 @@ from benchmarks.api_server.server_models import (
     ChatMessage,
 )
 from benchmarks.api_server import server_utils
-from benchmarks.api_server.encoding import encoding_dsv32
+from benchmarks.api_server.encoding import encoding_dsv32, encoding_dsv4
 
 # ----------------------------
 # Init
@@ -195,6 +195,15 @@ def _build_chat_completion_response(request, completion_result, llm):
       reasoning_out = parsed.get("reasoning_content")
     except (AssertionError, ValueError, IndexError) as e:
       logger.error("DeepSeek-V3.2 parsing failed: %s. Falling back to raw text.", e, exc_info=True)
+
+  if server_utils.is_dsv4_encoding_enabled(request.model):
+    try:
+      # DeepSeek-V4 models often generate thinking block.
+      parsed = encoding_dsv4.parse_message_from_completion_text(text_out, thinking_mode="thinking")
+      text_out = parsed.get("content", text_out)
+      reasoning_out = parsed.get("reasoning_content")
+    except (AssertionError, ValueError, IndexError) as e:
+      logger.error("DeepSeek-V4 parsing failed: %s. Falling back to raw text.", e, exc_info=True)
 
   want_top_logprobs = (
       (request.top_logprobs or 0) > 0 if isinstance(request, ChatCompletionRequest) else (request.logprobs or 0) > 0
