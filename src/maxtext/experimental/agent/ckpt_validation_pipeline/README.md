@@ -87,13 +87,11 @@ python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/decode_validator
 ## Architecture Notes (Linen vs. NNX)
 
 MaxText currently supports two neural network frameworks internally: Flax Linen and the newer Flax NNX. 
-However, for stability, all validators in this pipeline currently map strictly to the **Linen** framework:
+**Going forward, NNX is the only supported architecture.** DeepSeekV4 is officially the last model that will be compatible with Linen. All validation scripts have been migrated to support NNX abstract states natively:
 
-*   **`forward_compile_validator.py` (Linen):** Uses the `transformer_as_linen` wrapper to preserve `.init` and `.apply` shape tracing abilities.
-*   **`checkpoint_shape_validator.py` (Linen):** Theoretical inputs are derived from `inspect_checkpoint.py`, which relies on Linen `init` layer structures.
-*   **`decode_validator.py` & `forward_pass_validator.py` (Linen):** We explicitly pass `--enable_nnx=False` (along with `--pure_nnx=False` and `--pure_nnx_decoder=False`) to ensure the forward pass and decoding utilize the stable Linen path.
-
-*Note: There is a bridge to NNX that is being implemented, but the entire validation code currently relies on Linen due to its proven stability. Transitioning the pipeline native components to NNX is currently paused.*
+*   **`forward_compile_validator.py` (NNX):** Uses the `create_nnx_abstract_model` abstraction.
+*   **`checkpoint_shape_validator.py` (NNX):** Theoretical inputs are derived from `inspect_checkpoint.py`, which supports extracting the parameter tree from `nnx.State`.
+*   **`decode_validator.py` & `forward_pass_validator.py` (NNX):** Will automatically use NNX models directly without falling back to Linen overrides.
 
 ### Reading the JSON Reports
 

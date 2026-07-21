@@ -31,8 +31,10 @@ from maxtext.utils import max_logging as logger
 absl.logging.set_verbosity(absl.logging.INFO)
 
 
-def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report_gcs_dir, unknown_args):
-  """Run Snehal's logit checker as a subprocess and generate a standardized JSON report."""
+def validate_forward_pass(
+    run_name, internal_model_name, checkpoint_path, report_gcs_dir, unknown_args
+):
+  """Run logit checker as a subprocess and generate a standardized JSON report."""
   logger.info(f"Running Forward Pass Logit Verification for {run_name}...")
 
   # base command
@@ -59,7 +61,9 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
   repo_root = os.path.abspath(os.path.join(maxtext_module_dir, "../../"))
 
   # run subprocess
-  result = subprocess.run(command, text=True, capture_output=True, check=False, cwd=repo_root)
+  result = subprocess.run(
+      command, text=True, capture_output=True, check=False, cwd=repo_root
+  )
 
   # generate report
   report = {
@@ -91,7 +95,9 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
   if result.returncode != 0:
     logger.info(f"Command STDOUT:\n{result.stdout}")
     logger.error(f"Command STDERR:\n{result.stderr}")
-    raise ValueError("ERROR: Forward pass logit verification failed! See logs for details.")
+    raise ValueError(
+        "ERROR: Forward pass logit verification failed! See logs for details."
+    )
 
   logger.info("Forward pass validation successful!")
 
@@ -99,14 +105,29 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Validate Forward Pass Logits")
   parser.add_argument("--run_name", type=str, required=True, help="Validation run name")
-  parser.add_argument("--maxtext_model_name", type=str, required=True, help="Internal MaxText model name")
-  parser.add_argument("--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint")
-  parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS directory for reports")
+  parser.add_argument(
+      "--maxtext_model_name",
+      type=str,
+      required=True,
+      help="Internal MaxText model name",
+  )
+  parser.add_argument(
+      "--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint"
+  )
+  parser.add_argument(
+      "--report_gcs_dir", type=str, default="", help="GCS directory for reports"
+  )
 
   args, unknown = parser.parse_known_args()
 
   try:
-    validate_forward_pass(args.run_name, args.maxtext_model_name, args.checkpoint_gcs_path, args.report_gcs_dir, unknown)
+    validate_forward_pass(
+        args.run_name,
+        args.maxtext_model_name,
+        args.checkpoint_gcs_path,
+        args.report_gcs_dir,
+        unknown,
+    )
   except (ValueError, KeyError, subprocess.CalledProcessError) as e:
     logger.error(f"FAILED: {e}")
     # Always fail hard to halt the Airflow DAG
