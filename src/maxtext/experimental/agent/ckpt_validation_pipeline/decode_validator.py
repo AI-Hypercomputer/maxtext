@@ -28,7 +28,6 @@ from maxtext.utils import max_logging as logger
 absl.logging.set_verbosity(absl.logging.INFO)
 
 
-
 def validate_checkpoint(run_name, internal_model_name, checkpoint_path, report_gcs_dir, unknown_args):
   """Validate MaxText checkpoint using passed arguments."""
   logger.info(f"Validating {run_name}...")
@@ -94,6 +93,11 @@ def validate_checkpoint(run_name, internal_model_name, checkpoint_path, report_g
       gcs_dir += "/"
     gcs_utils.upload_blob(f"{gcs_dir}report_{run_name}.json", output_path)
 
+  if result.returncode != 0:
+    raise RuntimeError(f"Subprocess decode.py failed with exit code {result.returncode}. Stderr: {result.stderr}")
+
+
+import sys
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Validate MaxText Checkpoints")
@@ -101,11 +105,11 @@ if __name__ == "__main__":
   parser.add_argument("--maxtext_model_name", type=str, required=True, help="Internal MaxText model name")
   parser.add_argument("--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint")
   parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS directory for reports")
-  
+
   args, unknown = parser.parse_known_args()
 
   try:
     validate_checkpoint(args.run_name, args.maxtext_model_name, args.checkpoint_gcs_path, args.report_gcs_dir, unknown)
-  except (KeyError, ValueError, FileNotFoundError) as e:
+  except (KeyError, ValueError, FileNotFoundError, RuntimeError) as e:
     logger.error(f"FAILED: {e}")
-
+    sys.exit(1)

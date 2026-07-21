@@ -1,11 +1,33 @@
-# Checkpoint validation pipeline
-The pipeline is used to automate the validation of converted model checkpoints. It is designed to be triggered deterministically by Airflow DAGs to verify the correctness of model checkpoints in a fast-fail architecture, preventing the waste of expensive TPU compute on malformed checkpoints.
+# Automated Model Onboarding & Verification Pipeline
+
+This pipeline is used to automate the validation of converted model checkpoints. It is designed to be triggered deterministically by Airflow DAGs to verify the correctness of model checkpoints in a fast-fail architecture, preventing the waste of expensive TPU compute on malformed checkpoints.
+
+If a step fails, the Overwatch Agent analyzes the divergence, attempts to fix the MaxText code, and re-runs the validation step automatically.
+
+## The Pipeline Lifecycle
+
+1. **Task A: Shape Matching (Mock Tensor) - The "Fast Fail"**
+   Validates basic matrix shapes and model architecture acceptance using mock tensors in seconds.
+   Script: `checkpoint_shape_validator.py`
+
+2. **Task B: Checkpoint Inspection**
+   Inspects the structure of the Orbax/MaxText checkpoint to ensure all required files and layers are present in GCS.
+   Script: `inspect_checkpoint.py`
+
+3. **Task C: Forward Pass Logit Verification**
+   Runs the model on PyTorch and MaxText simultaneously and compares the intermediate layer outputs (using Flax `sow`) to catch the exact layer where a conversion bug exists.
+   Script: `forward_pass_validator.py`
+
+4. **Task D: SFT & Decoding (Caching Logic)**
+   *   **SFT**: Tests the backward pass by running training steps to ensure loss decreases without hitting NaNs.
+   *   **Decoding Check**: Tests text generation and autoregressive caching logic (KV Cache) for new models.
+   Script: `decode_validator.py`
 
 ## Quick starts
 To begin, you'll need:
 
 1. A valid Google Cloud Storage (GCS) bucket where your converted checkpoint is located (e.g., `gs://my-bucket/converted_ckpt/0/items`).
-2. The corresponding MaxText internal model name (e.g., `gemma3-4b`, `llama3-70b`).
+2. The corresponding MaxText internal model name (e.g., `qwen3-8b`, `llama3-70b`).
 3. To trigger the pipeline via the Airflow UI using the `maxtext_validation_agent` DAG.
 4. A full run of the pipeline typically takes about 30-45 minutes if all stages pass.
 
@@ -19,10 +41,11 @@ The first step of the pipeline (`checkpoint_shape_validator.py`) requires contex
 The Airflow DAG automatically generates these `/tmp/ideal_shapes.txt` and `/tmp/actual_shapes.txt` files and passes them to the validator.
 
 ## 2. Run the pipeline
+While the primary interaction is via the Airflow UI, you can execute the validation process step-by-step manually.
 
-While the primary interaction is via the Airflow UI, you can execute the validation process step-by-step manually for debugging purposes.
+## Manual Run Instructions (For Debugging)
 
-### 2.1 Step 1: Shape Validation (CPU-only)
+### Step 1: Shape Validation (CPU-only)
 
 ```bash
 python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/checkpoint_shape_validator.py \
@@ -31,41 +54,46 @@ python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/checkpoint_shape
   --report_gcs_dir=gs://your-bucket/reports/
 ```
 
-### 2.2 Step 2: Forward Compile Validation (Mock Tensors)
+### Step 2: Forward Compile Validation (Mock Tensors)
 
 ```bash
 python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/forward_compile_validator.py \
   --checkpoint_gcs_path=gs://your-bucket/checkpoint/0/items \
-  --maxtext_model_name=gemma3-4b \
+  --maxtext_model_name=qwen3-8b \
   --report_gcs_dir=gs://your-bucket/reports/ \
   --scan_layers=true
 ```
-*(Note: You can pass any standard MaxText configs, like `--scan_layers=true`, to the end of the command to test specific model configurations. See the full list of available configs in the MaxText codebase.)*
 
-### 2.3 Step 3: Decode Validation (Full Execution)
+### Step 3: Forward Pass Logit Verification (WIP)
+
+```bash
+python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/forward_pass_validator.py \
+  --checkpoint_gcs_path=gs://your-bucket/checkpoint/0/items \
+  --maxtext_model_name=qwen3-8b \
+  --run_hf_model=true \
+  --hf_model_path=Qwen/Qwen2.5-7B-Instruct \
+  --report_gcs_dir=gs://your-bucket/reports/
+```
+
+### Step 4: Decoding (Caching Logic) Verification (WIP)
 
 ```bash
 python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/decode_validator.py \
-  --run_name=decode_test \
   --checkpoint_gcs_path=gs://your-bucket/checkpoint/0/items \
-  --maxtext_model_name=gemma3-4b \
-  --report_gcs_dir=gs://your-bucket/reports/ \
-  --tokenizer_path=assets/tokenizers/tokenizer.gemma3 \
-  --scan_layers=true
+  --maxtext_model_name=qwen3-8b \
+  --report_gcs_dir=gs://your-bucket/reports/
 ```
 
-## Evaluation and Debugging
-There are two primary ways to check the generated reports and validate the architecture used during debugging.
+## Architecture Notes (Linen vs. NNX)
 
-### Architecture Notes (Linen vs. NNX)
+MaxText currently supports two neural network frameworks internally: Flax Linen and the newer Flax NNX. 
+However, for stability, all validators in this pipeline currently map strictly to the **Linen** framework:
 
-MaxText currently supports two neural network frameworks internally. The validators map to these frameworks as follows:
+*   **`forward_compile_validator.py` (Linen):** Uses the `transformer_as_linen` wrapper to preserve `.init` and `.apply` shape tracing abilities.
+*   **`checkpoint_shape_validator.py` (Linen):** Theoretical inputs are derived from `inspect_checkpoint.py`, which relies on Linen `init` layer structures.
+*   **`decode_validator.py` & `forward_pass_validator.py` (Linen):** We explicitly pass `--enable_nnx=False` (along with `--pure_nnx=False` and `--pure_nnx_decoder=False`) to ensure the forward pass and decoding utilize the stable Linen path.
 
-*   **`forward_compile_validator.py` (Linen):** This script is strictly based on the Flax Linen API. It uses the `transformer_as_linen` wrapper to preserve `.init` and `.apply` shape tracing abilities which are critical for the mock tensor execution.
-*   **`checkpoint_shape_validator.py` (Linen):** As mentioned in Step 1, since the theoretical inputs are derived from `inspect_checkpoint.py`, it inherently relies on Linen `init` layer structures.
-*   **`decode_validator.py` (NNX):** By default, the full decoding run uses the newer NNX architecture.
-
-*Note: As MaxText transitions more fully toward NNX, we will assess whether to fully accommodate NNX tracing natively in `forward_compile_validator.py` and `checkpoint_shape_validator.py` as an immediate next step, potentially bypassing the `transformer_as_linen` wrapper.*
+*Note: There is a bridge to NNX that is being implemented, but the entire validation code currently relies on Linen due to its proven stability. Transitioning the pipeline native components to NNX is currently paused.*
 
 ### Reading the JSON Reports
 
@@ -78,7 +106,8 @@ If you specified `--report_gcs_dir=gs://your-bucket/reports/`, each step will up
 1. If a validation step fails in Airflow, check the task logs directly in the Airflow UI to see the exact stdout/stderr from the Python script.
 2. If the **Shape Validation** fails, ensure your model configuration matches the checkpoint architecture exactly.
 3. If the **Forward Compile** fails, look for OOMs or distributed check failures that might indicate incorrect batch size or sequence length overrides.
-4. If the **Decode** fails, verify that your `--tokenizer_path` is correct and accessible.
+4. If the **Forward Pass** fails with `401 Unauthorized`, ensure you are using an open HuggingFace model or providing a valid `HF_TOKEN`.
+5. If the **Decoding** step fails, check the KV caching parameters in your model configuration.
 
 ## Tests
 Run standard MaxText tests:

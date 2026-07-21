@@ -16,9 +16,10 @@
 
 import unittest
 from unittest.mock import patch, MagicMock
-from src.maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator import (
+from maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator import (
     validate_checkpoint,
 )
+
 
 class TestCheckpointValidationAgent(unittest.TestCase):
   """Test suite for the checkpoint validation agent."""
@@ -33,7 +34,7 @@ class TestCheckpointValidationAgent(unittest.TestCase):
       # Missing tokenizer_path
       validate_checkpoint("test-run", "qwen", "gs://fake", "", ["scan_layers=false"])
 
-  @patch("src.maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator.subprocess.run")
+  @patch("maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator.subprocess.run")
   @patch("os.makedirs")
   @patch("builtins.open")
   def test_successful_command_generation(self, _mock_open, _mock_makedirs, mock_subprocess):
@@ -45,7 +46,7 @@ class TestCheckpointValidationAgent(unittest.TestCase):
         "qwen3-4b",
         "gs://path/to/checkpoint",
         "",
-        ["tokenizer_path=Qwen/Qwen3-4B", "scan_layers=False", "per_device_batch_size=16.0"]
+        ["tokenizer_path=Qwen/Qwen3-4B", "scan_layers=False", "per_device_batch_size=16.0"],
     )
 
     mock_subprocess.assert_called_once()
@@ -57,7 +58,7 @@ class TestCheckpointValidationAgent(unittest.TestCase):
     self.assertIn("scan_layers=False", executed_command)
     self.assertIn("per_device_batch_size=16.0", executed_command)
 
-  @patch("src.maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator.subprocess.run")
+  @patch("maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator.subprocess.run")
   @patch("os.makedirs")
   @patch("builtins.open")
   @patch("maxtext.utils.gcs_utils.upload_blob")
@@ -70,7 +71,7 @@ class TestCheckpointValidationAgent(unittest.TestCase):
         "qwen3-4b",
         "gs://path/to/checkpoint",
         "gs://my-bucket/reports",
-        ["tokenizer_path=Qwen/Qwen3-4B", "scan_layers=False"]
+        ["tokenizer_path=Qwen/Qwen3-4B", "scan_layers=False"],
     )
 
     mock_upload_blob.assert_called_once()

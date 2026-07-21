@@ -16,7 +16,7 @@
 
 import unittest
 import os
-from src.maxtext.experimental.agent.ckpt_validation_pipeline.checkpoint_shape_validator import load_shapes, check_mismatches
+from maxtext.experimental.agent.ckpt_validation_pipeline.checkpoint_shape_validator import load_shapes, check_mismatches
 
 
 class TestValidator(unittest.TestCase):
@@ -26,10 +26,10 @@ class TestValidator(unittest.TestCase):
     # create a temp file
     with open("test_shapes.txt", "w", encoding="utf-8") as f:
       f.write("key: layer_0 | shape: (10, 10)\n")
+    self.addCleanup(os.remove, "test_shapes.txt")
 
     shapes = load_shapes("test_shapes.txt")
     self.assertEqual(shapes["layer_0"], "(10, 10)")
-    os.remove("test_shapes.txt")
 
   def test_logic_detects_mismatch(self):
     # pass pure dictionaries to the function to simulate a mismatch
@@ -37,5 +37,5 @@ class TestValidator(unittest.TestCase):
     actual = {"layer_0": "(10, 11)"}  # deliberate mismatch
 
     # function should return True indicating a mismatch exists
-    has_mismatch = check_mismatches(ideal, actual)
+    has_mismatch, _ = check_mismatches(ideal, actual)
     self.assertTrue(has_mismatch)

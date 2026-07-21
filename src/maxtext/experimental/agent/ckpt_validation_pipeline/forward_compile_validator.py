@@ -49,7 +49,8 @@ def run_mock_forward(checkpoint_path, model_name, *overrides):
 
   logger.info(f"Loading model from {checkpoint_path}...")
   # create a dummy 1-device hardware mesh using pod's single CPU
-  dummy_mesh = Mesh(np.array(jax.devices()), ("data",))
+  mesh_shape = (1,) * len(config.mesh_axes)
+  dummy_mesh = Mesh(np.array(jax.devices()).reshape(mesh_shape), tuple(config.mesh_axes))
   # pass dummy_mesh instead of None
   model = transformer_as_linen(config, mesh=dummy_mesh, quant=None)
 
@@ -80,13 +81,12 @@ def run_mock_forward(checkpoint_path, model_name, *overrides):
   return out_shape
 
 
-
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Mock tensor validation")
   parser.add_argument("--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint")
   parser.add_argument("--maxtext_model_name", type=str, required=True, help="Internal MaxText model name")
   parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS directory for reports")
-  
+
   args, _overrides = parser.parse_known_args()
   report_gcs_dir = args.report_gcs_dir
 
