@@ -17,8 +17,12 @@
 import argparse
 import json
 import time
+import absl.logging
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging as logger
+
+# Initialize logging verbosity to INFO so logger.info is actually printed
+absl.logging.set_verbosity(absl.logging.INFO)
 
 
 def load_shapes(filepath):

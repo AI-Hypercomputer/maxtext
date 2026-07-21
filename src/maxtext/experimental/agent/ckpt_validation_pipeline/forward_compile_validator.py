@@ -18,6 +18,7 @@ import argparse
 import json
 import time
 import jax
+import absl.logging
 from maxtext.utils import gcs_utils
 import jax.numpy as jnp
 import numpy as np
@@ -25,6 +26,9 @@ from jax.sharding import Mesh
 from maxtext import pyconfig
 from maxtext.models.models import transformer_as_linen
 from maxtext.utils import max_logging as logger
+
+# Initialize logging verbosity to INFO so logger.info is actually printed
+absl.logging.set_verbosity(absl.logging.INFO)
 
 
 def run_mock_forward(checkpoint_path, model_name, *overrides):

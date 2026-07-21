@@ -21,10 +21,14 @@ import argparse
 import json
 import os
 import subprocess
+import absl.logging
 import maxtext
 from maxtext.utils import gcs_utils
 # pylint: disable=no-name-in-module
 from maxtext.utils import max_logging as logger
+
+# Initialize logging verbosity to INFO so logger.info is actually printed
+absl.logging.set_verbosity(absl.logging.INFO)
 
 
 def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report_gcs_dir, unknown_args):
