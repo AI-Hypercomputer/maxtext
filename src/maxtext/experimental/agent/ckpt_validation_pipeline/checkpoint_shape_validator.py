@@ -32,7 +32,9 @@ def load_shapes(filepath):
     for line in file_handle:
       if "key:" in line and "|" in line:
         parts = line.split("|")
-        shapes[parts[0].replace("key:", "").strip()] = parts[1].replace("shape:", "").strip()
+        shapes[parts[0].replace("key:", "").strip()] = (
+            parts[1].replace("shape:", "").strip()
+        )
   return shapes
 
 
@@ -42,7 +44,9 @@ import sys
 def check_mismatches(ideal, actual):
   """Compares dictionaries and returns True if mismatches exist."""
   if not ideal or not actual:
-    logger.info("MISMATCH: One or both shape dictionaries are empty. This is likely an upstream failure.")
+    logger.info(
+        "MISMATCH: One or both shape dictionaries are empty. This is likely an upstream failure."
+    )
     return True, []
 
   all_keys = sorted(set(ideal.keys()) | set(actual.keys()))
@@ -64,12 +68,20 @@ def check_mismatches(ideal, actual):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
-  parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS dir to upload report")
   parser.add_argument(
-      "--ideal_shapes_path", type=str, default="/tmp/ideal_shapes.txt", help="Path to ideal shapes text file"
+      "--report_gcs_dir", type=str, default="", help="GCS dir to upload report"
   )
   parser.add_argument(
-      "--actual_shapes_path", type=str, default="/tmp/actual_shapes.txt", help="Path to actual shapes text file"
+      "--ideal_shapes_path",
+      type=str,
+      default="/tmp/ideal_shapes.txt",
+      help="Path to ideal shapes text file",
+  )
+  parser.add_argument(
+      "--actual_shapes_path",
+      type=str,
+      default="/tmp/actual_shapes.txt",
+      help="Path to actual shapes text file",
   )
   args = parser.parse_args()
 

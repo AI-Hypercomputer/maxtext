@@ -50,10 +50,9 @@ def run_mock_forward(checkpoint_path, model_name, *overrides):
   logger.info(f"Loading model from {checkpoint_path}...")
   # create a dummy 1-device hardware mesh using pod's single CPU
   mesh_shape = (1,) * len(config.mesh_axes)
-  dummy_mesh = Mesh(np.array(jax.devices()).reshape(mesh_shape), tuple(config.mesh_axes))
-  # pass dummy_mesh instead of None
-  model = transformer_as_linen(config, mesh=dummy_mesh, quant=None)
-
+  dummy_mesh = Mesh(
+      np.array(jax.devices()).reshape(mesh_shape), tuple(config.mesh_axes)
+  )
   # dynamically generate tensor shapes based on the parsed config
   batch_size = int(config.per_device_batch_size) if config.per_device_batch_size else 1
   seq_len = int(config.max_target_length) if config.max_target_length else 128
@@ -66,16 +65,40 @@ def run_mock_forward(checkpoint_path, model_name, *overrides):
   mock_segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
 
   logger.info("Executing forward pass...")
-  # tracing full traceback without try/except block
-  rng = jax.random.PRNGKey(0)
 
-  # generate abstract shapes for the parameters which uses 0 memory
-  logger.info("Initializing abstract model parameters...")
-  abstract_variables = jax.eval_shape(model.init, rng, mock_input, mock_positions, mock_segment_ids)
+  if getattr(config, "enable_nnx", False):
+    # pylint: disable=import-outside-toplevel
+    from maxtext.utils.model_creation_utils import create_nnx_abstract_model
 
-  # dry-run the forward pass using the abstract parameters
-  logger.info("Tracing forward pass graph...")
-  out_shape = jax.eval_shape(model.apply, abstract_variables, mock_input, mock_positions, mock_segment_ids)
+    logger.info("Initializing NNX abstract model parameters...")
+    _, abstract_model = create_nnx_abstract_model(config, mesh=dummy_mesh)
+
+    logger.info("Tracing forward pass graph with NNX...")
+
+    def forward(m, x, p, s):
+      return m(tokens=x, positions=p, segment_ids=s)
+
+    out_shape = jax.eval_shape(
+        forward, abstract_model, mock_input, mock_positions, mock_segment_ids
+    )
+  else:
+    # pass dummy_mesh instead of None
+    model = transformer_as_linen(config, mesh=dummy_mesh, quant=None)
+
+    logger.info("Initializing Linen abstract model parameters...")
+    rng = jax.random.PRNGKey(0)
+    abstract_variables = jax.eval_shape(
+        model.init, rng, mock_input, mock_positions, mock_segment_ids
+    )
+
+    logger.info("Tracing forward pass graph with Linen...")
+    out_shape = jax.eval_shape(
+        model.apply,
+        abstract_variables,
+        mock_input,
+        mock_positions,
+        mock_segment_ids,
+    )
 
   logger.info(f"SUCCESS: Model architecture is stable. Output shape: {out_shape}")
   return out_shape
@@ -83,9 +106,18 @@ def run_mock_forward(checkpoint_path, model_name, *overrides):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Mock tensor validation")
-  parser.add_argument("--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint")
-  parser.add_argument("--maxtext_model_name", type=str, required=True, help="Internal MaxText model name")
-  parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS directory for reports")
+  parser.add_argument(
+      "--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint"
+  )
+  parser.add_argument(
+      "--maxtext_model_name",
+      type=str,
+      required=True,
+      help="Internal MaxText model name",
+  )
+  parser.add_argument(
+      "--report_gcs_dir", type=str, default="", help="GCS directory for reports"
+  )
 
   args, _overrides = parser.parse_known_args()
   report_gcs_dir = args.report_gcs_dir
@@ -109,7 +141,9 @@ if __name__ == "__main__":
       gcs_utils.upload_blob(f"{gcs_dir}{report_name}", local_report_path)
 
   try:
-    _out_shape = run_mock_forward(args.checkpoint_gcs_path, args.maxtext_model_name, *_overrides)
+    _out_shape = run_mock_forward(
+        args.checkpoint_gcs_path, args.maxtext_model_name, *_overrides
+    )
     report["output_shape"] = str(_out_shape)
   except Exception as e:  # pylint: disable=broad-exception-caught
     report["status"] = "FAILURE"
