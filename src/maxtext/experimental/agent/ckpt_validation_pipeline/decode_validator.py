@@ -19,9 +19,13 @@ import subprocess
 import json
 import os
 import argparse
+import absl.logging
 from maxtext.utils import gcs_utils
 # pylint: disable=no-name-in-module
 from maxtext.utils import max_logging as logger
+
+# Initialize logging verbosity to INFO so logger.info is actually printed
+absl.logging.set_verbosity(absl.logging.INFO)
 
 
 
