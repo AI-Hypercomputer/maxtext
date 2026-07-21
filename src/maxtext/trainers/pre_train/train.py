@@ -197,18 +197,22 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
     )
+    # mtp_losses and mtp_acceptance subclass nnx.Intermediate, and nnx type filters match
+    # subclasses. Pop them before the generic Intermediate pop below, which would otherwise
+    # take them too and leave the MTP loss silently reading as 0.
+    mtp_losses_state, mtp_acceptance_state = None, None
+    if config.mtp_num_layers > 0:
+      mtp_losses_state = nnx.pop(model, mtp_losses)
+      mtp_acceptance_state = nnx.pop(model, mtp_acceptance)
+
     intermediates = nnx.pop(model, nnx.Intermediate)
     intermediate_outputs = intermediates.to_pure_dict()
 
-    # MTP sows mtp_losses/mtp_acceptance as custom Variable subclasses, not
-    # Intermediate, so the nnx.pop above misses them. Pop them here under their
-    # collection names so calculate_mtp_loss / calculate_mtp_acceptance_rate
-    # find them. Otherwise the MTP loss is silently zeroed. They are also
-    # excluded from the returned state below so they don't leak into
-    # out_shardings.
-    if config.mtp_num_layers > 0:
-      intermediate_outputs["mtp_losses"] = nnx.pop(model, mtp_losses).to_pure_dict()
-      intermediate_outputs["mtp_acceptance"] = nnx.pop(model, mtp_acceptance).to_pure_dict()
+    # Store them under the collection name so calculate_mtp_loss and
+    # calculate_mtp_acceptance_rate find them at the same path as the Linen collections.
+    if mtp_losses_state is not None and mtp_acceptance_state is not None:
+      intermediate_outputs["mtp_losses"] = mtp_losses_state.to_pure_dict()
+      intermediate_outputs["mtp_acceptance"] = mtp_acceptance_state.to_pure_dict()
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.

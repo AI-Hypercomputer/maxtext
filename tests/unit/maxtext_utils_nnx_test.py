@@ -203,5 +203,68 @@ class TestMaxTextUtilsNNX(unittest.TestCase):
     self.assertEqual(broadcast_state["raw_array"].shape, (10,))
 
 
+def _make_scanned_param(shape, out_sharding, partition_name):
+  """Build an nnx.Param mirroring a scanned decoder variable.
+
+  DeepSeek stacks name their scan axis via nnx.PARTITION_NAME ("dense_layers" or
+  "moe_layers"), so the variable carries that name in its metadata rather than
+  the caller literal "layers". Eager sharding is disabled because the sliced
+  value rank is intentionally one less than the metadata length.
+  """
+  with nnx.use_eager_sharding(False):
+    return nnx.Param(jnp.zeros(shape), out_sharding=out_sharding, **{nnx.PARTITION_NAME: partition_name})
+
+
+class TestScanAxisMetadata(unittest.TestCase):
+  """Lock in per-variable scan-axis resolution for DeepSeek-style stacks."""
+
+  def test_nnx_remove_scan_axis_preserves_real_leading_axis(self):
+    """nnx_remove_scan_axis must drop the stack's own scan axis, not "embed"."""
+    # Metadata carries the real fsdp axis "embed" plus the scan axis
+    # "dense_layers"; the sliced value is rank-2, one less than the 3 names.
+    param = _make_scanned_param((4, 8), ("embed", "dense_layers", "mlp"), "dense_layers")
+    state = nnx.State({"kernel": param})
+
+    result = maxtext_utils_nnx.nnx_remove_scan_axis(state, "layers")
+
+    out_sharding = result["kernel"].get_metadata().get("out_sharding")
+    # The scan axis is gone and the real leading logical axis survives. The
+    # unfixed fallback pops index 0 and strips "embed" to ("dense_layers", "mlp").
+    self.assertEqual(tuple(out_sharding), ("embed", "mlp"))
+
+  def test_nnx_remove_scan_axis_moe_layers(self):
+    """The same resolution holds for the "moe_layers" stack axis name."""
+    param = _make_scanned_param((4, 8), ("embed", "moe_layers", "mlp"), "moe_layers")
+    state = nnx.State({"kernel": param})
+
+    result = maxtext_utils_nnx.nnx_remove_scan_axis(state, "layers")
+
+    out_sharding = result["kernel"].get_metadata().get("out_sharding")
+    self.assertEqual(tuple(out_sharding), ("embed", "mlp"))
+
+  def test_nnx_remove_scan_axis_raises_on_inconsistent_metadata(self):
+    """A rank mismatch with no matching scan axis is an error, not a silent pop."""
+    # No name in the metadata matches the resolved scan axis, and the metadata
+    # is one longer than the value rank; the fixed code raises instead of
+    # blindly popping a real axis.
+    param = _make_scanned_param((4, 8), ("embed", "mlp", "vocab"), "dense_layers")
+    state = nnx.State({"kernel": param})
+
+    with self.assertRaises(ValueError):
+      maxtext_utils_nnx.nnx_remove_scan_axis(state, "layers")
+
+  def test_nnx_add_and_sync_scan_axis_uses_partition_name(self):
+    """nnx_add_and_sync_scan_axis must insert the stack's own axis name, not "layers"."""
+    # Stacked value is rank-3; metadata holds the two sliced logical axes.
+    param = _make_scanned_param((2, 4, 8), ("embed", "mlp"), "dense_layers")
+    state = nnx.State({"kernel": param})
+
+    result = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(state, "layers", 0)
+
+    out_sharding = result["kernel"].get_metadata().get("out_sharding")
+    # The unfixed code inserts the literal "layers" here.
+    self.assertEqual(tuple(out_sharding), ("dense_layers", "embed", "mlp"))
+
+
 if __name__ == "__main__":
   unittest.main()

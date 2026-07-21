@@ -861,6 +861,12 @@ def maybe_quantize_model(model, config):
         dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+        # The MTP block reads the decoder targets, so the qwix forward pass needs them.
+        # The Linen path supplies them from the is_initializing() guard in Transformer.
+        dummy_targets = {}
+        if config.mtp_num_layers > 0:
+          dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
+          dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
         model = qwix.quantize_model(
             model,
             quantization_provider,
@@ -868,6 +874,7 @@ def maybe_quantize_model(model, config):
             dummy_positions,
             dummy_segment_ids,
             enable_dropout=False,
+            **dummy_targets,
         )
         # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
         # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
