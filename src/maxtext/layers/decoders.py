@@ -1438,7 +1438,12 @@ class Decoder(nn.Module):
     if num_full_blocks > 0:
       ScannableBlockToLinen = gemma4.Gemma4ScannableBlockToLinen
       policy = self.get_remat_policy()
-      RemattedGemma4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
+      # Gemma4ScannableBlock rematerializes its own local (scanned) and global
+      # layers when apply_internal_remat=True, so we do NOT wrap it in
+      # block-level remat here (that would double-rematerialize and make XLA
+      # treat the whole block as one unit). Unrolling the block scan lets XLA
+      # free each block's activations across iterations instead of keeping the
+      # block live as a unit.
 
       kv_cache_scanned = maxtext_utils.prepare_kv_caches_for_scan(
           kv_caches, num_full_blocks, block_pattern_len, stack=True
@@ -1461,7 +1466,7 @@ class Decoder(nn.Module):
 
       # For a fully scanned block, apply it inside a nn.scan over the calculated number of full blocks
       y, returned_kv_cache = nn.scan(
-          RemattedGemma4Block,
+          ScannableBlockToLinen,
           variable_axes={
               "params": cfg.param_scan_axis,
               "cache": 0,
@@ -1472,6 +1477,7 @@ class Decoder(nn.Module):
           split_rngs={"params": True, "dropout": cfg.enable_dropout},
           in_axes=in_axes_tuple,
           length=num_full_blocks,
+          unroll=num_full_blocks,
           metadata_params={
               nn.PARTITION_NAME: "layers",
               "abstract_init": False,
@@ -1482,6 +1488,8 @@ class Decoder(nn.Module):
           quant=self.quant,
           model_mode=model_mode,
           num_of_layers=block_pattern_len,
+          remat_policy_fn=policy,
+          apply_internal_remat=True,
           name="scanned_blocks",
       )(
           y, *broadcast_args
