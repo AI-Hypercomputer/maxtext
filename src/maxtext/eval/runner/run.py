@@ -20,10 +20,12 @@ Dispatches to the appropriate runner based on --runner:
   lm_eval       lm-evaluation-harness runner.
   evalchemy     evalchemy runner.
   simple_evals  OpenAI simple-evals runner (grader-free evals).
-  profile       XProf tracing runner (prefill/decode/batch bottleneck analysis).
+  profile       XProf tracing runner for one model's prefill and decode paths.
+  roofline      Implementation-grounded GPT-OSS XProf report analyzer.
 
 lm_eval and evalchemy dispatch to harness_runner.py; simple_evals uses
-simple_evals_runner.py; profile uses profile_runner.py.
+simple_evals_runner.py; profile uses profile_runner.py; roofline uses
+roofline_analyzer.py.
 
 Usage::
 
@@ -80,7 +82,7 @@ def main() -> None:
   pre_parser.add_argument(
       "--runner",
       required=True,
-      choices=["eval", "lm_eval", "evalchemy", "simple_evals", "profile"],
+      choices=["eval", "lm_eval", "evalchemy", "simple_evals", "profile", "roofline"],
       help="Which evaluation runner to use.",
   )
   pre_args, remaining = pre_parser.parse_known_args()
@@ -101,6 +103,10 @@ def main() -> None:
     _main()
   elif pre_args.runner == "profile":
     from maxtext.eval.runner.profile_runner import main as _main  # pylint: disable=import-outside-toplevel
+
+    _main()
+  elif pre_args.runner == "roofline":
+    from maxtext.eval.runner.roofline_analyzer import main as _main  # pylint: disable=import-outside-toplevel
 
     _main()
   else:  # evalchemy

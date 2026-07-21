@@ -400,7 +400,7 @@ def run_simple_evals(cfg: dict, hf_token: str | None = None) -> dict:
     n_repeats = int(n_repeats)
   max_tokens = int(cfg.get("max_tokens") or 2048)
   temperature_value = cfg.get("temperature")
-  temperature = float(0 if temperature_value is None else temperature_value)
+  temperature = float(0.5 if temperature_value is None else temperature_value)
   system_message = cfg.get("system_message", DEFAULT_SYSTEM_MESSAGE)
   reasoning_effort = cfg.get("reasoning_effort")
   log_debug_info = bool(cfg.get("log_debug_info", False))
@@ -546,7 +546,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
       ),
   )
   parser.add_argument("--max_tokens", type=int, default=2048, help="Max tokens per generation.")
-  parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (upstream default: 0.0).")
+  parser.add_argument("--temperature", type=float, default=0.5, help="Sampling temperature (upstream default: 0.5).")
   parser.add_argument(
       "--concurrency",
       type=int,
