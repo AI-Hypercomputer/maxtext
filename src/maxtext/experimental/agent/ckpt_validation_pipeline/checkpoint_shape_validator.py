@@ -36,10 +36,18 @@ def load_shapes(filepath):
   return shapes
 
 
+import sys
+
+
 def check_mismatches(ideal, actual):
   """Compares dictionaries and returns True if mismatches exist."""
+  if not ideal or not actual:
+    logger.info("MISMATCH: One or both shape dictionaries are empty. This is likely an upstream failure.")
+    return True, []
+
   all_keys = sorted(set(ideal.keys()) | set(actual.keys()))
   has_mismatch = False
+  mismatched_layers = []
 
   for k in all_keys:
     exp = ideal.get(k, "MISSING")
@@ -49,28 +57,33 @@ def check_mismatches(ideal, actual):
     else:
       logger.info(f"MISMATCH: {k} | Expected: {exp} -> Got: {got}")
       has_mismatch = True
+      mismatched_layers.append(k)
 
-  return has_mismatch
-
+  return has_mismatch, mismatched_layers
 
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS dir to upload report")
-  parser.add_argument("--ideal_shapes_path", type=str, default="/tmp/ideal_shapes.txt", help="Path to ideal shapes text file")
-  parser.add_argument("--actual_shapes_path", type=str, default="/tmp/actual_shapes.txt", help="Path to actual shapes text file")
+  parser.add_argument(
+      "--ideal_shapes_path", type=str, default="/tmp/ideal_shapes.txt", help="Path to ideal shapes text file"
+  )
+  parser.add_argument(
+      "--actual_shapes_path", type=str, default="/tmp/actual_shapes.txt", help="Path to actual shapes text file"
+  )
   args = parser.parse_args()
 
   ideal_shapes = load_shapes(args.ideal_shapes_path)
   actual_shapes = load_shapes(args.actual_shapes_path)
 
-  _has_mismatch = check_mismatches(ideal_shapes, actual_shapes)
+  _has_mismatch, _mismatched_layers = check_mismatches(ideal_shapes, actual_shapes)
 
   report = {
       "task": "checkpoint_shape_validation",
       "timestamp": time.time(),
       "status": "FAILURE" if _has_mismatch else "SUCCESS",
       "mismatches_found": _has_mismatch,
+      "mismatched_layers": _mismatched_layers,
   }
 
   if args.report_gcs_dir:
@@ -84,6 +97,7 @@ if __name__ == "__main__":
     gcs_utils.upload_blob(f"{gcs_dir}{report_name}", local_report_path)
 
   if _has_mismatch:
-    raise ValueError("ERROR: Structural mismatches found!")
+    logger.error("ERROR: Structural mismatches found!")
+    sys.exit(1)
 
   logger.info("\nSUCCESS: All parameters match perfectly.")
