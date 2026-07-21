@@ -22,14 +22,14 @@ MaxText supports automatic upload of logs collected in a directory to a Tensorbo
 
 ## What is Vertex AI Tensorboard and Vertex AI Experiment
 
-Vertex AI Tensorboard is a fully managed and enterprise-ready version of open-source Tensorboard. To learn more about Vertex AI Tensorboard, visit [this](https://cloud.google.com/vertex-ai/docs/experiments/tensorboard-introduction). Vertex AI Experiment is a tool that helps to track and analyze an experiment run on Vertex AI Tensorboard. To learn more about Vertex AI Experiments, visit [this](https://cloud.google.com/vertex-ai/docs/experiments/intro-vertex-ai-experiments).
+Vertex AI Tensorboard is a fully managed and enterprise-ready version of open-source Tensorboard. To learn more about Vertex AI Tensorboard, visit [this](https://docs.cloud.google.com/vertex-ai/docs/experiments/tensorboard-introduction). Vertex AI Experiment is a tool that helps to track and analyze an experiment run on Vertex AI Tensorboard. To learn more about Vertex AI Experiments, visit [this](https://docs.cloud.google.com/vertex-ai/docs/experiments/intro-vertex-ai-experiments).
 
 You can use a single Vertex AI Tensorboard instance to track and compare metrics from multiple Vertex AI Experiments. While you can view metrics from multiple Vertex AI Experiments within a single Tensorboard instance, the underlying log data for each experiment remains separate.
 
 ## Prerequisites
 
-- Enable [Vertex AI API](https://cloud.google.com/vertex-ai/docs/start/cloud-environment#set_up_a_project) in your Google Cloud console.
-- Assign [Vertex AI User IAM role](https://cloud.google.com/vertex-ai/docs/general/access-control#aiplatform.user) to the service account used by the TPU VMs. This is required to create and access the Vertex AI Tensorboard in Google Cloud console. If you are using XPK for MaxText, the necessary Vertex AI User IAM role will be automatically assigned to your node pools by XPK – no need to assign it manually.
+- Enable [Vertex AI API](https://docs.cloud.google.com/vertex-ai/docs/start/cloud-environment#set_up_a_project) in your Google Cloud console.
+- Assign [Vertex AI User IAM role](https://docs.cloud.google.com/vertex-ai/docs/general/access-control#aiplatform.user) to the service account used by the TPU VMs. This is required to create and access the Vertex AI Tensorboard in Google Cloud console. If you are using XPK for MaxText, the necessary Vertex AI User IAM role will be automatically assigned to your node pools by XPK – no need to assign it manually.
 
 ## Upload logs to Vertex AI Tensorboard
 
@@ -47,7 +47,7 @@ The above configuration will upload logs in `config.tensorboard_dir` to Vertex T
 
 **Scenario 2: Running MaxText on GCE**
 
-Set `use_vertex_tensorboard=True` to upload logs in `config.tensorboard_dir` to a Tensorboard instance in Vertex AI. You can manually create a Tensorboard instance named `<config.vertex_tensorboard_project>-tb-instance` and an Experiment named `config.run_name` in Vertex AI on Google Cloud console. Otherwise, MaxText will create those resources for you when `use_vertex_tensorboard=True`. Note that Vertex AI is available in only [these](https://cloud.google.com/vertex-ai/docs/general/locations#available-regions) regions.
+Set `use_vertex_tensorboard=True` to upload logs in `config.tensorboard_dir` to a Tensorboard instance in Vertex AI. You can manually create a Tensorboard instance named `<config.vertex_tensorboard_project>-tb-instance` and an Experiment named `config.run_name` in Vertex AI on Google Cloud console. Otherwise, MaxText will create those resources for you when `use_vertex_tensorboard=True`. Note that Vertex AI is available in only [these](https://docs.cloud.google.com/vertex-ai/docs/general/locations#available-regions) regions.
 
 **Scenario 2.1: Configuration to upload logs to Vertex AI Tensorboard**
 

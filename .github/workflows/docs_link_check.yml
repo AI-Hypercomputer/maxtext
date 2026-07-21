@@ -64,7 +64,7 @@ jobs:
           echo "exit_code=$?" >> $GITHUB_OUTPUT
 
       - name: Prepare issue body
-        if: steps.linkcheck.outcome == 'failure'
+        if: steps.linkcheck.outcome == 'failure' && github.event_name == 'schedule'
         run: |
           DATE=$(date +%Y-%m-%d)
           echo "ISSUE_DATE=$DATE" >> $GITHUB_ENV
@@ -92,7 +92,7 @@ jobs:
           echo 'Please review and fix the broken links in the documentation.' >> issue-body.md
 
       - name: Create issue for broken links
-        if: steps.linkcheck.outcome == 'failure'
+        if: steps.linkcheck.outcome == 'failure' && github.event_name == 'schedule'
         uses: peter-evans/create-issue-from-file@fca9117c27cdc29c6c4db3b86c48e4115a786710  # v6.0.0
         with:
           title: Documentation Link Check Failed - ${{ env.ISSUE_DATE }}
