@@ -254,6 +254,8 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   def verify_fn(key_path, _):
     keystr = jax.tree_util.keystr(key_path)
+    if "['rngs']" in keystr:
+      return
     assert keystr in state_map, f"{keystr} not found"
 
   jax.tree_util.tree_map_with_path(verify_fn, state)
@@ -264,6 +266,8 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   def map_fn(key_path, value):
     key_path_str = jax.tree_util.keystr(key_path)
+    if "['rngs']" in key_path_str:
+      return value
     file_path, transform_fn = state_map[key_path_str]
     full_path = os.path.join(paxml_ckpt_prefix, file_path)
     spec = {"driver": "zarr", "metadata_key": ".zarray", "kvstore": {}}
