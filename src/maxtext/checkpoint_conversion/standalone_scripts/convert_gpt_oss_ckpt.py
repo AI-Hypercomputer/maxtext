@@ -53,7 +53,7 @@ CAST_DTYPE = ml_dtypes.bfloat16
 
 
 def _convert_huggingface_to_jax_weights(
-    base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process
+    base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process, pure_nnx: bool = True
 ):
   """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
 
@@ -62,6 +62,7 @@ def _convert_huggingface_to_jax_weights(
     model_size (str): Size of the base model.
     model_params (dict): Dictionary containing model parameters.
     mem_info (psutil.Process): Process object to track memory usage.
+    pure_nnx (bool): Whether to format weights for pure NNX.
 
   Returns:
     jax_weights (dict): Dictionary containing the converted weights.
@@ -96,12 +97,14 @@ def _convert_huggingface_to_jax_weights(
       "decoder": {
           "decoder_norm": {"scale": None},
           "logits_dense": {"kernel": None},
-          "layers": {},
       },
   }
+  if pure_nnx:
+    jax_weights["decoder"]["layers"] = {}
+
   # block 0, 1
   for block_idx in range(layer_cycle_interval):
-    jax_weights["decoder"]["layers"][f"layers_{block_idx}"] = {
+    layer_dict = {
         "pre_self_attention_layer_norm": {"scale": None},
         "post_self_attention_layer_norm": {"scale": None},
         "GptOssAttention": {
@@ -121,6 +124,13 @@ def _convert_huggingface_to_jax_weights(
             "wo_bias": None,
         },
     }
+    if pure_nnx:
+      jax_weights["decoder"]["layers"][block_idx] = layer_dict
+    else:
+      jax_weights["decoder"][f"layers_{block_idx}"] = layer_dict
+
+  def get_layer(b_idx):
+    return jax_weights["decoder"]["layers"][b_idx] if pure_nnx else jax_weights["decoder"][f"layers_{b_idx}"]
 
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
@@ -147,7 +157,7 @@ def _convert_huggingface_to_jax_weights(
   for layer_idx in MemoryMonitorTqdm(range(base_num_decoder_layers), desc="layers", leave=True):
     block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
     stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
-    self_attention = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]["GptOssAttention"]
+    self_attention = get_layer(block_idx)["GptOssAttention"]
 
     wq = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"], cast_dtype=CAST_DTYPE)
     wk = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"], cast_dtype=CAST_DTYPE)
@@ -200,7 +210,7 @@ def _convert_huggingface_to_jax_weights(
     self_attention["sinks"][block_layer_idx, ...] = sinks
 
   for block_idx in range(layer_cycle_interval):
-    self_attention = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]["GptOssAttention"]
+    self_attention = get_layer(block_idx)["GptOssAttention"]
     self_attention["query"]["kernel"] = self_attention["query"]["kernel"].transpose(1, 0, 2, 3)
     self_attention["key"]["kernel"] = self_attention["key"]["kernel"].transpose(1, 0, 2, 3)
     self_attention["value"]["kernel"] = self_attention["value"]["kernel"].transpose(1, 0, 2, 3)
@@ -218,7 +228,7 @@ def _convert_huggingface_to_jax_weights(
   for layer_idx in MemoryMonitorTqdm(range(base_num_decoder_layers), desc="layers", leave=True):
     block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
     stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
-    layer_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]
+    layer_weight = get_layer(block_idx)
 
     pre_self_attention_layernorm = _pt_to_np(
         chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE
@@ -237,7 +247,7 @@ def _convert_huggingface_to_jax_weights(
     layer_weight["post_self_attention_layer_norm"]["scale"][block_layer_idx, ...] = post_self_attention_layernorm  # pylint: disable=E1137
 
   for block_idx in range(layer_cycle_interval):
-    layer_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]
+    layer_weight = get_layer(block_idx)
     layer_weight["pre_self_attention_layer_norm"]["scale"] = layer_weight["pre_self_attention_layer_norm"][
         "scale"
     ].transpose(1, 0)
@@ -253,7 +263,7 @@ def _convert_huggingface_to_jax_weights(
   for layer_idx in MemoryMonitorTqdm(range(base_num_decoder_layers), desc="layers", leave=True):
     block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
     stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
-    mlp_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]["GptOssMlp"]
+    mlp_weight = get_layer(block_idx)["GptOssMlp"]
 
     gate = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.weight"], cast_dtype=CAST_DTYPE)
     gate_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.bias"], cast_dtype=CAST_DTYPE)
@@ -296,7 +306,7 @@ def _convert_huggingface_to_jax_weights(
     gc.collect()
 
   for block_idx in range(layer_cycle_interval):
-    mlp_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]["GptOssMlp"]
+    mlp_weight = get_layer(block_idx)["GptOssMlp"]
     mlp_weight["gate"]["kernel"] = mlp_weight["gate"]["kernel"].transpose(1, 0, 2)
     mlp_weight["wi_0"] = mlp_weight["wi_0"].transpose(1, 0, 2, 3)
     mlp_weight["wi_1"] = mlp_weight["wi_1"].transpose(1, 0, 2, 3)
@@ -312,7 +322,7 @@ def _convert_huggingface_to_jax_weights(
   return jax_weights
 
 
-def convert_to_jax_weights(base_model_path: str, model_size: str):
+def convert_to_jax_weights(base_model_path: str, model_size: str, pure_nnx: bool = True):
   """
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and output jax_weights ready for MaxText
@@ -320,12 +330,13 @@ def convert_to_jax_weights(base_model_path: str, model_size: str):
   Args:
     base_model_path: checkpoint path
     model_size: gpt-oss-20b, gpt-oss-120b
+    pure_nnx: whether to format weights for pure NNX
   """
   model_params = MODEL_PARAMS_DICT[model_size]
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   max_logging.log(f"Loading the base model from {base_model_path}")
-  return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info)
+  return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info, pure_nnx)
 
 
 if __name__ == "__main__":
@@ -336,6 +347,7 @@ if __name__ == "__main__":
   parser.add_argument("--simulated-cpu-devices-count", type=int, required=False, default=16)
   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
+  parser.add_argument("--pure-nnx", type=str2bool, required=False, default=True)
   args = parser.parse_args()
 
   overall_start = time.time()
@@ -348,7 +360,7 @@ if __name__ == "__main__":
 
   # transform
   start = time.time()
-  weights = convert_to_jax_weights(args.base_model_path, args.model_size)
+  weights = convert_to_jax_weights(args.base_model_path, args.model_size, args.pure_nnx)
   max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
 
   # save
