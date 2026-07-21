@@ -16,7 +16,7 @@
 
 import unittest
 import os
-from src.maxtext.experimental.agent.checkpoint_validation_agent.checkpoint_shape_validator import load_shapes, check_mismatches
+from src.maxtext.experimental.agent.ckpt_validation_pipeline.checkpoint_shape_validator import load_shapes, check_mismatches
 
 
 class TestValidator(unittest.TestCase):
