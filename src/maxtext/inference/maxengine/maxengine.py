@@ -192,7 +192,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     """Zero-filled pure-dict cache matching the abstract NNX model."""
     src = self._abstract_model_for_mode(mode)
     _, cache_state, _ = nnx.split(src, nnx.Cache, ...)
-    cache_dict = cache_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
+    cache_dict = nnx.to_pure_dict(cache_state)
     return jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict)
 
   def _nnx_run_model(
@@ -239,7 +239,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         true_length=true_length,
         slot=slot,
     )
-    new_cache = nnx.state(model, nnx.Cache).to_pure_dict()
+    new_cache = nnx.to_pure_dict(nnx.state(model, nnx.Cache))
     return logits, new_cache
 
   def generate_aot(
@@ -398,22 +398,13 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         forward. Same output as serve mode (absmax calibration), slower.
     """
 
-    if params:
-      print("Resharding given NNX params")
-      _, params_abs, _ = nnx.split(self.model, nnx.Param, ...)
-      # self.model is abstract (built via nnx.eval_shape), so its leaves carry logical
-      # axis metadata but no physical .sharding. Resolve logical to physical here so
-      # device_put actually reshards instead of being a no-op.
-      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        target_shardings = sharding.nnx_construct_named_sharding(params_abs, self._mesh)
-      params_state = jax.device_put(params, target_shardings)
-      # We only need a concrete `rest` (RNG vars) for nnx.merge. create_nnx_sharded_model
-      # builds the model with a jitted out_shardings so params are produced already
-      # sharded, avoiding a single-device allocation of the full model (an OOM risk for
-      # large models). self.model is abstract with no .sharding, so pass an explicit one.
+    # Safely create the concrete PREFILL model once, avoiding OOM risks:
+    # create_nnx_sharded_model builds the model with a jitted out_shardings so params
+    # are produced already sharded, avoiding a single-device allocation of the full
+    # model.
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
       _, full_abs = nnx.split(self.model)
-      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
+      full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
       concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
           self.model,
           self._create_model_fn,
@@ -422,8 +413,18 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       )
       graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       self.graphdef = graphdef
-      self._nnx_rest_state = rest_state
       del concrete_model
+
+    if params:
+      print("Resharding given NNX params")
+      _, params_abs, _ = nnx.split(self.model, nnx.Param, ...)
+      # self.model is abstract (built via nnx.eval_shape), so its leaves carry logical
+      # axis metadata but no physical .sharding. Resolve logical to physical here so
+      # device_put actually reshards instead of being a no-op.
+      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        target_shardings = sharding.nnx_construct_named_sharding(params_abs, self._mesh)
+        params_state = jax.device_put(params, target_shardings)
+      self._nnx_rest_state = rest_state
     else:
       max_logging.log("Loading NNX params via from_pretrained")
       with self._mesh:
@@ -438,22 +439,14 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       # `_nnx_rest_state`. Param-only filtering would silently drop them and
       # the model would run with random qrhs values.
       _, params_state, _, loaded_rest_state = nnx.split(nnx_model, nnx.Param, nnx.Cache, ...)
-      # `_prefill_jit` re-merges with `self.graphdef`, which must be the PREFILL
-      # graphdef built in `__init__` (matching `_create_model_fn`). Don't
-      # overwrite with the AR-mode graphdef from `from_pretrained` — the
-      # PREFILL/AR attention ops have different cache variable shapes, and a
-      # mismatch trips the `assert prefill_kv_cache` check inside attention_op.
-      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        concrete_model = self._create_model_fn()  # pyrefly: ignore[not-callable]
-      graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       # Overlay loaded non-Param/non-Cache leaves (e.g. AQT qrhs.frozen) onto
       # the PREFILL-mode rest_state. The PREFILL concrete_model already has
       # placeholder qrhs vars at the right paths; we just swap in the loaded
       # values. Anything only in `loaded_rest_state` (e.g. AR-only RNG slots)
       # is ignored. We keep PREFILL rest_state as the base so RNG variables
       # match the PREFILL graphdef's expectations.
-      loaded_rest_dict = loaded_rest_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-      rest_dict = rest_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
+      loaded_rest_dict = nnx.to_pure_dict(loaded_rest_state)
+      rest_dict = nnx.to_pure_dict(rest_state)
 
       def _overlay(dst, src):
         if isinstance(dst, dict) and isinstance(src, dict):
@@ -469,9 +462,8 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
       rest_dict = _overlay(rest_dict, loaded_rest_dict)
       nnx.replace_by_pure_dict(rest_state, rest_dict)
-      self.graphdef = graphdef
       self._nnx_rest_state = rest_state
-      del nnx_model, concrete_model
+      del nnx_model, loaded_rest_state, loaded_rest_dict, rest_dict
 
     self.abstract_params = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -2011,7 +2003,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         cache_state,
         is_leaf=lambda v: isinstance(v, nnx.Variable),
     )
-    self.kv_cache_annotations_named = annotations_state.to_pure_dict()
+    self.kv_cache_annotations_named = nnx.to_pure_dict(annotations_state)
 
     return {
         "logits": jnp.zeros((batch, 1, vocab), dtype=jnp.float32),
