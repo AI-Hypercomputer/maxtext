@@ -1125,8 +1125,9 @@ local_sa_v_layout: None  # inherits from sa_v_layout if None
 local_use_splash_scheduler: None  # inherits from use_splash_scheduler if None
 local_sa_fuse_reciprocal: None  # inherits from sa_fuse_reciprocal if None
 local_sa_use_base2_exp: None  # inherits from sa_use_base2_exp if None
-experimental_sa_quant_q_fp8: False # Experimental flag: If enabled, the Q tensor in splash attention is quantized to jnp.float8_e4m3fn, without scaling factors.
-experimental_sa_quant_k_fp8: False # Experimental flag: If enabled, the K tensor in splash attention is quantized to jnp.float8_e4m3fn, without scaling factors.
+experimental_sa_quant_q_fp8: "none" # Experimental flag: Quantization strategy for Q in splash attention ("none", "cast", or "tensor").
+experimental_sa_quant_k_fp8: "none" # Experimental flag: Quantization strategy for K in splash attention ("none", "cast", or "tensor").
+experimental_sa_quant_v_fp8: "none" # Experimental flag: Quantization strategy for V in splash attention ("none", "cast", or "tensor").
 use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
 cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)
