@@ -180,6 +180,7 @@ def naive_jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
+@functools.partial(jax.named_call, name="jax_chunked_delta_rule")
 def jax_chunk_gated_delta_rule(
     query: Array,
     key: Array,
@@ -565,6 +566,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         rngs=rngs,
     )
 
+  @functools.partial(jax.named_call, name="qwen3_next_gated_delta_net")
   def __call__(
       self,
       hidden_states: Array,
@@ -1029,6 +1031,7 @@ class Qwen3NextFullAttention(nnx.Module):
         rngs=rngs,
     )
 
+  @functools.partial(jax.named_call, name="qwen3_next_full_attention")
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -1435,6 +1438,7 @@ class AttentionWithNorm(nnx.Module):
         rngs=rngs,
     )
 
+  @functools.partial(jax.named_call, name="apply_attention_with_norm")
   def apply_attention_with_norm(
       self,
       inputs: jnp.ndarray,
@@ -1449,25 +1453,28 @@ class AttentionWithNorm(nnx.Module):
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # Pre attention norm
-    lnx = self.pre_self_attention_layer_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    with jax.named_scope("pre_self_attention"):
+      lnx = self.pre_self_attention_layer_norm(inputs)
+      lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
     # Self attention
-    attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
-    )
+    with jax.named_scope("self_attention"):
+      attention_lnx, kv_cache = self.self_attention(
+          lnx,
+          lnx,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+      )
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     # Residual connection after attention
     intermediate_inputs = inputs + attention_lnx
     # Post attention norm
-    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    with jax.named_scope("post_self_attention_layer"):
+      hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
+      hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
     return hidden_states, intermediate_inputs, kv_cache
 
 
@@ -1500,6 +1507,7 @@ class Qwen3DecoderLayer(AttentionWithNorm):
         rngs=rngs,
     )
 
+  @functools.partial(jax.named_call, name="qwen3_decoder_layer")
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -1515,18 +1523,19 @@ class Qwen3DecoderLayer(AttentionWithNorm):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
-        inputs,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
-    )
-
-    mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    with jax.named_scope("apply_attention_with_norm"):
+        hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
+            inputs,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            kv_cache=kv_cache,
+            attention_metadata=attention_metadata,
+        )
+    with jax.named_scope("apply_mlp"):
+        mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
+        mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     layer_output = intermediate_inputs + mlp_lnx
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
@@ -1563,6 +1572,7 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         rngs=rngs,
     )
 
+  @functools.partial(jax.named_call, name="qwen3_moe_decoder_layer")
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -1596,8 +1606,9 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         attention_metadata=attention_metadata,
     )
 
-    mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    with jax.named_scope("moe_block"):
+      mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 
