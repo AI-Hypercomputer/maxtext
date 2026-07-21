@@ -42,6 +42,10 @@ on:
         required: false
         type: boolean
         default: false
+      is_pull_request:
+        required: false
+        type: boolean
+        default: false
       maxtext_sha:
         description: 'Git SHA to checkout if MaxText is not pre-installed'
         required: false
@@ -223,8 +227,10 @@ jobs:
             || '--privileged' }}
 
       # Metadata
+      flavor: ${{ inputs.flavor }}
       base_image: ${{ inputs.base_image }}
       is_scheduled_run: ${{ inputs.is_scheduled_run }}
+      is_pull_request: ${{ inputs.is_pull_request }}
       maxtext_installed: ${{ inputs.maxtext_installed }}
       worker_group: ${{ matrix.worker_group }}
       total_workers: ${{ fromJSON(needs.setup-parameters.outputs.total_workers) }}
