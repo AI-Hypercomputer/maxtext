@@ -93,7 +93,7 @@ class RLTrainerIntegrationTests(unittest.TestCase):
         trainer_config, sampler_config, trainer_devices, sampler_devices
     )
 
-    rl_cluster, rl_trainer, _ = train_rl.create_rl_components(
+    rl_cluster, rl_trainer, _, _ = train_rl.create_rl_components(
         trainer_config,
         sampler_config,
         sampler_devices,
@@ -137,7 +137,7 @@ class RLTrainerIntegrationTests(unittest.TestCase):
 
     # Verify results
     for metrics in [pre_metrics, post_metrics]:
-      corr, total, acc, partial_acc, format_acc = metrics
+      corr, total, acc, partial_acc, format_acc, _ = metrics
       self.assertGreaterEqual(total, 1, "There should be at least one eval item")
       self.assertGreaterEqual(corr, 0, "Correct items should be non-negative")
       self.assertTrue(0.0 <= partial_acc <= 100.0, "Partial accuracy should be a percentage between 0 and 100")
