@@ -102,7 +102,10 @@ build_tpu_image() {
     docker_build_args+=("LIBTPU_VERSION=NONE")
   fi
 
-  if [[ ${MANTARAY} == "true" ]]; then
+  # build_maxtext_docker_image WORKFLOW=post-training BASEIMAGE=python:3.12-slim-bookworm
+  if [[ -n "${BASEIMAGE:-}" ]]; then
+    docker_build_args+=("BASEIMAGE=${BASEIMAGE}")
+  elif [[ ${MANTARAY:-} == "true" ]]; then
     local base_image=gcr.io/tpu-prod-env-one-vm/benchmark-db:2025-02-14
     docker_build_args+=("BASEIMAGE=${base_image}")
   fi
