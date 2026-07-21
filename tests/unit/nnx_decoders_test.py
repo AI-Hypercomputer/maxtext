@@ -951,3 +951,65 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
               model_mode=MODEL_MODE_TRAIN,
               kv_caches=kv_caches,
           )
+
+
+class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
+
+  def test_metadata_axis_name_parameterization(self):
+    from maxtext.layers.nnx_decoders import NNXDecoder
+    from maxtext.utils import maxtext_utils_nnx
+    import jax
+    from flax import nnx
+    from unittest.mock import MagicMock
+
+    cfg = _make_config()
+    cfg.param_scan_axis = 0
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0)
+
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=rngs,
+    )
+
+    class DummyLayer(nnx.Module):
+
+      def __init__(self, rngs):
+        self.p = nnx.Param(jax.numpy.zeros((2, 2)))
+
+      def __call__(self, x, **kwargs):
+        return x + self.p.value, None
+
+    # Manually create a stacked layer using NNX scan
+    stacked_layers = nnx.vmap(lambda: DummyLayer(rngs=rngs), in_axes=(), out_axes=0, axis_size=2)()
+
+    x_in = jax.numpy.zeros((2,))
+
+    # We mock maxtext_utils_nnx.nnx_add_scan_axis to ensure the custom name is passed
+    original_add_scan_axis = maxtext_utils_nnx.nnx_add_scan_axis
+    mock_add_scan_axis = MagicMock(side_effect=original_add_scan_axis)
+    maxtext_utils_nnx.nnx_add_scan_axis = mock_add_scan_axis
+
+    try:
+      # Use a custom metadata_axis_name
+      custom_axis_name = "custom_scanned_blocks"
+      out, layers, _ = decoder._apply_layers_sequentially(
+          layers=stacked_layers, x_in=x_in, length=2, metadata_axis_name=custom_axis_name
+      )
+
+      # Verify that the custom axis name was indeed passed down
+      found_custom_name = False
+      for call_args in mock_add_scan_axis.call_args_list:
+        if call_args[0][1] == custom_axis_name:
+          found_custom_name = True
+          break
+
+      self.assertTrue(found_custom_name, "The custom metadata_axis_name was not passed to nnx_add_scan_axis!")
+    finally:
+      maxtext_utils_nnx.nnx_add_scan_axis = original_add_scan_axis
+
+
+if __name__ == "__main__":
+  unittest.main()

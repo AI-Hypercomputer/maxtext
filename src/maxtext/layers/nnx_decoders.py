@@ -905,7 +905,9 @@ class NNXDecoder(nnx.Module):
 
     return out
 
-  def _apply_layers_sequentially(self, layers, x_in, *args, length: int, kv_caches_stacked=None, **kwargs):
+  def _apply_layers_sequentially(
+      self, layers, x_in, *args, length: int, kv_caches_stacked=None, metadata_axis_name: str = "layers", **kwargs
+  ):
     """Runs the layer stack using nnx.scan.
 
     Args:
@@ -916,6 +918,10 @@ class NNXDecoder(nnx.Module):
       kv_caches_stacked: Optional pytree whose leaves have shape [num_layers, ...].
         When provided, the i-th slice is passed as `kv_cache=` to layer i and the
         updated caches are returned as a third element of the tuple.
+      metadata_axis_name: The name of the scan axis used during layer initialization.
+        This must perfectly match the string passed to `_create_scanned_layers`
+        (e.g., "layers", "scanned_blocks") to prevent strict JAX `pjit` PyTree
+        metadata mismatch errors when using custom `nnx.Variable` types (like `MoEBiasVar`).
       **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
 
     Returns:
@@ -1033,8 +1039,12 @@ class NNXDecoder(nnx.Module):
       final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
       returned_kv_stacked = None
 
-      # Ensure metadata rank matches the stacked values
-      scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, "layers", 0)
+      # Ensure metadata rank matches the stacked values.
+      # We dynamically pass metadata_axis_name instead of hardcoding "layers"
+      # so that custom NNX Variables (like MoEBiasVar) which were initialized under
+      # a different axis name (e.g. "scanned_blocks") do not fail JAX's strict
+      # pjit PyTree metadata matching during lowering.
+      scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, metadata_axis_name, 0)
 
       if scan_axis != 0:
         new_params, new_rest = scanned_state.split(nnx.Param, ...)
@@ -1957,6 +1967,7 @@ class NNXDecoder(nnx.Module):
           deterministic,
           model_mode,
           length=num_full_blocks,
+          metadata_axis_name="scanned_blocks",
           **layer_call_kwargs,
       )
 

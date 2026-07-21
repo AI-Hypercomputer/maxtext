@@ -232,6 +232,10 @@ class Tid2EidVar(nnx.Variable):
   """Custom variable to hold tid2eid without trainable param overhead."""
 
 
+class MoEBiasVar(nnx.Variable):
+  """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -307,10 +311,17 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
+      # DSV3 was using nnx.Param and that code we are keeping the same
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
           out_sharding=bias_axes,
       )
+      if self.model_name.startswith("deepseek4"):
+        # DSV4 uses MoEBiasVar to naturally isolate from sequence-wise updates
+        self.bias = MoEBiasVar(
+            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            out_sharding=bias_axes,
+        )
     else:
       self.bias = None
 
@@ -2571,13 +2582,29 @@ class RoutedMoE(nnx.Module):
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits) -> jax.Array:
-    """Compute the load balance loss."""
+    """Compute the sequence-wise load balance loss.
+
+    For DeepSeek V4 like models, standard load balancing across an entire batch can
+    be inadequate due to heterogeneous prompt lengths and varying sequence
+    characteristics. This method implements sequence-wise load balancing by
+    computing the token density and routing probabilities on a per-sequence basis.
+
+    The resulting loss is scaled by `self.config.load_balance_loss_weight`.
+    When this configuration value is set > 0, the computed loss is aggregated
+    into the total training loss. By minimizing this scaled auxiliary loss,
+    the optimizer updates the routing parameters to actively enforce an even
+    distribution of tokens to experts within each individual sequence.
+    """
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     summed_expert_mask = jnp.sum(expert_mask, axis=2)
     # Get fraction of tokens dispatched to each expert
+    # jnp.mean over axis=1 (sequence length) isolates the token density per sequence.
     density = jnp.mean(summed_expert_mask, axis=1)
     # get fraction of probability allocated to each expert
+    # jnp.mean over axis=1 isolates the routing probability per sequence.
     density_prob = jnp.mean(logits, axis=1)
+    # The sequence-wise densities and probabilities are multiplied and then averaged
+    # over the batch dimension, scaled by the required constant.
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 
