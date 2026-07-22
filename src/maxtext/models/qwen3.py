@@ -34,6 +34,7 @@ from flax import nnx
 from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.common.common_types import KV_BATCH, KV_HEAD
 from maxtext.utils.sharding import logical_to_mesh_axes
+from maxtext.kernels.attention.gated_delta_network import gdn_inter_chunk_scan, invert_unit_lower
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -190,6 +191,7 @@ def jax_chunk_gated_delta_rule(
     initial_state: None | Array = None,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
+    use_pallas: bool = False,
 ) -> tuple[Array, None | Array]:
   """Optimized JAX implementation of Gated Delta Rule."""
   # =========================================================================
@@ -265,10 +267,14 @@ def jax_chunk_gated_delta_rule(
   S = jnp.where(mask, S, 0.0)
 
   # Inversion (A) - Strictly float32
-  identity = jnp.eye(chunk_size, dtype=jnp.float32)
-  identity_broadcasted = jnp.broadcast_to(identity, S.shape)
-
-  A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+  if use_pallas:
+    # Blockwise inversion as a Pallas kernel: pure MXU matmuls on VMEM
+    # tiles, versus the row-sequential TPU triangular solve.
+    A = invert_unit_lower(S, jax.default_backend() != "tpu")
+  else:
+    identity = jnp.eye(chunk_size, dtype=jnp.float32)
+    identity_broadcasted = jnp.broadcast_to(identity, S.shape)
+    A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
 
   # 5. WY Factors
   v_beta = v_c * beta_c[..., None]
@@ -282,6 +288,20 @@ def jax_chunk_gated_delta_rule(
   # =========================================================================
   # STAGE 3: INTER-CHUNK RECURRENCE (Scan)
   # =========================================================================
+  if use_pallas:
+    # Fused Pallas TPU kernel: the whole sequential walk runs in one kernel
+    # with the recurrent state held in VMEM instead of round-tripping
+    # through HBM on every lax.scan iteration.
+    h0 = (
+        jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32) if initial_state is None else initial_state.astype(jnp.float32)
+    )
+    interpret = jax.default_backend() != "tpu"
+    o_chunks, final_h = gdn_inter_chunk_scan(w_chunks, u_chunks, q_c, k_c, g_cumsum, h0, interpret, compute_dtype)
+    o = o_chunks.transpose(0, 1, 3, 2, 4).reshape(B, -1, H, V_dim)
+    if pad_len > 0:
+      o = o[:, :seq_len, :, :]
+    return o.astype(initial_dtype), (final_h if initial_state is not None else None)
+
   scan_perm_vec = (1, 0, 2, 3, 4)
   scan_perm_scl = (1, 0, 2, 3)
 
@@ -883,6 +903,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             initial_state=init_h,
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=cfg.dtype,
+            use_pallas=model_mode == MODEL_MODE_TRAIN and jax.default_backend() == "tpu",
         )
 
       core_attn_out, next_recurrent_state = shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg)
@@ -897,6 +918,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           initial_state=recurrent_state,
           use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
           compute_dtype=cfg.dtype,
+          use_pallas=model_mode == MODEL_MODE_TRAIN and jax.default_backend() == "tpu",
       )
 
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
