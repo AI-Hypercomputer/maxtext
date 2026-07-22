@@ -96,9 +96,11 @@ def test_train_step_cache_hit():
 
     # Check if cache dir has files
     cache_files = os.listdir(temp_dir)
+    train_step_cache_files = [f for f in cache_files if f.startswith("jit_train_step")]
     print("=== Cache Directory Content ===")
     print(f"Path: {temp_dir}")
     print(f"Files: {cache_files}")
+    print(f"Train step cache files: {train_step_cache_files}")
     print("===============================")
 
     assert len(cache_files) > 0, (
