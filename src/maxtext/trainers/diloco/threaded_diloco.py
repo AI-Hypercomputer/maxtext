@@ -61,6 +61,7 @@ def _normalize_to_null_layout(tree):
   np.asarray(shard.data) accesses existing CPU memory with no copy, and
   device_put(numpy, SingleDeviceSharding(cpu)) creates a fresh null-layout IFRT buffer.
   """
+
   def normalize_leaf(x):
     if not isinstance(x, jax.Array) or not hasattr(x, "addressable_shards"):
       return x
@@ -379,10 +380,10 @@ def _run_learner_loop(
           prof.maybe_deactivate_profiler(step, state)
           last_step_completion = datetime.datetime.now()
 
-      if learner_config.save_checkpoint_on_completion:
-        checkpointing.maybe_save_checkpoint(checkpoint_manager, state, learner_config, data_iterator)
       if checkpoint_manager is not None:
         checkpoint_manager.wait_until_finished()
+      if learner_config.save_checkpoint_on_completion:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state, learner_config, data_iterator, step=step)
 
     except exceptions.StopTraining as e:
       prof.deactivate()
@@ -540,7 +541,7 @@ def _run_syncer_loop(
   # that avoids the jit-level layout checking that caused Pathways layout mismatches.
   for i, submesh in enumerate(cpu_submeshes):
     local_sharding = jax.tree_util.tree_map(
-        lambda s: jax.sharding.NamedSharding(submesh, s.spec),
+        lambda s, submesh=submesh: jax.sharding.NamedSharding(submesh, s.spec),
         params_shardings,
     )
     local_params = jax.device_put(syncer_state.params, local_sharding)
@@ -585,8 +586,7 @@ def _run_syncer_loop(
         frag_dict = {}
         trace_dict = {}
         for keystr, v in [
-            (jax.tree_util.keystr(k), v)
-            for k, v in jax.tree_util.tree_flatten_with_path(syncer_state.params)[0]
+            (jax.tree_util.keystr(k), v) for k, v in jax.tree_util.tree_flatten_with_path(syncer_state.params)[0]
         ]:
           if manipulator.keypath_to_is_scanned.get(keystr, False):
             frag_shape = (num_layer_indices,) + v.shape[1:]
@@ -660,8 +660,7 @@ def _run_syncer_loop(
     # so rebinding to each cpu_submesh is a metadata-only operation with no layout checking.
     for i, submesh in enumerate(cpu_submeshes):
       frag_local_sharding = {
-          k: jax.sharding.NamedSharding(submesh, flat_params_shardings[k].spec)
-          for k in new_outer_params_frag
+          k: jax.sharding.NamedSharding(submesh, flat_params_shardings[k].spec) for k in new_outer_params_frag
       }
       local_frag = jax.device_put(new_outer_params_frag, frag_local_sharding)
       transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=local_frag)
@@ -670,7 +669,11 @@ def _run_syncer_loop(
     syncer_ckpt_config = copy.copy(config)
     syncer_ckpt_config._flat_config["pure_nnx"] = False
     checkpointing.maybe_save_checkpoint(
-        checkpoint_manager=checkpoint_manager, state=syncer_state, config=syncer_ckpt_config, data_iterator=None, step=step
+        checkpoint_manager=checkpoint_manager,
+        state=syncer_state,
+        config=syncer_ckpt_config,
+        data_iterator=None,
+        step=step,
     )
     max_logging.log(f"Syncer: Step {step} sync finished")
 

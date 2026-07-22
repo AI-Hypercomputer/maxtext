@@ -2,17 +2,17 @@
 set -e
 
 # cluster
-CLUSTER=v5p-8-bodaborg-europe-west4-b
+CLUSTER=wl-v5p-8-2
 PROJECT=cloud-tpu-multipod-dev
-ZONE=europe-west4
+ZONE=us-east5
 
 # specify resource
 NUM_SLICES=2
-DEVICE_TYPE=v5p-8 # 4 chips per slice (8 chips total)
+DEVICE_TYPE=v5p-8 # v5p-8 cluster
 
 # command
 RUNNAME="j-ns-${DEVICE_TYPE}x${NUM_SLICES}-$(date +%d%H%M)"
-DOCKER_IMAGE_BASE="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:latest"
+DOCKER_IMAGE_BASE="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2026-07-17"
 MY_IMAGE="gcr.io/${PROJECT}/jzuo-runner:${RUNNAME}"
 
 BASE_OUTPUT_DIRECTORY="gs://chriszuo-maxtext-logs"
@@ -27,7 +27,7 @@ DILOCO_COMM_OVERLAP_ALPHA=0.0
 MODEL_NAME="qwen3-8b"
 PER_DEVICE_BATCH_SIZE=2
 MAX_TARGET_LENGTH=1024
-STEPS=100
+STEPS=20
 
 XLA_FLAGS=" \
   --xla_tpu_scoped_vmem_limit_kib=65536 \
@@ -76,7 +76,7 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && 
              per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
              max_target_length=${MAX_TARGET_LENGTH} \
              enable_diloco=true \
-             enable_streaming_diloco=false \
+             enable_streaming_diloco=true \
              enable_non_spmd_diloco=true \
              enable_single_controller=true \
              pure_nnx=true \
@@ -111,7 +111,7 @@ docker push "${MY_IMAGE}"
 
 # 2. Create the workload directly using xpk
 echo "Creating workload: ${RUNNAME}"
-xpk workload create-pathways --workload "${RUNNAME}" \
+/usr/local/google/home/mohitkhatwani/max_venv/bin/xpk workload create-pathways --workload "${RUNNAME}" \
 --docker-image "${MY_IMAGE}" \
 --command "${CMD}" \
 --num-slices=$NUM_SLICES \
