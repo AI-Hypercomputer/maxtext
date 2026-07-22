@@ -432,9 +432,17 @@ class NNXDecoder(nnx.Module):
 
     self.scanned_layers = None
     self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
+    self.is_deepseek4 = self.config.decoder_block == DecoderBlockType.DEEPSEEK4
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
+
+    if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
+      self.hc_head = mhc.DeepSeek4HyperHead(
+          config=config,
+          mesh=self.mesh,
+          rngs=self.rngs,
+      )
 
     self._init_decoder_layers(decoder_block_classes, rngs, mesh)
 
@@ -532,12 +540,38 @@ class NNXDecoder(nnx.Module):
     """Initializes decoder layers with scanning (non-pipeline)."""
     if self.is_deepseek:
       self._init_scanned_deepseek(decoder_block_classes, rngs)
+    elif self.is_deepseek4:
+      self._init_scanned_deepseek4(rngs)
     elif self.is_gemma3:
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
+
+  def _init_scanned_deepseek4(self, rngs):
+    """Initializes DeepSeek V4 scanned layers: unrolls first_num_hash_layers prefix layers and scans remaining full blocks."""
+    config = self.config
+    self.layers = nnx.List([])
+    num_hash_layers = config.first_num_hash_layers
+    for layer_idx in range(num_hash_layers):
+      self._create_and_register_layer(
+          deepseek4.DeepSeek4DecoderLayer,
+          rngs,
+          "layers",
+          layer_idx,
+          layer_idx=layer_idx,
+      )
+
+    num_remaining_layers = config.num_decoder_layers - num_hash_layers
+    num_full_blocks = num_remaining_layers // 2
+    if num_full_blocks > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          deepseek4.DeepSeek4ScannableBlock,
+          length=num_full_blocks,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+      )
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
     """Initializes scanned DeepSeek layers with optional Engram support."""
@@ -733,6 +767,7 @@ class NNXDecoder(nnx.Module):
       elif config.decoder_block in {
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
+          DecoderBlockType.DEEPSEEK4,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1201,6 +1236,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -1739,6 +1775,18 @@ class NNXDecoder(nnx.Module):
                   length=num_moe,
                   **layer_kwargs,
               )
+
+        elif self.is_deepseek4:
+          y = self._apply_deepseek4_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              slot,
+              previous_chunk,
+              decoder_input_tokens,
+          )
         elif self.is_gemma3:
           y = self._apply_gemma3_scanned_blocks(
               y,
@@ -1810,7 +1858,9 @@ class NNXDecoder(nnx.Module):
           else:
             kv_cache = None
 
-          input_tokens = decoder_input_tokens if cfg.engram_layers else None
+          input_tokens = (
+              decoder_input_tokens if (cfg.engram_layers or cfg.decoder_block == DecoderBlockType.DEEPSEEK4) else None
+          )
           if input_tokens is not None:
             layer_kwargs["decoder_input_tokens"] = input_tokens
 
@@ -1834,8 +1884,11 @@ class NNXDecoder(nnx.Module):
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     if cfg.mhc_expansion_rate > 1:
-      # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
-      hidden_state = mhc_reduce(y)
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+        hidden_state = self.hc_head(y)
+      else:
+        # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+        hidden_state = mhc_reduce(y)
     else:
       hidden_state = y
 
@@ -1860,6 +1913,55 @@ class NNXDecoder(nnx.Module):
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     return logits, hidden_state, kv_caches
+
+  def _apply_deepseek4_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      slot=None,
+      previous_chunk=None,
+      decoder_input_tokens=None,
+  ):
+    cfg = self.config
+    num_hash_layers = cfg.first_num_hash_layers
+
+    layer_call_kwargs = {
+        "previous_chunk": previous_chunk,
+        "slot": slot,
+        "decoder_input_tokens": decoder_input_tokens,
+    }
+
+    # 1. Unrolled prefix layers (0, 1, 2)
+    for layer_idx in range(num_hash_layers):
+      layer = getattr(self, f"layers_{layer_idx}")
+      y, _ = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          **layer_call_kwargs,
+      )
+
+    # 2. Scanned blocks
+    num_remaining_layers = cfg.num_decoder_layers - num_hash_layers
+    num_full_blocks = num_remaining_layers // 2
+    if num_full_blocks > 0 and hasattr(self, "scanned_blocks"):
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          length=num_full_blocks,
+          **layer_call_kwargs,
+      )
+
+    return y
 
   def _apply_gemma3_scanned_blocks(
       self,

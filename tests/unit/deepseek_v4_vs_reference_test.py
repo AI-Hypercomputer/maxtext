@@ -1512,6 +1512,18 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
     print(f"HYPER HEAD PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
     np.testing.assert_allclose(mt_out, pt_out, rtol=5e-5, atol=5e-5)
 
+  def test_nnx_decoder_hyperhead_integration(self):
+    from maxtext.layers.nnx_decoders import NNXDecoder
+
+    # Specifically instantiate full NNXDecoder to ensure it didn't bypass the HyperHead!
+    mt_decoder = NNXDecoder(
+        config=self.mx_config,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+    self.assertTrue(hasattr(mt_decoder, "hc_head"), "NNXDecoder completely missed hc_head setup! Bug in nnx_decoders.py!")
+    self.assertIsInstance(mt_decoder.hc_head, DeepSeek4HyperHead, "NNXDecoder instantiated the wrong HyperHead class!")
+
 
 if __name__ == "__main__":
   unittest.main()
