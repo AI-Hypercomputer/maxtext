@@ -616,6 +616,9 @@ input_data_sharding_logical_axes: ['activation_embed_and_logits_batch', 'activat
 # Determines which physical axis plays the role of context parallelism for input data processing and load balancing
 # only supports "context" or "expert" (when custom_mesh_and_rule=ep-as-cp)
 context_sharding: "context"
+# Customized mesh and logical rules for evaluation (e.g. "ep-as-cp")
+custom_mesh_and_rule_for_eval: ""
+logical_axis_rules_for_eval: []
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02

@@ -33,7 +33,7 @@ from flax import nnx
 
 from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.common.common_types import KV_BATCH, KV_HEAD
-from maxtext.utils.sharding import logical_to_mesh_axes
+from maxtext.utils.sharding import logical_to_mesh_axes, get_logical_axis_rules
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -612,7 +612,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
     mixed_qkvz = qkvz.reshape(new_shape_qkvz)
     if self.mesh is not None:
-      logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
+      logical_rules = get_logical_axis_rules()
       qkvz_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
       mixed_qkvz = jax.lax.with_sharding_constraint(mixed_qkvz, qkvz_sharding)
@@ -845,7 +845,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           compute_dtype=cfg.dtype,
       )
     elif self.mesh is not None:
-      logical_rules = self.config.logical_axis_rules
+      logical_rules = get_logical_axis_rules()
       recurrent_state_arg = (
           recurrent_state
           if recurrent_state is not None

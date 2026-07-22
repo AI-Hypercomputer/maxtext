@@ -20,7 +20,7 @@ import inspect  # for debugging only
 from pathlib import Path
 
 from flax import linen as nn, nnx
-from flax.core.spmd import get_logical_axis_rules
+from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
 import jax
 from jax.core import Tracer
 from jax.sharding import NamedSharding, PartitionSpec as P, reshard
@@ -40,15 +40,31 @@ def clear_input_shardings_dump():
   _ACTIVATION_SHARDINGS_DUMP.clear()
 
 
-def get_input_data_sharding(config, mesh):
+def get_input_data_sharding(config, mesh, rules=None):
   """Get the input data sharding for the model"""
+  if rules is None:
+    rules = config.logical_axis_rules
   if config.enable_diloco:
-    data_sharding = create_sharding(
-        mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=config.logical_axis_rules
-    )
+    data_sharding = create_sharding(mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=rules)
   else:
-    data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
+    data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=rules)
   return data_sharding
+
+
+def get_logical_axis_rules():
+  """Get the logical axis rules for the flax model"""
+  return flax_get_logical_axis_rules()
+
+
+def get_logical_axis_rules_from_config(config):
+  """Get the logical axis rules from the config.
+  When we use pipeline parallelism or in eval step, we may use
+  a different logical axis rule than the one in config.
+  Plan to deprecate (b/536927795) and use get_logical_axis_rules instead.
+  """
+  if config.using_pipeline_parallelism or config.eval_interval != -1:
+    return None
+  return config.logical_axis_rules
 
 
 def _get_sharding_desc(inputs, extra_stack_level):

@@ -677,6 +677,35 @@ class TrainTests(unittest.TestCase):
       )
     train_main(thd_ring_attention)
 
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_fractional_eval_batch_size(self):
+    frac_eval = [  # tests Zero-1 optimizer sharding with gradient accumulation
+        None,
+        get_test_config_path(),
+        f"base_output_directory={self._base_output_directory}",
+        "run_name=runner_test",
+        f"dataset_path={self.dataset_path}",
+        "steps=5",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "dataset_type=synthetic",
+        "remat_policy=minimal",
+        "per_device_batch_size=1",
+        "ici_expert_parallelism=-1",
+        "ici_fsdp_parallelism=1",
+        "use_ring_of_experts=True",
+        "model_name=deepseek3-test",
+        "eval_per_device_batch_size=0.25",
+        "eval_interval=3",
+        "eval_steps=1",
+        "custom_mesh_and_rule_for_eval=ep-as-cp",
+        "override_model_config=true",
+        "base_num_decoder_layers=7",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+    ]
+    train_main(frac_eval)
+
 
 if __name__ == "__main__":
   absltest.main()
