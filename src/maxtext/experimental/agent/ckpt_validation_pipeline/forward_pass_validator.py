@@ -67,16 +67,17 @@ def validate_forward_pass(
 
   # applying a monkeypatch to maxtext's model_creation_utils because it has a bug where 
   # it cannot resolve SequenceKey (list indices) to string keys in Linen checkpoints.
+  import re
   from maxtext.utils import model_creation_utils
   source = inspect.getsource(model_creation_utils._fix_restore_args_for_shape_mismatch)
 
-  target = "if isinstance(node, (list, tuple)) and 0 <= key.idx < len(node):\n          node = node[key.idx]\n          continue\n        return None"
-  replacement = "if isinstance(node, (list, tuple)) and 0 <= key.idx < len(node):\n          node = node[key.idx]\n          continue\n        if isinstance(node, dict) and str(key.idx) in node:\n          node = node[str(key.idx)]\n          continue\n        return None"
-  patched_source = source.replace(target, replacement)
-  
-  target2 = "if not isinstance(node, dict):\n        return None\n      name = _key_str(key)\n      if name in node:\n        node = node[name]\n        continue"
-  replacement2 = "if isinstance(node, (list, tuple)):\n        name = _key_str(key)\n        if name.isdigit() and 0 <= int(name) < len(node):\n          node = node[int(name)]\n          continue\n        return None\n      " + target2
-  patched_source = patched_source.replace(target2, replacement2)
+  target1 = r"(if isinstance\(node, \(list, tuple\)\) and 0 <= key\.idx < len\(node\):\n\s*node = node\[key\.idx\]\n\s*continue\n\s*)return None"
+  replacement1 = r"\1if isinstance(node, dict) and str(key.idx) in node:\n          node = node[str(key.idx)]\n          continue\n        return None"
+  patched_source = re.sub(target1, replacement1, source)
+
+  target2 = r"(if not isinstance\(node, dict\):\n\s*return None)"
+  replacement2 = r"if isinstance(node, (list, tuple)):\n        name = _key_str(key)\n        if name.isdigit() and 0 <= int(name) < len(node):\n          node = node[int(name)]\n          continue\n        return None\n      \1"
+  patched_source = re.sub(target2, replacement2, patched_source)
   
   env = dict(model_creation_utils.__dict__)
   exec(patched_source, env)
