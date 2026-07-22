@@ -71,10 +71,10 @@ _CONFIG_FILE_MAPPING: dict[str, str] = {
 
 def _module_from_path(path: str) -> str | None:
   """Convert a file path to module path for config inference."""
-  real_path = os.path.realpath(path)
-  pkg_parent = os.path.realpath(os.path.dirname(MAXTEXT_PKG_DIR))
-  if real_path.startswith(pkg_parent + os.sep):
-    relative = os.path.relpath(real_path, pkg_parent)
+  abs_path = os.path.abspath(path)
+  pkg_parent = os.path.abspath(os.path.dirname(MAXTEXT_PKG_DIR))
+  if abs_path.startswith(pkg_parent + os.sep):
+    relative = os.path.relpath(abs_path, pkg_parent)
     return relative.replace(os.sep, ".").removesuffix(".py")
   return None
 

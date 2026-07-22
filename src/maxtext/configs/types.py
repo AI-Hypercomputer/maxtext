@@ -3198,6 +3198,15 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.elastic_enabled and (
+        self.enable_multi_tier_checkpointing
+        or self.enable_emergency_checkpoint
+    ):
+      raise ValueError(
+          "Elastic training does not support emergency checkpointing. "
+          "Please disable `enable_multi_tier_checkpointing` and "
+          "`enable_emergency_checkpoint`."
+      )
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
           "Colocated python data input is only supported with Pathways (single"
