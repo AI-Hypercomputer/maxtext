@@ -71,6 +71,7 @@ from maxtext.integration.vllm.torchax_converter.base import timer
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
+from maxtext.configs import types
 from maxtext.utils import model_creation_utils
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -253,7 +254,9 @@ def validate_converter(argv) -> None:
   Multislice: first num_trainer_slices slices go to MaxText, the next
   num_samplers_slices slices go to vLLM.
   """
-  trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(argv)
+  trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
+      argv, config_class=types.RLConfig
+  )
 
   if trainer_config.model_name not in vllm_model_name_mapping:
     raise ValueError(

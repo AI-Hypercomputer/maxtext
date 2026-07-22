@@ -592,7 +592,9 @@ class Attention(nnx.Module):
     #       linear transformations, which is equivalent under Adafactor.
     # We disable depth_scaling when using qk_norm or a query_pre_attn_scalar
     # to avoid applying scaling twice.
-    if self.config.use_qk_norm or (self.query_pre_attn_scalar is not None and self.query_pre_attn_scalar != 1.0):
+    if getattr(self.config, "use_qk_norm", False) or (
+        self.query_pre_attn_scalar is not None and self.query_pre_attn_scalar != 1.0
+    ):
       depth_scaling = 1.0
     else:
       depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
@@ -1281,7 +1283,7 @@ class Attention(nnx.Module):
       out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
       out = out * jax.nn.sigmoid(gate)
     out = self.out_projection(out, out_sharding=out_sharding)
-    if self.config.distill_beta > 0.0:
+    if getattr(self.config, "distill_beta", 0.0) > 0.0:
       self.sow(nnx.Intermediate, "out_projection_activations", out)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache

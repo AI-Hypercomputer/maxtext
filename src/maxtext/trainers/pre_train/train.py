@@ -587,7 +587,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "scalar": scalar_metrics,
       "scalars": {},
   }
-  if config.record_internal_nn_metrics:
+  if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
   if isinstance(model, nn.Module):

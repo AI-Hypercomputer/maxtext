@@ -647,7 +647,7 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
-  if config.use_batch_split_schedule and config.quantization:
+  if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
     if config.quantization == "fp8_full" and not config.use_manual_quantization:
       return QwixQuantization(

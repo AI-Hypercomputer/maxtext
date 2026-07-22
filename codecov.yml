@@ -65,4 +65,3 @@ coverage:
         threshold: 10% # fail on 10+ percent degradation
         flags:
           - regular
-

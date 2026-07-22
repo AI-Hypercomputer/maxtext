@@ -2039,7 +2039,7 @@ def create_device_mesh(config, devices=None):
   if devices is None:
     devices = jax.devices()
 
-  if config.elastic_enabled:
+  if getattr(config, "elastic_enabled", False):
     devices = elastic_utils.live_devices(config)
     num_slices = len(elastic_utils.live_slice_indices(config))
   else:
@@ -2062,18 +2062,61 @@ def create_device_mesh(config, devices=None):
     devices = subslice_devices
 
   num_devices = len(devices)
-  num_slices = 1 if config.inference_benchmark_test else num_slices
+  num_slices = 1 if getattr(config, "inference_benchmark_test", False) else num_slices
   num_devices_per_slice = num_devices // num_slices
 
-  multi_slice_env = num_slices > 1
-
   # Find possible unspecified parallelisms
-  ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
+  ici_parallelism = getattr(config, "ici_parallelism", None)
+  if ici_parallelism is None:
+    ici_map = {
+        "diloco": getattr(config, "ici_diloco_parallelism", 1),
+        "data": getattr(config, "ici_data_parallelism", 1),
+        "stage": getattr(config, "ici_pipeline_parallelism", 1),
+        "fsdp": getattr(config, "ici_fsdp_parallelism", -1),
+        "fsdp_transpose": getattr(config, "ici_fsdp_transpose_parallelism", 1),
+        "sequence": getattr(config, "ici_sequence_parallelism", 1),
+        "context": getattr(config, "ici_context_parallelism", 1),
+        "context_autoregressive": getattr(config, "ici_context_autoregressive_parallelism", 1),
+        "tensor": getattr(config, "ici_tensor_parallelism", 1),
+        "tensor_sequence": getattr(config, "ici_tensor_sequence_parallelism", 1),
+        "model": getattr(config, "ici_tensor_parallelism", 1),
+        "expert": getattr(config, "ici_expert_parallelism", 1),
+        "autoregressive": getattr(config, "ici_autoregressive_parallelism", 1),
+        "attn_dp": 1,
+        "attn_dp_expert": 1,
+    }
+    ici_parallelism = [ici_map[axis] for axis in config.mesh_axes]
+  else:
+    ici_parallelism = ici_parallelism.copy()
+  ici_parallelism = max_utils.fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if multi_slice_env:
-    dcn_parallelism = max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
+  if num_slices > 1:
+    dcn_parallelism = getattr(config, "dcn_parallelism", None)
+    if dcn_parallelism is None:
+      dcn_map = {
+          "diloco": getattr(config, "dcn_diloco_parallelism", 1),
+          "data": getattr(config, "dcn_data_parallelism", 1),
+          "stage": getattr(config, "dcn_pipeline_parallelism", 1),
+          "fsdp": getattr(config, "dcn_fsdp_parallelism", 1),
+          "fsdp_transpose": getattr(config, "dcn_fsdp_transpose_parallelism", 1),
+          "sequence": getattr(config, "dcn_sequence_parallelism", 1),
+          "context": getattr(config, "dcn_context_parallelism", 1),
+          "context_autoregressive": getattr(config, "dcn_context_autoregressive_parallelism", 1),
+          "tensor": getattr(config, "dcn_tensor_parallelism", 1),
+          "tensor_sequence": getattr(config, "dcn_tensor_sequence_parallelism", 1),
+          "model": getattr(config, "dcn_tensor_parallelism", 1),
+          "expert": getattr(config, "dcn_expert_parallelism", 1),
+          "autoregressive": getattr(config, "dcn_autoregressive_parallelism", 1),
+          "attn_dp": 1,
+          "attn_dp_expert": 1,
+      }
+      dcn_parallelism = [dcn_map[axis] for axis in config.mesh_axes]
+    else:
+      dcn_parallelism = dcn_parallelism.copy()
+    dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
+
     if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
       mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
     else:
