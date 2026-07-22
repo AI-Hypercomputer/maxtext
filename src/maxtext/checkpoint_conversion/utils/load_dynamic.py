@@ -169,6 +169,7 @@ def load_sharded_hf_state(path):
   """
   t0 = time.time()
   context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
+  context.safetensors.ignore_load_sharding = True
   with context:
     metadata = ocp_v1.pytree_metadata(path)
     simple_abstract_state = metadata.metadata
@@ -186,18 +187,26 @@ def load_sharded_hf_state(path):
     max_logging.log("Reading raw Safetensors into memory (Distributed Sharded GCS Download)...")
     hf_state = ocp_v1.load_pytree(path, sharded_abstract_state)
     max_logging.log(f"load_sharded_hf_state took {time.time() - t0:.2f}s")
-    return hf_state
+    return hf_state, simple_abstract_state
 
 
-def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config):
+def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config, simple_abstract_state):
   """Transforms HF state into MaxText state by applying param mappings and mathematical hooks."""
   t0 = time.time()
 
   def tensor_getter(key):
-    return hf_state.pop(key)
+    info = simple_abstract_state.get(key)
+    arr = hf_state.pop(key, None)
+    if info is not None:
+      return arr, info.shape, info.dtype
+    return arr, None, None
 
-  flat_target = flax.traverse_util.flatten_dict(target_tree, sep=".")
+  flat_target = flax.traverse_util.flatten_dict(target_tree, sep=None)
   flat_restored = flat_target.copy()
+
+  # Create a lookup mapping from stringified/joined path to the original tuple path
+  # Make sure we stringify any integer indices to support mixed arrays in paths securely.
+  path_str_to_tuple = {".".join(map(str, path)): path for path in flat_target}
 
   mapped_count = 0
   keys_missed = []
@@ -206,19 +215,22 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
   for mt_key, hf_source in param_map_mt_to_hf.items():
     mt_name = mt_key.replace("params-", "").replace("-", ".")
 
-    # Determine the correct key in flat_target
+    # Determine the correct key in path_str_to_tuple
     check_name = mt_name
-    if check_name not in flat_target:
-      if f"params.{mt_name}" in flat_target:
+    if check_name not in path_str_to_tuple:
+      if f"params.{mt_name}" in path_str_to_tuple:
         check_name = f"params.{mt_name}"
-      elif mt_key.replace("-", ".") in flat_target:
+      elif f"model.{mt_name}" in path_str_to_tuple:
+        check_name = f"model.{mt_name}"
+      elif mt_key.replace("-", ".") in path_str_to_tuple:
         check_name = mt_key.replace("-", ".")
 
-    if check_name not in flat_target:
+    if check_name not in path_str_to_tuple:
       keys_missed.append(mt_name)
       continue
 
-    target_leaf = flat_target[check_name]
+    target_path = path_str_to_tuple[check_name]
+    target_leaf = flat_target[target_path]
     hook_fn = hook_fn_map_mt.get(mt_key)
 
     load_fn = get_hf_loading_function(
@@ -229,19 +241,15 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
         maxtext_config,
     )
 
-    # Execute transformation and assign to flat_restored
-    t_layer = time.time()
-    flat_restored[check_name] = load_fn()
-
-    max_logging.log(f"Transformed {check_name} from {hf_source} in {time.time() - t_layer:.4f}s")
+    flat_restored[target_path] = load_fn()
     mapped_count += 1
 
   if mapped_count == 0:
     max_logging.log(f"All transformations missed! Sample missed mt_names: {keys_missed[:5]}")
-    max_logging.log(f"Sample flat_target keys: {list(flat_target.keys())[:5]}")
+    max_logging.log(f"Sample flat_target keys: {list(path_str_to_tuple.keys())[:5]}")
 
   max_logging.log(f"Successfully mapped {mapped_count} parameters.")
-  restored_params = flax.traverse_util.unflatten_dict(flat_restored, sep=".")
+  restored_params = flax.traverse_util.unflatten_dict(flat_restored, sep=None)
 
   if "params" in restored_params:
     restored_params = restored_params["params"]
@@ -349,23 +357,57 @@ def load_safetensors_dynamic_state(path, abstract_unboxed_pre_state, maxtext_con
   param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config)
   max_logging.log(f"[1/3] Mappings derived in {time.time() - t_total:.2f}s")
 
-  target_tree = (
-      abstract_unboxed_pre_state.to_pure_dict()
-      if isinstance(abstract_unboxed_pre_state, nnx.State)
-      else abstract_unboxed_pre_state.params
-  )
+  if isinstance(abstract_unboxed_pre_state, nnx.State):
+    # In NNX, abstract_unboxed_pre_state contains both model and optimizer states.
+    # We only want to target and transform the model variables.
+    model_state = getattr(abstract_unboxed_pre_state, "model", None)
+    if model_state is not None:
+      target_tree = (
+          model_state.to_pure_dict()
+          if hasattr(model_state, "to_pure_dict")
+          else model_state
+      )
+    else:
+      target_tree = abstract_unboxed_pre_state.to_pure_dict()
+  else:
+    # In Linen, params is only the model parameters.
+    target_tree = abstract_unboxed_pre_state.params
 
   t1 = time.time()
-  hf_state = load_sharded_hf_state(path)
+  hf_state_raw = load_sharded_hf_state(path)
+  if isinstance(hf_state_raw, tuple):
+    hf_state, simple_abstract_state = hf_state_raw
+  else:
+    hf_state, simple_abstract_state = hf_state_raw, {}
   max_logging.log(f"[2/3] Distributed Sharded GCS load completed in {time.time() - t1:.2f}s")
 
   t2 = time.time()
   # Transform Hugging Face weight tensors on-the-fly into MaxText format
   # in-memory. This is done in-memory on each host, sharded across the mesh.
   restored_params = transform_hf_state_to_mt_state(
-      hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config
+      hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config, simple_abstract_state
   )
   max_logging.log(f"[3/3] CPU Transformations completed in {time.time() - t2:.2f}s")
   max_logging.log(f"Total safetensors_dynamic duration: {time.time() - t_total:.2f}s")
+
+  if restored_params and "params" in restored_params:
+    restored_params = restored_params["params"]
+
+  def _filter_shape_dtype_structs(d):
+    if not isinstance(d, dict):
+      return d
+    res = {}
+    for k, v in d.items():
+      if isinstance(v, dict):
+        sub = _filter_shape_dtype_structs(v)
+        if sub:
+          res[k] = sub
+      elif not hasattr(v, "sharding") or not isinstance(v, jax.ShapeDtypeStruct):
+        # Only keep things that are not ShapeDtypeStruct, 
+        # meaning real JAX arrays that we restored
+        res[k] = v
+    return res
+
+  restored_params = _filter_shape_dtype_structs(restored_params)
 
   return None, restored_params
