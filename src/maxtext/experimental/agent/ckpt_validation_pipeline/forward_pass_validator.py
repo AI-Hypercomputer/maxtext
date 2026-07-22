@@ -60,24 +60,68 @@ def validate_forward_pass(
   maxtext_module_dir = os.path.dirname(maxtext.__file__)
   repo_root = os.path.abspath(os.path.join(maxtext_module_dir, "../../"))
 
-  # run subprocess
-  result = subprocess.run(
-      command, text=True, capture_output=True, check=False, cwd=repo_root
-  )
+  import sys
+  import io
+  import runpy
+  import inspect
+
+  # applying a monkeypatch to maxtext's model_creation_utils because it has a bug where 
+  # it cannot resolve SequenceKey (list indices) to string keys in Linen checkpoints.
+  from maxtext.utils import model_creation_utils
+  source = inspect.getsource(model_creation_utils._fix_restore_args_for_shape_mismatch)
+
+  target = "if isinstance(node, (list, tuple)) and 0 <= key.idx < len(node):\n          node = node[key.idx]\n          continue\n        return None"
+  replacement = "if isinstance(node, (list, tuple)) and 0 <= key.idx < len(node):\n          node = node[key.idx]\n          continue\n        if isinstance(node, dict) and str(key.idx) in node:\n          node = node[str(key.idx)]\n          continue\n        return None"
+  patched_source = source.replace(target, replacement)
+  
+  target2 = "if not isinstance(node, dict):\n        return None\n      name = _key_str(key)\n      if name in node:\n        node = node[name]\n        continue"
+  replacement2 = "if isinstance(node, (list, tuple)):\n        name = _key_str(key)\n        if name.isdigit() and 0 <= int(name) < len(node):\n          node = node[int(name)]\n          continue\n        return None\n      " + target2
+  patched_source = patched_source.replace(target2, replacement2)
+  
+  env = dict(model_creation_utils.__dict__)
+  exec(patched_source, env)
+  model_creation_utils._fix_restore_args_for_shape_mismatch = env["_fix_restore_args_for_shape_mismatch"]
+
+  # run script in same process to apply monkeypatch
+  old_stdout = sys.stdout
+  old_stderr = sys.stderr
+  sys.stdout = stdout_cap = io.StringIO()
+  sys.stderr = stderr_cap = io.StringIO()
+  
+  old_cwd = os.getcwd()
+  os.chdir(repo_root)
+  
+  returncode = 0
+  try:
+    sys.argv = command
+    runpy.run_path("tests/utils/forward_pass_logit_checker.py", run_name="__main__")
+  except SystemExit as e:
+    returncode = e.code if e.code is not None else 0
+  except Exception as e:
+    import traceback
+    traceback.print_exc(file=sys.stderr)
+    returncode = 1
+  finally:
+    sys.stdout = old_stdout
+    sys.stderr = old_stderr
+    os.chdir(old_cwd)
+    
+  stdout_str = stdout_cap.getvalue()
+  stderr_str = stderr_cap.getvalue()
 
   # generate report
   report = {
       "run_name": run_name,
       "model": internal_model_name,
-      "success": result.returncode == 0,
-      "stderr": (result.stderr if result.returncode != 0 else "Success"),
-      "stdout": (result.stdout if result.returncode != 0 else "Success"),
+      "success": returncode == 0,
+      "stderr": (stderr_str if returncode != 0 else "Success"),
+      "stdout": (stdout_str if returncode != 0 else "Success"),
       "checkpoint_used": checkpoint_path,
       "stage": "forward_pass_validation",
   }
 
   # build and save report
-  report_dir = os.path.join(os.getcwd(), "reports")
+  report_dir = os.path.join(old_cwd, "reports")
   os.makedirs(report_dir, exist_ok=True)
   output_path = os.path.join(report_dir, f"report_{run_name}_forward_pass.json")
 
@@ -92,9 +136,9 @@ def validate_forward_pass(
       gcs_dir += "/"
     gcs_utils.upload_blob(f"{gcs_dir}report_{run_name}_forward_pass.json", output_path)
 
-  if result.returncode != 0:
-    logger.info(f"Command STDOUT:\n{result.stdout}")
-    logger.error(f"Command STDERR:\n{result.stderr}")
+  if returncode != 0:
+    logger.info(f"Command STDOUT:\n{stdout_str}")
+    logger.error(f"Command STDERR:\n{stderr_str}")
     raise ValueError(
         "ERROR: Forward pass logit verification failed! See logs for details."
     )
