@@ -669,6 +669,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask: Any = None,
       compressed_mask: Optional[Array] = None,
       segment_positions: Array | None = None,
+      pad_kv_total: int = 0,
   ) -> Array | None:
     """Generates a combined attention mask for Transformer models.
 
@@ -844,6 +845,14 @@ class AttentionOp(nnx.Module):
         uncompressed_mask = uncompressed_mask & output_mask[..., :s_len]
 
       uncompressed_mask = jnp.where(uncompressed_mask, 0.0, DEFAULT_MASK_VALUE)
+
+      if pad_kv_total > 0:
+        pad_width = [(0, 0)] * (compressed_mask.ndim - 1) + [(pad_kv_total, 0)]
+        compressed_mask = jnp.pad(
+            compressed_mask,
+            pad_width,
+            constant_values=DEFAULT_MASK_VALUE,
+        )
 
       return jnp.concatenate([uncompressed_mask, compressed_mask], axis=-1)
 
@@ -1038,6 +1047,7 @@ class AttentionOp(nnx.Module):
       indexer_mask: Array | None = None,
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
+      decoder_segment_ids_kv: Optional[Array] = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1120,6 +1130,7 @@ class AttentionOp(nnx.Module):
             bidirectional_mask=bidirectional_mask,
             use_ragged_attention=use_ragged_attention,
             record_max_logits=record_max_logits,
+            decoder_segment_ids_kv=decoder_segment_ids_kv,
         )
         if max_logits is not None:
           self.max_logits = nnx.Intermediate(max_logits)
@@ -1305,6 +1316,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask: Any = None,
       use_ragged_attention: bool = False,
       record_max_logits: bool = False,
+      decoder_segment_ids_kv: Array | None = None,
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
@@ -1428,7 +1440,17 @@ class AttentionOp(nnx.Module):
       )
     else:
       sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
-      mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
+      block_q = sa_config.block_q
+      block_kv = sa_config.block_kv
+      if self.attention_type == AttentionType.COMPRESSED and (
+          (query.shape[2] % block_q != 0) or (key.shape[2] % block_kv != 0)
+      ):
+        padded_q_len = ((query.shape[2] + block_q - 1) // block_q) * block_q
+        padded_kv_len = ((key.shape[2] + block_kv - 1) // block_kv) * block_kv
+        mask_shape = (padded_q_len, padded_kv_len)
+      else:
+        mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
+
       mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
@@ -1446,14 +1468,14 @@ class AttentionOp(nnx.Module):
         local_window_size = (self.sliding_window_size - 1, self.sliding_window_size)
         if use_load_balanced_cp:
           mask &= LoadBalancedLocalMask(
-              shape=(query.shape[2], key.shape[2]),
+              shape=mask_shape,
               window_size=local_window_size,
               offset=0,
               cp_size=cp_size,
           )
         else:
           mask &= mask_module.LocalMask(
-              shape=(query.shape[2], key.shape[2]),
+              shape=mask_shape,
               window_size=local_window_size,
               offset=0,
           )
@@ -1463,16 +1485,15 @@ class AttentionOp(nnx.Module):
 
         if use_load_balanced_cp:
           mask &= LoadBalancedChunkedCausalMask(
-              shape=(query.shape[2], key.shape[2]),
+              shape=mask_shape,
               chunk_size=self.chunk_attn_window_size,
               cp_size=cp_size,
           )
         else:
           mask &= ChunkedCausalMask(
-              shape=(query.shape[2], key.shape[2]),
+              shape=mask_shape,
               chunk_size=self.chunk_attn_window_size,
           )
-
     max_logit_value = None
     if not use_tokamax_ring and self.config.use_tokamax_splash:
       # Create mask
@@ -1495,9 +1516,12 @@ class AttentionOp(nnx.Module):
         )
         return splash_kernel
 
-      splash_kernel = wrap_tokamax_splash_kernel(single_head_mask)
       segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
-      splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
+      if indexer_mask is None:
+        splash_kernel = wrap_tokamax_splash_kernel(single_head_mask)
+        splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
+      else:
+        splash_kernel = None
     elif not use_tokamax_ring and self.config.use_jax_splash:
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
@@ -1624,7 +1648,16 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_tuple = None
 
       if self.config.use_tokamax_splash:
-        if self.config.use_indexer and indexer_mask is not None:
+        if indexer_mask is not None:
+          pad_q = mask_shape[0] - indexer_mask.shape[-2]
+          pad_kv = mask_shape[1] - indexer_mask.shape[-1]
+          if pad_q > 0 or pad_kv > 0:
+            pad_width = [(0, 0)] * (indexer_mask.ndim - 2) + [(0, pad_q), (0, pad_kv)]
+            indexer_mask = jnp.pad(
+                indexer_mask,
+                pad_width,
+                constant_values=0.0,
+            )
           # Construct the splash kernel call with dynamic mask
           def dynamic_mask_splash_kernel(q, k, v, segment, sinks, indexer_mask):
             splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mha(
@@ -1634,10 +1667,10 @@ class AttentionOp(nnx.Module):
             kernel = partial(splash_kernel, max_logit_value=max_logit_value)
 
             if record_max_logits:
-              out, stats = kernel(q, k, v, segment, sinks=sinks, save_residuals=True)
+              out, stats = kernel(q, k, v, None, sinks=sinks, save_residuals=True)
               return out, stats["max_logits"]
             else:
-              return kernel(q, k, v, segment, sinks=sinks), None
+              return kernel(q, k, v, None, sinks=sinks), None
 
           # Iterate over batch dimension for (query, key, value, segment, sinks, mask)
           attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
@@ -1668,6 +1701,7 @@ class AttentionOp(nnx.Module):
                 query, key, value, decoder_segment_ids_tuple, sinks
             )
             return attention_output, None
+
       elif self.config.use_jax_splash:
         materialized_mask = jnp.asarray(mask[:, :])
         attention_output = jax_flash_attention.flash_attention_block_masked(
@@ -1698,7 +1732,8 @@ class AttentionOp(nnx.Module):
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
     value = self._maybe_shard_with_pspec(value, axis_names_kv)
     decoder_segment_ids_q = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
-    decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
+    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+    decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids_kv_in, segment_axis_names_kv)
     sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
     indexer_mask = self._maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
 
@@ -2270,6 +2305,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       slot: Optional[int] = None,
       record_max_logits: bool = False,
+      decoder_segment_ids_kv: Optional[Array] = None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -2304,6 +2340,7 @@ class AttentionOp(nnx.Module):
         record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
+        decoder_segment_ids_kv=decoder_segment_ids_kv,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
