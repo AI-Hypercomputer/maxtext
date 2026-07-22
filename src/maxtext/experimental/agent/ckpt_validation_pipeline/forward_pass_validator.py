@@ -54,13 +54,6 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
       "matmul_precision=high",
       "use_qk_norm=False",
       "override_model_config=True",
-      "base_emb_dim=3584",
-      "base_num_query_heads=28",
-      "base_num_kv_heads=4",
-      "base_mlp_dim=18944",
-      "base_num_decoder_layers=28",
-      "vocab_size=152064",
-      "rope_factor=1.0",
   ]
 
   # append additional maxtext configs from unknown args
