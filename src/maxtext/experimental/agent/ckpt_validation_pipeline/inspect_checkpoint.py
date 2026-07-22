@@ -248,7 +248,7 @@ def inspect_maxtext(args, remaining_args):
     from flax import nnx
 
     _, abstract_model = create_nnx_abstract_model(config, mesh=mesh)
-    _, abstract_param = nnx.split(abstract_model, nnx.Param)
+    _, abstract_param, _ = nnx.split(abstract_model, nnx.Param, ...)
   else:
     quant = quantizations.configure_quantization(config)
     model = Transformer(config, mesh=mesh, quant=quant)
