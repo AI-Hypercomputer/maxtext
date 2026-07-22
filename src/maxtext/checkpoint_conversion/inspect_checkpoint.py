@@ -238,15 +238,21 @@ def inspect_maxtext(args, remaining_args):
   print(argv)
   config = pyconfig.initialize(argv)
 
-  print(f"\n--- Inspecting MaxText Architecture: {config.model_name} (Scan: {config.scan_layers}) ---")
+  print(
+      f"\n--- Inspecting MaxText Architecture: {config.model_name} (Scan: {config.scan_layers}) ---"
+  )
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
-  quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh=mesh, quant=quant)
+  if getattr(config, "enable_nnx", False):
+    from maxtext.utils.model_creation_utils import create_nnx_abstract_model
+    from flax import nnx
 
-  # Extract abstract parameters. This returns a PyTree of `ShapeDtypeStruct`
-  # objects, without materializing weights.
-  abstract_param = maxtext_utils.get_abstract_param(model, config)
+    _, abstract_model = create_nnx_abstract_model(config, mesh=mesh)
+    _, abstract_param, _ = nnx.split(abstract_model, nnx.Param, ...)
+  else:
+    quant = quantizations.configure_quantization(config)
+    model = Transformer(config, mesh=mesh, quant=quant)
+    abstract_param = maxtext_utils.get_abstract_param(model, config)
 
   # Calculate and display the total parameter count based purely on abstract shapes.
   num_params = max_utils.calculate_num_params_from_pytree(abstract_param)
@@ -262,7 +268,11 @@ def inspect_maxtext(args, remaining_args):
     key_parts = param_key_parts_from_path(path_tuple)
 
     # Construct a MaxText-style parameter key (e.g., "params.params.layer.weight").
-    param_key = "params." + ".".join(key_parts)
+    key_str = ".".join(key_parts)
+    if getattr(config, "enable_nnx", False) and not key_str.startswith("params"):
+      param_key = "params.params." + key_str
+    else:
+      param_key = "params." + key_str
 
     shape = abstract_leaf_value.shape
     param_dict[param_key] = f"shape: {shape}"
@@ -334,19 +344,35 @@ def main():
   # Shared parser for arguments common across all modes.
   shared_parser = argparse.ArgumentParser(add_help=False)
   shared_parser.add_argument(
-      "--check_dtype", type=str2bool, required=False, default=False, help="Whether to append dtype info to the output"
+      "--check_dtype",
+      type=str2bool,
+      required=False,
+      default=False,
+      help="Whether to append dtype info to the output",
   )
   shared_parser.add_argument(
-      "--output_file", type=str, required=False, default="", help="Path to save the output structure"
+      "--output_file",
+      type=str,
+      required=False,
+      default="",
+      help="Path to save the output structure",
   )
 
   # Main parser and sub-parsers for distinct inspection modes.
-  parser = argparse.ArgumentParser(description="Consolidated Model Checkpoint Inspector")
-  subparsers = parser.add_subparsers(dest="mode", required=True, help="Inspection mode: hf, maxtext, orbax")
+  parser = argparse.ArgumentParser(
+      description="Consolidated Model Checkpoint Inspector"
+  )
+  subparsers = parser.add_subparsers(
+      dest="mode", required=True, help="Inspection mode: hf, maxtext, orbax"
+  )
 
   # Mode 1: HuggingFace
-  parser_hf = subparsers.add_parser("hf", parents=[shared_parser], help="Inspect .safetensors or .pth files")
-  parser_hf.add_argument("--path", type=str, required=True, help="Directory containing checkpoint files")
+  parser_hf = subparsers.add_parser(
+      "hf", parents=[shared_parser], help="Inspect .safetensors or .pth files"
+  )
+  parser_hf.add_argument(
+      "--path", type=str, required=True, help="Directory containing checkpoint files"
+  )
   parser_hf.add_argument(
       "--format",
       type=str,
@@ -357,11 +383,22 @@ def main():
   )
 
   # Mode 2: MaxText Architecture
-  subparsers.add_parser("maxtext", parents=[shared_parser], help="Inspect MaxText theoretical architecture")
+  subparsers.add_parser(
+      "maxtext",
+      parents=[shared_parser],
+      help="Inspect MaxText theoretical architecture",
+  )
 
   # Mode 3: Orbax
-  parser_orbax = subparsers.add_parser("orbax", parents=[shared_parser], help="Inspect saved Orbax checkpoint metadata")
-  parser_orbax.add_argument("--path", type=str, required=True, help="Path to checkpoint items (local or GCS)")
+  parser_orbax = subparsers.add_parser(
+      "orbax", parents=[shared_parser], help="Inspect saved Orbax checkpoint metadata"
+  )
+  parser_orbax.add_argument(
+      "--path",
+      type=str,
+      required=True,
+      help="Path to checkpoint items (local or GCS)",
+  )
 
   args, remaining_args = parser.parse_known_args()
 
