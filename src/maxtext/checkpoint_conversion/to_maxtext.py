@@ -119,20 +119,25 @@ class LazyHFLoader:
     self.current_shard_content = {}
     # Cache for resolved local shard paths
     self._local_shard_paths = {}
+    # Cache for open safetensors file readers
+    self._open_files = {}
     # Use a lock to serialize heavy RAM operations, but NOT downloads
     self._ram_lock = threading.Lock()
     self._initialize_index()
 
   def __getstate__(self):
-    """Allows pickling/copying by excluding the non-pickleable lock."""
+    """Allows pickling/copying by excluding the non-pickleable lock and files."""
     state = self.__dict__.copy()
     del state["_ram_lock"]
+    if "_open_files" in state:
+      del state["_open_files"]
     return state
 
   def __setstate__(self, state):
-    """Restores state after pickling/copying and recreates a new lock."""
+    """Restores state after pickling/copying and recreates a new lock and file cache."""
     self.__dict__.update(state)
     self._ram_lock = threading.Lock()
+    self._open_files = {}
 
   def _initialize_index(self):
     """Fetches and parses the Hugging Face model index file to build a shard map."""
@@ -205,8 +210,10 @@ class LazyHFLoader:
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
     with self._ram_lock:
-      with safe_open(local_path, framework="np", device="cpu") as f:
-        return f.get_tensor(key)
+      if shard_name not in self._open_files:
+        self._open_files[shard_name] = safe_open(local_path, framework="np", device="cpu")
+      return self._open_files[shard_name].get_tensor(key)
+
 
 
 class LazyTensor:
