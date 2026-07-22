@@ -331,9 +331,17 @@ def _prepare_batch_for_broadcast(batched_items):
   request_info_map = []
   for req_id, req in batched_items:
     is_chat = isinstance(req, ChatCompletionRequest)
-    prompts_for_req = server_utils.get_prompts_for_request(req, LLM)
-    all_prompts.extend(prompts_for_req)
-    request_info_map.append((req_id, req, is_chat, len(prompts_for_req)))
+    try:
+      prompts_for_req = server_utils.get_prompts_for_request(req, LLM)
+      all_prompts.extend(prompts_for_req)
+      request_info_map.append((req_id, req, is_chat, len(prompts_for_req)))
+    except ValueError as e:
+      logger.error("Failed to parse request %s: %s", req_id, e)
+      with response_lock:
+        response_dict[req_id] = {"error": f"Invalid request format or missing chat template: {e}"}
+        
+  if not all_prompts:
+    return 0, b"", []  # Signal other ranks to skip if all requests failed
 
   broadcast_payload = {"prompts": all_prompts, "params": params}
   payload_bytes = json.dumps(broadcast_payload).encode("utf-8")

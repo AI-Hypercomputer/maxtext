@@ -700,14 +700,16 @@ def parse_message_from_completion_text(text: str, thinking_mode: str) -> Dict[st
     if is_thinking:
         index, content_delta, stop_token = _read_until_stop(index, text, [thinking_end_token, tool_calls_start_token])
         reasoning_content = content_delta
-        assert stop_token == thinking_end_token, "Invalid thinking format: missing </think>"
+        if stop_token is not None and stop_token != thinking_end_token and stop_token != tool_calls_start_token:
+            pass # Incomplete text is fine, just stop parsing further
+        if stop_token is None:
+            # Reached end of text without closing tag (e.g. max_tokens)
+            pass
 
     index, content_delta, stop_token = _read_until_stop(index, text, [eos_token, tool_calls_start_token])
     summary_content = content_delta
     if stop_token == tool_calls_start_token:
         is_tool_calling = True
-    else:
-        assert stop_token == eos_token, "Invalid format: missing EOS token"
 
     if is_tool_calling:
         index, stop_token, tool_calls = parse_tool_calls(index, text)

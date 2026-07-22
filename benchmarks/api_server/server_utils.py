@@ -63,7 +63,8 @@ def is_dsv4_encoding_enabled(model_name: str) -> bool:
   """
   if DISABLE_DSV4_ENCODING:
     return False
-  return "deepseek4" in model_name.lower()
+  model_name_lower = model_name.lower()
+  return "deepseek4" in model_name_lower or "deepseekv4" in model_name_lower or "deepseek-v4" in model_name_lower
 
 def log_debug_event(request_id: str, event_type: str, content: dict):
   """

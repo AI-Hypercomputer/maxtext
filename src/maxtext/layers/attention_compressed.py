@@ -327,9 +327,16 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
         pad_len = self.compress_rate - remainder
         padded_kv = jnp.expand_dims(jnp.pad(leftover_kv, ((0, 0), (0, pad_len), (0, 0))), 2)
         padded_gate = jnp.expand_dims(jnp.pad(leftover_gate, ((0, 0), (0, pad_len), (0, 0))), 2)
+        
+        actual_batch = cache.leftover_buffer_kv.get_value().shape[0]
+        if padded_kv.shape[0] != actual_batch:
+          repeats = actual_batch // padded_kv.shape[0]
+          padded_kv = jnp.repeat(padded_kv, repeats, axis=0)
+          padded_gate = jnp.repeat(padded_gate, repeats, axis=0)
+          
         cache.leftover_buffer_kv.set_value(padded_kv)
         cache.leftover_buffer_gate.set_value(padded_gate)
-        cache.accumulator_index.set_value(jnp.full((batch_size, 1), remainder, dtype=jnp.int32))
+        cache.accumulator_index.set_value(jnp.full((actual_batch, 1), remainder, dtype=jnp.int32))
 
       if compressed_len > 0:
         cache_key_var = cache.cached_prefill_key
@@ -357,7 +364,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
         )
         # JETSTREAM FIX: Ensure entry_count update matches the physical cache batch size
         actual_batch = cache.entry_count.get_value().shape[0]
-        cache.entry_count.set_value(jnp.full((batch_size, 1), compressed_len, dtype=jnp.int32))
+        cache.entry_count.set_value(jnp.full((actual_batch, 1), compressed_len, dtype=jnp.int32))
 
     if seq_len == 1 or compressed_len == 0:
       compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
@@ -590,9 +597,16 @@ class DeepseekV4Indexer(nnx.Module):
           pad_len = self.compress_rate - remainder
           padded_kv = jnp.expand_dims(jnp.pad(leftover_kv, ((0, 0), (0, pad_len), (0, 0))), 2)
           padded_gate = jnp.expand_dims(jnp.pad(leftover_gate, ((0, 0), (0, pad_len), (0, 0))), 2)
+          
+          actual_batch = cache.leftover_buffer_kv.get_value().shape[0]
+          if padded_kv.shape[0] != actual_batch:
+            repeats = actual_batch // padded_kv.shape[0]
+            padded_kv = jnp.repeat(padded_kv, repeats, axis=0)
+            padded_gate = jnp.repeat(padded_gate, repeats, axis=0)
+            
           cache.leftover_buffer_kv.set_value(padded_kv)
           cache.leftover_buffer_gate.set_value(padded_gate)
-          cache.accumulator_index.set_value(jnp.full((batch_size, 1), remainder, dtype=jnp.int32))
+          cache.accumulator_index.set_value(jnp.full((actual_batch, 1), remainder, dtype=jnp.int32))
         
         if compressed_len > 0:
           cache_key_var = cache.cached_prefill_key
@@ -627,12 +641,20 @@ class DeepseekV4Indexer(nnx.Module):
           )
           # JETSTREAM FIX: Ensure entry_count update matches the physical cache batch size
           actual_batch = cache.entry_count.get_value().shape[0]
-          cache.entry_count.set_value(jnp.full((batch_size, 1), compressed_len, dtype=jnp.int32))
+          cache.entry_count.set_value(jnp.full((actual_batch, 1), compressed_len, dtype=jnp.int32))
           
           # Save the new trailing Ca slices to the overlap registers!
           # Convert from [batch, 1, compress_rate, head_dim] -> [batch, compress_rate, 1, head_dim]
-          cache.overlap_kv.set_value(jnp.transpose(next_prior_kv, (0, 2, 1, 3)))
-          cache.overlap_gate.set_value(jnp.transpose(next_prior_gate, (0, 2, 1, 3)))
+          overlap_kv_to_write = jnp.transpose(next_prior_kv, (0, 2, 1, 3))
+          overlap_gate_to_write = jnp.transpose(next_prior_gate, (0, 2, 1, 3))
+          
+          if overlap_kv_to_write.shape[0] != cache.overlap_kv.get_value().shape[0]:
+            repeats = cache.overlap_kv.get_value().shape[0] // overlap_kv_to_write.shape[0]
+            overlap_kv_to_write = jnp.repeat(overlap_kv_to_write, repeats, axis=0)
+            overlap_gate_to_write = jnp.repeat(overlap_gate_to_write, repeats, axis=0)
+            
+          cache.overlap_kv.set_value(overlap_kv_to_write)
+          cache.overlap_gate.set_value(overlap_gate_to_write)
 
     if compressed_len == 0:
       return jnp.zeros((batch_size, seq_len, min(self.index_topk, compressed_len)), dtype=jnp.int32)
@@ -826,9 +848,16 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
           pad_len = self.compress_rate - remainder
           padded_kv = jnp.expand_dims(jnp.pad(leftover_kv, ((0, 0), (0, pad_len), (0, 0))), 2)
           padded_gate = jnp.expand_dims(jnp.pad(leftover_gate, ((0, 0), (0, pad_len), (0, 0))), 2)
+          
+          actual_batch = cache.leftover_buffer_kv.get_value().shape[0]
+          if padded_kv.shape[0] != actual_batch:
+            repeats = actual_batch // padded_kv.shape[0]
+            padded_kv = jnp.repeat(padded_kv, repeats, axis=0)
+            padded_gate = jnp.repeat(padded_gate, repeats, axis=0)
+            
           cache.leftover_buffer_kv.set_value(padded_kv)
           cache.leftover_buffer_gate.set_value(padded_gate)
-          cache.accumulator_index.set_value(jnp.full((batch_size, 1), remainder, dtype=jnp.int32))
+          cache.accumulator_index.set_value(jnp.full((actual_batch, 1), remainder, dtype=jnp.int32))
         
         if compressed_len > 0:
           cache_key_var = cache.cached_prefill_key
@@ -856,10 +885,18 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
           )
           # JETSTREAM FIX: Ensure entry_count update matches the physical cache batch size
           actual_batch = cache.entry_count.get_value().shape[0]
-          cache.entry_count.set_value(jnp.full((batch_size, 1), compressed_len, dtype=jnp.int32))
+          cache.entry_count.set_value(jnp.full((actual_batch, 1), compressed_len, dtype=jnp.int32))
 
-          cache.overlap_kv.set_value(jnp.transpose(next_prior_kv, (0, 2, 1, 3)))
-          cache.overlap_gate.set_value(jnp.transpose(next_prior_gate, (0, 2, 1, 3)))
+          overlap_kv_to_write = jnp.transpose(next_prior_kv, (0, 2, 1, 3))
+          overlap_gate_to_write = jnp.transpose(next_prior_gate, (0, 2, 1, 3))
+          
+          if overlap_kv_to_write.shape[0] != cache.overlap_kv.get_value().shape[0]:
+            repeats = cache.overlap_kv.get_value().shape[0] // overlap_kv_to_write.shape[0]
+            overlap_kv_to_write = jnp.repeat(overlap_kv_to_write, repeats, axis=0)
+            overlap_gate_to_write = jnp.repeat(overlap_gate_to_write, repeats, axis=0)
+            
+          cache.overlap_kv.set_value(overlap_kv_to_write)
+          cache.overlap_gate.set_value(overlap_gate_to_write)
 
     if compressed_len == 0:
       return compressed_kv, jnp.zeros((batch_size, 1, seq_len, 0), dtype=self.dtype)
