@@ -239,7 +239,7 @@ class LoadDynamicTest(parameterized.TestCase):
     dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, abstract_state, config)
 
     self.assertIsNone(dummy_ret_val)
-    self.assertEqual(loaded_vars, {"params": {}})
+    self.assertEqual(loaded_vars, {})
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
 
@@ -305,7 +305,7 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     self.assertIsNotNone(loaded_vars)
 
     # Assert values match
-    loaded_weight = loaded_vars["params"]["token_embedder"]["embedding"]
+    loaded_weight = loaded_vars["token_embedder"]["embedding"]
     np.testing.assert_allclose(loaded_weight, dummy_weight)
 
 
