@@ -228,15 +228,8 @@ class LoadDynamicTest(parameterized.TestCase):
 
     config = MockConfig()
 
-    class DummyAbstractState:
-
-      def __init__(self):
-        self.params = {}
-
-    abstract_state = DummyAbstractState()
-
     path = "repo/meta-llama"
-    dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, abstract_state, config)
+    dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
 
     self.assertIsNone(dummy_ret_val)
     self.assertEqual(loaded_vars, {"params": {}})
