@@ -471,7 +471,7 @@ def create_rl_components(
           rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
       },
       rollout_engine=rl_rollout_engine,
-      offload_to_cpu=False,
+      offload_to_cpu=trainer_config.rl_offload_to_cpu,  # [NAVI patch D] whole-model host offload (default False)
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
           eval_every_n_steps=trainer_config.eval_interval,
@@ -479,6 +479,8 @@ def create_rl_components(
           mini_batch_size=trainer_config.batch_size,
           train_micro_batch_size=train_micro_batch_size,
           rollout_micro_batch_size=rollout_micro_batch_size,
+          # [NAVI patch C] chunked logps (default 0 = off)
+          compute_logps_chunk_size=trainer_config.rl_compute_logps_chunk_size,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
           checkpoint_root_directory=checkpoint_dir,
