@@ -68,7 +68,7 @@ from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNo
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
-from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding
+from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -558,6 +558,20 @@ class Attention(nnx.Module):
         debug_sharding=config.debug_sharding,
     )
 
+  def _logical_to_mesh_axes(self, logical_name):
+    # Pipeline parallelism uses context managers for logical rules instead of the config,
+    # so pass None to ensure `logical_to_mesh_axes` defers to using the current Flax context manager
+    logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
+    return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
+
+  def _validate_kv_heads(self) -> None:
+    """Validates the number of key/value heads."""
+    if self.num_kv_heads == -1:
+      raise ValueError("num_kv_heads is not defined.")
+
+    if self.num_query_heads % self.num_kv_heads != 0:
+      raise ValueError("Invalid num_kv_heads for GQA.")
+
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
     """Initializes the query, key, value, and output projections."""
     if self.config.fused_qkv:
@@ -625,11 +639,7 @@ class Attention(nnx.Module):
     Returns:
       A DenseGeneral module that performs the key or value projection.
     """
-    if self.num_kv_heads == -1:
-      raise ValueError("num_kv_heads is not defined.")
-
-    if self.num_query_heads % self.num_kv_heads != 0:
-      raise ValueError("Invalid num_kv_heads for GQA.")
+    self._validate_kv_heads()
 
     kernel_axes = (
         (None, None, None)
@@ -675,12 +685,15 @@ class Attention(nnx.Module):
       raise ValueError(f"proj_name must be 'key' or 'value', but got {proj_name}")
 
   def init_qkv_w(self, inputs_shape: Tuple) -> nnx.Module:
+    """Initializes the a fused QKV projection using only one DenseGeneral module."""
+    self._validate_kv_heads()
+
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_shape),
-        out_features_shape=(3, self.num_query_heads, self.head_dim),
+        out_features_shape=(self.num_query_heads + 2 * self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "qkv", "heads", "kv"),
+        kernel_axes=("embed", "heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -695,8 +708,22 @@ class Attention(nnx.Module):
 
     qkv_proj = self.qkv_proj(inputs, out_sharding)
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
-    query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
-    return query, key, value
+
+    # Since fused QKV projection places all heads along the same axis which could be tensor
+    # parallel partitioned, we must use shard_map to split into equally partitioned Q, K, V arrays.
+    q_bshd = self._logical_to_mesh_axes(self.query_axis_names)
+    k_bshd = self._logical_to_mesh_axes(self.key_axis_names)
+    v_bshd = self._logical_to_mesh_axes(self.value_axis_names)
+
+    @jax.shard_map(mesh=self.mesh, in_specs=(q_bshd,), out_specs=(q_bshd, k_bshd, v_bshd))
+    def split_qkv(qkv_proj: Array) -> tuple[Array, Array, Array]:
+      num_local_heads = qkv_proj.shape[2]
+      num_query_heads = (num_local_heads * self.num_query_heads) // (self.num_query_heads + 2 * self.num_kv_heads)
+      num_kv_heads = (num_local_heads - num_query_heads) // 2
+
+      return tuple(jnp.split(qkv_proj, [num_query_heads, num_query_heads + num_kv_heads], axis=2))
+
+    return split_qkv(qkv_proj)
 
   @property
   def out_head_dim(self) -> int:
