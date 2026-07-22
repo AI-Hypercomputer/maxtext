@@ -533,6 +533,18 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
 
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict)
 
+  # Resolve relative tokenizer_path against the config directory (fileset root on Borg)
+  if pydantic_kwargs.get("tokenizer_path"):
+    fileset_root = os.path.dirname(config_path)
+    candidate_path = os.path.join(fileset_root, pydantic_kwargs["tokenizer_path"])
+    if os.path.exists(candidate_path):
+      logger.info(
+          "Resolved tokenizer_path %s to %s under fileset root",
+          pydantic_kwargs["tokenizer_path"],
+          candidate_path,
+      )
+      pydantic_kwargs["tokenizer_path"] = candidate_path
+
   if pydantic_kwargs.get("use_tokamax_splash") and pydantic_kwargs.get("use_jax_splash"):
     raise ValueError("At most one of `use_tokamax_splash` and `use_jax_splash` can be set to True.")
 
