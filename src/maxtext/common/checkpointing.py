@@ -838,9 +838,7 @@ def load_state_if_possible(
           (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
       ):
         checkpoint_path = str(checkpoint_manager.directory / str(step) / "items")
-        with handle_checkpoint_mismatch(
-            "restore NNX checkpoint", checkpoint_path
-        ):
+        with handle_checkpoint_mismatch("restore NNX checkpoint", checkpoint_path):
           restored_nnx = _load_linen_checkpoint_into_nnx(
               checkpoint_path,
               abstract_unboxed_pre_state,
@@ -876,9 +874,7 @@ def load_state_if_possible(
                   EmergencyReplicatorCheckpointManager,
               ),
           ):
-            restored = checkpoint_manager.restore(
-                step, args=Composite(state=checkpoint_args)
-            ).state
+            restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
             _assert_no_shaped_dtype_struct(restored)
             return (
                 restored,
@@ -906,9 +902,7 @@ def load_state_if_possible(
           # Case 3: Default/Fallback case.
           # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
           case _:
-            restored = checkpoint_manager.restore(
-                step, args=Composite(items=checkpoint_args)
-            )
+            restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
             _assert_no_shaped_dtype_struct(restored)
             return (restored, None)
 
@@ -918,9 +912,7 @@ def load_state_if_possible(
     else:
       params = abstract_unboxed_pre_state.params
 
-    with handle_checkpoint_mismatch(
-        "load parameters", load_parameters_from_path
-    ):
+    with handle_checkpoint_mismatch("load parameters", load_parameters_from_path):
       restored_params = load_params_from_path(
           load_parameters_from_path,
           params,
@@ -932,9 +924,7 @@ def load_state_if_possible(
     return None, restored_params
   elif load_full_state_from_path != "":
     max_logging.log(f"Loading full state from path: {load_full_state_from_path}")
-    with handle_checkpoint_mismatch(
-        "load full state", load_full_state_from_path
-    ):
+    with handle_checkpoint_mismatch("load full state", load_full_state_from_path):
       restored_state = _load_full_state_from_path(
           path=load_full_state_from_path,
           abstract_unboxed_pre_state=abstract_unboxed_pre_state,
@@ -1033,17 +1023,21 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   if step is not None:
     actual_step = int(step)
   else:
-    if config.pure_nnx:
-      actual_step = int(state.optimizer.step) - 1
+    if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+      actual_step = int(state.optimizer.step.get_value()) - 1
+    elif hasattr(state, "step"):
+      if hasattr(state.step, "get_value"):
+        actual_step = int(state.step.get_value()) - 1
+      else:
+        actual_step = int(state.step) - 1
     else:
-      # Linen TrainState has .step attribute
-      actual_step = int(state.step) - 1
+      actual_step = -1
 
   if checkpoint_manager.latest_step() == actual_step:
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
-  if config.pure_nnx:
+  if config.pure_nnx and not config.enable_diloco:
     # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
     state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
 

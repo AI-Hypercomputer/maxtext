@@ -76,9 +76,15 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 
 def get_first_step(model, state):
-  if isinstance(model, nn.Module):
+  if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+    return int(state.optimizer.step.get_value())
+  elif hasattr(state, "step"):
+    if hasattr(state.step, "get_value"):
+      return int(state.step.get_value())
     return int(state.step)
-  return int(state.optimizer.step.get_value())
+  elif isinstance(model, nn.Module):
+    return int(state.step)
+  return 0
 
 
 # -----------------------------------------------------------------------------
@@ -626,12 +632,15 @@ def train_loop(config, recorder, state=None):
   start_step = get_first_step(model, state)  # this is the start_step for training
   train_utils.validate_completed_steps(start_step, config.steps)
 
-  if isinstance(model, nn.Module):
+  if config.enable_diloco or isinstance(model, nn.Module):
     jit_model = model
   else:
     jit_model, state = nnx.split(state)
 
-  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+  if config.enable_diloco:
+    params_shardings = state_mesh_shardings.params
+  else:
+    params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config,
@@ -653,7 +662,7 @@ def train_loop(config, recorder, state=None):
     elif config.shard_optimizer_over_data:
       # NNX: reshard state so params match the data-sharded in_shardings (Zero-1 layout)
       state = jax.device_put(state, state_mesh_shardings)
-    if isinstance(model, nn.Module):
+    if config.enable_diloco or isinstance(model, nn.Module):
       lower_args = (state, shaped_batch, init_rng)
     else:
       lower_args = (state, shaped_batch)
@@ -667,7 +676,7 @@ def train_loop(config, recorder, state=None):
   metric_logger_instance = metric_logger.MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  if isinstance(model, nn.Module):
+  if config.enable_diloco or isinstance(model, nn.Module):
     setup_params = state.params
   else:
     _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
@@ -683,7 +692,7 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
-        if isinstance(model, nn.Module):
+        if config.enable_diloco or isinstance(model, nn.Module):
           # pylint: disable=not-callable
           step_rng_args = (jax.jit(jax.random.fold_in)(init_rng, step),)
         else:
