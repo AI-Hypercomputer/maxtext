@@ -301,11 +301,11 @@ safetensors>=0.8.0
 scipy>=1.17.1
 scipy-stubs>=1.17.1.4
 semantic-version>=2.8.2
-sentencepiece>=0.2.1
+sentencepiece>=0.2.2
 sentry-sdk>=2.20.0
 seqio>=0.0.20
 setproctitle>=1.3.7
-setuptools>=78.1.0
+setuptools>=83.0.0
 setuptools-rust>=1.9.0
 setuptools-scm>=8.0.1
 shellingham>=1.5.4
@@ -338,14 +338,14 @@ tokenizers>=0.22.2
 toml>=0.10.2
 tomlkit>=0.15.0
 toolz>=1.1.0
-torch==2.11.0+cpu
+torch==2.13.0
 torchax>=0.0.11
 torchvision==0.26.0+cpu
 tornado>=6.5.7
 tpu-info>=0.7.1
 tqdm>=4.68.3
 traitlets>=5.15.1
-transformers>=5.12.1
+transformers>=5.14.1
 treescope>=0.1.10
 triton>=3.6.0 ; sys_platform == 'linux'
 typeguard>=2.13.3
