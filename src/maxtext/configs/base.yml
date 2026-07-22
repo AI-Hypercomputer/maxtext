@@ -1336,3 +1336,6 @@ elastic_enabled: false
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
+
+# Limits HBM footprint by sequentially evaluating the QK matrix across the unsharded local heads dimension natively. Size must evenly divide the number of attention heads.
+qk_head_chunk_size: 0
