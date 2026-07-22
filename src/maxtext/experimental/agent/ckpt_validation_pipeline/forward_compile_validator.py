@@ -76,7 +76,11 @@ def run_mock_forward(checkpoint_path, model_name, *overrides):
     logger.info("Tracing forward pass graph with NNX...")
 
     def forward(m, x, p, s):
-      return m(tokens=x, positions=p, segment_ids=s)
+      return m(
+          decoder_input_tokens=x,
+          decoder_positions=p,
+          decoder_segment_ids=s
+      )
 
     out_shape = jax.eval_shape(
         forward, abstract_model, mock_input, mock_positions, mock_segment_ids
