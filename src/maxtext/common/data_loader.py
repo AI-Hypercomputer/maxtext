@@ -15,17 +15,38 @@
 # pytype: disable=unsupported-operands
 """Module to load data for training."""
 
+import contextlib
 import jax
-import jax.numpy as jnp
 from jax.experimental import checkify
-
+import jax.numpy as jnp
 from maxtext.common.goodput import (
     GoodputEvent,
     maybe_record_goodput,
 )
 from maxtext.trainers.diloco import diloco
+from maxtext.utils import elastic_utils
 from maxtext.utils import exceptions
 from maxtext.utils.sharding import get_input_data_sharding
+
+
+@contextlib.contextmanager
+def loader_exception_guard(config):
+  """Context manager that wraps data loading Exception handling.
+
+  On block failure: bubbles up JAX/ScaleUp errors if elastic training is active;
+  otherwise raises a StopTraining exception.
+
+  Args:
+    config: maxtext configuration object.
+  """
+  try:
+    yield
+  except Exception as e:  # pylint: disable=broad-except
+    elastic_utils.maybe_bubble_elastic_exception(config, e)
+    if isinstance(e, StopIteration):
+      raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)}" f" exception: ({e})")
+    else:
+      raise exceptions.StopTraining(f"`next(self.data_iterator)` failed with {type(e)} exception: ({e}).")
 
 
 class DataLoader:
@@ -54,23 +75,18 @@ class DataLoader:
   def load_next_batch_pre_sharding(self):
     """Loads the next batch w/o sharding. Can keep reusing the same batch for performance reasons."""
     with maybe_record_goodput(self.goodput_recorder, GoodputEvent.DATA_LOADING):
-      try:
-        if self.config.reuse_example_batch and self.last_batch:
-          example_batch = self.last_batch
-        else:
+      if self.config.reuse_example_batch and self.last_batch:
+        example_batch = self.last_batch
+      else:
+        with loader_exception_guard(self.config):
           example_batch = next(self.data_iterator)
-          self.update_data_iterator()
-        self.last_batch = example_batch
-        self.check_example_batch()
-      except Exception as e:  # pylint: disable=broad-except
-        if isinstance(e, StopIteration):
-          raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)} exception: ({e})")
-        else:
-          raise exceptions.StopTraining(f"`load_next_batch()` failed with {type(e)} exception: ({e}).")
+        self.update_data_iterator()
+      self.last_batch = example_batch
+      self.check_example_batch()
     return self.last_batch
 
   def load_next_batch(self, *args, **kwargs):
-    """Loads the next batch with sharding hint"""
+    """Loads the next batch with sharding hint."""
     example_batch = self.load_next_batch_pre_sharding()
     if self.config.enable_diloco:
       example_batch = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)

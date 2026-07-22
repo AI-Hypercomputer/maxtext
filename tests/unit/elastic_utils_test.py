@@ -15,14 +15,17 @@
 """Unit tests for Elastic Training utility functions."""
 
 import unittest
-from unittest.mock import create_autospec, Mock
+from unittest.mock import Mock, create_autospec
 from absl.testing import parameterized
-
-
+from maxtext.common import checkpointing
 from maxtext.utils import elastic_utils
 from maxtext.utils import gcs_utils
 import pathwaysutils
 from pathwaysutils.elastic.manager import ScaleUpSignalError
+
+
+class MockJaxRuntimeError(Exception):
+  """Fake JAX Runtime Error class for unit tests."""
 
 
 class FakeDevice:
@@ -77,6 +80,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     # Inject fakes into elastic_utils namespace
     elastic_utils.pathwaysutils = self.fake_pathwaysutils
     elastic_utils.jax = self.fake_jax
+    self.fake_jax.errors.JaxRuntimeError = MockJaxRuntimeError
     elastic_utils.gcs_utils = self.fake_gcs_utils
     elastic_utils.max_logging = self.fake_logging
 
@@ -466,6 +470,80 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     self.fake_manager.available_inactive_slices = available_inactive_slices
     self.assertEqual(elastic_utils.is_scale_up_event(config), expected)
+
+  def test_maybe_bubble_elastic_exception_bubbles_on_elastic_errors(self):
+    """Tests that elastic exceptions are bubbled up, while other exceptions are returned normally."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+
+    # Scenario 1: Elastic JAX error propagates
+    with self.assertRaises(MockJaxRuntimeError):
+      elastic_utils.maybe_bubble_elastic_exception(config, MockJaxRuntimeError("TPU offline"))
+
+    # Scenario 2: ScaleUpSignalError propagates
+    with self.assertRaises(ScaleUpSignalError):
+      elastic_utils.maybe_bubble_elastic_exception(config, ScaleUpSignalError())
+
+    # Scenario 3: Non-elastic error is returned/ignored
+    elastic_utils.maybe_bubble_elastic_exception(config, ValueError("Disk full"))
+
+  def test_maybe_bubble_elastic_exception_disabled_does_not_bubble(self):
+    """If elasticity is disabled, JaxRuntimeError should not bubble."""
+    config = FakeConfig()
+    config.elastic_enabled = False  # Disabled
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+
+    # Executes normally (no exception raised)
+    elastic_utils.maybe_bubble_elastic_exception(config, MockJaxRuntimeError("JAX error but elasticity disabled"))
+
+  def test_checkpoint_exception_guard_checks_scale_up_on_success(self):
+    """Signals ScaleUpSignalError if scale-up is active when save completes."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_manager.available_inactive_slices = {1}  # Trigger scale-up
+
+    mock_checkpoint_manager = Mock()
+
+    # Successful checkpoint save block raises ScaleUpSignalError to trigger restart
+    with self.assertRaises(ScaleUpSignalError):
+      with checkpointing.checkpoint_exception_guard(config, mock_checkpoint_manager):
+        pass
+
+    mock_checkpoint_manager.wait_until_finished.assert_called_once()
+
+  def test_checkpoint_exception_guard_none_manager(self):
+    """Checks that checkpoint_manager=None doesn't raise AttributeError on scale-up."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_manager.available_inactive_slices = {1}  # Trigger scale-up
+
+    with self.assertRaises(ScaleUpSignalError):
+      with checkpointing.checkpoint_exception_guard(config, checkpoint_manager=None):
+        pass
+
+  def test_checkpoint_exception_guard_skips_scale_up_on_failure(self):
+    """If checkpoint save fails, scale-up check should be skipped, and exception handled."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_manager.available_inactive_slices = {1}
+
+    handler_called = False
+
+    def handler(_err):
+      nonlocal handler_called
+      handler_called = True
+
+    with checkpointing.checkpoint_exception_guard(config, self.fake_manager, handler):
+      raise ValueError("Save failed")
+
+    self.assertTrue(handler_called)
 
 
 if __name__ == "__main__":
