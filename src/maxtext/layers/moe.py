@@ -2970,6 +2970,8 @@ class RoutedMoE(nnx.Module):
 
     # Map MaxText config fields to fused_moe_func args
     activation = self.config.mlp_activations[0]  # e.g. "silu"
+    if activation == "sigmoid":
+      activation = "swigluoai"
     scoring_fn = self.config.routed_score_func if self.config.routed_score_func else "softmax"
 
     # Check if the model architecture intrinsically renormalizes weights
