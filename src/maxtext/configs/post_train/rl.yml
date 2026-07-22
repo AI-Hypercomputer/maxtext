@@ -109,6 +109,13 @@ debug:
 enable_tunix_perf_metrics: false
 
 # ====== Training ======
+# RL computes actual optimizer updates as:
+# num_batches * rl.num_iterations * train_fraction * num_epoch.
+# Keep these at -1 so the RL optimizer falls back to that computed max_train_steps
+# unless a recipe explicitly pins a schedule horizon.
+steps: -1
+learning_rate_schedule_steps: -1
+
 batch_size: 1
 # Increase `batch_size` and `MAX_STEPS` for better results.
 # num_batches: 3738
