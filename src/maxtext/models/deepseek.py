@@ -42,7 +42,7 @@ from maxtext.models import deepseek_batchsplit_fp8
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.sharding import maybe_shard_with_logical
-from maxtext.utils.sharding import get_logical_axis_rules_from_config
+from maxtext.utils.sharding import get_logical_axis_rules
 
 import transformers
 
@@ -79,9 +79,9 @@ class DeepSeekGenericLayer(nnx.Module):
     batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
     self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
 
-    self.out_sharding = create_sharding(self.mesh, self.logical_axis_names, rules=self.config.logical_axis_rules)
+    self.out_sharding = create_sharding(self.mesh, self.logical_axis_names, rules=get_logical_axis_rules())
     self.mlp_intermediate_sharding = create_sharding(
-        self.mesh, self.mlp_logical_axis_names, rules=self.config.logical_axis_rules
+        self.mesh, self.mlp_logical_axis_names, rules=get_logical_axis_rules()
     )
 
     self.pre_self_attention_layer_norm = RMSNorm(
@@ -190,7 +190,7 @@ class DeepSeekGenericLayer(nnx.Module):
         shard_mode=self.config.shard_mode,
         debug_sharding=self.config.debug_sharding,
         extra_stack_level=1,
-        rules=get_logical_axis_rules_from_config(self.config),
+        rules=get_logical_axis_rules(),
     )
 
   def dropout_op(self, x, deterministic):
@@ -527,7 +527,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
               x.sharding_names,
               self.mesh,
               shard_mode=self.config.shard_mode,
-              rules=self.config.logical_axis_rules,
+              rules=get_logical_axis_rules(),
           )
         return x
 

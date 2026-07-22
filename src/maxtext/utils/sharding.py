@@ -56,17 +56,6 @@ def get_logical_axis_rules():
   return flax_get_logical_axis_rules()
 
 
-def get_logical_axis_rules_from_config(config):
-  """Get the logical axis rules from the config.
-  When we use pipeline parallelism or in eval step, we may use
-  a different logical axis rule than the one in config.
-  Plan to deprecate (b/536927795) and use get_logical_axis_rules instead.
-  """
-  if config.using_pipeline_parallelism or config.eval_interval != -1:
-    return None
-  return config.logical_axis_rules
-
-
 def _get_sharding_desc(inputs, extra_stack_level):
   """Get the inputs sharding description using inspect module"""
   frame = inspect.currentframe()
