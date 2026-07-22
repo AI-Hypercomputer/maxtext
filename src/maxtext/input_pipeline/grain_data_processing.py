@@ -14,26 +14,26 @@
 
 """Input pipeline using Grain."""
 
-import math
-import glob
-from pathlib import Path
-import functools
-import ml_collections
 from concurrent import futures
+import functools
+import glob
 import json
+import math
+from pathlib import Path
 
-import jax
-
-import grain.python as grain
 from grain.experimental import ElasticIterator
-
+import grain.python as grain
+import jax
 from maxtext.input_pipeline import data_processing_utils
-from maxtext.input_pipeline import input_pipeline_utils
-from maxtext.input_pipeline import grain_tokenizer
 from maxtext.input_pipeline import dpo_utils
+from maxtext.input_pipeline import grain_tokenizer
+from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.input_pipeline.data_processing_utils import format_and_batch
+from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
+import ml_collections
 
 
 def find_data_files(data_file_pattern):
@@ -323,11 +323,10 @@ def _format_chat_template_grain(element, data_columns, tokenizer_model):
   ), f"SFT requires a conversational format. Expected dicts with 'role' and 'content', but got: {messages}"
 
   # Assign the standardized messages back to the primary column
-  element[data_columns[0]] = messages
+  data_col = data_columns[0]
+  element[data_col] = messages
 
-  return input_pipeline_utils.apply_chat_template(
-      element, tokenizer_model=tokenizer_model, data_column_name=data_columns[0]
-  )
+  return input_pipeline_utils.apply_chat_template(element, tokenizer_model=tokenizer_model, data_column_name=data_col)
 
 
 def _tokenize_sft_chunks(element, text_column_name, tokenizer_model):
@@ -381,9 +380,7 @@ def sft_preprocessing_pipeline(
   data_columns = ("inputs", "targets")
 
   batch_size = data_processing_utils.get_local_batch_size(config)
-  dataset = data_processing_utils.format_and_batch(
-      dataset, config, batch_size, pad_id, data_columns, base_tokenizer_model
-  )
+  dataset = format_and_batch(dataset, config, batch_size, pad_id, data_columns, base_tokenizer_model)
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
       dataset, config, grain_worker_count, grain_per_worker_buffer_size
   )
@@ -399,18 +396,48 @@ def _get_pipeline_fn(config):
   return pretrain_preprocessing_pipeline
 
 
-def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None):
+def _make_elastic_iterator(
+    dataset,
+    config,
+    preprocessing_fn,
+    shard_index=None,
+    shard_count=None,
+    process_indices=None,
+    mp_opts=None,
+):
   """Applies preprocessing_fn then wraps the result with ElasticIterator.
 
-  When shard_index/shard_count are None, defaults to jax.process_index()/jax.process_count().
+  When shard_index/shard_count are None, defaults to
+  jax.process_index()/jax.process_count() (or calculated from
+  process_indices if provided).
+
+  Args:
+    dataset: The input dataset.
+    config: The hyperparameter configuration.
+    preprocessing_fn: The function to apply before wrapping.
+    shard_index: The shard index. Defaults to None.
+    shard_count: The shard count. Defaults to None.
+    process_indices: The active process indices. Defaults to None.
+    mp_opts: Multiprocessing options. Defaults to None.
   """
   ds = preprocessing_fn(dataset=dataset)
+  if shard_index is None:
+    if process_indices is not None:
+      shard_index = process_indices.index(jax.process_index())
+    else:
+      shard_index = jax.process_index()
+  if shard_count is None:
+    if process_indices is not None:
+      shard_count = len(process_indices)
+    else:
+      shard_count = jax.process_count()
+
   return ElasticIterator(
       ds,
       global_batch_size=config.global_batch_size_to_load,
       shard_options=grain.ShardOptions(
-          shard_index=shard_index if shard_index is not None else jax.process_index(),
-          shard_count=shard_count if shard_count is not None else jax.process_count(),
+          shard_index=shard_index,
+          shard_count=shard_count,
       ),
       read_options=grain.ReadOptions(
           num_threads=config.grain_num_threads,
@@ -465,7 +492,12 @@ def make_grain_train_iterator(
   # pass to MultiHostDataLoadIterator
   if config.colocated_python_data_input:
     if config.grain_use_elastic_iterator:
-      preprocessing_fn = functools.partial(_make_elastic_iterator, config=config, preprocessing_fn=preprocessing_fn)
+      preprocessing_fn = functools.partial(
+          _make_elastic_iterator,
+          config=config,
+          preprocessing_fn=preprocessing_fn,
+          process_indices=process_indices,
+      )
 
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(
@@ -562,9 +594,7 @@ def make_grain_eval_iterator(
         dataloading_host_count=len(process_indices),
     )
     eval_dataloader = preprocessing_fn(dataset=eval_ds)
-    return multihost_dataloading.MultiHostDataLoadIterator(
-        eval_dataloader, global_mesh, config.generate_padding_batch_eval
-    )
+    return MultiHostDataLoadIterator(eval_dataloader, global_mesh, config.generate_padding_batch_eval)
   else:
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(

@@ -18,6 +18,7 @@
 Adapted from Sholto's:
 https://github.com/sholtodouglas/multihost_dataloading
 """
+
 from functools import partial
 from typing import Union, Sequence
 from collections.abc import Iterator, Iterable
@@ -76,7 +77,9 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
 
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class.
-  expansion_factor_for_grain is only used for grain pipeline when having a subset of hosts loading real data.
+
+  expansion_factor_for_grain is only used for grain pipeline when having a
+  subset of hosts loading real data.
   """
 
   def __init__(
@@ -267,7 +270,7 @@ class RemoteIteratorWrapper:
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
-    self.dummy_array = jnp.zeros((len(self.cpu_devices)))
+    self.dummy_array = jnp.zeros((self.cpu_mesh.size,))
     self.dummy_array = jax.device_put(self.dummy_array, self.cpu_sharding)
     # This is a proxy to a RemoteIterator running in a colocated process,
     # named "local_iterator" to match MultiHostDataLoadIterator's interface.
