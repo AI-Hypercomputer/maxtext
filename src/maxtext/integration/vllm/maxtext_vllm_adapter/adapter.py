@@ -201,6 +201,10 @@ class MaxTextForCausalLM(nnx.Module):
     elif self.maxtext_config.load_parameters_path is None:
       max_logging.log("Warning: No load_parameters_path provided. The model will be initialized with random weights.")
 
+  def modules(self):
+    """Dummy method to satisfy vLLM's internal cleanup logic."""
+    return []
+
   def __call__(
       self,
       kv_caches: list[jax.Array],

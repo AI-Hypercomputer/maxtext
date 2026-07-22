@@ -218,33 +218,6 @@ def nnx_update_sharding_meta(variable, transform_fn):
   return variable
 
 
-def nnx_sync_moveaxis(tree, from_axis, to_axis):
-  """Moves an axis in both values and sharding metadata of nnx.Variables."""
-  if from_axis == to_axis:
-    return tree
-
-  def _op(x):
-    is_var = isinstance(x, nnx.Variable)
-    val = x.get_value() if is_var else x
-    if not hasattr(val, "shape"):
-      return x
-
-    new_val = jnp.moveaxis(val, from_axis, to_axis)
-    if not is_var:
-      return new_val
-
-    def move_fn(l):
-      while len(l) < val.ndim:
-        l.append(None)
-      if len(l) > max(from_axis, to_axis):
-        l.insert(to_axis, l.pop(from_axis))
-      return l
-
-    return nnx_update_sharding_meta(x.replace(value=new_val), move_fn)
-
-  return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable) or hasattr(x, "shape"))
-
-
 def nnx_remove_scan_axis(tree, name="layers"):
   """Removes the given scan axis from the PartitionSpec."""
 
@@ -252,11 +225,25 @@ def nnx_remove_scan_axis(tree, name="layers"):
     if not isinstance(x, nnx.Variable):
       return x
 
+    # Scanned stacks record their own axis name, such as "dense_layers" or "moe_layers",
+    # so prefer it over the caller's default. Otherwise the name never matches and the
+    # check below strips a real logical axis instead of the scan axis.
+    axis_name = x.get_metadata().get(nnx.PARTITION_NAME, name)
+
     def remove_fn(l):
-      if name in l:
-        l.remove(name)
-      while len(l) > x.get_value().ndim:
-        l.pop(0)
+      removed = axis_name in l
+      if removed:
+        l.remove(axis_name)
+      if len(l) > x.get_value().ndim:
+        if removed:
+          raise ValueError(
+              f"Sharding names {l} still exceed value rank {x.get_value().ndim} after removing scan axis "
+              f"{axis_name!r}; the partition metadata is inconsistent."
+          )
+        raise ValueError(
+            f"Scan axis {axis_name!r} not found in sharding names {l} for a rank-{x.get_value().ndim} value; "
+            "the partition metadata is inconsistent."
+        )
       return l
 
     return nnx_update_sharding_meta(x, remove_fn)
@@ -264,18 +251,31 @@ def nnx_remove_scan_axis(tree, name="layers"):
   return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
 
-def nnx_add_scan_axis(tree, name="layers", pos=0):
-  """Adds the given scan axis to the PartitionSpec at the specified position."""
+def nnx_add_and_sync_scan_axis(tree, name="layers", pos=0):
+  """Restores the scan axis on each variable's value and sharding metadata.
+
+  jax.lax.scan stacks its outputs with the scan axis at position 0. For each
+  variable this moves that axis to the variable's own param_scan_axis (falling
+  back to pos when the metadata is absent) and inserts the matching axis name at
+  the same position, so the value and its sharding metadata stay aligned.
+  """
 
   def _op(x):
     if not isinstance(x, nnx.Variable):
       return x
 
+    axis_name = x.get_metadata().get(nnx.PARTITION_NAME, name)
+    target = x.get_metadata().get("param_scan_axis", pos)
+
+    val = x.get_value()
+    if target != 0 and hasattr(val, "ndim") and val.ndim > target:
+      x = x.replace(value=jnp.moveaxis(val, 0, target))
+
     def add_fn(l):
-      if name not in l:
+      if axis_name not in l:
         while len(l) < x.get_value().ndim - 1:
           l.append(None)
-        l.insert(pos, name)
+        l.insert(target, axis_name)
       else:
         while len(l) < x.get_value().ndim:
           l.append(None)

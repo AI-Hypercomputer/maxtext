@@ -32,6 +32,7 @@ from maxtext.checkpoint_conversion.utils.tensor_handling import (
     get_hf_loading_function,
 )
 from maxtext.common import checkpointing
+from maxtext.common import grain_utility
 import numpy as np
 import optax
 import safetensors.numpy
@@ -364,12 +365,12 @@ class GrainCheckpointableEquivalenceTest(parameterized.TestCase):
     v1_path = self.tmp_dir / str(step) / "iter_v1"
 
     # v0 Save
-    handler = checkpointing.GrainCheckpointHandler()
+    handler = grain_utility.GrainCheckpointHandler()
     v0_path.mkdir(parents=True, exist_ok=True)
     handler.save(v0_path, item=iterator_v0)
 
     # v1 Save
-    wrapper = checkpointing.GrainCheckpointable(save_args=checkpointing.GrainCheckpointSave(item=iterator_v1))
+    wrapper = grain_utility.GrainCheckpointable(save_args=grain_utility.GrainCheckpointSave(item=iterator_v1))
 
     class MockDirectory:
       """Mock directory for testing checkpointing."""
@@ -392,14 +393,14 @@ class GrainCheckpointableEquivalenceTest(parameterized.TestCase):
 
     # v0 Restore
     restored_iterator_v0 = FakeIterator(0)
-    args_v0 = checkpointing.GrainCheckpointRestore(item=restored_iterator_v0)
+    args_v0 = grain_utility.GrainCheckpointRestore(item=restored_iterator_v0)
     handler.restore(v0_path, args=args_v0)
     self.assertEqual(restored_iterator_v0.state, 10)
 
     # v1 Restore
     restored_iterator_v1 = FakeIterator(0)
-    wrapper_restore = checkpointing.GrainCheckpointable(
-        restore_args=checkpointing.GrainCheckpointRestore(item=restored_iterator_v1)
+    wrapper_restore = grain_utility.GrainCheckpointable(
+        restore_args=grain_utility.GrainCheckpointRestore(item=restored_iterator_v1)
     )
 
     load_func = asyncio.run(wrapper_restore.load(v1_path))
@@ -430,12 +431,12 @@ class GrainCheckpointableEquivalenceTest(parameterized.TestCase):
     v1_path = self.tmp_dir / str(step) / "iter_v1"
 
     # v0 Save
-    handler = checkpointing.GrainCheckpointHandler()
+    handler = grain_utility.GrainCheckpointHandler()
     v0_path.mkdir(parents=True, exist_ok=True)
     handler.save(v0_path, item=item_v0)
 
     # v1 Save
-    wrapper = checkpointing.GrainCheckpointable(save_args=checkpointing.GrainCheckpointSave(item=item_v1))
+    wrapper = grain_utility.GrainCheckpointable(save_args=grain_utility.GrainCheckpointSave(item=item_v1))
 
     class MockDirectory:
       """Mock directory for testing checkpointing."""
@@ -464,7 +465,7 @@ class GrainCheckpointableEquivalenceTest(parameterized.TestCase):
 
     # v0 Restore
     iterators_restore_v0 = [FakeIterator(0), FakeIterator(0)]
-    args_v0 = checkpointing.GrainCheckpointRestore(item=iterators_restore_v0, process_index=[0, 1], process_count=2)
+    args_v0 = grain_utility.GrainCheckpointRestore(item=iterators_restore_v0, process_index=[0, 1], process_count=2)
     handler.restore(v0_path, args=args_v0)
 
     self.assertEqual(iterators_restore_v0[0].state, 10)
@@ -472,8 +473,8 @@ class GrainCheckpointableEquivalenceTest(parameterized.TestCase):
 
     # v1 Restore
     iterators_restore_v1 = [FakeIterator(0), FakeIterator(0)]
-    wrapper_restore = checkpointing.GrainCheckpointable(
-        restore_args=checkpointing.GrainCheckpointRestore(
+    wrapper_restore = grain_utility.GrainCheckpointable(
+        restore_args=grain_utility.GrainCheckpointRestore(
             item=iterators_restore_v1, process_index=[0, 1], process_count=2
         )
     )
