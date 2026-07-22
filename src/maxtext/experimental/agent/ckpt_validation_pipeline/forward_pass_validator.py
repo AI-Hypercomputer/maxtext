@@ -18,12 +18,19 @@ reporting for the Airflow fail-fast pipeline.
 """
 
 import argparse
+import io
+import inspect
 import json
 import os
+import re
+import runpy
 import subprocess
+import sys
+import traceback
 import absl.logging
 import maxtext
 from maxtext.utils import gcs_utils
+from maxtext.utils import model_creation_utils
 # pylint: disable=no-name-in-module
 from maxtext.utils import max_logging as logger
 
@@ -31,9 +38,7 @@ from maxtext.utils import max_logging as logger
 absl.logging.set_verbosity(absl.logging.INFO)
 
 
-def validate_forward_pass(
-    run_name, internal_model_name, checkpoint_path, report_gcs_dir, unknown_args
-):
+def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report_gcs_dir, unknown_args):
   """Run logit checker as a subprocess and generate a standardized JSON report."""
   logger.info(f"Running Forward Pass Logit Verification for {run_name}...")
 
@@ -60,16 +65,10 @@ def validate_forward_pass(
   maxtext_module_dir = os.path.dirname(maxtext.__file__)
   repo_root = os.path.abspath(os.path.join(maxtext_module_dir, "../../"))
 
-  import sys
-  import io
-  import runpy
-  import inspect
-
-  # applying a monkeypatch to maxtext's model_creation_utils because it has a bug where 
+  # applying a monkeypatch to maxtext's model_creation_utils because it has a bug where
   # it cannot resolve SequenceKey (list indices) to string keys in Linen checkpoints.
-  import re
-  from maxtext.utils import model_creation_utils
-  source = inspect.getsource(model_creation_utils._fix_restore_args_for_shape_mismatch)
+
+  source = inspect.getsource(model_creation_utils._fix_restore_args_for_shape_mismatch)  # pylint: disable=protected-access
 
   new_lookup = """  def _lookup_stored_meta(path):
     # Monkeypatched to handle NNX to Linen structural mismatches
@@ -118,35 +117,92 @@ def validate_forward_pass(
 
   target_lookup = r"  def _lookup_stored_meta\(path\):[\s\S]*?(?=\n\s*mismatched_paths_sharded = \[\])"
   patched_source = re.sub(target_lookup, new_lookup, source)
-  
+
   env = dict(model_creation_utils.__dict__)
-  exec(patched_source, env)
-  model_creation_utils._fix_restore_args_for_shape_mismatch = env["_fix_restore_args_for_shape_mismatch"]
+  exec(patched_source, env)  # pylint: disable=exec-used
+  model_creation_utils._fix_restore_args_for_shape_mismatch = env[  # pylint: disable=protected-access
+      "_fix_restore_args_for_shape_mismatch"
+  ]
+
+  import orbax.checkpoint as ocp  # pylint: disable=import-outside-toplevel
+
+  _original_restore = ocp.Checkpointer.restore
+
+  def _monkeypatched_restore(self, directory, item=None, transforms=None, restore_args=None, **kwargs):
+    # pylint: disable=too-many-nested-blocks
+    def flatten_layers(tree):
+      if isinstance(tree, dict) or hasattr(tree, "items"):
+        new_tree = {}
+        for k, v in tree.items():
+          if str(k).endswith("layers") and (isinstance(v, dict) or hasattr(v, "items")):
+            for sub_k, sub_v in v.items():
+              if str(sub_k).isdigit():
+                new_tree[f"{k}_{sub_k}"] = flatten_layers(sub_v)
+              else:
+                if k not in new_tree:
+                  new_tree[k] = {}
+                new_tree[k][sub_k] = flatten_layers(sub_v)
+          else:
+            new_tree[k] = flatten_layers(v)
+        return new_tree
+      if isinstance(tree, (list, tuple)):
+        return type(tree)(flatten_layers(x) for x in tree)
+      return tree
+
+    def unflatten_layers(tree):
+      if isinstance(tree, dict) or hasattr(tree, "items"):
+        new_tree = {}
+        for k, v in tree.items():
+          m = re.search(r"(.*layers)_(\d+)$", str(k))
+          if m:
+            layer_name, idx = m.groups()
+            if layer_name not in new_tree:
+              new_tree[layer_name] = {}
+            new_tree[layer_name][idx] = unflatten_layers(v)
+          else:
+            new_tree[k] = unflatten_layers(v)
+        return new_tree
+      if isinstance(tree, (list, tuple)):
+        return type(tree)(unflatten_layers(x) for x in tree)
+      return tree
+
+    if item is not None and restore_args is not None and not transforms:
+      flat_item = flatten_layers(item)
+      flat_restore_args = flatten_layers(restore_args)
+      if flat_item != item:
+        # Pylint has a bug ignoring self in monkeypatched methods
+        restored_flat = _original_restore(
+            self, directory, item=flat_item, transforms=transforms, restore_args=flat_restore_args, **kwargs
+        )
+        return unflatten_layers(restored_flat)
+
+    return _original_restore(self, directory, item=item, transforms=transforms, restore_args=restore_args, **kwargs)
+
+  ocp.Checkpointer.restore = _monkeypatched_restore
 
   # run script in same process to apply monkeypatch
   old_stdout = sys.stdout
   old_stderr = sys.stderr
   sys.stdout = stdout_cap = io.StringIO()
   sys.stderr = stderr_cap = io.StringIO()
-  
+
   old_cwd = os.getcwd()
   os.chdir(repo_root)
-  
+
   returncode = 0
   try:
     sys.argv = command[1:]
     runpy.run_path("tests/utils/forward_pass_logit_checker.py", run_name="__main__")
   except SystemExit as e:
     returncode = e.code if e.code is not None else 0
-  except Exception as e:
-    import traceback
+  except Exception:  # pylint: disable=broad-exception-caught
     traceback.print_exc(file=sys.stderr)
     returncode = 1
   finally:
     sys.stdout = old_stdout
     sys.stderr = old_stderr
     os.chdir(old_cwd)
-    
+
   stdout_str = stdout_cap.getvalue()
   stderr_str = stderr_cap.getvalue()
 
@@ -180,9 +236,7 @@ def validate_forward_pass(
   if returncode != 0:
     logger.info(f"Command STDOUT:\n{stdout_str}")
     logger.error(f"Command STDERR:\n{stderr_str}")
-    raise ValueError(
-        "ERROR: Forward pass logit verification failed! See logs for details."
-    )
+    raise ValueError("ERROR: Forward pass logit verification failed! See logs for details.")
 
   logger.info("Forward pass validation successful!")
 
@@ -196,12 +250,8 @@ if __name__ == "__main__":
       required=True,
       help="Internal MaxText model name",
   )
-  parser.add_argument(
-      "--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint"
-  )
-  parser.add_argument(
-      "--report_gcs_dir", type=str, default="", help="GCS directory for reports"
-  )
+  parser.add_argument("--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint")
+  parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS directory for reports")
 
   args, unknown = parser.parse_known_args()
 
@@ -216,6 +266,4 @@ if __name__ == "__main__":
   except (ValueError, KeyError, subprocess.CalledProcessError) as e:
     logger.error(f"FAILED: {e}")
     # Always fail hard to halt the Airflow DAG
-    import sys
-
     sys.exit(1)
