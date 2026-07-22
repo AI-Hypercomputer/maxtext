@@ -110,6 +110,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
+  # A multimodal model may receive a text-only batch while retaining its vision
+  # parameters in the model and checkpoints. Only pass image inputs when present.
+  encoder_images = data.get("images") if config.use_multimodal else None
+  encoder_image_masks = data.get("image_masks") if config.use_multimodal else None
   mutable_collections = ["intermediates"]
   if config.mtp_num_layers > 0 and is_train:
     # The single model.apply call now triggers the entire chain if MTP is enabled:
@@ -142,8 +146,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         data["inputs"],
         data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
-        encoder_images=data["images"] if config.use_multimodal else None,
-        encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
+        encoder_images=encoder_images,
+        encoder_image_masks=encoder_image_masks,
         enable_dropout=config.enable_dropout if is_train else False,
         rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
         mutable=mutable_collections,
@@ -191,8 +195,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
-        encoder_images=data["images"] if config.use_multimodal else None,
-        encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
+        encoder_images=encoder_images,
+        encoder_image_masks=encoder_image_masks,
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
