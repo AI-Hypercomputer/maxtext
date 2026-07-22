@@ -749,7 +749,7 @@ class AttentionOp(nnx.Module):
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
 
-      # All-gather prior to broadcast to avoid large all-to-all on broadcasted ids with TSP/CP.
+      # With TSP/CP, all-gather prior to broadcast to avoid large all-to-all on broadcasted ids.
       key_sharding = self._logical_to_mesh_axes((DATA_EMB_BATCH, None))
       decoder_key_segment_ids = self._maybe_shard_with_pspec(decoder_segment_ids, key_sharding)
 
