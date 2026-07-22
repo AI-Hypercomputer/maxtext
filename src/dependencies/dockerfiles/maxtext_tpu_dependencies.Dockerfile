@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:experimental
 
-ARG BASEIMAGE=python:3.12-slim-bullseye
+ARG BASEIMAGE=python:3.12-slim-bookworm
 FROM $BASEIMAGE
 
 # Install system dependencies
@@ -18,6 +18,7 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python
 
 # Set environment variables for Google Cloud SDK and Python 3.12
 ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.12:${PATH}"
+ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 # Set environment variables via build arguments
 ARG MODE
