@@ -187,10 +187,12 @@ def _build_chat_completion_response(request, completion_result, llm):
     except (ValueError, IndexError) as e:
       logger.error("Harmony parsing failed for gpt-oss: %s. Falling back to raw text.", e, exc_info=True)
 
+  t_mode = getattr(request, "thinking_mode", "thinking")
+
   if server_utils.is_dsv32_encoding_enabled(request.model):
     try:
       # DeepSeek-V3.2 models often generate thinking block.
-      parsed = encoding_dsv32.parse_message_from_completion_text(text_out, thinking_mode="thinking")
+      parsed = encoding_dsv32.parse_message_from_completion_text(text_out, thinking_mode=t_mode)
       text_out = parsed.get("content", text_out)
       reasoning_out = parsed.get("reasoning_content")
     except (AssertionError, ValueError, IndexError) as e:
@@ -199,7 +201,7 @@ def _build_chat_completion_response(request, completion_result, llm):
   if server_utils.is_dsv4_encoding_enabled(request.model):
     try:
       # DeepSeek-V4 models often generate thinking block.
-      parsed = encoding_dsv4.parse_message_from_completion_text(text_out, thinking_mode="thinking")
+      parsed = encoding_dsv4.parse_message_from_completion_text(text_out, thinking_mode=t_mode)
       text_out = parsed.get("content", text_out)
       reasoning_out = parsed.get("reasoning_content")
     except (AssertionError, ValueError, IndexError) as e:

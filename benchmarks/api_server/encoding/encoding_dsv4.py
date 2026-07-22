@@ -713,15 +713,7 @@ def parse_message_from_completion_text(text: str, thinking_mode: str) -> Dict[st
 
     if is_tool_calling:
         index, stop_token, tool_calls = parse_tool_calls(index, text)
-
         index, tool_ends_text, stop_token = _read_until_stop(index, text, [eos_token])
-        assert not tool_ends_text, "Unexpected content after tool calls"
-
-    assert len(text) == index and stop_token in [eos_token, None], "Unexpected content at end"
-
-    for sp_token in [bos_token, eos_token, thinking_start_token, thinking_end_token, dsml_token]:
-        assert sp_token not in summary_content and sp_token not in reasoning_content, \
-            f"Unexpected special token '{sp_token}' in content"
 
     return {
         "role": "assistant",

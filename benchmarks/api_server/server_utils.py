@@ -138,14 +138,16 @@ def get_prompts_for_request(req: any, llm: MaxTextGenerator) -> List[str]:
       A list of string prompts.
   """
   if hasattr(req, "messages"):  # ChatCompletionRequest
+    t_mode = getattr(req, "thinking_mode", "thinking")
+    
     if is_dsv32_encoding_enabled(req.model):
       messages = [m.model_dump(exclude_none=True) for m in req.messages]
-      encode_config = {"thinking_mode": "thinking", "drop_thinking": True, "add_default_bos_token": True}
+      encode_config = {"thinking_mode": t_mode, "drop_thinking": True, "add_default_bos_token": True}
       return [encoding_dsv32.encode_messages(messages, **encode_config)]
     
     if is_dsv4_encoding_enabled(req.model):
       messages = [m.model_dump(exclude_none=True) for m in req.messages]
-      encode_config = {"thinking_mode": "thinking", "drop_thinking": True, "add_default_bos_token": True}
+      encode_config = {"thinking_mode": t_mode, "drop_thinking": True, "add_default_bos_token": True}
       return [encoding_dsv4.encode_messages(messages, **encode_config)]
 
     messages = [m.model_dump() for m in req.messages]
