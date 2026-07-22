@@ -71,13 +71,53 @@ def validate_forward_pass(
   from maxtext.utils import model_creation_utils
   source = inspect.getsource(model_creation_utils._fix_restore_args_for_shape_mismatch)
 
-  target1 = r"(if isinstance\(node, \(list, tuple\)\) and 0 <= key\.idx < len\(node\):\n\s*node = node\[key\.idx\]\n\s*continue\n\s*)return None"
-  replacement1 = r"\1if isinstance(node, dict) and str(key.idx) in node:\n          node = node[str(key.idx)]\n          continue\n        return None"
-  patched_source = re.sub(target1, replacement1, source)
+  new_lookup = """  def _lookup_stored_meta(path):
+    # Monkeypatched to handle NNX to Linen structural mismatches
+    # Map layers.0 -> layers_0
+    new_path = []
+    i = 0
+    while i < len(path):
+      k_str = _key_str(path[i])
+      if i + 1 < len(path) and k_str.endswith("layers"):
+        next_k_str = _key_str(path[i+1])
+        if next_k_str.isdigit():
+          new_path.append(f"{k_str}_{next_k_str}")
+          i += 2
+          continue
+      new_path.append(path[i])
+      i += 1
 
-  target2 = r"(if not isinstance\(node, dict\):\n\s*return None)"
-  replacement2 = r"if isinstance(node, (list, tuple)):\n        name = _key_str(key)\n        if name.isdigit() and 0 <= int(name) < len(node):\n          node = node[int(name)]\n          continue\n        return None\n      \1"
-  patched_source = re.sub(target2, replacement2, patched_source)
+    node = stored_metadata_tree
+    for key in new_path:
+      if isinstance(key, jax.tree_util.SequenceKey):
+        if isinstance(node, (list, tuple)) and 0 <= key.idx < len(node):
+          node = node[key.idx]
+          continue
+        if isinstance(node, dict) and str(key.idx) in node:
+          node = node[str(key.idx)]
+          continue
+        return None
+      if isinstance(node, (list, tuple)):
+        name = _key_str(key)
+        if name.isdigit() and 0 <= int(name) < len(node):
+          node = node[int(name)]
+          continue
+        return None
+      if not isinstance(node, dict):
+        return None
+      name = _key_str(key)
+      if name in node:
+        node = node[name]
+        continue
+      raw = str(key)
+      if raw in node:
+        node = node[raw]
+        continue
+      return None
+    return node"""
+
+  target_lookup = r"  def _lookup_stored_meta\(path\):[\s\S]*?(?=\n\s*mismatched_paths_sharded = \[\])"
+  patched_source = re.sub(target_lookup, new_lookup, source)
   
   env = dict(model_creation_utils.__dict__)
   exec(patched_source, env)
