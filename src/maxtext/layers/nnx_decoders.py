@@ -356,13 +356,17 @@ class NNXScannedPipelineStage(nnx.Module):
           **kwargs,
       )
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-      return new_carry, nnx.state(layer)
+      # Avoid returning and stacking read-only parameters inside the scan body.
+      # This prevents huge unnecessary memory allocation.
+      _, _, updated_state = nnx.split(layer, nnx.Param, ...)
+      return new_carry, updated_state
 
     final_carry, scanned_state = jax.lax.scan(layer_fn, inputs, (params, state))
 
     if scan_axis != 0:
       scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
-      scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
+      if scanned_params:
+        scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
       scanned_state = nnx.State.merge(scanned_params, scanned_other)
 
     nnx.update(self.scanned_layers, scanned_state)
@@ -957,7 +961,10 @@ class NNXDecoder(nnx.Module):
         returned_params = updated_params
         new_current_state = nnx.State.merge(returned_params, updated_state)
       else:
-        new_current_state = nnx.state(layer)
+        # Avoid returning and stacking read-only parameters inside the scan body.
+        # This prevents huge unnecessary memory allocation.
+        _, _, updated_state = nnx.split(layer, nnx.Param, ...)
+        new_current_state = updated_state
 
       if use_kv:
         return new_carry, (new_current_state, updated_kv)
