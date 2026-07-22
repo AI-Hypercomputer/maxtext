@@ -15,6 +15,7 @@
 """Tests for Attentions."""
 
 import itertools
+import os
 import random
 import sys
 import types
@@ -1715,7 +1716,7 @@ class AttentionTest(parameterized.TestCase):
 
   @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
   @pytest.mark.tpu_only
-  @mock.patch("tpu_inference.layers.jax.attention_interface.sharded_ragged_paged_attention", create=True)
+  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
   def test_forward_serve_vllm(self, mock_sharded_ragged_paged_attention):
     """Tests the forward_serve_vllm method with mocked RPA attention."""
     # Setup config for vLLM RPA
@@ -1764,8 +1765,7 @@ class AttentionTest(parameterized.TestCase):
     mock_output = jnp.ones(mock_output_shape, dtype=self.dtype)
     mock_updated_kv_cache = [jnp.zeros((1,))]
 
-    mock_callable = mock.Mock(return_value=(mock_output, mock_updated_kv_cache))
-    mock_sharded_ragged_paged_attention.return_value = mock_callable
+    mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
 
     # Call the attention layer
     output, updated_kv_cache = attention_vllm(
@@ -1781,8 +1781,83 @@ class AttentionTest(parameterized.TestCase):
 
     # Assertions
     mock_sharded_ragged_paged_attention.assert_called_once()
-    mock_callable.assert_called_once()
     self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+
+    # The output of forward_serve_vllm is reshaped back to (batch, seq, ...)
+    reshaped_mock_output = mock_output.reshape(self.global_batch_size, seq_len, self.num_query_heads, self.head_dim)
+    expected_output = attention_vllm.out_projection(reshaped_mock_output)
+    self.assertTrue(jnp.allclose(output, expected_output))
+    self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
+
+  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
+  @pytest.mark.tpu_only
+  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
+  def test_forward_serve_vllm_batched_rpa(self, mock_sharded_ragged_paged_attention):
+    """Tests the forward_serve_vllm method with mocked batched RPA attention."""
+    # Setup config for vLLM Batched RPA
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_batched_rpa"
+    vllm_config_arguments["chunk_attn_window_size"] = 128
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+
+    # Create Attention instance
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+
+    # Prepare inputs
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
+    mock_kv_cache = [jnp.ones((1,))]
+
+    mock_attention_metadata = mock.Mock()
+    mock_attention_metadata.seq_lens = jnp.array([1] * self.global_batch_size)
+    mock_attention_metadata.block_tables = jnp.array([[0]] * self.global_batch_size)
+    mock_attention_metadata.query_start_loc = jnp.array(list(range(self.global_batch_size)))
+    mock_attention_metadata.request_distribution = jnp.array([self.global_batch_size])
+
+    # Mock the return value of sharded_ragged_paged_attention
+    total_tokens = self.global_batch_size * seq_len
+    mock_output_shape = (total_tokens, self.num_query_heads, self.head_dim)
+    mock_output = jnp.ones(mock_output_shape, dtype=self.dtype)
+    mock_updated_kv_cache = [jnp.zeros((1,))]
+
+    mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
+
+    # Call the attention layer
+    output, updated_kv_cache = attention_vllm(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        kv_cache=mock_kv_cache,
+        attention_metadata=mock_attention_metadata,
+    )
+
+    # Assertions
+    mock_sharded_ragged_paged_attention.assert_called_once()
+    self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+    self.assertEqual(os.environ.get("USE_BATCHED_RPA_KERNEL"), "1")
 
     # The output of forward_serve_vllm is reshaped back to (batch, seq, ...)
     reshaped_mock_output = mock_output.reshape(self.global_batch_size, seq_len, self.num_query_heads, self.head_dim)

@@ -481,7 +481,14 @@ class AttentionOp(nnx.Module):
     self.kv_quant = kv_quant
     self.attention_type = attention_type
     # Block sizes are only used by TPU splash attention kernels. Exclude non-splash kernels
-    if self.attention_kernel not in ("dot_product", "paged", "vllm_rpa", "cudnn_flash_te", "cudnn_flash_jax"):
+    if self.attention_kernel not in (
+        "dot_product",
+        "paged",
+        "vllm_rpa",
+        "vllm_batched_rpa",
+        "cudnn_flash_te",
+        "cudnn_flash_jax",
+    ):
       if self.attention_type == AttentionType.LOCAL_SLIDING:
         self.block_q = self.config.local_sa_block_q
         self.block_kv = self.config.local_sa_block_kv
@@ -1069,7 +1076,7 @@ class AttentionOp(nnx.Module):
         or (self.attention_kernel == "autoselected" and model_mode == MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
         or (self.attention_kernel == "paged")
-        or (self.attention_kernel == "vllm_rpa")
+        or (self.attention_kernel in ("vllm_rpa", "vllm_batched_rpa"))
     ):
       return self.apply_attention_dot(
           query,

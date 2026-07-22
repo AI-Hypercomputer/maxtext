@@ -1833,7 +1833,7 @@ class NNXDecoder(nnx.Module):
       hidden_state = y
 
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
-    if cfg.attention == "vllm_rpa":
+    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa"):
       logits = None
 
     # When in the Indexer Dense Warm-up stage, skip the expensive output head projection
