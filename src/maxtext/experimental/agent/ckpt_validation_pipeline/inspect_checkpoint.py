@@ -268,7 +268,11 @@ def inspect_maxtext(args, remaining_args):
     key_parts = param_key_parts_from_path(path_tuple)
 
     # Construct a MaxText-style parameter key (e.g., "params.params.layer.weight").
-    param_key = "params." + ".".join(key_parts)
+    key_str = ".".join(key_parts)
+    if getattr(config, "enable_nnx", False) and not key_str.startswith("params"):
+      param_key = "params.params." + key_str
+    else:
+      param_key = "params." + key_str
 
     shape = abstract_leaf_value.shape
     param_dict[param_key] = f"shape: {shape}"
