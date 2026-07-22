@@ -93,7 +93,7 @@ def validate_forward_pass(
   
   returncode = 0
   try:
-    sys.argv = command
+    sys.argv = command[1:]
     runpy.run_path("tests/utils/forward_pass_logit_checker.py", run_name="__main__")
   except SystemExit as e:
     returncode = e.code if e.code is not None else 0
