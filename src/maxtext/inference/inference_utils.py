@@ -25,7 +25,7 @@ def str2bool(v: str) -> bool:
   """Convert a string of truth to True or False.
 
   Args:
-    - v (str):
+    v (str):
       - True values are 'y', 'yes', 't', 'true', and '1';
       - False values are 'n', 'no', 'f', 'false', and '0'.
 
