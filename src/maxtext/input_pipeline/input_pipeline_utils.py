@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 import grain.python as grain
 import numpy as np
 from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, _TFRecordDatasetIterator  # pylint: disable=protected-access
-from grain.experimental import TFRecordIterDataset
+from grain.experimental import FlatMapTransform, TFRecordIterDataset
 from maxtext.input_pipeline.protos import example_pb2
 from maxtext.input_pipeline import tokenizer
 from maxtext.multimodal import processor as mm_processor
@@ -352,6 +352,111 @@ class SFTPromptMasking(grain.MapTransform):
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
     }
+
+
+@dataclasses.dataclass
+class SFTPromptMaskingWindows(FlatMapTransform):
+  """Construct SFT inputs/targets for completion-only training, splitting examples longer than
+  ``max_target_length`` into multiple ``<= max_target_length`` records via a prompt-pinned sliding
+  window instead of head-truncating them.
+
+  Motivation: the 1:1 :class:`SFTPromptMasking` truncates the concatenated sequence with
+  ``[:max_target_length]``. For any example longer than ``max_target_length`` this drops the tail —
+  including the turn terminator (e.g. ``<end_of_turn>``) — from both ``inputs`` and ``targets``, so
+  the stop token never enters the loss and the model is trained on a stop-less completion prefix.
+
+  This transform instead emits, per completion segment of an over-length example, a sequence of
+  windows. Each window is ``[ conversation-prefix-so-far (front-capped, masked) ] +
+  [ small completion overlap (masked) ] + [ a slice of new completion tokens (loss) ]``. The loss
+  slices tile the completion with NO overlap, so every completion token — including the terminator
+  in the final window — contributes to the loss exactly once. Examples that already fit yield a
+  single record byte-identical to :class:`SFTPromptMasking`.
+
+  Only completion-only SFT is supported (the context/overlap tokens are masked with ``unk_id``).
+  """
+
+  max_fan_out: int = 32
+
+  def __init__(
+      self,
+      text_column_name,
+      completion_only,
+      max_target_length,
+      unk_id=0,
+      overlap=256,
+      context_cap=-1,
+      max_fan_out=32,
+  ):
+    self.text_column_name = text_column_name
+    self.completion_only = completion_only
+    self.max_target_length = max_target_length
+    self.unk_id = unk_id
+    self.overlap = overlap
+    self.context_cap = context_cap
+    self.max_fan_out = max_fan_out
+
+  def _single_record(self, segments, is_prompt):
+    """Fast path identical to SFTPromptMasking.map for examples that fit in max_target_length."""
+    inputs, targets = [], []
+    for seg, is_p in zip(segments, is_prompt):
+      seg = list(seg)
+      inputs += seg
+      targets += [self.unk_id] * len(seg) if (self.completion_only and is_p) else seg
+    return {
+        "inputs": np.asarray(inputs, dtype=np.int32),
+        "targets": np.asarray(targets, dtype=np.int32),
+    }
+
+  def flat_map(self, element):
+    """Emit one or more ``<= max_target_length`` records for a single SFT example (see class docstring)."""
+    length = self.max_target_length
+    segments = element[self.text_column_name]
+    is_prompt = element["is_prompt"]
+
+    total = sum(len(seg) for seg in segments)
+    if total <= length:
+      return [self._single_record(segments, is_prompt)]
+
+    # Clamp window geometry so every window always leaves room for >=1 loss token:
+    #   ctx (<= cap) + overlap (<= overlap_cap) + min_room <= length.
+    overlap_cap = max(0, min(self.overlap, length // 8))
+    min_room = max(1, length // 8)
+    auto_cap = self.context_cap if (self.context_cap and self.context_cap > 0) else length // 2
+    cap = max(1, min(auto_cap, length - overlap_cap - min_room))
+
+    records = []
+    prefix = []  # all tokens of preceding segments, replayed (masked) as grounding context
+    for seg, is_p in zip(segments, is_prompt):
+      seg = list(seg)
+      if self.completion_only and is_p:
+        prefix += seg
+        continue
+      comp = seg
+      if not comp:
+        continue
+      ctx = prefix[-cap:] if len(prefix) > cap else list(prefix)
+      i, n = 0, len(comp)
+      while i < n:
+        if len(records) >= self.max_fan_out:
+          max_logging.log(
+              f"SFTPromptMaskingWindows: hit max_fan_out={self.max_fan_out}; dropping {n - i} "
+              "trailing completion token(s) (including the turn terminator) for one example."
+          )
+          return records
+        overlap_tokens = comp[max(0, i - overlap_cap) : i]
+        room = length - len(ctx) - len(overlap_tokens)
+        loss_tokens = comp[i : i + room]
+        n_mask = len(ctx) + len(overlap_tokens)
+        records.append(
+            {
+                "inputs": np.asarray(ctx + overlap_tokens + loss_tokens, dtype=np.int32),
+                "targets": np.asarray([self.unk_id] * n_mask + loss_tokens, dtype=np.int32),
+            }
+        )
+        i += len(loss_tokens)
+      prefix += comp
+
+    return records
 
 
 @dataclasses.dataclass

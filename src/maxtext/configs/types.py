@@ -1433,6 +1433,34 @@ class FineTuning(BaseModel):
   sft_train_on_completion_only: bool = Field(
       False, description="If True, trains only on the completion part of the text."
   )
+  sft_long_example_handling: Literal["truncate", "window"] = Field(
+      "truncate",
+      description=(
+          "How to handle SFT examples longer than max_target_length (grain pipeline). "
+          "'truncate' head-truncates (drops the tail, incl. the turn terminator <end_of_turn>, "
+          "from long examples). 'window' splits a long example into multiple <=max_target_length "
+          "records via a prompt-pinned sliding window so the terminator always enters the loss; "
+          "requires sft_train_on_completion_only=True."
+      ),
+  )
+  sft_window_overlap: int = Field(
+      256,
+      description=(
+          "For sft_long_example_handling='window': completion tokens carried as masked context "
+          "between consecutive windows. Clamped to <= max_target_length // 8."
+      ),
+  )
+  sft_window_context_cap: int = Field(
+      -1,
+      description=(
+          "For 'window': max tokens of conversation-prefix context pinned (masked) in front of "
+          "each window. -1 = auto (max_target_length // 2)."
+      ),
+  )
+  sft_window_max_fan_out: int = Field(
+      32,
+      description="For 'window': hard cap on records emitted per example (runaway guard).",
+  )
   formatting_func_path: str = Field(
       "",
       description="Path to the custom data formatting function for SFT.",
