@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Tests for the common Max Utils"""
 import os
 import sys
@@ -38,6 +37,9 @@ class MaxUtilsSummaryStats(unittest.TestCase):
     x = {"a": jax.numpy.array([0, 2, 0]), "b": jax.numpy.array([0, 3, 6])}
     pytree_l2_norm = max_utils.l2norm_pytree(x)
     self.assertTrue(jax.numpy.allclose(pytree_l2_norm, 7, rtol=1e-05, atol=1e-08, equal_nan=False))
+
+  def test_dummy_tpu7x_newly_added(self):
+    self.assertEqual(1 + 1, 2)
 
 
 class MaxUtilsPytree(unittest.TestCase):

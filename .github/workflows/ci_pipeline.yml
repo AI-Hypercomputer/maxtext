@@ -53,11 +53,25 @@ jobs:
     outputs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
+      has_new_tests: ${{ steps.check_new_tests.outputs.has_new_tests }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ inputs.maxtext_sha || github.sha }}
+      - name: Check if PR added or modified tests
+        id: check_new_tests
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "has_new_tests=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch origin main:main 2>/dev/null || :
+          git remote add origin https://github.com/${GITHUB_REPOSITORY:-AI-Hypercomputer/maxtext}.git 2>/dev/null || :
+          git fetch origin main:refs/remotes/origin/main 2>/dev/null || :
+          HAS_NEW=$(python3 -c 'from tests.utils.newly_added_detection import get_changed_tests; print("true" if len(get_changed_tests()) > 0 else "false")' 2>/dev/null || echo "true")
+          echo "has_new_tests=${HAS_NEW}" >> "$GITHUB_OUTPUT"
+          echo "Detected has_new_tests=${HAS_NEW}"
       - name: Check for Code Changes
         id: check
         run: |
@@ -65,6 +79,7 @@ jobs:
             echo "Not a pull request, running all tests"
             echo "run_tests=true" >> $GITHUB_OUTPUT
             echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            echo "has_new_tests=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -203,6 +218,7 @@ jobs:
         flavor: [tpu-unit, tpu-integration, tpu-post-training-unit]
     with:
       flavor: ${{ matrix.flavor }}
+      is_pull_request: ${{ github.event_name == 'pull_request' }}
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
@@ -222,11 +238,12 @@ jobs:
 
   tpu7x-tests:
     name: TPU7X tests
-    needs: [gate_test_run]
+    needs: [analyze_code_changes, gate_test_run]
     if: |
       always() &&
       needs.gate_test_run.result == 'success' &&
-      github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      (github.event_name != 'pull_request' || needs.analyze_code_changes.outputs.has_new_tests == 'true') &&
+      (github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -234,6 +251,7 @@ jobs:
         flavor: [tpu7x-unit, tpu7x-integration, tpu7x-post-training-unit]
     with:
       flavor: ${{ matrix.flavor }}
+      is_pull_request: ${{ github.event_name == 'pull_request' }}
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
