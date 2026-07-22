@@ -17,16 +17,16 @@ MY_IMAGE="gcr.io/${PROJECT}/jzuo-runner:${RUNNAME}"
 
 BASE_OUTPUT_DIRECTORY="gs://chriszuo-maxtext-logs"
 DATASET_PATH="gs://chriszuo-maxtext-datasets"
-DILOCO_SYNC_PERIOD=9
-DILOCO_OUTER_LR=0.3
+DILOCO_SYNC_PERIOD=36
+DILOCO_OUTER_LR=0.1
 DILOCO_OUTER_MOMENTUM=0.9
-DILOCO_NUM_FRAGMENTS=8 # matches the overridden base_num_decoder_layers
+DILOCO_NUM_FRAGMENTS=36 # matches num_decoder_layers for full qwen3-8b
 DILOCO_USE_SEQUENTIAL_LAYERS=false
 DILOCO_NUM_COMM_OVERLAP_STEPS=2
 DILOCO_COMM_OVERLAP_ALPHA=0.0
 MODEL_NAME="qwen3-8b"
-PER_DEVICE_BATCH_SIZE=2
-MAX_TARGET_LENGTH=1024
+PER_DEVICE_BATCH_SIZE=8
+MAX_TARGET_LENGTH=2048
 STEPS=20
 
 XLA_FLAGS=" \
@@ -88,13 +88,10 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && 
              diloco_sync_period=${DILOCO_SYNC_PERIOD} \
              diloco_outer_lr=${DILOCO_OUTER_LR} \
              diloco_outer_momentum=${DILOCO_OUTER_MOMENTUM} \
-             override_model_config=True \
-             base_num_decoder_layers=8 \
-             base_emb_dim=256 \
-             base_mlp_dim=512 \
-             base_num_query_heads=4 \
-             base_num_kv_heads=4 \
-             head_dim=32 \
+             profiler=xplane \
+             skip_first_n_steps_for_profiler=5 \
+             profiler_steps=5 \
+             upload_all_profiler_results=true \
              steps=${STEPS}"
 
 # 1. Build and push the docker image manually containing your local changes
@@ -115,5 +112,6 @@ echo "Creating workload: ${RUNNAME}"
 --docker-image "${MY_IMAGE}" \
 --command "${CMD}" \
 --num-slices=$NUM_SLICES \
+--enable-debug-logs \
 --cluster "${CLUSTER}" --tpu-type "${DEVICE_TYPE}" --project "${PROJECT}" --zone "${ZONE}"
 
