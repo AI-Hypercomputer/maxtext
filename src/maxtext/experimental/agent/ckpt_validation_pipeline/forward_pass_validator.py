@@ -149,32 +149,62 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
         return type(tree)(flatten_layers(x) for x in tree)
       return tree
 
-    def unflatten_layers(tree):
+    def unflatten_layers(tree, template_tree):
       if isinstance(tree, dict) or hasattr(tree, "items"):
         new_tree = {}
+        orig_keys = {}
+        if isinstance(template_tree, dict) or hasattr(template_tree, "items"):
+          for orig_k in (template_tree.keys() if hasattr(template_tree, "keys") else []):
+            orig_keys[str(orig_k)] = orig_k
+
         for k, v in tree.items():
           m = re.search(r"(.*layers)_(\d+)$", str(k))
           if m:
-            layer_name, idx = m.groups()
-            if layer_name not in new_tree:
-              new_tree[layer_name] = {}
-            new_tree[layer_name][idx] = unflatten_layers(v)
+            layer_name, idx_str = m.groups()
+            orig_layer_name = orig_keys.get(layer_name, layer_name)
+            if orig_layer_name not in new_tree:
+              new_tree[orig_layer_name] = {}
+            orig_layer = None
+            if (isinstance(template_tree, dict) or hasattr(template_tree, "items")) and orig_layer_name in template_tree:
+              orig_layer = template_tree[orig_layer_name]
+            orig_idx = int(idx_str) if (orig_layer is not None and int(idx_str) in orig_layer) else idx_str
+            new_tree[orig_layer_name][orig_idx] = unflatten_layers(
+                v, orig_layer[orig_idx] if (orig_layer is not None and orig_idx in orig_layer) else None
+            )
           else:
-            new_tree[k] = unflatten_layers(v)
+            orig_k = orig_keys.get(str(k), k)
+            orig_v_template = (
+                template_tree[orig_k]
+                if ((isinstance(template_tree, dict) or hasattr(template_tree, "items")) and orig_k in template_tree)
+                else None
+            )
+            new_tree[orig_k] = unflatten_layers(v, orig_v_template)
+
+        if template_tree is not None:
+          try:
+            return type(template_tree)(new_tree)
+          except Exception:  # pylint: disable=broad-exception-caught
+            return new_tree
         return new_tree
+
       if isinstance(tree, (list, tuple)):
-        return type(tree)(unflatten_layers(x) for x in tree)
+        return type(tree)(
+            unflatten_layers(x, template_tree[i] if template_tree and i < len(template_tree) else None)
+            for i, x in enumerate(tree)
+        )
       return tree
 
     if item is not None and restore_args is not None and not transforms:
       flat_item = flatten_layers(item)
       flat_restore_args = flatten_layers(restore_args)
-      if flat_item != item:
-        # Pylint has a bug ignoring self in monkeypatched methods
-        restored_flat = _original_restore(
-            self, directory, item=flat_item, transforms=transforms, restore_args=flat_restore_args, **kwargs
-        )
-        return unflatten_layers(restored_flat)
+      # In many cases flat_item is a dict but item is an nnx.State. To detect structural change,
+      # we compare flat_item with flatten_layers(item), but flat_item IS flatten_layers(item).
+      # Actually, if there's no "layers_x" flattened, flat_item might just be a dict copy of item.
+      # To be safe, we just always unflatten back to item's type/structure if we flattened successfully.
+      restored_flat = _original_restore(
+          self, directory, item=flat_item, transforms=transforms, restore_args=flat_restore_args, **kwargs
+      )
+      return unflatten_layers(restored_flat, item)
 
     return _original_restore(self, directory, item=item, transforms=transforms, restore_args=restore_args, **kwargs)
 
