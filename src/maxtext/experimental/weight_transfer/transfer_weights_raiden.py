@@ -329,6 +329,7 @@ def transfer_and_benchmark(
   start_req = build_resharding_start_request(flat_src, src_sharding, dst_sharding, args.dest_ip, args.dest_port)
 
   if jax.process_count() > 1:
+    syncer_dst = None
     for w in range(args.warmup_iterations):
       multihost_utils.sync_global_devices(f"warmup_start_{w}")
       print(f"  Warmup iteration {w + 1}/{args.warmup_iterations}...", flush=True)
@@ -373,6 +374,11 @@ def transfer_and_benchmark(
       latencies.append(elapsed_ms)
       print(f"  Iteration {it + 1}/{args.iterations}: {elapsed_ms:.2f} ms", flush=True)
       multihost_utils.sync_global_devices(f"iter_end_{it}")
+
+    if jax.process_index() == 1:
+      syncer_dst.h2d()
+      jax.tree.map(lambda x: x.block_until_ready(), flat_dst_init)
+    multihost_utils.sync_global_devices("h2d_complete")
 
     transferred_flat = flat_dst_init
   else:
