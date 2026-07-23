@@ -554,6 +554,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     is_skipped = new_opt_state.get("is_skipped") if isinstance(new_opt_state, dict) else None
     if is_skipped is not None:
       scalar_metrics["optim/step_skipped"] = is_skipped.astype(jnp.float32)
+
   def _extract_sowed_leaf(intermediate_outputs, key_name):
     if not intermediate_outputs:
       return None

@@ -213,7 +213,6 @@ class FragmentedTreeManipulator:
     return jax.tree_util.tree_unflatten(treedef, new_kvs)
 
 
-
 def extract_router_params(tree):
   """Finds all router/gate parameters in a PyTree."""
   kvs, _ = jax.tree_util.tree_flatten_with_path(tree)
@@ -308,6 +307,7 @@ def compute_expert_utilization_entropy(top_k_indices, num_experts: int):
 
   entropy = -jnp.sum(probs * jnp.log(probs + 1e-12))
   return entropy
+
 
 def build_abstract_diloco_state(
     config: "pyconfig.HyperParameters",
@@ -529,11 +529,15 @@ def build_diloco_train_step(
     curr_loss = (
         avg_metrics["scalar"]["learning/loss"]
         if (isinstance(avg_metrics, dict) and "scalar" in avg_metrics and "learning/loss" in avg_metrics["scalar"])
-        else (avg_metrics.get("loss", jnp.array(0.0, dtype=jnp.float32)) if isinstance(avg_metrics, dict) else jnp.array(0.0, dtype=jnp.float32))
+        else (
+            avg_metrics.get("loss", jnp.array(0.0, dtype=jnp.float32))
+            if isinstance(avg_metrics, dict)
+            else jnp.array(0.0, dtype=jnp.float32)
+        )
     )
 
-    is_sync_step = (new_step % config.diloco_sync_period == 0)
-    is_post_sync_step = ((new_step - 1) % config.diloco_sync_period == 0)
+    is_sync_step = new_step % config.diloco_sync_period == 0
+    is_post_sync_step = (new_step - 1) % config.diloco_sync_period == 0
 
     delta_loss_sync = jax.lax.cond(
         is_post_sync_step,
