@@ -102,7 +102,7 @@ BATCH_TIMEOUT_S = float(os.environ.get("MAXTEXT_BATCH_TIMEOUT_S", "0.1"))
 REQUEST_TIMEOUT_S = int(os.environ.get("MAXTEXT_REQUEST_TIMEOUT_S", "36000"))
 # Define a maximum size for the request payload to be broadcasted.
 # This avoids broadcasting variable-sized arrays, which can be complex.
-MAX_REQUEST_SIZE = int(os.environ.get("MAXTEXT_REQUEST_SIZE", "2097152"))
+MAX_REQUEST_SIZE = int(os.environ.get("MAXTEXT_REQUEST_SIZE", "655360"))
 
 
 async def _queue_and_wait_for_response(request: Union[CompletionRequest, ChatCompletionRequest]):
