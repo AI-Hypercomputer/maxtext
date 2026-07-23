@@ -971,7 +971,7 @@ def training_loop_iteration(
       state_dict = {"model": nnx.to_pure_dict(model_state), "metrics": metrics}
       if opt_state is not None:
         state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
-    snapshot_mgr.save_pytree(step, state_dict)
+    snapshot_mgr.save(step, state_dict)
 
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
@@ -1286,7 +1286,7 @@ def recover(
               "params": state.params,
               "opt_state": state.opt_state,
           }
-          restored_dict = snapshot_mgr.load_pytree(abstract_dict)
+          restored_dict = snapshot_mgr.load(abstract_dict)
           restored_state = state.replace(
               step=restored_dict["step"],
               params=restored_dict["params"],
@@ -1304,7 +1304,7 @@ def recover(
           abstract_dict = {"model": nnx.to_pure_dict(model_state)}
           if opt_state is not None:
             abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
-          restored_dict = snapshot_mgr.load_pytree(abstract_dict)
+          restored_dict = snapshot_mgr.load(abstract_dict)
           if hasattr(state, "model") and "model" in restored_dict:
             nnx.update(state.model, restored_dict["model"])
           if hasattr(state, "optimizer") and "optimizer" in restored_dict:
@@ -1601,7 +1601,7 @@ def train_loop(config, recorder, state=None):
       state_dict = {"model": nnx.to_pure_dict(model_state)}
       if opt_state is not None:
         state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
-    snapshot_mgr.save_pytree(start_step, state_dict)
+    snapshot_mgr.save(start_step, state_dict)
     # Block on the first snapshot at startup to guarantee it is secured before training begins
     snapshot_mgr.join()
 
@@ -1709,7 +1709,7 @@ def train_loop(config, recorder, state=None):
               state_dict = {"model": nnx.to_pure_dict(model_state)}
               if opt_state is not None:
                 state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
-            snapshot_mgr.save_pytree(python_vars["step"], state_dict)
+            snapshot_mgr.save(python_vars["step"], state_dict)
 
           training_loop_iteration(jax_device_state, python_vars, immutable_data)
           python_vars["step"] += 1
