@@ -1005,6 +1005,35 @@ class ShiftData(grain.MapTransform):
     return shift_and_refine(element, ignored_ids=self.ignored_ids, axis=self.axis)
 
 
+def _select_last_completion_suffix(validity_mask, completion_mask, axis):
+  """Selects the final assistant turn and truncates later conversation turns."""
+  sequence_length = validity_mask.shape[axis]
+  moved_validity = np.moveaxis(validity_mask, axis, -1)
+  moved_completion = np.moveaxis(completion_mask, axis, -1)
+  flat_validity = moved_validity.reshape(-1, sequence_length)
+  flat_completion = moved_completion.reshape(-1, sequence_length)
+  positions = np.arange(sequence_length)[None, :]
+
+  has_completion = flat_completion.any(axis=-1)
+  last_completion = np.max(np.where(flat_completion, positions, -1), axis=-1)
+  last_prefix_token = np.max(
+      np.where((positions < last_completion[:, None]) & ~flat_completion, positions, -1),
+      axis=-1,
+  )
+  suffix_start = last_prefix_token + 1
+  has_prompt = np.any(flat_validity & (positions < suffix_start[:, None]), axis=-1)
+  nonempty_rows = flat_validity.any(axis=-1)
+  invalid_rows = nonempty_rows & (~has_completion | ~has_prompt)
+  if np.any(invalid_rows):
+    raise ValueError("diffusion OPD requires a completion span after a prompt")
+
+  retained = flat_validity & (positions <= last_completion[:, None]) & has_completion[:, None]
+  selected = retained & (positions >= suffix_start[:, None])
+  selected = selected.reshape(moved_completion.shape)
+  retained = retained.reshape(moved_validity.shape)
+  return np.moveaxis(selected, -1, axis), np.moveaxis(retained, -1, axis)
+
+
 @dataclasses.dataclass
 class BlockDiffusionCorruption(grain.RandomMapTransform):
   """Builds explicit completion, corruption, and loss masks for block diffusion."""
@@ -1018,6 +1047,7 @@ class BlockDiffusionCorruption(grain.RandomMapTransform):
       completion_only: bool = False,
       seed_first_token: bool = False,
       include_seed_in_loss: bool = False,
+      select_last_completion_suffix: bool = False,
   ):
     if block_size <= 0:
       raise ValueError(f"block_size must be positive, got {block_size}")
@@ -1025,6 +1055,8 @@ class BlockDiffusionCorruption(grain.RandomMapTransform):
       raise ValueError(f"min_noise must satisfy 0 < min_noise <= 1, got {min_noise}")
     if include_seed_in_loss and not seed_first_token:
       raise ValueError("include_seed_in_loss requires seed_first_token=True")
+    if select_last_completion_suffix and not completion_only:
+      raise ValueError("select_last_completion_suffix requires completion_only=True")
     self.block_size = block_size
     self.mask_id = mask_id
     self.min_noise = min_noise
@@ -1032,6 +1064,7 @@ class BlockDiffusionCorruption(grain.RandomMapTransform):
     self.completion_only = completion_only
     self.seed_first_token = seed_first_token
     self.include_seed_in_loss = include_seed_in_loss
+    self.select_last_completion_suffix = select_last_completion_suffix
 
   def random_map(self, element, rng: np.random.Generator):
     inputs = np.asarray(element["inputs"])
@@ -1053,6 +1086,13 @@ class BlockDiffusionCorruption(grain.RandomMapTransform):
     if completion_mask.shape != inputs.shape:
       raise ValueError(f"completion_mask must match inputs shape; received {completion_mask.shape} and {inputs.shape}")
     completion_mask &= validity_mask
+    if self.select_last_completion_suffix:
+      completion_mask, validity_mask = _select_last_completion_suffix(validity_mask, completion_mask, axis)
+      inputs = np.where(validity_mask, inputs, inputs.dtype.type(0))
+      targets = np.where(validity_mask, targets, targets.dtype.type(0))
+      targets_segmentation = np.where(
+          validity_mask, targets_segmentation, targets_segmentation.dtype.type(0)
+      )
     eligible_mask = completion_mask if self.completion_only else validity_mask
 
     moved_eligible = np.moveaxis(eligible_mask, axis, -1)
@@ -1083,6 +1123,12 @@ class BlockDiffusionCorruption(grain.RandomMapTransform):
     output = dict(element)
     output["inputs"] = np.where(corruption_mask, inputs.dtype.type(self.mask_id), inputs)
     output["targets"] = targets
+    if self.select_last_completion_suffix:
+      inputs_segmentation = np.asarray(element["inputs_segmentation"])
+      output["inputs_segmentation"] = np.where(
+          validity_mask, inputs_segmentation, inputs_segmentation.dtype.type(0)
+      )
+      output["targets_segmentation"] = targets_segmentation
     output["completion_mask"] = completion_mask.astype(targets_segmentation.dtype)
     output["corruption_mask"] = corruption_mask.astype(targets_segmentation.dtype)
     output["targets_loss_mask"] = targets_loss_mask.astype(targets_segmentation.dtype)

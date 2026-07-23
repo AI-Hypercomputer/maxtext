@@ -241,6 +241,9 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.attention_type, "global")
     self.assertEqual(config.training_objective, "causal_lm")
     self.assertEqual(config.block_diffusion_mask_id, -1)
+    self.assertEqual(config.distill_data_source, "dataset")
+    self.assertEqual(config.distill_rollout_algorithm, "low_confidence")
+    self.assertEqual(config.distill_rollout_stop_token_ids, [])
 
   def test_block_diffusion_training_objective_config(self):
     argv = [

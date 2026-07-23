@@ -69,6 +69,12 @@ class MaxTextTrainingInput(peft_trainer.TrainingInput):
   targets_position: jax.Array | None = None
   #: Segment IDs for packed target tokens.
   targets_segmentation: jax.Array | None = None
+  #: Role-derived positions eligible for completion generation.
+  completion_mask: jax.Array | None = None
+  #: Positions replaced by the diffusion mask token for the student forward pass.
+  corruption_mask: jax.Array | None = None
+  #: Per-target weights for target-aligned diffusion objectives.
+  targets_loss_mask: jax.Array | None = None
   #: Top-K logits from the teacher model.
   top_k_logits: jax.Array | None = None
   top_k_indices: jax.Array | None = None
@@ -132,6 +138,9 @@ class MaxTextToTunixIterator:
         targets=batch["targets"],
         targets_position=targets_position,
         targets_segmentation=targets_segmentation,
+        completion_mask=batch.get("completion_mask"),
+        corruption_mask=batch.get("corruption_mask"),
+        targets_loss_mask=batch.get("targets_loss_mask"),
         top_k_logits=batch.get("top_k_logits"),
         top_k_indices=batch.get("top_k_indices"),
     )

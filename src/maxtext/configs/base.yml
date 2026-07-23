@@ -1321,6 +1321,12 @@ engram_kernel_size: 4
 engram_seed: 0
 
 ##### Distillation parameters
+distill_data_source: "dataset" # dataset or student_rollout for diffusion on-policy distillation
+distill_rollout_algorithm: "low_confidence"
+distill_rollout_confidence_threshold: 0.9
+distill_rollout_temperature: 1.0
+distill_rollout_max_denoise_steps: -1 # -1 uses block_diffusion_block_size
+distill_rollout_stop_token_ids: [] # Empty uses the tokenizer EOS; set model-specific EOT IDs explicitly
 distill_alpha: 0.5
 distill_temperature: 1.0
 # distill_beta is used for cosine similarity loss between intermediate activataitions of out_proj in teacher/student models.

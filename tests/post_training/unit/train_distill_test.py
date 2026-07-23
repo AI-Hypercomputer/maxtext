@@ -104,6 +104,9 @@ class TrainDistillTest(unittest.TestCase):
         "targets": np.array([[11, 12]]),
         "targets_position": np.array([[100, 101]]),  # Custom position
         "targets_segmentation": np.array([[0, 1]]),  # Custom segmentation (mask)
+        "completion_mask": np.array([[0, 1]]),
+        "corruption_mask": np.array([[0, 1]]),
+        "targets_loss_mask": np.array([[0, 1]]),
     }
     dummy_iter_sft = iter([dummy_batch_sft])
 
@@ -115,6 +118,9 @@ class TrainDistillTest(unittest.TestCase):
     self.assertIsInstance(tunix_input_sft, distillation_utils.MaxTextTrainingInput)
     np.testing.assert_array_equal(tunix_input_sft.targets_position, dummy_batch_sft["targets_position"])
     np.testing.assert_array_equal(tunix_input_sft.targets_segmentation, dummy_batch_sft["targets_segmentation"])
+    np.testing.assert_array_equal(tunix_input_sft.completion_mask, dummy_batch_sft["completion_mask"])
+    np.testing.assert_array_equal(tunix_input_sft.corruption_mask, dummy_batch_sft["corruption_mask"])
+    np.testing.assert_array_equal(tunix_input_sft.targets_loss_mask, dummy_batch_sft["targets_loss_mask"])
 
   def test_maxtext_to_tunix_iterator_packed_fallback(self):
     """Verifies fallback behavior when segmentation is missing."""
@@ -151,13 +157,19 @@ class TrainDistillTest(unittest.TestCase):
         input_mask=jnp.array([[True]]),
         positions=jnp.array([[0]]),
         targets=jnp.array([[1]]),
+        completion_mask=jnp.array([[1]]),
+        corruption_mask=jnp.array([[1]]),
+        targets_loss_mask=jnp.array([[1]]),
     )
 
     # 4. Run
-    _ = trainer._prepare_inputs(input_data)
+    prepared = trainer._prepare_inputs(input_data)
 
     # 5. Verify
     trainer.strategy.get_teacher_outputs.assert_not_called()
+    np.testing.assert_array_equal(prepared.completion_mask, input_data.completion_mask)
+    np.testing.assert_array_equal(prepared.corruption_mask, input_data.corruption_mask)
+    np.testing.assert_array_equal(prepared.targets_loss_mask, input_data.targets_loss_mask)
 
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.optax.global_norm")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.tree.map")
@@ -645,6 +657,32 @@ class TrainDistillTest(unittest.TestCase):
 
       # Verify it returned the restored iterator, NOT the raw one
       self.assertEqual(result, restored_iter)
+
+  def test_standard_distillation_rejects_diffusion_opd_checkpoint(self):
+    mock_trainer = mock.Mock()
+    mock_trainer.checkpoint_manager = mock.Mock()
+    mock_trainer.model = mock.Mock()
+    mock_trainer.optimizer = mock.Mock()
+    mock_trainer._lora_enabled = False
+    mock_trainer.config = mock.Mock(
+        checkpointing_options=ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+    )
+    mock_manager = mock.Mock()
+    mock_manager.maybe_restore.return_value = (10, {"diffusion_opd_contract": {"version": 1}})
+    config = mock.Mock(dataset_type="synthetic", checkpoint_dir=self.test_dir)
+
+    with (
+        mock.patch(
+            "maxtext.trainers.post_train.distillation.distillation_utils.MaxTextCheckpointManager",
+            return_value=mock_manager,
+        ),
+        self.assertRaisesRegex(ValueError, "cannot resume a diffusion OPD checkpoint"),
+    ):
+      train_distill.MaxTextDistillationTrainer.setup_checkpoint_manager_and_restore(
+          mock_trainer,
+          object(),
+          config,
+      )
 
   def test_eval_step_calls_student_forward(self):
     """Verifies eval step correctly calls the student forward function and computes loss."""

@@ -422,6 +422,9 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         targets=input_data.targets,
         targets_position=input_data.targets_position,
         targets_segmentation=input_data.targets_segmentation,
+        completion_mask=input_data.completion_mask,
+        corruption_mask=input_data.corruption_mask,
+        targets_loss_mask=input_data.targets_loss_mask,
         top_k_logits=input_data.top_k_logits,
         top_k_indices=input_data.top_k_indices,
     )
@@ -532,6 +535,11 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         self.optimizer,
         restore_only_lora_params=getattr(self, "_lora_enabled", False),
     )
+    if "diffusion_opd_contract" in (self._restored_custom_metadata or {}):
+      raise ValueError(
+          "standard distillation cannot resume a diffusion OPD checkpoint; "
+          "keep distill_data_source='student_rollout' or start from a compatible checkpoint"
+      )
     grad_accum_steps = self.config.get_with_default("gradient_accumulation_steps", 1)
     self._iter_steps = self._train_steps * grad_accum_steps
 
@@ -574,14 +582,14 @@ def build_training_components(
     is_offline: bool = False,
     offline_data_dir: str | None = None,
 ):
-  """Builds and returns the strategy, optimizer, and training config objects.
+  """Builds the strategy, optimizer, training config, and tokenizer EOS ID.
 
   Args:
     student_config: Configuration object for the Student model.
     teacher_config: Configuration object for the Teacher model.
 
   Returns:
-    A tuple of (DistillationStrategy, Optimizer, TrainingConfig).
+    A tuple of (DistillationStrategy, Optimizer, TrainingConfig, eos_id).
   """
   # 2. Load Tokenizer Info
   tok = tokenizer.build_tokenizer(
@@ -642,6 +650,9 @@ def build_training_components(
       log_dir=student_config.tensorboard_dir, flush_every_n_steps=student_config.log_period
   )
 
+  opd_training_options = (
+      {"max_inflight_computations": 1} if student_config.distill_data_source == "student_rollout" else {}
+  )
   train_config = peft_trainer.TrainingConfig(
       max_steps=student_config.steps,
       eval_every_n_steps=student_config.eval_interval,
@@ -651,9 +662,10 @@ def build_training_components(
       checkpointing_options=checkpointing_options,
       gradient_accumulation_steps=student_config.gradient_accumulation_steps,
       data_sharding_axis=tuple(student_config.data_sharding),
+      **opd_training_options,
   )
 
-  return strategy, optimizer, train_config
+  return strategy, optimizer, train_config, tok.eos_id
 
 
 def train_distill(
@@ -677,9 +689,19 @@ def train_distill(
         f"Vocab size mismatch! Student: {student_config.vocab_size}, Teacher: {teacher_config.vocab_size}. "
         "Distillation requires matching vocabularies."
     )
+  diffusion_opd_enabled = student_config.distill_data_source == "student_rollout"
+  diffusion_opd_lib = None
+  if diffusion_opd_enabled:
+    # Keep the standard distillation import path compatible with the currently
+    # pinned Tunix release. New Tunix diffusion APIs are required only when OPD
+    # is explicitly selected.
+    # pylint: disable-next=import-outside-toplevel
+    from maxtext.trainers.post_train.distillation import diffusion_opd as diffusion_opd_lib
+
+    diffusion_opd_lib.validate_diffusion_opd_configs(student_config, teacher_config, is_offline=is_offline)
 
   # Build Training Components (No hardware context required)
-  strategy, optimizer, train_config = build_training_components(
+  strategy, optimizer, train_config, eos_id = build_training_components(
       student_config, teacher_config, is_offline, offline_data_dir
   )
 
@@ -724,21 +746,33 @@ def train_distill(
       )
 
     student_model.train()
-    model_bundle = ModelBundle(teacher_model, student_model)
-
-    # 3. Initialize Trainer
-    trainer = MaxTextDistillationTrainer(
-        model=model_bundle,
-        strategy=strategy,
-        optimizer=optimizer,
-        training_config=train_config,
-        student_config=student_config,
-        teacher_config=teacher_config,
-        is_offline=is_offline,
-        student_freeze_param_filter=student_freeze_param_fn if student_params_to_update else None,
-    )
+    model_bundle = None
+    if diffusion_opd_enabled:
+      assert diffusion_opd_lib is not None
+      trainer = diffusion_opd_lib.MaxTextDiffusionOPDTrainer(
+          student_model=student_model,
+          teacher_model=teacher_model,
+          optimizer=optimizer,
+          training_config=train_config,
+          student_config=student_config,
+          teacher_config=teacher_config,
+          eos_id=eos_id,
+      )
+    else:
+      model_bundle = ModelBundle(teacher_model, student_model)
+      trainer = MaxTextDistillationTrainer(
+          model=model_bundle,
+          strategy=strategy,
+          optimizer=optimizer,
+          training_config=train_config,
+          student_config=student_config,
+          teacher_config=teacher_config,
+          is_offline=is_offline,
+          student_freeze_param_filter=student_freeze_param_fn if student_params_to_update else None,
+      )
     trainer.is_managed_externally = True
-    trainer._has_aux = True  # pylint: disable=protected-access
+    if not diffusion_opd_enabled:
+      trainer._has_aux = True  # pylint: disable=protected-access
 
     if is_offline:
       max_logging.log("Initializing Data Iterators via MaxText pipeline...")
@@ -759,7 +793,10 @@ def train_distill(
 
     # Sync the ModelBundle step counter with the restored training step so that
     # loss weight schedules resume from the correct position after checkpoint restore.
-    model_bundle.training_step.set_value(jnp.array(trainer._train_steps, dtype=jnp.int32))  # pylint: disable=protected-access
+    if model_bundle is not None:
+      model_bundle.training_step.set_value(  # pylint: disable=protected-access
+          jnp.array(trainer._train_steps, dtype=jnp.int32)  # pylint: disable=protected-access
+      )
 
     # 6. Configure Input Mapping
     def custom_gen_model_input_fn(batch):
@@ -782,10 +819,21 @@ def train_distill(
       )
       return inputs_dict
 
-    trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
+    if not diffusion_opd_enabled:
+      trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
 
     # 7. Create Iterator Wrappers (Use Utils)
     train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
+    if diffusion_opd_enabled:
+      assert diffusion_opd_lib is not None
+      train_iter = diffusion_opd_lib.replay_and_bound_iterator(
+          train_iter,
+          iter_steps=trainer.iter_steps,
+          train_steps=trainer.train_steps,
+          max_steps=student_config.steps,
+          accumulation_steps=student_config.gradient_accumulation_steps,
+          replay_iterator=getattr(raw_train_iter, "local_iterator", None),
+      )
 
     eval_iter = None
     if raw_eval_iter is not None:
@@ -821,6 +869,7 @@ def train_distill(
             optimizer=trainer.optimizer,
             save_only_lora_params=getattr(trainer, "_lora_enabled", False),
             force=True,
+            custom_metadata=trainer.custom_checkpoint_metadata() if diffusion_opd_enabled else {},
         )
         if saved:
           # Ensure underlying orbax manager finishes writing
@@ -910,6 +959,12 @@ def main(argv: Sequence[str]) -> None:
   # This ensures flags like `num_query_heads=16` passed in CLI don't affect the Teacher.
   teacher_argv = [argv[0], argv[1]]
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
+
+  if student_config.distill_data_source == "student_rollout":
+    # pylint: disable-next=import-outside-toplevel
+    from maxtext.trainers.post_train.distillation import diffusion_opd as diffusion_opd_lib
+
+    diffusion_opd_lib.validate_diffusion_opd_configs(student_config, teacher_config, is_offline=is_offline)
 
   # Batch shape (per_device_batch_size / max_target_length / gradient_accumulation_steps)
   # must be set at the YAML top level — not inside *_overrides — since student and

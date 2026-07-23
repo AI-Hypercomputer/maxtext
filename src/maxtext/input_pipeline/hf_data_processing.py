@@ -68,6 +68,7 @@ def _get_training_objective_transform(
         completion_only=bool(use_sft and completion_only),
         seed_first_token=config.block_diffusion_canvas_policy == "seed_and_mask",
         include_seed_in_loss=config.block_diffusion_logit_alignment == "shifted",
+        select_last_completion_suffix=getattr(config, "distill_data_source", "dataset") == "student_rollout",
     )
   if objective != "causal_lm":
     raise ValueError(f"Unsupported training objective: {objective}")

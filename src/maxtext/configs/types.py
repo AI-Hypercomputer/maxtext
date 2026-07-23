@@ -1511,6 +1511,35 @@ class Distillation(BaseModel):
       description="GCS or local path to the pre-generated ArrayRecord teacher data.",
   )
 
+  distill_data_source: Literal["dataset", "student_rollout"] = Field(
+      "dataset",
+      description="Whether distillation consumes dataset targets or fresh rollouts from the current student.",
+  )
+  distill_rollout_algorithm: Literal["low_confidence"] = Field(
+      "low_confidence",
+      description="Block-diffusion rollout algorithm used for on-policy distillation.",
+  )
+  distill_rollout_confidence_threshold: float = Field(
+      0.9,
+      ge=0.0,
+      le=1.0,
+      description="Confidence threshold for parallel token commits during diffusion rollout.",
+  )
+  distill_rollout_temperature: float = Field(
+      1.0,
+      gt=0.0,
+      description="Temperature used to compute rollout token confidence.",
+  )
+  distill_rollout_max_denoise_steps: int = Field(
+      -1,
+      ge=-1,
+      description="Maximum denoising iterations per block; -1 uses block_diffusion_block_size.",
+  )
+  distill_rollout_stop_token_ids: list[int] = Field(
+      default_factory=list,
+      description="Generated token IDs that terminate the OPD completion; empty uses the tokenizer EOS ID.",
+  )
+
   # --- Loss Params ---
   distill_alpha: float = Field(0.5, description="Weight for the distillation loss component.")
   distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
