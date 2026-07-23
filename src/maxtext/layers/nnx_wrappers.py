@@ -312,6 +312,57 @@ class ToNNX(Module):
 
     return out
 
+  def get_layers(self) -> list[Any]:
+    """Returns all decoder layer modules in execution order."""
+    layers = []
+    seen = set()
+
+    def _add(module):
+      if module is not None and id(module) not in seen:
+        seen.add(id(module))
+        layers.append(module)
+
+    def _append_unscanned(prefix):
+      i = 0
+      while hasattr(self, f"{prefix}_{i}"):
+        _add(getattr(self, f"{prefix}_{i}"))
+        i += 1
+
+    def _append_scanned(name):
+      if hasattr(self, name):
+        val = getattr(self, name)
+        if name == "layers_remainder" and getattr(val, "num_of_layers", 0) == 0:
+          return
+        _add(val)
+
+    _append_scanned("dense_layers")
+    _append_unscanned("dense_layers")
+
+    _append_scanned("moe_layers")
+    _append_unscanned("moe_layers")
+
+    _append_scanned("moe_layers_outside_pipeline")
+    _append_unscanned("moe_layers_outside_pipeline")
+
+    if hasattr(self, "pipeline_module"):
+      _add(getattr(self.pipeline_module, "layers", None))
+
+    _append_scanned("scanned_blocks")  # Gemma 4
+    _append_scanned("layers")
+    _append_unscanned("layers")
+
+    _append_scanned("layers_remainder")  # Gemma 3/4
+
+    _append_scanned("layers_outside_pipeline")
+    _append_unscanned("layers_outside_pipeline")
+
+    if not layers:
+      for k, m in vars(self).items():
+        if k.startswith(("dense_layers", "moe_layers", "layers", "scanned_blocks")):
+          _add(m)
+
+    return layers
+
 
 def linen_rngs_dict(linen_module: linen.Module, add_default: bool = False):
   """Given a module, split out one of its every active RNG key collections."""

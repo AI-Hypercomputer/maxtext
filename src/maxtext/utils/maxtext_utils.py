@@ -1496,10 +1496,15 @@ def get_intermediate_value(model, nested_key, default=None, clear=False):
   intermediate_value = default
   match nested_key:
     case "out_projection_activations":
-      if nested_key in model.decoder.layers["self_attention"]:
-        intermediate_value = model.decoder.layers["self_attention"][nested_key].get_value()[-1]
-        if clear:
-          del model.decoder.layers["self_attention"][nested_key]
+      layers = model.decoder.get_layers()
+      last_layer = layers[-1]
+      if hasattr(last_layer, "self_attention"):
+        attn = last_layer.self_attention
+        if hasattr(attn, nested_key):
+          var = getattr(attn, nested_key)
+          intermediate_value = var.get_value()[-1]
+          if clear:
+            delattr(attn, nested_key)
     case _:
       # Default case to handle any unknown nested keys
       raise ValueError(f"Incorrect nested_key: {nested_key}")

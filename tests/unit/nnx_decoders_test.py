@@ -999,7 +999,7 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
     )
 
     # Mock each layer's compute_shared_kv
-    for layer in decoder.layers:
+    for layer in decoder.get_layers():
       layer.compute_shared_kv = MagicMock(return_value=(jnp.zeros((1, 16, 128)), jnp.zeros((1, 16, 128))))
 
     # Inputs

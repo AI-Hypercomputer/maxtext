@@ -29,7 +29,7 @@ import jax.numpy as jnp
 if jax.__version_info__ >= (0, 6, 3):
   from jax.experimental.layout import Layout as DLL  # type: ignore
 else:
-  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
+  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore # pylint: disable=no-name-in-module
 
 from flax import linen as nn
 from flax import nnx
@@ -486,7 +486,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           lambda x: jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(None, *x.spec)),
           self.prefill_kv_cache_shardings,
       )
-      self.prefill_kv_cache_shardings = {"decoder": {"layers": self.prefill_kv_cache_shardings["decoder"]["layers"][0]}}
+      decoder_dict = self.prefill_kv_cache_shardings["decoder"]
+      first_key = next(k for k in decoder_dict.keys() if k.endswith("layers_0"))
+      first_layer_sharding = decoder_dict[first_key]
+      self.prefill_kv_cache_shardings = {"decoder": {"layers": first_layer_sharding}}
     # scan_layers=True is already stacked on axis 0; shardings stay as-is and stack/unstack are no-ops.
     # AR-mode abstract model so axis names use CACHE_BATCH (not CACHE_BATCH_PREFILL);
     # bulk_insert / _insert_jit search for "cache_batch" in the per-leaf logical axes.
@@ -610,10 +613,17 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if self.config.scan_layers:
         # scan_layers already stacks the per-layer KV cache on axis 0; nothing to restack.
         return cache
-      # scan_layers=False: stack the per-layer subtrees under decoder/layers into one
+      # scan_layers=False: stack the per-layer subtrees under decoder into one
       # subtree with a leading layer axis (matching the scan_layers=True shape).
-      layers = cache["decoder"]["layers"]
-      stacked = jax.tree.map(lambda *c: jnp.stack(c), *[layers[i] for i in range(self.config.num_decoder_layers)])
+      if "dense_layers_0" in cache["decoder"] or "moe_layers_0" in cache["decoder"]:
+        first_dense = self.config.first_num_dense_layers
+        num_moe = self.config.num_decoder_layers - first_dense
+        layer_keys = [f"dense_layers_{i}" for i in range(first_dense)] + [f"moe_layers_{i}" for i in range(num_moe)]
+      else:
+        layer_keys = [f"layers_{i}" for i in range(self.config.num_decoder_layers)]
+
+      layer_cache = [cache["decoder"][key] for key in layer_keys]
+      stacked = jax.tree.map(lambda *c: jnp.stack(c), *layer_cache)
       return {"decoder": {"layers": stacked}}
 
     layer_keys = []
@@ -636,8 +646,22 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         return cache
       # scan_layers=False: split the leading layer axis back into per-layer subtrees.
       stacked = cache["decoder"]["layers"]
-      layers = {i: jax.tree.map(lambda x, i=i: x[i], stacked) for i in range(self.config.num_decoder_layers)}
-      return {"decoder": {"layers": layers}}
+      res_cache = {"decoder": {}}
+      is_deepseek = (
+          getattr(self.model, "is_deepseek", False)
+          or (hasattr(self.model, "decoder") and getattr(self.model.decoder, "is_deepseek", False))
+          or (hasattr(self.config, "decoder_block") and str(self.config.decoder_block).lower() == "deepseek")
+      )
+      if is_deepseek:
+        first_dense = self.config.first_num_dense_layers
+        num_moe = self.config.num_decoder_layers - first_dense
+        layer_keys = [f"dense_layers_{i}" for i in range(first_dense)] + [f"moe_layers_{i}" for i in range(num_moe)]
+      else:
+        layer_keys = [f"layers_{i}" for i in range(self.config.num_decoder_layers)]
+
+      for idx, key in enumerate(layer_keys):
+        res_cache["decoder"][key] = jax.tree.map(lambda x, i=idx: x[i], stacked)
+      return res_cache
 
     flat_cache, treedef = jax.tree.flatten(cache)
     layer_cache = [jax.tree.unflatten(treedef, flat_cache_vars) for flat_cache_vars in zip(*flat_cache, strict=True)]
