@@ -192,6 +192,54 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.attention_type, "chunk")
     self.assertTrue(config.context_parallel_load_balance)
 
+  def test_block_diffusion_config(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "attention=dot_product",
+        "attention_type=block_diffusion",
+        "block_diffusion_block_size=7",
+        "vocab_size=256",
+        "max_target_length=2048",
+        "hardware=cpu",
+    ]
+    config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.attention_type, "block_diffusion")
+    self.assertEqual(config.block_diffusion_block_size, 7)
+    self.assertNotEqual(config.max_target_length % config.block_diffusion_block_size, 0)
+    self.assertFalse(hasattr(config, "enable_block_diffusion"))
+
+  def test_block_diffusion_invalid_configs_raise(self):
+    base_overrides = {
+        "run_name": "test",
+        "steps": 1,
+        "attention": "dot_product",
+        "attention_type": "block_diffusion",
+        "block_diffusion_block_size": 32,
+        "vocab_size": 256,
+        "max_target_length": 2048,
+        "hardware": "cpu",
+    }
+    cases = [
+        {"block_diffusion_block_size": 0},
+        {"attention": "cudnn_flash_te"},
+        {"attention": "flash", "hardware": "gpu"},
+    ]
+    for overrides in cases:
+      with self.subTest(overrides=overrides):
+        config = base_overrides | overrides
+        argv = ["", _BASE_CONFIG_PATH, *(f"{key}={value}" for key, value in config.items())]
+        with self.assertRaises((ValueError, pydantic.ValidationError)):
+          pyconfig.initialize(argv)
+
+  def test_default_attention_remains_global(self):
+    config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "steps=1"])
+
+    self.assertEqual(config.attention_type, "global")
+
   @unittest.mock.patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_env_override(self):
     """Tests that environment variables override YAML values."""

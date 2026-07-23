@@ -380,12 +380,13 @@ param_scan_axis: 1
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
+attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla, full, compressed, block_diffusion
 share_kv_projections: false # Note: Not compatible with attention_type='mla'
 attention_bias: false # If true, adds a learnable bias to the query, key, and value projections
 attention_sink: false
 sliding_window_size: 0
 chunk_attn_window_size: 0
+block_diffusion_block_size: 32 # Size of each bidirectional block when attention_type='block_diffusion'
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 z_loss_multiplier: 0.0

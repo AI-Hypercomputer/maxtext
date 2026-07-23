@@ -84,6 +84,16 @@ import numpy as np
 dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
 
+def _resolve_attention_type(config: Config, attention_type: AttentionType | str | None) -> AttentionType:
+  configured_attention_type = AttentionType(getattr(config, "attention_type", AttentionType.GLOBAL.value))
+  if attention_type is None:
+    return configured_attention_type
+  resolved_attention_type = AttentionType(attention_type)
+  if configured_attention_type == AttentionType.BLOCK_DIFFUSION and resolved_attention_type == AttentionType.GLOBAL:
+    return configured_attention_type
+  return resolved_attention_type
+
+
 def validate_compute_axis_order(s: AxisIdxes) -> None:
   valid_compute_axis_order = ((0, 1, 2, 3), (0, 2, 1, 3))
   if s not in valid_compute_axis_order:  # currently supported compute_axis_order
@@ -204,6 +214,50 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
     )
 
 
+class BlockCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access,abstract-method
+  """Lazy mask with bidirectional attention within causal blocks."""
+
+  block_size: int
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      block_size: int,
+      shard_count: int = 1,
+  ):
+    if block_size <= 0:
+      raise ValueError("block_size must be positive")
+    self.block_size = block_size
+
+    def block_causal_mask_function(q_ids, kv_ids):
+      return (q_ids // self.block_size) >= (kv_ids // self.block_size)
+
+    super().__init__(
+        shape=shape,
+        mask_function=block_causal_mask_function,
+        shard_count=shard_count,
+    )
+
+  def __eq__(self, other: object):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+    return (
+        self.shape == other.shape
+        and self.block_size == other.block_size
+        and np.array_equal(self.q_sequence, other.q_sequence)
+    )
+
+  def __hash__(self):
+    return hash(
+        (
+            type(self),
+            self.shape,
+            self.block_size,
+            self.q_sequence.tobytes() if self.q_sequence is not None else None,
+        )
+    )
+
+
 def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
   """Generates an explicit boolean mask for chunked causal attention.
 
@@ -232,6 +286,16 @@ def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int,
   same_chunk = (row_ids // chunk_size) == (col_ids // chunk_size)
   chunk_mask = same_chunk & (row_ids >= col_ids)
   return chunk_mask
+
+
+def _generate_block_causal_attention_mask(mask_shape: tuple[int, int], block_size: int, q_offset: int = 0) -> jax.Array:
+  """Generates a block-causal mask, bidirectional within each block."""
+  if block_size <= 0:
+    raise ValueError("block_size must be positive")
+
+  row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0) + q_offset
+  col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+  return (row_ids // block_size) >= (col_ids // block_size)
 
 
 def _make_block_mask_indices(bidirectional_mask):
@@ -479,7 +543,13 @@ class AttentionOp(nnx.Module):
     self.dtype = dtype
     self.quant = quant
     self.kv_quant = kv_quant
-    self.attention_type = attention_type
+    self.attention_type = _resolve_attention_type(self.config, attention_type)
+    self.block_diffusion_block_size = getattr(self.config, "block_diffusion_block_size", None)
+    if self.attention_type == AttentionType.BLOCK_DIFFUSION:
+      if self.block_diffusion_block_size is None or self.block_diffusion_block_size <= 0:
+        raise ValueError("block_diffusion_block_size must be positive for block-diffusion attention")
+      if self.attention_kernel not in ("autoselected", "dot_product", "flash"):
+        raise ValueError("Block-diffusion attention is supported only by dot_product attention and TPU Splash attention.")
     # Block sizes are only used by TPU splash attention kernels. Exclude non-splash kernels
     if self.attention_kernel not in (
         "dot_product",
@@ -782,6 +852,7 @@ class AttentionOp(nnx.Module):
     if model_mode != MODEL_MODE_AUTOREGRESSIVE and self.attention_type not in (
         AttentionType.FULL,
         AttentionType.COMPRESSED,
+        AttentionType.BLOCK_DIFFUSION,
     ):
       if use_segment_positions:
         causal_mask = (position_col_ids <= position_row_ids)[:, None, None, :, :]
@@ -860,6 +931,19 @@ class AttentionOp(nnx.Module):
             q_offset=next_pos,
         )
       output_mask = chunk_mask * output_mask
+
+    elif self.attention_type == AttentionType.BLOCK_DIFFUSION and model_mode != MODEL_MODE_AUTOREGRESSIVE:
+      if use_segment_positions:
+        block_mask = (
+            (position_row_ids // self.block_diffusion_block_size) >= (position_col_ids // self.block_diffusion_block_size)
+        )[:, None, None, :, :]
+      else:
+        block_mask = _generate_block_causal_attention_mask(
+            mask_shape=(q_seq_len, kv_seq_len),
+            block_size=self.block_diffusion_block_size,
+            q_offset=next_pos,
+        )[None, None, None, :, :]
+      output_mask = block_mask if output_mask is None else jnp.logical_and(output_mask, block_mask)
 
     if bidirectional_mask is not None:
       image_mask = _make_bidirectional_block_mask(bidirectional_mask)
@@ -1126,6 +1210,11 @@ class AttentionOp(nnx.Module):
         return out, None, None
 
       else:
+        if self.attention_type == AttentionType.BLOCK_DIFFUSION:
+          raise ValueError(
+              "Block-diffusion flash attention is supported only by TPU Splash; "
+              "use attention='dot_product' on other hardware."
+          )
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
           return self.apply_attention_dot(
@@ -1430,13 +1519,24 @@ class AttentionOp(nnx.Module):
       sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
       mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
       mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
+      use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
+      elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
+        mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
+        mask_kwargs = {"cp_size": cp_size} if use_load_balanced_cp else {}
+        mask = mask_type(
+            shape=mask_shape,
+            block_size=self.block_diffusion_block_size,
+            **mask_kwargs,
+        )
       else:
         mask = mask_module.CausalMask(shape=mask_shape)
 
-      use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
-      if use_load_balanced_cp and self.attention_type != AttentionType.FULL:
+      if use_load_balanced_cp and self.attention_type not in (
+          AttentionType.FULL,
+          AttentionType.BLOCK_DIFFUSION,
+      ):
         mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
 
       # Apply local masking if local sliding attention is enabled.
@@ -2444,6 +2544,24 @@ class LoadBalancedChunkedCausalMask(ChunkedCausalMask):
     super().__init__(
         shape=shape,
         chunk_size=chunk_size,
+        shard_count=shard_count,
+    )
+    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)
+
+
+class LoadBalancedBlockCausalMask(BlockCausalMask):  # pylint: disable=abstract-method
+  """Lazy block-causal mask with load-balanced query positions."""
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      block_size: int,
+      cp_size: int,
+      shard_count: int = 1,
+  ):
+    super().__init__(
+        shape=shape,
+        block_size=block_size,
         shard_count=shard_count,
     )
     self.q_sequence = _load_balanced_q_sequence(shape, cp_size)

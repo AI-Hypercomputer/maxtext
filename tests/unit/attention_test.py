@@ -44,9 +44,12 @@ from maxtext.layers.attention_mla import MLA
 from maxtext.layers import attention_op
 from maxtext.layers.attention_op import (
     AttentionOp,
+    BlockCausalMask,
     ChunkedCausalMask,
+    _generate_block_causal_attention_mask,
     _generate_chunk_attention_mask,
     _make_bidirectional_block_mask,
+    _resolve_attention_type,
 )
 from maxtext.layers.attentions import Attention
 from maxtext.layers import embeddings
@@ -330,6 +333,143 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+class BlockCausalMaskTest(unittest.TestCase):
+  """Tests the shared dense and Splash block-causal masks."""
+
+  def _make_op(self, sequence_length, *, attention_type=AttentionType.BLOCK_DIFFUSION):
+    """Builds a minimal dot-product attention operator."""
+    config = types.SimpleNamespace(
+        block_diffusion_block_size=4,
+        context_parallel_load_balance=False,
+        context_sharding="context",
+    )
+    mesh = types.SimpleNamespace(shape={})
+    kwargs = {}
+    if attention_type is not None:
+      kwargs["attention_type"] = attention_type
+    return AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=sequence_length,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        **kwargs,
+    )
+
+  def test_dense_and_splash_masks_match(self):
+    sequence_length = 10
+    block_size = 4
+    query_positions = np.arange(sequence_length)[:, None]
+    key_positions = np.arange(sequence_length)[None, :]
+    expected = query_positions // block_size >= key_positions // block_size
+
+    splash_mask = BlockCausalMask((sequence_length, sequence_length), block_size)
+    dense_mask = _generate_block_causal_attention_mask((sequence_length, sequence_length), block_size)
+
+    np.testing.assert_array_equal(splash_mask[:, :], expected)
+    np.testing.assert_array_equal(dense_mask, expected)
+    self.assertTrue(expected[1, 3])
+    self.assertFalse(expected[3, 4])
+    self.assertTrue(expected[4, 3])
+    self.assertTrue(expected[8, 9])
+
+  def test_dot_product_mask_respects_packed_segments(self):
+    sequence_length = 12
+    query = jnp.zeros((1, sequence_length, 1, 8))
+    key = jnp.zeros((1, sequence_length, 1, 8))
+    segment_ids = jnp.asarray([[1] * 8 + [2] * 4], dtype=jnp.int32)
+
+    mask = self._make_op(sequence_length).generate_attention_mask(
+        query,
+        key,
+        segment_ids,
+        MODEL_MODE_TRAIN,
+    )
+
+    positions = np.arange(sequence_length)
+    expected = (positions[:, None] // 4 >= positions[None, :] // 4) & (
+        np.asarray(segment_ids[0])[:, None] == np.asarray(segment_ids[0])[None, :]
+    )
+    np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected)
+
+  def test_autoregressive_mask_is_unchanged(self):
+    key_length = 8
+    query = jnp.zeros((1, 1, 1, 8))
+    key = jnp.zeros((1, key_length, 1, 8))
+    segment_ids = jnp.asarray([[1, 1, 0, 1, 0, 0, 1, 0]], dtype=jnp.int32)
+
+    default_mask = self._make_op(key_length, attention_type=None).generate_attention_mask(
+        query,
+        key,
+        segment_ids,
+        MODEL_MODE_AUTOREGRESSIVE,
+    )
+    block_diffusion_mask = self._make_op(key_length).generate_attention_mask(
+        query,
+        key,
+        segment_ids,
+        MODEL_MODE_AUTOREGRESSIVE,
+    )
+
+    np.testing.assert_array_equal(block_diffusion_mask, default_mask)
+    np.testing.assert_array_equal(
+        np.asarray(default_mask == 0.0)[0, 0, 0, 0],
+        np.asarray(segment_ids[0] == DECODING_ACTIVE_SEQUENCE_INDICATOR),
+    )
+
+  def test_invalid_block_size_raises(self):
+    with self.assertRaises(ValueError):
+      BlockCausalMask((4, 4), 0)
+    with self.assertRaises(ValueError):
+      _generate_block_causal_attention_mask((4, 4), -1)
+
+
+class AttentionTypeResolutionTest(unittest.TestCase):
+
+  def test_config_selects_block_diffusion_without_model_dispatch(self):
+    config = types.SimpleNamespace(attention_type=AttentionType.BLOCK_DIFFUSION.value)
+
+    self.assertEqual(_resolve_attention_type(config, None), AttentionType.BLOCK_DIFFUSION)
+    self.assertEqual(_resolve_attention_type(config, AttentionType.GLOBAL), AttentionType.BLOCK_DIFFUSION)
+    self.assertEqual(_resolve_attention_type(config, AttentionType.FULL), AttentionType.FULL)
+    self.assertEqual(_resolve_attention_type(config, AttentionType.LOCAL_SLIDING), AttentionType.LOCAL_SLIDING)
+    self.assertEqual(
+        _resolve_attention_type(types.SimpleNamespace(attention_type=AttentionType.GLOBAL.value), AttentionType.FULL),
+        AttentionType.FULL,
+    )
+    self.assertEqual(_resolve_attention_type(types.SimpleNamespace(), None), AttentionType.GLOBAL)
+
+  def test_attention_op_honors_config_without_overriding_specialized_layers(self):
+    config = types.SimpleNamespace(
+        attention_type=AttentionType.BLOCK_DIFFUSION.value,
+        block_diffusion_block_size=4,
+    )
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=8,
+        mesh=types.SimpleNamespace(shape={}),
+        attention_kernel="dot_product",
+        attention_type=AttentionType.GLOBAL,
+    )
+
+    self.assertEqual(op.attention_type, AttentionType.BLOCK_DIFFUSION)
+
+    full_op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=8,
+        mesh=types.SimpleNamespace(shape={}),
+        attention_kernel="dot_product",
+        attention_type=AttentionType.FULL,
+    )
+
+    self.assertEqual(full_op.attention_type, AttentionType.FULL)
+
+
 class LoadBalancedMaskTest(unittest.TestCase):
   """Tests for load-balanced Splash masks."""
 
@@ -369,6 +509,20 @@ class LoadBalancedMaskTest(unittest.TestCase):
     )
 
     np.testing.assert_array_equal((causal_mask & chunk_mask)[:, :], expected_mask)
+
+  def test_load_balanced_block_causal_mask(self):
+    sequence_length = 8
+    block_size = 2
+    mask = attention_op.LoadBalancedBlockCausalMask(
+        shape=(sequence_length, sequence_length),
+        block_size=block_size,
+        cp_size=2,
+    )
+    query_positions = mask.q_sequence[:, None]
+    key_positions = np.arange(sequence_length)[None, :]
+    expected = query_positions // block_size >= key_positions // block_size
+
+    np.testing.assert_array_equal(mask[:, :], expected)
 
   def test_dot_product_local_mask_uses_segment_positions(self):
     config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")

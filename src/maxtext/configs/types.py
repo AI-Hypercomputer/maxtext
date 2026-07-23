@@ -572,7 +572,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
@@ -619,6 +619,10 @@ class Attention(BaseModel):
   )
   sliding_window_size: NonNegativeInt = Field(0, description="The size of the sliding window for local attention.")
   chunk_attn_window_size: NonNegativeInt = Field(0, description="The window size for chunked attention.")
+  block_diffusion_block_size: PositiveInt = Field(
+      32,
+      description="The size of each bidirectional block when attention_type is 'block_diffusion'.",
+  )
   attn_logits_soft_cap: None | NonNegativeFloat = Field(
       None, description="Soft-cap value for attention logits. None means no cap."
   )
@@ -3283,6 +3287,14 @@ class MaxTextConfig(
         not isinstance(self.sliding_window_size, int) or self.sliding_window_size <= 0
     ):
       raise ValueError("`sliding_window_size` must be an integer > 0 for 'local_sliding' attention.")
+    if self.attention_type == AttentionType.BLOCK_DIFFUSION.value:
+      if self.attention not in ("autoselected", "dot_product", "flash"):
+        raise ValueError("Block-diffusion attention is supported only by dot_product attention and TPU Splash attention.")
+      if self.attention in ("autoselected", "flash") and self.hardware != "tpu":
+        raise ValueError(
+            "Block-diffusion attention with attention='autoselected' or attention='flash' requires hardware='tpu'; "
+            "use attention='dot_product' on other hardware."
+        )
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
     if (
