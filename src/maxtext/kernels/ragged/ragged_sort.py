@@ -17,7 +17,7 @@
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
-from maxtext.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
+from maxtext.kernels.ragged.ragged_gather_reduce_v2 import get_sorted_by_validity, ragged_gather_reduce
 
 
 def ring_ragged_sort(
@@ -34,6 +34,7 @@ def ring_ragged_sort(
     gather_reduce_flops_override=-1,
     gather_bytes_accessed_override=-1,
     gather_reduce_bytes_accessed_override=-1,
+    precomputed_sorted_by_validity=None,
 ):
   """Ragged-gather variant for AG-RS Expert Parallelism token routing.
 
@@ -62,6 +63,7 @@ def ring_ragged_sort(
     ep_name: ``str`` identifying the expert parallel axis name.
     ep_size: scalar ``int`` representing the expert parallel mesh size.
     buffer_size: optional scalar ``int`` representing the size of the local buffer.
+    precomputed_sorted_by_validity: optional pre-computed sorted_by_validity array.
 
   Returns:
     A tuple containing:
@@ -72,13 +74,41 @@ def ring_ragged_sort(
       - 1D tensor ``topk_argsort_revert_indices`` for inverse routing.
   """
 
+  def _compute_valid_rows_mask(topk_argsort_revert_indices, shard_output_start, shard_output_end, local_buffer_size):
+    """Computes valid rows mask and indices for ragged gather / gather reduce operations."""
+    # Restrict to the [start, end) source range via a validity bitmask. The
+    # ragged kernel packs valid rows to the front of each row-partition and
+    # only iterates over the populated prefix, so we hand it the mask directly
+    # rather than materializing a (mostly-zero) dense buffer ourselves.
+    n = topk_argsort_revert_indices.shape[0]
+    if local_buffer_size >= n:
+      valid_rows_mask = (topk_argsort_revert_indices >= shard_output_start) & (
+          topk_argsort_revert_indices < shard_output_end
+      )
+      indices = topk_argsort_revert_indices
+    else:
+      # Buffering: g_x has size `local_buffer_size` (packed).
+      # The revert indices are global [0, n), but they must map to the local
+      # packed g_x buffer.
+      shifted_indices = topk_argsort_revert_indices - shard_output_start
+      local_num_tokens = shard_output_end - shard_output_start
+      # We only reduce gradients from the valid portion of the local buffer.
+      limit = jnp.minimum(local_num_tokens, local_buffer_size)
+      # Mask out tokens that were not gathered (either because they belong to
+      # other shards, or they exceeded the local buffer size).
+      valid_rows_mask = (shifted_indices >= 0) & (shifted_indices < limit)
+      # Clamp invalid indices to 0 to prevent compile-time/run-time out-of-bounds
+      # in JAX. These clamped values will be ignored due to `valid_rows_mask`.
+      indices = jnp.where(valid_rows_mask, shifted_indices, 0)
+    return valid_rows_mask, indices
+
   @jax.custom_vjp
-  def _ring_ragged_sort(hidden_states_local, topk_indices_local):
+  def _ring_ragged_sort(hidden_states_local, topk_indices_local, precomputed_sorted_by_validity):
     """Sort and gather activations to different EP shards."""
-    return _ring_ragged_sort_fwd(hidden_states_local, topk_indices_local)[0]
+    return _ring_ragged_sort_fwd(hidden_states_local, topk_indices_local, precomputed_sorted_by_validity)[0]
 
   @jax.named_scope("ragged-sort-fwd")
-  def _ring_ragged_sort_fwd(hidden_states_local, topk_indices_local):
+  def _ring_ragged_sort_fwd(hidden_states_local, topk_indices_local, precomputed_sorted_by_validity):
     """Sort and gather activations forward pass."""
 
     num_tokens_local = hidden_states_local.shape[0]
@@ -136,7 +166,17 @@ def ring_ragged_sort(
           bytes_accessed_override=gather_bytes_accessed_override,
       )
 
-    out = (x, group_sizes_local, topk_argsort_revert_indices)
+    n = topk_argsort_revert_indices.shape[0]
+    sorted_by_validity_cache = None
+    if precomputed_sorted_by_validity is None and not enforce_gather_reduce_fallback:
+      valid_rows_mask_fwd, _ = _compute_valid_rows_mask(
+          topk_argsort_revert_indices, shard_output_start, shard_output_end, local_buffer_size
+      )
+      sorted_by_validity_cache = get_sorted_by_validity(hidden_states_local.shape[1], n, valid_rows_mask_fwd, topk)
+    else:
+      sorted_by_validity_cache = precomputed_sorted_by_validity
+
+    out = (x, group_sizes_local, topk_argsort_revert_indices, sorted_by_validity_cache)
 
     res = (
         topk_argsort_revert_indices,
@@ -144,6 +184,7 @@ def ring_ragged_sort(
         shard_output_end,
         local_buffer_size,
         hidden_states_local.shape,
+        sorted_by_validity_cache,
     )
 
     return out, res
@@ -163,62 +204,30 @@ def ring_ragged_sort(
         shard_output_end,
         local_buffer_size,
         _,
+        sorted_by_validity_cache,
     ) = res
-    g_x, _, _ = g_out
-    # Restrict to the [start, end) source range via a validity bitmask. The
-    # ragged kernel packs valid rows to the front of each row-partition and
-    # only iterates over the populated prefix, so we hand it the mask directly
-    # rather than materializing a (mostly-zero) dense buffer ourselves.
-    n = topk_argsort_revert_indices.shape[0]
+    g_x, _, _, _ = g_out
 
-    if local_buffer_size >= n:
-      valid_rows_mask = (topk_argsort_revert_indices >= shard_output_start) & (
-          topk_argsort_revert_indices < shard_output_end
-      )
-      # The forward scatter-add over `token_indices_sorted` is equivalent to a
-      # gather-reduce: each input token has exactly `topk` contributions located
-      # at sorted positions `topk_argsort_revert_indices[t*topk:(t+1)*topk]`.
-      # `topk_weights` is set to ones because this op has no per-row weighting.
-      grad_hidden_states = ragged_gather_reduce(
-          g_x,
-          topk_argsort_revert_indices,
-          topk_weights=jnp.ones((n,), dtype=jnp.float32),
-          valid_rows_mask=valid_rows_mask,
-          reduce_group_size=topk,
-          enforce_fallback=enforce_gather_reduce_fallback,
-          flops_override=gather_reduce_flops_override,
-          bytes_accessed_override=gather_reduce_bytes_accessed_override,
-      )
-    else:
-      # Buffering: g_x has size `local_buffer_size` (packed).
-      # The revert indices are global [0, n), but they must map to the local
-      # packed g_x buffer.
-      shifted_indices = topk_argsort_revert_indices - shard_output_start
-      local_num_tokens = shard_output_end - shard_output_start
-      # We only reduce gradients from the valid portion of the local buffer.
-      limit = jnp.minimum(local_num_tokens, local_buffer_size)
-      # Mask out tokens that were not gathered (either because they belong to
-      # other shards, or they exceeded the local buffer size).
-      valid_rows_mask = (shifted_indices >= 0) & (shifted_indices < limit)
-      # Clamp invalid indices to 0 to prevent compile-time/run-time out-of-bounds
-      # in JAX. These clamped values will be ignored due to `valid_rows_mask`.
-      safe_indices = jnp.where(valid_rows_mask, shifted_indices, 0)
+    valid_rows_mask, indices = _compute_valid_rows_mask(
+        topk_argsort_revert_indices, shard_output_start, shard_output_end, local_buffer_size
+    )
 
-      grad_hidden_states = ragged_gather_reduce(
-          g_x,
-          safe_indices,
-          topk_weights=jnp.ones((n,), dtype=jnp.float32),
-          valid_rows_mask=valid_rows_mask,
-          reduce_group_size=topk,
-          enforce_fallback=enforce_gather_reduce_fallback,
-          flops_override=gather_reduce_flops_override,
-          bytes_accessed_override=gather_reduce_bytes_accessed_override,
-      )
-    return grad_hidden_states, None
+    grad_hidden_states = ragged_gather_reduce(
+        g_x,
+        indices,
+        topk_weights=jnp.ones((topk_argsort_revert_indices.shape[0],), dtype=jnp.float32),
+        valid_rows_mask=valid_rows_mask,
+        reduce_group_size=topk,
+        enforce_fallback=enforce_gather_reduce_fallback,
+        flops_override=gather_reduce_flops_override,
+        bytes_accessed_override=gather_reduce_bytes_accessed_override,
+        precomputed_sorted_by_validity=sorted_by_validity_cache,
+    )
+    return grad_hidden_states, None, None
 
   _ring_ragged_sort.defvjp(_ring_ragged_sort_fwd, _ring_ragged_sort_bwd)
 
-  return _ring_ragged_sort(hidden_states_local, topk_indices_local)
+  return _ring_ragged_sort(hidden_states_local, topk_indices_local, precomputed_sorted_by_validity)
 
 
 def ring_ragged_unsort(
