@@ -712,6 +712,32 @@ class TestCreateNnxModel(unittest.TestCase):
     self.assertIsInstance(model, models.Transformer)
 
   @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_load_checkpoint_with_custom_vision_projector(self, mock_ocp):
+    """NNX checkpoint loading with customized_mlp vision projector runs _free_device_memory cleanly."""
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    cfg = _make_config(
+        enable_checkpointing=True,
+        load_parameters_path="gs://fake/custom_vision_ckpt",
+        use_multimodal=True,
+        model_name="qwen3-vl-2b",
+        override_model_config=True,
+        scan_layers=False,
+        vision_projector_type="customized_mlp",
+        vision_connector_num_layers=2,
+        vision_connector_activation="gelu",
+        vision_connector_use_bias=True,
+    )
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    self.assertIsInstance(model, models.Transformer)
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
   def test_checkpoint_load_error_propagates(self, mock_ocp):
     """Non-mismatch exceptions during checkpoint loading should propagate directly."""
     mock_ckptr = MagicMock()
