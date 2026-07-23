@@ -45,9 +45,13 @@ def get_input_data_sharding(config, mesh, rules=None):
   if rules is None:
     rules = config.logical_axis_rules
   if config.enable_diloco:
-    data_sharding = create_sharding(mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=rules)
+    data_sharding = create_sharding(mesh, ["diloco"] +
+                                    config.input_data_sharding_logical_axes,
+                                    rules=rules)
   else:
-    data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=rules)
+    data_sharding = create_sharding(mesh,
+                                    config.input_data_sharding_logical_axes,
+                                    rules=rules)
   return data_sharding
 
 
@@ -66,7 +70,10 @@ def _get_sharding_desc(inputs, extra_stack_level):
   if frame is not None:
     callers_local_vars = frame.f_locals.items()
 
-    x = [var_name for var_name, var_val in callers_local_vars if var_val is inputs]
+    x = [
+        var_name for var_name, var_val in callers_local_vars
+        if var_val is inputs
+    ]
     if len(x) > 0:
       caller_path_full = inspect.stack()[1 + extra_stack_level].filename
       # Use pathlib.Path to easily extract just the filename from the full path.
@@ -75,9 +82,13 @@ def _get_sharding_desc(inputs, extra_stack_level):
   return "Unknown"
 
 
-def maybe_shard_with_name(
-    inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0, sharding_desc="", logical_axes=None
-):
+def maybe_shard_with_name(inputs,
+                          named_sharding,
+                          shard_mode,
+                          debug_sharding=False,
+                          extra_stack_level=0,
+                          sharding_desc="",
+                          logical_axes=None):
   """
   In auto shardmode, this function hints inputs follow given named_sharding.
   In explicit shardmode, this function enforces inputs following named_sharding.
@@ -86,9 +97,8 @@ def maybe_shard_with_name(
   """
   if inputs is None:
     return None
-  if (
-      debug_sharding and isinstance(inputs, Tracer) and isinstance(named_sharding, NamedSharding)
-  ):  # only print pspec for JitTracer
+  if (debug_sharding and isinstance(inputs, Tracer) and isinstance(
+      named_sharding, NamedSharding)):  # only print pspec for JitTracer
     if not sharding_desc:
       sharding_desc = _get_sharding_desc(inputs, extra_stack_level + 1)
 
@@ -97,30 +107,37 @@ def maybe_shard_with_name(
     elif isinstance(logical_axes, list):
       logical_axes = tuple(logical_axes)
 
-    pspec = remove_size_one_mesh_axis(getattr(named_sharding, "spec"), getattr(named_sharding, "mesh"))
-    log_key = (sharding_desc, str(jax.typeof(inputs)), tuple(pspec), extra_stack_level)
+    pspec = remove_size_one_mesh_axis(getattr(named_sharding, "spec"),
+                                      getattr(named_sharding, "mesh"))
+    log_key = (sharding_desc, str(jax.typeof(inputs)), tuple(pspec),
+               extra_stack_level)
     if log_key not in _LOGGED_ACTIVATION_SHARDINGS:
-      max_logging.info(f"{sharding_desc} Logical: {log_key[1]:.<60} {logical_axes}.", stacklevel=3 + extra_stack_level)
-      max_logging.info(f"{sharding_desc} Physical: {log_key[1]:.<60} {log_key[2]}.", stacklevel=3 + extra_stack_level)
+      max_logging.info(
+          f"{sharding_desc} Logical: {log_key[1]:.<60} {logical_axes}.",
+          stacklevel=3 + extra_stack_level)
+      max_logging.info(
+          f"{sharding_desc} Physical: {log_key[1]:.<60} {log_key[2]}.",
+          stacklevel=3 + extra_stack_level)
       _LOGGED_ACTIVATION_SHARDINGS.add(log_key)
 
-      _ACTIVATION_SHARDINGS_DUMP.append(
-          {
-              f"{sharding_desc}: {log_key[1]}": {
-                  "logic_axes": f"{logical_axes}",
-                  "PartitionSpec": f"P{log_key[2]}",
-              }
+      _ACTIVATION_SHARDINGS_DUMP.append({
+          f"{sharding_desc}: {log_key[1]}": {
+              "logic_axes": f"{logical_axes}",
+              "PartitionSpec": f"P{log_key[2]}",
           }
-      )
+      })
   if shard_mode == ShardMode.EXPLICIT:
     return reshard(inputs, named_sharding)
   else:
     return jax.lax.with_sharding_constraint(inputs, named_sharding)
 
 
-def maybe_shard_with_pspec(
-    inputs, pspec: jax.sharding.PartitionSpec | None, mesh, shard_mode, debug_sharding=False, extra_stack_level=0
-):
+def maybe_shard_with_pspec(inputs,
+                           pspec: jax.sharding.PartitionSpec | None,
+                           mesh,
+                           shard_mode,
+                           debug_sharding=False,
+                           extra_stack_level=0):
   if pspec is None:
     return None
   sharding = NamedSharding(mesh, pspec)
@@ -133,9 +150,14 @@ def maybe_shard_with_pspec(
   )
 
 
-def maybe_shard_with_logical(
-    inputs, logical_axes, mesh, shard_mode, rules=None, debug_sharding=False, extra_stack_level=0, sharding_desc=""
-):
+def maybe_shard_with_logical(inputs,
+                             logical_axes,
+                             mesh,
+                             shard_mode,
+                             rules=None,
+                             debug_sharding=False,
+                             extra_stack_level=0,
+                             sharding_desc=""):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
   sharding_desc is description of inputs of upper layer(s) of caller (with the form of <filename>/<variable>).
@@ -181,7 +203,8 @@ def remove_size_one_mesh_axis(spec, mesh):
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 
-def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Variable:
+def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable,
+                                              mesh) -> nnx.Variable:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
   val = v.get_value()
   if not hasattr(val, "shape"):
@@ -193,7 +216,8 @@ def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Vari
       return v.replace(jax.tree.map(lambda _: replicated, val))
     return v
   metadata = v.get_metadata()
-  out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
+  out_sharding = metadata.get("out_sharding") or metadata.get(
+      "sharding_names") or metadata.get("sharding")
   if not out_sharding:
     pspec = P()
   else:
@@ -201,7 +225,8 @@ def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Vari
     if nnx.PARTITION_NAME in metadata:
       partition_name = metadata[nnx.PARTITION_NAME]
       scan_axis = metadata.get("param_scan_axis", 0)
-      out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
+      out_sharding = [out_sharding] if isinstance(out_sharding,
+                                                  str) else list(out_sharding)
       if partition_name not in out_sharding:
         out_sharding.insert(scan_axis, partition_name)
       out_sharding = tuple(out_sharding)
@@ -210,13 +235,16 @@ def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Vari
     local_rules = metadata.get("sharding_rules", ())
     if context_rules or local_rules:
       local_rules_list = list(local_rules) if local_rules is not None else []
-      context_rules_list = list(context_rules) if context_rules is not None else []
+      context_rules_list = list(
+          context_rules) if context_rules is not None else []
       rules = local_rules_list + context_rules_list
       pspec = logical_to_mesh_axes(out_sharding, mesh, rules=rules)
     else:
       pspec = P(*out_sharding)
       if mesh is not None:
         pspec = remove_size_one_mesh_axis(pspec, mesh)
+  if mesh is None:
+    return v.replace(pspec)
   return v.replace(NamedSharding(mesh, pspec))
 
 
@@ -283,7 +311,8 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
 
 def create_sharding(mesh, logical_names, rules=None):
   """Create NamedSharding with given logical names."""
-  return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
+  return NamedSharding(mesh,
+                       logical_to_mesh_axes(logical_names, mesh, rules=rules))
 
 
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
@@ -305,10 +334,9 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
   """
   # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
   tensor_sharding_spec = sum(
-      [
-          [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
-          for axis in tensor_sharding_spec
-      ],
+      [[axis] if isinstance(axis, str) else
+       list(axis) if isinstance(axis, Iterable) else []
+       for axis in tensor_sharding_spec],
       [],
   )
   return tensor_sharding_spec
@@ -344,7 +372,10 @@ def _get_nontrival_mesh_axes(mesh):
 
   # Filter the target axes to find those that exist in the current mesh
   # and have a size greater than 1, meaning they are actually used for sharding.
-  return {axis for axis in target_sharding_axes_config if axis in mesh.axis_names and mesh.shape[axis] > 1}
+  return {
+      axis for axis in target_sharding_axes_config
+      if axis in mesh.axis_names and mesh.shape[axis] > 1
+  }
 
 
 def _analyze_sharding(params, mesh, valid_target_mesh_axes):
@@ -368,48 +399,50 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
         dictionary contains details about a tensor that is not sharded on any of the target axes.
   """
   unsharded_params_total_size = 0  # Initialize a counter for the size of unsharded parameters.
-  problematic_tensors_details = []  # Initialize a list to store details of problematic tensors.
+  problematic_tensors_details = [
+  ]  # Initialize a list to store details of problematic tensors.
 
   # Get a flattened list of all parameters (leaves) in the PyTree, along with their paths.
   all_params_leaves = jax.tree_util.tree_leaves_with_path(params)
 
   for path, p_leaf in all_params_leaves:  # Iterate over each parameter leaf
-    param_name_str = jax.tree_util.keystr(path)  # Convert the tree path to a readable string
+    param_name_str = jax.tree_util.keystr(
+        path)  # Convert the tree path to a readable string
 
     # Check that sharding and spec exist and are valid
     sharding = getattr(p_leaf, "sharding", None)
     spec = getattr(sharding, "spec", None)
     assert sharding is not None and spec is not None and isinstance(spec, P), (
         f"Parameter '{param_name_str}' is missing a valid '.sharding.spec'."
-        "Expected 'p_leaf.sharding.spec' to be a non-null 'partitionspec'."
-    )
+        "Expected 'p_leaf.sharding.spec' to be a non-null 'partitionspec'.")
 
     current_sharding_spec = p_leaf.sharding.spec  # Extract the current tensor's sharding spec
     # Identify axes used for sharding
     mesh_axes_used = get_mesh_axes_used_by_tensor_spec(current_sharding_spec)
     # Check if the parameter is sharded on all the valid target axes.
-    is_sharded_on_all_target_axis = all(axis in mesh_axes_used for axis in valid_target_mesh_axes)
+    is_sharded_on_all_target_axis = all(
+        axis in mesh_axes_used for axis in valid_target_mesh_axes)
 
     # If the parameter is not sharded on all of the target axes, it's considered "problematic."
     if not is_sharded_on_all_target_axis:
       unsharded_params_total_size += p_leaf.size  # Add to total unsharded parameter size
       unsharded_axes = set(valid_target_mesh_axes) - set(mesh_axes_used)
       # Add detailed info to list of problematic tensors
-      problematic_tensors_details.append(
-          {
-              "name": param_name_str,  # Tensor name
-              "size": p_leaf.size,  # tensor size
-              "shape": p_leaf.shape,  # tensor shape
-              "spec": str(current_sharding_spec),  # Tensor sharding spec as string
-              "available_axes": sorted(list(valid_target_mesh_axes)),  # Axes that could be used for sharding
-              "unsharded_axes": sorted(list(unsharded_axes)),  # Unsharded axes
-          }
-      )
+      problematic_tensors_details.append({
+          "name": param_name_str,  # Tensor name
+          "size": p_leaf.size,  # tensor size
+          "shape": p_leaf.shape,  # tensor shape
+          "spec": str(current_sharding_spec),  # Tensor sharding spec as string
+          "available_axes": sorted(list(valid_target_mesh_axes)
+                                  ),  # Axes that could be used for sharding
+          "unsharded_axes": sorted(list(unsharded_axes)),  # Unsharded axes
+      })
   # Return the total size of unsharded parameters and the list of problematic tensors.
   return unsharded_params_total_size, problematic_tensors_details  # Return results
 
 
-def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance, problematic_tensors_details):
+def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
+                                          problematic_tensors_details):
   """
   Raises an AssertionError if the percentage of unsharded parameters exceeds the given tolerance.
 
@@ -440,20 +473,20 @@ def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
 
     # Begin constructing the error message.
     error_msg_lines = [
-        f"Unsharded parameter percentage ({unsharded_param_perc:.2%})" f"exceeds tolerance ({tolerance:.2%})."
+        f"Unsharded parameter percentage ({unsharded_param_perc:.2%})"
+        f"exceeds tolerance ({tolerance:.2%})."
     ]
     # Add a header explaining the issue.
     error_msg_lines.append(
         "The following large tensors are replicated (unsharded) but could be sharded on at "
-        "least one of the available axes:"
-    )
+        "least one of the available axes:")
     # Add details for the top 5 largest problematic tensors.
-    for detail in problematic_tensors_details[:5]:  # Show top 5 largest problematic tensors
+    for detail in problematic_tensors_details[:
+                                              5]:  # Show top 5 largest problematic tensors
       error_msg_lines.append(
           f" - Name: {detail['name']}(Size: {detail['size']}, Shape: {detail['spec']}, Spec: {detail['spec']}) "
           f" is unsharded on axis: {detail['unsharded_axes']}"
-          f" could be sharded on: {detail['available_axes']}"
-      )
+          f" could be sharded on: {detail['available_axes']}")
 
     # Raise the assertion error with the combined, formatted message.
     raise AssertionError("\n".join(error_msg_lines))
@@ -484,13 +517,14 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
 
   # Analyze the parameters to find the total size of unsharded parameters
   # and get details on which tensors are problematic.
-  unsharded_params_total_size, problematic_tensors_details = _analyze_sharding(params, mesh, valid_target_mesh_axes)
+  unsharded_params_total_size, problematic_tensors_details = _analyze_sharding(
+      params, mesh, valid_target_mesh_axes)
 
   # Check if the amount of unsharded parameters is within the tolerance and
   # raise an exception if it is not.
-  _raise_if_unsharded_exceeds_tolerance(
-      unsharded_params_total_size, total_num_params, tolerance, problematic_tensors_details
-  )
+  _raise_if_unsharded_exceeds_tolerance(unsharded_params_total_size,
+                                        total_num_params, tolerance,
+                                        problematic_tensors_details)
 
 
 def add_data_to_sharding(mesh, path, aval, sharding):
@@ -514,11 +548,15 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     AssertionError: If sharding is not NamedSharding or shape cannot be sharded
   """
   if not isinstance(sharding, jax.sharding.NamedSharding):
-    raise AssertionError(f"Expected NamedSharding, found {sharding} of {type(sharding)=} at {jax.tree_util.keystr(path)}")
+    raise AssertionError(
+        f"Expected NamedSharding, found {sharding} of {type(sharding)=} at {jax.tree_util.keystr(path)}"
+    )
   try:
     sharded_shape = sharding.shard_shape(aval.shape)
   except Exception as e:
-    raise AssertionError(f"Could not shard {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}") from e
+    raise AssertionError(
+        f"Could not shard {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}"
+    ) from e
   pspec = sharding.spec
 
   if "data" in jax.tree.leaves(pspec):
@@ -531,9 +569,12 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     if isinstance(partition, str):
       partition = (partition,)
 
-    if size % mesh.shape["data"] == 0 and (partition is None or "tensor" not in partition):
-      added_component = ("data",) + partition  # pyrefly: ignore[unsupported-operation]
-      new_pspec = jax.sharding.PartitionSpec(*(pspec[:idx] + (added_component,) + pspec[idx + 1 :]))
+    if size % mesh.shape["data"] == 0 and (partition is None or
+                                           "tensor" not in partition):
+      added_component = (
+          "data",) + partition  # pyrefly: ignore[unsupported-operation]
+      new_pspec = jax.sharding.PartitionSpec(
+          *(pspec[:idx] + (added_component,) + pspec[idx + 1:]))
       new_sharding = jax.sharding.NamedSharding(sharding.mesh, new_pspec)
       return new_sharding
   return sharding
@@ -558,30 +599,32 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
         (unchanged if shard_optimizer_over_data is False)
   """
   if config.pure_nnx:
-    return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
+    return maybe_update_params_sharding_with_opt_nnx(config,
+                                                     state_mesh_shardings)
   prev_params_shardings = state_mesh_shardings.params
   if config.shard_optimizer_over_data:
     if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
       sharded_fp32_params = state_mesh_shardings.opt_state.mu
     elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(
-        state_mesh_shardings.opt_state[0], optax.ScaleByAdamState
-    ):
+        state_mesh_shardings.opt_state[0], optax.ScaleByAdamState):
       sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
     else:
-      raise NotImplementedError(f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}")
+      raise NotImplementedError(
+          f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}"
+      )
     if "params" not in sharded_fp32_params.keys():
       # When quantization=fp8 is enabled the sharded_fp32_params
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
-    state_mesh_shardings = state_mesh_shardings.replace(
-        params=dict(prev_params_shardings, **sharded_fp32_params)
-    )  # pyrefly: ignore[bad-unpacking]
+    state_mesh_shardings = state_mesh_shardings.replace(params=dict(
+        prev_params_shardings,
+        **sharded_fp32_params))  # pyrefly: ignore[bad-unpacking]
   return prev_params_shardings, state_mesh_shardings
 
 
 def maybe_update_params_sharding_with_opt_nnx(
-    config: pyconfig.HyperParameters, state_mesh_shardings: nnx.State
-) -> tuple[nnx.State, nnx.State]:
+    config: pyconfig.HyperParameters,
+    state_mesh_shardings: nnx.State) -> tuple[nnx.State, nnx.State]:
   """
   NNX version of parameter sharding update. Updates parameter sharding configuration
   when optimizer state sharding is enabled.
@@ -610,9 +653,13 @@ def maybe_update_params_sharding_with_opt_nnx(
     structure as nnx.split(model, nnx.Param, ...)[1], enabling jax.tree.map
     to work correctly between ga_params (Param-only) and params_shardings.
     """
+    param_type = nnx.LoRAParam if getattr(getattr(config, "lora", None),
+                                          "enable_lora", False) else nnx.Param
     result = {}
     for k, v in state.items():
-      if isinstance(v, nnx.Param):
+      if isinstance(v, (NamedSharding, jax.sharding.Sharding)):
+        result[k] = v
+      elif isinstance(v, param_type):
         result[k] = v
       elif isinstance(v, nnx.Variable):
         pass  # skip non-Param variables (RngKey, RngCount, OptVariable, etc.)
@@ -663,24 +710,40 @@ def maybe_update_params_sharding_with_opt_nnx(
     sharded_fp32_params = find_adam_mu(opt_state)
   if sharded_fp32_params is None:
     actual_type = type(state_mesh_shardings.optimizer.get("opt_state", "None"))
-    raise NotImplementedError(f"Could not find Adam optimizer state in: {actual_type}")
+    raise NotImplementedError(
+        f"Could not find Adam optimizer state in: {actual_type}")
 
   # Update model parameter sharding to match the mu (first moment) sharding.
   # This ensures parameter sharding is consistent with the Zero-1 distributed layout.
   # Build a path → new_PS lookup from sharded_fp32_params (mu), then update model_shardings
   # at those paths while preserving rngs and any other non-Param variables.
   mu_leaves_with_paths = list(
-      jax.tree_util.tree_leaves_with_path(sharded_fp32_params, is_leaf=lambda x: isinstance(x, nnx.Variable))
-  )
-  mu_lookup = {path: mu_var.get_value() for path, mu_var in mu_leaves_with_paths}
+      jax.tree_util.tree_leaves_with_path(
+          sharded_fp32_params,
+          is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding, jax.
+                                           sharding.Sharding)),
+      ))
+  mu_lookup = {
+      path: (mu_var.get_value() if isinstance(mu_var, nnx.Variable) else mu_var)
+      for path, mu_var in mu_leaves_with_paths
+  }
 
   def _update_model_var(path, var):
     if path in mu_lookup:
-      return var.replace(mu_lookup[path])
+      if isinstance(var, nnx.Variable):
+        val = var.get_value()
+        if isinstance(val, jax.ShapeDtypeStruct):
+          return var.replace(value=jax.ShapeDtypeStruct(
+              val.shape, val.dtype, sharding=mu_lookup[path]))
+        return var.replace(mu_lookup[path])
+      return mu_lookup[path]
     return var
 
   new_model_shardings = jax.tree_util.tree_map_with_path(
-      _update_model_var, model_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable)
+      _update_model_var,
+      model_shardings,
+      is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding, jax.sharding
+                                       .Sharding)),
   )
   # Use jax.tree_util.tree_map (identity) to create a new nnx.State via JAX's unflatten
   # mechanism (not the nnx.State constructor). This is critical because:
@@ -689,13 +752,17 @@ def maybe_update_params_sharding_with_opt_nnx(
   #    nested module states as plain dicts). JAX's unflatten preserves the original types.
   # 2. copy.deepcopy fails because NamedSharding contains non-picklable jaxlib.Device objects.
   # Direct __setattr__ assignment stores new_model_shardings as-is (no type conversion).
-  updated_state = jax.tree_util.tree_map(lambda x: x, state_mesh_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  updated_state = jax.tree_util.tree_map(
+      lambda x: x,
+      state_mesh_shardings,
+      is_leaf=lambda x: isinstance(x, nnx.Variable))
   updated_state.model = new_model_shardings
 
   return prev_params_shardings, updated_state
 
 
-def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_shardings):
+def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings,
+                                           params_shardings):
   """Build the train-step input shardings under shard_optimizer_over_data (Zero-1).
 
   Model params on input use the original pre-Zero-1 sharding (params_shardings),
@@ -742,7 +809,8 @@ def logical_axis_rules_pp_act_as_dp(logical_rules):
     new_physical_axes = tuple(axis for axis in physical_axes if axis != "stage")
     if "data" in new_physical_axes:
       data_idx = new_physical_axes.index("data")
-      new_physical_axes = new_physical_axes[0:data_idx] + ("stage",) + new_physical_axes[data_idx:]
+      new_physical_axes = new_physical_axes[0:data_idx] + (
+          "stage",) + new_physical_axes[data_idx:]
     new_rules.append((key, new_physical_axes))
   return tuple(new_rules)
 
@@ -769,7 +837,8 @@ def get_formatted_sharding_annotations(params, mesh=None):
 
   # If a mesh object is provided, add its details to the report header.
   if mesh:
-    annotation_lines.append(f"Mesh axes: {mesh.axis_names}, Mesh shape: {mesh.shape}")
+    annotation_lines.append(
+        f"Mesh axes: {mesh.axis_names}, Mesh shape: {mesh.shape}")
     annotation_lines.append("-" * 30)
 
   # Get a flattened list of all parameters (leaves) and their corresponding paths in the PyTree.
@@ -806,7 +875,9 @@ def get_formatted_sharding_annotations(params, mesh=None):
       sharding_desc = "No .sharding attribute found"
 
     # Append the formatted details for the current parameter to our list of lines.
-    annotation_lines.append(f" - Param: {param_name_str}\n" f"   Shape: {shape_str}\n" f"   Sharding: {sharding_desc}")
+    annotation_lines.append(f" - Param: {param_name_str}\n"
+                            f"   Shape: {shape_str}\n"
+                            f"   Sharding: {sharding_desc}")
   # Join all the collected lines into a single string, separated by newlines.
   return "\n".join(annotation_lines)
 
@@ -835,7 +906,8 @@ def remove_fsdp_sharding(sharding_tree):
         else:
           raise ValueError(f"Unsupported_axis_type: {type(axis)}")
         # Return a new sharding object with the modified spec.
-      return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+      return jax.sharding.NamedSharding(named_sharding.mesh,
+                                        jax.sharding.PartitionSpec(*new_spec))
     return named_sharding
 
   return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
@@ -892,13 +964,16 @@ def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
   """
 
   # Convert the high-level logical spec to a physical one using default rules.
-  physical = logical_to_mesh_sharding(full_logical, mesh=mesh, rules=logical_axis_rules)
+  physical = logical_to_mesh_sharding(full_logical,
+                                      mesh=mesh,
+                                      rules=logical_axis_rules)
   # Apply the function to remove the FSDP sharding, defining our target layout.
   physical_no_fsdp = remove_fsdp_sharding(physical)
   return physical_no_fsdp
 
 
-def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode):
+def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules,
+                         shard_mode):
   """Performs an all-gather on FSDP-sharded variables via a sharding constraint.
   This function triggers an all-gather operation on the model's parameters.
   It does so by applying a sharding constraint that specifies a fully
@@ -920,7 +995,10 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
     in the weights being fully replicated on all devices in the 'fsdp' mesh.
   """
   # Get the target physical layout (weights fully replicated).
-  physical_constraint_no_fsdp = get_physical_spec_no_fsdp(sharding_info, mesh, logical_axis_rules)
+  physical_constraint_no_fsdp = get_physical_spec_no_fsdp(
+      sharding_info, mesh, logical_axis_rules)
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
-  return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
+  return maybe_shard_with_name(variables,
+                               physical_constraint_no_fsdp,
+                               shard_mode=shard_mode)

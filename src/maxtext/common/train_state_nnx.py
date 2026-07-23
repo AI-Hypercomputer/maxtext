@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """The NNX Unified TrainState."""
 
 from typing import Any
@@ -51,9 +50,12 @@ class TrainStateNNX(nnx.Module):
       raise RuntimeError(
           "Cannot call apply_gradients on a TrainStateNNX initialized without"
           " an optimizer. This usually happens when the state was created for"
-          " inference only."
-      )
+          " inference only.")
     self.optimizer.update(self.model, grads, **kwargs)
+
+  def to_pure_dict(self):
+    """Returns the pure dict representation of the NNX state."""
+    return nnx.state(self).to_pure_dict()
 
 
 # On-disk checkpoint format.
@@ -81,7 +83,9 @@ def _cast_step(step, dtype):
   values.
   """
   if isinstance(step, jax.ShapeDtypeStruct):
-    return jax.ShapeDtypeStruct(step.shape, dtype, sharding=getattr(step, "sharding", None))
+    return jax.ShapeDtypeStruct(step.shape,
+                                dtype,
+                                sharding=getattr(step, "sharding", None))
   return jnp.asarray(step, dtype=dtype)
 
 
@@ -108,7 +112,12 @@ def _wrap_mu_nu_with_params(state):
   """Wraps mu/nu under an inner 'params' key (the Linen collection)."""
   if not isinstance(state, dict):
     return state
-  return {k: {"params": v} if k in ("mu", "nu") and isinstance(v, dict) else v for k, v in state.items()}
+  return {
+      k: {
+          "params": v
+      } if k in ("mu", "nu") and isinstance(v, dict) else
+         v for k, v in state.items()
+  }
 
 
 def _as_chain_index(key):
@@ -137,13 +146,80 @@ def _opt_state_to_linen(opt_state):
   return chain
 
 
+def _rename_nnx_to_linen_layers(d):
+  """Converts NNX nested layer dicts ('scanned_blocks/layers/0' or 'layers_remainder/layers/0')
+  to Linen-style flat layer keys ('layers_0', 'layers_1') for on-disk checkpoint compatibility.
+  """
+  if not isinstance(d, dict):
+    return d
+  res = {}
+  num_scanned = 0
+
+  def _count_scanned(d_sub):
+    if not isinstance(d_sub, dict):
+      return 0
+    if "scanned_blocks" in d_sub and isinstance(d_sub["scanned_blocks"], dict):
+      sb = d_sub["scanned_blocks"]
+      if "layers" in sb and isinstance(sb["layers"], dict):
+        return len(sb["layers"])
+      return len(
+          [k for k in sb.keys() if k.startswith("layers_") or str(k).isdigit()])
+    for v_sub in d_sub.values():
+      if isinstance(v_sub, dict):
+        c = _count_scanned(v_sub)
+        if c > 0:
+          return c
+    return 0
+
+  num_scanned = _count_scanned(d)
+
+  for k, v in d.items():
+    if k == "scanned_blocks" and isinstance(v, dict):
+      if "layers" in v and isinstance(v["layers"], dict):
+        for l_idx, l_val in v["layers"].items():
+          layer_key = f"layers_{l_idx}" if str(l_idx).isdigit() else str(l_idx)
+          res[layer_key] = _rename_nnx_to_linen_layers(l_val)
+      else:
+        for sub_k, sub_v in v.items():
+          layer_key = sub_k if sub_k.startswith("layers_") else (
+              f"layers_{sub_k}" if str(sub_k).isdigit() else sub_k)
+          res[layer_key] = _rename_nnx_to_linen_layers(sub_v)
+    elif k == "layers_remainder" and isinstance(v, dict):
+      if "layers" in v and isinstance(v["layers"], dict):
+        for l_idx, l_val in v["layers"].items():
+          idx_int = int(l_idx) if str(l_idx).isdigit() else 0
+          global_idx = num_scanned + idx_int
+          layer_key = f"layers_{global_idx}"
+          res[layer_key] = _rename_nnx_to_linen_layers(l_val)
+      else:
+        for sub_k, sub_v in v.items():
+          if sub_k.startswith("layers_") and sub_k[7:].isdigit():
+            idx_int = int(sub_k[7:])
+          elif str(sub_k).isdigit():
+            idx_int = int(sub_k)
+          else:
+            idx_int = 0
+          global_idx = num_scanned + idx_int
+          layer_key = f"layers_{global_idx}"
+          res[layer_key] = _rename_nnx_to_linen_layers(sub_v)
+    else:
+      res[k] = _rename_nnx_to_linen_layers(v)
+  return res
+
+
 def to_linen_checkpoint_dict(nnx_pure_dict):
   """Reshapes a TrainStateNNX pure dict ({model, optimizer}) into the Linen on-disk layout."""
   if not isinstance(nnx_pure_dict, dict):
     return nnx_pure_dict
   result = {}
   if "model" in nnx_pure_dict:
-    result["params"] = {"params": _strip_rng_state(nnx_pure_dict["model"])}
+    model_dict = _rename_nnx_to_linen_layers(
+        _strip_rng_state(nnx_pure_dict["model"]))
+    if isinstance(model_dict,
+                  dict) and "params" in model_dict and len(model_dict) == 1:
+      result["params"] = model_dict
+    else:
+      result["params"] = {"params": model_dict}
   optimizer = nnx_pure_dict.get("optimizer")
   if isinstance(optimizer, dict):
     if "step" in optimizer:
@@ -159,7 +235,8 @@ def _strip_mu_nu_params(state):
   if not isinstance(state, dict):
     return state
   return {
-      k: (v["params"] if k in ("mu", "nu") and isinstance(v, dict) and "params" in v else v) for k, v in state.items()
+      k: (v["params"] if k in ("mu", "nu") and isinstance(v, dict) and
+          "params" in v else v) for k, v in state.items()
   }
 
 
@@ -171,7 +248,11 @@ def _opt_state_from_linen(opt_state):
   up with the model's opt_state.
   """
   if isinstance(opt_state, list):
-    return {i: _strip_mu_nu_params(e) for i, e in enumerate(opt_state) if isinstance(e, dict)}
+    return {
+        i: _strip_mu_nu_params(e)
+        for i, e in enumerate(opt_state)
+        if isinstance(e, dict)
+    }
   if not isinstance(opt_state, dict):
     return opt_state
   return _strip_mu_nu_params(opt_state)
@@ -202,43 +283,80 @@ def from_linen_checkpoint_dict(linen_pure_dict):
 
 
 def split_for_checkpoint(state: nnx.State):
-  """Partitions an nnx.State by its on-disk destination.
+  """Partition an NNX State into on-disk checkpoint collections.
 
-  Named by on-disk destination. Returns `(linen_state, aux, ephemeral)`:
-    linen_state: trainable weights (nnx.Param) and the optimizer -> Linen params/opt_state/step.
-      Its model side is pure nnx.Param, so it maps to the Linen `params` collection cleanly.
-    aux:         rngs/dropout, batch stats, and any other persistent model variable (e.g. a
-      frozen routing table) -> nnx_aux.
-    ephemeral:   caches and intermediates, which are recomputed and so are not checkpointed.
-
-  The type-based catch-all `rest` mixes the optimizer (under "optimizer") with any custom
-  persistent variable (under "model"); they route to different places, so they're split apart
-  here. Grouping by the ephemeral types rather than whitelisting nnx.Param means a new Variable
-  subclass persists (via `aux`) instead of being silently dropped. Save and restore must
-  partition identically, so both go through here.
+  When LoRA parameters (nnx.LoRAParam) are present in the state, only LoRAParam
+  is saved in `params` (adapter-only saving), and frozen base parameters are
+  excluded to avoid duplicating base weights or saving quantized arrays.
   """
+  has_lora = bool(nnx.filter_state(state, nnx.LoRAParam))
+  flat = state.flat_state()
+  if not has_lora:
+    has_lora = any(
+        any(
+            isinstance(k, str) and ("lora_a" in k or "lora_b" in k)
+            for k in path)
+        for path, _ in flat)
+
+  if has_lora and not bool(nnx.filter_state(state, nnx.LoRAParam)):
+    # Abstract/unboxed state where variable wrappers were stripped to ShapeDtypeStruct
+    params_flat = []
+    custom_flat = []
+    opt_flat = []
+    aux_flat = []
+    for path, val in flat:
+      if path and path[0] == "optimizer":
+        opt_flat.append((path, val))
+      elif path and path[0] == "model":
+        if any(isinstance(k, str) and k in ("rngs", "dropout") for k in path):
+          aux_flat.append((path, val))
+        elif any(
+            isinstance(k, str) and ("lora_a" in k or "lora_b" in k)
+            for k in path):
+          params_flat.append((path, val))
+        else:
+          custom_flat.append((path, val))
+      else:
+        aux_flat.append((path, val))
+    params = nnx.State.from_flat_path(params_flat)
+    optimizer = nnx.State.from_flat_path(opt_flat)
+    custom = nnx.State.from_flat_path(custom_flat)
+    aux = nnx.State.from_flat_path(aux_flat)
+    linen_state = nnx.merge_state(params, optimizer)
+    aux_state = nnx.merge_state(aux, custom)
+    return linen_state, aux_state, nnx.State({})
+
+  param_type = nnx.LoRAParam if has_lora else nnx.Param
+
   params, rng_state, batch_stats, caches, intermediates, rest = nnx.split_state(
-      state, nnx.Param, nnx.RngState, nnx.BatchStat, nnx.Cache, nnx.Intermediate, ...
-  )
-  optimizer = nnx.State({"optimizer": rest["optimizer"]}) if "optimizer" in rest else nnx.State({})
-  custom = nnx.State({"model": rest["model"]}) if "model" in rest else nnx.State({})
+      state, param_type, nnx.RngState, nnx.BatchStat, nnx.Cache,
+      nnx.Intermediate, ...)
+  optimizer = nnx.State({"optimizer": rest["optimizer"]
+                        }) if "optimizer" in rest else nnx.State({})
+  custom = nnx.State({"model": rest["model"]
+                     }) if ("model" in rest and not has_lora) else nnx.State({})
   linen_state = nnx.merge_state(params, optimizer)
+
   aux = nnx.merge_state(rng_state, batch_stats, custom)
   ephemeral = nnx.merge_state(caches, intermediates)
   return linen_state, aux, ephemeral
 
 
-def to_checkpoint_dict(state: nnx.State):
-  """Reshapes an nnx.State into the on-disk checkpoint layout.
+def to_checkpoint_dict(state: Any):
+  """Reshapes an nnx.State or TrainStateNNX into the on-disk checkpoint layout.
 
-  Weights (nnx.Param) map to the Linen `params` collection and the optimizer to
+  Weights (nnx.Param / nnx.LoRAParam) map to the Linen `params` collection and the optimizer to
   opt_state/step, so pure_nnx and Linen checkpoints stay interchangeable. Everything else that
   must persist -- rngs/dropout, batch stats, and any custom variable -- goes under an `nnx_aux`
   subtree. Works on a concrete state (save) or an abstract state (restore target).
   """
-  linen_state, aux_state, _ = split_for_checkpoint(state)
+  nnx_state = state if isinstance(state, nnx.State) else nnx.state(state)
+  linen_state, aux_state, _ = split_for_checkpoint(nnx_state)
   pure = linen_state.to_pure_dict()
-  linen_dict = to_linen_checkpoint_dict({"model": pure.get("model", {}), "optimizer": pure.get("optimizer", {})})
+  linen_dict = to_linen_checkpoint_dict({
+      "model": pure.get("model", {}),
+      "optimizer": pure.get("optimizer", {})
+  })
   aux = aux_state.to_pure_dict()
   if aux:
     linen_dict["nnx_aux"] = aux

@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Unit tests for model_creation_utils.py."""
 
 import dataclasses
@@ -122,7 +121,8 @@ class FixRestoreArgsRankGuardTest(unittest.TestCase):
       arg = dataclasses.replace(arg, sharding=sharding)
     restore_args = {"kernel": arg}
     metadata_tree = {"kernel": _FakeArrayMetadata(shape=stored_shape)}
-    return _fix_restore_args_for_shape_mismatch(restore_args, metadata_tree, self.mesh)
+    return _fix_restore_args_for_shape_mismatch(restore_args, metadata_tree,
+                                                self.mesh)
 
   def test_scanned_ckpt_unscanned_model_raises_error(self):
     """Rank mismatch (scanned ckpt rank 4 vs unscanned model rank 3): arg must be unchanged."""
@@ -147,17 +147,19 @@ class FixRestoreArgsRankGuardTest(unittest.TestCase):
   def test_same_rank_shape_mismatch_indivisible_falls_back_to_replicated(self):
     """Stored dim not divisible by mesh axis size: fall back to fully-replicated."""
     if jax.device_count() < 2:
-      self.skipTest("Requires >=2 devices to construct an indivisible mesh axis.")
+      self.skipTest(
+          "Requires >=2 devices to construct an indivisible mesh axis.")
     devices = jax.local_devices()[:2]
     multi_mesh = jax.sharding.Mesh(devices, ("x",))
-    sharding = jax.sharding.NamedSharding(multi_mesh, jax.sharding.PartitionSpec(None, "x", None))
+    sharding = jax.sharding.NamedSharding(
+        multi_mesh, jax.sharding.PartitionSpec(None, "x", None))
     # stored axis 1 = 3, mesh "x" = 2 -> 3 % 2 != 0 -> can't shard, must replicate.
     stored_shape = (256, 3, 128)
     model_shape = (256, 4, 128)
     arg = dataclasses.replace(_make_restore_arg(model_shape), sharding=sharding)
     fixed = _fix_restore_args_for_shape_mismatch(
-        {"kernel": arg}, {"kernel": _FakeArrayMetadata(shape=stored_shape)}, multi_mesh
-    )
+        {"kernel": arg}, {"kernel": _FakeArrayMetadata(shape=stored_shape)},
+        multi_mesh)
     arg = fixed["kernel"]
     # Replicated fallback: global_shape cleared, sharding swapped to fully-replicated.
     self.assertIsNone(arg.global_shape)
@@ -200,13 +202,16 @@ class TestAlignCheckpointToModelShapes(unittest.TestCase):
     # Distinguishable per-head values so the layout assertion is unambiguous.
     ckpt = jnp.array(
         [
-            [[1.0, 1.0], [2.0, 2.0]],  # embed=0: kv_head_0=[1,1], kv_head_1=[2,2]
-            [[3.0, 3.0], [4.0, 4.0]],  # embed=1: kv_head_0=[3,3], kv_head_1=[4,4]
+            [[1.0, 1.0], [2.0, 2.0]
+            ],  # embed=0: kv_head_0=[1,1], kv_head_1=[2,2]
+            [[3.0, 3.0], [4.0, 4.0]
+            ],  # embed=1: kv_head_0=[3,3], kv_head_1=[4,4]
         ],
         dtype=jnp.float32,
     )
     model = jnp.zeros((2, 4, 2), dtype=jnp.float32)
-    out = _align_checkpoint_to_model_shapes(ckpt, model, ("embed", "kv_heads", "kv_head_dim"))
+    out = _align_checkpoint_to_model_shapes(
+        ckpt, model, ("embed", "kv_heads", "kv_head_dim"))
     out_np = np.asarray(out)
     self.assertEqual(out_np.shape, (2, 4, 2))
     # kv_heads axis layout for embed=0 must be [h0, h0, h1, h1]:
@@ -219,31 +224,40 @@ class TestAlignCheckpointToModelShapes(unittest.TestCase):
     """mlp_moe axis must zero-pad at the end (not repeat) — wi_0/wi_1 last-axis case."""
     ckpt = jnp.ones((2, 4, 6), dtype=jnp.float32)  # exp=2, embed=4, mlp=6
     model = jnp.zeros((2, 4, 8), dtype=jnp.float32)  # mlp padded to 8
-    out = _align_checkpoint_to_model_shapes(ckpt, model, ("exp", "embed_moe", "mlp_moe"))
+    out = _align_checkpoint_to_model_shapes(ckpt, model,
+                                            ("exp", "embed_moe", "mlp_moe"))
     out_np = np.asarray(out)
     self.assertEqual(out_np.shape, (2, 4, 8))
     # First 6 cols preserved as ones; last 2 cols are zeros.
-    np.testing.assert_array_equal(out_np[..., :6], np.ones((2, 4, 6), dtype=np.float32))
-    np.testing.assert_array_equal(out_np[..., 6:], np.zeros((2, 4, 2), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[..., :6],
+                                  np.ones((2, 4, 6), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[..., 6:],
+                                  np.zeros((2, 4, 2), dtype=np.float32))
 
   def test_mlp_moe_zero_pads_at_end_wo(self):
     """wo has the MLP dim on axis 1 — zero-pad at the end of axis 1."""
     ckpt = jnp.ones((2, 6, 4), dtype=jnp.float32)
     model = jnp.zeros((2, 8, 4), dtype=jnp.float32)
-    out = _align_checkpoint_to_model_shapes(ckpt, model, ("exp", "mlp_moe", "embed_moe"))
+    out = _align_checkpoint_to_model_shapes(ckpt, model,
+                                            ("exp", "mlp_moe", "embed_moe"))
     out_np = np.asarray(out)
     self.assertEqual(out_np.shape, (2, 8, 4))
-    np.testing.assert_array_equal(out_np[:, :6, :], np.ones((2, 6, 4), dtype=np.float32))
-    np.testing.assert_array_equal(out_np[:, 6:, :], np.zeros((2, 2, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, :6, :],
+                                  np.ones((2, 6, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 6:, :],
+                                  np.zeros((2, 2, 4), dtype=np.float32))
 
   def test_activation_mlp_zero_pads_bias(self):
     """activation_mlp axis (bias arrays) must also zero-pad at the end."""
     ckpt = jnp.ones((2, 6), dtype=jnp.float32)
     model = jnp.zeros((2, 8), dtype=jnp.float32)
-    out = _align_checkpoint_to_model_shapes(ckpt, model, ("exp", "activation_mlp"))
+    out = _align_checkpoint_to_model_shapes(ckpt, model,
+                                            ("exp", "activation_mlp"))
     out_np = np.asarray(out)
-    np.testing.assert_array_equal(out_np[:, :6], np.ones((2, 6), dtype=np.float32))
-    np.testing.assert_array_equal(out_np[:, 6:], np.zeros((2, 2), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, :6],
+                                  np.ones((2, 6), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 6:],
+                                  np.zeros((2, 2), dtype=np.float32))
 
   def test_unknown_axis_divisible_falls_back_to_repeat(self):
     """Unknown axis with divisible dims preserves prior repeat behavior (backward compat)."""
@@ -256,7 +270,8 @@ class TestAlignCheckpointToModelShapes(unittest.TestCase):
     """Unknown axis with non-divisible dims must raise a clear error pointing at the axis."""
     ckpt = jnp.ones((3,), dtype=jnp.float32)
     model = jnp.zeros((4,), dtype=jnp.float32)
-    with self.assertRaisesRegex(ValueError, "not registered in _VLLM_REPEAT_AXES"):
+    with self.assertRaisesRegex(ValueError,
+                                "not registered in _VLLM_REPEAT_AXES"):
       _align_checkpoint_to_model_shapes(ckpt, model, ("unknown_axis",))
 
   def test_logical_axes_none_falls_back_to_repeat(self):
@@ -271,14 +286,16 @@ class TestAlignCheckpointToModelShapes(unittest.TestCase):
     ckpt = jnp.ones((4, 3, 2), dtype=jnp.float32)
     model = jnp.zeros((4, 4, 2), dtype=jnp.float32)
     with self.assertRaisesRegex(ValueError, "kv_heads"):
-      _align_checkpoint_to_model_shapes(ckpt, model, ("embed", "kv_heads", "kv_head_dim"))
+      _align_checkpoint_to_model_shapes(ckpt, model,
+                                        ("embed", "kv_heads", "kv_head_dim"))
 
   def test_rank_mismatch_raises(self):
     """Different ranks (scanned vs unscanned ckpt) must raise the helpful message."""
     ckpt = jnp.ones((4, 4, 2), dtype=jnp.float32)
     model = jnp.zeros((2, 4, 4, 2), dtype=jnp.float32)
     with self.assertRaisesRegex(ValueError, "different ranks"):
-      _align_checkpoint_to_model_shapes(ckpt, model, ("scan", "embed", "kv_heads", "kv_head_dim"))
+      _align_checkpoint_to_model_shapes(
+          ckpt, model, ("scan", "embed", "kv_heads", "kv_head_dim"))
 
 
 @pytest.mark.tpu_only
@@ -290,8 +307,14 @@ class TestFuseMoeWeights(unittest.TestCase):
 
   def test_no_op_when_model_has_unfused_wi(self):
     """If model has wi_0/wi_1 (not fused), the helper returns the ckpt tree unchanged."""
-    ckpt = {"wi_0": np.ones((2, 4, 3), dtype=np.float32), "wi_1": 2 * np.ones((2, 4, 3), dtype=np.float32)}
-    model = {"wi_0": np.zeros((2, 4, 3), dtype=np.float32), "wi_1": np.zeros((2, 4, 3), dtype=np.float32)}
+    ckpt = {
+        "wi_0": np.ones((2, 4, 3), dtype=np.float32),
+        "wi_1": 2 * np.ones((2, 4, 3), dtype=np.float32)
+    }
+    model = {
+        "wi_0": np.zeros((2, 4, 3), dtype=np.float32),
+        "wi_1": np.zeros((2, 4, 3), dtype=np.float32)
+    }
     out = _fuse_moe_weights(ckpt, model)
     self.assertIn("wi_0", out)
     self.assertIn("wi_1", out)
@@ -324,18 +347,39 @@ class TestFuseMoeWeights(unittest.TestCase):
     self.assertEqual(out["wi"].shape, (2, 4, 8))
     # First half: wi_0_data (3 cols) then 1 col of zeros.
     np.testing.assert_array_equal(out["wi"][..., :3], wi_0)
-    np.testing.assert_array_equal(out["wi"][..., 3:4], np.zeros((2, 4, 1), dtype=np.float32))
+    np.testing.assert_array_equal(out["wi"][..., 3:4],
+                                  np.zeros((2, 4, 1), dtype=np.float32))
     # Second half: wi_1_data (3 cols) then 1 col of zeros.
     np.testing.assert_array_equal(out["wi"][..., 4:7], wi_1)
-    np.testing.assert_array_equal(out["wi"][..., 7:8], np.zeros((2, 4, 1), dtype=np.float32))
+    np.testing.assert_array_equal(out["wi"][..., 7:8],
+                                  np.zeros((2, 4, 1), dtype=np.float32))
 
   def test_recurses_through_nested_dicts(self):
     """The helper should walk arbitrary nested dicts and only fuse at MoE blocks."""
     wi_0 = np.ones((2, 4, 3), dtype=np.float32)
     wi_1 = 2 * np.ones((2, 4, 3), dtype=np.float32)
     other = np.full((2, 4), 7.0, dtype=np.float32)
-    ckpt = {"layers": {"0": {"moe": {"wi_0": wi_0, "wi_1": wi_1}, "other": other}}}
-    model = {"layers": {"0": {"moe": {"wi": np.zeros((2, 4, 6), dtype=np.float32)}, "other": other}}}
+    ckpt = {
+        "layers": {
+            "0": {
+                "moe": {
+                    "wi_0": wi_0,
+                    "wi_1": wi_1
+                },
+                "other": other
+            }
+        }
+    }
+    model = {
+        "layers": {
+            "0": {
+                "moe": {
+                    "wi": np.zeros((2, 4, 6), dtype=np.float32)
+                },
+                "other": other
+            }
+        }
+    }
     out = _fuse_moe_weights(ckpt, model)
     self.assertEqual(out["layers"]["0"]["moe"]["wi"].shape, (2, 4, 6))
     np.testing.assert_array_equal(out["layers"]["0"]["other"], other)
@@ -356,22 +400,27 @@ class TestShardedZeroPad(unittest.TestCase):
   def test_evenly_shardable_true_when_stored_dim_divides_mesh_axis(self):
     devices = jax.local_devices()[:1]
     mesh = jax.sharding.Mesh(devices, ("model",))
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "model", None))
+    sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(None, "model", None))
     restore_arg = _make_restore_arg((128, 1024, 2048))
     restore_arg = dataclasses.replace(restore_arg, sharding=sharding)
     # 1-device mesh: any stored dim trivially divides 1.
-    self.assertTrue(_stored_shape_evenly_shardable(restore_arg, (128, 768, 2048)))
+    self.assertTrue(
+        _stored_shape_evenly_shardable(restore_arg, (128, 768, 2048)))
 
   def test_evenly_shardable_false_when_stored_dim_indivisible(self):
     if jax.device_count() < 2:
-      self.skipTest("Requires >=2 devices to construct a non-trivial mesh size.")
+      self.skipTest(
+          "Requires >=2 devices to construct a non-trivial mesh size.")
     devices = jax.local_devices()[:2]
     mesh = jax.sharding.Mesh(devices, ("model",))
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "model", None))
+    sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(None, "model", None))
     restore_arg = _make_restore_arg((128, 8, 2048))
     restore_arg = dataclasses.replace(restore_arg, sharding=sharding)
     # stored_shape[1]=3 is not divisible by mesh "model"=2 -> must fall back to replicated.
-    self.assertFalse(_stored_shape_evenly_shardable(restore_arg, (128, 3, 2048)))
+    self.assertFalse(_stored_shape_evenly_shardable(restore_arg,
+                                                    (128, 3, 2048)))
 
   def test_zero_pad_axis_no_op_when_extra_zero(self):
     arr = jnp.ones((2, 4, 2), dtype=jnp.float32)
@@ -383,8 +432,10 @@ class TestShardedZeroPad(unittest.TestCase):
     out = _zero_pad_axis(arr, axis=1, extra=2)
     out_np = np.asarray(out)
     self.assertEqual(out_np.shape, (2, 6, 2))
-    np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 2), dtype=np.float32))
-    np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 2, 2), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, :4, :],
+                                  np.ones((2, 4, 2), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 4:, :],
+                                  np.zeros((2, 2, 2), dtype=np.float32))
 
   def test_zero_pad_axis_sharded_pads_each_local_shard(self):
     """Per-shard layout: zeros land at the tail of *each* shard, not the global tail.
@@ -395,7 +446,8 @@ class TestShardedZeroPad(unittest.TestCase):
     tails are zero, per-shard heads preserve the original ckpt slice.
     """
     if jax.device_count() < 4:
-      self.skipTest("Requires >=4 devices to exercise the sharded pad path with TP=4.")
+      self.skipTest(
+          "Requires >=4 devices to exercise the sharded pad path with TP=4.")
     devices = jax.local_devices()[:4]
     mesh = jax.sharding.Mesh(devices, ("model",))
     spec = jax.sharding.PartitionSpec(None, "model", None)
@@ -404,16 +456,19 @@ class TestShardedZeroPad(unittest.TestCase):
     ckpt_np = np.arange(2 * 8 * 2, dtype=np.float32).reshape(2, 8, 2)
     arr = jax.device_put(jnp.asarray(ckpt_np), sharding)
 
-    out = _zero_pad_axis(arr, axis=1, extra=4)  # 8 -> 12, 4 shards -> +1 zero per shard
+    out = _zero_pad_axis(arr, axis=1,
+                         extra=4)  # 8 -> 12, 4 shards -> +1 zero per shard
     out_np = np.asarray(out)
     self.assertEqual(out_np.shape, (2, 12, 2))
 
     for s in range(4):
       # Per-shard head holds the original ckpt slice [s*2:s*2+2].
       for i in range(2):
-        np.testing.assert_array_equal(out_np[:, s * 3 + i, :], ckpt_np[:, s * 2 + i, :])
+        np.testing.assert_array_equal(out_np[:, s * 3 + i, :],
+                                      ckpt_np[:, s * 2 + i, :])
       # Per-shard tail is zero.
-      np.testing.assert_array_equal(out_np[:, s * 3 + 2, :], np.zeros((2, 2), dtype=np.float32))
+      np.testing.assert_array_equal(out_np[:, s * 3 + 2, :],
+                                    np.zeros((2, 2), dtype=np.float32))
 
 
 @pytest.mark.tpu_only
@@ -430,6 +485,7 @@ class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
   """
 
   def test_unwrap_yields_partition_spec_and_enables_zero_pad(self):
+
     class _TinyMoE(nnx.Module):
 
       def __init__(self, rngs: nnx.Rngs):
@@ -441,7 +497,8 @@ class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
     # flax >= 0.12 requires an active mesh + logical_axis_rules to construct
     # a Variable annotated with logical sharding names.
     devices = jax.local_devices()[:1]
-    mesh = jax.sharding.Mesh(devices, ("x",), axis_types=(jax.sharding.AxisType.Explicit,))
+    mesh = jax.sharding.Mesh(devices, ("x",),
+                             axis_types=(jax.sharding.AxisType.Explicit,))
     rules = (("exp", None), ("mlp_moe", None), ("embed_moe", None))
     with jax.sharding.set_mesh(mesh), nn.logical_axis_rules(rules):
       module = nnx.eval_shape(lambda: _TinyMoE(nnx.Rngs(params=0)))
@@ -468,8 +525,10 @@ class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
     out = _align_checkpoint_to_model_shapes(ckpt, model, wo_axes)
     out_np = np.asarray(out)
     self.assertEqual(out_np.shape, (2, 6, 4))
-    np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
-    np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 2, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, :4, :],
+                                  np.ones((2, 4, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 4:, :],
+                                  np.zeros((2, 2, 4), dtype=np.float32))
 
 
 class TestGetTransformerModel(unittest.TestCase):
@@ -481,26 +540,35 @@ class TestGetTransformerModel(unittest.TestCase):
 
   def test_returns_linen_module_when_rngs_is_none(self):
     """Without rngs, should return a Linen nn.Module."""
-    model = model_creation_utils.get_transformer_model(self.config, self.mesh, quant=None, rngs=None)
+    model = model_creation_utils.get_transformer_model(self.config,
+                                                       self.mesh,
+                                                       quant=None,
+                                                       rngs=None)
     self.assertIsInstance(model, nn.Module)
 
   def test_returns_nnx_module_when_rngs_provided(self):
     """With rngs, should return an NNX nnx.Module."""
-    model = nnx.eval_shape(
-        lambda: model_creation_utils.get_transformer_model(
-            self.config, self.mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1, aqt=2)
-        )
-    )
+    model = nnx.eval_shape(lambda: model_creation_utils.get_transformer_model(
+        self.config,
+        self.mesh,
+        quant=None,
+        rngs=nnx.Rngs(params=0, dropout=1, aqt=2)))
     self.assertIsInstance(model, nnx.Module)
 
   def test_respects_model_mode_prefill(self):
     """Linen model created with MODEL_MODE_PREFILL should differ from train mode."""
     linen_train = model_creation_utils.get_transformer_model(
-        self.config, self.mesh, quant=None, model_mode=MODEL_MODE_TRAIN, rngs=None
-    )
+        self.config,
+        self.mesh,
+        quant=None,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=None)
     linen_prefill = model_creation_utils.get_transformer_model(
-        self.config, self.mesh, quant=None, model_mode=MODEL_MODE_PREFILL, rngs=None
-    )
+        self.config,
+        self.mesh,
+        quant=None,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=None)
     # Both are still nn.Module instances
     self.assertIsInstance(linen_train, nn.Module)
     self.assertIsInstance(linen_prefill, nn.Module)
@@ -518,9 +586,8 @@ class TestCreateModel(unittest.TestCase):
     self.assertIsInstance(model, nn.Module)
 
   def test_returns_nnx_model_with_rngs(self):
-    model = nnx.eval_shape(
-        lambda: model_creation_utils.create_model(self.config, self.mesh, rngs=nnx.Rngs(params=0, dropout=1, aqt=2))
-    )
+    model = nnx.eval_shape(lambda: model_creation_utils.create_model(
+        self.config, self.mesh, rngs=nnx.Rngs(params=0, dropout=1, aqt=2)))
     self.assertIsInstance(model, nnx.Module)
 
   def test_model_mode_train_default(self):
@@ -538,24 +605,31 @@ class TestFromConfig(unittest.TestCase):
 
   def test_linen_path_rngs_none(self):
     """from_config with rngs=None should return a Linen nn.Module."""
-    model = model_creation_utils.from_config(self.config, mesh=self.mesh, rngs=None)
+    model = model_creation_utils.from_config(self.config,
+                                             mesh=self.mesh,
+                                             rngs=None)
     self.assertIsInstance(model, nn.Module)
 
   def test_nnx_path_with_rngs(self):
     """from_config with rngs provided should return an NNX nnx.Module."""
-    model = nnx.eval_shape(
-        lambda: model_creation_utils.from_config(self.config, mesh=self.mesh, rngs=nnx.Rngs(params=0, dropout=1, aqt=2))
-    )
+    model = nnx.eval_shape(lambda: model_creation_utils.from_config(
+        self.config, mesh=self.mesh, rngs=nnx.Rngs(params=0, dropout=1, aqt=2)))
     self.assertIsInstance(model, nnx.Module)
 
   def test_mesh_created_from_devices_when_none(self):
     """from_config should work when mesh is None (creates mesh internally)."""
-    model = model_creation_utils.from_config(self.config, devices=None, mesh=None, rngs=None)
+    model = model_creation_utils.from_config(self.config,
+                                             devices=None,
+                                             mesh=None,
+                                             rngs=None)
     self.assertIsInstance(model, nn.Module)
 
   def test_model_mode_is_forwarded(self):
     """from_config should accept and forward model_mode."""
-    model = model_creation_utils.from_config(self.config, mesh=self.mesh, model_mode=MODEL_MODE_PREFILL, rngs=None)
+    model = model_creation_utils.from_config(self.config,
+                                             mesh=self.mesh,
+                                             model_mode=MODEL_MODE_PREFILL,
+                                             rngs=None)
     self.assertIsInstance(model, nn.Module)
 
   def test_explicit_shard_mode_creates_mesh_with_explicit_axis_types(self):
@@ -574,13 +648,15 @@ class TestCreateNNXAbstractModel(unittest.TestCase):
     self.mesh = _make_mesh(self.config)
 
   def test_returns_tuple_of_callable_and_module(self):
-    create_fn, abstract_model = model_creation_utils.create_nnx_abstract_model(self.config, mesh=self.mesh)
+    create_fn, abstract_model = model_creation_utils.create_nnx_abstract_model(
+        self.config, mesh=self.mesh)
     self.assertTrue(callable(create_fn))
     self.assertIsInstance(abstract_model, nnx.Module)
 
   def test_abstract_model_has_abstract_arrays(self):
     """Abstract model leaves should be ShapeDtypeStruct, not concrete arrays."""
-    _, abstract_model = model_creation_utils.create_nnx_abstract_model(self.config, mesh=self.mesh)
+    _, abstract_model = model_creation_utils.create_nnx_abstract_model(
+        self.config, mesh=self.mesh)
     _, state = nnx.split(abstract_model)
     leaves = jax.tree.leaves(state)
     self.assertGreater(len(leaves), 0)
@@ -591,7 +667,8 @@ class TestCreateNNXAbstractModel(unittest.TestCase):
 
   def test_create_fn_produces_concrete_model(self):
     """The returned create_fn should produce a real (concrete) NNX Module."""
-    create_fn, _ = model_creation_utils.create_nnx_abstract_model(self.config, mesh=self.mesh)
+    create_fn, _ = model_creation_utils.create_nnx_abstract_model(
+        self.config, mesh=self.mesh)
     with self.mesh:
       concrete = create_fn()
     self.assertIsInstance(concrete, nnx.Module)
@@ -601,7 +678,8 @@ class TestCreateNNXAbstractModel(unittest.TestCase):
 
   def test_works_without_explicit_mesh(self):
     """create_nnx_abstract_model should work when mesh=None (from_config creates mesh)."""
-    create_fn, abstract_model = model_creation_utils.create_nnx_abstract_model(self.config, mesh=None)
+    create_fn, abstract_model = model_creation_utils.create_nnx_abstract_model(
+        self.config, mesh=None)
     self.assertTrue(callable(create_fn))
     self.assertIsInstance(abstract_model, nnx.Module)
 
@@ -609,16 +687,14 @@ class TestCreateNNXAbstractModel(unittest.TestCase):
     """Passing a rng_key should not raise and returns valid abstract model."""
     rng_key = jax.random.PRNGKey(42)
     create_fn, abstract_model = model_creation_utils.create_nnx_abstract_model(
-        self.config, mesh=self.mesh, rng_key=rng_key
-    )
+        self.config, mesh=self.mesh, rng_key=rng_key)
     self.assertTrue(callable(create_fn))
     self.assertIsInstance(abstract_model, nnx.Module)
 
   def test_prefill_model_mode(self):
     """create_nnx_abstract_model should accept MODEL_MODE_PREFILL."""
     _, abstract_model = model_creation_utils.create_nnx_abstract_model(
-        self.config, mesh=self.mesh, model_mode=MODEL_MODE_PREFILL
-    )
+        self.config, mesh=self.mesh, model_mode=MODEL_MODE_PREFILL)
     self.assertIsInstance(abstract_model, nnx.Module)
 
 
@@ -643,12 +719,16 @@ class TestCreateNnxModel(unittest.TestCase):
   def test_explicit_rng_key(self):
     """An explicit rng_key should be accepted without error."""
     rng_key = jax.random.PRNGKey(99)
-    model = model_creation_utils.from_pretrained(self.config, self.mesh, rng_key=rng_key)
+    model = model_creation_utils.from_pretrained(self.config,
+                                                 self.mesh,
+                                                 rng_key=rng_key)
     self.assertIsInstance(model, models.Transformer)
 
   def test_inference_mode_disables_dropout_rng(self):
     """MODEL_MODE_PREFILL should create rngs without a dropout key."""
-    model = model_creation_utils.from_pretrained(self.config, self.mesh, model_mode=MODEL_MODE_PREFILL)
+    model = model_creation_utils.from_pretrained(self.config,
+                                                 self.mesh,
+                                                 model_mode=MODEL_MODE_PREFILL)
     self.assertIsInstance(model, models.Transformer)
 
   def test_debug_sharding_flag(self):
@@ -688,7 +768,8 @@ class TestCreateNnxModel(unittest.TestCase):
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
     mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
 
-    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/nnx_ckpt")
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/nnx_ckpt")
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
@@ -707,7 +788,8 @@ class TestCreateNnxModel(unittest.TestCase):
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
     mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
 
-    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/linen_ckpt")
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/linen_ckpt")
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
@@ -719,18 +801,21 @@ class TestCreateNnxModel(unittest.TestCase):
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
 
-    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/bad_ckpt")
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/bad_ckpt")
     with self.assertRaises(RuntimeError):
       model_creation_utils.from_pretrained(cfg, self.mesh)
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_scan_layers_mismatch_raises_error(self, mock_load_meta):
     """ValueError is raised if run specifies scan_layers=True but checkpoint specifies scan_layers=False."""
     mock_load_meta.return_value = {"scan_layers": False}
 
-    cfg = _make_config(
-        enable_checkpointing=True, load_parameters_path="gs://fake/scan_layers_false_ckpt", scan_layers=True
-    )
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/scan_layers_false_ckpt",
+                       scan_layers=True)
 
     with self.assertRaises(ValueError) as context:
       model_creation_utils.from_pretrained(cfg, self.mesh)
@@ -740,7 +825,9 @@ class TestCreateNnxModel(unittest.TestCase):
         str(context.exception),
     )
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_scan_layers_match_no_error(self, mock_ocp, mock_load_meta):
     """If the run specifies scan_layers=True and the checkpoint matches, it proceeds without error."""
@@ -754,16 +841,19 @@ class TestCreateNnxModel(unittest.TestCase):
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
     mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
 
-    cfg = _make_config(
-        enable_checkpointing=True, load_parameters_path="gs://fake/scan_layers_true_ckpt", scan_layers=True
-    )
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/scan_layers_true_ckpt",
+                       scan_layers=True)
 
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   @patch("maxtext.utils.model_creation_utils.ocp")
-  def test_scan_layers_missing_metadata_no_error(self, mock_ocp, mock_load_meta):
+  def test_scan_layers_missing_metadata_no_error(self, mock_ocp,
+                                                 mock_load_meta):
     """Skip verification and proceed if custom_metadata lacks 'scan_layers'."""
     mock_load_meta.return_value = {}
 
@@ -776,8 +866,9 @@ class TestCreateNnxModel(unittest.TestCase):
     mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
 
     cfg = _make_config(
-        enable_checkpointing=True, load_parameters_path="gs://fake/scan_layers_missing_ckpt", scan_layers=True
-    )
+        enable_checkpointing=True,
+        load_parameters_path="gs://fake/scan_layers_missing_ckpt",
+        scan_layers=True)
 
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
@@ -795,15 +886,18 @@ class TestSetupDecodeStateFromNnx(unittest.TestCase):
     """Should return a linen TrainState whose params mirror the NNX model's nnx.Param values."""
     # Build a real (small) NNX model WITHOUT any patch active so from_pretrained
     # runs normally and produces concrete jax.Array weights.
-    real_nnx_model = model_creation_utils.from_pretrained(self.config, mesh=self.mesh)
+    real_nnx_model = model_creation_utils.from_pretrained(self.config,
+                                                          mesh=self.mesh)
 
-    linen_model = model_creation_utils.from_config(self.config, mesh=self.mesh, rngs=None)
+    linen_model = model_creation_utils.from_config(self.config,
+                                                   mesh=self.mesh,
+                                                   rngs=None)
 
     # Now patch from_pretrained so setup_decode_state_from_nnx never touches a checkpoint.
-    with patch("maxtext.utils.model_creation_utils.from_pretrained", return_value=real_nnx_model) as mock_fp:
+    with patch("maxtext.utils.model_creation_utils.from_pretrained",
+               return_value=real_nnx_model) as mock_fp:
       state, state_mesh_annotations = model_creation_utils.setup_decode_state_from_nnx(
-          linen_model, self.config, self.rng, self.mesh
-      )
+          linen_model, self.config, self.rng, self.mesh)
 
     # from_pretrained must have been called with the right model_mode.
     mock_fp.assert_called_once()
@@ -838,12 +932,15 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
   def setUp(self):
     self.mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("x",))
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_sync_to_false_when_implicit(self, mock_load_meta):
     """If scan_layers is not explicit, sync scan_layers to False from checkpoint metadata."""
     mock_load_meta.return_value = {"scan_layers": False}
     # Create config without scan_layers in kwargs so it's not explicit
-    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/ckpt")
 
     # Pre-assertions
     pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
@@ -858,20 +955,27 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     synced_pydantic_cfg = getattr(synced_cfg, "_pydantic_config", synced_cfg)
     self.assertFalse(synced_pydantic_cfg.scan_layers)
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_sync_to_true_when_implicit(self, mock_load_meta):
     """If scan_layers is not explicit, sync scan_layers to True from checkpoint metadata."""
     mock_load_meta.return_value = {"scan_layers": True}
-    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/ckpt")
 
     synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
     self.assertTrue(synced_cfg.scan_layers)
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_explicit_match_raises_no_error(self, mock_load_meta):
     """If scan_layers is explicit and matches checkpoint metadata, no error is raised."""
     mock_load_meta.return_value = {"scan_layers": True}
-    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt", scan_layers=True)
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/ckpt",
+                       scan_layers=True)
 
     # Pre-assertions
     pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
@@ -881,11 +985,15 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
     self.assertTrue(synced_cfg.scan_layers)
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   def test_explicit_mismatch_raises_value_error(self, mock_load_meta):
     """If scan_layers is explicit and mismatches checkpoint metadata, ValueError is raised."""
     mock_load_meta.return_value = {"scan_layers": False}
-    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt", scan_layers=True)
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/ckpt",
+                       scan_layers=True)
 
     # Pre-assertions
     pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
@@ -897,14 +1005,17 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
 
     self.assertIn("Configuration mismatch", str(context.exception))
 
-  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch(
+      "maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata"
+  )
   @patch("maxtext.utils.model_creation_utils.max_logging.log")
   def test_sync_log_and_early_return(self, mock_log, mock_load_meta):
     """Test that we log only when auto-resolution actually changes scan_layers, and early return otherwise."""
     # Scenario A: saved_scan_layers == config.scan_layers (default True).
     # Since they match, it should return early, and NO log should be printed.
     mock_load_meta.return_value = {"scan_layers": True}
-    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+    cfg = _make_config(enable_checkpointing=True,
+                       load_parameters_path="gs://fake/ckpt")
 
     synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
     self.assertTrue(synced_cfg.scan_layers)
@@ -913,11 +1024,13 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     # Scenario B: saved_scan_layers (False) != config.scan_layers (default True), and is not explicit (implicit).
     # It should log the auto-resolution and update scan_layers to False.
     mock_load_meta.return_value = {"scan_layers": False}
-    cfg2 = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+    cfg2 = _make_config(enable_checkpointing=True,
+                        load_parameters_path="gs://fake/ckpt")
 
     synced_cfg2 = model_creation_utils.verify_and_sync_scan_layers(cfg2)
     self.assertFalse(synced_cfg2.scan_layers)
-    mock_log.assert_called_once_with("Setting scan_layers=False loaded from checkpoint metadata.")
+    mock_log.assert_called_once_with(
+        "Setting scan_layers=False loaded from checkpoint metadata.")
 
 
 if __name__ == "__main__":
@@ -937,7 +1050,8 @@ class TestFromPretrainedAuth(unittest.TestCase):
   @patch("maxtext.utils.model_creation_utils.subprocess.run")
   @patch("maxtext.utils.model_creation_utils.get_token")
   @patch("maxtext.utils.model_creation_utils.epath.Path")
-  def test_auth_success_with_config_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
+  def test_auth_success_with_config_token(self, mock_path, mock_get_token,
+                                          mock_run, mock_ocp):
     config = _make_config(
         convert_checkpoint_if_possible=True,
         base_output_directory="gs://fake_bucket/fake_run",
@@ -968,7 +1082,8 @@ class TestFromPretrainedAuth(unittest.TestCase):
   @patch("maxtext.utils.model_creation_utils.subprocess.run")
   @patch("maxtext.utils.model_creation_utils.get_token")
   @patch("maxtext.utils.model_creation_utils.epath.Path")
-  def test_auth_success_with_cached_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
+  def test_auth_success_with_cached_token(self, mock_path, mock_get_token,
+                                          mock_run, mock_ocp):
     config = _make_config(
         convert_checkpoint_if_possible=True,
         base_output_directory="gs://fake_bucket/fake_run",
@@ -1001,7 +1116,8 @@ class TestFromPretrainedAuth(unittest.TestCase):
   @patch("maxtext.utils.model_creation_utils.subprocess.run")
   @patch("maxtext.utils.model_creation_utils.get_token")
   @patch("maxtext.utils.model_creation_utils.epath.Path")
-  def test_auth_failure_no_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
+  def test_auth_failure_no_token(self, mock_path, mock_get_token, mock_run,
+                                 mock_ocp):
     config = _make_config(
         convert_checkpoint_if_possible=True,
         base_output_directory="gs://fake_bucket/fake_run",
