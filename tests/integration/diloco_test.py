@@ -321,6 +321,47 @@ class DiLoCoTest(unittest.TestCase):
         )
     )
 
+  def test_diloco_moe_instrumentation_metrics_unit(self):
+    """Unit test for the 5 DiLoCo MoE instrumentation and diagnostic metrics."""
+    num_replicas = 2
+    num_experts = 4
+    k = 2
+
+    # 1. Test Router Distance (d_router)
+    params1 = {"gate": {"kernel": jnp.ones((4, 4))}}
+    params2 = {"gate": {"kernel": jnp.ones((4, 4)) * -1.0}}
+    inner_params = jax.tree.map(lambda p1, p2: jnp.stack([p1, p2]), params1, params2)
+    d_router = diloco.compute_inter_replica_router_distance(inner_params, num_replicas)
+    np.testing.assert_allclose(d_router, 2.0, atol=1e-5)
+
+    # Identical router params -> d_router = 0.0
+    same_params = jax.tree.map(lambda p1, p2: jnp.stack([p1, p1]), params1, params1)
+    d_router_zero = diloco.compute_inter_replica_router_distance(same_params, num_replicas)
+    np.testing.assert_allclose(d_router_zero, 0.0, atol=1e-5)
+
+    # 2. Test Top-K Routing Overlap (J_route)
+    # Replica 0 picks experts [0, 1], Replica 1 picks experts [0, 1] -> Jaccard = 1.0
+    topk_same = jnp.array([[[[0, 1]], [[0, 1]]], [[[0, 1]], [[0, 1]]]])  # (2, 2, 1, 2)
+    j_same = diloco.compute_topk_token_routing_overlap(topk_same, num_experts, num_replicas)
+    np.testing.assert_allclose(j_same, 1.0, atol=1e-5)
+
+    # Replica 0 picks [0, 1], Replica 1 picks [2, 3] -> Jaccard = 0.0
+    topk_diff = jnp.array([[[[0, 1]]], [[[2, 3]]]])  # (2, 1, 1, 2)
+    j_diff = diloco.compute_topk_token_routing_overlap(topk_diff, num_experts, num_replicas)
+    np.testing.assert_allclose(j_diff, 0.0, atol=1e-5)
+
+    # 3. Test Jensen-Shannon Routing Divergence Index (RDI)
+    # Identical logits -> JS divergence = 0.0
+    logits_same = jnp.ones((2, 1, 1, num_experts))
+    rdi_same = diloco.compute_jensen_shannon_routing_divergence(logits_same, num_replicas)
+    np.testing.assert_allclose(rdi_same, 0.0, atol=1e-5)
+
+    # 4. Test Expert Utilization Entropy (EUE)
+    # Uniform allocation across 4 experts -> Entropy = ln(4) = 1.386294
+    topk_uniform = jnp.array([[[[0, 1]]], [[[2, 3]]]])  # counts: [1, 1, 1, 1]
+    eue_uniform = diloco.compute_expert_utilization_entropy(topk_uniform, num_experts)
+    np.testing.assert_allclose(eue_uniform, np.log(4), atol=1e-5)
+
   @pytest.mark.cpu_only
   @pytest.mark.tpu_backend
   def test_streaming_diloco_two_slices(self):

@@ -826,6 +826,12 @@ class RoutedMoE(nnx.Module):
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids)
+    try:
+      if hasattr(self, "sow") and isinstance(self, nnx.Module):
+        self.sow(nnx.Intermediate, "top_k_indices", selected_experts)
+        self.sow(nnx.Intermediate, "gate_logits", gate_logits)
+    except Exception:
+      pass
     lb_loss = None
     if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
       softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -2191,6 +2197,12 @@ class RoutedMoE(nnx.Module):
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
       )
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs, input_ids=input_ids)
+    try:
+      if hasattr(self, "sow") and isinstance(self, nnx.Module):
+        self.sow(nnx.Intermediate, "top_k_indices", top_k_indices)
+        self.sow(nnx.Intermediate, "gate_logits", gate_logits)
+    except Exception:
+      pass
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)

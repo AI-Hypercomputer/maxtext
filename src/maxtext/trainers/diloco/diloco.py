@@ -63,6 +63,7 @@ class DiLoCoTrainState(struct.PyTreeNode):
   params: Params
   outer_opt_state: OptState
   step: Step
+  pre_sync_loss: Any = None
 
 
 def add_diloco_to_sharding(pytree):
@@ -212,6 +213,102 @@ class FragmentedTreeManipulator:
     return jax.tree_util.tree_unflatten(treedef, new_kvs)
 
 
+
+def extract_router_params(tree):
+  """Finds all router/gate parameters in a PyTree."""
+  kvs, _ = jax.tree_util.tree_flatten_with_path(tree)
+  router_leaves = []
+  for k, v in kvs:
+    keystr = jax.tree_util.keystr(k)
+    if "gate" in keystr.lower() or "router" in keystr.lower():
+      router_leaves.append(v)
+  return router_leaves
+
+
+def compute_inter_replica_router_distance(inner_model_params, num_replicas: int):
+  """Computes cosine distance between router parameters across replicas (d_router)."""
+  if num_replicas <= 1:
+    return jnp.array(0.0, dtype=jnp.float32)
+
+  router_leaves = extract_router_params(inner_model_params)
+  if not router_leaves:
+    return jnp.array(0.0, dtype=jnp.float32)
+
+  replica_vecs = []
+  for r in range(num_replicas):
+    r_leaves = [v[r].reshape(-1).astype(jnp.float32) for v in router_leaves]
+    vec = jnp.concatenate(r_leaves, axis=0)
+    norm = jnp.linalg.norm(vec) + 1e-12
+    replica_vecs.append(vec / norm)
+
+  dists = []
+  for i in range(num_replicas):
+    for j in range(i + 1, num_replicas):
+      cos_sim = jnp.sum(replica_vecs[i] * replica_vecs[j])
+      dists.append(1.0 - cos_sim)
+
+  if not dists:
+    return jnp.array(0.0, dtype=jnp.float32)
+
+  return jnp.mean(jnp.stack(dists))
+
+
+def compute_topk_token_routing_overlap(top_k_indices, num_experts: int, num_replicas: int):
+  """Computes Jaccard similarity of top-k expert choices across replicas (J_route)."""
+  if num_replicas <= 1 or top_k_indices is None:
+    return jnp.array(1.0, dtype=jnp.float32)
+
+  k = top_k_indices.shape[-1]
+  r_dim = top_k_indices.shape[0]
+  flat_topk = top_k_indices.reshape((r_dim, -1, k))
+
+  mask = jnp.sum(jax.nn.one_hot(flat_topk, num_classes=num_experts, dtype=jnp.float32), axis=-2)
+
+  jaccards = []
+  for i in range(num_replicas):
+    for j in range(i + 1, num_replicas):
+      intersection = jnp.sum(mask[i] * mask[j], axis=-1)
+      union = 2.0 * k - intersection
+      jaccard = intersection / (union + 1e-12)
+      jaccards.append(jnp.mean(jaccard))
+
+  if not jaccards:
+    return jnp.array(1.0, dtype=jnp.float32)
+
+  return jnp.mean(jnp.stack(jaccards))
+
+
+def compute_jensen_shannon_routing_divergence(gate_logits, num_replicas: int):
+  """Computes JS divergence of router probability distributions across replicas (RDI)."""
+  if num_replicas <= 1 or gate_logits is None:
+    return jnp.array(0.0, dtype=jnp.float32)
+
+  r_dim = gate_logits.shape[0]
+  num_experts = gate_logits.shape[-1]
+  flat_logits = gate_logits.reshape((r_dim, -1, num_experts))
+
+  P = jax.nn.softmax(flat_logits.astype(jnp.float32), axis=-1)
+  M = jnp.mean(P, axis=0, keepdims=True)
+
+  kl = jnp.sum(P * (jnp.log(P + 1e-12) - jnp.log(M + 1e-12)), axis=-1)
+  js_div = jnp.mean(kl)
+
+  return js_div
+
+
+def compute_expert_utilization_entropy(top_k_indices, num_experts: int):
+  """Computes Shannon entropy of expert token allocations (EUE)."""
+  if top_k_indices is None:
+    return jnp.array(0.0, dtype=jnp.float32)
+
+  flat_indices = top_k_indices.reshape(-1)
+  counts = jnp.bincount(flat_indices, length=num_experts).astype(jnp.float32)
+  total = jnp.sum(counts) + 1e-12
+  probs = counts / total
+
+  entropy = -jnp.sum(probs * jnp.log(probs + 1e-12))
+  return entropy
+
 def build_abstract_diloco_state(
     config: "pyconfig.HyperParameters",
     abstract_state: PyTree,
@@ -261,12 +358,16 @@ def build_abstract_diloco_state(
   # Create abstract step
   abstract_step = jax.ShapeDtypeStruct((), jnp.int32)
 
+  # Create abstract pre_sync_loss
+  abstract_pre_sync_loss = jax.ShapeDtypeStruct((), jnp.float32)
+
   # Build abstract DiLoCo state
   diloco_state = DiLoCoTrainState(
       inner_state=inner_state,
       params=model_params,
       outer_opt_state=outer_opt_state,
       step=abstract_step,
+      pre_sync_loss=abstract_pre_sync_loss,
   )
 
   # Build shardings
@@ -282,6 +383,7 @@ def build_abstract_diloco_state(
       params=model_params_sharding,
       outer_opt_state=outer_opt_state_sharding,
       step=None,
+      pre_sync_loss=None,
   )
 
   return diloco_state, diloco_state_shardings, inner_state_shardings
@@ -316,7 +418,13 @@ def build_diloco_state(
     # For NNX, the step counter lives at state.optimizer.step; for Linen at state.step.
     step = state.optimizer.step if config.pure_nnx else state.step
     return (
-        DiLoCoTrainState(inner_state=inner_state, params=outer_params, outer_opt_state=outer_opt_state, step=step),
+        DiLoCoTrainState(
+            inner_state=inner_state,
+            params=outer_params,
+            outer_opt_state=outer_opt_state,
+            step=step,
+            pre_sync_loss=jnp.array(0.0, dtype=jnp.float32),
+        ),
         outer_opt_state_sharding,
     )
 
@@ -403,9 +511,58 @@ def build_diloco_train_step(
     avg_metrics = typed_reduce_mean(metrics)
     # For NNX, the step counter lives at inner_state.optimizer.step; for Linen at inner_state.step.
     new_step = inner_state.optimizer.step[0] if config.pure_nnx else inner_state.step[0]
+
+    inner_model_params = (
+        nnx.filter_state(state.inner_state.model, nnx.Param) if config.pure_nnx else state.inner_state.params
+    )
+
+    # Compute diagnostic metrics across replicas
+    num_experts = getattr(config, "num_experts", 8)
+    d_router = compute_inter_replica_router_distance(inner_model_params, config.num_diloco_replicas)
+    topk_indices = metrics.get("top_k_indices", None) if isinstance(metrics, dict) else None
+    gate_logits_val = metrics.get("gate_logits", None) if isinstance(metrics, dict) else None
+    j_route = compute_topk_token_routing_overlap(topk_indices, num_experts, config.num_diloco_replicas)
+    rdi = compute_jensen_shannon_routing_divergence(gate_logits_val, config.num_diloco_replicas)
+    eue = compute_expert_utilization_entropy(topk_indices, num_experts)
+
+    # Track Post-Sync Loss Spike Severity (Delta L_sync)
+    curr_loss = (
+        avg_metrics["scalar"]["learning/loss"]
+        if (isinstance(avg_metrics, dict) and "scalar" in avg_metrics and "learning/loss" in avg_metrics["scalar"])
+        else (avg_metrics.get("loss", jnp.array(0.0, dtype=jnp.float32)) if isinstance(avg_metrics, dict) else jnp.array(0.0, dtype=jnp.float32))
+    )
+
+    is_sync_step = (new_step % config.diloco_sync_period == 0)
+    is_post_sync_step = ((new_step - 1) % config.diloco_sync_period == 0)
+
+    delta_loss_sync = jax.lax.cond(
+        is_post_sync_step,
+        lambda: curr_loss - state.pre_sync_loss,
+        lambda: jnp.array(0.0, dtype=jnp.float32),
+    )
+    new_pre_sync_loss = jax.lax.cond(
+        is_sync_step,
+        lambda: curr_loss,
+        lambda: state.pre_sync_loss,
+    )
+
+    diagnostic_metrics = {
+        "diloco/inter_replica_router_distance": d_router,
+        "diloco/topk_token_routing_overlap": j_route,
+        "diloco/js_routing_divergence_index": rdi,
+        "diloco/post_sync_loss_spike_severity": delta_loss_sync,
+        "diloco/post_sync_expert_utilization_entropy": eue,
+    }
+
+    if isinstance(avg_metrics, dict):
+      if "scalar" in avg_metrics and isinstance(avg_metrics["scalar"], dict):
+        avg_metrics["scalar"].update(diagnostic_metrics)
+      avg_metrics.update(diagnostic_metrics)
+
     state = state.replace(
         inner_state=inner_state,
         step=new_step,
+        pre_sync_loss=new_pre_sync_loss,
     )
 
     if config.enable_streaming_diloco:
