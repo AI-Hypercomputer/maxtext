@@ -257,9 +257,17 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
   pydantic_kwargs = {}
   valid_fields = config_class.model_fields
 
+  # Check if multimodal is enabled in the current configuration
+  use_multimodal = raw_keys.get("use_multimodal", False)
+
   for key, value in raw_keys.items():
     check_flag = _check_for_invalid_keys(key, valid_fields)
     if not check_flag:
+      # Bypass the error for multimodal keys if use_multimodal is False
+      if not use_multimodal and key in types.Multimodal.model_fields:
+        logger.warning("Ignoring multimodal field %s because use_multimodal is False.", repr(key))
+        continue
+
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
       raise ValueError(f"{key!r} not in {', '.join(map(repr, valid_fields))}.")
 

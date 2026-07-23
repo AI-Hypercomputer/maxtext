@@ -2171,6 +2171,10 @@ class AudioEncoder(BaseModel):
   max_sample_len_for_audio: int = Field(10000, description="Maximum sample length for audio input.")
 
 
+class Multimodal(MultimodalGeneral, VisionTower, VisionProjector, AudioEncoder):
+  """Configurations for multimodal"""
+
+
 class RLCluster(BaseModel):
   """Cluster configurations specific to RL training."""
 
@@ -3706,20 +3710,23 @@ class RLConfig(
     LogitsAndLoss,
     RematAndOffload,
     Attention,
-    PositionalEmbedding,
     LayoutAndSharding,
     InferenceLayout,
     InferenceGeneral,
     Decoding,
-    Rope,
     IciParallelism,
     DcnParallelism,
     HardwareAndMesh,
     ModelArchitecture,
     MoBa,
+    # Positional Embeddings
+    PositionalEmbedding,
+    Rope,
+    YarnRope,
     # Mixture of Experts
     MoEGeneral,
     MoEKernels,
+    DeepSeekMoE,
     # General MaxText Configs
     RunInfo,
     Checkpointing,
