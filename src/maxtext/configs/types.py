@@ -1114,6 +1114,10 @@ class LayoutAndSharding(BaseModel):
       "with auto sharding, megablox kernel, and EP / FSDP parallelisms.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
+  dense_fsdp_use_two_stage_all_gather: bool = Field(
+      False,
+      description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",

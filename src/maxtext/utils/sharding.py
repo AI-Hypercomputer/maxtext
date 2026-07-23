@@ -822,34 +822,50 @@ def get_formatted_sharding_annotations(params, mesh=None):
   return "\n".join(annotation_lines)
 
 
-def remove_fsdp_sharding(sharding_tree):
-  """Recursively traverses the sharding tree to remove fsdp axes."""
+FSDP_MESH_AXES = ("fsdp", "fsdp_transpose")
 
-  def _remove_fsdp_from_partition_spec(named_sharding):
-    """Removes 'fsdp' and 'fsdp_transpose' from a PartitionSpec."""
+
+def remove_mesh_axes_from_partition_spec(pspec, axes_to_remove, dims=None):
+  """Return `pspec` with `axes_to_remove` stripped from the given dims.
+
+  Replacing a mesh axis with `None` in a PartitionSpec instructs JAX to replicate
+  the array data along that physical mesh dimension, so peeling an axis here is
+  what turns a sharding constraint into an all-gather.
+
+  Args:
+    pspec: The PartitionSpec to strip axes from.
+    axes_to_remove: Collection of physical mesh axis names to remove.
+    dims: Dim indices to modify; `None` (the default) modifies every dim.
+
+  Returns:
+    A new PartitionSpec with the requested axes replaced by `None`.
+  """
+  axes_to_remove = set(axes_to_remove)
+  new_spec = []
+  for i, axis in enumerate(pspec):
+    if axis is None or (dims is not None and i not in dims):
+      new_spec.append(axis)
+    elif isinstance(axis, str):
+      new_spec.append(None if axis in axes_to_remove else axis)
+    elif isinstance(axis, (list, tuple)):
+      new_spec.append(tuple(a for a in axis if a not in axes_to_remove) or None)
+    else:
+      raise ValueError(f"Unsupported axis type: {type(axis)}")
+  return jax.sharding.PartitionSpec(*new_spec)
+
+
+def remove_mesh_axes_from_sharding(sharding_tree, axes_to_remove):
+  """Recursively traverses a sharding tree removing `axes_to_remove` from each spec."""
+
+  def _peel(named_sharding):
     if isinstance(named_sharding, jax.sharding.NamedSharding):
-      new_spec = []
-      # Iterate through each axis in the original PartitionSpec.
-      for axis in named_sharding.spec:
-        if axis is None:
-          new_spec.append(None)
-        elif isinstance(axis, str):
-          # If the axis is 'fsdp', replace it with None to signify replication.
-          if axis not in ("fsdp", "fsdp_transpose"):
-            new_spec.append(axis)
-          else:
-            new_spec.append(None)
-        elif isinstance(axis, (list, tuple)):
-          # If the axis is a collection, filter out 'fsdp'.
-          new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
-          new_spec.append(tuple(new_axis))
-        else:
-          raise ValueError(f"Unsupported_axis_type: {type(axis)}")
-        # Return a new sharding object with the modified spec.
-      return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+      return jax.sharding.NamedSharding(
+          named_sharding.mesh,
+          remove_mesh_axes_from_partition_spec(named_sharding.spec, axes_to_remove),
+      )
     return named_sharding
 
-  return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
+  return jax.tree.map(_peel, sharding_tree)
 
 
 def remove_expert_from_partition_spec(pspec, dims_to_peel):
@@ -863,19 +879,31 @@ def remove_expert_from_partition_spec(pspec, dims_to_peel):
   untouched. Avoids needing a separate `activation_batch_no_exp` logical rule that every
   `custom_mesh_and_rule` set would have to redefine.
   """
-  new_spec = list(pspec)
-  for i in dims_to_peel:
-    axis = new_spec[i]
-    if axis is None:
-      continue
-    if isinstance(axis, str):
-      new_spec[i] = None if axis == "expert" else axis
-    elif isinstance(axis, (list, tuple)):
-      filtered = tuple(a for a in axis if a != "expert")
-      new_spec[i] = filtered or None
-    else:
-      raise ValueError(f"Unsupported axis type: {type(axis)}")
-  return jax.sharding.PartitionSpec(*new_spec)
+  return remove_mesh_axes_from_partition_spec(pspec, ("expert",), dims=dims_to_peel)
+
+
+def get_physical_spec_without_axes(full_logical, mesh, axes_to_remove, logical_axis_rules=None):
+  """Resolve `full_logical` to a physical sharding with `axes_to_remove` peeled off.
+
+  Combines the logical-to-physical lookup with an axis peel, producing a target
+  layout for an all-gather over exactly the named mesh axes. Peeling a subset of
+  the FSDP axes (rather than all of them at once) is what lets a 2D-FSDP-sharded
+  weight be gathered in two separate single-axis stages.
+
+  Args:
+    full_logical: A PyTree of logical PartitionSpecs. Note that a bare tuple of
+      logical names is a pytree of strings, not a leaf -- wrap it in a
+      `PartitionSpec` before passing it in.
+    mesh: The JAX device mesh.
+    axes_to_remove: Collection of physical mesh axis names to peel.
+    logical_axis_rules: Rules for converting logical axes to physical mesh axes.
+      Defaults to the ambient rules context.
+
+  Returns:
+    A PyTree of physical `jax.sharding.NamedSharding` objects.
+  """
+  physical = logical_to_mesh_sharding(full_logical, mesh=mesh, rules=logical_axis_rules)
+  return remove_mesh_axes_from_sharding(physical, axes_to_remove)
 
 
 def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
@@ -902,11 +930,7 @@ def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
     mesh axis.
   """
 
-  # Convert the high-level logical spec to a physical one using default rules.
-  physical = logical_to_mesh_sharding(full_logical, mesh=mesh, rules=logical_axis_rules)
-  # Apply the function to remove the FSDP sharding, defining our target layout.
-  physical_no_fsdp = remove_fsdp_sharding(physical)
-  return physical_no_fsdp
+  return get_physical_spec_without_axes(full_logical, mesh, FSDP_MESH_AXES, logical_axis_rules)
 
 
 def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode):
