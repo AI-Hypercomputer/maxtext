@@ -560,9 +560,11 @@ def load_state_if_possible(
         use_zarr3=use_zarr3,
     )
     return {"items": restored_state}, None
+  if checkpoint_manager is None:
+    max_logging.log("Checkpoint manager is None, skipping checkpoint restoration.")
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
-    return None, None
+  return None, None
 
 
 def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
@@ -840,3 +842,41 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       return checkpoint_manager.save(
           step, args=Composite(**save_args_composite), force=force, custom_metadata=custom_metadata
       )
+
+
+def cancel_checkpoint_manager(checkpoint_manager):
+  """Immediately cancels/aborts background saving and finalize threads on a CheckpointManager."""
+  if checkpoint_manager is None:
+    return
+
+  max_logging.log("Immediately cancelling background checkpoint saving operations on CheckpointManager...")
+  try:
+    # 1. Detach and clear async checkpointer saving threads
+    checkpointer = getattr(checkpoint_manager, "_checkpointer", None)
+    checkpointers = []
+    if checkpointer is not None:
+      if isinstance(checkpointer, dict):
+        checkpointers.extend(checkpointer.values())
+      elif hasattr(checkpointer, "values"):
+        checkpointers.extend(checkpointer.values())
+      else:
+        checkpointers.append(checkpointer)
+
+    for ckptr in checkpointers:
+      async_mgr = getattr(ckptr, "_async_manager", None)
+      if async_mgr is not None:
+        thread = getattr(async_mgr, "_thread", None)
+        if thread is not None:
+          max_logging.log(f"Detached background async save thread: {thread.name}")
+          async_mgr._thread = None
+        async_mgr._exception = None
+
+    # 2. Detach and clear finalize thread
+    finalize_ref = getattr(checkpoint_manager, "_finalize_thread", None)
+    if finalize_ref is not None:
+      if hasattr(finalize_ref, "set"):
+        finalize_ref.set(None)
+
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Warning: error during immediate checkpoint manager cancellation: {e}")
+

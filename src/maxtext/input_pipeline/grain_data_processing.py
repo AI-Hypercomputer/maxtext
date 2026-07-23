@@ -34,6 +34,7 @@ from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
+from maxtext.utils import sharding as max_sharding
 
 
 def find_data_files(data_file_pattern):
@@ -467,12 +468,15 @@ def make_grain_train_iterator(
     if config.grain_use_elastic_iterator:
       preprocessing_fn = functools.partial(_make_elastic_iterator, config=config, preprocessing_fn=preprocessing_fn)
 
+    data_sharding = max_sharding.get_input_data_sharding(config, global_mesh)
+    sharding_spec = data_sharding.spec
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(
         get_ds_fn,
         preprocessing_fn,
         global_mesh,
         global_shape,
+        sharding_spec=sharding_spec,
         checkpoint_path=config.checkpoint_dir,
         elastic=config.grain_use_elastic_iterator,
     )
@@ -566,12 +570,15 @@ def make_grain_eval_iterator(
         eval_dataloader, global_mesh, config.generate_padding_batch_eval
     )
   else:
+    data_sharding = max_sharding.get_input_data_sharding(config, global_mesh)
+    sharding_spec = data_sharding.spec
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(
         get_ds_fn,
         preprocessing_fn,
         global_mesh,
         global_shape,
+        sharding_spec=sharding_spec,
         checkpoint_path=config.checkpoint_dir,
         elastic=config.grain_use_elastic_iterator,
     )

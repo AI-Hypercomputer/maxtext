@@ -26,6 +26,7 @@ from maxtext.common.goodput import (
 from maxtext.trainers.diloco import diloco
 from maxtext.utils import exceptions
 from maxtext.utils.sharding import get_input_data_sharding
+from maxtext.utils import elastic_utils
 
 
 class DataLoader:
@@ -63,6 +64,11 @@ class DataLoader:
         self.last_batch = example_batch
         self.check_example_batch()
       except Exception as e:  # pylint: disable=broad-except
+        if elastic_utils.elastic_enabled(self.config) and (
+            isinstance(e, jax.errors.JaxRuntimeError)
+            or isinstance(e, elastic_utils.manager.ScaleUpSignalError)
+        ):
+          raise
         if isinstance(e, StopIteration):
           raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)} exception: ({e})")
         else:
