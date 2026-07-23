@@ -78,6 +78,7 @@ HF_IDS = {
     "deepseek3-671b": "deepseek-ai/DeepSeek-V3",
     "deepseek3.2-671b": "deepseek-ai/DeepSeek-V3.2",
     "deepseek4-284b": "deepseek-ai/DeepSeek-V4-Flash",
+    "deepseek4-tiny": "deepseek-ai/DeepSeek-V4-Flash",
     "gpt-oss-20b": "openai/gpt-oss-20b",
     "gpt-oss-120b": "openai/gpt-oss-120b",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",

@@ -273,8 +273,14 @@ class LazyHFLoader:
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
     with self._ram_lock:
-      with safe_open(local_path, framework="np", device="cpu") as f:
-        return f.get_tensor(mapped_key)
+      try:
+        with safe_open(local_path, framework="np", device="cpu") as f:
+          return f.get_tensor(mapped_key)
+      except (AttributeError, Exception):
+        import torch
+        with safe_open(local_path, framework="pt", device="cpu") as f:
+          t = f.get_tensor(mapped_key)
+          return t.to(torch.float32).numpy()
 
 
 class LazyTensor:
@@ -386,6 +392,8 @@ def get_maxtext_model_info(config):
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   # Get abstract model structure (name, shape) without materializing the weights to save memory
+  # We do not extract ["params"] here because we may need to convert variables outside of
+  # the 'params' collection (e.g. 'Tid2EidVar' for routing or other state).
   abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
@@ -399,6 +407,12 @@ def get_maxtext_model_info(config):
   maxtext_abstract_dict = {}
   for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
     joined_path = "-".join(param_key_parts_from_path(path_tuple))
+    
+    # Handle both top-level collections and inner params.
+    # For example, a target key might be "params-Decoder-0..." or "Tid2EidVar-0...". 
+    # If the abstract param tree path already starts with the collection name 
+    # (e.g. "params-" or "Tid2EidVar-"), we use it directly. 
+    # Otherwise, for backward compatibility with nested flax structures, we prepend "params-".
     if joined_path.startswith("params-") or joined_path.startswith("Tid2EidVar-"):
       mt_param_key = joined_path
     else:

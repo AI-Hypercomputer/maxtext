@@ -106,7 +106,7 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
       flattened_map_keys.add(key)
 
   # 1 Validate: every maxtext state key must be covered by param map
-  missing_keys = maxtext_state_keys - flattened_map_keys
+  missing_keys = {k for k in (maxtext_state_keys - flattened_map_keys) if "tid2eid" not in k}
   if missing_keys:
     hint = ""
     ckpt_has_scanned = any("scanned_blocks" in k for k in missing_keys)
@@ -254,6 +254,8 @@ def process_maxtext_param(
   if maxtext_param_key not in param_map:
     raise ValueError(f"MaxText param key '{maxtext_param_key}' not found in param_map.")
   hf_target_paths = param_map[maxtext_param_key]
+  if hf_target_paths is None:
+    return []
   if not hf_target_paths:
     raise ValueError(f"No HF target paths found for MaxText key '{maxtext_param_key}'")
 
@@ -285,7 +287,10 @@ def process_maxtext_param(
 
   if not isinstance(hf_target_paths[0], list):
     # Case 2 or 3: The source tensor is stacked on a single axis.
-    if maxtext_config.scan_layers:
+    if len(hf_target_paths) == getattr(maxtext_config, "num_experts", -1) or "experts" in str(hf_target_paths[0]):
+      max_logging.log("\tmoe expert slice")
+      axis_to_slice = 0
+    elif maxtext_config.scan_layers:
       max_logging.log("\tscan")
       # Case 2: Standard scanned layer. Stacked ONLY on the layer axis.
       axis_to_slice = maxtext_config.param_scan_axis
