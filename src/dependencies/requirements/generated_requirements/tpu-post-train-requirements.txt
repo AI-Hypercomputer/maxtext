@@ -335,9 +335,9 @@ tokenizers>=0.22.2
 toml>=0.10.2
 tomlkit>=0.15.1
 toolz>=1.1.0
-torch==2.11.0+cpu
+torch>=2.11.0
 torchax>=0.0.13
-torchvision==0.26.0+cpu
+torchvision>=0.26.0
 tornado>=6.5.7
 tpu-info>=0.7.1
 tqdm>=4.69.0

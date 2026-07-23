@@ -37,9 +37,9 @@ def main():
   if not os.path.exists(github_deps_path):
     raise FileNotFoundError(f"Github dependencies file not found at {github_deps_path}")
 
-  # Check if 'uv' is available in the environment
+  # Check if 'uv' and 'setuptools' are available in the environment
   try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "uv"], check=True, capture_output=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "uv", "setuptools"], check=True, capture_output=True)
     subprocess.run([sys.executable, "-m", "uv", "--version"], check=True, capture_output=True)
   except subprocess.CalledProcessError as e:
     print(f"Error checking uv version: {e}")
