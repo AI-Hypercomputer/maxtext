@@ -42,7 +42,6 @@ from orbax.checkpoint._src.arrays import sharding as sharding_utils
 from orbax.checkpoint._src.checkpoint_managers import preservation_policy as preservation_policy_lib
 from orbax.checkpoint._src.checkpoint_managers import save_decision_policy as save_decision_policy_lib
 
-
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
 Composite = ocp.args.Composite
 PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
@@ -362,6 +361,21 @@ def print_save_message(step, async_checkpointing):
     max_logging.log(f"Saved a checkpoint at step {step}.")
 
 
+def latest_step(checkpoint_manager):
+  """Latest saved step or None, across the v0 emergency manager and the v1 Checkpointer."""
+  return checkpoint_manager.latest_step()
+
+
+def wait_until_finished(checkpoint_manager):
+  """Blocks until pending saves finish, across the v0 emergency manager and the v1 Checkpointer."""
+  return checkpoint_manager.wait_until_finished()
+
+
+def reached_preemption(checkpoint_manager, step: int) -> bool:
+  """Whether a preemption sync point has been reached at `step`, across the v0 emergency manager and the v1 Checkpointer."""
+  return checkpoint_manager.reached_preemption(step)
+
+
 def load_state_if_possible(
     checkpoint_manager: CheckpointManager | None,
     data_iterator: MultiHostDataLoadIterator | list[MultiHostDataLoadIterator] | None,
@@ -409,7 +423,7 @@ def load_state_if_possible(
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
 
-    step = checkpoint_manager.latest_step() if step < 0 else step  # pyrefly: ignore[bad-assignment]
+    step = latest_step(checkpoint_manager) if step < 0 else step  # pyrefly: ignore[bad-assignment]
     if step is not None:
       max_logging.log(f"restoring from this run's directory step {step}")
 
@@ -678,16 +692,18 @@ def _should_save_checkpoint_at_step(checkpoint_manager, step, config, force):
   else:
     base_checkpoint_due = step % config.checkpoint_period == 0
   local_checkpoint_due = _uses_local_checkpoint_period(config) and step % config.local_checkpoint_period == 0
-  autocheckpoint_due = config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step)
+  autocheckpoint_due = config.enable_autocheckpoint and reached_preemption(checkpoint_manager, step)
   return base_checkpoint_due or local_checkpoint_due or autocheckpoint_due
 
 
 def _handle_post_checkpoint_preemption(checkpoint_manager, step, force_ckpt_save):
   """Waits on final/preemption saves and raises if preempted."""
-  reached_preemption = checkpoint_manager.reached_preemption(step)
-  if force_ckpt_save or reached_preemption:
-    checkpoint_manager.wait_until_finished()
-  if reached_preemption:
+  # Named is_preempted (not reached_preemption) so it doesn't shadow the module-level
+  # reached_preemption dispatcher we call below.
+  is_preempted = reached_preemption(checkpoint_manager, step)
+  if force_ckpt_save or is_preempted:
+    wait_until_finished(checkpoint_manager)
+  if is_preempted:
     raise exceptions.StopTraining("Job is preempted.")
 
 
@@ -721,7 +737,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
     return
 
-  if checkpoint_manager.latest_step() == actual_step:
+  if latest_step(checkpoint_manager) == actual_step:
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
@@ -770,7 +786,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         force
         or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
         or (_uses_local_checkpoint_period(config) and step % config.local_checkpoint_period == 0)
-        or (config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step))
+        or (config.enable_autocheckpoint and reached_preemption(checkpoint_manager, step))
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")

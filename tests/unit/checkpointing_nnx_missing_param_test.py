@@ -125,7 +125,7 @@ class TestMissingParamRoundTrip(unittest.TestCase):
     model = _Model(nnx.Rngs(0))
     state = train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, _TX, wrt=nnx.Param))
     checkpointing.maybe_save_checkpoint(manager, nnx.state(state), _config(), data_iterator=None, step=1)
-    manager.wait_until_finished()
+    checkpointing.wait_until_finished(manager)
     return manager
 
   def _load_overlay(self, manager, model_cls):

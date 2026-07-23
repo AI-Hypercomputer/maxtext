@@ -421,7 +421,7 @@ class LoraUtilsTest(unittest.TestCase):
       # Use save_checkpoint wrapper with a simple state
       dummy_state = {"weight": jnp.array([1.0, 2.0])}
       checkpointing.save_checkpoint(manager, step=0, state=dummy_state, config=cfg_save)
-      manager.wait_until_finished()
+      checkpointing.wait_until_finished(manager)
 
       # Now verify that the saved checkpoint contains metadata on disk
       checkpoint_dir = epath.Path(tmpdir) / "0"
