@@ -370,7 +370,15 @@ class LoadBalancedMaskTest(unittest.TestCase):
     np.testing.assert_array_equal((causal_mask & chunk_mask)[:, :], expected_mask)
 
   def test_dot_product_local_mask_uses_segment_positions(self):
-    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
+    config = types.SimpleNamespace(
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        using_pipeline_parallelism=False,
+        logical_axis_rules=[["activation_embed_and_logits_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
+    )
     mesh = types.SimpleNamespace(shape={"context": 4})
     seq_len = 16
     sliding_window_size = 4
@@ -411,6 +419,9 @@ class LoadBalancedMaskTest(unittest.TestCase):
         context_sharding="context",
         using_pipeline_parallelism=False,
         logical_axis_rules=[["activation_embed_and_logits_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
     )
     mesh = types.SimpleNamespace(shape={"context": 4})
     seq_len = 16
