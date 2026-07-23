@@ -41,6 +41,7 @@ from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
+from maxtext.diffusion import scoring as diffusion_scoring
 from maxtext.utils.globals import EPS
 from maxtext.utils import elastic_utils
 # Placeholder: internal
@@ -103,6 +104,22 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     loss: average loss
     aux: a dictionary including intermediate_outputs, xent_sum, and total_weights
   """
+  is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
+  if getattr(config, "attention_type", "global") == "block_diffusion" and not is_block_diffusion:
+    raise ValueError(
+        "Block-diffusion attention requires target-aligned block-diffusion losses; "
+        "causal next-token labels would leak within a bidirectional block."
+    )
+  if is_block_diffusion:
+    required_masks = {"completion_mask", "corruption_mask", "targets_loss_mask"}
+    missing_masks = required_masks - data.keys()
+    if missing_masks:
+      raise ValueError(f"Block-diffusion loss requires explicit batch masks; missing {sorted(missing_masks)}")
+    target_shape = data["targets"].shape
+    for mask_name in required_masks:
+      if data[mask_name].shape != target_shape:
+        raise ValueError(f"{mask_name} must match targets shape; got {data[mask_name].shape} and {target_shape}")
+
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
@@ -110,6 +127,14 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
+  loss_mask_values = data["targets_loss_mask"] if is_block_diffusion else data["targets_segmentation"]
+  targets_loss_mask = (loss_mask_values != 0) & (data["targets_segmentation"] != 0)
+  target_positions = data.get("targets_position", data["inputs_position"])
+  if is_block_diffusion and config.block_diffusion_canvas_policy == "seed_and_mask":
+    if config.block_diffusion_logit_alignment == "shifted":
+      targets_loss_mask &= target_positions != 0
+    else:
+      targets_loss_mask &= target_positions % config.block_diffusion_block_size != 0
   mutable_collections = ["intermediates"]
   if config.mtp_num_layers > 0 and is_train:
     # The single model.apply call now triggers the entire chain if MTP is enabled:
@@ -161,6 +186,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
       xent_sum, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
     else:
+      if is_block_diffusion:
+        logits = diffusion_scoring.align_logits_to_targets(
+            logits,
+            config.block_diffusion_logit_alignment,
+            target_positions,
+            data["targets_segmentation"] != 0,
+        )
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
@@ -179,9 +211,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           debug_sharding=config.debug_sharding,
       )
 
-      # Mask out paddings at the end of each example.
-      xent = xent * (data["targets_segmentation"] != 0)
-      z_loss = z_loss * (data["targets_segmentation"] != 0)
+      xent = xent * targets_loss_mask
+      z_loss = z_loss * targets_loss_mask
 
       xent_sum = jnp.sum(xent)
       total_z_loss = jnp.sum(z_loss)
@@ -224,6 +255,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
       xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
     else:
+      if is_block_diffusion:
+        logits = diffusion_scoring.align_logits_to_targets(
+            logits,
+            config.block_diffusion_logit_alignment,
+            target_positions,
+            data["targets_segmentation"] != 0,
+        )
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
@@ -242,14 +280,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           debug_sharding=config.debug_sharding,
       )
 
-      # Mask out paddings at the end of each example.
-      xent = xent * (data["targets_segmentation"] != 0)
-      z_loss = z_loss * (data["targets_segmentation"] != 0)
+      xent = xent * targets_loss_mask
+      z_loss = z_loss * targets_loss_mask
 
       xent_sum = jnp.sum(xent)
       total_z_loss = jnp.sum(z_loss)
 
-  total_weights = jnp.sum(data["targets_segmentation"] != 0)
+  total_weights = jnp.sum(targets_loss_mask)
   # If gradient accumulation is enabled, we don't need to divide xent_sum
   # by total_weights and then multiply the computed gradient by total_weights,
   # since it's equivalent to computing the gradient from xent_sum.

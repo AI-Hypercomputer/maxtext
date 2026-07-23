@@ -15,6 +15,7 @@
 """Tests for synthetic data sharding."""
 
 import sys
+from types import SimpleNamespace
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -22,7 +23,7 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from maxtext.configs import pyconfig
-from maxtext.input_pipeline.synthetic_data_processing import SyntheticDataIterator
+from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator, SyntheticDataIterator
 from maxtext.utils import sharding as maxtext_sharding
 from tests.utils.test_helpers import get_test_config_path
 
@@ -73,6 +74,26 @@ class SyntheticDataShardingTest(parameterized.TestCase):
     # Expected sharding: mapping of logical axes to physical mesh
     expected_sharding = maxtext_sharding.get_input_data_sharding(config, mesh)
     self.assertEqual(inputs.sharding, expected_sharding)
+
+
+class PlaceHolderDataTest(absltest.TestCase):
+  """Tests placeholder batch metadata for non-loading hosts."""
+
+  def test_block_diffusion_placeholder_has_zero_loss_masks(self):
+    config = SimpleNamespace(
+        global_batch_size_to_load=jax.process_count(),
+        max_target_length=8,
+        training_objective="block_diffusion",
+    )
+
+    batch = next(PlaceHolderDataIterator.get_place_holder_synthetic_data(config))
+
+    self.assertIn("completion_mask", batch)
+    self.assertIn("corruption_mask", batch)
+    self.assertIn("targets_loss_mask", batch)
+    self.assertFalse(batch["completion_mask"].any())
+    self.assertFalse(batch["corruption_mask"].any())
+    self.assertFalse(batch["targets_loss_mask"].any())
 
 
 if __name__ == "__main__":

@@ -74,6 +74,18 @@ class SFTHooksTest(unittest.TestCase):
     total_weights = training_hooks.get_total_weights(batch)
     self.assertEqual(total_weights, 3)
 
+  def test_sft_training_hooks_prefers_explicit_loss_mask(self):
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)
+    training_hooks = sft_hooks.SFTTrainingHooks(self.config, self.mesh, learning_rate_schedule, goodput_recorder=None)
+    batch = {
+        "targets_segmentation": np.ones((2, 4), dtype=np.int32),
+        "targets_loss_mask": np.array([[1, 0, 0, 0], [0, 1, 1, 0]], dtype=np.int32),
+    }
+
+    total_weights = training_hooks.get_total_weights(batch)
+
+    self.assertEqual(total_weights, 3)
+
 
 if __name__ == "__main__":
   unittest.main()

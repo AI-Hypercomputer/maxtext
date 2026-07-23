@@ -15,6 +15,7 @@
 """Tests for Hugging Face data processing."""
 
 import sys
+from types import SimpleNamespace
 import unittest
 import os.path
 
@@ -26,6 +27,7 @@ from jax.experimental import mesh_utils
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import hf_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
@@ -124,6 +126,76 @@ class HfDataProcessingTest(unittest.TestCase):
     train_batch2 = get_first_batch(self.train_iter)
     self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
+
+
+@pytest.mark.cpu_only
+class TrainingObjectiveTransformTest(unittest.TestCase):
+  """Tests objective selection at the HF pipeline boundary."""
+
+  def test_default_objective_keeps_shift_data(self):
+    transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+        SimpleNamespace(),
+        shift=True,
+        use_dpo=False,
+        use_sft=False,
+        completion_only=False,
+        packing=False,
+        pad_id=0,
+        bos_token_id=1,
+    )
+
+    self.assertIsInstance(transform, input_pipeline_utils.ShiftData)
+    self.assertEqual(transform.ignored_ids, [0, 1])
+
+  def test_explicit_block_diffusion_objective_replaces_shift(self):
+    config = SimpleNamespace(
+        training_objective="block_diffusion",
+        block_diffusion_block_size=4,
+        block_diffusion_mask_id=99,
+        block_diffusion_min_noise=0.05,
+        block_diffusion_canvas_policy="seed_and_mask",
+        block_diffusion_logit_alignment="shifted",
+    )
+
+    transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+        config,
+        shift=True,
+        use_dpo=False,
+        use_sft=True,
+        completion_only=True,
+        packing=False,
+        pad_id=0,
+        bos_token_id=1,
+    )
+
+    self.assertIsInstance(transform, input_pipeline_utils.BlockDiffusionCorruption)
+    self.assertEqual(transform.block_size, 4)
+    self.assertEqual(transform.mask_id, 99)
+    self.assertEqual(transform.min_noise, 0.05)
+    self.assertTrue(transform.completion_only)
+    self.assertTrue(transform.seed_first_token)
+    self.assertTrue(transform.include_seed_in_loss)
+
+  def test_block_diffusion_rejects_packing(self):
+    config = SimpleNamespace(
+        training_objective="block_diffusion",
+        block_diffusion_block_size=4,
+        block_diffusion_mask_id=99,
+        block_diffusion_min_noise=0.05,
+        block_diffusion_canvas_policy="all_masked",
+    )
+
+    with self.assertRaisesRegex(ValueError, "packing=False"):
+      hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+          config,
+          shift=True,
+          use_dpo=False,
+          use_sft=False,
+          completion_only=False,
+          packing=True,
+          pad_id=0,
+          bos_token_id=1,
+      )
 
 
 if __name__ == "__main__":

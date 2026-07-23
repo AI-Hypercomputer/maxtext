@@ -791,6 +791,11 @@ olmo_apply_ngram_filter: true # mask instances with repetitive n-grams (OLMo-cor
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
 log_period: 100 # The frequency of Tensorboard flush, gcs metrics writing, and managed profiler metrics updating.
+training_objective: 'causal_lm' # Supported objectives: causal_lm, block_diffusion
+block_diffusion_mask_id: -1 # Tokenizer mask-token id; required for training_objective='block_diffusion'
+block_diffusion_min_noise: 0.001 # Minimum per-block corruption probability for block-diffusion training
+block_diffusion_logit_alignment: 'same_position' # Supported alignments: same_position, shifted
+block_diffusion_canvas_policy: 'all_masked' # Supported canvases: all_masked, seed_and_mask
 
 jax_distributed_initialization_timeout: 300 # This is the default timeout in https://github.com/jax-ml/jax/blob/main/jax/_src/distributed.py
 # Note there are two separate initializations - the jax coordination service (aka jax.distributed.initialize) and the backend (e.g. PjRT), the timeout above refers
