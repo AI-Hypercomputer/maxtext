@@ -1653,8 +1653,9 @@ class TestNNXAbstractState(unittest.TestCase):
 
     # Verify PartitionSpec was extracted correctly from the mock model's annotations
     # Path: params -> kernel -> spec
+    kernel_spec = annotations.params.kernel.get_value() if isinstance(annotations.params.kernel, nnx.Variable) else annotations.params.kernel
     self.assertEqual(
-        annotations.params.kernel.get_value(),
+        kernel_spec,
         PartitionSpec(
             "model",
         ),
@@ -1669,7 +1670,7 @@ class TestNNXAbstractState(unittest.TestCase):
     # Original Pspec for optimizer was PartitionSpec(None).
     # add_data_to_sharding should find that dim 0 is compatible with mesh 'data'
     # and update it to PartitionSpec(('data',)).
-    opt_spec = annotations.optimizer.get_value()
+    opt_spec = annotations.optimizer.get_value() if isinstance(annotations.optimizer, nnx.Variable) else annotations.optimizer
 
     # Verify 'data' is now in the spec
     self.assertEqual(opt_spec, PartitionSpec(("data", "model")))
@@ -1681,11 +1682,11 @@ class TestNNXAbstractState(unittest.TestCase):
     _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
 
     # Optimizer state should be pinned to host
-    opt_sharding = shardings.optimizer.get_value()
+    opt_sharding = shardings.optimizer.get_value() if isinstance(shardings.optimizer, nnx.Variable) else shardings.optimizer
     self.assertEqual(opt_sharding.memory_kind, "pinned_host")
 
     # Params should still be on default memory (usually device)
-    param_sharding = shardings.params.kernel.get_value()
+    param_sharding = shardings.params.kernel.get_value() if isinstance(shardings.params.kernel, nnx.Variable) else shardings.params.kernel
     self.assertNotEqual(param_sharding.memory_kind, "pinned_host")
 
   def test_parameter_host_offload(self):
@@ -1696,7 +1697,7 @@ class TestNNXAbstractState(unittest.TestCase):
     _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
 
     # Parameters should be pinned to host
-    param_sharding = shardings.params.kernel.get_value()
+    param_sharding = shardings.params.kernel.get_value() if isinstance(shardings.params.kernel, nnx.Variable) else shardings.params.kernel
     self.assertEqual(param_sharding.memory_kind, "pinned_host")
 
   def test_invalid_init_fn(self):

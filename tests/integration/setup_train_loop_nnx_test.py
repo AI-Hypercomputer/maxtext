@@ -28,6 +28,7 @@ import unittest
 
 from flax import nnx
 import jax
+from jax.sharding import NamedSharding
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
@@ -118,15 +119,11 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
     *_, state_mesh_shardings, model, _, _, _, _, _, _, train_state = setup_train_loop(config, recorder=None)
 
     _, params, _ = nnx.split(train_state.model, nnx.Param, ...)
-    _, params_shardings, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
-
-    # Same key-set after nnx.split — this is what setup_train_loop relies on at
-    # train_utils.py:281-282 to pair state_params with state_mesh_shardings_params.
-    self.assertEqual(
-        jax.tree_util.tree_structure(params),
-        jax.tree_util.tree_structure(params_shardings),
-    )
-    self.assertGreater(len(jax.tree.leaves(params)), 0)
+    params_flat = dict(nnx.to_flat_state(params))
+    full_shardings_flat = dict(nnx.to_flat_state(state_mesh_shardings.model))
+    params_shardings_flat = {k: full_shardings_flat[k] for k in params_flat if k in full_shardings_flat}
+    self.assertEqual(set(params_flat.keys()), set(params_shardings_flat.keys()))
+    self.assertGreater(len(params_flat), 0)
 
     del model
 

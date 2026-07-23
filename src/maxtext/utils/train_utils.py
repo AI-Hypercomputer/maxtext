@@ -32,6 +32,7 @@ from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
+from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -234,17 +235,27 @@ def setup_train_loop(config, recorder, devices=None):
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     if config.pure_nnx:
       # Create abstract NNX model.
-      _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
+      _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
+      model = _create_model_partial()
+      if getattr(getattr(config, "lora", None), "enable_lora", False):
+        model = lora_utils.apply_lora_to_model(model, mesh, config)
     else:
       model = model_creation_utils.from_config(config, devices)
+
     learning_rate_schedule, tx = create_training_optimizer(config, model)
 
     if config.pure_nnx:
       # For NNX, the train state is wrapped in the TrainStateNNX module.
       def create_train_state_fn():
-        model = _create_model_partial()
-        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(model, optimizer)
+        m = _create_model_partial()
+        if getattr(getattr(config, "lora", None), "enable_lora", False):
+          m = lora_utils.apply_lora_to_model(m, mesh, config)
+          param_types = (getattr(nnx, "LoRAParam", nnx.Param),)
+        else:
+          param_types = (nnx.Param,)
+        nnx.pop(m, nnx.Intermediate)
+        optimizer = nnx.Optimizer(m, tx, wrt=param_types)
+        return train_state_nnx.TrainStateNNX(m, optimizer)
 
       init_state_fn = create_train_state_fn
     else:
@@ -311,9 +322,13 @@ def setup_train_loop(config, recorder, devices=None):
         # under jax.set_mesh(mesh) and rejects any logical name missing from
         # logical_axis_rules (e.g. concat_embed on the MTP kernel). Tracing shapes
         # without a mesh skips sharding resolution, so it avoids the crash.
-        state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
-        _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
-        _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
+        state_graphdef = nnx.graphdef(init_state_fn())
+        if isinstance(state, nnx.State):
+          state_params = state["model"]
+          state_mesh_shardings_params = state_mesh_shardings["model"]
+        else:
+          state_params = state.model
+          state_mesh_shardings_params = state_mesh_shardings.model
     else:
       state_params = state.params
       state_mesh_shardings_params = state_mesh_shardings.params
@@ -363,7 +378,10 @@ def setup_train_loop(config, recorder, devices=None):
       train_state = state
       model = state_graphdef  # pyrefly: ignore[unbound-name]
     else:
-      train_state = nnx.merge(state_graphdef, state)  # pyrefly: ignore[unbound-name]
+      if isinstance(state, nnx.State):
+        train_state = nnx.merge(state_graphdef, state)
+      else:
+        train_state = state
       model = train_state.model
   else:
     train_state = state

@@ -217,6 +217,8 @@ def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Vari
       pspec = P(*out_sharding)
       if mesh is not None:
         pspec = remove_size_one_mesh_axis(pspec, mesh)
+  if mesh is None:
+    return v.replace(pspec)
   return v.replace(NamedSharding(mesh, pspec))
 
 
@@ -610,9 +612,12 @@ def maybe_update_params_sharding_with_opt_nnx(
     structure as nnx.split(model, nnx.Param, ...)[1], enabling jax.tree.map
     to work correctly between ga_params (Param-only) and params_shardings.
     """
+    param_type = nnx.LoRAParam if getattr(getattr(config, "lora", None), "enable_lora", False) else nnx.Param
     result = {}
     for k, v in state.items():
-      if isinstance(v, nnx.Param):
+      if isinstance(v, (NamedSharding, jax.sharding.Sharding)):
+        result[k] = v
+      elif isinstance(v, param_type):
         result[k] = v
       elif isinstance(v, nnx.Variable):
         pass  # skip non-Param variables (RngKey, RngCount, OptVariable, etc.)
@@ -670,17 +675,29 @@ def maybe_update_params_sharding_with_opt_nnx(
   # Build a path → new_PS lookup from sharded_fp32_params (mu), then update model_shardings
   # at those paths while preserving rngs and any other non-Param variables.
   mu_leaves_with_paths = list(
-      jax.tree_util.tree_leaves_with_path(sharded_fp32_params, is_leaf=lambda x: isinstance(x, nnx.Variable))
+      jax.tree_util.tree_leaves_with_path(
+          sharded_fp32_params,
+          is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding, jax.sharding.Sharding)),
+      )
   )
-  mu_lookup = {path: mu_var.get_value() for path, mu_var in mu_leaves_with_paths}
+  mu_lookup = {
+      path: (mu_var.get_value() if isinstance(mu_var, nnx.Variable) else mu_var) for path, mu_var in mu_leaves_with_paths
+  }
 
   def _update_model_var(path, var):
     if path in mu_lookup:
-      return var.replace(mu_lookup[path])
+      if isinstance(var, nnx.Variable):
+        val = var.get_value()
+        if isinstance(val, jax.ShapeDtypeStruct):
+          return var.replace(value=jax.ShapeDtypeStruct(val.shape, val.dtype, sharding=mu_lookup[path]))
+        return var.replace(mu_lookup[path])
+      return mu_lookup[path]
     return var
 
   new_model_shardings = jax.tree_util.tree_map_with_path(
-      _update_model_var, model_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable)
+      _update_model_var,
+      model_shardings,
+      is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding, jax.sharding.Sharding)),
   )
   # Use jax.tree_util.tree_map (identity) to create a new nnx.State via JAX's unflatten
   # mechanism (not the nnx.State constructor). This is critical because:
