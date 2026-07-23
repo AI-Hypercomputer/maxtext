@@ -534,8 +534,6 @@ class AttentionOp(nnx.Module):
           raise ValueError("TPU Tokamax ring attention requires use_tokamax_splash=True.")
         if self.config.use_jax_splash:
           raise ValueError("TPU Tokamax ring attention requires use_jax_splash=False.")
-        if self.config.context_parallel_load_balance:
-          raise ValueError("TPU Tokamax ring attention does not support context_parallel_load_balance yet.")
         if self.config.packing:
           raise ValueError("TPU Tokamax ring attention does not support packing yet.")
         if self.attention_type != AttentionType.GLOBAL:

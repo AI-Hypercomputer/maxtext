@@ -183,12 +183,15 @@ class _ComputableMask(Mask):
       to undefined softmax.
     q_sequence: Indices of Q sequence. q_sequence is reused across __getitem__
       calls which is important for compile-time performance.
+    kv_sequence: Optional indices of KV sequence. When unset, KV positions are
+      the physical column indices.
     mask_function: Function used by the SplashAttention kernel to compute the
       mask rather than loading it.
   """
 
   _shape: tuple[int, int]
   q_sequence: np.ndarray
+  kv_sequence: np.ndarray | None
   mask_function: Callable[..., Any]
 
   def __init__(
@@ -207,6 +210,7 @@ class _ComputableMask(Mask):
       )
 
     self.q_sequence = np.arange(q_seq_len, dtype=np.int32)
+    self.kv_sequence = None
 
   @property
   def shape(self) -> tuple[int, ...]:
@@ -224,7 +228,10 @@ class _ComputableMask(Mask):
     kv_slice = _fill_slice(kv_slice, self.shape[1])
 
     rows = self.q_sequence[q_slice]
-    cols = np.arange(kv_slice.start, kv_slice.stop)
+    if self.kv_sequence is None:
+      cols = np.arange(kv_slice.start, kv_slice.stop)
+    else:
+      cols = self.kv_sequence[kv_slice]
 
     return self.mask_function(rows[:, None], cols[None, :])
 
@@ -276,7 +283,12 @@ class CausalMask(_ComputableMask):
     if not isinstance(other, type(self)):
       return NotImplemented
 
-    return self.shape == other.shape and self.offset == other.offset and np.array_equal(self.q_sequence, other.q_sequence)
+    return (
+        self.shape == other.shape
+        and self.offset == other.offset
+        and np.array_equal(self.q_sequence, other.q_sequence)
+        and np.array_equal(self.kv_sequence, other.kv_sequence)
+    )
 
   def __hash__(self):
     return hash(
@@ -285,6 +297,7 @@ class CausalMask(_ComputableMask):
             self.shape,
             self.offset,
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
+            self.kv_sequence.tobytes() if self.kv_sequence is not None else None,
         )
     )
 

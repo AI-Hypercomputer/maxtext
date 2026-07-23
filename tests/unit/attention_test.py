@@ -29,6 +29,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.sharding import AxisType, Mesh
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
 
@@ -1141,8 +1142,12 @@ class AttentionTest(parameterized.TestCase):
         f"are not close. context_parallel_load_balance={context_parallel_load_balance}.",
     )
 
+  @parameterized.named_parameters(
+      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
+      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
+  )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ring_context_parallel(self):
+  def test_tpu_flash_attention_ring_context_parallel(self, context_parallel_load_balance):
     """Test equivalence between dot_product and flash attention + ring context parallelism"""
 
     cfg_cp = pyconfig.initialize(
@@ -1150,7 +1155,7 @@ class AttentionTest(parameterized.TestCase):
         **self.config_arguments,
         attention="flash",
         context_parallel_strategy="ring",
-        context_parallel_load_balance=False,
+        context_parallel_load_balance=context_parallel_load_balance,
         ici_context_parallelism=2,
         use_tokamax_splash=True,
         use_jax_splash=False,
@@ -1217,11 +1222,16 @@ class AttentionTest(parameterized.TestCase):
 
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
-        msg="Logits from generic dot product and flash attention + ring context parallelism are not close.",
+        msg="Logits from generic dot product and flash attention + ring context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}.",
     )
 
+  @parameterized.named_parameters(
+      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
+      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
+  )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ring_context_parallel_grad(self):
+  def test_tpu_flash_attention_ring_context_parallel_grad(self, context_parallel_load_balance):
     """Test gradient equivalence between dot_product and flash attention + ring context parallelism"""
 
     cfg_cp = pyconfig.initialize(
@@ -1229,7 +1239,7 @@ class AttentionTest(parameterized.TestCase):
         **self.config_arguments,
         attention="flash",
         context_parallel_strategy="ring",
-        context_parallel_load_balance=False,
+        context_parallel_load_balance=context_parallel_load_balance,
         ici_context_parallelism=2,
         use_tokamax_splash=True,
         use_jax_splash=False,
@@ -1286,11 +1296,19 @@ class AttentionTest(parameterized.TestCase):
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
     def ring_loss(lnx):
+      if context_parallel_load_balance:
+        context_parallel_size = cfg_cp.ici_context_parallelism
+        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
+        ring_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
+        ring_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+      else:
+        ring_decoder_segment_ids = decoder_segment_ids
+        ring_decoder_positions = decoder_positions
       output, _ = attention_as_mha_flash_cp(
           lnx,
           lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
+          decoder_segment_ids=ring_decoder_segment_ids,
+          inputs_positions=ring_decoder_positions,
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
@@ -1304,7 +1322,8 @@ class AttentionTest(parameterized.TestCase):
 
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
-        msg="Input gradients from generic dot product and flash attention + ring context parallelism are not close.",
+        msg="Input gradients from generic dot product and flash attention + ring context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}.",
     )
 
   @pytest.mark.tpu_only
