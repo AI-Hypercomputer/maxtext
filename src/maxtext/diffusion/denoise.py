@@ -15,10 +15,19 @@
 """Model-independent block-diffusion rollout state transitions."""
 
 from collections.abc import Callable
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+class DenoiseTrace(NamedTuple):
+  """Compact sampled trajectory for replaying diffusion policy scores."""
+
+  tokens: jax.Array
+  action_steps: jax.Array
+  action_logps: jax.Array
 
 
 def _validate_shapes(initial_tokens, positions, validity_mask, completion_mask):
@@ -41,6 +50,26 @@ def _concrete_numpy(value):
   if isinstance(value, jax.Array) and not value.is_fully_addressable:
     return None
   return np.asarray(value)
+
+
+def _per_row_rngs(rng, batch_size):
+  """Normalizes one or per-row typed/legacy JAX keys to per-row keys."""
+  rng = jnp.asarray(rng)
+  is_typed_key = jax.dtypes.issubdtype(rng.dtype, jax.dtypes.prng_key)
+  scalar_shape = () if is_typed_key else tuple(jax.random.PRNGKey(0).shape)
+  if tuple(rng.shape) == scalar_shape:
+    return jax.vmap(lambda row: jax.random.fold_in(rng, row))(jnp.arange(batch_size, dtype=jnp.int32))
+  if tuple(rng.shape) == (batch_size, *scalar_shape):
+    return rng
+  raise ValueError(
+      "rng must be one PRNG key or one key per batch row; "
+      f"received shape {tuple(rng.shape)} for key shape {scalar_shape}"
+  )
+
+
+def _select_row_rngs(row_mask, new_rngs, old_rngs):
+  selector = row_mask.reshape((row_mask.shape[0],) + (1,) * (old_rngs.ndim - 1))
+  return jnp.where(selector, new_rngs, old_rngs)
 
 
 def _validate_logical_positions(positions, validity_mask, completion_mask, *, shifted_seed):
@@ -94,7 +123,7 @@ def validate_completion_suffix(positions, validity_mask, completion_mask, *, shi
       raise ValueError("diffusion OPD rollout requires completion_mask to be a contiguous suffix")
 
 
-def low_confidence_generate(
+def low_confidence_rollout(
     logits_fn: Callable[[jax.Array], jax.Array],
     initial_tokens: jax.Array,
     positions: jax.Array,
@@ -108,13 +137,16 @@ def low_confidence_generate(
     confidence_threshold: float = 0.9,
     temperature: float = 1.0,
     max_denoise_steps: int | None = None,
-) -> jax.Array:
-  """Generates a completion block by block with confidence-based commits.
+    rng: jax.Array | None = None,
+) -> DenoiseTrace:
+  """Samples a completion and records each token's pre-commit action step.
 
   ``logits_fn`` must return target-aligned logits for the current token canvas.
   Each denoising step commits every token at or above the confidence threshold;
   if a row has no such token, its highest-confidence unresolved token is forced
-  to commit. This guarantees progress for heterogeneous and partial blocks.
+  to commit. ``action_steps`` compactly identifies the exact masked canvas for
+  replay: token ``p`` was scored while every token with step >= its step was
+  still masked. Prompt, padding, and inactive completion tokens use step -1.
   """
   _validate_shapes(initial_tokens, positions, validity_mask, completion_mask)
   valid_contracts = {("same_position", "all_masked"), ("shifted", "seed_and_mask")}
@@ -143,10 +175,15 @@ def low_confidence_generate(
   completion_mask = jnp.asarray(completion_mask, dtype=jnp.bool_) & validity_mask
   positions = jnp.asarray(positions, dtype=jnp.int32)
   canvas = jnp.where(completion_mask, jnp.asarray(mask_id, initial_tokens.dtype), initial_tokens)
+  action_steps = jnp.full(initial_tokens.shape, -1, dtype=jnp.int32)
+  action_logps = jnp.zeros(initial_tokens.shape, dtype=jnp.float32)
+  sample_tokens = rng is not None
+  rng = jax.random.PRNGKey(0) if rng is None else jnp.asarray(rng)
+  row_rngs = _per_row_rngs(rng, initial_tokens.shape[0])
   block_ids = positions // block_size
   num_blocks = (initial_tokens.shape[1] + block_size - 1) // block_size
 
-  def propose(current_canvas):
+  def propose(current_canvas, proposal_keys):
     logits = logits_fn(current_canvas)
     expected_prefix = tuple(current_canvas.shape)
     if len(logits.shape) != 3 or tuple(logits.shape[:2]) != expected_prefix:
@@ -161,30 +198,63 @@ def low_confidence_generate(
       raise ValueError(f"mask_id must satisfy 0 <= mask_id < vocab_size ({vocab_size}); received {mask_id}")
     scaled_logits = jnp.asarray(logits, dtype=jnp.float32) / temperature
     scaled_logits = scaled_logits.at[..., mask_id].set(-jnp.inf)
-    probabilities = jax.nn.softmax(scaled_logits, axis=-1)
-    return jnp.argmax(scaled_logits, axis=-1).astype(initial_tokens.dtype), jnp.max(probabilities, axis=-1)
+    log_probabilities = jax.nn.log_softmax(scaled_logits, axis=-1)
+    if sample_tokens:
+      proposed_tokens = jax.vmap(lambda key, row_logits: jax.random.categorical(key, row_logits, axis=-1))(
+          proposal_keys, scaled_logits
+      ).astype(initial_tokens.dtype)
+    else:
+      proposed_tokens = jnp.argmax(scaled_logits, axis=-1).astype(initial_tokens.dtype)
+    proposed_logps = jnp.take_along_axis(log_probabilities, proposed_tokens[..., None], axis=-1)[..., 0]
+    confidence = jnp.max(jnp.exp(log_probabilities), axis=-1)
+    return proposed_tokens, confidence, proposed_logps
 
-  def generate_block(block_id, current_canvas):
+  def generate_block(block_id, rollout_state):
+    current_canvas, current_steps, current_logps, global_step, current_rng = rollout_state
     in_block = completion_mask & (block_ids == block_id)
 
-    def run_active_block(active_canvas):
+    def run_active_block(active_state):
+      active_canvas, active_steps, active_logps, active_global_step, active_rng = active_state
       anchors = in_block & (positions % block_size == 0) if shifted_seed else jnp.zeros_like(in_block)
 
-      def generate_anchors(anchor_canvas):
-        anchor_tokens, _ = propose(anchor_canvas)
-        return jnp.where(anchors, anchor_tokens, anchor_canvas)
+      def generate_anchors(anchor_state):
+        anchor_canvas, anchor_steps, anchor_logps, anchor_global_step, anchor_rng = anchor_state
+        split_keys = jax.vmap(jax.random.split)(anchor_rng)
+        next_rng = split_keys[:, 0]
+        proposal_keys = split_keys[:, 1]
+        anchor_tokens, _, proposed_logps = propose(anchor_canvas, proposal_keys)
+        anchor_canvas = jnp.where(anchors, anchor_tokens, anchor_canvas)
+        anchor_steps = jnp.where(anchors, anchor_global_step[:, None], anchor_steps)
+        anchor_logps = jnp.where(anchors, proposed_logps, anchor_logps)
+        rows_with_anchors = jnp.any(anchors, axis=1)
+        anchor_rng = _select_row_rngs(rows_with_anchors, next_rng, anchor_rng)
+        return (
+            anchor_canvas,
+            anchor_steps,
+            anchor_logps,
+            anchor_global_step + rows_with_anchors.astype(jnp.int32),
+            anchor_rng,
+        )
 
       if shifted_seed:
-        active_canvas = jax.lax.cond(jnp.any(anchors), generate_anchors, lambda value: value, active_canvas)
+        active_canvas, active_steps, active_logps, active_global_step, active_rng = jax.lax.cond(
+            jnp.any(anchors),
+            generate_anchors,
+            lambda value: value,
+            (active_canvas, active_steps, active_logps, active_global_step, active_rng),
+        )
       unresolved = in_block & ~anchors
 
       def continue_denoising(state):
-        step, _, remaining = state
+        step, _, _, _, _, _, remaining = state
         return (step < max_denoise_steps) & jnp.any(remaining)
 
       def denoise_step(state):
-        step, step_canvas, remaining = state
-        proposed_tokens, confidence = propose(step_canvas)
+        step, step_canvas, step_ids, step_logps, step_global, step_rng, remaining = state
+        split_keys = jax.vmap(jax.random.split)(step_rng)
+        next_rng = split_keys[:, 0]
+        proposal_keys = split_keys[:, 1]
+        proposed_tokens, confidence, proposed_logps = propose(step_canvas, proposal_keys)
         commits = remaining & (confidence >= confidence_threshold)
         row_needs_fallback = jnp.any(remaining, axis=1) & ~jnp.any(commits, axis=1)
         fallback_confidence = jnp.max(jnp.where(remaining, confidence, -jnp.inf), axis=1)
@@ -194,15 +264,85 @@ def low_confidence_generate(
         fallback = jax.nn.one_hot(fallback_indices, remaining.shape[1], dtype=jnp.bool_)
         commits |= fallback & row_needs_fallback[:, None]
         step_canvas = jnp.where(commits, proposed_tokens, step_canvas)
-        return step + 1, step_canvas, remaining & ~commits
+        step_ids = jnp.where(commits, step_global[:, None], step_ids)
+        step_logps = jnp.where(commits, proposed_logps, step_logps)
+        rows_with_commits = jnp.any(commits, axis=1)
+        step_rng = _select_row_rngs(rows_with_commits, next_rng, step_rng)
+        return (
+            step + 1,
+            step_canvas,
+            step_ids,
+            step_logps,
+            step_global + rows_with_commits.astype(jnp.int32),
+            step_rng,
+            remaining & ~commits,
+        )
 
-      _, active_canvas, _ = jax.lax.while_loop(
+      _, active_canvas, active_steps, active_logps, active_global_step, active_rng, _ = jax.lax.while_loop(
           continue_denoising,
           denoise_step,
-          (jnp.asarray(0, dtype=jnp.int32), active_canvas, unresolved),
+          (
+              jnp.asarray(0, dtype=jnp.int32),
+              active_canvas,
+              active_steps,
+              active_logps,
+              active_global_step,
+              active_rng,
+              unresolved,
+          ),
       )
-      return active_canvas
+      return active_canvas, active_steps, active_logps, active_global_step, active_rng
 
-    return jax.lax.cond(jnp.any(in_block), run_active_block, lambda value: value, current_canvas)
+    return jax.lax.cond(
+        jnp.any(in_block),
+        run_active_block,
+        lambda value: value,
+        (current_canvas, current_steps, current_logps, global_step, current_rng),
+    )
 
-  return jax.lax.fori_loop(0, num_blocks, generate_block, canvas)
+  canvas, action_steps, action_logps, _, _ = jax.lax.fori_loop(
+      0,
+      num_blocks,
+      generate_block,
+      (
+          canvas,
+          action_steps,
+          action_logps,
+          jnp.zeros((initial_tokens.shape[0],), dtype=jnp.int32),
+          row_rngs,
+      ),
+  )
+  return DenoiseTrace(tokens=canvas, action_steps=action_steps, action_logps=action_logps)
+
+
+def low_confidence_generate(
+    logits_fn: Callable[[jax.Array], jax.Array],
+    initial_tokens: jax.Array,
+    positions: jax.Array,
+    validity_mask: jax.Array,
+    completion_mask: jax.Array,
+    *,
+    block_size: int,
+    mask_id: int,
+    logit_alignment: str,
+    canvas_policy: str,
+    confidence_threshold: float = 0.9,
+    temperature: float = 1.0,
+    max_denoise_steps: int | None = None,
+) -> jax.Array:
+  """Greedily generates tokens while preserving the original public API."""
+
+  return low_confidence_rollout(
+      logits_fn,
+      initial_tokens,
+      positions,
+      validity_mask,
+      completion_mask,
+      block_size=block_size,
+      mask_id=mask_id,
+      logit_alignment=logit_alignment,
+      canvas_policy=canvas_policy,
+      confidence_threshold=confidence_threshold,
+      temperature=temperature,
+      max_denoise_steps=max_denoise_steps,
+  ).tokens
