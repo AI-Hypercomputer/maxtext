@@ -25,7 +25,7 @@ BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Step 2: Convert the checkpoint from Hugging Face
-python3 -m maxtext.checkpoint_conversion.to_maxtext \
+python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id} \
     scan_layers=false \
@@ -38,7 +38,7 @@ UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id}/0/items
 echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
 
 # Convert to scanned format
-python3 -m maxtext.checkpoint_conversion.to_maxtext \
+python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id} \
     scan_layers=true \
@@ -51,7 +51,7 @@ SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
 echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
 
 # Step 3: Run forward pass logits check
-python3 -m tests.utils.forward_pass_logit_checker \
+python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
     scan_layers=false \

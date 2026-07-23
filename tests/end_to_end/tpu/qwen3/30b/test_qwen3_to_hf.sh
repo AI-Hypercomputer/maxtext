@@ -23,7 +23,7 @@ else
 fi
 
 # Convert the checkpoint to Hugging Face format
-python3 -m maxtext.checkpoint_conversion.to_huggingface \
+python3 -m maxtext.checkpoint_conversion.to_huggingface "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     tokenizer_type="huggingface" \
     load_parameters_path=${CKPT_PATH} \
