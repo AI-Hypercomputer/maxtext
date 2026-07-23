@@ -42,7 +42,7 @@ permissions:
 jobs:
   build_and_upload:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
-    container: python:3.12.3-slim-bullseye
+    container: python:3.12-slim-bookworm
     outputs:
       maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
     steps:

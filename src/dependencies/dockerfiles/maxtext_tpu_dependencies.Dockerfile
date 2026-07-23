@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:experimental
 
-ARG BASEIMAGE=python:3.12-slim-bullseye
+ARG BASEIMAGE=python:3.12-slim-bookworm
 FROM $BASEIMAGE
 
 # Install system dependencies
