@@ -266,6 +266,7 @@ def is_scale_up_event(config) -> bool:
   if elastic_enabled(config):
     ensure_elastic_manager_initialized(config)
     assert elastic_manager is not None
+    # TODO: Simplify to bool(elastic_manager.available_inactive_slices) once pathwaysutils is bumped to >=0.1.11.
     available_inactive = getattr(elastic_manager, "available_inactive_slices", None)
     if available_inactive is not None:
       return bool(available_inactive)
