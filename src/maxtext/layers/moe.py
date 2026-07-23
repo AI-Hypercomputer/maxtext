@@ -1370,6 +1370,7 @@ class RoutedMoE(nnx.Module):
       inputs,
       gate_logits,
       pre_bias_logits,
+      wi_kernel,
       w0_kernel,
       w1_kernel,
       wo_kernel,
@@ -1379,6 +1380,11 @@ class RoutedMoE(nnx.Module):
       input_ids=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
+
+    # Keep prefused [experts, embed, 2 * mlp] weights intact through shard_map
+    # so FSDP gathers the combined tensor once before the grouped GEMM.
+    if self.config.prefuse_moe_weights and wi_kernel is None:
+      raise ValueError("prefuse_moe_weights=True requires a fused wi kernel in sparse_matmul.")
 
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
@@ -1561,14 +1567,25 @@ class RoutedMoE(nnx.Module):
           return True
       return False
 
-    def maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec):
+    def maybe_aqt_partition(
+        wi_kernel,
+        wi_pspec,
+        w0_kernel,
+        w0_pspec,
+        w1_kernel,
+        w1_pspec,
+        wo_kernel,
+        wo_pspec,
+    ):
+      if isinstance(wi_kernel, aqt.QTensor):
+        wi_pspec = aqt.partition_spec(wi_pspec, (1,), wi_kernel.dtype, use_bias=False)
       if isinstance(w0_kernel, aqt.QTensor):
         w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
       if isinstance(w1_kernel, aqt.QTensor):
         w1_pspec = aqt.partition_spec(w1_pspec, (1,), w1_kernel.dtype, use_bias=False)
       if isinstance(wo_kernel, aqt.QTensor):
         wo_pspec = aqt.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
-      return w0_pspec, w1_pspec, wo_pspec
+      return wi_pspec, w0_pspec, w1_pspec, wo_pspec
 
     def get_routed_moe_shardings(is_batch_sharded_by_expert, has_input_ids):
       if is_batch_sharded_by_expert:
@@ -1600,28 +1617,36 @@ class RoutedMoE(nnx.Module):
         quantization_rule = qpl.get_current_rule("gmm")
         if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
           # special sharding when using static scaling for weights in quantization with shard_exp_on_fsdp
-          w0_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
-          w1_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
+          input_weight_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
           wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)
         else:
           # special sharding for dsv3 to remove overhead between gmm/AG
-          w0_pspec = self._logical_to_mesh_axes((None, None, "mlp_no_fsdp"))
-          w1_pspec = self._logical_to_mesh_axes((None, None, "mlp_no_fsdp"))
+          input_weight_pspec = self._logical_to_mesh_axes((None, None, "mlp_no_fsdp"))
           wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
       elif self.config.use_2d_fsdp_sharding:
-        w0_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
-        w1_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
+        input_weight_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
       else:
         # These are the main shardings used by default - they use funky rules to AG over FSDP.
-        w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
-        w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
+        input_weight_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
+
+      # Apply the input-weight sharding to the prefused wi tensor when enabled;
+      # otherwise apply it independently to both w0 and w1.
+      if self.config.prefuse_moe_weights:
+        wi_pspec = input_weight_pspec
+        w0_pspec = None
+        w1_pspec = None
+      else:
+        wi_pspec = None
+        w0_pspec = input_weight_pspec
+        w1_pspec = input_weight_pspec
       return (
           batch_logical_axis,
           input_partition_pspec,
           gate_logits_pspec,
           pre_bias_logits_pspec,
+          wi_pspec,
           w0_pspec,
           w1_pspec,
           wo_pspec,
@@ -1638,6 +1663,7 @@ class RoutedMoE(nnx.Module):
         input_partition_pspec,
         gate_logits_pspec,
         pre_bias_logits_pspec,
+        wi_pspec,
         w0_pspec,
         w1_pspec,
         wo_pspec,
@@ -1646,7 +1672,9 @@ class RoutedMoE(nnx.Module):
         wo_bias_pspec,
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
-    w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
+    wi_pspec, w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(
+        wi_kernel, wi_pspec, w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec
+    )
 
     def roe_ag_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None):
       # The ring-of-experts strategy first duplicates the inputs to all
@@ -1835,8 +1863,9 @@ class RoutedMoE(nnx.Module):
       wi_gather_axes = []
       if weight_gather:
         # wi [Experts, In, Hidden] -> Gather Exp(0) and Hidden(2)
-        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
-        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
+        wi_weight_pspec = wi_pspec if self.config.prefuse_moe_weights else w0_pspec
+        wi_gather_axes.extend(get_active_sharding_axes(wi_weight_pspec[0], 0))
+        wi_gather_axes.extend(get_active_sharding_axes(wi_weight_pspec[2], 2))
       wi_tile_size = (
           self.config.wi_tile_fwd_batch_seq,  # m (LHS batch)
           self.config.wi_tile_fwd_embed_dim,  # k  (contracting)
@@ -1871,6 +1900,7 @@ class RoutedMoE(nnx.Module):
 
     def gmm_up(
         x,
+        wi,
         w0,
         w1,
         w0_bias,
@@ -1883,12 +1913,10 @@ class RoutedMoE(nnx.Module):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
       if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
-        out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        out = gmm_fn(x, wi, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
-        if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
+        if self.config.mlp_bias:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
@@ -2053,6 +2081,7 @@ class RoutedMoE(nnx.Module):
         gmm_fn = get_gmm_for_local_experts(cur_x, routing, route_metadata)
         next_ps0, next_ps1 = gmm_up(
             cur_x,
+            None,
             cur_w0,
             cur_w1,
             None,  # Only add biases once at the end of the loop
@@ -2086,6 +2115,7 @@ class RoutedMoE(nnx.Module):
       gmm_fn = get_gmm_for_local_experts(last_x_chunk, routing, route_metadata)
       output0, output1 = gmm_up(
           last_x_chunk,
+          None,
           last_w0,
           last_w1,
           w0_bias,
@@ -2101,6 +2131,7 @@ class RoutedMoE(nnx.Module):
         x,
         logits,
         pre_bias_logits,
+        wi,
         w0,
         w1,
         wo,
@@ -2132,7 +2163,7 @@ class RoutedMoE(nnx.Module):
           w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
         gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
-        output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather)
+        output0, output1 = gmm_up(x, wi, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather)
 
       intermediate_layer = self.apply_ffn_activation(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -2221,6 +2252,7 @@ class RoutedMoE(nnx.Module):
             input_partition_pspec,
             gate_logits_pspec,
             pre_bias_logits_pspec,
+            wi_pspec,
             w0_pspec,
             w1_pspec,
             wo_pspec,
@@ -2247,6 +2279,7 @@ class RoutedMoE(nnx.Module):
         x,
         logits,
         pre_bias_logits,
+        wi,
         w0,
         w1,
         wo,
@@ -2256,7 +2289,7 @@ class RoutedMoE(nnx.Module):
         sharded_input_ids,
         rngs,
     ):
-      # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
+      # The expert weights (wi or w0/w1, plus wo) are all-gathered over FSDP once at this
       # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
       # drops fsdp -> GSPMD inserts the boundary all-gather) and reused across all
       # chunks of the ring-of-experts pipeline below.
@@ -2266,6 +2299,7 @@ class RoutedMoE(nnx.Module):
             x,
             logits,
             pre_bias_logits,
+            wi,
             w0,
             w1,
             wo,
@@ -2300,6 +2334,7 @@ class RoutedMoE(nnx.Module):
             x_c,
             logits[:, sl, :],
             None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
+            wi,
             w0,
             w1,
             wo,
@@ -2321,21 +2356,30 @@ class RoutedMoE(nnx.Module):
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
-      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp"))
+      if self.config.prefuse_moe_weights:
+        wi_kernel = self._maybe_shard_with_logical(wi_kernel, ("exp_with_fsdp", None, "mlp"))
+      else:
+        w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp"))
+        w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp"))
 
       # Unshard on fsdp_transpose axis
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp", None))
 
       # Make sure XLA does not optimize by combining above All-Gather to unshard
       # on FSDP axis and the subsequent unshard on fsdp_transpose axis
-      w0_kernel = jax.lax.optimization_barrier(w0_kernel)
-      w1_kernel = jax.lax.optimization_barrier(w1_kernel)
+      if self.config.prefuse_moe_weights:
+        wi_kernel = jax.lax.optimization_barrier(wi_kernel)
+      else:
+        w0_kernel = jax.lax.optimization_barrier(w0_kernel)
+        w1_kernel = jax.lax.optimization_barrier(w1_kernel)
       wo_kernel = jax.lax.optimization_barrier(wo_kernel)
 
       # Unshard on both fsdp and fsdp_transpose transpose
-      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
+      if self.config.prefuse_moe_weights:
+        wi_kernel = self._maybe_shard_with_logical(wi_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
+      else:
+        w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
+        w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", None))
 
     input_axes = (batch_logical_axis, "activation_norm_length", None)
@@ -2351,8 +2395,11 @@ class RoutedMoE(nnx.Module):
     gate_logits = self._maybe_shard_with_logical(gate_logits, gate_logits_axes)
     pre_bias_logits = self._maybe_shard_with_logical(pre_bias_logits, pre_bias_logits_axes)
 
-    w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
-    w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
+    if self.config.prefuse_moe_weights:
+      wi_kernel = self._maybe_shard_with_pspec(wi_kernel, wi_pspec)
+    else:
+      w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
+      w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
     wo_kernel = self._maybe_shard_with_pspec(wo_kernel, wo_pspec)
     if w0_bias is not None:
       w0_bias = self._maybe_shard_with_pspec(w0_bias, w0_bias_pspec)
@@ -2365,6 +2412,7 @@ class RoutedMoE(nnx.Module):
         inputs,
         gate_logits,
         pre_bias_logits,
+        wi_kernel,
         w0_kernel,
         w1_kernel,
         wo_kernel,
@@ -3064,15 +3112,26 @@ class RoutedMoE(nnx.Module):
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
 
     fused_kernel = None
+    wi_kernel = None
     w0_kernel = None
     w1_kernel = None
     if cfg.prefuse_moe_weights and cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
       fused_kernel = jnp.asarray(self.wi[...], self.dtype)
     elif cfg.prefuse_moe_weights:
+      if cfg.sparse_matmul and quantizations.in_serve_mode(self.quant):
+        raise ValueError("prefuse_moe_weights with sparse_matmul does not support quantized serving.")
+      if cfg.sparse_matmul and self.wi_0_sparsity_module is not None:
+        raise ValueError("prefuse_moe_weights with sparse_matmul does not support weight sparsity.")
+      if cfg.sparse_matmul and cfg.num_moe_emb_chunks > 0:
+        raise ValueError("prefuse_moe_weights with sparse_matmul does not support num_moe_emb_chunks > 0.")
+
       wi = jnp.asarray(self.wi[...], self.dtype)
-      n = wi.shape[-1] // 2
-      w0_kernel = wi[..., :n]
-      w1_kernel = wi[..., n:]
+      if cfg.sparse_matmul:
+        wi_kernel = wi
+      else:
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
     else:
       w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
       w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
@@ -3122,6 +3181,7 @@ class RoutedMoE(nnx.Module):
           inputs,
           gate_logits,
           pre_bias_logits,
+          wi_kernel,
           w0_kernel,
           w1_kernel,
           wo_kernel,
