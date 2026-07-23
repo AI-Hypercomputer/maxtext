@@ -97,7 +97,8 @@ def _is_custom_vision_projector_problem(path: str, want: dict) -> bool:
     if isinstance(proj_dict, dict) and any("custom_linear" in k for k in proj_dict.keys()):
       print(
           f"===Warning: weight mismatch found in custom vision projector: {proj_name}.\n"
-          f"Its weights will be randomly initialized. Make sure this is intended==="
+          f"Path: {path}\n"
+          "This custom vision projector will be initialized with random weights.==="
       )
       return True
   return False
@@ -113,12 +114,7 @@ def _raise_on_weight_mismatch(want, have):
   without naming the weight.
   """
   problems = _weight_mismatches(want, have)
-
-  # Ignore expected weight mismatches from custom vision projectors (e.g., custom_linear).
-  # So the projector weights will be randomly initialized by the model, rather than
-  # loaded from the checkpoint (see `model_creation_utils._free_device_memory`).
   problems = [(p, why) for p, why in problems if not _is_custom_vision_projector_problem(p, want)]
-
   if not problems:
     return
   lines = "\n".join(f"  - '{p}': {why}" for p, why in problems)
