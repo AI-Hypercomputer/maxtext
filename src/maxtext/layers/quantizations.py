@@ -813,6 +813,7 @@ def get_quantization_rule(config: Config):
             act_qtype=dtype,
             bwd_qtype=dtype,
             bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+            disable_channelwise_axes=False,
             op_names=("dot_general",),
         )
     ]
@@ -909,13 +910,13 @@ def _get_max_min(target_dtype):
 
 
 def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_method: str) -> qwix.QArray:
-  """Manually quantizes a tensor based on a fixed calibration method.
+  """Manually quantizes a tensor based on per-tensor scaling with symmetric fixed range calibration.
 
   Args:
     tensor: The tensor to quantize.
     dtype: The logical type of the quantized value, e.g. jnp.float8_e4m3fn
-    calibration_method: A string specifying the calibration method. Expected
-      format is "fixed,{scale},{max_val}". e.g., "fixed,-224,224"
+    calibration_method: A string specifying the calibration method. Currently only support 
+    symmetric fixed range calibration: Expected format is "fixed,{-max_val},{max_val}".
 
   Returns:
     A qwix.QArray containing the quantized value and the scale.
@@ -929,13 +930,16 @@ def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_
     raise ValueError("calibration_method cannot be None for manual quantization")
   if not calib_method.startswith("fixed"):
     # we can use static scale for weight/activation, but grad usually needs dynamic
-    raise ValueError("Only static scale quantization is supported, but got" f" {calib_method}")
+    raise ValueError(f"Only static scale quantization is supported, but got {calib_method}")
   parts = calib_method.split(",")
   if len(parts) != 3:
-    raise ValueError(f"Unexpected format for weight calibration method: {calib_method}")
+    raise ValueError(f"Unexpected format for calibration method: {calib_method}")
 
   dtype_max, dtype_min = _get_max_min(dtype)
-  max_val = float(parts[2])
+  min_val, max_val = float(parts[1]), float(parts[2])
+  if max_val <= 0 or min_val != -max_val:
+    raise ValueError(f"Unexpected format for calibration method: {calib_method}")
+
   scale = max_val / dtype_max
   scale = jnp.where(scale == 0, 1.0, scale)
   # scale must be converted to a tensor because grad has reduced axes.
@@ -944,7 +948,8 @@ def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_
   max_bound = _make_scale_tensor(dtype_max, tensor)
   q_tensor = jnp.clip(tensor / scale_tensor, min_bound, max_bound).astype(dtype)
 
-  # get scale for QArray
+  # get scale for QArray.
+  # per-tensor scaling: same scale for each axis
   scale_shape = [1] * tensor.ndim
   # It must stay fully replicated for the backward pass and Pallas.
   scale_tensor_qpl = jnp.full(scale_shape, scale, dtype=tensor.dtype)

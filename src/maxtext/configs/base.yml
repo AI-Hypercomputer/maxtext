@@ -144,7 +144,7 @@ kv_quant_dtype: "int8"
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
 # saves params quantized on fly at following path
 save_quantized_params_path: ""
-#used to configure the mode in which model is called
+# used to configure the mode in which model is called
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
