@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the standalone_checkpointer.py """
+"""Tests for the standalone_checkpointer.py"""
 import unittest
 import pytest
 from maxtext.utils.standalone_checkpointer import main as sckpt_main

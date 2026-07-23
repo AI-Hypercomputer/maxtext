@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" A wrapper file for easily calculating training TFLOPs. """
+"""A wrapper file for easily calculating training TFLOPs."""
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR

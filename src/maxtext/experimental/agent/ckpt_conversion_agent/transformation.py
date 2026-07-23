@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-A transformation agent to generate the 
+A transformation agent to generate the
 layerwise and bidirectional transformation hook functions between HF & Maxtext
 """
 import argparse

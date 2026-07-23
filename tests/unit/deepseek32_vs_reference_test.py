@@ -16,7 +16,7 @@
 """
 Tests for DeepSeek V3.2: Indexer, MLA
 
-DeepSeek 3.2 PyTorch implementation at: 
+DeepSeek 3.2 PyTorch implementation at:
 https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py
 
 We adapt the reference implementation to run on CPU:

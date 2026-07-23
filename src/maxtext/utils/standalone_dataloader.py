@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with
-""" Standalone data loader - only loads data for each training step, accesses storage needs."""
+"""Standalone data loader - only loads data for each training step, accesses storage needs."""
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more

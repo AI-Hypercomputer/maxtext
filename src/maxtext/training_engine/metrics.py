@@ -87,29 +87,17 @@ class MetricsLogger:
         )
       else:
         current_val = buffer.weighted_metrics[name]
-        new_sum = jax.numpy.append(
-            current_val.unreduced_sum, metric.unreduced_sum
-        )
-        new_denom = jax.numpy.append(
-            current_val.denominator, metric.denominator
-        )
-        buffer.weighted_metrics[name] = dataclasses.replace(
-            current_val, unreduced_sum=new_sum, denominator=new_denom
-        )
+        new_sum = jax.numpy.append(current_val.unreduced_sum, metric.unreduced_sum)
+        new_denom = jax.numpy.append(current_val.denominator, metric.denominator)
+        buffer.weighted_metrics[name] = dataclasses.replace(current_val, unreduced_sum=new_sum, denominator=new_denom)
     else:
       if name not in buffer.scalar_metrics:
-        buffer.scalar_metrics[name] = jax.numpy.atleast_1d(
-            jax.numpy.asarray(metric)
-        )
+        buffer.scalar_metrics[name] = jax.numpy.atleast_1d(jax.numpy.asarray(metric))
       else:
-        buffer.scalar_metrics[name] = jax.numpy.append(
-            buffer.scalar_metrics[name], metric
-        )
+        buffer.scalar_metrics[name] = jax.numpy.append(buffer.scalar_metrics[name], metric)
     self._metrics_buffer[-1] = buffer
 
-  def get_metrics(
-      self, clear_cache: bool = True
-  ) -> list[abstract_engine.MetricsBuffer]:
+  def get_metrics(self, clear_cache: bool = True) -> list[abstract_engine.MetricsBuffer]:
     """Returns cached metrics and optionally clears the metrics cache.
 
     Args:
@@ -137,7 +125,8 @@ class MetricsLogger:
         logging.info("Metric %s: %s", metric_name, agg_value)
       except Exception:  # pylint: disable=broad-except
         logging.warning(
-            "Skipping metric %s: Could not convert to numpy array.", metric_name
+            "Skipping metric %s: Could not convert to numpy array.",
+            metric_name,
         )
         continue
 
@@ -196,9 +185,10 @@ class MetricsLogger:
     logging.info("Logging metrics for step %s", metrics.id)
     self.write_metrics(processed)
 
-  def flush_metrics_and_cleanup(self) -> list[abstract_engine.MetricsBuffer]:
+  def flush_metrics_and_cleanup(self) -> list[abstract_engine.MetricsBuffer] | None:
     """Flushes metrics and cleans up the metrics buffer."""
     if self._metrics_buffer is None:
       return None
     self.process_metrics(self._metrics_buffer)
     self._metrics_buffer = None
+    return None

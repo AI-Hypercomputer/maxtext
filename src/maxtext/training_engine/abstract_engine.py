@@ -83,13 +83,9 @@ class MetricsBuffer:
   """
 
   id: Any
-  weighted_metrics: dict[str, WeightedMetric] = flax.struct.field(
-      default_factory=dict
-  )
+  weighted_metrics: dict[str, WeightedMetric] = flax.struct.field(default_factory=dict)
   scalar_metrics: dict[str, jax.Array] = flax.struct.field(default_factory=dict)
-  aggregation_fns: dict[str, Callable[[jax.Array], Any]] = flax.struct.field(
-      default_factory=dict, pytree_node=False
-  )
+  aggregation_fns: dict[str, Callable[[jax.Array], Any]] = flax.struct.field(default_factory=dict, pytree_node=False)
   mode: str = flax.struct.field(default="train", pytree_node=False)
 
 
@@ -156,9 +152,7 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def with_gen_model_input_fn(
-      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
-  ) -> "AbstractTrainingEngine":
+  def with_gen_model_input_fn(self, gen_model_input_fn: Callable[[Any], dict[str, Any]]) -> "AbstractTrainingEngine":
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs.
 
     This adapter enables the trainer to accept arbitrary payloads (SFT, RL,
