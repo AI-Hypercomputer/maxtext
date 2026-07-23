@@ -390,18 +390,6 @@ def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False):
     return w
 
 
-def _roll_and_shard(x, shift, shard_mode, debug_sharding=False):
-  """Rolls an array along axis 0 by `shift` and applies its sharding constraint."""
-  rolled = jnp.roll(x, shift, axis=0)
-  x_sharding = getattr(jax.typeof(x), "sharding", None) or getattr(x, "sharding", None)
-  if isinstance(x_sharding, NamedSharding):
-    try:
-      return sharding.maybe_shard_with_name(rolled, x_sharding, shard_mode=shard_mode, debug_sharding=debug_sharding)
-    except TypeError:
-      return rolled
-  return rolled
-
-
 def _reduce_scatter_param_grads(grad_w, orig_w, shard_mode, debug_sharding=False):
   """Applies sharding constraint to parameter gradients matching original parameter sharding."""
 
@@ -455,56 +443,46 @@ def _custom_vjp_prefetch_pipeline_fwd(
   kwargs_tuple = jax.tree_util.tree_unflatten(kwargs_treedef, reconstructed_kwargs_leaves)
   valid_kwargs = dict(kwargs_tuple)
 
-  nxt_params_seq = jax.tree.map(lambda x: _roll_and_shard(x, -1, shard_mode, debug_sharding), params)
-
   def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
     return jax.experimental.xla_metadata.set_xla_metadata(_scheduling_group_id=group_id)
 
-  with scheduling_group(group_id=40):
-    w_0 = jax.tree.map(lambda x: x[0], params)
-    w_init = jax.tree.map(lambda x: _apply_sharding_hint(x, mesh, shard_mode, debug_sharding), w_0)
+  def scanned_layers_fn(x_in_scan, params_diff):
+    # params_diff: the original stacked SHARDED params, the only differentiable weight
+    # input. Step i's xs slice holds layer i's sharded weights; gradients reduce-scatter
+    # directly into it. The all-gather happens INSIDE the remat region, so:
+    #   - only the sharded params_i slice is saved as a scan residual (no gathered
+    #     weights are kept alive from fwd to bwd),
+    #   - the backward pass re-gathers from the sharded slice (unless the remat policy
+    #     explicitly saves "fsdp_bsw"),
+    #   - the scheduling-group metadata lets XLA's latency-hiding scheduler overlap the
+    #     gather with surrounding compute in both fwd and bwd.
 
-  def scanned_layers_fn(x_in_scan, bsw):
-    # Unpack initial layer weights and rolled next-layer parameters from the bsw tuple.
-    # Passing bsw as a differentiable argument to jax.vjp allows scan_vjp_fn to compute
-    # parameter gradients for all layers in the backward pass.
-    w_curr, nxt_params = bsw
+    def scan_step_fn(y_curr, xs):
+      st_i, params_i = xs
 
-    def scan_step_fn(carry, xs):
-      y_curr, w_c = carry
-      st_i, nxt_params_i, idx = xs
-
-      with scheduling_group(group_id=43):
-        w_next_ag = jax.tree.map(lambda x: _apply_sharding_hint(x, mesh, shard_mode, debug_sharding), nxt_params_i)
-        w_prefetched_ag = checkpoint_name(w_next_ag, "fsdp_bsw")
-
-      def _maybe_skip(ag_w, curr_w):
-        return jax.lax.cond(idx < length - 1, lambda: ag_w, lambda: curr_w)
-
-      w_prefetched = jax.tree.map(_maybe_skip, w_prefetched_ag, w_c)
-
-      def _single_layer_fn(y_inp, w_inp):
-        layer = nnx.merge(graphdef, w_inp, st_i)
+      def _single_layer_fn(y_inp, params_i_inp):
+        with scheduling_group(group_id=43):
+          w_ag = jax.tree.map(lambda x: _apply_sharding_hint(x, mesh, shard_mode, debug_sharding), params_i_inp)
+          w_ag = checkpoint_name(w_ag, "fsdp_bsw")
+        layer = nnx.merge(graphdef, w_ag, st_i)
         layer_out = layer(y_inp, *args_tuple, **valid_kwargs)
         return layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-      if policy is not None:
-        _single_layer_fn_remat = jax.checkpoint(_single_layer_fn, policy=policy, prevent_cse=prevent_cse)
-      else:
-        _single_layer_fn_remat = _single_layer_fn
+      _single_layer_fn_remat = jax.checkpoint(_single_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
-      y_out = _single_layer_fn_remat(y_curr, w_c)
-      layer = nnx.merge(graphdef, w_c, st_i)
+      y_out = _single_layer_fn_remat(y_curr, params_i)
+      layer = nnx.merge(graphdef, params_i, st_i)
       _, _, new_state_i = nnx.split(layer, nnx.Param, ...)
 
-      # Stop gradients on the prefetched weights carried over to the next iteration.
-      # The actual gradient computation for these weights occurs in the next step when consumed as w_curr.
-      return (y_out, jax.tree.map(jax.lax.stop_gradient, w_prefetched)), new_state_i
+      return y_out, new_state_i
 
-    (final_y, _), scanned_state = jax.lax.scan(scan_step_fn, (x_in_scan, w_curr), (state, nxt_params, jnp.arange(length)))
+    final_y, scanned_state = jax.lax.scan(scan_step_fn, x_in_scan, (state, params_diff))
     return final_y, scanned_state
 
-  (final_y, scanned_state), scan_vjp_fn = jax.vjp(scanned_layers_fn, x_in, (w_init, nxt_params_seq))
+  (final_y, scanned_state), scan_vjp_fn = jax.vjp(scanned_layers_fn, x_in, params)
+  # Drop the stacked sharded params residual held by the vjp closure; it is re-injected
+  # in the backward pass from params_leaves (which alias the caller's live params), so
+  # no extra full-stack copy is retained between fwd and bwd.
   scan_vjp_fn.args_res[1] = None
 
   return (final_y, scanned_state), (
@@ -521,11 +499,11 @@ def _custom_vjp_prefetch_pipeline_bwd(_graphdef, _length, ctx, res, g_out):
   scan_vjp_fn, scanned_state, params_leaves, diff_args_leaves, diff_kwargs_leaves = res
   y_bar_final, g_scanned_state = g_out
   (
-      mesh,
-      shard_mode,
       _,
       _,
-      debug_sharding,
+      _,
+      _,
+      _,
       _,
       _,
       params_treedef,
@@ -533,16 +511,10 @@ def _custom_vjp_prefetch_pipeline_bwd(_graphdef, _length, ctx, res, g_out):
       _,
       _,
   ) = ctx
+  # Re-inject the stacked sharded params residual dropped in fwd. params_leaves alias the
+  # caller's live params, so this holds no extra full-stack copy across the fwd/bwd gap.
   params = jax.tree_util.tree_unflatten(params_treedef, params_leaves)
-
-  nxt_params_seq = jax.tree.map(lambda x: _roll_and_shard(x, -1, shard_mode, debug_sharding), params)
-
-  def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
-    return jax.experimental.xla_metadata.set_xla_metadata(_scheduling_group_id=group_id)
-
-  with scheduling_group(group_id=40):
-    w_0 = jax.tree.map(lambda x: x[0], params)
-    w_init = jax.tree.map(lambda x: _apply_sharding_hint(x, mesh, shard_mode, debug_sharding), w_0)
+  scan_vjp_fn.args_res[1] = params
 
   if g_scanned_state is None:
     g_scanned_state = jax.tree.map(
@@ -550,19 +522,12 @@ def _custom_vjp_prefetch_pipeline_bwd(_graphdef, _length, ctx, res, g_out):
         scanned_state,
     )
 
-  scan_vjp_fn.args_res[1] = (w_init, nxt_params_seq)
-  dx_in, (dw_init, d_nxt_params_seq) = scan_vjp_fn((y_bar_final, g_scanned_state))
-
-  # Roll back rolled parameter gradients to match original stacked params shape
-  d_params_seq = jax.tree.map(lambda x: _roll_and_shard(x, 1, shard_mode, debug_sharding), d_nxt_params_seq)
-
-  # Combine dw_init (gradient for layer 0 initial weights) into layer 0 of d_params_seq
-  def _add_w0(dp, w0):
-    return dp.at[0].add(w0)
-
-  params_bar_stacked = jax.tree.map(_add_w0, d_params_seq, dw_init)
-  params_bar_sharded = _reduce_scatter_param_grads(params_bar_stacked, params, shard_mode, debug_sharding)
-  params_bar_leaves = tuple(jax.tree_util.tree_leaves(params_bar_sharded))
+  # Gradients flow through the in-remat gather of the sharded params, so d_params comes
+  # out of the scan VJP already sharded like the stacked sharded params (the gather's
+  # transpose is a reduce-scatter); no post-hoc resharding is needed (it would force an
+  # extra full-stack copy).
+  dx_in, d_params = scan_vjp_fn((y_bar_final, g_scanned_state))
+  params_bar_leaves = tuple(jax.tree_util.tree_leaves(d_params))
 
   def _zero_tangent(x):
     if isinstance(x, jax.Array) or (hasattr(jax.core, "Tracer") and isinstance(x, jax.core.Tracer)):
