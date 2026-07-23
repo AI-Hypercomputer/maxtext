@@ -48,6 +48,7 @@ from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 from maxtext.utils import max_utils
 from maxtext.inference import kvcache
+from maxtext.kernels.attention.gated_delta_rule_attention import pallas_chunk_gated_delta_rule
 
 
 # -----------------------------------------
@@ -843,6 +844,19 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           initial_state=recurrent_state,
           use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
           compute_dtype=cfg.dtype,
+      )
+    elif getattr(cfg, "use_gdn_kernel", False):
+      core_attn_out, next_recurrent_state = pallas_chunk_gated_delta_rule(
+          query=query,
+          key=key,
+          value=value,
+          g=g,
+          beta=beta,
+          chunk_size=cfg.gdn_chunk_size,
+          initial_state=recurrent_state,
+          use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+          compute_dtype=cfg.dtype,
+          mesh=self.mesh,
       )
     elif self.mesh is not None:
       logical_rules = get_logical_axis_rules()
