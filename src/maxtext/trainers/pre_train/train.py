@@ -41,6 +41,7 @@ from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
+from maxtext.configs.types import TeCommGemmOverlapPolicy
 from maxtext.utils.globals import EPS
 from maxtext.utils import elastic_utils
 # Placeholder: internal
@@ -939,7 +940,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.use_te_comm_gemm_overlap:
+  if config.te_comm_gemm_overlap != TeCommGemmOverlapPolicy.DISABLED:
     max_utils.bootstrap_transformer_engine_cgemm(config)
 
   # Create the Goodput recorder
