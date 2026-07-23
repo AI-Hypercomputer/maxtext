@@ -42,44 +42,32 @@ class Train(parameterized.TestCase):
           {
               # "tokamax v1 bf16",
               "quantization": "",
-              "use_gmm_v2_fwd": False,
-              "use_gmm_v2_dlhs": False,
-              "use_gmm_v2_drhs": False,
+              "use_gmm_v2": False,
           },
           {
               # "tokamax v1 fp8",
               "quantization": "fp8_full",
-              "use_gmm_v2_fwd": False,
-              "use_gmm_v2_dlhs": False,
-              "use_gmm_v2_drhs": False,
+              "use_gmm_v2": False,
           },
           {
               # "tokamax v2+v1+v2 bf16",
               "quantization": "",
-              "use_gmm_v2_fwd": True,
-              "use_gmm_v2_dlhs": False,
-              "use_gmm_v2_drhs": True,
+              "use_gmm_v2": (True, False, True),
           },
           {
               # "tokamax v2+v1+v2 fp8",
               "quantization": "fp8_full",
-              "use_gmm_v2_fwd": True,
-              "use_gmm_v2_dlhs": False,
-              "use_gmm_v2_drhs": True,
+              "use_gmm_v2": (True, False, True),
           },
           {
               # "tokamax v2+v2+v2 bf16",
               "quantization": "",
-              "use_gmm_v2_fwd": True,
-              "use_gmm_v2_dlhs": True,
-              "use_gmm_v2_drhs": True,
+              "use_gmm_v2": True,
           },
           {
               # "tokamax v2+v2+v2 fp8",
               "quantization": "fp8_full",
-              "use_gmm_v2_fwd": True,
-              "use_gmm_v2_dlhs": True,
-              "use_gmm_v2_drhs": True,
+              "use_gmm_v2": True,
           },
       ),
       ici_expert_parallelism=[1, 2],
@@ -88,15 +76,14 @@ class Train(parameterized.TestCase):
   def test_smoke_train(
       self,
       quantization: str,
-      use_gmm_v2_fwd: bool,
-      use_gmm_v2_dlhs: bool,
-      use_gmm_v2_drhs: bool,
+      use_gmm_v2: bool | tuple[bool, bool, bool],
       ici_expert_parallelism: int,
   ):
     """Smoke train with small config."""
     sharding_tolerance = 0.22 if ici_expert_parallelism > 1 else 2e-2
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
+    use_gmm_v2_str = list(use_gmm_v2) if isinstance(use_gmm_v2, tuple) else use_gmm_v2
     args = [
         None,
         get_test_config_path(),
@@ -120,9 +107,7 @@ class Train(parameterized.TestCase):
         "sparse_matmul=True",
         "megablox=False",
         "use_tokamax_gmm=True",
-        f"use_gmm_v2_fwd={use_gmm_v2_fwd}",
-        f"use_gmm_v2_dlhs={use_gmm_v2_dlhs}",
-        f"use_gmm_v2_drhs={use_gmm_v2_drhs}",
+        f"use_gmm_v2={use_gmm_v2_str}",
         # tile sizes
         "wi_tile_fwd_batch_seq=128",
         "wi_tile_fwd_embed_dim=128",

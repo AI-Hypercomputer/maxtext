@@ -1491,9 +1491,7 @@ class RoutedMoE(nnx.Module):
         # tokamax (v1 quantized, v2 both quantized and unquantized)
         if (
             self.config.quantization
-            or self.config.use_gmm_v2_fwd
-            or self.config.use_gmm_v2_dlhs
-            or self.config.use_gmm_v2_drhs
+            or any(self.config.use_gmm_v2)
         ):
           output = mblx.gmm(
               lhs=inputs,
@@ -1509,9 +1507,7 @@ class RoutedMoE(nnx.Module):
               weight_gather_axes=weight_gather_axes,
               lhs_vma_axes=lhs_vma_axes,
               rhs_vma_axes=rhs_vma_axes,
-              use_gmm_v2_fwd=self.config.use_gmm_v2_fwd,
-              use_gmm_v2_dlhs=self.config.use_gmm_v2_dlhs,
-              use_gmm_v2_drhs=self.config.use_gmm_v2_drhs,
+              use_gmm_v2=self.config.use_gmm_v2,
               partial_sum=partial_sum,
               interpret=megablox_interpret,
           )

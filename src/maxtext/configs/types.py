@@ -961,18 +961,29 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the Tokamax library for GMM kernel implementation.",
   )
-  use_gmm_v2_fwd: bool = Field(
-      False,
-      description="Whether to use GMM v2 for MoE forward pass. (Requires use_tokamax_gmm: true)",
+  use_gmm_v2: bool | tuple[bool, bool, bool] = Field(
+      (False, False, False),
+      description=(
+          "Whether to use GMM v2 for MoE forward/backward passes. "
+          "Can be a single boolean (shorthand for all True or all False) or a "
+          "3-tuple of booleans representing (fwd, dlhs, drhs)."
+      ),
   )
-  use_gmm_v2_dlhs: bool = Field(
-      False,
-      description="Whether to use GMM v2 for MoE backward pass (dlhs). (Requires use_tokamax_gmm: true)",
-  )
-  use_gmm_v2_drhs: bool = Field(
-      False,
-      description="Whether to use GMM v2 for MoE backward pass (drhs). (Requires use_tokamax_gmm: true)",
-  )
+
+  @field_validator("use_gmm_v2", mode="before")
+  @classmethod
+  def validate_use_gmm_v2(cls, v: Any) -> tuple[bool, bool, bool]:
+    # preprocesssing single boolean to tuple
+    if isinstance(v, bool):
+      return (v, v, v)
+    # check if it is a list or tuple of 3 booleans
+    if isinstance(v, (list, tuple)):
+      if len(v) != 3 or not all(isinstance(x, bool) for x in v):
+        raise ValueError("use_gmm_v2 tuple must contain exactly 3 booleans.")
+      return tuple(v)
+    # unsupported type
+    raise ValueError("use_gmm_v2 must be a boolean or a tuple/list of 3 booleans.")
+
   num_moe_emb_chunks: int = Field(
       0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
   )
@@ -2699,8 +2710,8 @@ class MaxTextConfig(
     Validates that num_moe_emb_chunks is used with supported settings.
     """
     if self.num_moe_emb_chunks > 0:
-      # TODO: update self.use_gmm_v2
-      if not self.use_gmm_v2 or not self.use_ring_of_experts:
+      # If any value in use_gmm_v2 is False (e.g., [True, False, True]), raise an error.
+      if not all(self.use_gmm_v2) or not self.use_ring_of_experts:
         raise ValueError(
             f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
@@ -3589,31 +3600,21 @@ class MaxTextConfig(
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
 
-    if (self.use_gmm_v2_fwd or self.use_gmm_v2_dlhs or self.use_gmm_v2_drhs) and not self.use_tokamax_gmm:
+    if any(self.use_gmm_v2) and not self.use_tokamax_gmm:
       raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
 
-    # Ensure GMM v2 flags (fwd, dlhs, drhs) are set to a valid combination:
-    # - v1+v1+v1 (False, False, False)
-    # - v2+v2+v2 (True, True, True)
-    # - v2+v1+v2 (True, False, True)
-    gmm_v2_combo = (
-        self.use_gmm_v2_fwd,
-        self.use_gmm_v2_dlhs,
-        self.use_gmm_v2_drhs,
-    )
     valid_combos = {
         (False, False, False),  # 111 (v1+v1+v1)
         (True, True, True),  # 222 (v2+v2+v2)
         (True, False, True),  # 212 (v2+v1+v2)
     }
-    if gmm_v2_combo not in valid_combos:
+    if self.use_gmm_v2 not in valid_combos:
       raise ValueError(
-          "Invalid GMM v2 configuration combination (fwd, dlhs, drhs). "
-          "Allowed combinations are:\n"
-          "  - v1+v1+v1 (False, False, False)\n"
-          "  - v2+v2+v2 (True, True, True)\n"
-          "  - v2+v1+v2 (True, False, True)\n"
-          f"But got: {gmm_v2_combo}"
+          "Invalid GMM v2 configuration combination. Allowed combinations are:\n"
+          "  - [False, False, False] (v1+v1+v1)\n"
+          "  - [True, True, True] (v2+v2+v2)\n"
+          "  - [True, False, True] (v2+v1+v2)\n"
+          f"But got: {list(self.use_gmm_v2)}"
       )
 
     for val in self.compress_ratios:

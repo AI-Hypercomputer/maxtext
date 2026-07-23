@@ -77,9 +77,7 @@ def gmm(
     # TODO(amandaliang): get rid of the qwix_rule in favor of Qwix's interception feature
     qwix_rule: qwix.QtRule | None = None,
     use_manual_quantization: bool = False,  # used in batchsplit
-    use_gmm_v2_fwd: bool = False,
-    use_gmm_v2_dlhs: bool = False,
-    use_gmm_v2_drhs: bool = False,
+    use_gmm_v2: tuple[bool, bool, bool] = (False, False, False),
     partial_sum: jnp.ndarray | None = None,
 ):
   """Grouped matrix multiplication operation."""
@@ -111,7 +109,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+      nondiff_argnums=(3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
@@ -132,9 +130,7 @@ def gmm(
       use_manual_quantization,
       lhs_vma_axes,
       rhs_vma_axes,
-      use_gmm_v2_fwd,
-      use_gmm_v2_dlhs,
-      use_gmm_v2_drhs,
+      use_gmm_v2,
       partial_sum,
   )
 
@@ -172,9 +168,7 @@ def _gmm_fwd(
     use_manual_quantization: bool = False,
     lhs_vma_axes: tuple = tuple(),
     rhs_vma_axes: tuple = tuple(),
-    use_gmm_v2_fwd: bool = False,
-    use_gmm_v2_dlhs: bool = False,
-    use_gmm_v2_drhs: bool = False,
+    use_gmm_v2: tuple[bool, bool, bool] = (False, False, False),
     partial_sum: jnp.ndarray | None = None,
 ) -> tuple[
     jnp.ndarray,
@@ -185,6 +179,7 @@ def _gmm_fwd(
         jnp.ndarray | None,
     ],
 ]:
+  use_gmm_v2_fwd, use_gmm_v2_dlhs, use_gmm_v2_drhs = use_gmm_v2
   """Forward function for GMM VJP.
 
   - lhs: [m, k]
@@ -419,9 +414,7 @@ def _gmm_bwd(
     use_manual_quantization: bool,
     lhs_vma_axes: tuple,
     rhs_vma_axes: tuple,
-    use_gmm_v2_fwd: bool,
-    use_gmm_v2_dlhs: bool,
-    use_gmm_v2_drhs: bool,
+    use_gmm_v2: tuple[bool, bool, bool],
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -432,6 +425,7 @@ def _gmm_bwd(
     grad: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray | None, jnp.ndarray | None]:
   """Backward function for throughput GMM VJP."""
+  use_gmm_v2_fwd, use_gmm_v2_dlhs, use_gmm_v2_drhs = use_gmm_v2
   del preferred_element_type
   lhs, rhs, group_sizes, group_offset, partial_sum_fwd = residual
   num_actual_groups = rhs.shape[0]
