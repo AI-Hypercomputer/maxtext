@@ -59,7 +59,7 @@ from benchmarks.api_server.server_models import (
     ChatMessage,
 )
 from benchmarks.api_server import server_utils
-from benchmarks.api_server.encoding import encoding_dsv32
+from benchmarks.api_server.encoding import encoding_dsv32, encoding_dsv4
 
 # ----------------------------
 # Init
@@ -187,14 +187,25 @@ def _build_chat_completion_response(request, completion_result, llm):
     except (ValueError, IndexError) as e:
       logger.error("Harmony parsing failed for gpt-oss: %s. Falling back to raw text.", e, exc_info=True)
 
+  t_mode = getattr(request, "thinking_mode", "thinking")
+
   if server_utils.is_dsv32_encoding_enabled(request.model):
     try:
       # DeepSeek-V3.2 models often generate thinking block.
-      parsed = encoding_dsv32.parse_message_from_completion_text(text_out, thinking_mode="thinking")
+      parsed = encoding_dsv32.parse_message_from_completion_text(text_out, thinking_mode=t_mode)
       text_out = parsed.get("content", text_out)
       reasoning_out = parsed.get("reasoning_content")
     except (AssertionError, ValueError, IndexError) as e:
       logger.error("DeepSeek-V3.2 parsing failed: %s. Falling back to raw text.", e, exc_info=True)
+
+  if server_utils.is_dsv4_encoding_enabled(request.model):
+    try:
+      # DeepSeek-V4 models often generate thinking block.
+      parsed = encoding_dsv4.parse_message_from_completion_text(text_out, thinking_mode=t_mode)
+      text_out = parsed.get("content", text_out)
+      reasoning_out = parsed.get("reasoning_content")
+    except (AssertionError, ValueError, IndexError) as e:
+      logger.error("DeepSeek-V4 parsing failed: %s. Falling back to raw text.", e, exc_info=True)
 
   want_top_logprobs = (
       (request.top_logprobs or 0) > 0 if isinstance(request, ChatCompletionRequest) else (request.logprobs or 0) > 0
@@ -322,9 +333,17 @@ def _prepare_batch_for_broadcast(batched_items):
   request_info_map = []
   for req_id, req in batched_items:
     is_chat = isinstance(req, ChatCompletionRequest)
-    prompts_for_req = server_utils.get_prompts_for_request(req, LLM)
-    all_prompts.extend(prompts_for_req)
-    request_info_map.append((req_id, req, is_chat, len(prompts_for_req)))
+    try:
+      prompts_for_req = server_utils.get_prompts_for_request(req, LLM)
+      all_prompts.extend(prompts_for_req)
+      request_info_map.append((req_id, req, is_chat, len(prompts_for_req)))
+    except ValueError as e:
+      logger.error("Failed to parse request %s: %s", req_id, e)
+      with response_lock:
+        response_dict[req_id] = {"error": f"Invalid request format or missing chat template: {e}"}
+        
+  if not all_prompts:
+    return 0, b"", []  # Signal other ranks to skip if all requests failed
 
   broadcast_payload = {"prompts": all_prompts, "params": params}
   payload_bytes = json.dumps(broadcast_payload).encode("utf-8")

@@ -190,12 +190,15 @@ class ChatCompletionRequest(SamplingParams):
       messages: A list of `ChatMessage` objects representing the conversation history.
       logprobs: Whether to return log probabilities.
       top_logprobs: The number of top log probabilities to return if `logprobs` is true.
+      thinking_mode: Optional flag to toggle thinking mode ("thinking" or "chat").
   """
 
   model: str
   messages: List[ChatMessage]
   logprobs: Optional[bool] = False
   top_logprobs: Optional[int] = None
+  thinking_mode: Optional[str] = "thinking"
+
 
 
 class ChatCompletionChoice(BaseModel):

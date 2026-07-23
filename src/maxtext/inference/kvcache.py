@@ -14,7 +14,7 @@
 
 """Implementation of the kvcache."""
 
-from typing import Any
+from typing import Any, Optional, Callable
 
 import jax
 import jax.numpy as jnp
@@ -175,6 +175,9 @@ def kv_cache_as_linen(
     use_chunked_prefill: bool = False,
     model_mode: str = MODEL_MODE_PREFILL,
     is_gdn: bool = False,
+    is_deepseek_v4: bool = False,
+    compress_rate: int = 1,
+    is_indexer: bool = False,
     conv_kernel_size: int = 0,
     conv_dim: int = 0,
     name: str | None = None,
@@ -228,6 +231,9 @@ def kv_cache_as_linen(
       use_chunked_prefill=use_chunked_prefill,
       model_mode=model_mode,
       is_gdn=is_gdn,
+      is_deepseek_v4=is_deepseek_v4,
+      compress_rate=compress_rate,
+      is_indexer=is_indexer,
       conv_kernel_size=conv_kernel_size,
       conv_dim=conv_dim,
       metadata_fn=variable_to_logically_partitioned,
@@ -272,6 +278,9 @@ class KVCache(BaseCache):
       use_chunked_prefill: bool = False,
       model_mode: str = MODEL_MODE_PREFILL,
       is_gdn: bool = False,
+      is_deepseek_v4: bool = False,
+      compress_rate: int = 1,
+      is_indexer: bool = False,
       conv_kernel_size: int = 0,
       conv_dim: int = 0,
       *,
@@ -324,12 +333,43 @@ class KVCache(BaseCache):
     self.model_mode = model_mode
     self.use_chunked_prefill = use_chunked_prefill
     self.is_gdn = is_gdn
+    self.is_deepseek_v4 = is_deepseek_v4
+    self.compress_rate = compress_rate
+    self.is_indexer = is_indexer
     self.conv_kernel_size = conv_kernel_size
     self.conv_dim = conv_dim
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       self._initialize_prefill_caches(model_mode)
       self._initialize_ar_cache_vars(model_mode)
+
+      if self.is_deepseek_v4 and self.compress_rate > 1:
+        cache_batch_axis_name = CACHE_BATCH_PREFILL if model_mode == MODEL_MODE_PREFILL else CACHE_BATCH
+
+        self.entry_count = nnx.Cache(
+            jnp.zeros((self.batch, 1), dtype=jnp.int32),
+            out_sharding=(cache_batch_axis_name, None)
+        )
+        self.accumulator_index = nnx.Cache(
+            jnp.zeros((self.batch, 1), dtype=jnp.int32),
+            out_sharding=(cache_batch_axis_name, None)
+        )
+        self.leftover_buffer_kv = nnx.Cache(
+            jnp.zeros((self.batch, self.compress_rate, self.key_heads, self.key_head_size), dtype=dtype),
+            out_sharding=(cache_batch_axis_name, None, None, None)
+        )
+        self.leftover_buffer_gate = nnx.Cache(
+            jnp.zeros((self.batch, self.compress_rate, self.key_heads, self.key_head_size), dtype=dtype),
+            out_sharding=(cache_batch_axis_name, None, None, None)
+        )
+        self.overlap_kv = nnx.Cache(
+            jnp.zeros((self.batch, self.compress_rate, self.key_heads, self.key_head_size), dtype=dtype),
+            out_sharding=(cache_batch_axis_name, None, None, None)
+        )
+        self.overlap_gate = nnx.Cache(
+            jnp.zeros((self.batch, self.compress_rate, self.key_heads, self.key_head_size), dtype=dtype),
+            out_sharding=(cache_batch_axis_name, None, None, None)
+        )
 
   @property
   def prefill_key_vars(self):
@@ -718,6 +758,7 @@ class KVCache(BaseCache):
     if decoder_segment_ids is not None:
       assert cached_prefill_segment_id_var is not None
       cached_prefill_segment_id_var.set_value(decoder_segment_ids)
+
     return key, value, decoder_segment_ids
 
   def update_ar_key_value(
@@ -924,7 +965,131 @@ class KVCache(BaseCache):
         cached_ar_segment_id_var.get_value(),
         cache_ar_lengths_var.get_value(),
     )
+
     return cached_prefill, cached_ar
+  
+
+  def kv_cache_autoregressive_v4(
+      self,
+      key: Array,
+      value: Array,
+      gate: Optional[Array] = None,
+      use_ragged_attention: bool = False,
+      compressor_fn: Optional[Callable] = None,
+  ):
+    """DeepSeek-V4 aware token-by-token caching matrix (Functionally Pure for JAX tracing)."""
+    if self.compress_rate == 1:
+      return self.kv_cache_autoregressive(key, value, use_ragged_attention)
+    
+    incoming_batch = key.shape[0]
+
+    # 1. Update the Accumulator Buffers
+    current_index_array = self.accumulator_index.get_value()
+    current_index = jnp.reshape(current_index_array, (-1,))[0]
+
+    buffer_kv = jax.lax.dynamic_update_slice_in_dim(
+        self.leftover_buffer_kv.get_value(), key, current_index, 1
+    )
+    buffer_gate = jax.lax.dynamic_update_slice_in_dim(
+        self.leftover_buffer_gate.get_value(), gate, current_index, 1
+    )
+
+    self.leftover_buffer_kv.set_value(buffer_kv)
+    self.leftover_buffer_gate.set_value(buffer_gate)
+
+    next_index = current_index + 1
+    window_complete = (next_index == self.compress_rate)
+
+    # 2. Compute the compressed block using the layer's math callback
+    if compressor_fn is not None:
+      compressed_block, next_overlap_kv, next_overlap_gate = compressor_fn(buffer_kv, buffer_gate)
+      
+      # Conditionally update the overlap registers only if the window finished
+      if next_overlap_kv is not None:
+        new_overlap_kv = jnp.where(window_complete, next_overlap_kv, self.overlap_kv.get_value())
+        self.overlap_kv.set_value(new_overlap_kv)
+          
+      if next_overlap_gate is not None:
+        new_overlap_gate = jnp.where(window_complete, next_overlap_gate, self.overlap_gate.get_value())
+        self.overlap_gate.set_value(new_overlap_gate)
+    else:
+      gate_weights = jax.nn.softmax(buffer_gate, axis=1).astype(buffer_kv.dtype)
+      compressed_block = jnp.sum(buffer_kv * gate_weights, axis=1, keepdims=True)
+
+    potential_update_key = compressed_block
+
+    operand_shape = self.cached_ar_key.get_value().shape
+    if potential_update_key.shape[3] < operand_shape[3]:
+      pad_amt = operand_shape[3] - potential_update_key.shape[3]
+      potential_update_key = jnp.pad(potential_update_key, ((0, 0), (0, 0), (0, 0), (0, pad_amt)))
+
+    # If window incomplete, we will just write dummy zeros
+    dummy_key = jnp.zeros_like(potential_update_key)
+    update_key = jnp.where(window_complete, potential_update_key, dummy_key)
+
+    # 3. Fetch current AR cache state variables
+    (
+        cached_ar_key_vars,
+        cached_ar_value_vars,
+        cached_ar_segment_id_var,
+        _,
+        cache_ar_lengths_var,
+    ) = self._get_ar_cache_vars()
+    ar_index = self.cache_ar_index.get_value()
+
+    # 4. Unconditionally write to the cache array
+    self.update_ar_key_value(
+        update_key, update_key,  # Value is identical to key for DeepSeek V4 compressed states
+        cached_ar_key_vars, cached_ar_value_vars,
+        ar_index, cache_ar_lengths_var.get_value(), use_ragged_attention
+    )
+
+    # 5. Conditionally write the segment ID mask (FIXED: Uses incoming_batch)
+    active_indicator = jnp.zeros((incoming_batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+    zero_indicator = jnp.zeros_like(active_indicator)
+    indicator_to_write = jnp.where(window_complete, active_indicator, zero_indicator)
+
+    temp_ar_seg = cached_ar_segment_id_var.get_value()
+
+    new_ar_seg = jax.lax.dynamic_update_index_in_dim(
+        temp_ar_seg, indicator_to_write, jnp.squeeze(ar_index), 1
+    )
+    cached_ar_segment_id_var.set_value(new_ar_seg)
+
+    # 6. Conditionally advance all the pointers and counters
+    next_ar_index = jnp.mod(ar_index + 1, self.max_target_length - self.max_prefill_length)
+    self.cache_ar_index.set_value(jnp.where(window_complete, next_ar_index, ar_index))
+
+    self.entry_count.set_value(
+        jnp.where(window_complete, self.entry_count.get_value() + 1, self.entry_count.get_value())
+    )
+
+    cache_ar_lengths_var.set_value(
+        jnp.where(window_complete, cache_ar_lengths_var.get_value() + 1, cache_ar_lengths_var.get_value())
+    )
+
+    self.accumulator_index.set_value(
+        jnp.full_like(current_index_array, jnp.where(window_complete, jnp.int32(0), next_index))
+    )
+
+    # --- 7. UNPACK JAX ARRAYS TO MATCH STANDARD ATTENTION PIPELINE ---
+    cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars()
+
+    cached_prefill = (
+        self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
+        self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
+        cached_prefill_segment_id_var.get_value(),
+    )
+
+    cached_ar = (
+        self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order),
+        self.get_cached_values(cached_ar_value_vars, value.dtype, self.ar_cache_axis_order),
+        cached_ar_segment_id_var.get_value(),
+        cache_ar_lengths_var.get_value(),
+    )
+
+    return cached_prefill, cached_ar
+  
 
   def __call__(
       self,
@@ -934,6 +1099,8 @@ class KVCache(BaseCache):
       model_mode: str,
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
+      gate: Optional[Array] = None,
+      compressor_fn: Optional[Callable] = None,
   ) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
 
@@ -958,6 +1125,8 @@ class KVCache(BaseCache):
       else:
         return self.kv_cache_prefill(key, value, decoder_segment_ids), None
     elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
+      if self.is_deepseek_v4 and self.compress_rate > 1:
+        return self.kv_cache_autoregressive_v4(key, value, gate, use_ragged_attention, compressor_fn)
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
@@ -1130,6 +1299,7 @@ class MlaKVCache(KVCache):
       model_mode: str,
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
+      gate: Optional[Array] = None,
   ) -> tuple[
       None | tuple[Array, Array, Array],
       None | tuple[Array, Array, Array, Array],

@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
+from maxtext.utils import max_utils
 
 from flax import nnx
 
@@ -29,6 +30,8 @@ from maxtext.common.common_types import (
     Config,
     DType,
     MODEL_MODE_TRAIN,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
     AttentionType,
     DEFAULT_MASK_VALUE,
 )
@@ -41,98 +44,59 @@ from maxtext.layers.linears import DenseGeneral, DeepSeekV4GroupedLinear
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference.kvcache import KVQuant
+from maxtext.inference import kvcache
 
 
-def csa_overlap_pooling(
-    hidden_states: Array,
-    kv_proj: Any,
-    gate_proj: Any,
-    position_bias: Array,
-    kv_norm: Any,
-    compress_rate: int,
-    head_dim: int,
-) -> Array:
-  """Shared utility for Compressed Sparse Attention (CSA) overlap pooling.
+def csa_overlap_pooling(chunk_kv, chunk_gate, kv_norm, head_dim, prior_kv, prior_gate):
+    # D2 is 2 * head_dim
+    B, W, C, D2 = chunk_kv.shape
+    expected_size = B * 1 * C * D2
+    
+    # 1. Split the projections into Ca and Cb components for overlapping
+    # -> 2x [batch, n_windows, compress_rate, head_dim]
+    a_kv, b_kv = jnp.split(chunk_kv, 2, axis=-1)
+    a_gate, b_gate = jnp.split(chunk_gate, 2, axis=-1)
+    
+    # 2. Safely handle cache priors 
+    if prior_kv is None or prior_kv.size != expected_size:
+        prior_a_kv = jnp.zeros((B, 1, C, head_dim), dtype=a_kv.dtype)
+        # Note: Empty gate prior must be -inf so softmax(gate) = 0
+        prior_a_gate = jnp.full((B, 1, C, head_dim), -jnp.inf, dtype=a_gate.dtype)
+    else:
+        prior_kv = prior_kv.reshape((B, 1, C, D2))
+        prior_gate = prior_gate.reshape((B, 1, C, D2))
+        prior_a_kv, _ = jnp.split(prior_kv, 2, axis=-1)
+        prior_a_gate, _ = jnp.split(prior_gate, 2, axis=-1)
+        
+        # KVCache initializes with zeros. If it's the very first step, 
+        # gate must be -inf for softmax to equal 0.
+        is_empty = jnp.all(prior_a_kv == 0)
+        prior_a_gate = jnp.where(is_empty, -jnp.inf, prior_a_gate)
 
-  Implements the overlapping Ca/Cb pooling logic shared by both the CSA Compressor
-  and the CSA Indexer. It splits the projected states into two halves (Ca and Cb),
-  shifts the first half forward by one window, and concatenates them to form
-  overlapping windows over which softmax gating is applied.
-
-  Args:
-    hidden_states: Input token embeddings. Shape: `[batch, seq_len, emb_dim]`.
-    kv_proj: Dense layer projecting to `2 * head_dim`.
-    gate_proj: Dense layer projecting to `2 * head_dim`.
-    position_bias: Bias tensor. Shape: `[compress_rate, 2 * head_dim]`.
-    kv_norm: RMSNorm instance.
-    compress_rate: Compression rate for CSA.
-    head_dim: Standard head dimension.
-
-  Returns:
-    compressed: The pooled overlapping states. Shape: `[batch, n_windows, head_dim]`.
-
-  Shape Transformations:
-    1. Projections: `[batch, seq_len, emb_dim]` -> `[batch, seq_len, 2 * head_dim]`
-    2. Reshape: -> `[batch, n_windows, compress_rate, 2 * head_dim]`
-    3. Split: -> 2x `[batch, n_windows, compress_rate, head_dim]`
-    4. Shift: Ca shifted forward by one window.
-    5. Concat (Ca + Cb): -> `[batch, n_windows, 2 * compress_rate, head_dim]`
-    6. Gating & Sum: -> `[batch, n_windows, head_dim]`
-  """
-  batch_size, seq_len, _ = hidden_states.shape
-
-  # [batch, seq_len, emb_dim] -> [batch, seq_len, 2 * head_dim]
-  kv = kv_proj(hidden_states)
-  # [batch, seq_len, emb_dim] -> [batch, seq_len, 2 * head_dim]
-  gate = gate_proj(hidden_states)
-
-  usable = (seq_len // compress_rate) * compress_rate
-  chunk_kv = kv[:, :usable]
-  chunk_gate = gate[:, :usable]
-
-  # Return zero tensor if there are no full windows available for pooling
-  if chunk_kv.shape[1] == 0:
-    return jnp.zeros((batch_size, 0, head_dim), dtype=hidden_states.dtype)
-
-  n_windows = chunk_kv.shape[1] // compress_rate
-
-  # Reshape flat sequence into discrete compression windows
-  # -> [batch, n_windows, compress_rate, 2 * head_dim]
-  chunk_kv = chunk_kv.reshape((batch_size, n_windows, compress_rate, 2 * head_dim))
-  chunk_gate = chunk_gate.reshape((batch_size, n_windows, compress_rate, 2 * head_dim)) + position_bias
-
-  # Split the projections into Ca and Cb components for overlapping
-  # 2x [batch, n_windows, compress_rate, head_dim]
-  a_kv, b_kv = jnp.split(chunk_kv, 2, axis=-1)
-  a_gate, b_gate = jnp.split(chunk_gate, 2, axis=-1)
-
-  # Shift Ca forward by one window to align with the next Cb
-  a_kv_shifted = jnp.concatenate(
-      [
-          jnp.zeros((batch_size, 1, compress_rate, head_dim), dtype=a_kv.dtype),
-          a_kv[:, :-1],
-      ],
-      axis=1,
-  )
-  a_gate_shifted = jnp.concatenate(
-      [
-          jnp.full((batch_size, 1, compress_rate, head_dim), -jnp.inf, dtype=a_gate.dtype),
-          a_gate[:, :-1],
-      ],
-      axis=1,
-  )
-
-  # Concatenate shifted Ca and unshifted Cb to form the final overlapping window
-  # -> [batch, n_windows, 2 * compress_rate, head_dim]
-  new_kv = jnp.concatenate([a_kv_shifted, b_kv], axis=2)
-  new_gate = jnp.concatenate([a_gate_shifted, b_gate], axis=2)
-
-  # Apply softmax gating and sum across the overlapping window dimension
-  gate_weights = jax.nn.softmax(new_gate, axis=2).astype(new_kv.dtype)
-  # -> [batch, n_windows, head_dim]
-  compressed = kv_norm(jnp.sum(new_kv * gate_weights, axis=2))
-
-  return compressed
+    # 3. Shift Ca forward by one window
+    # We prepend the prior window to the current chunks, and drop the last window of Ca
+    a_kv_shifted = jnp.concatenate([prior_a_kv, a_kv[:, :-1]], axis=1)
+    a_gate_shifted = jnp.concatenate([prior_a_gate, a_gate[:, :-1]], axis=1)
+    
+    # 4. Concatenate shifted Ca and unshifted Cb to form the 2m overlapping window
+    # -> [batch, n_windows, 2 * compress_rate, head_dim]
+    new_kv = jnp.concatenate([a_kv_shifted, b_kv], axis=2)
+    new_gate = jnp.concatenate([a_gate_shifted, b_gate], axis=2)
+    
+    # 5. Apply softmax gating and sum across the overlapping window dimension
+    gate_weights = jax.nn.softmax(new_gate, axis=2).astype(new_kv.dtype)
+    compressed = jnp.sum(new_kv * gate_weights, axis=2)
+    
+    # 6. Apply the projection norm 
+    if kv_norm is not None:
+        compressed = kv_norm(compressed)
+        
+    # 7. Extract the next priors (Keep the full D2 so it fits the cache!)
+    # We grab the full last window of the current chunk to pass into the next chunk
+    next_prior_kv = chunk_kv[:, -1:, :, :] 
+    next_prior_gate = chunk_gate[:, -1:, :, :]
+    
+    return compressed, next_prior_kv, next_prior_gate
 
 
 class BaseDeepseekCompressor(nnx.Module):
@@ -264,6 +228,8 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       hidden_states: Array,
       q_normed: Array,
       position_ids: Array,
+      model_mode: str,
+      cache: Optional[Any] = None,
   ) -> Tuple[Array, Array]:
     """Forward pass for the HCA compressor.
 
@@ -278,56 +244,134 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
                               Shape: `[batch, 1, seq_len, n_windows]`.
     """
     batch_size, seq_len, _ = hidden_states.shape
-
-    # Project hidden states to KV and Gate components
-    # [batch, seq_len, emb_dim] -> [batch, seq_len, head_dim]
     kv = self.kv_proj(hidden_states)
-    # [batch, seq_len, emb_dim] -> [batch, seq_len, head_dim]
     gate = self.gate_proj(hidden_states)
 
-    # Truncate sequence to the nearest multiple of the compression rate
+    # --- AUTOREGRESSIVE DELEGATION ---
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE and cache is not None:
+      # Expand dims to match [B, S, H, D] format for the cache
+      kv_exp = jnp.expand_dims(kv, 2)
+      gate_exp = jnp.expand_dims(gate, 2)
+      
+      def hca_compressor_fn(buf_kv, buf_gate):
+        gate_weights = jax.nn.softmax(buf_gate + self.position_bias.value[:, None, :], axis=1).astype(buf_kv.dtype)
+        compressed = self.kv_norm(jnp.sum(buf_kv * gate_weights, axis=1)) 
+        block_pos = position_ids - (self.compress_rate - 1)
+        compressed = self.rotary_emb(compressed, block_pos, unsqueeze_dim=None)
+        return jnp.expand_dims(compressed, 2), None, None
+
+      cached_prefill, cached_ar = cache(
+          key=kv_exp, value=kv_exp, gate=gate_exp, decoder_segment_ids=None, model_mode=model_mode,
+          compressor_fn=hca_compressor_fn
+      )
+
+      comp_dim = self.head_dim
+      compressed_full = jnp.concatenate([cached_prefill[0], cached_ar[0]], axis=1)
+      
+      # Restore back to original batch_size and strip RoPE/dummy head
+      compressed = compressed_full[:batch_size, :, 0, :comp_dim]
+      compressed_kv = jnp.expand_dims(compressed, 2) # [B, N, 1, D]
+      
+      # --- NEW VALIDITY MASK FOR AR MODE ---
+      max_prefill_comp = cached_prefill[0].shape[1]
+      
+      # The AR valid count (how many new AR blocks have been completed)
+      ar_valid = jnp.expand_dims(cached_ar[3], axis=1) # [B, 1]
+      
+      # entry_count tracks TOTAL blocks (prefill + AR). 
+      # Subtract ar_valid to get the constant, unchanging number of true prefill blocks!
+      prefill_blocks_count = cache.entry_count.get_value() - ar_valid # [B, 1]
+      
+      entry_indices = jnp.arange(compressed_kv.shape[1])[None, None, None, :] # [1, 1, 1, L]
+      
+      is_prefill = entry_indices < max_prefill_comp
+      is_valid_prefill = is_prefill & (entry_indices < jnp.expand_dims(prefill_blocks_count, axis=(1, 3)))
+      
+      is_ar = entry_indices >= max_prefill_comp
+      is_valid_ar = is_ar & ((entry_indices - max_prefill_comp) < jnp.expand_dims(ar_valid, axis=(1, 3)))
+      
+      is_valid = is_valid_prefill | is_valid_ar
+      
+      compressed_mask = jnp.where(is_valid, 0.0, DEFAULT_MASK_VALUE).astype(self.dtype)
+      
+      return compressed_kv, compressed_mask
+    
+    # --- PREFILL CHUNKING & PRIMING ---
     usable = (seq_len // self.compress_rate) * self.compress_rate
     chunk_kv = kv[:, :usable]
     chunk_gate = gate[:, :usable]
     first_window_position = position_ids[:, 0:1]
 
-    # Process overlapping windows if there is enough sequence length
     if chunk_kv.shape[1] > 0:
       n_windows = chunk_kv.shape[1] // self.compress_rate
-
-      # Reshape into blocks of size `compress_rate`
-      # -> [batch, n_windows, compress_rate, head_dim]
       chunk_kv = chunk_kv.reshape((batch_size, n_windows, self.compress_rate, -1))
       chunk_gate = chunk_gate.reshape((batch_size, n_windows, self.compress_rate, -1)) + self.position_bias.value
 
-      # Apply gating mechanism over each compression window
       gate_weights = jax.nn.softmax(chunk_gate, axis=2).astype(chunk_kv.dtype)
-      # -> [batch, n_windows, head_dim]
       compressed = self.kv_norm(jnp.sum(chunk_kv * gate_weights, axis=2))
-
-      # Calculate positions for the compressed blocks
       positions = jnp.arange(n_windows) * self.compress_rate + first_window_position
-
-      # Apply Rotary Positional Embeddings to the pooled representations
-      # compressed is [batch, n_windows, head_dim]
       compressed = self.rotary_emb(compressed, positions, unsqueeze_dim=None)
     else:
-      # Provide an empty tensor when the sequence is shorter than the compression rate
       compressed = jnp.zeros((batch_size, 0, self.head_dim), dtype=self.dtype)
 
-    # Expand the feature dimension to match the standard KV projection shape
-    # -> [batch, n_windows, 1, head_dim]
     compressed_kv = jnp.expand_dims(compressed, axis=2)
     compressed_len = compressed_kv.shape[1]
 
-    # Skip causal mask generation during decoding (seq_len == 1) or if no blocks were pooled
-    if seq_len == 1 or compressed_len == 0:
-      return compressed_kv, jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
+    # --- PREFILL CACHE PRIMING ---
+    if cache is not None:
+      remainder = seq_len % self.compress_rate
+      if remainder > 0:
+        leftover_kv = kv[:, usable:]
+        leftover_gate = gate[:, usable:]
+        
+        pad_len = self.compress_rate - remainder
+        padded_kv = jnp.expand_dims(jnp.pad(leftover_kv, ((0, 0), (0, pad_len), (0, 0))), 2)
+        padded_gate = jnp.expand_dims(jnp.pad(leftover_gate, ((0, 0), (0, pad_len), (0, 0))), 2)
+        
+        actual_batch = cache.leftover_buffer_kv.get_value().shape[0]
+        if padded_kv.shape[0] != actual_batch:
+          repeats = actual_batch // padded_kv.shape[0]
+          padded_kv = jnp.repeat(padded_kv, repeats, axis=0)
+          padded_gate = jnp.repeat(padded_gate, repeats, axis=0)
+          
+        cache.leftover_buffer_kv.set_value(padded_kv)
+        cache.leftover_buffer_gate.set_value(padded_gate)
+        cache.accumulator_index.set_value(jnp.full((actual_batch, 1), remainder, dtype=jnp.int32))
 
-    # Construct a causal mask preventing early queries from attending to future compressed blocks
+      if compressed_len > 0:
+        cache_key_var = cache.cached_prefill_key
+        
+        # Transpose from [B, L, H, D] -> [L, H, B, D] to match the cache's physical layout
+        update_blocks = jnp.transpose(compressed_kv, cache.prefill_cache_axis_order)
+
+        operand_shape = cache_key_var.get_value().shape
+        # Pad the Head Dim (axis 3) if needed (e.g. 64 -> 128)
+        if update_blocks.shape[3] < operand_shape[3]:
+            pad_amt = operand_shape[3] - update_blocks.shape[3]
+            update_blocks = jnp.pad(update_blocks, ((0, 0), (0, 0), (0, 0), (0, pad_amt)))
+
+        operand = cache_key_var.get_value()
+        batch_axis = cache.prefill_cache_axis_order.index(0)
+        
+        # JETSTREAM FIX: Broadcast batch=1 prefill requests to fit the max_concurrent_decodes cache
+        if operand.shape[batch_axis] != update_blocks.shape[batch_axis]:
+            repeats = operand.shape[batch_axis] // update_blocks.shape[batch_axis]
+            update_blocks = jnp.repeat(update_blocks, repeats, axis=batch_axis)
+        
+        # Insert along the sequence axis (which is axis=0 in the transposed shape)
+        cache_key_var.set_value(
+            jax.lax.dynamic_update_slice_in_dim(operand, update_blocks, 0, axis=0)
+        )
+        # JETSTREAM FIX: Ensure entry_count update matches the physical cache batch size
+        actual_batch = cache.entry_count.get_value().shape[0]
+        cache.entry_count.set_value(jnp.full((actual_batch, 1), compressed_len, dtype=jnp.int32))
+
+    if seq_len == 1 or compressed_len == 0:
+      compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
+      return compressed_kv, compressed_mask
+
     entry_indices = jnp.arange(compressed_len)
     causal_threshold = (position_ids + 1) // self.compress_rate
-
     future_mask = entry_indices[None, None, None, :] >= jnp.expand_dims(causal_threshold, axis=(1, 3))
     compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0).astype(self.dtype)
 
@@ -453,90 +497,204 @@ class DeepseekV4Indexer(nnx.Module):
       q_latent: Array,
       position_ids: Array,
       attention_mask: Optional[Array] = None,
+      model_mode: str = MODEL_MODE_TRAIN,
+      cache: Optional[Any] = None,
   ) -> Array:
     batch_size, seq_len, _ = hidden_states.shape
+    kv = self.kv_proj(hidden_states)
+    gate = self.gate_proj(hidden_states)
 
-    # Process overlapping pooling independently for the Indexer using its own head dimension
-    # -> [batch, n_windows, index_head_dim]
-    compressed = csa_overlap_pooling(
-        hidden_states,
-        self.kv_proj,
-        self.gate_proj,
-        self.position_bias.value,
-        self.kv_norm,
-        self.compress_rate,
-        self.index_head_dim,
-    )
-    compressed_len = compressed.shape[1]
+    # --- AUTOREGRESSIVE DELEGATION ---
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE and cache is not None:
+      kv_exp = jnp.expand_dims(kv, 2)
+      gate_exp = jnp.expand_dims(gate, 2)
 
-    # Apply rotary positional embeddings to the compressed blocks if valid windows exist
-    if compressed_len > 0:
-      first_window_position = position_ids[:, 0:1]
-      positions = jnp.arange(compressed_len) * self.compress_rate + first_window_position
+      def indexer_compressor_fn(buf_kv, buf_gate):
+        chunk_kv_reshaped = jnp.swapaxes(buf_kv, 1, 2)
+        chunk_gate_reshaped = jnp.swapaxes(buf_gate, 1, 2) + self.position_bias.value
+        
+        prior_kv = jnp.transpose(cache.overlap_kv.get_value(), (0, 2, 1, 3))
+        prior_gate = jnp.transpose(cache.overlap_gate.get_value(), (0, 2, 1, 3))
+        
+        compressed, next_prior_kv, next_prior_gate = csa_overlap_pooling(
+            chunk_kv_reshaped, chunk_gate_reshaped, self.kv_norm, self.index_head_dim, prior_kv, prior_gate
+        )
+        
+        block_pos = position_ids - (self.compress_rate - 1)
+        compressed = self.rotary_emb(compressed, block_pos, unsqueeze_dim=None)
+        
+        return jnp.expand_dims(compressed, 2), jnp.transpose(next_prior_kv, (0, 2, 1, 3)), jnp.transpose(next_prior_gate, (0, 2, 1, 3))
 
-      compressed = self.rotary_emb(compressed, positions, unsqueeze_dim=None)
-    else:
-      # Return empty top-k selections when sequence is too short to form any windows
-      return jnp.zeros(
-          (batch_size, seq_len, min(self.index_topk, compressed_len)),
-          dtype=jnp.int32,
+      cached_prefill, cached_ar = cache(
+        key=kv_exp, value=kv_exp, gate=gate_exp, decoder_segment_ids=None, model_mode=model_mode,
+        compressor_fn=indexer_compressor_fn
       )
+      
+      comp_dim = self.index_head_dim
+      compressed_full = jnp.concatenate([cached_prefill[0], cached_ar[0]], axis=1)
+      
+      # Restore back to original batch_size and strip RoPE/dummy head
+      compressed = compressed_full[:batch_size, :, 0, :comp_dim]
+      compressed_len = compressed.shape[1]
+      
+      # --- NEW VALIDITY MASK FOR AR MODE ---
+      max_prefill_comp = cached_prefill[0].shape[1]
+      ar_valid = jnp.expand_dims(cached_ar[3], axis=1) # [B, 1]
+      
+      # Calculate constant true prefill blocks
+      prefill_blocks_count = cache.entry_count.get_value() - ar_valid # [B, 1]
+      
+      entry_indices = jnp.arange(compressed_len)[None, None, :] # [1, 1, L]
+      
+      is_prefill = entry_indices < max_prefill_comp
+      is_valid_prefill = is_prefill & (entry_indices < jnp.expand_dims(prefill_blocks_count, axis=1))
+      
+      is_ar = entry_indices >= max_prefill_comp
+      is_valid_ar = is_ar & ((entry_indices - max_prefill_comp) < jnp.expand_dims(ar_valid, axis=1))
+      
+      is_valid = is_valid_prefill | is_valid_ar
+      
+      future_mask = ~is_valid
+    
+    # --- PREFILL CHUNKING & PRIMING ---
+    else:
+      usable = (seq_len // self.compress_rate) * self.compress_rate
+      chunk_kv = kv[:, :usable]
+      chunk_gate = gate[:, :usable]
+      
+      # Extract staggered overlap states if cache is available
+      if cache is not None:
+        # Convert from [batch, compress_rate, 1, head_dim] -> [batch, 1, compress_rate, head_dim]
+        prior_kv = jnp.transpose(cache.overlap_kv.get_value(), (0, 2, 1, 3))
+        prior_gate = jnp.transpose(cache.overlap_gate.get_value(), (0, 2, 1, 3))
+      else:
+        prior_kv, prior_gate = None, None
 
-    # Broadcast the compressed KV representations across all indexer heads
-    # -> [batch, 1, n_windows, index_head_dim]
+      if chunk_kv.shape[1] > 0:
+        n_windows = chunk_kv.shape[1] // self.compress_rate
+        chunk_kv_reshaped = chunk_kv.reshape((batch_size, n_windows, self.compress_rate, -1))
+        chunk_gate_reshaped = chunk_gate.reshape((batch_size, n_windows, self.compress_rate, -1)) + self.position_bias.value
+
+        compressed, next_prior_kv, next_prior_gate = csa_overlap_pooling(
+            chunk_kv_reshaped, chunk_gate_reshaped, self.kv_norm, self.index_head_dim, prior_kv, prior_gate
+        )
+        compressed_len = compressed.shape[1]
+        
+        positions = jnp.arange(compressed_len) * self.compress_rate + position_ids[:, 0:1]
+        compressed = self.rotary_emb(compressed, positions, unsqueeze_dim=None)
+      else:
+        compressed = jnp.zeros((batch_size, 0, self.index_head_dim), dtype=self.dtype)
+        compressed_len = 0
+        next_prior_kv = prior_kv
+        next_prior_gate = prior_gate
+
+      # Prefill Cache Insertion
+      if cache is not None:
+        remainder = seq_len % self.compress_rate
+        if remainder > 0:
+          leftover_kv = kv[:, usable:]
+          leftover_gate = gate[:, usable:]
+          pad_len = self.compress_rate - remainder
+          padded_kv = jnp.expand_dims(jnp.pad(leftover_kv, ((0, 0), (0, pad_len), (0, 0))), 2)
+          padded_gate = jnp.expand_dims(jnp.pad(leftover_gate, ((0, 0), (0, pad_len), (0, 0))), 2)
+          
+          actual_batch = cache.leftover_buffer_kv.get_value().shape[0]
+          if padded_kv.shape[0] != actual_batch:
+            repeats = actual_batch // padded_kv.shape[0]
+            padded_kv = jnp.repeat(padded_kv, repeats, axis=0)
+            padded_gate = jnp.repeat(padded_gate, repeats, axis=0)
+            
+          cache.leftover_buffer_kv.set_value(padded_kv)
+          cache.leftover_buffer_gate.set_value(padded_gate)
+          cache.accumulator_index.set_value(jnp.full((actual_batch, 1), remainder, dtype=jnp.int32))
+        
+        if compressed_len > 0:
+          cache_key_var = cache.cached_prefill_key
+          
+          # 1. Expand dims to [Batch, Seq, Heads, Dim]
+          update_blocks_raw = jnp.expand_dims(compressed, 2)
+          
+          # 2. Transpose to [Seq, Heads, Batch, Dim]
+          update_blocks = jnp.transpose(update_blocks_raw, cache.prefill_cache_axis_order)
+          
+          operand_shape = cache_key_var.get_value().shape
+          
+          # 3. Adjust padding logic to target the transposed axes
+          if update_blocks.shape[3] < operand_shape[3]:
+              pad_amt = operand_shape[3] - update_blocks.shape[3]
+              update_blocks = jnp.pad(update_blocks, ((0, 0), (0, 0), (0, 0), (0, pad_amt)))
+          
+          update_blocks = update_blocks[:, :operand_shape[1], ...]
+          
+          # 4. Insert along the Sequence axis (which is now axis=0)
+          operand = cache_key_var.get_value()
+
+          batch_axis = cache.prefill_cache_axis_order.index(0)
+        
+          # JETSTREAM FIX: Broadcast batch=1 prefill requests to fit the max_concurrent_decodes cache
+          if operand.shape[batch_axis] != update_blocks.shape[batch_axis]:
+            repeats = operand.shape[batch_axis] // update_blocks.shape[batch_axis]
+            update_blocks = jnp.repeat(update_blocks, repeats, axis=batch_axis)
+          
+          cache_key_var.set_value(
+              jax.lax.dynamic_update_slice_in_dim(operand, update_blocks, 0, axis=0)
+          )
+          # JETSTREAM FIX: Ensure entry_count update matches the physical cache batch size
+          actual_batch = cache.entry_count.get_value().shape[0]
+          cache.entry_count.set_value(jnp.full((actual_batch, 1), compressed_len, dtype=jnp.int32))
+          
+          # Save the new trailing Ca slices to the overlap registers!
+          # Convert from [batch, 1, compress_rate, head_dim] -> [batch, compress_rate, 1, head_dim]
+          overlap_kv_to_write = jnp.transpose(next_prior_kv, (0, 2, 1, 3))
+          overlap_gate_to_write = jnp.transpose(next_prior_gate, (0, 2, 1, 3))
+          
+          if overlap_kv_to_write.shape[0] != cache.overlap_kv.get_value().shape[0]:
+            repeats = cache.overlap_kv.get_value().shape[0] // overlap_kv_to_write.shape[0]
+            overlap_kv_to_write = jnp.repeat(overlap_kv_to_write, repeats, axis=0)
+            overlap_gate_to_write = jnp.repeat(overlap_gate_to_write, repeats, axis=0)
+            
+          cache.overlap_kv.set_value(overlap_kv_to_write)
+          cache.overlap_gate.set_value(overlap_gate_to_write)
+
+    if compressed_len == 0:
+      return jnp.zeros((batch_size, seq_len, min(self.index_topk, compressed_len)), dtype=jnp.int32)
+
+    # --- TOP-K ROUTING MATH (Executes in both Prefill and AR) ---
     compressed_kv = jnp.expand_dims(compressed, axis=1)
-    # -> [batch, index_n_heads, n_windows, index_head_dim]
-    compressed_kv = jnp.broadcast_to(
-        compressed_kv,
-        (batch_size, self.index_n_heads, compressed_len, self.index_head_dim),
-    )
+    compressed_kv = jnp.broadcast_to(compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim))
 
-    # Project the latent query to match the Indexer's dimensions
-    # [batch, seq_len, index_n_heads * index_head_dim] -> [batch, seq_len, index_n_heads, index_head_dim]
     q = self.q_proj(q_latent).reshape((batch_size, seq_len, self.index_n_heads, self.index_head_dim))
-    # -> [batch, index_n_heads, seq_len, index_head_dim]
     q = jnp.transpose(q, (0, 2, 1, 3))
-
-    # Apply standard Rotary Positional Embeddings to queries
     q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
 
     q = q.astype(jnp.float32)
     compressed_kv = compressed_kv.astype(jnp.float32)
 
-    # Compute dot product between Queries and Compressed KV Blocks
-    # -> [batch, index_n_heads, seq_len, n_windows]
     scores = jnp.einsum("bhsd,bhwd->bhsw", q, compressed_kv)
     scores = jax.nn.relu(scores) * self.softmax_scale
-
-    # Compute routing weights to combine scores across indexer heads
-    # [batch, seq_len, emb_dim] -> [batch, seq_len, index_n_heads]
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
-
-    # Combine individual head scores according to routing weights
-    # -> [batch, seq_len, n_windows]
     index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights)
 
     k = min(self.index_topk, compressed_len)
+    
+    # --- ONLY RUN MATHEMATICAL CAUSAL MASK IN PREFILL ---
+    if model_mode != MODEL_MODE_AUTOREGRESSIVE:
+      causal_threshold = (position_ids + 1) // self.compress_rate
+      entry_indices_mask = jnp.arange(compressed_len)
+      future_mask = entry_indices_mask[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
 
-    # Mask out future compressed blocks to ensure causal routing
-    causal_threshold = (position_ids + 1) // self.compress_rate
-    entry_indices = jnp.arange(compressed_len)
-    future_mask = entry_indices[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
-
+    # Apply the mask to the scores
     index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
-    # Apply standard segment attention mask (additive 0 and -inf)
     if attention_mask is not None:
       index_scores += attention_mask[:, :, :compressed_len]
 
-    # Retrieve the top-k highest scoring block indices for each token
     top_k_indices = jax.lax.top_k(index_scores, k)[1]
-
-    # Invalidate any top-k selections that point to future blocks (edge case safety)
-    invalid = top_k_indices >= jnp.expand_dims(causal_threshold, axis=-1)
-    top_k_indices = jnp.where(invalid, jnp.full_like(top_k_indices, -1), top_k_indices)
-
-    return top_k_indices
+    invalid = jnp.take_along_axis(future_mask, top_k_indices, axis=-1)
+    
+    final_indices = jnp.where(invalid, jnp.full_like(top_k_indices, -1), top_k_indices)
+    
+    return final_indices
 
 
 class DeepseekV4CSACompressor(BaseDeepseekCompressor):
@@ -601,58 +759,150 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       q_latent: Array,
       position_ids: Array,
       attention_mask: Optional[Array] = None,
+      model_mode: str = MODEL_MODE_TRAIN,
+      cache: Optional[Any] = None,
+      indexer_cache: Optional[Any] = None,
   ) -> Tuple[Array, Array]:
-    """Forward pass for the CSA compressor.
-
-    Args:
-      hidden_states: Input token embeddings. Shape: `[batch, seq_len, emb_dim]`.
-      q_latent: Latent query representation. Shape: `[batch, seq_len, emb_dim]`.
-      position_ids: Absolute token positions. Shape: `[batch, seq_len]`.
-
-    Returns:
-      compressed_kv: The pooled KV tensors. Shape: `[batch, n_windows, 1, head_dim]`.
-      compressed_mask: Causal and routing mask dynamically selected by the Indexer.
-                       Shape: `[batch, 1, seq_len, n_windows]`.
-    """
     batch_size, seq_len, _ = hidden_states.shape
-
-    # Retrieve top-k blocks dynamically chosen for each query
-    # -> [batch, seq_len, index_topk]
-    top_k_indices = self.indexer(hidden_states, q_latent, position_ids, attention_mask)
-
-    # Perform overlapping pooling over the sequence
-    # -> [batch, n_windows, head_dim]
-    compressed = csa_overlap_pooling(
-        hidden_states,
-        self.kv_proj,
-        self.gate_proj,
-        self.position_bias.value,
-        self.kv_norm,
-        self.compress_rate,
-        self.head_dim,
+    # 1. ALWAYS Run Indexer (It fetches its own history inside AR)
+    top_k_indices = self.indexer(
+        hidden_states, q_latent, position_ids, attention_mask, model_mode, indexer_cache
     )
-    compressed_len = compressed.shape[1]
 
-    # Apply rotary positional embeddings to the pooled blocks if there are any full windows
-    if compressed_len > 0:
-      first_window_position = position_ids[:, 0:1]
-      positions = jnp.arange(compressed_len) * self.compress_rate + first_window_position
+    kv = self.kv_proj(hidden_states)
+    gate = self.gate_proj(hidden_states)
 
-      compressed = self.rotary_emb(compressed, positions, unsqueeze_dim=None)
+    # --- AUTOREGRESSIVE DELEGATION ---
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE and cache is not None:
+      kv_exp = jnp.expand_dims(kv, 2)
+      gate_exp = jnp.expand_dims(gate, 2)
 
-    # Expand to standard KV format
-    # -> [batch, n_windows, 1, head_dim]
-    compressed_kv = jnp.expand_dims(compressed, axis=2)
+      def csa_compressor_fn(buf_kv, buf_gate):
+        chunk_kv_reshaped = jnp.swapaxes(buf_kv, 1, 2)
+        chunk_gate_reshaped = jnp.swapaxes(buf_gate, 1, 2) + self.position_bias.value
+        
+        prior_kv = jnp.transpose(cache.overlap_kv.get_value(), (0, 2, 1, 3))
+        prior_gate = jnp.transpose(cache.overlap_gate.get_value(), (0, 2, 1, 3))
+        
+        compressed, next_prior_kv, next_prior_gate = csa_overlap_pooling(
+            chunk_kv_reshaped, chunk_gate_reshaped, self.kv_norm, self.head_dim, prior_kv, prior_gate
+        )
+        
+        block_pos = position_ids - (self.compress_rate - 1)
+        compressed = self.rotary_emb(compressed, block_pos, unsqueeze_dim=None)
+        
+        return jnp.expand_dims(compressed, 2), jnp.transpose(next_prior_kv, (0, 2, 1, 3)), jnp.transpose(next_prior_gate, (0, 2, 1, 3))
 
-    # Return early if no compressed blocks could be formed (e.g. sequence too short)
+      cached_prefill, cached_ar = cache(
+        key=kv_exp, value=kv_exp, gate=gate_exp, decoder_segment_ids=None, model_mode=model_mode,
+        compressor_fn=csa_compressor_fn
+      )
+
+      comp_dim = self.head_dim
+      compressed_full = jnp.concatenate([cached_prefill[0], cached_ar[0]], axis=1)
+      
+      # Restore back to original batch_size and strip RoPE/dummy head
+      compressed = compressed_full[:batch_size, :, 0, :comp_dim]
+      
+      compressed_kv = jnp.expand_dims(compressed, 2)
+      compressed_len = compressed_kv.shape[1]
+    
+    # --- PREFILL CHUNKING & PRIMING ---
+    else:
+      usable = (seq_len // self.compress_rate) * self.compress_rate
+      chunk_kv = kv[:, :usable]
+      chunk_gate = gate[:, :usable]
+      
+      if cache is not None:
+        # Convert from [batch, compress_rate, 1, head_dim] -> [batch, 1, compress_rate, head_dim]
+        prior_kv = jnp.transpose(cache.overlap_kv.get_value(), (0, 2, 1, 3))
+        prior_gate = jnp.transpose(cache.overlap_gate.get_value(), (0, 2, 1, 3))
+      else:
+        prior_kv, prior_gate = None, None
+
+      if chunk_kv.shape[1] > 0:
+        n_windows = chunk_kv.shape[1] // self.compress_rate
+        chunk_kv_reshaped = chunk_kv.reshape((batch_size, n_windows, self.compress_rate, -1))
+        chunk_gate_reshaped = chunk_gate.reshape((batch_size, n_windows, self.compress_rate, -1)) + self.position_bias.value
+
+        compressed, next_prior_kv, next_prior_gate = csa_overlap_pooling(
+            chunk_kv_reshaped, chunk_gate_reshaped, self.kv_norm, self.head_dim, prior_kv, prior_gate
+        )
+        compressed_len = compressed.shape[1]
+        
+        positions = jnp.arange(compressed_len) * self.compress_rate + position_ids[:, 0:1]
+        compressed = self.rotary_emb(compressed, positions, unsqueeze_dim=None)
+      else:
+        compressed = jnp.zeros((batch_size, 0, self.head_dim), dtype=self.dtype)
+        compressed_len = 0
+        next_prior_kv = prior_kv
+        next_prior_gate = prior_gate
+
+      compressed_kv = jnp.expand_dims(compressed, 2)
+
+      if cache is not None:
+        remainder = seq_len % self.compress_rate
+        if remainder > 0:
+          leftover_kv = kv[:, usable:]
+          leftover_gate = gate[:, usable:]
+          pad_len = self.compress_rate - remainder
+          padded_kv = jnp.expand_dims(jnp.pad(leftover_kv, ((0, 0), (0, pad_len), (0, 0))), 2)
+          padded_gate = jnp.expand_dims(jnp.pad(leftover_gate, ((0, 0), (0, pad_len), (0, 0))), 2)
+          
+          actual_batch = cache.leftover_buffer_kv.get_value().shape[0]
+          if padded_kv.shape[0] != actual_batch:
+            repeats = actual_batch // padded_kv.shape[0]
+            padded_kv = jnp.repeat(padded_kv, repeats, axis=0)
+            padded_gate = jnp.repeat(padded_gate, repeats, axis=0)
+            
+          cache.leftover_buffer_kv.set_value(padded_kv)
+          cache.leftover_buffer_gate.set_value(padded_gate)
+          cache.accumulator_index.set_value(jnp.full((actual_batch, 1), remainder, dtype=jnp.int32))
+        
+        if compressed_len > 0:
+          cache_key_var = cache.cached_prefill_key
+          
+          # Transpose from [B, L, H, D] -> [L, H, B, D] to match the cache's physical layout
+          update_blocks = jnp.transpose(compressed_kv, cache.prefill_cache_axis_order)
+          
+          operand_shape = cache_key_var.get_value().shape
+          # Pad the Head Dim (axis 3) if needed
+          if update_blocks.shape[3] < operand_shape[3]:
+              pad_amt = operand_shape[3] - update_blocks.shape[3]
+              update_blocks = jnp.pad(update_blocks, ((0, 0), (0, 0), (0, 0), (0, pad_amt)))
+          
+          # Insert along the sequence axis (which is axis=0 in the transposed shape)
+          operand = cache_key_var.get_value()
+          batch_axis = cache.prefill_cache_axis_order.index(0)
+        
+          # JETSTREAM FIX: Broadcast batch=1 prefill requests to fit the max_concurrent_decodes cache
+          if operand.shape[batch_axis] != update_blocks.shape[batch_axis]:
+            repeats = operand.shape[batch_axis] // update_blocks.shape[batch_axis]
+            update_blocks = jnp.repeat(update_blocks, repeats, axis=batch_axis)
+          
+          cache_key_var.set_value(
+              jax.lax.dynamic_update_slice_in_dim(operand, update_blocks, 0, axis=0)
+          )
+          # JETSTREAM FIX: Ensure entry_count update matches the physical cache batch size
+          actual_batch = cache.entry_count.get_value().shape[0]
+          cache.entry_count.set_value(jnp.full((actual_batch, 1), compressed_len, dtype=jnp.int32))
+
+          overlap_kv_to_write = jnp.transpose(next_prior_kv, (0, 2, 1, 3))
+          overlap_gate_to_write = jnp.transpose(next_prior_gate, (0, 2, 1, 3))
+          
+          if overlap_kv_to_write.shape[0] != cache.overlap_kv.get_value().shape[0]:
+            repeats = cache.overlap_kv.get_value().shape[0] // overlap_kv_to_write.shape[0]
+            overlap_kv_to_write = jnp.repeat(overlap_kv_to_write, repeats, axis=0)
+            overlap_gate_to_write = jnp.repeat(overlap_gate_to_write, repeats, axis=0)
+            
+          cache.overlap_kv.set_value(overlap_kv_to_write)
+          cache.overlap_gate.set_value(overlap_gate_to_write)
+
     if compressed_len == 0:
       return compressed_kv, jnp.zeros((batch_size, 1, seq_len, 0), dtype=self.dtype)
 
-    # Construct the final dynamic mask applying the Indexer's selections
-    # -> [batch, 1, seq_len, n_windows]
+    # 3. Apply Dynamic Masking Logic
     k = top_k_indices.shape[-1]
-
-    # Only compute and apply the complex block mask if top-k selections exist
     if k > 0:
       valid = top_k_indices >= 0
       entry_indices = jnp.arange(compressed_len)[None, None, :]
@@ -919,6 +1169,54 @@ class CompressedAttention(Attention):
         rngs=self.rngs,
     )
 
+    if self.model_mode != MODEL_MODE_TRAIN and self.compress_ratio > 0:
+      batch_size, _ = max_utils.get_batch_seq_len_for_mode(self.config, MODEL_MODE_AUTOREGRESSIVE)
+
+      max_prefill_comp = max(1, self.max_prefill_predict_length // self.compress_ratio)
+      max_target_comp = max(max_prefill_comp + 1, self.max_target_length // self.compress_ratio)
+
+      comp_head_dim = self.head_dim if self.compress_ratio > 4 else 2 * self.head_dim
+
+      self.compressor_cache = kvcache.KVCache(
+          max_prefill_length=max_prefill_comp,
+          max_target_length=max_target_comp,
+          batch=batch_size,
+          key_seq_len=max_target_comp,
+          value_seq_len=max_target_comp,
+          key_heads=1,
+          value_heads=1,
+          key_head_size=comp_head_dim,
+          value_head_size=comp_head_dim,
+          dtype=self.dtype,
+          model_mode=self.model_mode,
+          is_deepseek_v4=True,
+          compress_rate=self.compress_ratio,
+          rngs=self.rngs,
+      )
+    else:
+      self.compressor_cache = None
+
+    if self.model_mode != MODEL_MODE_TRAIN and self.compress_ratio == 4:
+      self.indexer_cache = kvcache.KVCache(
+          max_prefill_length=max_prefill_comp,
+          max_target_length=max_target_comp,
+          batch=batch_size,
+          key_seq_len=max_prefill_comp,
+          value_seq_len=max_prefill_comp,
+          key_heads=1,
+          value_heads=1,
+          key_head_size=2 * self.config.indexer_head_dim,
+          value_head_size=2 * self.config.indexer_head_dim,
+          dtype=self.dtype,
+          model_mode=self.model_mode,
+          is_deepseek_v4=True,
+          compress_rate=self.compress_ratio,
+          is_indexer=True,
+          rngs=self.rngs,
+      )
+    else:
+      self.indexer_cache = None
+
   @property
   def out_head_dim(self) -> int:
     """Returns the head dimension used prior to the output projection."""
@@ -954,7 +1252,12 @@ class CompressedAttention(Attention):
     q_up_normed = self.q_up_norm(q_up)
 
     # -> [batch, seq_len, num_query_heads, head_dim]
-    q_out = self.rotary_embedding(q_up_normed, inputs_positions, unsqueeze_dim=-2)
+    try:
+        q_out = self.rotary_embedding(q_up_normed, inputs_positions, unsqueeze_dim=-2)
+    except TypeError:
+        # If the embedding rejects the kwarg, reshape manually before passing it in, 
+        # or rely on the embedding's internal broadcasting.
+        q_out = self.rotary_embedding(q_up_normed, inputs_positions)
 
     # Scale queries by 1/sqrt(head_dim) prior to attention to prevent softmax saturation
     # -> [batch, seq_len, num_query_heads, head_dim]
@@ -986,7 +1289,10 @@ class CompressedAttention(Attention):
 
     kv_up_normed = self.kv_norm(kv_up)
 
-    kv_out = self.rotary_embedding(kv_up_normed, inputs_positions, unsqueeze_dim=-2)
+    try:
+        kv_out = self.rotary_embedding(kv_up_normed, inputs_positions, unsqueeze_dim=-2)
+    except TypeError:
+        kv_out = self.rotary_embedding(kv_up_normed, inputs_positions)
 
     return kv_out, kv_out
 
@@ -1021,53 +1327,60 @@ class CompressedAttention(Attention):
       5. Grouped Linear (o_a_proj): -> `[batch, q_length, o_groups, out_features_per_group]`.
       6. Flatten & Dense (o_b_proj): -> `[batch, q_length, emb_dim]`.
     """
+    kv_cache = kwargs.get("kv_cache", None)
+    attention_metadata = kwargs.get("attention_metadata", None)
+
     q, q_normed = self.compressed_query_projection(inputs_q, inputs_positions, model_mode)
     q = checkpoint_name(q, "query_proj")
     kv, _ = self.compressed_kv_projection(inputs_kv, inputs_positions, model_mode)
 
+    current_kv_cache = kv_cache
+
+    # 1. Update the Local (Sliding Window) KV Cache with the uncompressed tokens
+    if model_mode != MODEL_MODE_TRAIN and getattr(self, 'KVCache_0', None) is not None:
+      current_kv_cache = self.update_kv_caches(
+          kv, kv, decoder_segment_ids, model_mode, kwargs.get("previous_chunk", None)
+      )
+
+    prefill_kv_cache = current_kv_cache[0] if current_kv_cache is not None else None
+    ar_kv_cache = current_kv_cache[1] if current_kv_cache is not None else None
+
     # Generate compressed representations based on the configured layer type
     compressed_kv = None
     compressed_mask = None
-    # Generate the standard segment mask
     compressed_segment_mask = None
+    
     if decoder_segment_ids is not None and self.compress_ratio > 0:
       segment_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
       segment_mask_additive = jnp.where(segment_mask, 0.0, DEFAULT_MASK_VALUE)
-
-      # Downsample the kv dimension
       compress_rate = self.compress_ratio
       compressed_segment_mask = segment_mask_additive[:, :, ::compress_rate]
 
-    # Route to the appropriate compressor depending on the layer's role in the architecture
+    # Route to the appropriate compressor
     if self.compress_ratio > 4:
-      compressed_kv, compressed_mask = self.hca_compressor(inputs_kv, q_normed, inputs_positions)
+      compressed_kv, compressed_mask = self.hca_compressor(
+        inputs_kv, q_normed, inputs_positions, model_mode, self.compressor_cache
+      )
     elif self.compress_ratio == 4:
-      compressed_kv, compressed_mask = self.csa_compressor(inputs_kv, q_normed, inputs_positions, compressed_segment_mask)
+      compressed_kv, compressed_mask = self.csa_compressor(
+          inputs_kv, q_normed, inputs_positions, compressed_segment_mask, model_mode, self.compressor_cache, self.indexer_cache
+      )
 
     # Apply segment masking to the compressed blocks
     if compressed_segment_mask is not None and compressed_mask is not None:
-      # compressed_segment_mask is [batch, q_len, num_compressed_blocks]
-      # compressed_mask is [batch, 1, q_len, num_compressed_blocks]
       compressed_mask = compressed_mask + jnp.expand_dims(
           compressed_segment_mask[:, :, : compressed_mask.shape[-1]], axis=1
       )
 
-    # Extend local KV tensors with the compressed blocks
-    if compressed_kv is not None:
-      kv = jnp.concatenate([kv, compressed_kv], axis=1)
-
     kv = checkpoint_name(kv, "kv_proj")
 
-    # Prepare the mask shape for the underlying AttentionOp
     if compressed_mask is not None:
       compressed_mask = jnp.expand_dims(compressed_mask, axis=2)
 
-    # Scale queries if a pre-attention scalar is defined
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
       q = q * self.query_pre_attn_scalar
 
-    # Compute Attention
-    # -> [batch, q_length, num_query_heads, head_dim]
+    # Compute Attention (Now safely passing kv_cache so the kernel doesn't assert!)
     attn_out = self.attention_op(
         q,
         kv,
@@ -1075,31 +1388,31 @@ class CompressedAttention(Attention):
         decoder_segment_ids,
         inputs_positions,
         model_mode,
-        sinks=self.sinks.value,
+        sinks=self.sinks.value if self.sinks is not None else None,
         compressed_mask=compressed_mask,
+        compressed_kv=compressed_kv,
+        cached_values=current_kv_cache,
     )
 
     # Reverse RoPE on Values
-    attn_out = self.rotary_embedding(attn_out, inputs_positions, unsqueeze_dim=-2, reverse=True)
+    try:
+        attn_out = self.rotary_embedding(attn_out, inputs_positions, unsqueeze_dim=-2, reverse=True)
+    except TypeError:
+        if hasattr(self.rotary_embedding, 'reverse'):
+             attn_out = self.rotary_embedding(attn_out, inputs_positions, reverse=True)
 
     attn_out = checkpoint_name(attn_out, "attention_out")
 
     # Project outputs through Grouped Linear layers
     b, s, h, d = attn_out.shape
-    # -> [batch, q_length, o_groups, in_features_per_group]
     grouped_out = attn_out.reshape(b, s, self.config.o_groups, (h * d) // self.config.o_groups)
-
-    # -> [batch, q_length, o_groups, out_features_per_group]
     grouped_out = self.o_a_proj(grouped_out)
-
-    # -> [batch, q_length, o_groups * out_features_per_group]
     grouped_flat = grouped_out.reshape(b, s, -1)
-
-    # -> [batch, q_length, emb_dim]
     final_out = self.o_b_proj(grouped_flat)
     final_out = checkpoint_name(final_out, "out_proj")
 
-    return final_out, None
+    # Return the Tuple expected by the transformer block
+    return final_out, current_kv_cache
 
 
 def compressed_attention(

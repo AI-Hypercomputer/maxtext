@@ -818,32 +818,61 @@ class AttentionOp(nnx.Module):
         sliding_mask = sliding_mask[:, None, None, :, :]
       output_mask = sliding_mask * output_mask
     elif self.attention_type == AttentionType.COMPRESSED:
-      if compressed_mask is None:
-        raise ValueError("compressed_mask must be provided for COMPRESSED attention type")
-      c_len = compressed_mask.shape[-1]
+      c_len = compressed_mask.shape[-1] if compressed_mask is not None else 0
       s_len = kv_seq_len - c_len
 
-      # Build causal and sliding window mask for the uncompressed sequence
-      # -> [q_seq_len, s_len]
-      row_ids = jax.lax.broadcasted_iota(jnp.int32, (q_seq_len, s_len), 0) + next_pos
-      # -> [1, s_len]
-      col_ids = jax.lax.broadcasted_iota(jnp.int32, (1, s_len), 1)
-      uncompressed_mask = col_ids <= row_ids
-      if self.sliding_window_size is not None:
-        uncompressed_mask = uncompressed_mask & (col_ids > (row_ids - self.sliding_window_size))
+      def get_sliding_mask(s_len):
+        # Safely use segment_positions, or fall back to next_pos if None
+        if segment_positions is not None:
+          abs_q = segment_positions[:, :, None]
+        else:
+          local_next = next_pos[:, None] if isinstance(next_pos, jax.Array) else next_pos
+          abs_q = jnp.arange(q_seq_len)[None, :, None] + local_next
 
-      # Broadcast uncompressed_mask to match compressed_mask's layout
+        if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+          if decoder_segment_ids is not None:
+            is_valid = decoder_segment_ids[:, :s_len] == DECODING_ACTIVE_SEQUENCE_INDICATOR
+            valid_indices = jnp.where(is_valid, jnp.arange(s_len)[None, :], -1)
+            max_valid = jnp.max(valid_indices, axis=-1, keepdims=True) # [batch, 1]
+            
+            # Safely trace AR cache vs Prefill cache without triggering a ConcretizationTypeError
+            is_ar_cache = jnp.max(max_valid, axis=(0, 1), keepdims=True) >= 0 
+            
+            i = jnp.arange(s_len)[None, None, :]
+            abs_k_ar = abs_q - max_valid[:, :, None] + i
+            abs_k_prefill = jnp.broadcast_to(i, abs_k_ar.shape)
+            
+            abs_k = jnp.where(is_ar_cache, abs_k_ar, abs_k_prefill)
+            distance = abs_q - abs_k
+            return (distance < self.sliding_window_size) & (distance >= 0)
+                
+        # For prefill phase (q_seq_len > 1)
+        abs_k = jnp.arange(s_len)[None, None, :]
+        distance = abs_q - abs_k
+        return (distance < self.sliding_window_size) & (distance >= 0)
+
+      uncompressed_mask = get_sliding_mask(s_len)
+
+      if uncompressed_mask.ndim == 3:
+        uncompressed_mask_5d = uncompressed_mask[:, None, None, :, :]
+      else:
+        uncompressed_mask_5d = uncompressed_mask[None, None, None, :, :]
+
+      if compressed_mask is None:
+        if output_mask is not None:
+          output_mask = uncompressed_mask_5d * output_mask
+        else:
+          output_mask = uncompressed_mask_5d
+        return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE)
+      
       target_shape = compressed_mask.shape[:-1] + (s_len,)
-      padded_shape = (1,) * (len(target_shape) - 2) + uncompressed_mask.shape
-      uncompressed_mask = jnp.broadcast_to(uncompressed_mask.reshape(padded_shape), target_shape)
+      uncompressed_mask_5d = jnp.broadcast_to(uncompressed_mask_5d, target_shape)
 
-      # Apply document-packing mask if it exists
       if output_mask is not None:
-        uncompressed_mask = uncompressed_mask & output_mask[..., :s_len]
+        uncompressed_mask_5d = uncompressed_mask_5d & output_mask[..., :s_len]
 
-      uncompressed_mask = jnp.where(uncompressed_mask, 0.0, DEFAULT_MASK_VALUE)
-
-      return jnp.concatenate([uncompressed_mask, compressed_mask], axis=-1)
+      uncompressed_mask_5d = jnp.where(uncompressed_mask_5d, 0.0, DEFAULT_MASK_VALUE).astype(compressed_mask.dtype)
+      return jnp.concatenate([uncompressed_mask_5d, compressed_mask], axis=-1)
 
     elif self.attention_type == AttentionType.CHUNK and output_mask is not None:
       if use_segment_positions:
@@ -2266,6 +2295,7 @@ class AttentionOp(nnx.Module):
       sinks=None,
       indexer_mask: Optional[Array] = None,
       compressed_mask: Optional[Array] = None,
+      compressed_kv: Optional[Array] = None,
       slot: Optional[int] = None,
       record_max_logits: bool = False,
   ):
@@ -2276,19 +2306,25 @@ class AttentionOp(nnx.Module):
     if model_mode != MODEL_MODE_TRAIN:
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
+    pass_comp_to_prefill = (compressed_kv is not None) and (ar_kv_cache is None)
+    k_prefill = key
+    v_prefill = value
+    if pass_comp_to_prefill:
+      k_prefill = jnp.concatenate([k_prefill, compressed_kv], axis=1)
+      v_prefill = jnp.concatenate([v_prefill, compressed_kv], axis=1)
 
     indexer_mask_prefill = None
     indexer_mask_ar = None
     if indexer_mask is not None:
-      prefill_len = key.shape[1]
+      prefill_len = key.shape[1] # Use original key shape before concat
       indexer_mask_prefill = indexer_mask[:, :, :prefill_len]
       if ar_kv_cache is not None:
         indexer_mask_ar = indexer_mask[:, :, prefill_len:]
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
-        key=key,
-        value=value,
+        key=k_prefill,
+        value=v_prefill,
         decoder_segment_ids=decoder_segment_ids,
         segment_positions=inputs_positions,
         lengths=None,
@@ -2298,31 +2334,35 @@ class AttentionOp(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
         indexer_mask=indexer_mask_prefill,
-        compressed_mask=compressed_mask,
+        compressed_mask=compressed_mask if pass_comp_to_prefill else None,
         record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
     )
 
-    # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:
       if prefill_exponentials_sum is not None:
         return prefill_unnormalized_output / prefill_exponentials_sum
       return prefill_unnormalized_output
 
-    key, value, decoder_segment_ids, lengths = ar_kv_cache
+    key_ar, value_ar, decoder_segment_ids_ar, lengths = ar_kv_cache
+
+    if compressed_kv is not None:
+      key_ar = jnp.concatenate([key_ar, compressed_kv], axis=1)
+      value_ar = jnp.concatenate([value_ar, compressed_kv], axis=1)
 
     ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
         query=query,
-        key=key,
-        value=value,
-        decoder_segment_ids=decoder_segment_ids,
+        key=key_ar,
+        value=value_ar,
+        decoder_segment_ids=decoder_segment_ids_ar,
         segment_positions=inputs_positions,
         lengths=lengths,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
         bidirectional_mask=bidirectional_mask,
         indexer_mask=indexer_mask_ar,
+        compressed_mask=compressed_mask,
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
     )
