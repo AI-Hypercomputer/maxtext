@@ -165,7 +165,7 @@ class MultimodalMLPProjector(nnx.Module):
 
     self.tokens_per_block = spatial_merge_size**2
 
-    # Supported activations
+    # Activations
     activations = {
         "gelu": jax.nn.gelu,
         "silu": jax.nn.silu,
