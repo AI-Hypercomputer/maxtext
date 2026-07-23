@@ -42,6 +42,68 @@ def _get_mock_devices(devices_per_slice, num_slices=1):
 class TrainRLTest(unittest.TestCase):
   """Tests for train_rl.py."""
 
+  def test_rollout_strategy_preserves_default_vllm_path(self):
+    config = SimpleNamespace(
+        rl=SimpleNamespace(diffusion_rollout=False),
+        use_standalone_converter=False,
+    )
+
+    rollout_engine, logits_fn = train_rl.build_rollout_strategy(config)
+
+    self.assertEqual(rollout_engine, "vllm")
+    self.assertIsNone(logits_fn)
+
+  def test_rollout_strategy_selects_diffusion_trace_pair(self):
+    config = SimpleNamespace(
+        rl=SimpleNamespace(diffusion_rollout=True),
+        block_diffusion_mask_id=31,
+        block_diffusion_logit_alignment="same_position",
+        vocab_size=32,
+    )
+
+    rollout_engine, logits_fn = train_rl.build_rollout_strategy(config)
+
+    from maxtext.integration.tunix import diffusion_rl  # pylint: disable=import-outside-toplevel
+
+    self.assertIs(rollout_engine.func, diffusion_rl.MaxTextDiffusionRollout)
+    self.assertIs(rollout_engine.keywords["maxtext_config"], config)
+    self.assertTrue(callable(logits_fn))
+
+  def test_checkpoint_metadata_fingerprints_diffusion_semantics(self):
+    config = SimpleNamespace(
+        rl=SimpleNamespace(
+            diffusion_rollout=True,
+            diffusion_score_mode="denoising_trace",
+            diffusion_max_denoise_steps=-1,
+            diffusion_confidence_threshold=0.9,
+            diffusion_stop_token_ids=[],
+        ),
+        model_name="test-model",
+        tokenizer_path="test-tokenizer",
+        vocab_size=32,
+        block_diffusion_block_size=4,
+        block_diffusion_mask_id=31,
+        block_diffusion_logit_alignment="same_position",
+        block_diffusion_canvas_policy="all_masked",
+        decode_sampling_temperature=0.7,
+        decode_sampling_top_k=-1,
+        decode_sampling_nucleus_p=1.0,
+        max_prefill_predict_length=8,
+        max_target_length=12,
+    )
+    tokenizer = SimpleNamespace(eos_token_id=2)
+
+    metadata = train_rl.build_checkpoint_metadata(config, tokenizer)
+
+    self.assertEqual(metadata["diffusion_policy_objective"], "fixed_schedule_full_trace")
+    self.assertEqual(metadata["stop_token_ids"], (2,))
+    self.assertEqual(metadata["max_denoise_steps"], 4)
+
+  def test_checkpoint_metadata_is_empty_for_default_ar(self):
+    config = SimpleNamespace(rl=SimpleNamespace(diffusion_rollout=False))
+
+    self.assertEqual(train_rl.build_checkpoint_metadata(config, SimpleNamespace()), {})
+
   @pytest.mark.cpu_only
   def test_setup_configs_and_devices_pathways_split(self):
     """Test setup_configs_and_devices with multiple VMs and Pathways."""

@@ -70,6 +70,15 @@ rl:
   # If null, the entire model is resharded at once.
   reshard_chunk_size: null
 
+  # ====== Block-Diffusion Rollout ======
+  # Default-off exact denoising-trace policy semantics. The same prepared trace
+  # is scored by the live, anchor-old, and reference policies.
+  diffusion_rollout: false
+  diffusion_score_mode: 'denoising_trace'
+  diffusion_confidence_threshold: 0.9
+  diffusion_max_denoise_steps: -1
+  diffusion_stop_token_ids: []
+
 # ====== Models ======
 # for MaxText
 # Model and Tokenizer Configuration

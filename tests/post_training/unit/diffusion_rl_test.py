@@ -14,6 +14,7 @@
 
 """Tests exact MaxText denoising-trace replay for diffusion RL."""
 
+import functools
 from types import SimpleNamespace
 
 from absl.testing import absltest
@@ -69,6 +70,29 @@ class _NonFiniteModel(nnx.Module):
     return jnp.full((*decoder_input_tokens.shape, 8), jnp.nan) * self.scale[...]
 
 
+class _MeshConstrainedModel(nnx.Module):
+
+  def __init__(self, mesh):
+    self.mesh = mesh
+    self.scale = nnx.Param(jnp.asarray(2.0, dtype=jnp.float32))
+    self._shard = functools.partial(
+        jax.lax.with_sharding_constraint,
+        shardings=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data", None)),
+    )
+
+  def __call__(self, decoder_input_tokens, **kwargs):
+    del kwargs
+    tokens = self._shard(decoder_input_tokens)
+    target_ids = jnp.arange(tokens.shape[1])[None, :] % 7
+    return jax.nn.one_hot(target_ids, 8, dtype=jnp.float32) * self.scale[...]
+
+
+class _MeshConstrainedWrapper(nnx.Module):
+
+  def __init__(self, mesh):
+    self.base = _MeshConstrainedModel(mesh)
+
+
 class _Tokenizer:
   """Minimal tokenizer contract used by the in-process rollout tests."""
 
@@ -94,6 +118,46 @@ class _PadValuedPromptTokenizer(_Tokenizer):
 
 
 class DiffusionRLTest(absltest.TestCase):
+
+  def test_rollout_rebinds_nested_model_constraints_to_sampler_mesh(self):
+    if len(jax.devices()) < 2:
+      self.skipTest("requires two CPU devices")
+    trainer_mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:1]), ("data",))
+    sampler_mesh = jax.sharding.Mesh(np.asarray(jax.devices()[1:2]), ("data",))
+    model = _MeshConstrainedWrapper(trainer_mesh)
+    graphdef, state = nnx.split(model)
+    sampler_state = jax.tree.map(
+        lambda value: jax.device_put(
+            value,
+            jax.sharding.NamedSharding(sampler_mesh, jax.sharding.PartitionSpec()),
+        ),
+        state,
+    )
+    model = nnx.merge(graphdef, sampler_state)
+    rollout_config = SimpleNamespace(
+        max_prompt_length=2,
+        max_tokens_to_generate=3,
+        temperature=0.7,
+        return_logprobs=True,
+        top_k=-1,
+        top_p=1.0,
+    )
+
+    rollout = diffusion_rl.MaxTextDiffusionRollout(
+        rollout_actor=model,
+        tokenizer=_Tokenizer(),
+        mesh=sampler_mesh,
+        rollout_config=rollout_config,
+        maxtext_config=_config(),
+    )
+    output = rollout.generate(["prompt"], rollout_config)
+
+    self.assertEqual(rollout._model.base.mesh, sampler_mesh)  # pylint: disable=protected-access
+    self.assertEqual(
+        rollout._model.base._shard.keywords["shardings"].mesh,  # pylint: disable=protected-access
+        sampler_mesh,
+    )
+    self.assertEqual(output.diffusion_batch.target_ids.shape, (1, 3))
 
   def test_trace_replay_matches_action_time_logps_and_has_live_gradient(self):
     model = _CanvasDependentModel()

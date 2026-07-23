@@ -45,6 +45,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 
 from __future__ import annotations
 import contextlib
+import dataclasses
 from functools import wraps
 from typing import Any, Callable, Optional, Sequence
 
@@ -64,9 +65,6 @@ from flax import nnx
 from orbax import checkpoint as ocp
 from pprint import pprint
 from transformers import AutoTokenizer
-import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
-
-adapter.register()
 import functools
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
@@ -119,7 +117,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "0"
 
 from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
@@ -381,6 +378,59 @@ def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
   ]
 
 
+def build_rollout_strategy(trainer_config):
+  """Selects the default AR engine or the explicit diffusion trace strategy."""
+  if trainer_config.rl.diffusion_rollout:
+    from maxtext.integration.tunix import diffusion_rl  # pylint: disable=import-outside-toplevel
+
+    return (
+        functools.partial(
+            diffusion_rl.MaxTextDiffusionRollout,
+            maxtext_config=trainer_config,
+        ),
+        diffusion_rl.make_diffusion_trace_logits_fn(trainer_config),
+    )
+  if trainer_config.use_standalone_converter:
+    from maxtext.integration.vllm.maxtext_vllm_rollout import (  # pylint: disable=import-outside-toplevel
+        MaxTextVllmRollout,
+    )
+
+    return functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config), None
+  return "vllm", None
+
+
+def build_checkpoint_metadata(trainer_config, tokenizer) -> dict[str, object]:
+  """Builds a fail-closed fingerprint for diffusion policy checkpoints."""
+  if not trainer_config.rl.diffusion_rollout:
+    return {}
+  from maxtext.integration.tunix import diffusion_rl  # pylint: disable=import-outside-toplevel
+
+  stop_token_ids = diffusion_rl.resolve_stop_token_ids(trainer_config, tokenizer.eos_token_id)
+  max_denoise_steps = trainer_config.rl.diffusion_max_denoise_steps
+  if max_denoise_steps == -1:
+    max_denoise_steps = trainer_config.block_diffusion_block_size
+  return {
+      "diffusion_policy_version": 1,
+      "diffusion_policy_objective": "fixed_schedule_full_trace",
+      "diffusion_score_mode": trainer_config.rl.diffusion_score_mode,
+      "model_name": str(trainer_config.model_name),
+      "tokenizer_path": str(trainer_config.tokenizer_path),
+      "vocab_size": int(trainer_config.vocab_size),
+      "block_size": int(trainer_config.block_diffusion_block_size),
+      "mask_id": int(trainer_config.block_diffusion_mask_id),
+      "logit_alignment": trainer_config.block_diffusion_logit_alignment,
+      "canvas_policy": trainer_config.block_diffusion_canvas_policy,
+      "sampling_temperature": float(trainer_config.decode_sampling_temperature),
+      "sampling_top_k": int(trainer_config.decode_sampling_top_k or -1),
+      "sampling_top_p": float(trainer_config.decode_sampling_nucleus_p),
+      "confidence_threshold": float(trainer_config.rl.diffusion_confidence_threshold),
+      "max_denoise_steps": int(max_denoise_steps),
+      "stop_token_ids": tuple(stop_token_ids),
+      "max_prompt_length": int(trainer_config.max_prefill_predict_length),
+      "max_completion_length": int(trainer_config.max_target_length - trainer_config.max_prefill_predict_length),
+  }
+
+
 def create_rl_components(
     trainer_config,
     sampler_config,
@@ -437,15 +487,64 @@ def create_rl_components(
       except json.JSONDecodeError as e:
         raise ValueError(f"Failed to parse additional_config JSON: {e}") from e
 
-  # We need to parse vLLM config to get the logical axis rules for the sampler config.
-  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
-  argv_list = ["", str(vllm_config_path), "log_config=False"]
-  vllm_config = pyconfig.initialize(argv_list, config_class=types.RLConfig)
+  rl_rollout_engine, diffusion_logits_fn = build_rollout_strategy(trainer_config)
+  if diffusion_logits_fn is None:
+    from maxtext.integration.vllm import maxtext_vllm_adapter  # pylint: disable=import-outside-toplevel
 
-  rl_rollout_engine = (
-      functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
-      if trainer_config.use_standalone_converter
-      else "vllm"
+    maxtext_vllm_adapter.register()
+    # The AR sampler uses its inference-specific logical axis rules.
+    vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
+    argv_list = ["", str(vllm_config_path), "log_config=False"]
+    rollout_logical_axis_rules = pyconfig.initialize(argv_list, config_class=types.RLConfig).logical_axis_rules
+    rollout_parallelism_kwargs = get_rollout_kwargs_for_parallelism(sampler_config, len(sampler_devices))
+  else:
+    rollout_logical_axis_rules = trainer_config.logical_axis_rules
+    rollout_parallelism_kwargs = {}
+
+  training_rollout_config = base_rollout.RolloutConfig(
+      max_tokens_to_generate=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
+      max_prompt_length=trainer_config.max_prefill_predict_length,
+      kv_cache_size=trainer_config.max_target_length + trainer_config.kv_cache_buffer,
+      temperature=trainer_config.decode_sampling_temperature,
+      top_p=trainer_config.decode_sampling_nucleus_p,
+      top_k=trainer_config.decode_sampling_top_k,
+      rollout_vllm_model_version=trainer_config.tokenizer_path,
+      rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
+      rollout_vllm_tpu_backend_type="jax",
+      rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
+      rollout_vllm_additional_config=rollout_additional_config,
+      rollout_vllm_init_with_random_weights=True,
+      rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
+      rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
+      rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
+      rollout_vllm_async_scheduling=trainer_config.async_scheduling,
+      rollout_vllm_server_mode=trainer_config.rl.use_agentic_rollout,
+      rollout_vllm_reshard_chunk_size=trainer_config.rl.reshard_chunk_size,
+      rollout_vllm_kwargs={
+          "hf_overrides": trainer_config.vllm_hf_overrides,
+          "enable_expert_parallel": sampler_config.enable_expert_parallel,
+          "enable_prefix_caching": True,
+          "dtype": trainer_config.weight_dtype.value,
+      },
+      rollout_vllm_sampling_kwargs={
+          "stop": trainer_config.stop_strings,
+          "detokenize": trainer_config.stop_strings is not None,
+          "include_stop_str_in_output": trainer_config.stop_strings is not None,
+      },
+      **(
+          {"return_logprobs": True}
+          if trainer_config.rl.use_agentic_rollout or trainer_config.rl.diffusion_rollout
+          else {}
+      ),
+      **rollout_parallelism_kwargs,
+  )
+  eval_strategy = trainer_config.generation_configs[trainer_config.eval_sampling_strategy]
+  evaluation_rollout_config = dataclasses.replace(
+      training_rollout_config,
+      temperature=eval_strategy["eval_temperature"],
+      top_k=eval_strategy["eval_top_k"],
+      top_p=eval_strategy["eval_top_p"],
+      return_logprobs=False,
   )
 
   cluster_config = rl_cluster_lib.ClusterConfig(
@@ -457,7 +556,7 @@ def create_rl_components(
       role_to_logical_axis_rule={
           rl_cluster_lib.Role.ACTOR: trainer_config.logical_axis_rules,
           rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
-          rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
+          rl_cluster_lib.Role.ROLLOUT: rollout_logical_axis_rules,
       },
       rollout_engine=rl_rollout_engine,
       offload_to_cpu=False,
@@ -472,43 +571,12 @@ def create_rl_components(
           profiler_options=profiler_options,
           checkpoint_root_directory=checkpoint_dir,
           checkpointing_options=checkpointing_options,
+          checkpoint_metadata=build_checkpoint_metadata(trainer_config, model_tokenizer),
       ),
-      rollout_config=base_rollout.RolloutConfig(
-          max_tokens_to_generate=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
-          max_prompt_length=trainer_config.max_prefill_predict_length,
-          kv_cache_size=trainer_config.max_target_length + trainer_config.kv_cache_buffer,
-          temperature=trainer_config.decode_sampling_temperature,
-          top_p=trainer_config.decode_sampling_nucleus_p,
-          top_k=trainer_config.decode_sampling_top_k,
-          rollout_vllm_model_version=trainer_config.tokenizer_path,
-          rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
-          rollout_vllm_tpu_backend_type="jax",
-          rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
-          rollout_vllm_additional_config=rollout_additional_config,
-          rollout_vllm_init_with_random_weights=True,
-          rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
-          rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
-          rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
-          rollout_vllm_async_scheduling=trainer_config.async_scheduling,
-          rollout_vllm_server_mode=trainer_config.rl.use_agentic_rollout,
-          rollout_vllm_reshard_chunk_size=trainer_config.rl.reshard_chunk_size,
-          rollout_vllm_kwargs={
-              "hf_overrides": trainer_config.vllm_hf_overrides,
-              "enable_expert_parallel": sampler_config.enable_expert_parallel,
-              "enable_prefix_caching": True,  # Enable prefix caching to speed up generation for long prompts
-              # Ensures vLLM model initializes with correct dtype (not float32 default)
-              "dtype": trainer_config.weight_dtype.value,
-          },
-          rollout_vllm_sampling_kwargs={
-              "stop": trainer_config.stop_strings,
-              "detokenize": trainer_config.stop_strings is not None,
-              "include_stop_str_in_output": trainer_config.stop_strings is not None,
-          },
-          # AgenticGRPOLearner requires log-probabilities from the rollout engine
-          # to support off-policy filtering and multi-iteration training.
-          **({"return_logprobs": True} if trainer_config.rl.use_agentic_rollout else {}),
-          **get_rollout_kwargs_for_parallelism(sampler_config, len(sampler_devices)),
-      ),
+      rollout_config={
+          rl_cluster_lib.Mode.TRAIN: training_rollout_config,
+          rl_cluster_lib.Mode.EVAL: evaluation_rollout_config,
+      },
   )
 
   # Create RL cluster
@@ -600,10 +668,14 @@ def create_rl_components(
         loss_algo=trainer_config.rl.loss_algo,
         loss_agg_mode=trainer_config.rl.loss_agg_mode,
     )
+    learner_kwargs = {}
+    if diffusion_logits_fn is not None:
+      learner_kwargs["diffusion_logits_fn"] = diffusion_logits_fn
     rl_trainer = GrpoLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         algo_config=grpo_config,
+        **learner_kwargs,
     )
 
   return rl_cluster, rl_trainer, optimizer, reward_fns
