@@ -231,7 +231,7 @@ if [ -n "${RESERVATION}" ]; then
 fi
 
 # Construct command to run inside container
-COMMAND="export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python PYTHONUNBUFFERED=1 && JOB_NAME=\${JOBSET_NAME:-${WORKLOAD_NAME}} && SRC_HOST=\$(getent hosts \${JOB_NAME}-slice-job-0-0.\${JOB_NAME} | awk '{print \$1}') && DST_HOST=\$(getent hosts \${JOB_NAME}-slice-job-1-0.\${JOB_NAME} | awk '{print \$1}') && PYTHONPATH=/app/src:/app:\$PYTHONPATH python3 -u /app/src/maxtext/experimental/weight_transfer/transfer_weights_raiden.py --weight_size_mb=${WEIGHT_SIZE_MB} --num_layers=${NUM_LAYERS} --iterations=${ITERATIONS} --source_ip=\${SRC_HOST:-\"0.0.0.0\"} --dest_ip=\${DST_HOST:-\"127.0.0.1\"}"
+COMMAND="export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python PYTHONUNBUFFERED=1 && JOB_NAME=\${JOBSET_NAME:-${WORKLOAD_NAME}} && SRC_HOST=\$(hostname -I | awk '{print \$1}') && DST_HOST=\$(getent hosts \${JOB_NAME}-slice-job-1-0.\${JOB_NAME} | awk '{print \$1}') && PYTHONPATH=/app/src:/app:\$PYTHONPATH python3 -u /app/src/maxtext/experimental/weight_transfer/transfer_weights_raiden.py --weight_size_mb=${WEIGHT_SIZE_MB} --num_layers=${NUM_LAYERS} --iterations=${ITERATIONS} --dest_port=29500 --source_ip=\${SRC_HOST:-\"0.0.0.0\"} --dest_ip=\${DST_HOST:-\"127.0.0.1\"}"
 
 if [ -n "${PROFILE_DIR}" ]; then
   COMMAND="${COMMAND} --profile_dir=${PROFILE_DIR}"
@@ -258,6 +258,9 @@ if [ -n "${PROFILE_DIR}" ]; then
 fi
 echo "Command       : ${COMMAND}"
 echo "========================================================="
+
+echo "Cleaning up prior workload ${WORKLOAD_NAME} if exists..."
+kubectl delete jobset "${WORKLOAD_NAME}" -n default 2>/dev/null || true
 
 xpk workload create \
   --cluster="${CLUSTER_NAME}" \

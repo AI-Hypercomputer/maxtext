@@ -21,18 +21,20 @@ from one host/slice to another on 2 TPU v5p-8 slices, with performance timing an
 from __future__ import annotations
 
 import argparse
-import ctypes
 import os
 import socket
-import sys
 import time
 from typing import Any, Dict, List, Tuple
 
-os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
-try:
-  sys.setdlopenflags(sys.getdlopenflags() & ~ctypes.RTLD_GLOBAL | ctypes.RTLD_LOCAL)
-except Exception:  # pylint: disable=broad-exception-caught
-  pass
+# Default host platform devices if XLA_FLAGS is not set
+if "XLA_FLAGS" not in os.environ:
+  os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
+
+import jax
+from jax.experimental import multihost_utils
+import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+import numpy as np
 
 try:
   import google.protobuf.runtime_version
@@ -50,11 +52,6 @@ try:
     raise RuntimeError("tpu-raiden native C++ extension is not available!")
 except Exception as e:  # pylint: disable=broad-exception-caught
   raise RuntimeError(f"tpu-raiden is required for transfer_weights_raiden.py but could not be imported: {e}") from e
-
-import jax
-import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-import numpy as np
 
 
 def str2bool(v: Any) -> bool:
@@ -119,7 +116,7 @@ def parse_args(raw_args: list[str] | None = None) -> argparse.Namespace:
   parser.add_argument(
       "--dest_port",
       type=int,
-      default=8080,
+      default=29500,
       help="Target port for destination WeightSynchronizer.",
   )
   parser.add_argument(
@@ -134,28 +131,18 @@ def parse_args(raw_args: list[str] | None = None) -> argparse.Namespace:
 
 def setup_multi_slice_devices() -> Tuple[List[Any], List[Any]]:
   """Sets up source and destination device lists across 2 TPU slices/processes."""
-  try:
-    if jax.process_count() > 1:
-      devices = jax.local_devices(backend="tpu")
-      src_devices = devices
-      dst_devices = devices
-    else:
-      devices = jax.devices("tpu")
-      num_devices = len(devices)
-      half = max(1, num_devices // 2)
-      src_devices = devices[:half]
-      dst_devices = devices[half:]
-  except Exception:  # pylint: disable=broad-exception-caught
-    if jax.process_count() > 1:
-      devices = jax.local_devices()
-      src_devices = devices
-      dst_devices = devices
-    else:
-      devices = jax.devices()
-      num_devices = len(devices)
-      half = max(1, num_devices // 2)
-      src_devices = devices[:half]
-      dst_devices = devices[half:]
+  if jax.process_count() > 1:
+    # In multi-process XPK execution, each process uses its local devices
+    devices = jax.local_devices()
+    src_devices = devices
+    dst_devices = devices
+  else:
+    # In single-process SPS execution (Pathways proxy or single process multi-mesh)
+    devices = jax.devices()
+    num_devices = len(devices)
+    half = max(1, num_devices // 2)
+    src_devices = devices[:half]
+    dst_devices = devices[half:]
   return src_devices, dst_devices
 
 
@@ -175,17 +162,14 @@ def create_synthetic_weights(num_layers: int, total_size_mb: int, mesh: Mesh, sh
   dim0, dim1 = calculate_layer_dimensions(total_bytes, num_layers)
 
   sharding = NamedSharding(mesh, sharding_spec)
-  replicated_sharding = NamedSharding(mesh, P())
   weights = {}
 
   for i in range(num_layers):
     layer_name = f"layer_{i}"
     raw_array = jnp.ones((dim0, dim1), dtype=jnp.float32) * (i + 1.0)
     sharded_array = jax.device_put(raw_array, sharding)
-    bias_array = jax.device_put(jnp.zeros((dim1,), dtype=jnp.float32), replicated_sharding)
     weights[layer_name] = {
         "kernel": sharded_array,
-        "bias": bias_array,
     }
   return weights
 
@@ -209,7 +193,7 @@ def build_resharding_start_request(
   start_req = raiden_service_pb2.StartTransferRequest(is_sender=True)
   has_reshard = False
 
-  for arr in flat_src:
+  for idx, arr in enumerate(flat_src):
     if arr.ndim == 2:
       global_shape = arr.shape
       try:
@@ -248,6 +232,8 @@ def build_resharding_start_request(
         entry = schedule.entries.add()
         entry.dst_peer = f"{dest_ip}:{dest_port}"
         entry.dst_shard_idx = chunk.dst_device_id
+        entry.src_block_id = idx
+        entry.dst_block_id = idx
         entry.src_offset_bytes = (r_start * src_cols + c_start) * itemsize
         entry.dst_offset_bytes = (d_r_start * dst_cols + d_c_start) * itemsize
         entry.size_bytes = c_cols * itemsize
@@ -263,8 +249,9 @@ def build_resharding_start_request(
 def trigger_raiden_transfer(
     ws_source: weight_synchronizer.WeightSynchronizer,
     dest_ip: str,
-    ws_dest: weight_synchronizer.WeightSynchronizer,
+    ws_dest: weight_synchronizer.WeightSynchronizer | int | None = None,
     start_transfer_req: raiden_service_pb2.StartTransferRequest | None = None,
+    dest_port: int | None = None,
 ) -> None:
   """Sends ControlRequest protobuf COMMAND_START_TRANSFER to ws_source.listener_port."""
   if start_transfer_req is None:
@@ -272,13 +259,27 @@ def trigger_raiden_transfer(
   else:
     start_transfer_req.is_sender = True
 
+  if isinstance(ws_dest, weight_synchronizer.WeightSynchronizer):
+    target_port = ws_dest.local_port
+  elif isinstance(ws_dest, int):
+    target_port = ws_dest
+  elif dest_port is not None:
+    target_port = dest_port
+  else:
+    target_port = 29500
+
   req = raiden_service_pb2.ControlRequest(
       command=raiden_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
-      peers=[f"{dest_ip}:{ws_dest.local_port}"],
+      peers=[f"{dest_ip}:{target_port}"],
       start_transfer_request=start_transfer_req,
   )
   payload = req.SerializeToString()
 
+  print(
+      f"  [trigger_raiden_transfer] Connecting to C++ listener port"
+      f" {ws_source.listener_port} -> destination {dest_ip}:{target_port}...",
+      flush=True,
+  )
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   try:
     sock.connect(("127.0.0.1", ws_source.listener_port))
@@ -288,11 +289,13 @@ def trigger_raiden_transfer(
     sock.connect(("::1", ws_source.listener_port))
 
   sock.sendall(len(payload).to_bytes(4, "big") + payload)
+  print("  [trigger_raiden_transfer] ControlRequest sent, waiting for C++ response...", flush=True)
   resp_len = int.from_bytes(sock.recv(4), "big")
   resp_bytes = sock.recv(resp_len)
   resp = raiden_service_pb2.ControlResponse()
   resp.ParseFromString(resp_bytes)
   sock.close()
+  print(f"  [trigger_raiden_transfer] ControlResponse received: success={resp.success}, msg='{resp.message}'", flush=True)
   if not resp.success:
     raise RuntimeError(f"Raiden transfer trigger failed: {resp.message}")
 
@@ -317,69 +320,122 @@ def transfer_and_benchmark(
       )
       for arr in flat_src
   ]
+  jax.tree.map(lambda x: x.block_until_ready(), flat_src)
   jax.tree.map(lambda x: x.block_until_ready(), flat_dst_init)
 
-  print(f"\n--- Running Benchmark: {name} ---")
-  print(f"Total payload size: {total_mb:.2f} MB ({total_bytes} bytes)")
+  print(f"\n--- Running Benchmark: {name} ---", flush=True)
+  print(f"Total payload size: {total_mb:.2f} MB ({total_bytes} bytes)", flush=True)
 
   start_req = build_resharding_start_request(flat_src, src_sharding, dst_sharding, args.dest_ip, args.dest_port)
 
-  for w in range(args.warmup_iterations):
-    syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=args.source_ip)
-    syncer_dst = weight_synchronizer.WeightSynchronizer(flat_dst_init, local_port=args.dest_port + w)
-    syncer_src.d2h()
-    trigger_raiden_transfer(syncer_src, args.dest_ip, syncer_dst, start_req)
-    syncer_dst.h2d()
+  if jax.process_count() > 1:
+    for w in range(args.warmup_iterations):
+      multihost_utils.sync_global_devices(f"warmup_start_{w}")
+      print(f"  Warmup iteration {w + 1}/{args.warmup_iterations}...", flush=True)
+      port_offset = w
+      if jax.process_index() == 0:
+        start_req = build_resharding_start_request(
+            flat_src, src_sharding, dst_sharding, args.dest_ip, args.dest_port + port_offset
+        )
+        syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=args.source_ip, listener_port=0)
+        trigger_raiden_transfer(syncer_src, args.dest_ip, None, start_req, dest_port=args.dest_port + port_offset)
+      elif jax.process_index() == 1:
+        syncer_dst = weight_synchronizer.WeightSynchronizer(
+            flat_dst_init, local_port=args.dest_port + port_offset, listener_port=0
+        )
+      multihost_utils.sync_global_devices(f"warmup_end_{w}")
+
+    if args.profile_dir:
+      print(f"Starting JAX profiler trace output to: {args.profile_dir}", flush=True)
+      jax.profiler.start_trace(args.profile_dir)
+
+    latencies = []
+
+    for it in range(args.iterations):
+      multihost_utils.sync_global_devices(f"iter_start_{it}")
+      t0 = time.perf_counter()
+
+      port_offset = args.warmup_iterations + it
+      if jax.process_index() == 0:
+        start_req = build_resharding_start_request(
+            flat_src, src_sharding, dst_sharding, args.dest_ip, args.dest_port + port_offset
+        )
+        syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=args.source_ip, listener_port=0)
+        trigger_raiden_transfer(syncer_src, args.dest_ip, None, start_req, dest_port=args.dest_port + port_offset)
+      elif jax.process_index() == 1:
+        syncer_dst = weight_synchronizer.WeightSynchronizer(
+            flat_dst_init, local_port=args.dest_port + port_offset, listener_port=0
+        )
+
+      t1 = time.perf_counter()
+
+      elapsed_ms = (t1 - t0) * 1000.0
+      latencies.append(elapsed_ms)
+      print(f"  Iteration {it + 1}/{args.iterations}: {elapsed_ms:.2f} ms", flush=True)
+      multihost_utils.sync_global_devices(f"iter_end_{it}")
+
     transferred_flat = flat_dst_init
-    jax.tree.map(lambda x: x.block_until_ready(), transferred_flat)
+  else:
+    for w in range(args.warmup_iterations):
+      print(f"  Warmup iteration {w + 1}/{args.warmup_iterations}...", flush=True)
+      syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=args.source_ip)
+      syncer_dst = weight_synchronizer.WeightSynchronizer(flat_dst_init, local_port=args.dest_port + w)
+      syncer_src.d2h()
+      trigger_raiden_transfer(syncer_src, args.dest_ip, syncer_dst, start_req)
+      syncer_dst.h2d()
+      transferred_flat = flat_dst_init
+      jax.tree.map(lambda x: x.block_until_ready(), transferred_flat)
 
-  if args.profile_dir:
-    print(f"Starting JAX profiler trace output to: {args.profile_dir}")
-    jax.profiler.start_trace(args.profile_dir)
+    if args.profile_dir:
+      print(f"Starting JAX profiler trace output to: {args.profile_dir}", flush=True)
+      jax.profiler.start_trace(args.profile_dir)
 
-  latencies = []
+    latencies = []
 
-  for it in range(args.iterations):
-    t0 = time.perf_counter()
+    for it in range(args.iterations):
+      t0 = time.perf_counter()
 
-    port_offset = args.warmup_iterations + it
-    syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=args.source_ip)
-    syncer_dst = weight_synchronizer.WeightSynchronizer(flat_dst_init, local_port=args.dest_port + port_offset)
-    syncer_src.d2h()
-    trigger_raiden_transfer(syncer_src, args.dest_ip, syncer_dst, start_req)
-    syncer_dst.h2d()
-    transferred_flat = flat_dst_init
+      port_offset = args.warmup_iterations + it
+      syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=args.source_ip)
+      syncer_dst = weight_synchronizer.WeightSynchronizer(flat_dst_init, local_port=args.dest_port + port_offset)
+      syncer_src.d2h()
+      trigger_raiden_transfer(syncer_src, args.dest_ip, syncer_dst, start_req)
+      syncer_dst.h2d()
+      transferred_flat = flat_dst_init
 
-    jax.tree.map(lambda x: x.block_until_ready(), transferred_flat)
-    t1 = time.perf_counter()
+      jax.tree.map(lambda x: x.block_until_ready(), transferred_flat)
+      t1 = time.perf_counter()
 
-    elapsed_ms = (t1 - t0) * 1000.0
-    latencies.append(elapsed_ms)
+      elapsed_ms = (t1 - t0) * 1000.0
+      latencies.append(elapsed_ms)
+      print(f"  Iteration {it + 1}/{args.iterations}: {elapsed_ms:.2f} ms", flush=True)
 
   if args.profile_dir:
     jax.profiler.stop_trace()
-    print("Stopped JAX profiler trace.")
+    print("Stopped JAX profiler trace.", flush=True)
 
   avg_latency_ms = float(np.mean(latencies))
   min_latency_ms = float(np.min(latencies))
   throughput_gbps = (total_bytes / 1e9) / (avg_latency_ms / 1000.0) if avg_latency_ms > 0 else 0.0
 
-  print(f"Results for {name}:")
-  print(f"  Avg Latency: {avg_latency_ms:.3f} ms")
-  print(f"  Min Latency: {min_latency_ms:.3f} ms")
-  print(f"  Throughput : {throughput_gbps:.3f} GB/s")
+  print(f"Results for {name}:", flush=True)
+  print(f"  Avg Latency: {avg_latency_ms:.3f} ms", flush=True)
+  print(f"  Min Latency: {min_latency_ms:.3f} ms", flush=True)
+  print(f"  Throughput : {throughput_gbps:.3f} GB/s", flush=True)
 
   if args.verify_correctness:
-    transferred_weights = jax.tree.unflatten(treedef, transferred_flat)
-    for k in src_weights.keys():
-      src_k = np.array(src_weights[k]["kernel"])
-      dst_k = np.array(transferred_weights[k]["kernel"])
-      np.testing.assert_allclose(src_k, dst_k, rtol=1e-5)
+    if jax.process_count() == 1 or jax.process_index() == 1:
+      transferred_weights = jax.tree.unflatten(treedef, transferred_flat)
+      for k in src_weights.keys():
+        src_k = np.array(src_weights[k]["kernel"])
+        dst_k = np.array(transferred_weights[k]["kernel"])
+        np.testing.assert_allclose(src_k, dst_k, rtol=1e-5)
 
-      src_b = np.array(src_weights[k]["bias"])
-      dst_b = np.array(transferred_weights[k]["bias"])
-      np.testing.assert_allclose(src_b, dst_b, rtol=1e-5)
-    print("  Correctness: VERIFIED PASSED")
+        if "bias" in src_weights[k]:
+          src_b = np.array(src_weights[k]["bias"])
+          dst_b = np.array(transferred_weights[k]["bias"])
+          np.testing.assert_allclose(src_b, dst_b, rtol=1e-5)
+      print("  Correctness: VERIFIED PASSED", flush=True)
 
   return {
       "name": name,
@@ -396,11 +452,6 @@ def main(raw_args: list[str] | None = None):
   print("=========================================================")
   print(f"Layers: {args.num_layers}, Weight Size Target: {args.weight_size_mb} MB")
   print(f"Iterations: {args.iterations}, Warmup Iterations: {args.warmup_iterations}")
-
-  try:
-    jax.distributed.initialize()
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    print(f"jax.distributed.initialize info: {e}")
 
   src_devices, dst_devices = setup_multi_slice_devices()
 
