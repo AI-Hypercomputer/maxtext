@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from maxtext.diffusion import denoise
+from maxtext.diffusion.block_diffusion import denoise
 
 
 def _target_logits(targets, vocab_size=32, high=12.0):
@@ -116,9 +116,9 @@ class DiffusionDenoiseTest(absltest.TestCase):
         typed_key = jax.random.key(7)
         keys = {
             "legacy_scalar": legacy_key,
-            "legacy_batched": jax.vmap(lambda row: jax.random.fold_in(legacy_key, row))(jnp.arange(2)),
+            "legacy_batched": jax.vmap(lambda row, key=legacy_key: jax.random.fold_in(key, row))(jnp.arange(2)),
             "typed_scalar": typed_key,
-            "typed_batched": jax.vmap(lambda row: jax.random.fold_in(typed_key, row))(jnp.arange(2)),
+            "typed_batched": jax.vmap(lambda row, key=typed_key: jax.random.fold_in(key, row))(jnp.arange(2)),
         }
         traces = {}
         for key_kind, key in keys.items():

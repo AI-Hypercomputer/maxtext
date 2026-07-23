@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maxtext.diffusion import scoring
+from maxtext.diffusion.block_diffusion import target_alignment
 from maxtext.integration.tunix import diffusion_sft
 
 
@@ -99,7 +99,7 @@ def test_logits_adapter_uses_target_alignment():
 
   batch = diffusion_sft.create_batch_adapter(_config())(_raw_batch())
   actual = diffusion_sft.create_target_aligned_logits_fn(_config())(Model(), batch.model_inputs)
-  expected = scoring.align_logits_to_targets(
+  expected = target_alignment.align_logits_to_targets(
       raw_logits,
       "shifted",
       batch.model_inputs["target_positions"],

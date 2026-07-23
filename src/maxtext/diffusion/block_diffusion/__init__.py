@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Diffusion model utilities."""
+"""Discrete block-diffusion generation and target-alignment utilities."""

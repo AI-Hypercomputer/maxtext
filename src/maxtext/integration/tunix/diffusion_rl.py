@@ -15,25 +15,67 @@
 """Trajectory-aware MaxText adapters for block-diffusion reinforcement learning."""
 
 from collections.abc import Sequence
+import functools
+import logging
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from maxtext.diffusion import scoring
-from maxtext.diffusion import denoise
+from maxtext.diffusion.block_diffusion import denoise
+from maxtext.diffusion.block_diffusion import target_alignment
+from maxtext.diffusion.block_diffusion.utils import concrete_numpy
 from tunix.diffusion import types as diffusion_types
 from tunix.rl import reshard as rl_reshard
 from tunix.rl.rollout import base_rollout
 
 
-def _concrete_numpy(value):
-  if isinstance(value, jax.core.Tracer):
-    return None
-  if isinstance(value, jax.Array) and not value.is_fully_addressable:
-    return None
-  return np.asarray(value)
+def _rebind_mesh_value(value, mesh: jax.sharding.Mesh):
+  """Rebinds graph-static sharding values to the active role mesh."""
+  if isinstance(value, jax.sharding.Mesh):
+    return value if value is mesh else mesh
+  if isinstance(value, jax.sharding.NamedSharding):
+    if value.mesh is mesh:
+      return value
+    return jax.sharding.NamedSharding(
+        mesh,
+        value.spec,
+        memory_kind=value.memory_kind,
+    )
+  if isinstance(value, functools.partial):
+    args = tuple(_rebind_mesh_value(arg, mesh) for arg in value.args)
+    keywords = {key: _rebind_mesh_value(keyword, mesh) for key, keyword in (value.keywords or {}).items()}
+    if all(new is old for new, old in zip(args, value.args)) and all(
+        keywords[key] is keyword for key, keyword in (value.keywords or {}).items()
+    ):
+      return value
+    return functools.partial(
+        value.func,
+        *args,
+        **keywords,
+    )
+  return value
+
+
+def _bind_module_mesh(model: nnx.Module, mesh: jax.sharding.Mesh | None) -> nnx.Module:
+  """Rebinds graph-static MaxText meshes after Tunix resharded model state.
+
+  Tunix moves variables to the role mesh, but MaxText modules also retain the
+  construction mesh used by their internal ``NamedSharding`` constraints.
+  """
+  if mesh is None:
+    return model
+  rebound_count = 0
+  for _, node in nnx.iter_graph(model):
+    if isinstance(node, nnx.Module):
+      for name, value in tuple(vars(node).items()):
+        rebound = _rebind_mesh_value(value, mesh)
+        if rebound is not value:
+          setattr(node, name, rebound)
+          rebound_count += 1
+  logging.info("Bound %d MaxText module mesh values to the rollout role", rebound_count)
+  return model
 
 
 def prepare_diffusion_policy_batch(
@@ -65,9 +107,9 @@ def prepare_diffusion_policy_batch(
     loss_mask = completion_mask
   if tuple(loss_mask.shape) != expected_shape:
     raise ValueError("loss_mask must match completion_tokens shape")
-  concrete_mask = _concrete_numpy(completion_mask)
-  concrete_steps = _concrete_numpy(action_steps)
-  concrete_loss_mask = _concrete_numpy(loss_mask)
+  concrete_mask = concrete_numpy(completion_mask)
+  concrete_steps = concrete_numpy(action_steps)
+  concrete_loss_mask = concrete_numpy(loss_mask)
   if concrete_mask is not None and concrete_steps is not None and concrete_loss_mask is not None:
     active = np.asarray(concrete_mask, dtype=bool)
     weighted = np.asarray(concrete_loss_mask, dtype=bool)
@@ -80,7 +122,14 @@ def prepare_diffusion_policy_batch(
       raise ValueError("active action steps must be smaller than the completion length")
   use_numpy = all(
       isinstance(value, np.ndarray)
-      for value in (prompt_tokens, prompt_mask, completion_tokens, completion_mask, action_steps, loss_mask)
+      for value in (
+          prompt_tokens,
+          prompt_mask,
+          completion_tokens,
+          completion_mask,
+          action_steps,
+          loss_mask,
+      )
   )
   array_module = np if use_numpy else jnp
   completion_tokens = array_module.asarray(completion_tokens)
@@ -144,12 +193,17 @@ def make_diffusion_trace_logits_fn(config):
             decoder_target_tokens=canvas,
             decoder_target_mask=segment_ids,
         )
-        target_aligned = scoring.align_logits_to_targets(raw_logits, alignment, positions, validity_mask)
+        target_aligned = target_alignment.align_logits_to_targets(raw_logits, alignment, positions, validity_mask)
         completion_logits = jnp.asarray(target_aligned[:, prompt_length:, :], dtype=jnp.float32)
         completion_logits = completion_logits.at[..., mask_id].set(-jnp.inf)
         return jnp.where(active_actions[..., None], completion_logits, current_logits)
 
-      return jax.lax.cond(jnp.any(active_actions), run_forward, lambda value: value, accumulated_logits)
+      return jax.lax.cond(
+          jnp.any(active_actions),
+          run_forward,
+          lambda value: value,
+          accumulated_logits,
+      )
 
     output_logits = jax.lax.fori_loop(0, completion_length, score_action_step, output_logits)
     return jnp.where(completion_mask[..., None], output_logits, 0.0)
@@ -179,7 +233,7 @@ def make_diffusion_rollout_fn(config, temperature: float, *, sample_tokens: bool
           decoder_target_tokens=canvas,
           decoder_target_mask=segment_ids,
       )
-      return scoring.align_logits_to_targets(
+      return target_alignment.align_logits_to_targets(
           raw_logits,
           config.block_diffusion_logit_alignment,
           positions,
@@ -249,7 +303,7 @@ class MaxTextDiffusionRollout(base_rollout.BaseRollout):
       cache_config_or_size=None,
   ):
     del cache_config_or_size
-    self._model = rollout_actor
+    self._model = _bind_module_mesh(rollout_actor, mesh)
     self._tokenizer = tokenizer
     self._mesh = mesh
     self._rollout_config = rollout_config
@@ -350,6 +404,7 @@ class MaxTextDiffusionRollout(base_rollout.BaseRollout):
     self._generation_call = 0
 
   def generate(self, prompts, rollout_config, **kwargs):
+    """Generates one block-diffusion rollout batch for Tunix."""
     del kwargs
     rollout_fn = self._rollout_fn_for(rollout_config)
     prompt_tokens, prompt_mask = self._encode_left_padded(prompts, rollout_config.max_prompt_length)

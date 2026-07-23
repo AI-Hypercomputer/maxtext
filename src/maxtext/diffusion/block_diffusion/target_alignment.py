@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Target-alignment utilities shared by diffusion training objectives."""
+"""Target alignment for discrete block-diffusion objectives."""
 
 import jax.numpy as jnp
 

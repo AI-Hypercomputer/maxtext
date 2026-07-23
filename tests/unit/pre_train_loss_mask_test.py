@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maxtext.trainers.pre_train import train as pre_train
-from maxtext.diffusion import scoring as diffusion_scoring
+from maxtext.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
 
 
 @dataclass
@@ -226,8 +226,8 @@ class PreTrainLossMaskTest(unittest.TestCase):
   def test_logit_alignment_matches_runtime_contract(self):
     logits = jnp.arange(8, dtype=jnp.float32).reshape(1, 4, 2)
 
-    same_position = diffusion_scoring.align_logits_to_targets(logits, "same_position")
-    shifted = diffusion_scoring.align_logits_to_targets(logits, "shifted")
+    same_position = block_diffusion_target_alignment.align_logits_to_targets(logits, "same_position")
+    shifted = block_diffusion_target_alignment.align_logits_to_targets(logits, "shifted")
 
     np.testing.assert_array_equal(same_position, logits)
     np.testing.assert_array_equal(shifted, logits[:, [0, 0, 1, 2], :])
@@ -236,7 +236,7 @@ class PreTrainLossMaskTest(unittest.TestCase):
     positions = jnp.asarray([[0, 3, 1, 2]], dtype=jnp.int32)
     logits = positions[..., None].astype(jnp.float32)
 
-    shifted = diffusion_scoring.align_logits_to_targets(
+    shifted = block_diffusion_target_alignment.align_logits_to_targets(
         logits,
         "shifted",
         positions=positions,

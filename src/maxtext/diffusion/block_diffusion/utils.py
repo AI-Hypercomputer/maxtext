@@ -12,4 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Diffusion model utilities."""
+"""Host-validation helpers for block-diffusion arrays."""
+
+import jax
+import numpy as np
+
+
+def concrete_numpy(value):
+  """Returns a host NumPy view when eager validation is safe, otherwise None."""
+  if isinstance(value, jax.core.Tracer):
+    return None
+  if isinstance(value, jax.Array) and not value.is_fully_addressable:
+    return None
+  return np.asarray(value)

@@ -356,15 +356,13 @@ def preprocessing_pipeline(
   )
   operations = []
   if use_sft:
-    is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
     operations.append(
         input_pipeline_utils.SFTPromptMasking(
             text_column_name=data_column_names[0],
             completion_only=sft_train_on_completion_only,
             max_target_length=max_target_length,
             unk_id=pad_id,
-            target_aligned=is_block_diffusion,
-            emit_completion_mask=is_block_diffusion,
+            training_objective=getattr(config, "training_objective", "causal_lm"),
         )
     )
     data_column_names = ("inputs", "targets")

@@ -325,8 +325,8 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
 @dataclasses.dataclass
 class SFTPromptMasking(grain.MapTransform):
   """Construct inputs and targets for SFT training. Concat prompt and completion to generate inputs.
-  Causal SFT can mask prompt targets with ``unk_id``. Target-aligned objectives
-  keep clean targets and may emit role-derived completion metadata instead.
+  Causal SFT can mask prompt targets with ``unk_id``. Block diffusion keeps
+  clean same-position targets and emits role-derived completion metadata.
   """
 
   def __init__(
@@ -335,15 +335,15 @@ class SFTPromptMasking(grain.MapTransform):
       completion_only,
       max_target_length,
       unk_id=0,
-      target_aligned=False,
-      emit_completion_mask=False,
+      training_objective="causal_lm",
   ):
+    if training_objective not in ("causal_lm", "block_diffusion"):
+      raise ValueError(f"Unsupported training objective: {training_objective}")
     self.text_column_name = text_column_name
     self.completion_only = completion_only
     self.max_target_length = max_target_length
     self.unk_id = unk_id
-    self.target_aligned = target_aligned
-    self.emit_completion_mask = emit_completion_mask
+    self.training_objective = training_objective
 
   def map(self, element):
     """
@@ -351,22 +351,23 @@ class SFTPromptMasking(grain.MapTransform):
     It concatenates the prompt and completion to form the `inputs` sequence.
     For the `targets` sequence:
     - If `self.completion_only` is `True`, the prompt portion of the
-      concatenated sequence is masked using `self.unk_id`, unless
-      `self.target_aligned` requests clean same-position targets.
+      concatenated sequence is masked using `self.unk_id`, unless the block
+      diffusion objective requests clean same-position targets.
     - If `self.completion_only` is `False`, the target sequence is
       identical to the input sequence.
     """
+    is_block_diffusion = self.training_objective == "block_diffusion"
     inputs, targets, completion_mask = [], [], []
     for i, text in enumerate(element[self.text_column_name]):
       inputs += text
       is_prompt = element["is_prompt"][i]
-      targets += [self.unk_id] * len(text) if self.completion_only and is_prompt and not self.target_aligned else text
+      targets += [self.unk_id] * len(text) if self.completion_only and is_prompt and not is_block_diffusion else text
       completion_mask += [not is_prompt] * len(text)
     output = {
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
     }
-    if self.emit_completion_mask:
+    if is_block_diffusion:
       output["completion_mask"] = np.asarray(completion_mask[: self.max_target_length], dtype=np.int32)
     return output
 
@@ -1067,6 +1068,7 @@ class BlockDiffusionCorruption(grain.RandomMapTransform):
     self.select_last_completion_suffix = select_last_completion_suffix
 
   def random_map(self, element, rng: np.random.Generator):
+    """Corrupts eligible positions and records explicit supervision masks."""
     inputs = np.asarray(element["inputs"])
     targets = np.asarray(element["targets"])
     targets_segmentation = np.asarray(element["targets_segmentation"])

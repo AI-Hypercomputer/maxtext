@@ -21,8 +21,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from maxtext.diffusion import denoise
-from maxtext.diffusion import scoring
+from maxtext.diffusion.block_diffusion import denoise
+from maxtext.diffusion.block_diffusion import target_alignment
+from maxtext.diffusion.block_diffusion.utils import concrete_numpy
 from maxtext.trainers.post_train.distillation import distillation_utils
 from maxtext.utils import max_logging
 from tunix.diffusion import types as diffusion_types
@@ -50,7 +51,7 @@ def create_target_aligned_logits_fn(config, *, enable_dropout: bool):
         decoder_target_tokens=model_inputs["targets"],
         decoder_target_mask=model_inputs["targets_segmentation"],
     )
-    return scoring.align_logits_to_targets(
+    return target_alignment.align_logits_to_targets(
         logits,
         alignment,
         model_inputs["positions"],
@@ -120,14 +121,6 @@ def create_teacher_score_fn(config):
   return score
 
 
-def _concrete_numpy(value):
-  if isinstance(value, jax.core.Tracer):
-    return None
-  if isinstance(value, jax.Array) and not value.is_fully_addressable:
-    return None
-  return np.asarray(value)
-
-
 def _validate_input_masks(
     positions,
     validity_mask,
@@ -148,7 +141,7 @@ def _validate_input_masks(
   }
   if len(set(shapes.values())) != 1:
     raise ValueError(f"diffusion OPD masks must have identical shapes; received {shapes}")
-  concrete = [_concrete_numpy(value) for value in (positions, validity_mask, completion_mask, corruption_mask, loss_mask)]
+  concrete = [concrete_numpy(value) for value in (positions, validity_mask, completion_mask, corruption_mask, loss_mask)]
   if any(value is None for value in concrete):
     return
   concrete_positions = np.asarray(concrete[0])
@@ -591,8 +584,9 @@ class MaxTextDiffusionOPDTrainer(peft_trainer.PeftTrainer):
 
   def setup_checkpoint_manager_and_restore(self, raw_train_iter, config):
     """Restores model state; HF stream position is replayed deterministically."""
-    if self.checkpoint_manager is not None:
-      self.checkpoint_manager.close()
+    checkpoint_manager = getattr(self, "checkpoint_manager", None)
+    if checkpoint_manager is not None:
+      checkpoint_manager.close()
     self.checkpoint_manager = distillation_utils.MaxTextCheckpointManager(
         raw_iterator=None,
         root_directory=config.checkpoint_dir,

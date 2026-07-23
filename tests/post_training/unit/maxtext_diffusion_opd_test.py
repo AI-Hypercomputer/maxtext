@@ -114,7 +114,7 @@ def _training_input(**overrides):
       "targets_loss_mask": jnp.asarray([[0, 0, 1, 1]], dtype=jnp.int32),
   }
   values.update(overrides)
-  return distillation_utils.MaxTextTrainingInput(**values)
+  return distillation_utils.MaxTextTrainingInput(**values)  # pylint: disable=unexpected-keyword-arg
 
 
 class MaxTextDiffusionOPDTest(absltest.TestCase):
@@ -495,7 +495,7 @@ class MaxTextDiffusionOPDTest(absltest.TestCase):
     self.assertEqual(base["max_target_length"], 16)
 
   def test_checkpoint_restore_preserves_contract_without_claiming_hf_cursor_state(self):
-    trainer = diffusion_opd.MaxTextDiffusionOPDTrainer.__new__(diffusion_opd.MaxTextDiffusionOPDTrainer)
+    trainer = object.__new__(diffusion_opd.MaxTextDiffusionOPDTrainer)
     trainer.checkpoint_manager = mock.Mock()
     trainer.model = mock.sentinel.model
     trainer.optimizer = mock.sentinel.optimizer
@@ -518,7 +518,7 @@ class MaxTextDiffusionOPDTest(absltest.TestCase):
     self.assertEqual(trainer.custom_checkpoint_metadata()["diffusion_opd_contract"], trainer.checkpoint_contract)
 
   def test_checkpoint_restore_rejects_semantic_contract_mismatch(self):
-    trainer = diffusion_opd.MaxTextDiffusionOPDTrainer.__new__(diffusion_opd.MaxTextDiffusionOPDTrainer)
+    trainer = object.__new__(diffusion_opd.MaxTextDiffusionOPDTrainer)
     trainer.checkpoint_manager = mock.Mock()
     trainer.model = mock.sentinel.model
     trainer.optimizer = mock.sentinel.optimizer

@@ -18,11 +18,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from flax import nnx
-import jax
 import jax.numpy as jnp
 import numpy as np
 
-from maxtext.diffusion import scoring
+from maxtext.diffusion.block_diffusion import target_alignment
+from maxtext.diffusion.block_diffusion.utils import concrete_numpy
 from tunix.diffusion import types as diffusion_types
 
 
@@ -39,14 +39,6 @@ _REQUIRED_FIELDS = (
 )
 
 
-def _concrete_numpy(value):
-  if isinstance(value, jax.core.Tracer):
-    return None
-  if isinstance(value, jax.Array) and not value.is_fully_addressable:
-    return None
-  return np.asarray(value)
-
-
 def _validate_batch_masks(
     positions,
     validity_mask,
@@ -58,6 +50,7 @@ def _validate_batch_masks(
     block_size,
     completion_only,
 ):
+  """Validates the prepared block-diffusion supervision contract."""
   shapes = {
       "positions": tuple(positions.shape),
       "validity_mask": tuple(validity_mask.shape),
@@ -68,7 +61,7 @@ def _validate_batch_masks(
   if len(set(shapes.values())) != 1:
     raise ValueError(f"diffusion SFT masks must have identical shapes; received {shapes}")
   concrete = [
-      _concrete_numpy(value)
+      concrete_numpy(value)
       for value in (
           positions,
           validity_mask,
@@ -161,7 +154,7 @@ def create_target_aligned_logits_fn(config):
         decoder_target_tokens=model_inputs["targets"],
         decoder_target_mask=model_inputs["target_segmentation"],
     )
-    return scoring.align_logits_to_targets(
+    return target_alignment.align_logits_to_targets(
         logits,
         alignment,
         model_inputs["target_positions"],

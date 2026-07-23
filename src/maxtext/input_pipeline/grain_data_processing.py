@@ -376,6 +376,7 @@ def sft_preprocessing_pipeline(
           completion_only=config.sft_train_on_completion_only,
           max_target_length=config.max_target_length,
           unk_id=pad_id,
+          training_objective=getattr(config, "training_objective", "causal_lm"),
       )
   )
   data_columns = ("inputs", "targets")

@@ -40,7 +40,7 @@ from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
-from maxtext.diffusion import scoring as diffusion_scoring
+from maxtext.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
 from maxtext.utils.globals import EPS
 from maxtext.utils import elastic_utils
 # Placeholder: internal
@@ -186,7 +186,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       xent_sum, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
     else:
       if is_block_diffusion:
-        logits = diffusion_scoring.align_logits_to_targets(
+        logits = block_diffusion_target_alignment.align_logits_to_targets(
             logits,
             config.block_diffusion_logit_alignment,
             target_positions,
@@ -255,7 +255,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
     else:
       if is_block_diffusion:
-        logits = diffusion_scoring.align_logits_to_targets(
+        logits = block_diffusion_target_alignment.align_logits_to_targets(
             logits,
             config.block_diffusion_logit_alignment,
             target_positions,

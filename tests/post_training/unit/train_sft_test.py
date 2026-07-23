@@ -90,7 +90,7 @@ class TrainSFTTest(unittest.TestCase):
     train_sft.use_maxtext_loss_function(trainer, config)
     wrapped_loss = trainer.with_loss_fn.call_args.args[0]
     arrays = {
-        name: mock.sentinel.__getattr__(name)
+        name: getattr(mock.sentinel, name)
         for name in (
             "inputs",
             "inputs_position",
@@ -140,7 +140,7 @@ class TrainSFTTest(unittest.TestCase):
         mock.patch.object(train_sft, "MaxTextPeftTrainer", return_value=mock.sentinel.trainer) as trainer_type,
         mock.patch.object(train_sft, "use_maxtext_loss_function", return_value=mock.sentinel.configured) as configure,
     ):
-      trainer = train_sft._create_trainer("model", "optimizer", "config", config)
+      trainer = train_sft._create_trainer("model", "optimizer", "config", config)  # pylint: disable=protected-access
       result = train_sft.configure_training_objective(trainer, config)
 
     self.assertIs(trainer, mock.sentinel.trainer)
@@ -152,7 +152,7 @@ class TrainSFTTest(unittest.TestCase):
   def test_diffusion_objective_uses_current_tunix_trainer(self):
     config = SimpleNamespace(training_objective="block_diffusion")
     with mock.patch.object(train_sft.peft_trainer, "PeftTrainer", return_value=mock.sentinel.trainer) as trainer_type:
-      trainer = train_sft._create_trainer("model", "optimizer", "config", config)
+      trainer = train_sft._create_trainer("model", "optimizer", "config", config)  # pylint: disable=protected-access
 
     self.assertIs(trainer, mock.sentinel.trainer)
     trainer_type.assert_called_once_with("model", "optimizer", "config")

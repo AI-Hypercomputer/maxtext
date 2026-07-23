@@ -374,8 +374,7 @@ class BlockDiffusionSftMaskTest(unittest.TestCase):
         completion_only=True,
         max_target_length=8,
         unk_id=0,
-        target_aligned=True,
-        emit_completion_mask=True,
+        training_objective="block_diffusion",
     )
     element = {
         "messages": [[11, 12], [21, 22], [31], [41, 42]],
@@ -397,8 +396,7 @@ class BlockDiffusionSftMaskTest(unittest.TestCase):
         completion_only=False,
         max_target_length=8,
         unk_id=0,
-        target_aligned=True,
-        emit_completion_mask=True,
+        training_objective="block_diffusion",
     )
     element = {
         "messages": [[11, 12], [21, 22]],
@@ -424,6 +422,15 @@ class BlockDiffusionSftMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(corrupted["corruption_mask"][padding], 0)
     np.testing.assert_array_equal(corrupted["targets_loss_mask"][padding], 0)
     np.testing.assert_array_equal(corrupted["inputs"][padding], 7)
+
+  def test_rejects_unknown_training_objective(self):
+    with self.assertRaisesRegex(ValueError, "Unsupported training objective"):
+      SFTPromptMasking(
+          text_column_name="messages",
+          completion_only=True,
+          max_target_length=8,
+          training_objective="unknown",
+      )
 
 
 if __name__ == "__main__":

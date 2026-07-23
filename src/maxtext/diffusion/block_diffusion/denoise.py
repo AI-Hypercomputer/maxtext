@@ -21,8 +21,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maxtext.diffusion.block_diffusion.utils import concrete_numpy
 
-class DenoiseTrace(NamedTuple):
+
+class BlockDiffusionRolloutTrace(NamedTuple):
   """Compact sampled trajectory for replaying diffusion policy scores."""
 
   tokens: jax.Array
@@ -42,14 +44,6 @@ def _validate_shapes(initial_tokens, positions, validity_mask, completion_mask):
   ):
     if tuple(value.shape) != expected_shape:
       raise ValueError(f"{name} must match initial_tokens shape; received {tuple(value.shape)} and {expected_shape}")
-
-
-def _concrete_numpy(value):
-  if isinstance(value, jax.core.Tracer):
-    return None
-  if isinstance(value, jax.Array) and not value.is_fully_addressable:
-    return None
-  return np.asarray(value)
 
 
 def _per_row_rngs(rng, batch_size):
@@ -74,9 +68,9 @@ def _select_row_rngs(row_mask, new_rngs, old_rngs):
 
 def _validate_logical_positions(positions, validity_mask, completion_mask, *, shifted_seed):
   """Checks logical sequence invariants on eager, host-addressable inputs."""
-  concrete_positions = _concrete_numpy(positions)
-  concrete_validity = _concrete_numpy(validity_mask)
-  concrete_completion = _concrete_numpy(completion_mask)
+  concrete_positions = concrete_numpy(positions)
+  concrete_validity = concrete_numpy(validity_mask)
+  concrete_completion = concrete_numpy(completion_mask)
   if concrete_positions is None or concrete_validity is None or concrete_completion is None:
     return
   concrete_validity = np.asarray(concrete_validity, dtype=bool)
@@ -105,9 +99,9 @@ def validate_completion_suffix(positions, validity_mask, completion_mask, *, shi
   the bidirectional attention block of an earlier generated completion.
   """
   _validate_logical_positions(positions, validity_mask, completion_mask, shifted_seed=shifted_seed)
-  concrete_positions = _concrete_numpy(positions)
-  concrete_validity = _concrete_numpy(validity_mask)
-  concrete_completion = _concrete_numpy(completion_mask)
+  concrete_positions = concrete_numpy(positions)
+  concrete_validity = concrete_numpy(validity_mask)
+  concrete_completion = concrete_numpy(completion_mask)
   if concrete_positions is None or concrete_validity is None or concrete_completion is None:
     return
   concrete_validity = np.asarray(concrete_validity, dtype=bool)
@@ -138,7 +132,7 @@ def low_confidence_rollout(
     temperature: float = 1.0,
     max_denoise_steps: int | None = None,
     rng: jax.Array | None = None,
-) -> DenoiseTrace:
+) -> BlockDiffusionRolloutTrace:
   """Samples a completion and records each token's pre-commit action step.
 
   ``logits_fn`` must return target-aligned logits for the current token canvas.
@@ -312,7 +306,7 @@ def low_confidence_rollout(
           row_rngs,
       ),
   )
-  return DenoiseTrace(tokens=canvas, action_steps=action_steps, action_logps=action_logps)
+  return BlockDiffusionRolloutTrace(tokens=canvas, action_steps=action_steps, action_logps=action_logps)
 
 
 def low_confidence_generate(
