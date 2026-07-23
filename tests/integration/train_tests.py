@@ -689,6 +689,7 @@ class TrainTests(unittest.TestCase):
         "steps=5",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
+        "max_target_length=4096",
         "dataset_type=synthetic",
         "remat_policy=minimal",
         "per_device_batch_size=1",
