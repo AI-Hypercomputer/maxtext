@@ -1538,6 +1538,10 @@ class Distillation(BaseModel):
       "constant",
       description="Schedule type for beta annealing ('constant', 'linear', or 'cosine').",
   )
+  record_router_similarity_metrics: bool = Field(
+      False,
+      description="If True, computes and logs per-layer router selection similarity metrics between student and teacher.",
+  )
 
   # --- Learn to init related parameters --
   learn_to_init_mode: bool = Field(False, description="Runs in the learn-to-init mode only")

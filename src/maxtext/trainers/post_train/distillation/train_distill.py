@@ -156,14 +156,22 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
       out_projection_activations = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
 
     moe_lb_loss = None
-    if config.num_experts > 1 and config.load_balance_loss_weight > 0.0:
+    router_selections = None
+    if config.num_experts > 1:
       intermediate_outputs = nnx.pop(model, nnx.Intermediate)
-      total_moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
-      if total_moe_lb_losses:
-        moe_lb_loss = jnp.mean(jnp.concatenate(total_moe_lb_losses))
+      if config.load_balance_loss_weight > 0.0:
+        total_moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
+        if total_moe_lb_losses:
+          moe_lb_loss = jnp.mean(jnp.concatenate(total_moe_lb_losses))
+      selections = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "router_selections")
+      if selections:
+        router_selections = jnp.stack(selections)
 
     retval = distillation_utils.DistillationForwardOutput(
-        logits=logits, out_projection_activations=out_projection_activations, moe_lb_loss=moe_lb_loss
+        logits=logits,
+        out_projection_activations=out_projection_activations,
+        moe_lb_loss=moe_lb_loss,
+        router_selections=router_selections,
     )
     return retval
 
@@ -346,7 +354,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     return loss, aux
 
   def _eval_step(self, model, inputs):
-    """Evaluation only needs the student."""
+    """Evaluation runs student (and teacher, if available) to compute metrics."""
     inputs = self.gen_model_input_fn(inputs)
 
     student_output = self.strategy.student_forward_fn(
@@ -357,8 +365,23 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         decoder_segment_ids=inputs.get("decoder_segment_ids"),
         cache=None,
     )
+
+    teacher_output = None
+    if "teacher_output" in inputs:
+      teacher_output = inputs["teacher_output"]
+    elif model.teacher_model is not None:
+      teacher_output = self.strategy.teacher_forward_fn(
+          model=model.teacher_model,
+          input_tokens=inputs["input_tokens"],
+          positions=inputs["positions"],
+          attention_mask=inputs.get("attention_mask"),
+          decoder_segment_ids=inputs.get("decoder_segment_ids"),
+          cache=None,
+      )
+      teacher_output = jax.tree.map(jax.lax.stop_gradient, teacher_output)
+
     labels = self.strategy.create_labels(inputs["targets"], targets_segmentation=inputs.get("targets_segmentation", None))
-    return self.strategy.compute_eval_loss(student_output, labels)
+    return self.strategy.compute_eval_loss(student_output, labels, teacher_output=teacher_output)
 
   def _log_metrics(self, loss, step=None, additional_metrics=None, **kwargs):
     """Adds per-device TFLOPs to the standard Tunix metrics.
@@ -617,6 +640,8 @@ def build_training_components(
       beta_end=student_config.distill_beta_end,
       beta_schedule=student_config.distill_beta_schedule,
       max_steps=student_config.steps,
+      num_experts=student_config.num_experts,
+      record_router_similarity_metrics=student_config.record_router_similarity_metrics,
   )
 
   # Prepare optimizer
