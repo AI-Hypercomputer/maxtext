@@ -162,12 +162,15 @@ def gradient_accumulation_loss_and_grad(
   grad_and_loss, aux = jax.lax.scan(
       accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
   )
+  has_weights = grad_and_loss["total_weights"] > 0
+  safe_total_weights = jnp.maximum(grad_and_loss["total_weights"], 1)
   loss = (
-      grad_and_loss["loss"] / grad_and_loss["total_weights"]
+      grad_and_loss["loss"] / safe_total_weights
       + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
       + grad_and_loss["indexer_loss"] / config.gradient_accumulation_steps
       + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
   )
+  loss = jnp.where(has_weights, loss, 0.0)
   raw_grads = grad_and_loss["grad"]
   if data_parallel_active:
     # Mark the gradients unreduced over the "data" axis now that we're outside the
@@ -176,7 +179,10 @@ def gradient_accumulation_loss_and_grad(
     unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
-  raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
+  raw_grads = jax.tree_util.tree_map(
+      lambda arr: jnp.where(has_weights, arr / safe_total_weights, jnp.zeros_like(arr)),
+      raw_grads,
+  )
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
 
   if is_nnx:

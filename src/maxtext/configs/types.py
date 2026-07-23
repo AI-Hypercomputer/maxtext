@@ -1618,6 +1618,28 @@ class Distillation(BaseModel):
 class TrainingLoop(BaseModel):
   """Configuration for the main training loop, evaluation, and reproducibility."""
 
+  training_objective: Literal["causal_lm", "block_diffusion"] = Field(
+      "causal_lm",
+      description="The token-prediction objective used to prepare targets and compute loss.",
+  )
+  block_diffusion_mask_id: int = Field(
+      -1,
+      description="The tokenizer mask-token id required by the block-diffusion training objective.",
+  )
+  block_diffusion_min_noise: float = Field(
+      1.0e-3,
+      gt=0.0,
+      le=1.0,
+      description="The minimum corruption probability sampled independently for each block.",
+  )
+  block_diffusion_logit_alignment: Literal["same_position", "shifted"] = Field(
+      "same_position",
+      description="How model logits align to clean target-token positions.",
+  )
+  block_diffusion_canvas_policy: Literal["all_masked", "seed_and_mask"] = Field(
+      "all_masked",
+      description="Whether every block is fully maskable or begins with a clean anchor token.",
+  )
   steps: int = Field(
       150_001,
       ge=-1,
@@ -1636,6 +1658,10 @@ class TrainingLoop(BaseModel):
   eval_steps: int = Field(
       -1,
       description="Number of steps to run for each evaluation. -1 runs on entire eval split.",
+  )
+  loss_is_preaveraged: bool = Field(
+      False,
+      description="Whether the evaluation hook receives a loss already averaged across evaluation batches.",
   )
   target_eval_loss: float = Field(
       0.0,
@@ -3373,6 +3399,36 @@ class MaxTextConfig(
         raise ValueError(
             "Block-diffusion attention with attention='autoselected' or attention='flash' requires hardware='tpu'; "
             "use attention='dot_product' on other hardware."
+        )
+    if self.training_objective == "block_diffusion":
+      if self.attention_type != AttentionType.BLOCK_DIFFUSION.value:
+        raise ValueError("`training_objective='block_diffusion'` requires `attention_type='block_diffusion'`.")
+      if self.block_diffusion_mask_id < 0 or self.block_diffusion_mask_id >= self.vocab_size:
+        raise ValueError(
+            f"`block_diffusion_mask_id` ({self.block_diffusion_mask_id}) must satisfy "
+            f"0 <= block_diffusion_mask_id < vocab_size ({self.vocab_size})."
+        )
+      if self.packing:
+        raise ValueError("`training_objective='block_diffusion'` requires `packing=False`.")
+      if self.mtp_num_layers > 0:
+        raise ValueError("`training_objective='block_diffusion'` is not compatible with MTP.")
+      if self.num_vocab_tiling > 1:
+        raise ValueError("`training_objective='block_diffusion'` is not compatible with vocabulary tiling.")
+      if self.dataset_type != "hf":
+        raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'`.")
+      if self.use_dpo:
+        raise ValueError("`training_objective='block_diffusion'` is not compatible with DPO.")
+      if self.use_multimodal or self.use_audio:
+        raise ValueError("`training_objective='block_diffusion'` currently supports text-only training.")
+      valid_model_contracts = {
+          ("same_position", "all_masked"),
+          ("shifted", "seed_and_mask"),
+      }
+      model_contract = (self.block_diffusion_logit_alignment, self.block_diffusion_canvas_policy)
+      if model_contract not in valid_model_contracts:
+        raise ValueError(
+            "Block-diffusion training supports only `same_position/all_masked` or `shifted/seed_and_mask`; "
+            f"received `{model_contract[0]}/{model_contract[1]}`."
         )
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
