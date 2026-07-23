@@ -14,9 +14,11 @@
 """multi_token_prediction_test"""
 
 import unittest
+import functools
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh
 from flax import nnx
 
@@ -464,6 +466,253 @@ class TestRollAndMaskBySegment(unittest.TestCase):
     seg = self._make_data([1, 1, 1, 1])
     with self.assertRaises(AssertionError):
       multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg, shift=-2)
+
+
+class TestMakePackedSegmentIds(unittest.TestCase):
+  """Unit tests for _make_packed_segment_ids in synthetic_data_processing."""
+
+  def _make_ids(self, batch_size, seq_len, max_segs):
+    from maxtext.input_pipeline.synthetic_data_processing import _make_packed_segment_ids as fn
+
+    return fn(batch_size, seq_len, max_segs)
+
+  def test_single_segment_returns_all_ones(self):
+    """max_segments_per_seq=1 → all-ones."""
+    result = self._make_ids(batch_size=3, seq_len=16, max_segs=1)
+    self.assertEqual(result.shape, (3, 16))
+    self.assertTrue(jnp.array_equal(result, jnp.ones((3, 16), dtype=jnp.int32)))
+
+  def test_max_segments_lt_2_returns_all_ones(self):
+    """max_segments_per_seq < 2 → all-ones."""
+    result = self._make_ids(batch_size=2, seq_len=8, max_segs=0)
+    self.assertTrue(jnp.array_equal(result, jnp.ones((2, 8), dtype=jnp.int32)))
+
+  def test_multi_segment_boundaries(self):
+    """Multiple segments: varying segment IDs per row, all >= 1."""
+    result = self._make_ids(batch_size=4, seq_len=64, max_segs=5)
+    self.assertEqual(result.shape, (4, 64))
+    self.assertTrue(jnp.all(result >= 1))
+    # Each row should have at least 2 segments.
+    for b in range(4):
+      unique = jnp.unique(result[b])
+      self.assertGreaterEqual(len(unique), 2, f"Row {b} has only {len(unique)} segment(s)")
+
+  def test_no_zero_in_non_padding_region(self):
+    """No position should have segment_id == 0 (0 is reserved for padding)."""
+    result = self._make_ids(batch_size=8, seq_len=32, max_segs=4)
+    self.assertEqual(jnp.count_nonzero(result == 0), 0)
+
+  def test_segment_ids_are_contiguous_integers_per_row(self):
+    """Each row's segment IDs should be sequentially increasing (no gaps)."""
+    result = self._make_ids(batch_size=4, seq_len=48, max_segs=4)
+    for b in range(4):
+      unique = jnp.unique(result[b])
+      expected = jnp.arange(1, len(unique) + 1)
+      self.assertTrue(
+          jnp.array_equal(unique, expected),
+          f"Row {b}: expected {expected}, got {unique}",
+      )
+
+  def test_deterministic(self):
+    """Same seed produces same output (PRNGKey(42) is hardcoded)."""
+    r1 = self._make_ids(batch_size=2, seq_len=32, max_segs=4)
+    r2 = self._make_ids(batch_size=2, seq_len=32, max_segs=4)
+    self.assertTrue(jnp.array_equal(r1, r2))
+
+
+class TestShiftLeftOneCpAware(unittest.TestCase):
+  """CP-aware unit tests for _shift_left_one_cp_aware.
+
+  Runs inside a shard_map with a "context" mesh axis so the ppermute path is
+  exercised.  Falls back to a no-op when fewer than 2 devices are available.
+  """
+
+  @staticmethod
+  def _cp_mesh(cp_size=2):
+    devices = jax.devices()
+    n_devices = (len(devices) // cp_size) * cp_size
+    return jax.sharding.Mesh(np.array(devices[:n_devices]).reshape(cp_size, -1), ("context", "x"))
+
+  def setUp(self):
+    super().setUp()
+    self._cp_available = len(jax.devices()) >= 2
+    if not self._cp_available:
+      self.skipTest("need >=2 devices for CP test")
+
+  def _run_cp_shift(self, x, axis_name="context"):
+    """Run _shift_left_one_cp_aware inside a shard_map with a "context" axis."""
+    mesh = self._cp_mesh()
+
+    pspec = tuple(
+        (None if i != 1 else "context") for i in range(x.ndim)
+    )
+    pspec = jax.sharding.PartitionSpec(*pspec)
+
+    xs = jax.lax.with_sharding_constraint(
+        x, jax.sharding.NamedSharding(mesh, pspec)
+    )
+
+    @functools.partial(jax.shard_map, mesh=mesh, in_specs=pspec,
+                       out_specs=pspec, check_vma=False)
+    def _shift(x_local):
+      return multi_token_prediction._shift_left_one_cp_aware(x_local, axis_name=axis_name)
+
+    result = _shift(xs)
+    # All-gather to compare.
+    return jax.device_get(
+        jax.lax.with_sharding_constraint(
+            result, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+        )
+    )
+
+  def test_cp_shift_matches_local_reference(self):
+    """Under CP, the all-gathered result should match local roll_and_mask."""
+    T = 16
+    x = jnp.arange(T, dtype=jnp.int32).reshape((1, T))
+    # Local reference: roll left by 1, mask last position.
+    expected = multi_token_prediction.roll_and_mask(x, shift=-1)
+    result = self._run_cp_shift(x)
+    self.assertTrue(jnp.array_equal(result, expected), f"Expected {expected}, got {result}")
+
+  def test_cp_shift_2d_batch(self):
+    """2D input [B, T] works under CP."""
+    B, T = 4, 16
+    x = jnp.arange(B * T, dtype=jnp.int32).reshape((B, T))
+    expected = multi_token_prediction.roll_and_mask(x, shift=-1)
+    result = self._run_cp_shift(x)
+    self.assertTrue(jnp.array_equal(result, expected), f"Expected {expected}, got {result}")
+
+  def test_cp_shift_3d_tensor(self):
+    """3D input [B, T, F] works under CP (e.g. position_ids embeddings)."""
+    B, T, F = 2, 16, 4
+    x = jnp.arange(B * T * F, dtype=jnp.float32).reshape((B, T, F))
+    expected = multi_token_prediction.roll_and_mask(x, shift=-1)
+    result = self._run_cp_shift(x)
+    self.assertTrue(jnp.array_equal(result, expected), f"Expected {expected}, got {result}")
+
+  def test_cp_last_rank_last_position_is_zero(self):
+    """Last rank's last position must be zero (sequence end)."""
+    T = 16
+    x = jnp.ones((1, T), dtype=jnp.int32)
+    result = self._run_cp_shift(x)
+    self.assertEqual(int(result[0, -1]), 0, "Last position must be zero")
+
+  def test_cp_shift_no_wrap(self):
+    """Under CP, last position of non-last ranks must NOT be 0 (receives neighbor)."""
+    T_short = 8  # With cp_size=2: rank0 gets 4 tokens, rank1 gets 4
+    x = jnp.ones((1, T_short), dtype=jnp.int32) * 42
+    result = self._run_cp_shift(x)
+    # All positions except the very last should be 42 (shifted from neighbors).
+    self.assertEqual(int(result[0, -1]), 0, "Global last position should be 0")
+    # Position T_short-2 (second-to-last) is NOT the global end, should be 42.
+    self.assertEqual(int(result[0, -2]), 42,
+                     "Boundary between ranks should NOT be zeroed")
+
+
+class TestRollAndMaskBySegmentWithCp(unittest.TestCase):
+  """CP-aware tests for roll_and_mask_by_segment under shard_map."""
+
+  @staticmethod
+  def _cp_mesh(cp_size=2):
+    devices = jax.devices()
+    n_devices = (len(devices) // cp_size) * cp_size
+    return jax.sharding.Mesh(np.array(devices[:n_devices]).reshape(cp_size, -1), ("context", "x"))
+
+  def setUp(self):
+    super().setUp()
+    self._cp_available = len(jax.devices()) >= 2
+    if not self._cp_available:
+      self.skipTest("need >=2 devices for CP test")
+
+  def _run_cp_roll_by_segment(self, x, segment_ids, ndim):
+    """Run roll_and_mask_by_segment inside a CP shard_map."""
+    mesh = self._cp_mesh()
+
+    pspec_data = jax.sharding.PartitionSpec(*(
+        (None if i != 1 else "context") for i in range(ndim)
+    ))
+    pspec_seg = jax.sharding.PartitionSpec(None, "context")
+
+    xs = jax.lax.with_sharding_constraint(
+        x, jax.sharding.NamedSharding(mesh, pspec_data)
+    )
+    segs = jax.lax.with_sharding_constraint(
+        segment_ids, jax.sharding.NamedSharding(mesh, pspec_seg)
+    )
+
+    @functools.partial(jax.shard_map, mesh=mesh,
+                       in_specs=(pspec_data, pspec_seg),
+                       out_specs=pspec_data, check_vma=False)
+    def _fn(data_loc, seg_loc):
+      return multi_token_prediction.roll_and_mask_by_segment(data_loc, segment_ids=seg_loc)
+
+    result = _fn(xs, segs)
+    return jax.device_get(
+        jax.lax.with_sharding_constraint(
+            result, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+        )
+    )
+
+  def test_cp_with_segment_boundaries(self):
+    """Segment boundaries are respected under CP: cross-seg positions → 0."""
+    T = 16
+    x = jnp.arange(T, dtype=jnp.int32).reshape((1, T))
+    # Two segments: [0..7]=seg1, [8..15]=seg2
+    seg = jnp.ones((1, T), dtype=jnp.int32)
+    seg = seg.at[:, 8:].set(2)
+
+    result = self._run_cp_roll_by_segment(x, seg, ndim=2)
+    expected = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg)
+
+    self.assertEqual(result.shape, (1, T))
+    # Position 7 (end of seg 1) and position 15 (end of seg 2) → 0.
+    self.assertEqual(int(result[0, 7]), 0, "Seg-1 end should be masked")
+    self.assertEqual(int(result[0, 15]), 0, "Seg-2 end should be masked")
+    self.assertEqual(int(result[0, 0]), 1, "First non-boundary position should be shifted")
+    self.assertTrue(jnp.array_equal(result, expected),
+                    f"CP result differs from local reference:\n  CP: {result}\n  Ref: {expected}")
+
+  def test_cp_with_single_segment_matches_plain_roll(self):
+    """Single segment under CP = plain roll (last position only masked)."""
+    T = 16
+    x = jnp.arange(T, dtype=jnp.int32).reshape((1, T))
+    seg = jnp.ones((1, T), dtype=jnp.int32)
+
+    result = self._run_cp_roll_by_segment(x, seg, ndim=2)
+    expected = multi_token_prediction.roll_and_mask(x, shift=-1)
+    self.assertTrue(jnp.array_equal(result, expected),
+                    f"Single-seg CP should match plain roll:\n  CP: {result}\n  Ref: {expected}")
+
+  def test_cp_with_padding_masked(self):
+    """Padding positions (seg=0) are masked under CP."""
+    T = 16
+    x = jnp.ones((1, T), dtype=jnp.int32) * 99
+    # First 6 tokens valid (seg=1), rest padding (seg=0).
+    seg = jnp.zeros((1, T), dtype=jnp.int32)
+    seg = seg.at[:, :6].set(1)
+
+    result = self._run_cp_roll_by_segment(x, seg, ndim=2)
+    expected = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg)
+
+    self.assertEqual(result.shape, (1, T))
+    # All padding positions should be zeroed.
+    self.assertTrue(jnp.all(result[0, 6:] == 0), "Padding positions must be zero")
+    # Position 5 (end of seg=1) should be masked too (next is padding).
+    self.assertTrue(jnp.array_equal(result, expected),
+                    f"CP result differs from local reference:\n  CP: {result}\n  Ref: {expected}")
+
+  def test_cp_3d_no_crash(self):
+    """3D tensors don't crash under CP segment-aware roll."""
+    B, T, F = 2, 16, 4
+    x = jnp.ones((B, T, F), dtype=jnp.float32)
+    seg = jnp.ones((B, T), dtype=jnp.int32)
+    seg = seg.at[:, 8:].set(2)
+
+    result = self._run_cp_roll_by_segment(x, seg, ndim=3)
+    self.assertEqual(result.shape, (B, T, F))
+    # Segment boundary at position 7 in each row should be all-zero.
+    self.assertTrue(jnp.all(result[:, 7, :] == 0), "Boundary position should be all-zero")
+    self.assertTrue(jnp.all(result[:, 15, :] == 0), "Last position should be all-zero")
 
 
 if __name__ == "__main__":
