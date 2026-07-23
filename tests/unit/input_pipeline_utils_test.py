@@ -241,6 +241,77 @@ class BlockDiffusionCorruptionTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "explicit completion_mask"):
       self._apply_transform(clean)
 
+  def test_opd_suffix_contract_selects_final_assistant_turn(self):
+    clean = _make_block_diffusion_batch()
+    clean["completion_mask"][0] = np.asarray([0, 0, 1, 1, 0, 0, 1, 1, 1, 0])
+    transform = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        completion_only=True,
+        select_last_completion_suffix=True,
+    )
+
+    output = transform.random_map(clean, np.random.default_rng(0))
+
+    np.testing.assert_array_equal(
+        output["completion_mask"][0],
+        np.asarray([0, 0, 0, 0, 0, 0, 1, 1, 1, 0]),
+    )
+
+  def test_opd_suffix_contract_truncates_context_after_last_completion(self):
+    clean = _make_block_diffusion_batch()
+    clean["completion_mask"][0] = np.asarray([0, 0, 1, 1, 0, 0, 0, 0, 0, 0])
+    transform = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        completion_only=True,
+        select_last_completion_suffix=True,
+    )
+
+    output = transform.random_map(clean, np.random.default_rng(0))
+
+    np.testing.assert_array_equal(
+        output["completion_mask"][0],
+        np.asarray([0, 0, 1, 1, 0, 0, 0, 0, 0, 0]),
+    )
+    np.testing.assert_array_equal(
+        output["inputs_segmentation"][0],
+        np.asarray([1, 1, 1, 1, 0, 0, 0, 0, 0, 0]),
+    )
+    np.testing.assert_array_equal(
+        output["targets_segmentation"][0],
+        np.asarray([1, 1, 1, 1, 0, 0, 0, 0, 0, 0]),
+    )
+    np.testing.assert_array_equal(output["targets"][0, 4:], 0)
+
+  def test_opd_suffix_contract_requires_prompt_and_completion(self):
+    transform = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        completion_only=True,
+        select_last_completion_suffix=True,
+    )
+    for completion_mask in (
+        np.zeros(10, dtype=np.int32),
+        np.asarray([1, 1, 1, 1, 1, 1, 1, 1, 1, 0]),
+    ):
+      clean = _make_block_diffusion_batch()
+      clean["completion_mask"][0] = completion_mask
+      with self.assertRaisesRegex(ValueError, "completion span after a prompt"):
+        transform.random_map(clean, np.random.default_rng(0))
+
+  def test_opd_suffix_contract_accepts_prompt_then_completion(self):
+    transform = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        completion_only=True,
+        select_last_completion_suffix=True,
+    )
+
+    output = transform.random_map(_make_block_diffusion_batch(), np.random.default_rng(0))
+
+    self.assertTrue(output["targets_loss_mask"].any())
+
   def test_completion_mask_does_not_replace_full_validity(self):
     clean = _make_block_diffusion_batch()
     transform = BlockDiffusionCorruption(block_size=4, mask_id=99, min_noise=1.0, completion_only=False)
