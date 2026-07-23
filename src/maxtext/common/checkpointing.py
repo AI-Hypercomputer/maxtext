@@ -15,46 +15,45 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
+import datetime
 import time
 from typing import Any
 
-from absl import flags
-import datetime
 from etils import epath
 from flax import nnx
 from flax.training import train_state
+from grain.experimental import ElasticIterator
 import jax
-from maxtext.utils.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+from maxtext.checkpoint_conversion.utils.load_dynamic import load_safetensors_dynamic_state
+from maxtext.common import emergency_checkpointing
+from maxtext.common import grain_utility
+from maxtext.common import train_state_nnx
 from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
 from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
-from maxtext.common import grain_utility
-from maxtext.common import train_state_nnx
-from maxtext.utils import exceptions
-from maxtext.utils import max_logging
-from maxtext.utils import gcs_utils
 from maxtext.utils import elastic_utils
-from maxtext.checkpoint_conversion.utils.load_dynamic import load_safetensors_dynamic_state
-
+from maxtext.utils import exceptions
+from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
+from maxtext.utils.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 import orbax.checkpoint as ocp
 from orbax.checkpoint import v1 as ocp_v1
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 from orbax.checkpoint._src.checkpoint_managers import preservation_policy as preservation_policy_lib
 from orbax.checkpoint._src.checkpoint_managers import save_decision_policy as save_decision_policy_lib
-import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
-# pylint: disable=too-many-positional-arguments
 
-from grain.experimental import ElasticIterator
 
-CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
 Composite = ocp.args.Composite
 PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
-EmergencyCheckpointManager = emergency_checkpoint_manager.CheckpointManager
-LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
-PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointOptions
-EmergencyReplicatorCheckpointManager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager
+# Backward compatibility aliases for v0 emergency managers.
+EmergencyCheckpointManager = emergency_checkpointing.CheckpointManager
+EmergencyReplicatorCheckpointManager = emergency_checkpointing.ReplicatorCheckpointManager
+create_orbax_emergency_checkpoint_manager = emergency_checkpointing.create_emergency_checkpoint_manager
+create_orbax_emergency_replicator_checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager
+
+# Union of CheckpointManager / the emergency factories return; used in type hints.
+CheckpointManager = ocp.CheckpointManager | EmergencyCheckpointManager | EmergencyReplicatorCheckpointManager
 
 
 def _weight_mismatches(want, have, path=()):
@@ -336,7 +335,7 @@ def create_orbax_checkpoint_manager(
     async_options = ocp.AsyncOptions(
         timeout_secs=int(datetime.timedelta(minutes=60).total_seconds()),
     )
-  manager = CheckpointManager(
+  manager = ocp.CheckpointManager(
       p,
       item_names=item_names,
       item_handlers=item_handlers,
@@ -354,115 +353,6 @@ def create_orbax_checkpoint_manager(
 
   max_logging.log("Checkpoint manager created!")
   return manager
-
-
-def create_orbax_emergency_checkpoint_manager(
-    local_checkpoint_dir: str,
-    persistent_checkpoint_dir: str,
-    global_mesh: jax.sharding.Mesh,
-    abstract_state: Any,
-    local_save_interval_steps: int,
-    persistent_save_interval_steps: int,
-    orbax_logger: Any = None,  # pytype: disable=attribute-error
-):
-  """Returns an emergency checkpoint manager."""
-  flags.FLAGS.experimental_orbax_use_distributed_process_id = True
-  max_logging.log("Creating emergency checkpoint manager...")
-
-  # Only create local directories if running on GPUs as the previous directory structure might be assumed by TPUs.
-  if global_mesh.devices.flatten()[0].platform == "gpu":
-    # pylint: disable=protected-access
-    local_checkpoint_dir = f"{local_checkpoint_dir}/{jax._src.distributed.global_state.process_id}"
-    local_p = epath.Path(local_checkpoint_dir)
-    local_p.mkdir(exist_ok=True, parents=True)
-
-  persistent_p = gcs_utils.mkdir_and_check_permissions(persistent_checkpoint_dir)
-
-  # pure_nnx saves via to_checkpoint_dict (Linen params/opt_state/step plus an nnx_aux
-  # subtree), but the emergency manager restores against the abstract it is built with.
-  # Convert it the same way so it matches what is on disk; restore reshapes back to NNX.
-  if isinstance(abstract_state, nnx.State):
-    abstract_state = train_state_nnx.to_checkpoint_dict(abstract_state)
-
-  manager = EmergencyCheckpointManager(
-      local_checkpoint_dir,
-      persistent_p,
-      global_mesh=global_mesh,
-      abstract_state=abstract_state,
-      options=emergency_checkpoint_manager.CheckpointManagerOptions(
-          local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
-          persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
-      ),
-      logger=orbax_logger,
-  )
-
-  max_logging.log("Emergency checkpoint manager created!")
-  return manager
-
-
-def create_orbax_emergency_replicator_checkpoint_manager(
-    local_checkpoint_dir: str,
-    save_interval_steps: int,
-    global_mesh: jax.sharding.Mesh,
-    colocated_python_checkpointing: bool = False,
-):
-  """Returns an emergency replicator checkpoint manager."""
-  flags.FLAGS.experimental_orbax_use_distributed_process_id = True
-  max_logging.log("Creating emergency replicator checkpoint manager...")
-
-  manager = EmergencyReplicatorCheckpointManager(
-      epath.Path(local_checkpoint_dir),
-      options=emergency_replicator_checkpoint_manager.ReplicatorCheckpointManagerOptions(
-          save_interval_steps=save_interval_steps,
-          use_colocated_python=colocated_python_checkpointing,
-      ),
-      global_mesh=global_mesh,
-  )
-
-  max_logging.log("Emergency replicator checkpoint manager created!")
-  return manager
-
-
-def replicator_error_handler(config: Any):
-  """Replicator error handler to handle errors in replicator service."""
-  if config.enable_multi_tier_checkpointing:
-    local_dir = config.local_checkpoint_directory
-    replicator_errors_file = f"{local_dir}/replicator.errors"
-    replicator_failed_file = f"{local_dir}/replicator.failed"
-    process_replicator_error_file(replicator_errors_file)
-
-    # if the replicator.failed file exists, then we have a fatal error
-    is_fatal = process_replicator_error_file(replicator_failed_file)
-    if is_fatal:
-      raise ValueError("Replicator fatal error found in replicator.failed file.")
-
-
-def process_replicator_error_file(error_file: str) -> bool:
-  """Handles replicator errors by reading, logging, cleaning the error file."""
-  error_file_path_exists = epath.Path(error_file).exists()
-  if error_file_path_exists:
-    max_logging.log(f"replicator_error_handler: file found: {error_file}.")
-    read_replicator_error_file(error_file)
-    cleanup_replicator_error_file(error_file)
-
-  return error_file_path_exists
-
-
-def read_replicator_error_file(error_file: str):
-  """Read replicator errors file."""
-  try:
-    error_data = epath.Path(error_file).read_text()
-    max_logging.log(f"Contents of replicator error file:\n{error_data}")
-  except (OSError, ValueError) as e:
-    max_logging.log("replicator_error_handler: Failed to read contents of failed" f" file: {e}")
-
-
-def cleanup_replicator_error_file(error_file: str):
-  """Clean up replicator errors file."""
-  try:
-    epath.Path(error_file).unlink()
-  except (OSError, ValueError) as e:
-    max_logging.log("replicator_error_handler: Failed to remove replicator errors file:" f" {e}")
 
 
 def print_save_message(step, async_checkpointing):
@@ -944,7 +834,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     case (checkpoint_manager, _, _) if isinstance(
         checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
     ):
-      replicator_error_handler(config)
+      emergency_checkpointing.replicator_error_handler(config)
       return checkpoint_manager.save(step, args=Composite(state=checkpoint_args), force=force)
     case _:
       return checkpoint_manager.save(

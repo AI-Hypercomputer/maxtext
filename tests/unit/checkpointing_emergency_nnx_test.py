@@ -148,8 +148,10 @@ class TestEmergencyManagerAbstractLayout(unittest.TestCase):
     """Calls the constructor with Orbax mocked, and returns the abstract it was handed."""
     mesh = jax.sharding.Mesh(jax.devices(), ("x",))
     with (
-        mock.patch.object(checkpointing, "EmergencyCheckpointManager") as manager_cls,
-        mock.patch.object(checkpointing.gcs_utils, "mkdir_and_check_permissions", side_effect=epath.Path),
+        mock.patch.object(checkpointing.emergency_checkpointing, "CheckpointManager") as manager_cls,
+        mock.patch.object(
+            checkpointing.emergency_checkpointing.gcs_utils, "mkdir_and_check_permissions", side_effect=epath.Path
+        ),
         tempfile.TemporaryDirectory() as d,
     ):
       checkpointing.create_orbax_emergency_checkpoint_manager(
