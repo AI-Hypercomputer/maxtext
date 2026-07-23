@@ -186,9 +186,9 @@ class MultimodalMLPProjector(nnx.Module):
           weight_dtype=config.weight_dtype,
           matmul_precision=config.matmul_precision,
           use_bias=self.use_bias,
-          kernel_init=lambda key, shape, dtype, *args, **kwargs: jax.nn.initializers.normal(
-              stddev=0.02
-          )(key, shape, dtype),
+          kernel_init=lambda key, shape, dtype, *args, **kwargs: jax.nn.initializers.normal(stddev=0.02)(
+              key, shape, dtype
+          ),
           kernel_axes=("embed", "mlp"),
           rngs=rngs,
       )

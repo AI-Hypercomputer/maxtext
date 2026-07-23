@@ -68,9 +68,7 @@ def test_load_custom_vision_projector(hf_access_token, param_path):
   # Pass the image through the pure vision tower (before projector)
   encoder_output = pure_encoder(images)
 
-  vision_embeddings_customized = (
-      encoder_output[0] if isinstance(encoder_output, tuple) else encoder_output
-  )
+  vision_embeddings_customized = encoder_output[0] if isinstance(encoder_output, tuple) else encoder_output
 
   print("vision embeddings:", vision_embeddings_customized.shape)
   print(f"First 10 values:\n{vision_embeddings_customized.flatten()[:10]}")
@@ -134,18 +132,12 @@ def test_load_custom_vision_projector(hf_access_token, param_path):
 
   print("\n===================================")
   print("Comparing customized vs original embeddings")
-  vision_embeddings_match = jnp.allclose(
-      vision_embeddings_customized, vision_embeddings_original, atol=1e-5
-  )
+  vision_embeddings_match = jnp.allclose(vision_embeddings_customized, vision_embeddings_original, atol=1e-5)
   vision_max_diff = jnp.max(jnp.abs(vision_embeddings_customized - vision_embeddings_original))
   print(f"Vision embeddings match: {vision_embeddings_match} (Max diff: {vision_max_diff})")
 
-  projector_embeddings_match = jnp.allclose(
-      projected_embeddings_customized, projected_embeddings_original, atol=1e-5
-  )
-  projector_max_diff = jnp.max(
-      jnp.abs(projected_embeddings_customized - projected_embeddings_original)
-  )
+  projector_embeddings_match = jnp.allclose(projected_embeddings_customized, projected_embeddings_original, atol=1e-5)
+  projector_max_diff = jnp.max(jnp.abs(projected_embeddings_customized - projected_embeddings_original))
   print(f"Projector embeddings match: {projector_embeddings_match} (Max diff: {projector_max_diff})")
 
 

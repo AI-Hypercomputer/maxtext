@@ -88,7 +88,6 @@ def _expected_and_restored_params(abstract_nnx_state, restored_linen):
   return want, have
 
 
-
 def _is_custom_vision_projector_problem(path: str, want: dict) -> bool:
   """Returns True if a weight mismatch belongs to a newly attached custom vision projector."""
   parts = [p for p in path.replace(".", "/").split("/") if p and p != "params"]
