@@ -1,107 +1,56 @@
 """Manages asynchronous backups of JAX array states to pinned host memory."""
 
+import contextlib
 import logging
+import threading
+from typing import Any
 
 import jax
-from orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter import (
-    Snapshotter as BaseSnapshotter,
-    _unpack_if_prng_key,
-    _wrap_if_prng_key,
-    is_shardable_array,
-)
-from orbax.checkpoint.experimental.v1._src.tree import types as tree_types
-from pathwaysutils.experimental import concatenate_by_mesh_axis
-from pathwaysutils.experimental import split_by_mesh_axis
+from orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter import Snapshotter as BaseSnapshotter
 
 _logger = logging.getLogger(__name__)
 
 _identity_jit = jax.jit(lambda x: x)
+_original_block_until_ready = jax.block_until_ready
+_thread_local = threading.local()
+
+
+def _custom_block_until_ready(x: Any) -> Any:
+  """Thread-local override calling identity_jit(x).block_until_ready() during load."""
+  if getattr(_thread_local, "use_identity_jit", False):
+    try:
+      return _identity_jit(x).block_until_ready()
+    except Exception:
+      return _original_block_until_ready(x)
+  return _original_block_until_ready(x)
+
+
+# Install thread-safe wrapper once at module import
+jax.block_until_ready = _custom_block_until_ready
+
+
+@contextlib.contextmanager
+def _identity_jit_block_until_ready_context():
+  """Context manager enabling thread-local identity_jit for block_until_ready."""
+  _thread_local.use_identity_jit = True
+  try:
+    yield
+  finally:
+    _thread_local.use_identity_jit = False
 
 
 class Snapshotter(BaseSnapshotter):
-  """Extends Orbax Snapshotter using identity_jit for active replica validation."""
+  """Extends Orbax Snapshotter using thread-safe identity_jit during load."""
 
   def load(
       self,
-      abstract_state: tree_types.PyTree,
+      abstract_state: Any,
       *,
       reset_snapshot_state: bool = True,
-  ) -> tree_types.PyTree:
-    """Move arrays from workers onto TPU devices with identity_jit replica validation."""
-    with self._lock:
-      if self._latest_snapshot is None:
-        raise RuntimeError("No snapshots available to restore from.")
-      pinned_state, step = self._latest_snapshot
-
-    def is_replica_active(arr):
-      try:
-        data = _unpack_if_prng_key(arr)
-        _identity_jit(data).block_until_ready()
-        return True
-      except (jax.errors.JaxRuntimeError, RuntimeError) as _:
-        return False
-
-    def get_active_pytree(x):
-      mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
-      data = _unpack_if_prng_key(x)
-      all_replicas = split_by_mesh_axis.split_by_mesh_axis(
-          data,
-          mesh_axis_name,
-      )
-
-      active_replicas = [
-          replica for replica in all_replicas if is_replica_active(replica)
-      ]
-
-      if not active_replicas:
-        raise RuntimeError("No active replicas found.")
-
-      reconstructed_state = concatenate_by_mesh_axis.concatenate_by_mesh_axis(
-          active_replicas,
-          mesh_axis_name,
-      )
-      return _wrap_if_prng_key(reconstructed_state, x)
-
-    pinned_state = jax.tree.map(
-        lambda x: get_active_pytree(x) if is_shardable_array(x) else x,
-        pinned_state,
-    )
-
-    def _device_put_pinned(x, abs_x):
-      if is_shardable_array(x):
-        data = _unpack_if_prng_key(x)
-        put_x = jax.device_put(
-            data, abs_x.sharding.with_memory_kind("pinned_host")
-        )
-        return _wrap_if_prng_key(put_x, x)
-      return x
-
-    host_target_state = jax.tree.map(
-        _device_put_pinned,
-        pinned_state,
-        abstract_state,
-    )
-
-    def _device_put_to_device(x, abs_x):
-      if is_shardable_array(x):
-        data = _unpack_if_prng_key(x)
-        put_x = jax.device_put(data, abs_x.sharding.with_memory_kind(None))
-        return _wrap_if_prng_key(put_x, x)
-      return x
-
-    restored_state = jax.tree.map(
-        _device_put_to_device,
-        host_target_state,
-        abstract_state,
-    )
-    unpacked_restored = jax.tree.map(_unpack_if_prng_key, restored_state)
-    _identity_jit(unpacked_restored).block_until_ready()
-
-    if reset_snapshot_state:
-      with self._lock:
-        self._latest_snapshot = (host_target_state, step)
-
-    return restored_state
+  ) -> Any:
+    """Move arrays from workers onto TPU devices with thread-local identity_jit validation."""
+    with _identity_jit_block_until_ready_context():
+      return super().load(abstract_state, reset_snapshot_state=reset_snapshot_state)
 
   def join(self) -> None:
     self._queue.join()
