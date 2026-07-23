@@ -1,10 +1,14 @@
 """Manages asynchronous backups of JAX array states to pinned host memory."""
 
 import logging
-from typing import Any
 
 import jax
-from orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter import Snapshotter as BaseSnapshotter
+from orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter import (
+    Snapshotter as BaseSnapshotter,
+    _unpack_if_prng_key,
+    _wrap_if_prng_key,
+    is_shardable_array,
+)
 from orbax.checkpoint.experimental.v1._src.tree import types as tree_types
 from pathwaysutils.experimental import concatenate_by_mesh_axis
 from pathwaysutils.experimental import split_by_mesh_axis
@@ -12,32 +16,6 @@ from pathwaysutils.experimental import split_by_mesh_axis
 _logger = logging.getLogger(__name__)
 
 _identity_jit = jax.jit(lambda x: x)
-
-
-def _is_prng_key(x: Any) -> bool:
-  """Returns True if x has a JAX PRNGKeyArray dtype."""
-  return (
-      hasattr(x, "dtype")
-      and hasattr(x, "shape")
-      and jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)
-  )
-
-
-def _unpack_if_prng_key(x: Any) -> Any:
-  """Extracts the underlying key data buffer if x is a PRNGKeyArray."""
-  return jax.random.key_data(x) if _is_prng_key(x) else x
-
-
-def _wrap_if_prng_key(x: Any, orig_x: Any) -> Any:
-  """Wraps raw array x into a PRNGKeyArray if orig_x was a PRNGKeyArray."""
-  if _is_prng_key(orig_x):
-    return jax.random.wrap_key_data(x, dtype=orig_x.dtype)
-  return x
-
-
-def is_shardable_array(x: Any) -> bool:
-  """Returns True if x is a concrete shardable array."""
-  return isinstance(x, jax.Array)
 
 
 class Snapshotter(BaseSnapshotter):
