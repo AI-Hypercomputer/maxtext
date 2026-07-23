@@ -37,33 +37,56 @@ def main():
   if not os.path.exists(github_deps_path):
     raise FileNotFoundError(f"Github dependencies file not found at {github_deps_path}")
 
-  # Check if 'uv' and 'setuptools' are available in the environment
+  # Ensure setuptools is installed via uv without calling pip
   try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "uv", "setuptools"], check=True, capture_output=True)
-    subprocess.run([sys.executable, "-m", "uv", "--version"], check=True, capture_output=True)
-  except subprocess.CalledProcessError as e:
-    print(f"Error checking uv version: {e}")
-    print(f"Stderr: {e.stderr.decode()}")
-    sys.exit(1)
+    subprocess.run([sys.executable, "-m", "uv", "pip", "install", "setuptools"], check=True, capture_output=True)
+  except (subprocess.CalledProcessError, FileNotFoundError):
+    try:
+      subprocess.run(["uv", "pip", "install", "setuptools"], check=True, capture_output=True)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"Warning: could not install setuptools via uv: {e}")
 
   github_deps_command = [
-      sys.executable,  # Use the current Python executable's pip to ensure the correct environment
-      "-m",
       "uv",
       "pip",
       "install",
+      "--python",
+      sys.executable,
       "-r",
       str(github_deps_path),
       "--no-deps",
       "--no-build-isolation",
   ]
 
-  local_vllm_install_command = [
-      sys.executable,  # Use the current Python executable's pip to ensure the correct environment
+  raiden_keyring_command = [
+      sys.executable,
       "-m",
+      "pip",
+      "install",
+      "keyrings.google-artifactregistry-auth",
+      "--extra-index-url",
+      "https://pypi.org/simple",
+  ]
+
+  raiden_deps_command = [
+      sys.executable,
+      "-m",
+      "pip",
+      "install",
+      "tpu-raiden-jax",
+      "--extra-index-url",
+      "https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/",
+      "--extra-index-url",
+      "https://pypi.org/simple",
+      "--no-deps",
+  ]
+
+  local_vllm_install_command = [
       "uv",
       "pip",
       "install",
+      "--python",
+      sys.executable,
       f"{repo_root}/maxtext/integration/vllm",  # MaxText on vllm installations
       "--no-deps",
   ]
@@ -73,6 +96,17 @@ def main():
     print(f"Installing Github dependencies: {' '.join(github_deps_command)}")
     _ = subprocess.run(github_deps_command, check=True, capture_output=True, text=True, env=os.environ)
     print("Github dependencies installed successfully!")
+
+    # Attempt optional Raiden dependencies installation (non-blocking for outside users)
+    try:
+      print(f"Installing optional Raiden keyring dependency: {' '.join(raiden_keyring_command)}")
+      _ = subprocess.run(raiden_keyring_command, check=True, capture_output=True, text=True, env=os.environ)
+      print("Raiden keyring dependency installed successfully!")
+      print(f"Installing optional Raiden dependencies: {' '.join(raiden_deps_command)}")
+      _ = subprocess.run(raiden_deps_command, check=True, capture_output=True, text=True, env=os.environ)
+      print("Raiden dependencies installed successfully!")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"Warning: Optional Raiden dependencies installation skipped/failed: {e}")
 
     # Run the command to install the MaxText vLLM directory
     print(f"Installing MaxText vLLM dependency: {' '.join(local_vllm_install_command)}")
