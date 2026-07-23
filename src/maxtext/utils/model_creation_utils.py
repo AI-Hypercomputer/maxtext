@@ -36,7 +36,7 @@ from functools import partial
 import os
 import subprocess
 import sys
-from typing import Any, Callable, overload
+from typing import Callable, overload
 from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
@@ -650,13 +650,7 @@ def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=
     return model
 
 
-def setup_configs_and_devices(
-    argv: list[str] | None = None,
-    kwargs: dict | None = None,
-    *,
-    config_class: type[Any],
-    **extra_kwargs,
-):
+def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None = None, **extra_kwargs):
   """Setup device allocation and configs for training and inference.
   This API is particularly useful for Reinforcement Learning where we might split the available
   devices into separate mesh for trainer and sampler
@@ -666,7 +660,7 @@ def setup_configs_and_devices(
 
   combined_kwargs = dict(kwargs) if kwargs else {}
   combined_kwargs.update(extra_kwargs)
-  config = pyconfig.initialize_pydantic(argv, config_class=config_class, **combined_kwargs)
+  config = pyconfig.initialize_pydantic(argv, **combined_kwargs)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running on a single slice")
@@ -741,8 +735,8 @@ def setup_configs_and_devices(
         }
     )
 
-    trainer_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **trainer_kwargs)
-    sampler_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **sampler_kwargs)
+    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_kwargs)
+    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_kwargs)
 
   else:
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
@@ -1094,10 +1088,13 @@ def from_pretrained(
       # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
       # Skip transient runtime variables (RngState, Cache, Intermediate, BatchStat) — they hold runtime state
       # that is not present in the checkpoint and must remain valid after the restore.
-      def _free_device_memory(node):
+      def _free_device_memory(path, node):
+        # Check if the path contains any name containing 'custom' which indicates a customized layer
+        # If yes, skip freeing device memory for this node and its children so they can be initialized with random values
+        is_custom = any('custom_linear' in str(getattr(p, 'key', p)) for p in path)
         if isinstance(node, nnx.Variable) and not isinstance(
             node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)
-        ):
+        ) and not is_custom:
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
           # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
@@ -1105,12 +1102,12 @@ def from_pretrained(
           for leaf in jax.tree_util.tree_leaves(inner):
             if isinstance(leaf, jax.Array) and not leaf.is_deleted():
               leaf.delete()
-        elif isinstance(node, jax.Array) and not node.is_deleted():
+        elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
           node.delete()
 
         return node
 
-      jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+      jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
       restored = ckptr.restore(
           epath.Path(config.load_parameters_path),
