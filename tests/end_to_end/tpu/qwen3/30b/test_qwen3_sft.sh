@@ -26,7 +26,7 @@ UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/it
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
 # Step 1: Run inference on the pre-converted checkpoint
-python3 -m maxtext.inference.vllm_decode \
+python3 -m maxtext.inference.vllm_decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
@@ -35,7 +35,7 @@ python3 -m maxtext.inference.vllm_decode \
     ici_tensor_parallelism=4 prompt="Suggest some famous landmarks in London."
 
 # Step 2: Run SFT starting from the pre-converted checkpoint
-python3 -m maxtext.trainers.post_train.sft.train_sft \
+python3 -m maxtext.trainers.post_train.sft.train_sft "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     per_device_batch_size=0.125 run_name=${run_id} \
@@ -47,7 +47,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     enable_single_controller=True max_target_length=16 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd
 
 # Step 3: Run inference on the checkpoint produced by the SFT run
-python3 -m maxtext.inference.vllm_decode \
+python3 -m maxtext.inference.vllm_decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/5/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \

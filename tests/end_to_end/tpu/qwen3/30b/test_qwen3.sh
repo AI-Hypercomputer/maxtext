@@ -28,7 +28,7 @@ export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 DATASET_PATH=gs://maxtext-dataset
 
 # Step 1: Run inference on the pre-converted checkpoint
-python3 -m maxtext.inference.decode \
+python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} tokenizer_type="huggingface" \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     per_device_batch_size=1 run_name=${run_id} \
@@ -37,7 +37,7 @@ python3 -m maxtext.inference.decode \
     scan_layers=false prompt='I love to' attention=\'dot_product\'
 
 # Step 2: Run pre-training starting from the pre-converted checkpoint
-python3 -m maxtext.trainers.pre_train.train \
+python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/train \
     dataset_path=${DATASET_PATH} tokenizer_type="huggingface" \
     load_parameters_path=${SCANNED_CKPT_PATH} \
@@ -49,10 +49,11 @@ python3 -m maxtext.trainers.pre_train.train \
     ici_tensor_parallelism=4 ici_fsdp_parallelism=2 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd optimizer_memory_host_offload=true
 
 # Step 3: Run inference on the checkpoint produced by the pre-training run
-python3 -m maxtext.inference.decode \
+python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} tokenizer_type="huggingface" \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/4/items \
     per_device_batch_size=1 run_name=${run_id} \
     max_prefill_predict_length=8 max_target_length=16 steps=4 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     scan_layers=true prompt='I love to' attention=\'dot_product\'
+

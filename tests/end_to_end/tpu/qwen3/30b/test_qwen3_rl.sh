@@ -43,7 +43,7 @@ UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/it
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
 # Step 1: Run inference on the pre-converted checkpoint
-python3 -m maxtext.inference.vllm_decode \
+python3 -m maxtext.inference.vllm_decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
@@ -55,7 +55,7 @@ python3 -m maxtext.inference.vllm_decode \
     use_chat_template=True scan_layers=True enable_single_controller=True
 
 # Step 2: Run RL starting from the pre-converted checkpoint
-python3 -m maxtext.trainers.post_train.rl.train_rl \
+python3 -m maxtext.trainers.post_train.rl.train_rl "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     run_name=${run_id} rl.loss_algo='grpo' scan_layers=True \
@@ -72,7 +72,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     debug=False rl.reshard_chunk_size=1 
 
 # Step 3: Run inference on the checkpoint produced by the RL run
-python3 -m maxtext.inference.vllm_decode \
+python3 -m maxtext.inference.vllm_decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/4/items \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
