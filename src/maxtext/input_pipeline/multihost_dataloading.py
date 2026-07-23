@@ -262,12 +262,17 @@ class RemoteIterator:
 class RemoteIteratorWrapper:
   """Wrapper for RemoteIterator that handles device placement."""
 
-  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
+  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, sharding_spec=None, checkpoint_path="", elastic=False):
     self.cpu_devices = _colocated_cpu_devices(tuple(global_mesh.devices.flat))
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
-    self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
-    self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
-    self.dummy_array = jnp.zeros((len(self.cpu_devices)))
+    if sharding_spec is None:
+      sharding_spec = PartitionSpec(global_mesh.axis_names)
+      dummy_shape = (len(self.cpu_devices),)
+    else:
+      dummy_shape = global_shape
+    self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, sharding_spec)
+    self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, sharding_spec)
+    self.dummy_array = jnp.zeros(dummy_shape, dtype=jnp.int32)
     self.dummy_array = jax.device_put(self.dummy_array, self.cpu_sharding)
     # This is a proxy to a RemoteIterator running in a colocated process,
     # named "local_iterator" to match MultiHostDataLoadIterator's interface.

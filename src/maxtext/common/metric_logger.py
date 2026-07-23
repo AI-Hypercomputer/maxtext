@@ -83,6 +83,15 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics["scalar"][f"{label}/layer_{layer_num:03d}"] = per_layer[layer_num]
 
 
+def _pin_metrics_to_host(metrics):
+  """Pins metrics arrays to host memory."""
+  def _to_pinned_host(x):
+    if hasattr(x, "sharding"):
+      return jax.device_put(x, x.sharding.with_memory_kind("pinned_host"))
+    return x
+  return jax.tree.map(_to_pinned_host, metrics)
+
+
 class MetadataKey(enum.Enum):
   PER_DEVICE_TFLOPS = "per_device_tflops"
   PER_DEVICE_TOKENS = "per_device_tokens"
@@ -161,7 +170,15 @@ class MetricLogger:
     """Handles training-specific metric logging."""
     # Skip logging if in profiler activation/deactivation steps
     # TODO(b/456828037): Switch to subprocess profiling to avoid timing artifacts at boundary steps.
-    scalars = metrics["scalar"]
+    def _safe_get(val):
+      if isinstance(val, jax.Array):
+        try:
+          return jax.device_get(val)
+        except Exception:
+          return 0
+      return val
+
+    scalars = jax.tree.map(_safe_get, metrics["scalar"])
     loss = scalars["learning/loss"]
     is_rampup = step < self.config.rampup_end_step
     is_metric_hidden_step = self.config.hide_profiler_step_metric and self._is_profiler_boundary_step(step)
@@ -176,10 +193,12 @@ class MetricLogger:
           f"completed profiler activation/deactivation step: {step}",
       )
     else:
+      active_slices = len(elastic_utils.live_slice_indices(self.config)) if elastic_utils.elastic_enabled(self.config) else 1
       log_parts.extend(
           [
               f"completed step: {step}",
               f"seconds: {scalars['perf/step_time_seconds']:.3f}",
+              f"active_slices: {active_slices}",
           ]
       )
       if elastic_utils.elastic_enabled(self.config):
@@ -408,12 +427,30 @@ class MetricLogger:
       self._flush_one_buffered_entry(self.buffered_metrics.pop(0))
     if is_training:
       self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
-      self.buffered_metrics.append(("train", step, metrics, step_time_delta))
+      # Pinned host memory transfer to allow recovery from host safely without default device bindings
+      metrics_pinned = _pin_metrics_to_host(metrics)
+      self.buffered_metrics.append(("train", step, metrics_pinned, step_time_delta))
       if self._pending_eval_step_count > 0:
         self._finalize_eval_metrics(step)
     else:
       self._pending_eval_step_count += 1
       self.buffered_metrics.append(("eval", step, metrics, step_time_delta))
+
+  def recover_metrics(self, recovered_metrics=None):
+    """Flushes and prints buffered metrics safely during recovery, then clears the buffer."""
+    if recovered_metrics is not None:
+      try:
+        scalars = recovered_metrics.get("scalar", {})
+        loss = float(scalars.get("learning/loss", 0.0))
+        step_time = float(scalars.get("perf/step_time_seconds", 0.0))
+        max_logging.log(
+            f"[METRIC RECOVERY] Successfully recovered metrics via Snapshotter | Loss: {loss:.3f} | Step Time: {step_time:.3f}s"
+        )
+      except Exception as e:
+        max_logging.log(f"[METRIC RECOVERY] Failed to read Snapshotter recovered metrics: {e}")
+
+    # Cleanly clear the buffer to prevent dead device reference errors downstream
+    self.buffered_metrics.clear()
 
   def _flush_one_buffered_entry(self, entry):
     """Dispatches a single buffered entry to the writer."""
