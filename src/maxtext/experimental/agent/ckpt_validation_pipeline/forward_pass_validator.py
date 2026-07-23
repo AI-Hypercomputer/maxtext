@@ -52,7 +52,6 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
       "dtype=float32",
       "activations_in_float32=true",
       "matmul_precision=high",
-      "use_qk_norm=False",
       "override_model_config=True",
   ]
 
