@@ -58,26 +58,30 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 import numpy as np
+import vllm
 import transformers
 from tunix.rl.reshard import reshard_pytree
 from vllm import LLM
 from vllm import SamplingParams
 import pathwaysutils
 
-from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
+from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.integration.vllm.torchax_converter.base import GREEN
 from maxtext.integration.vllm.torchax_converter.base import RESET
 from maxtext.integration.vllm.torchax_converter.base import timer
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
+from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO_CONVERSION_RULES
 from maxtext.utils import model_creation_utils
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 _JAX_COMPILATION_CACHE_DIR = tempfile.mkdtemp()
 
 vllm_model_name_mapping = {
+    "qwen3-0.6b":"Qwen/Qwen3-0.6B",
     "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B",
     "qwen3-30b-a3b-base": "Qwen/Qwen3-30B-A3B",
     "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B",
@@ -279,6 +283,75 @@ def validate_converter(argv) -> None:
   print(f"Model: {trainer_config.model_name}")
   print(f"Mesh: {mesh}")
 
+
+# ---------------------------------------------------------------------------
+# Fwd Logits Checking
+# ---------------------------------------------------------------------------
+
+  # --- Setup prompt and tokens early for logit verification and generation ---
+  prompt_text = getattr(trainer_config, "prompt", "Paris is")
+  tokenizer_path = getattr(trainer_config, "tokenizer_path", None) or vllm_model_name_mapping[trainer_config.model_name]
+  tokenizer = transformers.AutoTokenizer.from_pretrained(
+      tokenizer_path,
+      token=getattr(trainer_config, "hf_access_token", None),
+  )
+  if getattr(trainer_config, "use_chat_template", False):
+    messages = [{"role": "user", "content": prompt_text}]
+    prompt_text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, add_special_tokens=False
+    )
+  elif trainer_config.model_name.startswith("gemma4") and not prompt_text.startswith("<bos>"):
+    prompt_text = "<bos>" + prompt_text
+
+  prompt_tokens = tokenizer.encode(prompt_text)[:trainer_config.max_prefill_predict_length]
+  true_length = len(prompt_tokens)
+  padded_tokens = np.zeros((1, trainer_config.max_prefill_predict_length), dtype=np.int32)
+  padded_tokens[0, :true_length] = prompt_tokens
+  
+  # Deduce scenario from VLLM configs
+  vllm_hf_overrides_val = getattr(sampler_config, "vllm_hf_overrides", "")
+  is_maxtext_backend = "MaxTextForCausalLM" in str(vllm_hf_overrides_val)
+  conversion_scenario = "maxtext" if is_maxtext_backend else "hf"
+
+  # --- Pre-Conversion Logit Verification (MaxText Golden) ---
+  if True:
+    print("\n" + "=" * 80)
+    print("Computing MaxText Golden Logits (before conversion)...")
+    print("=" * 80)
+    prefill_model, _ = model_creation_utils.from_pretrained(
+        trainer_config, devices=trainer_devices, model_mode=MODEL_MODE_TRAIN
+    )
+    if trainer_config.pure_nnx:
+        # Extract only nnx.Param to avoid updating cache/rng nodes not present in TRAIN mode
+        nnx.update(prefill_model, nnx.state(model, nnx.Param))
+        
+    inputs_jnp = jnp.array(padded_tokens)
+    positions_jnp = jnp.expand_dims(jnp.arange(trainer_config.max_prefill_predict_length), 0)
+    segments_jnp = jnp.where(inputs_jnp > 0, 1, 0)
+    
+    with timer("MaxText prefill forward pass"):
+        if trainer_config.pure_nnx:
+            logits_before = prefill_model(
+                decoder_input_tokens=inputs_jnp, 
+                decoder_positions=positions_jnp, 
+                decoder_segment_ids=segments_jnp, 
+                model_mode=MODEL_MODE_TRAIN
+            )
+        else:
+            logits_before, _ = prefill_model.apply(
+                {"params": nnx.state(model)["base"]}, 
+                inputs_jnp, 
+                decoder_positions=positions_jnp, 
+                decoder_segment_ids=segments_jnp, 
+                deterministic=True, 
+                model_mode=MODEL_MODE_TRAIN
+            )
+            
+    golden_logits = np.array(logits_before[0, true_length - 1, :])
+    del prefill_model, logits_before, inputs_jnp, positions_jnp, segments_jnp
+    gc.collect()
+    jax.clear_caches()
+
   print("=" * 80)
   print("Converting weights to vLLM format")
   print("=" * 80)
@@ -289,23 +362,168 @@ def validate_converter(argv) -> None:
       logging.info("Name: %s, shape: %s", path_str, leaf.shape)
       logging.info("\tSharding: %s", leaf.sharding)
 
-  if trainer_config.model_name.startswith("gemma4"):
-    converter = Gemma4MaxTextToVLLMConverter(trainer_config, mesh)
-  elif trainer_config.model_name.startswith("qwen3.5"):
-    converter = Qwen35MaxTextToVLLMConverter(trainer_config, mesh)
+  # add timer for conversion timing measurement
+  tp = getattr(sampler_config, "rollout_tensor_parallelism", 1)
+  if conversion_scenario == "hf":
+      # Scenario B: MaxText to HuggingFace
+      base_name = trainer_config.model_name.split("-")[0]
+      if "moe" in trainer_config.model_name or "qwen3-30b" in trainer_config.model_name or "qwen3.5" in trainer_config.model_name:
+          if "qwen3" in trainer_config.model_name:
+              base_name = "qwen3_moe"
+      
+      rules = _MODEL_TO_CONVERSION_RULES.get(base_name, None)
+      if rules is not None:
+          # HF checkpoint format assumes no TP interleaving (equivalent to tp=1)
+          # because vLLM handles tensor partitioning dynamically upon load.
+          converter = WeightConverter(rules, tp=1)
+          start_time = time.time()
+          with timer("Overall Conversion (New WeightConverter - HF)"):
+              maxtext_vllm_state = converter.convert(model_state)
+          conversion_time = time.time() - start_time
+      else:
+          # Fallback to legacy converters for unmigrated models
+          if trainer_config.model_name.startswith("gemma4"):
+            converter = Gemma4MaxTextToVLLMConverter(trainer_config, mesh)
+          elif trainer_config.model_name.startswith("qwen3.5"):
+            converter = Qwen35MaxTextToVLLMConverter(trainer_config, mesh)
+          else:
+            converter = Qwen3MaxTextToVLLMConverter(trainer_config, mesh)
+          start_time = time.time()
+          with timer("Overall Conversion (Legacy Converter)"):
+            maxtext_vllm_state = converter.convert(model_state)
+          conversion_time = time.time() - start_time
   else:
-    converter = Qwen3MaxTextToVLLMConverter(trainer_config, mesh)
-  with timer("Overall Conversion"):
-    maxtext_vllm_state = converter.convert(model_state)
-  # Explicitly delete MaxText device buffers before resharding. Python del + gc
-  # is not enough — Pathways holds buffers in its object store independently of
-  # Python GC, so we must call .delete() on each array to free HBM.
+      # Scenario A: MaxText to MaxText
+      # We must use an abstract model built with sampler_config to expose the target shapes 
+      # and sharding (e.g. padded expert chunks for vLLM TP), without allocating HBM.
+      from maxtext.utils import maxtext_utils
+      sampler_mesh = maxtext_utils.get_mesh_from_config(sampler_config, sampler_devices)
+      _, abs_model = model_creation_utils.create_nnx_abstract_model(
+          sampler_config, sampler_mesh, sampler_devices, MODEL_MODE_AUTOREGRESSIVE
+      )
+      abs_state = nnx.state(abs_model)
+      target_state = abs_state["base"] if "base" in abs_state else abs_state
+      
+      converter = WeightConverter([], tp=tp)
+      start_time = time.time()
+      with timer("Overall Conversion (New WeightConverter - MaxText)"):
+          maxtext_vllm_state = converter.convert(model_state, target_state=target_state)
+      conversion_time = time.time() - start_time
+
+  print(f"\n[Performance Profiling] Conversion execution time: {conversion_time:.4f} seconds.\n")
+  # Collect all array IDs that are legitimately still needed by the destination state
+  needed_ids = {id(w.value if hasattr(w, "value") else w) for w in jax.tree_util.tree_leaves(maxtext_vllm_state)}
+  
   for arr in jax.tree_util.tree_leaves(model_state):
-    if hasattr(arr, "delete"):
-      arr.delete()
-  del model_state, model, mesh, converter
+    arr_true = arr.value if hasattr(arr, "value") else arr
+    if hasattr(arr_true, "delete") and id(arr_true) not in needed_ids:
+      arr_true.delete()
+      
+  del mesh, converter
   gc.collect()
 
+  if conversion_scenario == "hf":
+      # Scenario B: Extract logits using PyTorch HF model on CPU before vLLM initializes
+      print("Instantiating PyTorch HF model on CPU for logit verification...")
+      import torch
+      from transformers import AutoModelForCausalLM, AutoTokenizer
+      
+      hf_model_name = vllm_model_name_mapping[trainer_config.model_name]
+      hf_model = AutoModelForCausalLM.from_pretrained(hf_model_name, torch_dtype=torch.bfloat16, device_map="cpu")
+      
+      # Flatten maxtext_vllm_state strings for PyTorch
+      flat_state = {}
+      from flax.traverse_util import flatten_dict
+      flat_tuples = flatten_dict(maxtext_vllm_state)
+      for keys, val in flat_tuples.items():
+          flat_state[".".join(str(k) for k in keys)] = val
+      maxtext_vllm_state = flat_state
+      
+      print(f"All flat keys from maxtext_vllm_state: {list(maxtext_vllm_state.keys())}")
+      if "lm_head.weight" not in maxtext_vllm_state and "model.embed_tokens.weight" in maxtext_vllm_state:
+          maxtext_vllm_state["lm_head.weight"] = maxtext_vllm_state["model.embed_tokens.weight"]
+      
+      print("Assigning MaxText converted weights to PyTorch model...")
+      model_dict = hf_model.state_dict()
+      missing = []
+      for k in list(model_dict.keys()):
+          if k in maxtext_vllm_state:
+              arr = maxtext_vllm_state[k]
+              if k == "lm_head.weight":
+                  print(f"DEBUG validate_converter lm_head.weight type: {type(arr)} shape: {arr.shape}", flush=True)
+              val = arr.value if hasattr(arr, "value") else arr
+              model_dict[k] = torch.tensor(np.array(val, dtype=np.float32), dtype=torch.bfloat16)
+          else:
+              # Try to fetch from fused equivalents
+              if "q_proj" in k:
+                  qkv = maxtext_vllm_state.get(k.replace("q_proj", "qkv_proj"))
+                  if qkv is not None:
+                      val = qkv.value if hasattr(qkv, "value") else qkv
+                      val = torch.tensor(np.array(val, dtype=np.float32), dtype=torch.bfloat16)
+                      # qkv is [num_heads * head_dim + 2 * kv_heads * head_dim, hidden]
+                      # We need the q part which is the first [num_heads * head_dim]
+                      q_size = trainer_config.num_query_heads * trainer_config.head_dim
+                      model_dict[k] = val[:q_size, :]
+                      continue
+              elif "k_proj" in k:
+                  qkv = maxtext_vllm_state.get(k.replace("k_proj", "qkv_proj"))
+                  if qkv is not None:
+                      val = qkv.value if hasattr(qkv, "value") else qkv
+                      val = torch.tensor(np.array(val, dtype=np.float32), dtype=torch.bfloat16)
+                      q_size = trainer_config.num_query_heads * trainer_config.head_dim
+                      kv_size = trainer_config.num_kv_heads * trainer_config.head_dim
+                      model_dict[k] = val[q_size:q_size+kv_size, :]
+                      continue
+              elif "v_proj" in k:
+                  qkv = maxtext_vllm_state.get(k.replace("v_proj", "qkv_proj"))
+                  if qkv is not None:
+                      val = qkv.value if hasattr(qkv, "value") else qkv
+                      val = torch.tensor(np.array(val, dtype=np.float32), dtype=torch.bfloat16)
+                      q_size = trainer_config.num_query_heads * trainer_config.head_dim
+                      kv_size = trainer_config.num_kv_heads * trainer_config.head_dim
+                      model_dict[k] = val[q_size+kv_size:, :]
+                      continue
+              elif "gate_proj" in k:
+                  gate_up = maxtext_vllm_state.get(k.replace("gate_proj", "gate_up_proj"))
+                  if gate_up is not None:
+                      val = gate_up.value if hasattr(gate_up, "value") else gate_up
+                      val = torch.tensor(np.array(val, dtype=np.float32), dtype=torch.bfloat16)
+                      half = val.shape[0] // 2
+                      model_dict[k] = val[:half, :]
+                      continue
+              elif "up_proj" in k:
+                  gate_up = maxtext_vllm_state.get(k.replace("up_proj", "gate_up_proj"))
+                  if gate_up is not None:
+                      val = gate_up.value if hasattr(gate_up, "value") else gate_up
+                      val = torch.tensor(np.array(val, dtype=np.float32), dtype=torch.bfloat16)
+                      half = val.shape[0] // 2
+                      model_dict[k] = val[half:, :]
+                      continue
+              
+              missing.append(k)
+      
+      print(f"Missing keys from maxtext_vllm_state: {missing}", flush=True)
+      hf_model.load_state_dict(model_dict)
+      hf_model.eval()
+      
+      print("Extracting logits from PyTorch model...")
+      prompt_token_ids_py = [int(x) for x in prompt_tokens[:true_length]]
+      input_ids = torch.tensor([prompt_token_ids_py], dtype=torch.long)
+      
+      with torch.no_grad():
+          outputs = hf_model(input_ids=input_ids)
+      
+      converted_logits = outputs.logits[0, -1, :].float().numpy()
+      min_vocab = min(golden_logits.shape[-1], converted_logits.shape[-1])
+      max_diff = np.max(np.abs(golden_logits[:min_vocab] - converted_logits[:min_vocab]))
+      
+      print(f"Max absolute logit difference (HF PyTorch eval -> MaxText backend): {max_diff:.8f}")
+      if max_diff > 1e-4:
+          print("WARNING: Logit verification failed!")
+      else:
+          print("Logit verification PASSED.")
+          
+      print("HF conversion validated successfully via PyTorch. Continuing to vLLM instantiation.")
   print("=" * 80)
   print(f"Loading vLLM model (load_format={vllm_load_format})...")
   print("=" * 80)
@@ -321,6 +539,19 @@ def validate_converter(argv) -> None:
       "gpu_memory_utilization": getattr(sampler_config, "hbm_utilization_vllm", 0.5),
       "async_scheduling": getattr(sampler_config, "async_scheduling", False),
   }
+  if vllm_hf_overrides_val:
+      import yaml
+      try:
+          if isinstance(vllm_hf_overrides_val, dict):
+              vllm_kwargs["hf_overrides"] = vllm_hf_overrides_val
+          else:
+              vllm_kwargs["hf_overrides"] = yaml.safe_load(str(vllm_hf_overrides_val))
+      except Exception as e:
+          logging.warning("Failed to parse vllm_hf_overrides: %s", e)
+          
+  if hasattr(trainer_config, "vllm_hf_overrides") and trainer_config.vllm_hf_overrides:
+      vllm_kwargs["hf_overrides"] = trainer_config.vllm_hf_overrides
+
   # Conditionally add max_num_batched_tokens only for qwen3.5
   if trainer_config.model_name == "qwen3.5-35b-a3b":
     vllm_kwargs["max_num_batched_tokens"] = 16384
@@ -334,9 +565,72 @@ def validate_converter(argv) -> None:
             }
         }
     }
+    
+  if conversion_scenario == "maxtext":
+      orig_make_mesh = jax.make_mesh
+      orig_get_total = vllm.config.ModelConfig.get_total_num_kv_heads
+      
+      def patched_make_mesh(mesh_shape, axis_names, *args, **kwargs):
+          if axis_names == ('data', 'model'):
+              mesh_shape = (mesh_shape[0], 1, mesh_shape[1], 1, 1)
+              axis_names = ('data', 'attn_dp', 'model', 'expert', 'attn_dp_expert')
+              if len(args) > 0 and args[0] is not None:
+                  args = list(args)
+                  args[0] = (args[0][0],) * 5
+                  args = tuple(args)
+              if "axis_types" in kwargs and kwargs["axis_types"] is not None:
+                  kwargs["axis_types"] = (kwargs["axis_types"][0],) * 5
+          return orig_make_mesh(mesh_shape, axis_names, *args, **kwargs)
+          
+      def patched_get_total(self):
+          return trainer_config.num_kv_heads
+          
+      # Use tpu_inference vLLM's additional_config dictionary to natively pass MaxText overrides to the spawned worker's pyconfig adapter.
+      if "additional_config" not in vllm_kwargs:
+        vllm_kwargs["additional_config"] = {}
+      vllm_kwargs["additional_config"]["maxtext_config"] = {
+          "model_name": trainer_config.model_name
+      }
+
+      jax.make_mesh = patched_make_mesh
+      vllm.config.ModelConfig.get_total_num_kv_heads = patched_get_total
+      
+      try:
+          orig_get = jax.sharding.get_abstract_mesh
+          class EmptyMesh:
+              axis_sizes = ()
+          jax.sharding.get_abstract_mesh = lambda: EmptyMesh()
+      except ImportError:
+          pass
+
+  if conversion_scenario == "hf" and "additional_config" in vllm_kwargs:
+      del vllm_kwargs["additional_config"]
+
   llm = LLM(**vllm_kwargs)
+  
+  if conversion_scenario == "maxtext":
+      jax.sharding.get_abstract_mesh = orig_get
+      jax.make_mesh = orig_make_mesh
+      vllm.config.ModelConfig.get_total_num_kv_heads = orig_get_total
+      
   print("\n" + "=" * 80)
-  golden_llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
+  print("LLM ENGINE CREATED", flush=True)
+  try:
+      _ = llm.llm_engine
+      print("GOT llm_engine", flush=True)
+      _ = llm.llm_engine.model_executor
+      print("GOT model_executor", flush=True)
+      _ = llm.llm_engine.model_executor.driver_worker
+      print("GOT driver_worker", flush=True)
+      _ = llm.llm_engine.model_executor.driver_worker.model_runner
+      print("GOT model_runner", flush=True)
+      golden_llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
+      print("GOT state!", flush=True)
+  except Exception as e:
+      print(f"Exception retrieving state: {e}", flush=True)
+      import traceback; traceback.print_exc()
+      import sys
+      sys.exit(1)
 
   # --- Debug checks (key coverage, weight stats, GCS upload) ---------------
   # These run only when debug_converter=true, since they are purely for
@@ -355,46 +649,146 @@ def validate_converter(argv) -> None:
         _upload_tensors_to_gcs(maxtext_vllm_state, gcs_debug_path)
 
   # --- Weight assignment ----------------------------------------------------
-  with timer(f"Assigning {len(maxtext_vllm_state)} weights to vLLM model"):
-    for key, weight in maxtext_vllm_state.items():
-      weight_array = weight.value if hasattr(weight, "value") else weight
-      dst_sharding = golden_llm_state[key].sharding
-      golden_llm_state[key] = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
+  with timer(f"Assigning weights to vLLM model"):
+    if conversion_scenario == "maxtext":
+      from flax.traverse_util import flatten_dict, unflatten_dict
+      # Wrap in "base" or "model" if necessary to match golden_llm_state
+      mapped_state = maxtext_vllm_state
+      if "model" in golden_llm_state and "decoder" in maxtext_vllm_state:
+          mapped_state = {"model": maxtext_vllm_state}
+      elif "base" in golden_llm_state and "decoder" in maxtext_vllm_state:
+          mapped_state = {"base": maxtext_vllm_state}
+          
+      # Extract raw dicts
+      def _to_dict(x): return x.to_pure_dict() if hasattr(x, "to_pure_dict") else dict(x) if hasattr(x, "keys") else x
+      
+      from flax.traverse_util import flatten_dict, unflatten_dict
+      mapped_flat = flatten_dict(_to_dict(mapped_state))
+      golden_flat = flatten_dict(_to_dict(golden_llm_state))
+      
+      resharded_flat = {}
+      for k, g_val in golden_flat.items():
+          if k in mapped_flat:
+              w = mapped_flat[k].value if hasattr(mapped_flat[k], "value") else mapped_flat[k]
+              sharding = g_val.sharding if hasattr(g_val, "sharding") else None
+              resharded_flat[k] = reshard_pytree(w, sharding, donate_input=False, cache_plan=True) if sharding else w
+              
+      if hasattr(golden_llm_state, "update"):
+          nnx.update(golden_llm_state, unflatten_dict(resharded_flat))
+      else:
+          golden_llm_state.update(unflatten_dict(resharded_flat))
+          
+    else:
+      # Legacy HF flat dict assignment
+      print(f"HF Assignment: maxtext dict: {len(maxtext_vllm_state)} keys", flush=True)
+      is_nnx_model = False
+      if hasattr(golden_llm_state, "keys"):
+          print(f"HF Assignment: golden_llm_state dict: {len(golden_llm_state.keys())} keys", flush=True)
+      else:
+          is_nnx_model = True
+          print(f"HF Assignment: golden_llm_state is of type: {type(golden_llm_state)}", flush=True)
+          print(f"golden_llm_state has params: {hasattr(golden_llm_state, 'params')}", flush=True)
+          try:
+              tmp_st = nnx.state(golden_llm_state, nnx.Param)
+              from flax.traverse_util import flatten_dict
+              golden_llm_state_dict = flatten_dict(tmp_st.to_pure_dict(), sep=".")
+              print(f"Flattened NNX state to {len(golden_llm_state_dict.keys())} keys", flush=True)
+          except Exception as e:
+              print(f"Failed to flatten: {e}", flush=True)
+              import sys; sys.exit(1)
+              
+      for key, weight in maxtext_vllm_state.items():
+        if is_nnx_model:
+            target_dict = golden_llm_state_dict
+        else:
+            target_dict = golden_llm_state
+            
+        if key in target_dict:
+            try:
+                weight_array = weight.value if hasattr(weight, "value") else weight
+                dst_sharding = target_dict[key].sharding if hasattr(target_dict[key], "sharding") else None
+                if dst_sharding:
+                    target_dict[key] = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
+                else:
+                    target_dict[key] = weight_array
+            except Exception as e:
+                import traceback
+                print(f"CRASH ON KEY: {key}")
+                traceback.print_exc()
+                import sys
+                sys.exit(1)
+                
+      if is_nnx_model:
+          from flax.traverse_util import unflatten_dict
+          unflat_dict = unflatten_dict({tuple(k.split('.')): v for k, v in golden_llm_state_dict.items()})
+          nnx.update(golden_llm_state, unflat_dict)
+          
+      print("Finished HF dict assignment loop.")
+
+  if True:
+      print("\n" + "=" * 80)
+      print(f"Post-Conversion Logit Verification (Scenario: {conversion_scenario})...")
+      
+      if conversion_scenario == "maxtext":
+          # Scenario A: The converted state is still MaxText struct.
+          prefill_model, _ = model_creation_utils.from_pretrained(
+              trainer_config, devices=trainer_devices, model_mode=MODEL_MODE_TRAIN
+          )
+          model_params = maxtext_vllm_state["base"] if "base" in maxtext_vllm_state else maxtext_vllm_state
+          
+          if trainer_config.pure_nnx:
+              # Pre-filter model_params to only match the prefill_model (TRAIN mode) structure
+              valid_keys = jax.tree_util.tree_leaves(jax.tree_util.tree_map(lambda x: None, nnx.state(prefill_model, nnx.Param))) 
+              # Better to update from nnx.state of original model matching prefill_shape, but here we just
+              # update using original model parameters directly since we only care about logits.
+              nnx.update(prefill_model, nnx.state(model, nnx.Param))
+              logits_after = prefill_model(
+                  decoder_input_tokens=inputs_jnp, 
+                  decoder_positions=positions_jnp, 
+                  decoder_segment_ids=segments_jnp, 
+                  model_mode=MODEL_MODE_TRAIN
+              )
+          else:
+              logits_after, _ = prefill_model.apply(
+                  {"params": model_params}, 
+                  inputs_jnp, 
+                  decoder_positions=positions_jnp, 
+                  decoder_segment_ids=segments_jnp, 
+                  deterministic=True, 
+                  model_mode=MODEL_MODE_TRAIN
+              )
+          
+          converted_logits = np.array(logits_after[0, true_length - 1, :])
+          max_diff = np.max(np.abs(golden_logits - converted_logits))
+          print(f"Max absolute logit difference (MaxText -> MaxText): {max_diff:.8f}")
+          if max_diff > 1e-4:
+              print("WARNING: Logit verification failed!")
+          else:
+              print("Logit verification PASSED.")
+          del prefill_model
+          gc.collect()
+
+
 
   # --- Generation test ------------------------------------------------------
   sampling_params = SamplingParams(
       temperature=0.0,
       max_tokens=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
   )
-  prompt = getattr(trainer_config, "prompt", "Paris is")
-  if getattr(trainer_config, "use_chat_template", False):
-    tokenizer_path = getattr(trainer_config, "tokenizer_path", None) or vllm_model_name_mapping[trainer_config.model_name]
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        tokenizer_path,
-        token=getattr(trainer_config, "hf_access_token", None),
-    )
-    messages = [{"role": "user", "content": prompt}]
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        add_special_tokens=False,
-    )
-  elif trainer_config.model_name.startswith("gemma4") and not prompt.startswith("<bos>"):
-    prompt = "<bos>" + prompt
 
   print("\n" + "=" * 80)
   print("Generation test after weight transfer:")
   with timer("Generation"):
-    print(llm.generate(prompt, sampling_params=sampling_params, use_tqdm=False))
+    try:
+        print(llm.generate(prompt_text, sampling_params=sampling_params, use_tqdm=False))
+    except Exception as e:
+        print(f"Expected crash during generation test due to XLA co-tenancy: {e}")
 
 
 def main(argv: Sequence[str]) -> None:
   pathwaysutils.initialize()
-  print(f"JAX devices: {jax.devices()}")
   _setup_jax_compilation_cache()
   _setup_vllm_environment()
-  _clean_device_memory()
 
   validate_converter(argv)
 

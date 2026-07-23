@@ -74,45 +74,8 @@ class TransposeSingle(Operation):
         out = tensors[0] if isinstance(tensors, list) else tensors
         return jnp.transpose(out, self.axes)
 
-class Transpose(Operation):
-    def __init__(self, axes): self.axes = axes
-    def __call__(self, tensors):
-        if isinstance(tensors, list):
-            return [jnp.transpose(t, self.axes) for t in tensors]
-        else:
-            return jnp.transpose(tensors, self.axes)
 
-# interleaving logic as _make_attn_compute() in qwen3_moe.py
-class FuseQwen3MoEGateUp(Operation):
-    def __init__(self, tp: int): 
-        # tp is config.rollout_tensor_parallelism
-        self.tp = tp
-        
-    def __call__(self, tensors):
-        w0, w1 = tensors
-        # [experts, d_model, d_inner] -> [experts, d_inner, d_model]
-        w0 = jnp.transpose(w0, (0, 2, 1))
-        w1 = jnp.transpose(w1, (0, 2, 1))
-        num_experts, d_inner, d_model = w0.shape
-        chunk_size = d_inner // self.tp
-        
-        # Pad each TP chunk to the next multiple of 128 for TPU GMM alignment
-        padded_chunk_size = ((chunk_size + 127) // 128) * 128
-        pad_amount = padded_chunk_size - chunk_size
-        
-        gate_chunks = w0.reshape(num_experts, self.tp, chunk_size, d_model)
-        up_chunks = w1.reshape(num_experts, self.tp, chunk_size, d_model)
-        
-        if pad_amount > 0:
-            gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-            up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-            
-        combined = jnp.stack([gate_chunks, up_chunks], axis=2)
-        fused = combined.reshape(num_experts, 2 * padded_chunk_size * self.tp, d_model)
-        return jnp.transpose(fused, (0, 2, 1))
-
-# logic as _make_fuse_all() in qwen3_moe.py
-class FuseQwen3MoEQKV(Operation):
+class _interleave_qkv(Operation):
     def __init__(self, tp: int): 
         self.tp = tp
         
@@ -141,6 +104,8 @@ class FuseQwen3MoEQKV(Operation):
         qkv_by_tp = jnp.concatenate([q_by_tp, k_by_tp, v_by_tp], axis=1)
         qkv_flat = qkv_by_tp.reshape(-1, d_model)
         return qkv_flat
+
+
 
 class TransposeAttentionOut(Operation):
     def __call__(self, tensors):
@@ -194,12 +159,16 @@ class WeightConverter(abc.ABC):
             except Exception as e:
                 print(f"DEBUG: Failed to extract tp from target_state: {e}")
 
-        if hasattr(src_pytree, 'to_pure_dict'):
-            src_pytree = src_pytree.to_pure_dict()
-            
+        # Unwrap NNX dictionaries
         if isinstance(src_pytree, dict) and "base" in src_pytree:
             src_pytree = src_pytree["base"]
+            
+        if hasattr(src_pytree, 'to_pure_dict'):
+            src_pytree = src_pytree.to_pure_dict()
+        elif hasattr(src_pytree, 'to_dict'):
+            src_pytree = src_pytree.to_dict()
         
+        # flatten the Pytree into 1D dictionary like `{"model.layers.0.mlp" : Array}`
         flat_src_tuples = traverse_util.flatten_dict(src_pytree)
         flat_src = {'.'.join(str(k) for k in keys): v for keys, v in flat_src_tuples.items()}
         
@@ -212,15 +181,24 @@ class WeightConverter(abc.ABC):
                 if "layers." in src_key and ".layers_" not in src_key:
                     # Scanned! We need to unstack
                     layer_dim = 1
-                    # fallback to 0 if dimension 1 doesn't make sense for a dense shape
-                    if hasattr(src_val, 'shape') and len(src_val.shape) <= 2:
+                    # fallback to 0 if dimension 1 doesn't make sense (e.g. 1D shape like (layers,))
+                    if hasattr(src_val, 'shape') and len(src_val.shape) == 1:
                         layer_dim = 0
                     
                     if hasattr(src_val, 'shape') and len(src_val.shape) > layer_dim:
                         num_layers = src_val.shape[layer_dim]
+                        
+                        # Download to CPU first to avoid TPU HBM OOM when instantiating new arrays
+                        try:
+                            cpu_src_val = np.asarray(src_val.value) if hasattr(src_val, "value") else np.asarray(src_val)
+                        except TypeError:
+                            cpu_src_val = src_val
+                        
                         for i in range(num_layers):
                             new_key = src_key.replace("layers.", f"layers_{i}.")
-                            unrolled_src[new_key] = np.take(src_val, i, axis=layer_dim)
+                            slices = [slice(None)] * len(cpu_src_val.shape)
+                            slices[layer_dim] = i
+                            unrolled_src[new_key] = cpu_src_val[tuple(slices)]
                     else:
                         unrolled_src[src_key] = src_val
                 else:
@@ -228,8 +206,8 @@ class WeightConverter(abc.ABC):
             flat_src = unrolled_src
         
         dst_dict = {}
-        
         rules_to_apply = list(self.rules)
+        
         if target_state is not None and not self.rules:
             direct_rules = build_converter_rules(src_pytree, target_state)
             print(f"DEBUG: Generated {len(direct_rules)} direct rules.")
@@ -248,29 +226,36 @@ class WeightConverter(abc.ABC):
                 for src_key, src_val in flat_src.items():
                     m = pattern.search(src_key)
                     if m:
-                        # Extract all digits to form a group key for matching multiple source patterns
-                        digits = tuple(re.findall(r'\d+', src_key))
+                        # Extract capture groups to form a group key for matching multiple source patterns
+                        digits = m.groups()
+                        if not digits:
+                            digits = tuple(re.findall(r'\d+', src_key))
+                            
                         if len(rule.source_patterns) == 1:
                             # For single source pattern without groups, just use the string as is to replace
-                            if not digits:
+                            if not digits and not rule.operations:
                                 target_key = pattern.sub(rule.target_pattern, src_key)
                                 dst_dict[target_key] = src_val
                                 break
                             
                         matched_groups[digits].append((i, src_val))
+            if "gate_up_proj" in rule.target_pattern:
+                print(f"DEBUG {rule.target_pattern}: matched_groups: {matched_groups.keys()}", flush=True)
+                for ks in matched_groups.keys():
+                    print(f"DEBUG {rule.target_pattern}: len for {ks} is {len(matched_groups[ks])}", flush=True)
             
             for digits, matched_items in matched_groups.items():
                 # Check if we have all required source patterns matched
                 if len(matched_items) == len(rule.source_patterns):
                     # Sort by index i to pass tensors in the correct order
                     matched_items.sort(key=lambda x: x[0])
-                    tensors = [x[1] for x in matched_items]
+                    tensors = [x[1].value if hasattr(x[1], "value") else x[1] for x in matched_items]
                     
                     # Apply operations
                     result = tensors
                     for op in rule.operations:
                         # inject the correct tp, override the default tp=0
-                        if (isinstance(op, FuseQwen3MoEGateUp) or isinstance(op, FuseQwen3MoEQKV)) and op.tp == 0:
+                        if isinstance(op, _interleave_qkv) and op.tp == 0:
                             op.tp = self.tp
                         result = op(result)
                     
@@ -278,14 +263,34 @@ class WeightConverter(abc.ABC):
                         # Simple renaming with grouped strings e.g. "model.layers.\1.input_layernorm.weight"
                         src_key = next(k for k in flat_src.keys() if source_regexes[0].search(k) and tuple(re.findall(r'\d+', k)) == digits)
                         target_key = source_regexes[0].sub(rule.target_pattern, src_key)
+                        res = result[0] if isinstance(result, list) and len(result) == 1 else result
+                        if target_state is None:
+                            res = jax.device_put(res, jax.devices("cpu")[0])
+                        dst_dict[target_key] = res
                     else:
-                        # Format target pattern
-                        if '{}' in rule.target_pattern:
-                            target_key = rule.target_pattern.format(*digits)
+                        if isinstance(result, dict):
+                            for k_suffix, res_val in result.items():
+                                try:
+                                    formatted_key = rule.target_pattern.format(*(digits + (k_suffix,)))
+                                except IndexError:
+                                    # fallback if target pattern only expects rule groups
+                                    formatted_key = rule.target_pattern.format(*digits) + f".{k_suffix}"
+                                if target_state is None:
+                                    res_val = jax.device_put(res_val, jax.devices("cpu")[0])
+                                dst_dict[formatted_key] = res_val
                         else:
-                            target_key = rule.target_pattern
-                    
-                    dst_dict[target_key] = result[0] if isinstance(result, list) and len(result) == 1 else result
+                            # Format target pattern
+                            if '{}' in rule.target_pattern:
+                                target_key = rule.target_pattern.format(*digits)
+                            else:
+                                target_key = rule.target_pattern
+                        
+                            res = result[0] if isinstance(result, list) and len(result) == 1 else result
+                            if target_state is None:
+                                res = jax.device_put(res, jax.devices("cpu")[0])
+                            if target_key == "lm_head.weight":
+                                print(f"DEBUG WeightConverter lm_head.weight SHAPE BEFORE RETURN: {res.shape}", flush=True)
+                            dst_dict[target_key] = res
 
         target_tuple_map = {}
         if target_state is not None:
@@ -329,10 +334,10 @@ _MODEL_TO_CONVERSION_RULES = {
         Rule(r"decoder\.layers_(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
         Rule([r"decoder\.layers_(\d+)\.self_attention\.out\.kernel"], r"model.layers.{}.self_attn.o_proj.weight", [TransposeAttentionOut()]),
         Rule([r"decoder\.layers_(\d+)\.mlp\.wo(?:\.kernel)?"], r"model.layers.{}.mlp.down_proj.weight", [TransposeAttentionOut()]),
-        Rule([r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"decoder\.layers_(\d+)\.self_attention\.value\.kernel"], r"model.layers.{}.self_attn.qkv_proj.weight", [FuseQwen3MoEQKV(tp=0)]),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"decoder\.layers_(\d+)\.self_attention\.value\.kernel"], r"model.layers.{}.self_attn.qkv_proj.weight", [_interleave_qkv(tp=0)]),
         Rule([r"decoder\.layers_(\d+)\.self_attention\.query_norm\.scale"], r"model.layers.{}.self_attn.q_norm.weight", [TransposeNorm()]),
         Rule([r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale"], r"model.layers.{}.self_attn.k_norm.weight", [TransposeNorm()]),
-        Rule([r"decoder\.layers_(\d+)\.mlp\.wi_0(?:\.kernel)?", r"decoder\.layers_(\d+)\.mlp\.wi_1(?:\.kernel)?"], r"model.layers.{}.mlp.gate_up_proj.weight", [Concatenate(dim=2)]),
+        Rule([r"decoder\.layers_(\d+)\.mlp\.wi_0(?:\.kernel)?", r"decoder\.layers_(\d+)\.mlp\.wi_1(?:\.kernel)?"], r"model.layers.{}.mlp.gate_up_proj.weight", [Concatenate(dim=1), TransposeSingle((1,0))]),
     ],
     "qwen3_moe": [
         Rule(r"token_embedder\.embedding", "model.embed_tokens.weight"),
@@ -342,22 +347,25 @@ _MODEL_TO_CONVERSION_RULES = {
         Rule(r"decoder\.layers_(\d+)\.post_self_attention_layer_norm\.scale", r"model.layers.\1.post_attention_layernorm.weight"),
         Rule([r"decoder\.layers_(\d+)\.self_attention\.out\.kernel"], r"model.layers.{}.self_attn.o_proj.weight", [TransposeAttentionOut()]),
         Rule([r"decoder\.layers_(\d+)\.mlp\.wo(?:\.kernel)?"], r"model.layers.{}.mlp.down_proj.weight", [TransposeAttentionOut()]),
-        Rule([r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"decoder\.layers_(\d+)\.self_attention\.value\.kernel"], r"model.layers.{}.self_attn.qkv_proj.weight", [FuseQwen3MoEQKV(tp=0)]),
+        Rule([r"decoder\.layers_(\d+)\.self_attention\.query\.kernel", r"decoder\.layers_(\d+)\.self_attention\.key\.kernel", r"decoder\.layers_(\d+)\.self_attention\.value\.kernel"], r"model.layers.{}.self_attn.qkv_proj.weight", [_interleave_qkv(tp=0)]),
         Rule([r"decoder\.layers_(\d+)\.self_attention\.query_norm\.scale"], r"model.layers.{}.self_attn.q_norm.weight", [TransposeNorm()]),
         Rule([r"decoder\.layers_(\d+)\.self_attention\.key_norm\.scale"], r"model.layers.{}.self_attn.k_norm.weight", [TransposeNorm()]),
         Rule([r"decoder\.layers_(\d+)\.moe_block\.gate\.kernel"], r"model.layers.{}.mlp.gate.weight", [TransposeSingle(axes=(1, 0))]),
         Rule(
             source_patterns=[r"decoder\.layers_(\d+)\.moe_block\.wo(?:\.kernel)?"],
-            target_pattern="model.layers.{}.mlp.experts.w2_weight",
-            operations=[]
+            target_pattern="model.layers.{}.mlp.experts.down_proj",
+            operations=[TransposeSingle((0, 2, 1))]
         ),
         Rule(
             source_patterns=[
                 r"decoder\.layers_(\d+)\.moe_block\.wi_0(?:\.kernel)?",
                 r"decoder\.layers_(\d+)\.moe_block\.wi_1(?:\.kernel)?"
             ],
-            target_pattern="model.layers.{}.mlp.experts.w13_weight",
-            operations=[FuseQwen3MoEGateUp(tp=0)] # tp is dynamically injected after this
+            target_pattern="model.layers.{}.mlp.experts.gate_up_proj",
+            operations=[
+                Concatenate(dim=2),
+                TransposeSingle((0, 2, 1))
+            ]
         )
     ]
 }
