@@ -177,7 +177,7 @@ def main(argv: Sequence[str]) -> None:
   # Prefill
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
-    with jax.profiler.StepTraceAnnotation("prefill", stream=i):
+    with jax.profiler.StepTraceAnnotation("prefill", step_num=i):
       prefill_result, first_token = engine.prefill(
           params=params,
           padded_tokens=tokens,
@@ -211,7 +211,7 @@ def main(argv: Sequence[str]) -> None:
   sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
   for i in steps:
     rng, rng_generate = jax.random.split(rng)
-    with jax.profiler.StepTraceAnnotation("generate", step=i):
+    with jax.profiler.StepTraceAnnotation("generate", step_num=i):
       decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
 
     # Automatically deactivate profiler after profiler_steps steps
