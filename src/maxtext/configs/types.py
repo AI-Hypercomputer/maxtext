@@ -1585,6 +1585,10 @@ class TrainingLoop(BaseModel):
       description="Total number of training steps. -1 defaults to learning_rate_schedule_steps.",
   )
   log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush Tensorboard.")
+  eval_start_step: int = Field(
+      0,
+      description="Start evaluation after training step is >= eval_start_step.",
+  )
   eval_interval: int = Field(
       -1,
       description="Run evaluation every N training steps. -1 disables interval-based evaluation.",
