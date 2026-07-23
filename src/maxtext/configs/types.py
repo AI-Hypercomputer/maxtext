@@ -856,6 +856,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
   )
+  ragged_sort_use_single_sparsecore: bool = Field(
+      False,
+      description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",

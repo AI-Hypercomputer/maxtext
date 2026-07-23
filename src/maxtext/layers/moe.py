@@ -917,6 +917,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -1005,6 +1006,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -1069,6 +1071,7 @@ class RoutedMoE(nnx.Module):
       use_custom_sort_vjp=True,
       use_ragged_sort=False,
       ragged_buffer_factor=-1.0,
+      use_single_sparsecore=False,
   ):
     """Permutes tokens locally within an expert shard.
 
@@ -1152,7 +1155,12 @@ class RoutedMoE(nnx.Module):
       # the worst-case ragged buffer. Restricting the gather to that prefix
       # makes both forward and backward proportional to the routed token count.
       valid_end = jnp.sum(local_group_size).astype(jnp.int32)
-      sorted_inputs = a2a_ragged_sort(inputs, sorted_indices, valid_end)
+      sorted_inputs = a2a_ragged_sort(
+          inputs,
+          sorted_indices,
+          valid_end,
+          use_single_sparsecore=use_single_sparsecore,
+      )
     else:
       sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
     sorted_experts_ids = expert_indices[sorted_indices]
@@ -1762,6 +1770,7 @@ class RoutedMoE(nnx.Module):
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.config.ragged_buffer_factor,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
@@ -1774,6 +1783,7 @@ class RoutedMoE(nnx.Module):
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.config.ragged_buffer_factor,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
 
       return (
@@ -1959,6 +1969,7 @@ class RoutedMoE(nnx.Module):
               intermediate_output,
               jnp.argsort(route_metadata.local_sorted_indices),  # pylint: disable=undefined-variable
               valid_end,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
           local_output = _sort_activations(

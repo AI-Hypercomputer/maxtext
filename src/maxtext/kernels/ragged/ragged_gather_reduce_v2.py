@@ -625,7 +625,14 @@ def main_kernel(
 
 
 @functools.partial(
-    jax.jit, static_argnames=("reduce_group_size", "enforce_fallback", "flops_override", "bytes_accessed_override")
+    jax.jit,
+    static_argnames=(
+        "reduce_group_size",
+        "enforce_fallback",
+        "flops_override",
+        "bytes_accessed_override",
+        "use_single_sparsecore",
+    ),
 )
 def ragged_gather_reduce(
     x: jax.Array,
@@ -636,6 +643,7 @@ def ragged_gather_reduce(
     enforce_fallback: bool = False,
     flops_override: int = -1,
     bytes_accessed_override: int = -1,
+    use_single_sparsecore: bool = False,
 ) -> jax.Array:
   """Gathers ``x`` by ``indices``, weights and masks, then reduces by group.
 
@@ -673,7 +681,8 @@ def ragged_gather_reduce(
   input_size = indices.size
   num_simd_lanes = sc_info.num_lanes
   num_lanes = pltpu.get_tpu_info().num_lanes
-  num_cores = sc_info.num_cores * sc_info.num_subcores
+  num_sc_cores = 1 if use_single_sparsecore else sc_info.num_cores
+  num_cores = num_sc_cores * sc_info.num_subcores
 
   num_column_partitions = _calculate_num_column_partitions(hidden_size, input_size, num_cores, num_lanes, num_simd_lanes)
   num_row_partitions = num_cores // num_column_partitions
@@ -711,7 +720,7 @@ def ragged_gather_reduce(
 
   # Step 4: Launch the SparseCore kernel.
   vector_mesh = plsc.VectorSubcoreMesh(
-      num_cores=sc_info.num_cores,
+      num_cores=num_sc_cores,
       num_subcores=sc_info.num_subcores,
       core_axis_name="core",
       subcore_axis_name="subcore",
