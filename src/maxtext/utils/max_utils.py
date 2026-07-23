@@ -130,6 +130,15 @@ def device_space():
     return jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access # pytype: disable=module-attr
 
 
+def host_space():
+  """Version guard for jax.memory.Space.Host."""
+  # See b/436565838 for more.
+  if Version(jax.__version__) >= Version("0.7.1"):
+    return jax.memory.Space.Host  # pytype: disable=module-attr
+  else:
+    return jax._src.sharding_impls.TransferToMemoryKind("pinned_host")  # pylint: disable=protected-access # pytype: disable=module-attr
+
+
 def calculate_total_params_per_chip(params):
   """Calculate total params per chip."""
 

@@ -272,6 +272,74 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         "Gradients do not match for vocab tiling when z-loss is enabled.",
     )
 
+  @pytest.mark.cpu_only
+  def test_vocab_tiling_gradient_param_host_offload(self):
+    """
+    Tests loss and gradient correctness when parameters are offloaded to host,
+    comparing on-device computation vs. host-offloaded computation.
+    """
+    cfg = pyconfig.initialize(
+        self.base_config,
+        run_name="grad_test_vt_no_offload",
+        enable_checkpointing=False,
+        enable_dropout=False,
+        max_target_length=self.seq_len,
+        per_device_batch_size=self.batch_size,
+        logits_via_embedding=False,
+        base_num_decoder_layers=0,
+        dtype="float32",
+        matmul_precision="high",
+        num_vocab_tiling=4,
+    )
+    quant = quantizations.configure_quantization(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    model = models.transformer_as_linen(cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+
+    rng_model, rng_targets = jax.random.split(self.rng)
+
+    params = model.init(
+        {"params": rng_model, "dropout": rng_model},
+        self.dummy_inputs,
+        self.dummy_inputs,
+    )
+
+    data = {
+        "targets": jax.random.randint(rng_targets, (self.batch_size, self.seq_len), 0, cfg.vocab_size),
+        "targets_segmentation": jnp.ones((self.batch_size, self.seq_len)),
+    }
+
+    loss_ref, grads_ref = self.get_grads(cfg, params, data)
+
+    cfg_offload = pyconfig.initialize(
+        self.base_config,
+        run_name="grad_test_vt_param_host_offload",
+        enable_checkpointing=False,
+        enable_dropout=False,
+        max_target_length=self.seq_len,
+        per_device_batch_size=self.batch_size,
+        logits_via_embedding=False,
+        base_num_decoder_layers=0,
+        dtype="float32",
+        matmul_precision="high",
+        num_vocab_tiling=4,
+        parameter_memory_host_offload=True,
+    )
+    params_host = jax.device_put(params, max_utils.host_space())
+    loss_offload, grads_offload = self.get_grads(cfg_offload, params_host, data)
+    # Gradients are in the primals' host memory space; move to device to compare.
+    grads_offload = jax.device_put(grads_offload, max_utils.device_space())
+
+    # Loss correctness test
+    assert jnp.allclose(loss_ref, loss_offload, rtol=self.rtol), "Losses do not match with parameter host offload."
+
+    # Gradient correctness test
+    self.assert_pytrees_all_close(
+        grads_ref,
+        grads_offload,
+        "Gradients do not match for vocab tiling with parameter host offload.",
+    )
+
   @pytest.mark.tpu_only
   def test_vocab_tiling_nnx_loss(self):
     """
