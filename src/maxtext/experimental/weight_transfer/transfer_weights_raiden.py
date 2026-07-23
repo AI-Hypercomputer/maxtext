@@ -324,13 +324,6 @@ def transfer_and_benchmark(
 
   start_req = build_resharding_start_request(flat_src, src_sharding, dst_sharding, args.dest_ip, args.dest_port)
 
-  dev_runtime = list(flat_src[0].devices())[0].client.runtime_type
-  print(
-      f"DEBUG ARRAY DIAGNOSTICS: type={type(flat_src[0])},"
-      f" devices={[d.platform for d in flat_src[0].devices()]},"
-      f" dev_client_runtime_type={dev_runtime}"
-  )
-
   for w in range(args.warmup_iterations):
     syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=args.source_ip)
     syncer_dst = weight_synchronizer.WeightSynchronizer(flat_dst_init, local_port=args.dest_port + w)

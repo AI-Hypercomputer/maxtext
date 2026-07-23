@@ -54,16 +54,19 @@ class TestTpuRaidenPy312StructOffset(unittest.TestCase):
     tpu_array = jax.device_put(jnp.ones((64, 128), dtype=jnp.float32), sharding)
     tpu_array.block_until_ready()
 
+    # pylint: disable-next=protected-access
+    raw_array = tpu_array._arrays[0] if hasattr(tpu_array, "_arrays") else tpu_array
     dev = list(tpu_array.devices())[0]
-    runtime_type = getattr(dev.client, "runtime_type", "N/A")
+    ifrt_runtime_type = getattr(dev.client, "runtime_type", "N/A")
 
-    print(f"Array Type     : {type(tpu_array)}")
-    print(f"Device Platform: {dev.platform}")
-    print(f"Runtime Type   : {runtime_type}")
+    print(f"JAX Array Outer Type : {type(tpu_array)}")
+    print(f"PyArrayObject Type   : {type(raw_array)}")
+    print(f"Device Platform      : {dev.platform}")
+    print(f"ifrt_array->client()->runtime_type(): {ifrt_runtime_type}")
     print("=======================================================")
 
     # Verification: Runtime type is pjrt_ifrt on physical TPU
-    self.assertEqual(runtime_type, "pjrt_ifrt")
+    self.assertEqual(ifrt_runtime_type, "pjrt_ifrt")
 
     # In Python 3.12, PyArrayObject struct offset mismatch causes
     # storage->ifrt_array.get() to read invalid memory, throwing
