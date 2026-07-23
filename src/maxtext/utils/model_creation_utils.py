@@ -1095,12 +1095,15 @@ def from_pretrained(
       # Skip transient runtime variables (RngState, Cache, Intermediate, BatchStat) — they hold runtime state
       # that is not present in the checkpoint and must remain valid after the restore.
       def _free_device_memory(path, node):
-        # Check if the path contains any name containing 'custom' which indicates a customized layer
-        # If yes, skip freeing device memory for this node and its children so they can be initialized with random values
-        is_custom = any('custom_linear' in str(getattr(p, 'key', p)) for p in path)
-        if isinstance(node, nnx.Variable) and not isinstance(
-            node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)
-        ) and not is_custom:
+        # Check if the path contains any name containing 'custom' which indicates a customized layer.
+        # If yes, skip freeing device memory for this node and its children so they can be
+        # initialized with random values.
+        is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
+        if (
+            isinstance(node, nnx.Variable)
+            and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+            and not is_custom
+        ):
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
           # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale

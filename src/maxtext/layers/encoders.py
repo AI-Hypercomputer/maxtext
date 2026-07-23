@@ -99,7 +99,8 @@ class VisionEncoder(nnx.Module):
     vision_projector_type_config = getattr(self.config, "vision_projector_type", "default")
     if vision_projector_type_config == "customized_mlp":
       setattr(
-          self, projector_name,
+          self,
+          projector_name,
           MultimodalMLPProjector(config=self.config, mesh=self.mesh, rngs=self.rngs),
       )
 
@@ -185,11 +186,13 @@ class MultimodalMLPProjector(nnx.Module):
           weight_dtype=config.weight_dtype,
           matmul_precision=config.matmul_precision,
           use_bias=self.use_bias,
-          kernel_init=lambda key, shape, dtype, *args, **kwargs: jax.nn.initializers.normal(stddev=0.02)(key, shape, dtype),
+          kernel_init=lambda key, shape, dtype, *args, **kwargs: jax.nn.initializers.normal(
+              stddev=0.02
+          )(key, shape, dtype),
           kernel_axes=("embed", "mlp"),
           rngs=rngs,
       )
-      
+
       setattr(self, f"custom_linear_{i}", layer)
       current_in = current_out
 

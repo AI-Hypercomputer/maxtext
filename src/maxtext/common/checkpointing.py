@@ -90,15 +90,16 @@ def _expected_and_restored_params(abstract_nnx_state, restored_linen):
 
 
 def _is_custom_vision_projector_problem(path: str, want: dict) -> bool:
-  """Returns True if a weight mismatch belongs to a newly attached custom vision projector.
-  """
+  """Returns True if a weight mismatch belongs to a newly attached custom vision projector."""
   parts = [p for p in path.replace(".", "/").split("/") if p and p != "params"]
   if len(parts) >= 2 and parts[0] == "vision_encoder":
     proj_name = parts[1]
     proj_dict = want.get("vision_encoder", {}).get(proj_name, {})
     if isinstance(proj_dict, dict) and any("custom_linear" in k for k in proj_dict.keys()):
-      print(f"===Warning: weight mismatch found in custom vision projector: {proj_name}.\n"
-            f"Its weights will be randomly initialized. Make sure this is intended===")
+      print(
+          f"===Warning: weight mismatch found in custom vision projector: {proj_name}.\n"
+          f"Its weights will be randomly initialized. Make sure this is intended==="
+      )
       return True
   return False
 
@@ -117,10 +118,7 @@ def _raise_on_weight_mismatch(want, have):
   # Ignore expected weight mismatches from custom vision projectors (e.g., custom_linear).
   # So the projector weights will be randomly initialized by the model, rather than
   # loaded from the checkpoint (see `model_creation_utils._free_device_memory`).
-  problems = [
-      (p, why) for p, why in problems
-      if not _is_custom_vision_projector_problem(p, want)
-  ]
+  problems = [(p, why) for p, why in problems if not _is_custom_vision_projector_problem(p, want)]
 
   if not problems:
     return
