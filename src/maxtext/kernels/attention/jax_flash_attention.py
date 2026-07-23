@@ -16,8 +16,15 @@
 from typing import Optional, Tuple, Union
 
 import jax
+from jax.experimental import layout
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from jax.experimental.xla_metadata import must_fuse_call
 import jax.numpy as jnp
 from maxtext.kernels.attention import splash_attention_kernel
+
+
+DLL = layout.Layout
+Layout = layout.Format
 
 SegmentIds = splash_attention_kernel.SegmentIds
 
@@ -35,7 +42,7 @@ def flash_attention_block_masked(
     segment_ids: SegmentIds | None,
     block_kv: int,
     block_q: int,
-    mask: jnp.ndarray,
+    mask: mask_lib.Mask,
     mask_value: float,
     cap: Optional[float] = None,
     save_residuals: bool = False,
@@ -91,15 +98,39 @@ def flash_attention_block_masked(
   num_kv_blocks = kv_seq_len // block_kv
   num_q_blocks = q_seq_len // block_q
 
+  mask_array = mask[:, :]
   # Before applying the segment mask, we need to broadcast the mask in batch
   # dimension since we have same logic for all batches.
-  mask_full = jnp.broadcast_to(mask[None, :, :], (batch_size, q_seq_len, kv_seq_len))
+  mask_full = jnp.broadcast_to(mask_array[None, :, :], (batch_size, q_seq_len, kv_seq_len))
 
   if segment_ids is not None:
     segment_ids_q = segment_ids.q[:, :, None]
     segment_ids_kv = segment_ids.kv[:, None, :]
     mask_full = jnp.logical_and(mask_full, segment_ids_q == segment_ids_kv)
-  mask_blocked = jax.jit(mask_blocker, static_argnums=[1, 2])(mask_full, block_q, block_kv)
+
+  if isinstance(mask, mask_lib.CausalMask):
+    # In the case of a causal mask, the compute_attention_block should be executed
+    # if the current block (i, j) falls within the lower triangle. This means that
+    # the maximum query index in block i must be greater than or equal to the
+    # minimum key/value index in block j.
+    # Max q_idx in block i: (i + 1) * block_q - 1
+    # Min kv_idx in block j: j * block_kv
+    # Condition: (i + 1) * block_q - 1 >= j * block_kv
+    # Which simplifies to: (i + 1) * block_q > j * block_kv
+    should_compute_block = lambda i, j: (i + 1) * block_q > j * block_kv
+  else:
+    mask_blocked = jax.jit(mask_blocker, static_argnums=[1, 2])(
+        mask_full, block_q, block_kv
+    )
+
+    def should_compute_block(i, j):
+      mask_i_j_slice = jax.lax.dynamic_slice(
+          mask_blocked, (0, i, j), (batch_size, 1, 1)
+      )
+      # The compute_attention_block should be executed if at least one element
+      # in the slice is non-zero, meaning at least one batch requires work for
+      # this block.
+      return jnp.any(jnp.not_equal(mask_i_j_slice, 0))
 
   # Initialize `l` (logsumexp) and `m` (max_logits) for the online softmax.
   # `l` is initialized to 0 since no blocks have been processed yet and the sum
@@ -127,15 +158,10 @@ def flash_attention_block_masked(
   # Outer loop over the key/value blocks.
   def outer_loop_body(j, carried):
     output, l, m = carried
-    k_j_slice = jax.lax.dynamic_slice_in_dim(k, j * block_kv, block_kv, axis=-2)
-    v_j_slice = jax.lax.dynamic_slice_in_dim(v, j * block_kv, block_kv, axis=-2)
 
     # Inner loop over the query blocks.
     def inner_loop_body(i, carried_inner):
       output, l, m = carried_inner
-
-      # let's get the slice of Q in N dimension
-      q_slice = jax.lax.dynamic_slice_in_dim(q, i * block_q, block_q, axis=-2)
 
       # Calculates the attention computation (Q@K.T)@V with online softmax for
       # the current query and key/value blocks.
@@ -143,12 +169,6 @@ def flash_attention_block_masked(
         output_i_slice = jax.lax.dynamic_slice_in_dim(output, i * block_q, block_q, axis=-2)
         l_i_slice = jax.lax.dynamic_slice_in_dim(l, i * block_q, block_q, axis=-1)
         m_i_slice = jax.lax.dynamic_slice_in_dim(m, i * block_q, block_q, axis=-1)
-        s_i_j = jnp.einsum(
-            "bxhqc,bxkc->bxhqk",
-            q_slice,
-            k_j_slice,
-            preferred_element_type=data_type,
-        )
         full_mask_i_j_slice = jax.lax.dynamic_slice(
             mask_full,
             (0, i * block_q, j * block_kv),
@@ -159,12 +179,41 @@ def flash_attention_block_masked(
             (batch_size, num_kv_heads, q_groups, block_q, block_kv),
         )
 
+        k_j_slice = jax.lax.dynamic_slice_in_dim(k, j * block_kv, block_kv, axis=-2)
+        v_j_slice = jax.lax.dynamic_slice_in_dim(v, j * block_kv, block_kv, axis=-2)
+
+        # let's get the slice of Q in N dimension
+        q_slice = jax.lax.dynamic_slice_in_dim(q, i * block_q, block_q, axis=-2)
+
+        s_i_j_dup = jnp.einsum(
+            "bxhqc,bxkc->bxhqk",
+            q_slice,
+            k_j_slice,
+            preferred_element_type=data_type,
+        )
+        s_i_j_dup = jnp.where(broadcasted_mask, s_i_j_dup, mask_value)
         if cap is not None:
-          s_i_j = jnp.tanh(s_i_j / cap)
-          s_i_j = s_i_j * cap
-        s_i_j = jnp.where(broadcasted_mask, s_i_j, mask_value)
-        m_i_j = s_i_j.max(axis=-1)
-        p_i_j = jnp.exp(s_i_j - m_i_j[..., None])
+          s_i_j_dup = jnp.tanh(s_i_j_dup / cap)
+          s_i_j_dup = s_i_j_dup * cap
+        m_i_j = s_i_j_dup.max(axis=-1)
+
+        def fuse_this(q_slice, k_j_slice, mask_value, broadcasted_mask, m_i_j):
+          s_i_j = jnp.einsum(
+              "bxhqc,bxkc->bxhqk",
+              q_slice,
+              k_j_slice,
+              preferred_element_type=jnp.bfloat16,
+          )
+          s_i_j = jnp.where(broadcasted_mask, s_i_j, mask_value)
+          if cap is not None:
+            s_i_j = jnp.tanh(s_i_j / cap)
+            s_i_j = s_i_j * cap
+          p_i_j = jnp.exp(s_i_j - m_i_j[..., None])
+          return p_i_j
+
+        p_i_j = must_fuse_call("1")(fuse_this)(
+            q_slice, k_j_slice, mask_value, broadcasted_mask, m_i_j
+        )
         l_i_j = p_i_j.sum(axis=-1)
         assert m_i_j.shape == m_i_slice.shape
         m_i_new = jnp.maximum(m_i_slice, m_i_j)
@@ -173,13 +222,23 @@ def flash_attention_block_masked(
         l_i_new = m_i_difference * l_i_slice + m_i_j_difference * l_i_j
 
         divider = l_i_new[..., None]
-        numerator = l_i_slice[..., None] * m_i_difference[..., None] * output_i_slice + m_i_j_difference[
-            ..., None
-        ] * jnp.einsum(
+        pv = jnp.einsum(
             "bxhqk,bxkc->bxhqc",
             p_i_j,
             v_j_slice,
             preferred_element_type=data_type,
+        )
+        # This forces the layout of the final @V to have better utilization by
+        # avoiding using XLU:
+        # Changes conv emitter type from
+        # EmitAllInputFeatureInSublanesOutputBatchInSublanesXposeReuse to
+        # EmitInputBatchInLanes
+        pv = layout.with_layout_constraint(
+            pv, DLL(major_to_minor=(0, 1, 2, 4, 3))
+        )
+        numerator = (
+            l_i_slice[..., None] * m_i_difference[..., None] * output_i_slice
+            + m_i_j_difference[..., None] * pv
         )
 
         output_i_slice_new = numerator / divider
@@ -193,13 +252,8 @@ def flash_attention_block_masked(
 
         return output, l, m
 
-      batch_size = mask_blocked.shape[0]
-      mask_i_j_slice = jax.lax.dynamic_slice(mask_blocked, (0, i, j), (batch_size, 1, 1))
-      # The compute_attention_block should be executed if at least one element
-      # in the slice is non-zero, meaning at least one batch requires work for
-      # this block.
       output, l, m = jax.lax.cond(
-          jnp.any(jnp.not_equal(mask_i_j_slice, 0)),
+          should_compute_block(i, j),
           compute_attention_block,
           identity,
           output,
