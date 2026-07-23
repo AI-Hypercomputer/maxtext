@@ -22,6 +22,7 @@ from typing import Any, Sequence
 import datetime
 import functools
 import os
+import threading
 
 from absl import app
 
@@ -29,10 +30,22 @@ from absl import app
 import optax
 
 import pathwaysutils  # pylint: disable=unused-import
+from pathwaysutils.debug import watchdog
 
 import tensorflow as tf
 
 import jax
+
+# Force initialization of JAX platforms (including pathways if JAX_PLATFORMS is set)
+# to register their absl flags before app.run() parses flags.
+try:
+  jax.devices()
+except Exception as e:  # pylint: disable=broad-except
+  import sys
+
+  print(
+      f"WARNING: JAX initialization failed during import: {e}", file=sys.stderr
+  )
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
@@ -43,11 +56,12 @@ from flax.nnx import variablelib
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import EPS
 from maxtext.utils import elastic_utils
+
 # Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
-from maxtext.common import checkpointing, profiler
+from maxtext.common import checkpointing, profiler, train_state_nnx
 from maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,
@@ -72,13 +86,46 @@ from maxtext.utils import train_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
 
+import logging
+from maxtext.utils.snapshot import Snapshotter
+from pathwaysutils.elastic import manager as pathways_manager
+from pathwaysutils.elastic import elastic
+
+_logger = logging.getLogger(__name__)
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
+
+
+def debug_print_pytree(name, tree):
+  import numpy as np
+
+  def debug_print_leaf(path, x):
+    if isinstance(x, jax.Array):
+      try:
+        val = np.array(x)
+        _logger.warning(
+            f"DEBUG {name}: {path} -> sharding: {x.sharding}, val: {val}"
+        )
+      except Exception as e:
+        _logger.error(
+            f"DEBUG {name} ERROR: {path} -> sharding: {x.sharding}, error: {e}"
+        )
+        if hasattr(x.sharding, "device_set"):
+          _logger.error(
+              f"DEBUG {name} ERROR: {path} -> sharding devices:"
+              f" {x.sharding.device_set}"
+          )
+    else:
+      _logger.warning(f"DEBUG {name}: {path} -> type: {type(x)}, val: {x}")
+
+  jax.tree_util.tree_map_with_path(debug_print_leaf, tree)
 
 
 def get_first_step(model, state):
   if isinstance(model, nn.Module):
     return int(state.step)
-  if hasattr(state, "inner_state"):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
+  if hasattr(
+      state, "inner_state"
+  ):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
     return int(state.step.get_value())
   return int(state.optimizer.step.get_value())
 
@@ -88,20 +135,24 @@ def get_first_step(model, state):
 # -----------------------------------------------------------------------------
 
 
-def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True):
+def loss_fn(
+    model, config, data, dropout_rng, params, sparsity_state=None, is_train=True
+):
   """loss_fn for both train and eval.
 
   Args:
     model: A nn.Module (Linen) or nnx.Module (NNX).
     config: Config of parameters
     data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout (Linen); unused for NNX.
+    dropout_rng: A key to use to generate rng for dropout (Linen); unused for
+      NNX.
     params: Model params (Linen); unused for NNX (params are part of the model).
     is_train: True for train_step and False for eval_step
 
   Returns:
     loss: average loss
-    aux: a dictionary including intermediate_outputs, xent_sum, and total_weights
+    aux: a dictionary including intermediate_outputs, xent_sum, and
+    total_weights
   """
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
@@ -120,7 +171,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # make its specific collection mutable so the MTPBlock can sow into it.
   if config.mtp_eval_target_module > 0 and not is_train:
     mutable_collections.append("mtp_acceptance")
-  sparsity_enabled = is_train and config.weight_sparsity_n and config.weight_sparsity_m
+  sparsity_enabled = (
+      is_train and config.weight_sparsity_n and config.weight_sparsity_m
+  )
   if sparsity_enabled:
     mutable_collections.append("batch_stats")
   if isinstance(model, nn.Module):
@@ -143,7 +196,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
-        encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
+        encoder_image_masks=data["image_masks"]
+        if config.use_multimodal and "image_masks" in data
+        else None,
         enable_dropout=config.enable_dropout if is_train else False,
         rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
         mutable=mutable_collections,
@@ -158,11 +213,17 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       total_z_loss = 0.0
     elif config.num_vocab_tiling > 1:
       hidden_state_key = ("intermediates", "decoder", "hidden_states")
-      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
-      xent_sum, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
+      hidden_states = maxtext_utils.get_nested_value(
+          intermediate_outputs, hidden_state_key
+      )[0]
+      xent_sum, total_z_loss = vocab_tiling_linen_loss(
+          hidden_states, data, config, model, params, is_train
+      )
     else:
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-      xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
+      xent, z_loss = max_utils.cross_entropy_with_logits(
+          logits, one_hot_targets, z_loss=config.z_loss_multiplier
+      )
 
       xent = sharding.maybe_shard_with_logical(
           xent,
@@ -192,7 +253,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_positions=data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
-        encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
+        encoder_image_masks=data["image_masks"]
+        if config.use_multimodal and "image_masks" in data
+        else None,
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
@@ -221,11 +284,17 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       total_z_loss = 0.0
     elif config.num_vocab_tiling > 1:
       hidden_state_key = ("decoder", "hidden_states")
-      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
-      xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
+      hidden_states = maxtext_utils.get_nested_value(
+          intermediate_outputs, hidden_state_key
+      )[0]
+      xent_sum, total_z_loss = vocab_tiling_nnx_loss(
+          model, hidden_states, data, config, is_train
+      )
     else:
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-      xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
+      xent, z_loss = max_utils.cross_entropy_with_logits(
+          logits, one_hot_targets, z_loss=config.z_loss_multiplier
+      )
 
       xent = sharding.maybe_shard_with_logical(
           xent,
@@ -258,7 +327,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # Zero1+GA to reduce communication overhead.
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
-  if config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation:
+  if (
+      config.gradient_accumulation_steps > 1
+      and not config.use_tunix_gradient_accumulation
+  ):
     loss = xent_sum
   else:
     # When using Tunix gradient accumulation, we revert to standard normalization.
@@ -279,7 +351,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # get indexer loss
   indexer_loss = 0.0
   if config.use_indexer and config.indexer_loss_scaling_factor > 0.0:
-    indexer_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "self_attention", "indexer_loss")
+    indexer_losses = maxtext_utils.collect_intermediates_by_suffix(
+        intermediate_outputs, "self_attention", "indexer_loss"
+    )
     if indexer_losses:
       indexer_loss = jnp.mean(jnp.concatenate(indexer_losses))
       loss += indexer_loss
@@ -289,7 +363,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # get MoE load balance loss
   moe_lb_loss = 0.0
   if config.num_experts > 1:
-    moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
+    moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(
+        intermediate_outputs, "moe_lb_loss"
+    )
     if moe_lb_losses:
       moe_lb_loss = jnp.mean(jnp.concatenate(moe_lb_losses))
       loss += moe_lb_loss
@@ -300,8 +376,15 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   moe_bias_updates = None
   if config.routed_bias and config.routed_bias_update_rate > 0.0:
     if isinstance(model, nn.Module):
-      nested_key = ("intermediates", "decoder", "moe_layers", "moe_bias_updates")
-      moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
+      nested_key = (
+          "intermediates",
+          "decoder",
+          "moe_layers",
+          "moe_bias_updates",
+      )
+      moe_bias_updates = maxtext_utils.get_nested_value(
+          intermediate_outputs, nested_key, None
+      )
     else:
       # NNX intermediates are model-rooted (no "intermediates" prefix), so match by
       # suffix instead. Unlike collect_intermediates_by_suffix we must not ravel:
@@ -309,8 +392,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       moe_bias_updates = next(
           (
               val
-              for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs)
-              if tuple(k.key for k in path if hasattr(k, "key"))[-1:] == ("moe_bias_updates",)
+              for path, val in jax.tree_util.tree_leaves_with_path(
+                  intermediate_outputs
+              )
+              if tuple(k.key for k in path if hasattr(k, "key"))[-1:]
+              == ("moe_bias_updates",)
           ),
           None,
       )
@@ -332,22 +418,36 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "indexer_loss": indexer_loss,
       "moe_bias_updates": moe_bias_updates,
       "mtp_loss": mtp_loss,
-      "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
+      "batch_stats": (
+          intermediate_outputs.get("batch_stats", None)
+          if hasattr(intermediate_outputs, "get")
+          else None
+      ),
   }
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
+def train_step(
+    model,
+    config,
+    state_mesh_shardings,
+    params_shardings,
+    state,
+    data,
+    dropout_rng=None,
+):
   """Training step for both Linen and NNX models.
 
   Args:
     model: A nn.Module (Linen) or nnx.GraphDef of the TrainStateNNX (NNX).
     config: Hyperparameters.
     state_mesh_shardings: PyTree of PartitionSpecs for the train state.
-    params_shardings: PyTree of PartitionSpecs for model parameters, used for gradient accumulation.
+    params_shardings: PyTree of PartitionSpecs for model parameters, used for
+      gradient accumulation.
     state: Linen TrainState or NNX pure State.
     data: Training data batch.
-    dropout_rng: A key to use to generate rng for dropout (Linen); unused for NNX.
+    dropout_rng: A key to use to generate rng for dropout (Linen); unused for
+      NNX.
 
   Returns:
     new_state: Updated Linen TrainState or NNX pure State.
@@ -376,7 +476,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if isinstance(model, nn.Module):
       if config.shard_optimizer_over_data:
         params = jax.tree.map(
-            functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+            functools.partial(
+                sharding.maybe_shard_with_name, shard_mode=config.shard_mode
+            ),
             params,  # pyrefly: ignore[unbound-name]
             params_shardings,
         )
@@ -395,9 +497,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           is_train=True,
       )
     else:
-      owg_type = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
+      owg_type = variablelib.variable_type_from_name(
+          "_overwrite_with_gradient", allow_register=True
+      )
       custom_param_filter = nnx.Any(owg_type)
-      model_graphdef, curr_params, custom_params, rest = nnx.split(state.model, nnx.Param, custom_param_filter, ...)
+      model_graphdef, curr_params, custom_params, rest = nnx.split(
+          state.model, nnx.Param, custom_param_filter, ...
+      )
       if config.parameter_memory_host_offload:
         # Params are kept on host (pinned_host) in in_shardings. Move only Param
         # variables to device before the forward/backward pass so that all dot_general
@@ -410,23 +516,35 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             is_leaf=lambda x: isinstance(x, NamedSharding),
         )
         curr_params = jax.device_put(curr_params, device_param_shardings)
-        nnx.update(state.model, curr_params)  # ensure state.model has device params for optimizer update
+        nnx.update(
+            state.model, curr_params
+        )  # ensure state.model has device params for optimizer update
       if config.shard_optimizer_over_data:
         curr_params = jax.tree.map(
-            functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+            functools.partial(
+                sharding.maybe_shard_with_name, shard_mode=config.shard_mode
+            ),
             curr_params,
             params_shardings,
         )
         nnx.update(state.model, curr_params)
 
       def diff_wrapper(curr_params, custom_params, rest, config, data):
-        local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
-        loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
-        _, _, _, new_rest = nnx.split(local_model, nnx.Param, custom_param_filter, ...)
+        local_model = nnx.merge(
+            model_graphdef, curr_params, custom_params, rest, copy=True
+        )
+        loss, aux = loss_fn(
+            local_model, config, data, None, None, is_train=True
+        )
+        _, _, _, new_rest = nnx.split(
+            local_model, nnx.Param, custom_param_filter, ...
+        )
         return loss, (aux, new_rest)
 
       grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
-      (loss, (aux, new_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
+      (loss, (aux, new_rest)), (raw_grads, custom_grads) = grad_func(
+          curr_params, custom_params, rest, config, data
+      )
       nnx.update(state.model, nnx.State.merge(custom_grads, new_rest))
 
   raw_grads = jax.tree_util.tree_map(
@@ -452,7 +570,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   if isinstance(model, nn.Module):
     if config.gradient_clipping_threshold > 0:
-      grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
+      grads = maxtext_utils.apply_gradient_clipping(
+          raw_grads, state, config.gradient_clipping_threshold
+      )
     else:
       grads = raw_grads
     if config.optimizer_memory_host_offload:
@@ -467,7 +587,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       )
     # Move all parameters to device before optimizer update
     if config.parameter_memory_host_offload:
-      max_logging.log("\nMoving all parameters to device before optimizer update")
+      max_logging.log(
+          "\nMoving all parameters to device before optimizer update"
+      )
 
       def move(path, value):
         max_logging.log(f"train.py: Moving f{path} to device")
@@ -476,7 +598,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       state = state.replace(
           params=jax.device_put(
               state.params,
-              jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
+              jax.tree_util.tree_map_with_path(
+                  move, state_mesh_shardings.params
+              ),
           )
       )
     # Re-wrap grads to match state.params structure if it's a dict of collections
@@ -485,7 +609,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if sparsity_enabled:
       full_grads = {"params": grads}
       if "batch_stats" in state.params:
-        batch_stats_grads = jax.tree_util.tree_map(jnp.zeros_like, state.params.get("batch_stats", {}))
+        batch_stats_grads = jax.tree_util.tree_map(
+            jnp.zeros_like, state.params.get("batch_stats", {})
+        )
         full_grads["batch_stats"] = batch_stats_grads
       full_grads = max_utils.unbox_logicallypartioned(full_grads)
     else:
@@ -494,7 +620,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if getattr(config, "skip_step_on_spikes", False):
       grad_norm = max_utils.l2norm_pytree(grads)
       # TrainState.apply_gradients doesn't pass **kwargs to tx.update, so we unpack it manually.
-      updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params, loss=loss, grad_norm=grad_norm)
+      updates, new_opt_state = state.tx.update(
+          grads, state.opt_state, state.params, loss=loss, grad_norm=grad_norm
+      )
       new_params = optax.apply_updates(state.params, updates)
 
       new_state = state.replace(
@@ -506,14 +634,30 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       new_state = state.apply_gradients(grads=full_grads)
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
-    if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
-      target_path = ("params", "decoder", "moe_layers", "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "bias")
+    if (
+        config.routed_bias
+        and config.routed_bias_update_rate > 0.0
+        and moe_bias_updates is not None
+    ):
+      target_path = (
+          "params",
+          "decoder",
+          "moe_layers",
+          "DeepSeekMoeBlock_0",
+          "MoeBlock_0",
+          "gate",
+          "bias",
+      )
       # Updates the shape to be aligned with state.
       moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
-      new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)
+      new_state = maxtext_utils.update_state_param(
+          new_state, target_path, moe_bias_updates
+      )
   else:
     if config.gradient_clipping_threshold > 0:
-      grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
+      grads = maxtext_utils.apply_gradient_clipping(
+          raw_grads, None, config.gradient_clipping_threshold
+      )
     else:
       grads = raw_grads
     if config.optimizer_memory_host_offload:
@@ -538,9 +682,17 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     new_state = state
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
-    if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
-      target_bias = new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
-      target_bias.value = target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
+    if (
+        config.routed_bias
+        and config.routed_bias_update_rate > 0.0
+        and moe_bias_updates is not None
+    ):
+      target_bias = (
+          new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
+      )
+      target_bias.value = (
+          target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
+      )
 
   lm_loss = xent_sum / (total_weights + EPS)
   scalar_metrics = {
@@ -555,32 +707,52 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   }
   if config.use_qk_clip:
     if isinstance(model, nn.Module):
-      new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)
+      new_state = qk_clip_utils.apply_qk_clip(
+          new_state, intermediate_outputs, config
+      )
     else:
-      new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)
+      new_state = qk_clip_utils.apply_qk_clip_nnx(
+          new_state, intermediate_outputs, config
+      )
 
-    global_max_logit = qk_clip_utils.calculate_max_logit_metric(intermediate_outputs)
+    global_max_logit = qk_clip_utils.calculate_max_logit_metric(
+        intermediate_outputs
+    )
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit
 
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
-    scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
+    scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(
+        raw_grads
+    )
     if isinstance(model, nn.Module):
-      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(
+          new_state.params
+      )
     else:
       model_params = nnx.state(new_state.model, nnx.Param)
-      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(model_params)
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(
+          model_params
+      )
 
   # Surface skip-step rejections as a TB metric. The skip-step optimizer stores
   # is_skipped in its opt_state: the Linen path gets it from the tx.update return,
   # the NNX path reads it back off the optimizer it just updated in place.
   if config.skip_step_on_spikes:
     if isinstance(model, nn.Module):
-      is_skipped = new_opt_state.get("is_skipped") if isinstance(new_opt_state, dict) else None
+      is_skipped = (
+          new_opt_state.get("is_skipped")
+          if isinstance(new_opt_state, dict)
+          else None
+      )
     else:
-      opt_state = nnx.to_pure_dict(nnx.state(new_state.optimizer)).get("opt_state", {})
-      is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
+      opt_state = nnx.to_pure_dict(nnx.state(new_state.optimizer)).get(
+          "opt_state", {}
+      )
+      is_skipped = (
+          opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
+      )
     if is_skipped is not None:
       scalar_metrics["optim/step_skipped"] = is_skipped.astype(jnp.float32)
   metrics = {
@@ -605,7 +777,9 @@ def eval_step(model, config, state, data, dropout_rng=None):
     pure_params = state.params["params"] if sparsity_enabled else state.params
     batch_stats = state.params.get("batch_stats", {})
 
-    eval_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=False)
+    eval_loss_fn = functools.partial(
+        loss_fn, model, config, data, dropout_rng, is_train=False
+    )
     loss, aux = eval_loss_fn(pure_params, sparsity_state=batch_stats)
   else:
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
@@ -613,7 +787,9 @@ def eval_step(model, config, state, data, dropout_rng=None):
 
   mtp_acceptance_rate = 0.0
   if config.mtp_eval_target_module > 0:
-    mtp_acceptance_rate = calculate_mtp_acceptance_rate(aux["intermediate_outputs"], config)
+    mtp_acceptance_rate = calculate_mtp_acceptance_rate(
+        aux["intermediate_outputs"], config
+    )
 
   xent_sum = aux["xent_sum"]
   z_loss = aux.get("z_loss", 0.0)
@@ -664,6 +840,7 @@ def training_loop_iteration(
   eval_data_iterator = python_vars["eval_data_iterator"]
   metric_logger_instance = python_vars["metric_logger_instance"]
   prof = python_vars["prof"]
+  snapshot_mgr = python_vars.get("snapshot")
 
   # Unpack immutable_data
   config = immutable_data["config"]  # for helpers
@@ -694,19 +871,40 @@ def training_loop_iteration(
     # DiLoCo's inner step takes the rng like the Linen step does.
     if isinstance(model, nn.Module) or config.enable_diloco:
       # pylint: disable=not-callable
-      step_rng_args = (jax.jit(jax.random.fold_in)(init_rng, step),)
+      nextrng = jax.jit(
+          jax.random.fold_in,
+          out_shardings=jax.sharding.NamedSharding(
+              mesh, jax.sharding.PartitionSpec()
+          ),
+      )(init_rng, step)
+      step_rng_args = (nextrng,)
     else:
       step_rng_args = ()
     with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_train):
         if shard_optimizer_over_data and isinstance(model, nn.Module):
-          state = sharding.maybe_shard_with_name(state, state_mesh_shardings, shard_mode)
+          state = sharding.maybe_shard_with_name(
+              state, state_mesh_shardings, shard_mode
+          )
         state, metrics = p_train_step(state, example_batch, *step_rng_args)
+        debug_print_pytree("metrics_raw", metrics)
+        replicated_sharding = jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec()
+        ).with_memory_kind("pinned_host")
+        metrics = jax.tree.map(
+            lambda x: jax.device_put(x, replicated_sharding)
+            if isinstance(x, jax.Array)
+            else x,
+            metrics,
+        )
+        debug_print_pytree("metrics_resharded", metrics)
 
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
 
-  checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
+  checkpointing.maybe_save_checkpoint(
+      checkpoint_manager, state, config, data_iterator, step
+  )
 
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
     jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -740,7 +938,10 @@ def training_loop_iteration(
       eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
       last_eval_step_completion = datetime.datetime.now()
       metric_logger_instance.buffer_and_write_metrics(
-          eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
+          eval_metrics,
+          eval_step_count,
+          step_time_delta=eval_step_time_delta,
+          is_training=False,
       )
       eval_step_count += 1
 
@@ -749,34 +950,555 @@ def training_loop_iteration(
   if step == start_step:
     max_utils.print_mem_stats("After params initialized")
 
-  metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
+  metric_logger_instance.buffer_and_write_metrics(
+      metrics, step, step_time_delta
+  )
+
+  # Async Host Backup (Elastic Mode only)
+  if snapshot_mgr is not None and step % config.elastic_snapshot_interval == 0:
+    if isinstance(model, nn.Module):
+      state_dict = {
+          "step": state.step,
+          "params": state.params,
+          "opt_state": state.opt_state,
+          "metrics": metrics,
+      }
+    else:
+      model_state = nnx.state(state.model) if hasattr(state, "model") else state
+      opt_state = (
+          nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
+      )
+      state_dict = {"model": nnx.to_pure_dict(model_state), "metrics": metrics}
+      if opt_state is not None:
+        state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+    snapshot_mgr.save_pytree(step, state_dict)
 
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
   python_vars["last_step_completion"] = last_step_completion
 
 
+def recover(
+    jax_device_state: dict[str, Any],
+    python_vars: dict[str, Any],
+    immutable_data: dict[str, Any],
+    active_state: Any = None,
+):
+  """Rebuilds MaxText JAX device state and restores state from host snapshot."""
+  config = immutable_data["config"]
+
+  metric_logger_instance = python_vars.get("metric_logger_instance")
+  if metric_logger_instance is not None:
+    metric_logger_instance.recover_metrics()
+
+  recorder = python_vars.get("recorder")
+  elastic_manager = python_vars.get("elastic_manager")
+  snapshot_mgr = (
+      python_vars.get("snapshot")
+      or python_vars.get("snapshot_mgr")
+      or python_vars.get("snapshot_manager")
+  )
+  # Delete old iterators and loaders to release colocated python resources
+  for key in ["data_iterator", "eval_data_iterator", "data_loader"]:
+    if key in python_vars:
+      _logger.info(
+          "Deleting old %s to release colocated python resources...", key
+      )
+      del python_vars[key]
+
+  if snapshot_mgr is None and config.elastic_enabled:
+    replica_axis_idx = config.mesh_axes.index("data")
+    snapshot_mgr = Snapshotter(replica_axis_index=replica_axis_idx)
+    python_vars["snapshot"] = snapshot_mgr
+
+  while True:
+    try:
+
+      # 1. Find currently active slices (wait if none are active)
+      min_slices = (
+          1
+          if config.elastic_min_slice_count == -1
+          else config.elastic_min_slice_count
+      )
+
+      all_active_slices = elastic.wait_for_slices(
+          slice_count=min_slices,
+          poll_interval=1,
+          slice_to_devices=elastic_manager.slice_to_devices,
+          timeout=config.elastic_timeout_seconds,
+      )
+      elastic_manager.active_slice_indices = all_active_slices
+      jax.config.update("jax_default_device", elastic_manager.default_device)
+      _logger.info(
+          "Active slices after recovery: %s",
+          elastic_manager.active_slice_indices,
+      )
+      _logger.info(
+          "Active devices after recovery: %d",
+          len(elastic_utils.live_devices(config)),
+      )
+
+      elastic_utils.elastic_manager = elastic_manager
+
+      # Dynamically mutate the config to match the degraded slice topology
+      new_slice_count = elastic_manager.active_slice_count
+      _logger.info(
+          "[*] Dynamically mutating config.num_slices and"
+          " config.dcn_data_parallelism to: %d",
+          new_slice_count,
+      )
+      object.__setattr__(config, "num_slices", new_slice_count)
+      object.__setattr__(config, "dcn_data_parallelism", new_slice_count)
+
+      # Update DCN data parallel axis in dcn_parallelism list
+      data_axis_idx = config.mesh_axes.index("data")
+      config.dcn_parallelism[data_axis_idx] = new_slice_count
+
+      # Recalculate num_target_devices and batch sizes for the new topology
+      new_num_devices = len(elastic_utils.live_devices(config))
+      object.__setattr__(config, "num_target_devices", new_num_devices)
+
+      def calc_gbs(
+          per_device_batch_size, expansion_factor, num_devices, grad_accum_steps
+      ):
+        if per_device_batch_size < 1.0:
+          mbs_load = num_devices * (
+              expansion_factor if expansion_factor > 0 else 1
+          )
+        else:
+          mbs_load = int(
+              num_devices
+              * per_device_batch_size
+              * (expansion_factor if expansion_factor > 0 else 1)
+          )
+        mbs_train = int(num_devices * per_device_batch_size)
+        gbs_load = int(mbs_load * grad_accum_steps)
+        gbs_train = int(mbs_train * grad_accum_steps)
+        return gbs_load, gbs_train, mbs_train
+
+      # Update train batch sizes
+      gbs_load, gbs_train, mbs_train = calc_gbs(
+          config.per_device_batch_size,
+          config.expansion_factor_real_data,
+          new_num_devices,
+          config.gradient_accumulation_steps,
+      )
+      object.__setattr__(config, "global_batch_size_to_load", gbs_load)
+      object.__setattr__(config, "global_batch_size_to_train_on", gbs_train)
+      object.__setattr__(config, "micro_batch_size_to_train_on", mbs_train)
+
+      # Update eval batch sizes
+      gbs_load_eval, gbs_eval, mbs_eval = calc_gbs(
+          config.eval_per_device_batch_size,
+          config.expansion_factor_real_data,
+          new_num_devices,
+          1,
+      )
+      object.__setattr__(
+          config, "global_batch_size_to_load_eval", gbs_load_eval
+      )
+      object.__setattr__(config, "global_batch_size_to_eval_on", gbs_eval)
+      object.__setattr__(config, "micro_batch_size_to_eval_on", mbs_eval)
+
+      if config.enable_rampup_batch_size:
+        gbs_load_start = calc_gbs(
+            config.per_device_batch_size_start,
+            config.expansion_factor_real_data,
+            new_num_devices,
+            config.gradient_accumulation_steps,
+        )[0]
+        gbs_load_inc, _, _ = calc_gbs(
+            config.per_device_batch_size_increment,
+            config.expansion_factor_real_data,
+            new_num_devices,
+            config.gradient_accumulation_steps,
+        )
+        object.__setattr__(
+            config, "global_batch_size_to_load_start", gbs_load_start
+        )
+        object.__setattr__(
+            config, "global_batch_size_to_load_increment", gbs_load_inc
+        )
+
+        diff_batch_size = gbs_load - gbs_load_start
+        if gbs_load_inc > 0:
+          num_increments = diff_batch_size // gbs_load_inc
+          if num_increments > 0:
+            rampup_samples_per_increment = (
+                config.global_rampup_samples / num_increments
+            )
+            object.__setattr__(
+                config,
+                "rampup_samples_per_increment_to_load",
+                rampup_samples_per_increment,
+            )
+
+            total_rampup_steps = 0
+            current_batch_size = gbs_load_start
+            for _ in range(int(num_increments)):
+              steps_for_this_stage = (
+                  int(
+                      np.ceil(rampup_samples_per_increment / current_batch_size)
+                  )
+                  if current_batch_size > 0
+                  else 0
+              )
+              total_rampup_steps += steps_for_this_stage
+              current_batch_size += gbs_load_inc
+      # Immediately cancel any in-flight background checkpoint saving operations on the existing manager
+      existing_checkpoint_manager = python_vars.get("checkpoint_manager")
+      if existing_checkpoint_manager is not None:
+        checkpointing.cancel_checkpoint_manager(existing_checkpoint_manager)
+
+      # 2. Re-run setup_train_loop to rebuild Mesh, Model, Optimizers, Dataloader
+      (
+          init_rng,
+          checkpoint_manager,
+          state_mesh_shardings,
+          model,
+          mesh,
+          learning_rate_schedule,
+          data_iterator,
+          data_loader,
+          rampup_manager,
+          eval_data_iterator,
+          state,  # Newly initialized scratch state
+      ) = train_utils.setup_train_loop(
+          config,
+          recorder,
+          devices=elastic_utils.live_devices(config),
+          restore_checkpoint=False,
+          checkpoint_manager=existing_checkpoint_manager,
+      )
+      init_rng = jax.device_put(
+          init_rng,
+          jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+      )
+
+      params_shardings, state_mesh_shardings = (
+          sharding.maybe_update_params_sharding_with_opt(
+              config, state_mesh_shardings
+          )
+      )
+
+      # 3. Re-compile train and eval steps for the NEW mesh
+      if isinstance(model, nn.Module):
+        jit_model = model
+      else:
+        jit_model, _ = nnx.split(state)
+
+      with (
+          jax.set_mesh(mesh),
+          mesh,
+          nn_partitioning.axis_rules(config.logical_axis_rules),
+      ):
+        p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+            config,
+            jit_model,
+            mesh,
+            state,
+            state_mesh_shardings,
+            train_step,
+            eval_step,
+            eval_data_iterator,
+            params_shardings,
+        )
+
+      # 4. Restore TrainState from host snapshot or active state
+      if active_state is not None:
+        _logger.info(
+            "[*] Resharding active state directly (device-to-device)..."
+        )
+        if isinstance(model, nn.Module):
+          abstract_dict = {
+              "step": state.step,
+              "params": state.params,
+              "opt_state": state.opt_state,
+          }
+          active_dict = {
+              "step": active_state.step,
+              "params": active_state.params,
+              "opt_state": active_state.opt_state,
+          }
+          restored_dict = jax.device_put(
+              active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
+          )
+          restored_state = state.replace(
+              step=restored_dict["step"],
+              params=restored_dict["params"],
+              opt_state=restored_dict["opt_state"],
+          )
+          restored_step = int(restored_state.step)
+        else:
+          model_state = (
+              nnx.state(state.model) if hasattr(state, "model") else state
+          )
+          opt_state = (
+              nnx.state(state.optimizer)
+              if hasattr(state, "optimizer")
+              else None
+          )
+          abstract_dict = {"model": nnx.to_pure_dict(model_state)}
+          if opt_state is not None:
+            abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+
+          act_model_state = (
+              nnx.state(active_state.model)
+              if hasattr(active_state, "model")
+              else active_state
+          )
+          act_opt_state = (
+              nnx.state(active_state.optimizer)
+              if hasattr(active_state, "optimizer")
+              else None
+          )
+          active_dict = {"model": nnx.to_pure_dict(act_model_state)}
+          if act_opt_state is not None:
+            active_dict["optimizer"] = nnx.to_pure_dict(act_opt_state)
+
+          restored_dict = jax.device_put(
+              active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
+          )
+          if hasattr(state, "model") and "model" in restored_dict:
+            nnx.update(state.model, restored_dict["model"])
+          if hasattr(state, "optimizer") and "optimizer" in restored_dict:
+            nnx.update(state.optimizer, restored_dict["optimizer"])
+          restored_state = state
+          try:
+            if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+              step_val = state.optimizer.step
+              restored_step = int(getattr(step_val, "value", step_val))
+          except Exception:
+            restored_step = 0
+        _logger.info(
+            "Resharding complete. Retrying. Slices used: %s",
+            elastic_manager.active_slice_indices,
+        )
+      else:
+        if snapshot_mgr.latest is None:
+          raise RuntimeError(
+              "No snapshots available to restore from. Cannot recover."
+          )
+        restored_step = snapshot_mgr.latest.step
+        if isinstance(model, nn.Module):
+          abstract_dict = {
+              "step": state.step,
+              "params": state.params,
+              "opt_state": state.opt_state,
+          }
+          restored_dict = snapshot_mgr.load_pytree(abstract_dict)
+          restored_state = state.replace(
+              step=restored_dict["step"],
+              params=restored_dict["params"],
+              opt_state=restored_dict["opt_state"],
+          )
+        else:
+          model_state = (
+              nnx.state(state.model) if hasattr(state, "model") else state
+          )
+          opt_state = (
+              nnx.state(state.optimizer)
+              if hasattr(state, "optimizer")
+              else None
+          )
+          abstract_dict = {"model": nnx.to_pure_dict(model_state)}
+          if opt_state is not None:
+            abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+          restored_dict = snapshot_mgr.load_pytree(abstract_dict)
+          if hasattr(state, "model") and "model" in restored_dict:
+            nnx.update(state.model, restored_dict["model"])
+          if hasattr(state, "optimizer") and "optimizer" in restored_dict:
+            nnx.update(state.optimizer, restored_dict["optimizer"])
+          restored_state = state
+          try:
+            if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+              step_val = state.optimizer.step
+              restored_step = int(getattr(step_val, "value", step_val))
+          except Exception:
+            pass
+        if metric_logger_instance is not None:
+          metric_logger_instance.recover_metrics(restored_dict.get("metrics"))
+          metric_logger_instance.learning_rate_schedule = learning_rate_schedule
+
+      # Update jax_device_state with the newly built JAX objects
+      if not isinstance(model, nn.Module) and isinstance(
+          restored_state, train_state_nnx.TrainStateNNX
+      ):
+        _, restored_state = nnx.split(restored_state)
+      jax_device_state["state"] = restored_state
+      jax_device_state["init_rng"] = init_rng
+      jax_device_state["model"] = model
+      jax_device_state["mesh"] = mesh
+      jax_device_state["state_mesh_shardings"] = state_mesh_shardings
+      jax_device_state["p_train_step"] = p_train_step
+      jax_device_state["p_eval_step"] = p_eval_step
+
+      # Update python_vars with new loop state and dataloader
+      python_vars["step"] = restored_step
+      python_vars["data_loader"] = data_loader
+      python_vars["data_iterator"] = data_iterator
+      python_vars["eval_data_iterator"] = eval_data_iterator
+      python_vars["checkpoint_manager"] = checkpoint_manager
+      python_vars["rampup_manager"] = rampup_manager
+      python_vars["last_step_completion"] = datetime.datetime.now()
+
+      _logger.info(
+          "Recovery complete! Resuming safely at step %d...", restored_step
+      )
+      break
+
+    except pathways_manager.ScaleUpSignalError as e:
+      _logger.info(
+          "ScaleUpSignalError caught during recovery: %s. Retrying recovery.", e
+      )
+      if elastic_manager is not None:
+        elastic_manager.new_slice_event.clear()
+
+
+def scale_up(
+    jax_device_state: dict[str, Any],
+    python_vars: dict[str, Any],
+    immutable_data: dict[str, Any],
+    active_state: Any,
+):
+  """Handles GKE scale-up by waiting for newly joined slices and recovering."""
+  elastic_manager = python_vars["elastic_manager"]
+  elastic_manager.slice_to_devices = elastic.get_slice_to_devices(
+      jax.devices()
+  )
+  elastic_manager.all_slice_indices = set(
+      elastic_manager.slice_to_devices.keys()
+  )
+
+  # Get the newly active slice indices
+  elastic_manager.active_slice_indices = elastic.get_active_slice_indices(
+      elastic_manager.slice_to_devices
+  )
+  elastic_manager.new_slice_event.clear()
+
+  recover(
+      jax_device_state,
+      python_vars,
+      immutable_data,
+      active_state=active_state,
+  )
+
+
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
-  (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      data_loader,
-      rampup_manager,
-      eval_data_iterator,
-      state,
-  ) = train_utils.setup_train_loop(config, recorder)
+  elastic_manager = None
+  snapshot_mgr = None
+  devices = None
+  stop_event = None
+  monitor_thread = None
+
+  if config.elastic_enabled:
+    min_slices = config.elastic_min_slice_count
+    if min_slices == -1:
+      min_slices = config.num_slices
+
+    _logger.info(
+        "[*] Waiting for %d slices to be active at startup...", min_slices
+    )
+    all_devices = jax.devices()
+    slice_to_devices = elastic.get_slice_to_devices(all_devices)
+    elastic.wait_for_slices(
+        slice_count=min_slices,
+        slice_to_devices=slice_to_devices,
+        timeout=config.elastic_timeout_seconds,
+    )
+
+    _logger.info(
+        "[*] Pathways Elastic Training enabled. Initializing Pathways"
+        " Manager..."
+    )
+    elastic_manager = pathways_manager.Manager()
+    jax.config.update("jax_default_device", elastic_manager.default_device)
+    # Use currently active slices populated by Manager constructor
+    _logger.info(
+        "[*] Active slices at startup: %s", elastic_manager.active_slice_indices
+    )
+    stop_event = threading.Event()
+    monitor_thread = threading.Thread(
+        target=elastic_manager._monitor_new_slices,  # pylint: disable=protected-access
+        args=(stop_event, config.elastic_new_slice_check_period),
+        daemon=True,
+    )
+    monitor_thread.start()
+    elastic_utils.elastic_manager = elastic_manager
+    devices = elastic_utils.live_devices(config)
+  else:
+    _logger.info("[*] Standard Non-Elastic Training.")
+
+  # Kills the workload if initialization takes longer than 20 minutes
+  with watchdog.watchdog(name="initialization", timeout=20 * 60, repeat=False):
+    setup_results = {}
+    init_complete_event = threading.Event()
+
+    def run_setup():
+      try:
+        results = train_utils.setup_train_loop(
+            config, recorder, devices=devices
+        )
+        setup_results["results"] = results
+      except Exception as e:
+        setup_results["exception"] = e
+      finally:
+        init_complete_event.set()
+
+    setup_thread = threading.Thread(target=run_setup, daemon=True)
+    setup_thread.start()
+
+    while True:
+      init_done = init_complete_event.wait(timeout=1)
+
+      if elastic_manager and elastic_utils.elastic_enabled(config):
+        new_slice = elastic_manager.new_slice_event.is_set()
+
+        if new_slice and not init_done:
+          max_logging.log(
+              "New slice detected during initialization. Triggering retry."
+          )
+          raise elastic_utils.manager.ScaleUpSignalError(
+              "Scale up during initialization"
+          )
+
+        if init_done and new_slice:
+          raise elastic_utils.manager.ScaleUpSignalError(
+              "Both events set during initialization"
+          )
+
+      if init_done:
+        break
+
+    if "exception" in setup_results:
+      raise setup_results["exception"]
+
+    (
+        init_rng,
+        checkpoint_manager,
+        state_mesh_shardings,
+        model,
+        mesh,
+        learning_rate_schedule,
+        data_iterator,
+        data_loader,
+        rampup_manager,
+        eval_data_iterator,
+        state,
+    ) = setup_results["results"]
+
+    init_rng = jax.device_put(
+        init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    )
 
   # Throttling is applied only if configured (dcn_bandwidth_limit is set).
   # The default flag value is empty, meaning no throttling is applied by default.
   train_utils.maybe_apply_dcn_throttling(config)
 
-  start_step = get_first_step(model, state)  # this is the start_step for training
+  start_step = get_first_step(
+      model, state
+  )  # this is the start_step for training
   train_utils.validate_completed_steps(start_step, config.steps)
 
   if isinstance(model, nn.Module):
@@ -792,7 +1514,11 @@ def train_loop(config, recorder, state=None):
     # the Zero-1 opt overlay doesn't apply through the diloco wrapper.
     params_shardings = state_mesh_shardings.params
   else:
-    params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+    params_shardings, state_mesh_shardings = (
+        sharding.maybe_update_params_sharding_with_opt(
+            config, state_mesh_shardings
+        )
+    )
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config,
@@ -806,11 +1532,19 @@ def train_loop(config, recorder, state=None):
       params_shardings,
   )
 
-  with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with (
+      jax.set_mesh(mesh),
+      mesh,
+      nn_partitioning.axis_rules(config.logical_axis_rules),
+  ):
     data_sharding = sharding.get_input_data_sharding(config, mesh)
-    shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
+    shaped_batch = maxtext_utils.get_shaped_batch(
+        config, batch_sharding=data_sharding
+    )
     if config.shard_optimizer_over_data and isinstance(model, nn.Module):
-      state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+      state = sharding.maybe_shard_with_name(
+          state, state_mesh_shardings, config.shard_mode
+      )
     elif config.shard_optimizer_over_data:
       # NNX: reshard state so params match the data-sharded in_shardings (Zero-1 layout)
       state = jax.device_put(state, state_mesh_shardings)
@@ -820,24 +1554,56 @@ def train_loop(config, recorder, state=None):
     else:
       lower_args = (state, shaped_batch)
     maxtext_utils.maybe_dump_jaxpr(config, p_train_step, lower_args)
-    if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
-      compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
-      compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)
+    if (
+        config.compiled_trainstep_file == ""
+    ):  # compile only when there is no pre-compiled file loaded
+      compiler_options = max_utils.parse_libtpu_flags_to_dict(
+          config.compile_xla_flags
+      )
+      compiled = p_train_step.lower(*lower_args).compile(
+          compiler_options=compiler_options
+      )
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats)
   prof = profiler.Profiler(config, offset_step=start_step)
-  metric_logger_instance = metric_logger.MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
+  metric_logger_instance = metric_logger.MetricLogger(
+      config=config, learning_rate_schedule=learning_rate_schedule
+  )
 
   # Write train config params, num model params, and XLA flags to tensorboard
   if isinstance(model, nn.Module):
     setup_params = state.params
   elif config.enable_diloco:
-    setup_params = state.params  # DiLoCoTrainState.params: the outer (global) params
+    setup_params = (
+        state.params
+    )  # DiLoCoTrainState.params: the outer (global) params
   else:
     _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
   metric_logger_instance.write_setup_info_to_tensorboard(setup_params)
 
   elastic_utils.record_elastic_reinit_end()
+
+  # Initialize host snapshot manager only in elastic mode
+  if config.elastic_enabled:
+    replica_axis_idx = config.mesh_axes.index("data")
+    snapshot_mgr = Snapshotter(replica_axis_index=replica_axis_idx)
+    if isinstance(model, nn.Module):
+      state_dict = {
+          "step": state.step,
+          "params": state.params,
+          "opt_state": state.opt_state,
+      }
+    else:
+      model_state = nnx.state(state.model) if hasattr(state, "model") else state
+      opt_state = (
+          nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
+      )
+      state_dict = {"model": nnx.to_pure_dict(model_state)}
+      if opt_state is not None:
+        state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+    snapshot_mgr.save_pytree(start_step, state_dict)
+    # Block on the first snapshot at startup to guarantee it is secured before training begins
+    snapshot_mgr.join()
 
   # Initialize dictionaries for refactored iteration
   jax_device_state = {
@@ -861,6 +1627,8 @@ def train_loop(config, recorder, state=None):
       "eval_data_iterator": eval_data_iterator,
       "metric_logger_instance": metric_logger_instance,
       "prof": prof,
+      "elastic_manager": elastic_manager,
+      "snapshot": snapshot_mgr,
   }
 
   immutable_data = {
@@ -889,15 +1657,85 @@ def train_loop(config, recorder, state=None):
     python_vars["last_step_completion"] = datetime.datetime.now()
 
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
+    # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
-      training_loop_iteration(jax_device_state, python_vars, immutable_data)
-      python_vars["step"] += 1
+      # Print the stacktrace every 60s and also exit the workload if longer than 600s
+      with (
+          watchdog.watchdog("step-stack-status", timeout=60),
+          watchdog.watchdog("step-timebomb", timeout=10 * 60, repeat=False),
+      ):
+        try:
+          # Scale-up check at the end of the step (only if elastic)
+          if (
+              config.elastic_enabled
+              and elastic_manager.new_slice_event.is_set()
+          ):
+            scale_up(
+                jax_device_state,
+                python_vars,
+                immutable_data,
+                active_state=jax_device_state["state"],
+            )
+            # Restart monitor thread because it exited
+            _logger.info("Restarting monitor thread after scale-up...")
+            if monitor_thread is not None:
+              stop_event.set()
+              monitor_thread.join()
+            stop_event = threading.Event()
+            monitor_thread = threading.Thread(
+                target=elastic_manager._monitor_new_slices,  # pylint: disable=protected-access
+                args=(stop_event, config.elastic_new_slice_check_period),
+                daemon=True,
+            )
+            monitor_thread.start()
+            # Start snapshot save immediately on the new mesh
+            snapshot_mgr = python_vars["snapshot"]
+            state = jax_device_state["state"]
+            if isinstance(model, nn.Module):
+              state_dict = {
+                  "step": state.step,
+                  "params": state.params,
+                  "opt_state": state.opt_state,
+              }
+            else:
+              model_state = (
+                  nnx.state(state.model) if hasattr(state, "model") else state
+              )
+              opt_state = (
+                  nnx.state(state.optimizer)
+                  if hasattr(state, "optimizer")
+                  else None
+              )
+              state_dict = {"model": nnx.to_pure_dict(model_state)}
+              if opt_state is not None:
+                state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+            snapshot_mgr.save_pytree(python_vars["step"], state_dict)
+
+          training_loop_iteration(jax_device_state, python_vars, immutable_data)
+          python_vars["step"] += 1
+
+        except jax.errors.JaxRuntimeError as e:
+          if config.elastic_enabled and elastic.is_error_due_to_slice_down(e):
+            # Slice Failure Recovery
+            _logger.exception(
+                "[!] Elastic event detected around step %d", python_vars["step"]
+            )
+            recover(jax_device_state, python_vars, immutable_data)
+          else:
+            # Non-elastic or unrelated JAX error: log and re-raise
+            _logger.exception(
+                "[!] JAX Runtime Error detected around step %d. Re-raising.",
+                python_vars["step"],
+            )
+            raise
 
     # Unpack state for post-loop actions
     state = jax_device_state["state"]
 
     if immutable_data["save_checkpoint_on_completion"]:
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
+      checkpointing.maybe_save_checkpoint(
+          checkpoint_manager, state, config, data_iterator
+      )
 
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
@@ -908,6 +1746,11 @@ def train_loop(config, recorder, state=None):
     max_logging.log(f"Training stopped: {str(e)}")
     _job_completed_gracefully = True
   finally:
+    # Terminate monitoring thread (Elastic Mode only)
+    if stop_event is not None:
+      stop_event.set()
+    if monitor_thread is not None:
+      monitor_thread.join()
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
     metric_logger_instance.flush_metrics_and_cleanup()
@@ -923,9 +1766,12 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")
-  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
+  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get(
+      "LIBTPU_INIT_ARGS", ""
+  ):
     os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+        os.environ.get("LIBTPU_INIT_ARGS", "")
+        + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
@@ -933,10 +1779,15 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   max_utils.print_system_information()
   train_utils.validate_train_config(config)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
-  jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
+  jax.config.update(
+      "jax_remove_size_one_mesh_axis_from_type",
+      config.remove_size_one_mesh_axis_from_type,
+  )
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
-  if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
+  if config.use_vertex_tensorboard or os.environ.get(
+      "UPLOAD_DATA_TO_TENSORBOARD"
+  ):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
   if config.use_te_comm_gemm_overlap:
@@ -955,9 +1806,14 @@ def run(config, recorder):
 
 
 def get_train_func(config, recorder, argv):
-  """Returns the train function, wrapping in elastic_retry if elastic training is enabled."""
+  """Returns the train function, wrapping in elastic_retry if backup_kind is checkpoint."""
   if config.elastic_enabled:
-    max_logging.log("Elastic utils: Elastic training enabled.")
+    max_logging.log(
+        "Elastic utils: Elastic training enabled with"
+        f" {config.elastic_backup_kind} backup."
+    )
+
+  if config.elastic_enabled and config.elastic_backup_kind == "checkpoint":
 
     def on_elastic_event():
       elastic_utils.record_elastic_event_start(recorder, config)
@@ -979,7 +1835,7 @@ def get_train_func(config, recorder, argv):
         pre_callback_fn=on_slices_ready,
     )(functools.partial(elastic_train_wrapper, argv=argv))
   else:
-    # Use the already initialized variables
+
     def train_func():
       run(config, recorder)
 

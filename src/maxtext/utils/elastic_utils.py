@@ -17,8 +17,12 @@
 import functools
 from collections import Counter
 from types import SimpleNamespace
+from typing import Any
 
 import jax
+import jax.numpy as jnp
+from flax import nnx
+from maxtext.common import train_state_nnx
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 import pathwaysutils
@@ -27,6 +31,56 @@ from pathwaysutils.elastic import manager
 elastic_manager: manager.Manager | None = None
 pending_reinit_recorder = None
 pending_elastic_event_type = None
+
+
+def maybe_snapshot_state(
+    elastic_mgr: Any,
+    step: int,
+    state: Any,
+    force: bool = False,
+    block: bool = False,
+) -> None:
+  """Takes an elasticity snapshot of TrainStateNNX or Linen TrainState."""
+  if isinstance(state, train_state_nnx.TrainStateNNX):
+    model_state = nnx.state(state.model)
+    opt_state = nnx.state(state.optimizer)
+    snapshot_jax_arrays = {
+        "model": nnx.to_pure_dict(model_state),
+        "optimizer": nnx.to_pure_dict(opt_state),
+    }
+  else:
+    linen_dict = {
+        "params": getattr(state, "params", None),
+        "opt_state": getattr(state, "opt_state", None),
+        "step": getattr(state, "step", None),
+    }
+    snapshot_jax_arrays = train_state_nnx.from_linen_checkpoint_dict(linen_dict)
+
+  elastic_mgr.maybe_snapshot(
+      step=step,
+      snapshot_jax_arrays=snapshot_jax_arrays,
+      force=force,
+      block=block,
+  )
+
+
+def restore_resharded_state(elastic_mgr: Any, mesh: Any, state: Any):
+  """Restores state from an elasticity snapshot on a new mesh."""
+  step, snapshot_jax_arrays, _ = elastic_mgr.get_resharded_snapshot(mesh)
+
+  if isinstance(state, train_state_nnx.TrainStateNNX):
+    if "model" in snapshot_jax_arrays:
+      nnx.update(state.model, snapshot_jax_arrays["model"])
+    if "optimizer" in snapshot_jax_arrays:
+      nnx.update(state.optimizer, snapshot_jax_arrays["optimizer"])
+      state.optimizer.step.value = jnp.asarray(step, dtype=jnp.uint32)
+  else:
+    linen_dict = train_state_nnx.to_linen_checkpoint_dict(snapshot_jax_arrays)
+    state = state.replace(**linen_dict)
+    state = state.replace(step=state.step.at[None].set(step))
+
+  return step, state
+
 
 
 def record_elastic_event_start(recorder, config) -> None:
@@ -122,9 +176,10 @@ def live_devices(config=None):
     ensure_elastic_manager_initialized(config)
     assert elastic_manager is not None
     # Filter devices that are in active slices
-    return [
+    active_devices = [
         d for d in jax.devices() if d is not None and getattr(d, "slice_index", 0) in elastic_manager.active_slice_indices
     ]
+    return sorted(active_devices, key=lambda d: (getattr(d, "slice_index", 0), getattr(d, "coords", ())))
   return jax.devices()
 
 
@@ -211,7 +266,10 @@ def is_scale_up_event(config) -> bool:
   if elastic_enabled(config):
     ensure_elastic_manager_initialized(config)
     assert elastic_manager is not None
-    return bool(elastic_manager.available_inactive_slices)
+    available_inactive = getattr(elastic_manager, "available_inactive_slices", None)
+    if available_inactive is not None:
+      return bool(available_inactive)
+    return elastic_manager.new_slice_event.is_set()
 
   return False
 
