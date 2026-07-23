@@ -2136,22 +2136,17 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
 
     x, _ = self.patch_embed(hidden_states)
     x = x.reshape(batch_size, -1, self.config.hidden_size_for_vit)
-    valid_grid = None
     if attention_mask is not None and video_grid_thw is None:
       raise ValueError("video_grid_thw is required when video_mask is provided.")
-    if attention_mask is not None and batch_size != 1:
-      raise ValueError("Padded Qwen3-Omni vision encoding currently supports batch size one.")
-    if video_grid_thw is not None:
-      grid = video_grid_thw[0] if getattr(video_grid_thw, "ndim", 1) == 2 else video_grid_thw
-      valid_grid = tuple(int(dim) for dim in grid)
-    pos = self.pos_embed_interpolate(num_frames, height, width)
-    if attention_mask is not None and valid_grid is not None:
-      valid_pos = self.pos_embed_interpolate(*valid_grid)
-      valid_indices = jnp.nonzero(attention_mask[0], size=math.prod(valid_grid))[0]
-      pos = jnp.zeros_like(pos).at[valid_indices].set(valid_pos)
-
-    pos = pos[jnp.newaxis, :, :]
+    pos = self.pos_embed_interpolate(
+        num_frames,
+        height,
+        width,
+        video_grid_thw=video_grid_thw,
+        attention_mask=attention_mask,
+    )
     x = x + pos
+    valid_grid = video_grid_thw
 
     h_traj = []
     for i in range(self.depth):
