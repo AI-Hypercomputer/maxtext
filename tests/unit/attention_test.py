@@ -71,6 +71,7 @@ class JaxFlashAttentionTest(unittest.TestCase):
     key = jnp.array([[[[10.0], [0.0]]]], dtype=jnp.float32)
     value = jnp.array([[[[1.0], [3.0]]]], dtype=jnp.float32)
     mask = jnp.array([[True, True], [True, False]])
+    mask_obj = splash_attention_mask.NumpyMask(mask)
 
     output = jax_flash_attention.flash_attention_block_masked(
         query,
@@ -79,7 +80,7 @@ class JaxFlashAttentionTest(unittest.TestCase):
         segment_ids=None,
         block_kv=2,
         block_q=1,
-        mask=mask,
+        mask=mask_obj,
         mask_value=mask_value,
         cap=cap,
     )
@@ -87,6 +88,38 @@ class JaxFlashAttentionTest(unittest.TestCase):
     logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
     logits = jnp.tanh(logits / cap) * cap
     logits = jnp.where(mask[None, None, :, :], logits, mask_value)
+    expected = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+
+  def test_flash_attention_block_masked_causal_mask(self):
+    cap = 1.0
+    mask_value = -1.0e9
+    query = jnp.array([[[[10.0], [10.0]]]], dtype=jnp.float32)
+    key = jnp.array([[[[10.0], [0.0]]]], dtype=jnp.float32)
+    value = jnp.array([[[[1.0], [3.0]]]], dtype=jnp.float32)
+    mask_obj = splash_attention_mask.CausalMask((2, 2))
+
+    output = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=2,
+        block_q=1,
+        mask=mask_obj,
+        mask_value=mask_value,
+        cap=cap,
+    )
+
+    mask_arr = mask_obj[:, :]
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.tanh(logits / cap) * cap
+    logits = jnp.where(mask_arr[None, None, :, :], logits, mask_value)
     expected = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
     np.testing.assert_allclose(
         np.asarray(output),
