@@ -144,7 +144,16 @@ class Snapshotter(BaseSnapshotter):
         if sharding is not None and getattr(sharding, 'spec', None) is not None:
             replica_axis = sharding.mesh.axis_names[self.replica_axis_index]
             if replica_axis not in sharding.spec:
-                return x  # Bypass fully replicated arrays because split_by_mesh_axis on them crashes with DATA_LOSS
+                # Fully replicated arrays span dead slices. split_by_mesh_axis crashes with DATA_LOSS.
+                # device_put also crashes if x has dead buffers. We must extract a healthy shard.
+                for shard in x.addressable_shards:
+                    try:
+                        healthy_data = shard.data
+                        jax.block_until_ready(healthy_data)
+                        return healthy_data
+                    except BaseException:
+                        continue
+                raise RuntimeError("No active replicas found for fully replicated array.")
                 
         return get_active_pytree(x)
 
