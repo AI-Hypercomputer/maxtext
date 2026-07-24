@@ -66,7 +66,10 @@ def validate_and_configure_sft_columns(data_columns, tokenizer_model, chat_templ
 
 def get_local_batch_size(config):
   """Computes local batch size based on process count and expansion factor."""
-  if config.elastic_enabled:
+  # Lightweight pipeline tests and programmatic callers may use a minimal
+  # config object from before elastic input was introduced.  Missing means
+  # the original, non-elastic behavior.
+  if getattr(config, "elastic_enabled", False):
     batch_size = elastic_utils.get_local_batch_size(config)
   else:
     batch_size = config.global_batch_size_to_load // jax.process_count()

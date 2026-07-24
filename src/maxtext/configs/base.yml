@@ -754,12 +754,13 @@ hf_access_token: ''
 # Path to grain data files. Can be a single pattern or multiple patterns with weights.
 # For multiple patterns, use semicolon (;) to separate and comma (,) to specify weights.
 # Example: "path/to/data1.array_record*,0.3;path/to/data2.array_record*,0.7"
-# Note: When using multiple files (separated by ';'), only ArrayRecord format is supported.
+# Semicolon mixtures are supported by ArrayRecord and Megatron mmap/mmap_npy;
+# see their guides because the mixture and ordering semantics differ by format.
 # For more details, see https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md
 grain_train_files: ''
 grain_eval_files: ''
-grain_train_mixture_config_path: '' # Path to a JSON file specifying the mixture weights for Grain training data.
-grain_file_type: 'arrayrecord' # arrayrecord or parquet
+grain_train_mixture_config_path: '' # ArrayRecord-only JSON mixture configuration.
+grain_file_type: 'arrayrecord' # arrayrecord, tfrecord, parquet, mmap, or mmap_npy
 grain_packing_type: 'first_fit' # 'first_fit', 'best_fit' or 'concat_then_split'. See details of the corresponding module in https://google-grain.readthedocs.io/en/latest/grain.experimental.html
 grain_worker_count: 1 # Set to -1 to enable auto-tuning: automatically determines optimal worker count. See https://google-grain.readthedocs.io/en/latest/_autosummary/grain.experimental.pick_performance_config.html
 grain_per_worker_buffer_size: 1
@@ -777,6 +778,15 @@ grain_prefetch_buffer_size_eval: 500
 grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
 grain_shuffle_buffer_size: 100 # shuffle buffer when using sequential access formats such as Parquet, TFRecord.
 grain_use_elastic_iterator: false # For elastic training, set to this true and packing=false
+# Megatron-LM indexed datasets (grain_file_type=mmap or mmap_npy).
+mmap_eod_id: 0 # must match the EOD token written during Megatron preprocessing
+blend_cache_dir: '' # optional runtime cache for multi-dataset mmap_npy global blend indices
+blend_index_dir: '' # optional prebuilt dataset_index.npy / dataset_sample_index.npy directory
+reset_attention_mask: true # reset attention and positions after EOD
+eod_mask_loss: false # exclude positions whose input token is EOD from loss when true
+packing_max_segments_per_sample: 25 # short-segment divisor; <=0 retains every EOD attention boundary
+mmap_split_sentences: false # must match whether preprocessing used --split-sentences
+mmap_npy_split: '' # mmap_npy only; train uses split 0 and eval uses split 1
 # for using pathways
 colocated_python_data_input: false  # experimental feature, under testing
 

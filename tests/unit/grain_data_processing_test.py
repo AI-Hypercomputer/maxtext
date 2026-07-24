@@ -19,6 +19,8 @@ import os.path
 import tempfile
 import unittest
 import json
+from types import SimpleNamespace
+from unittest import mock
 import numpy as np
 
 import jax
@@ -100,6 +102,59 @@ class GrainDeterminismMixin:
     train_batch2 = get_first_batch(self.train_iter)
     self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
+
+
+@pytest.mark.cpu_only
+class GrainMmapNpyEvalConfigTest(unittest.TestCase):
+  """Regression coverage for the bounded mmap_npy eval stream."""
+
+  @staticmethod
+  def _config(mmap_npy_split):
+    return SimpleNamespace(
+        global_batch_size_to_load=4,
+        global_batch_size_to_load_eval=4,
+        grain_file_type="mmap_npy",
+        eval_steps=3,
+        eval_interval=2,
+        steps=10,
+        data_shuffle_seed=42,
+        mmap_npy_split=mmap_npy_split,
+        mmap_eod_id=0,
+        mmap_split_sentences=False,
+        blend_cache_dir="",
+        blend_index_dir="",
+        grain_eval_files="unused",
+        grain_shuffle_buffer_size=0,
+        grain_worker_count_eval=0,
+        grain_num_threads_eval=1,
+        grain_prefetch_buffer_size_eval=1,
+        grain_per_worker_buffer_size_eval=1,
+        grain_data_source_max_workers=1,
+        eval_data_columns=("text",),
+        tokenize_eval_data=False,
+        colocated_python_data_input=False,
+        generate_padding_batch_eval=False,
+    )
+
+  @staticmethod
+  def _capture_dataset_config(config):
+    with (
+        mock.patch.object(grain_data_processing, "_get_pipeline_fn", return_value=lambda **_kwargs: object()),
+        mock.patch.object(grain_data_processing, "get_datasets", return_value=object()) as get_datasets,
+        mock.patch.object(grain_data_processing.multihost_dataloading, "MultiHostDataLoadIterator"),
+    ):
+      grain_data_processing.make_grain_eval_iterator(config, SimpleNamespace(size=1), [0])
+    return get_datasets.call_args.kwargs["dataset_config"]
+
+  def test_mmap_npy_eval_pins_all_scheduled_eval_samples(self):
+    dataset_config = self._capture_dataset_config(self._config("99,1"))
+    # ceil(10 / 2) eval rounds * 3 eval steps * 4 samples per batch.
+    self.assertEqual(dataset_config.num_samples, 60)
+    self.assertEqual(dataset_config.split_index, 1)
+
+  def test_mmap_npy_eval_without_split_uses_train_partition(self):
+    dataset_config = self._capture_dataset_config(self._config(""))
+    self.assertEqual(dataset_config.split_index, 0)
 
 
 class _GrainArrayRecordSetup:

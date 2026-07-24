@@ -32,6 +32,7 @@ from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import grain_tokenizer
 from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.input_pipeline._mmap_datasource import MMapDatasetConfig, get_mmap_dataset, get_mmap_npy_dataset
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
@@ -81,6 +82,32 @@ def _apply_mapdataset_transforms(
   return dataset
 
 
+def _build_dataset_config(config, num_samples=None, seed=1234, split_ratio=None, split_index=0):
+  """Build the configuration used by the Megatron-compatible data sources."""
+  if config.grain_file_type not in ("mmap", "mmap_npy"):
+    return None
+  return MMapDatasetConfig(
+      max_target_length=config.max_target_length,
+      eod_id=config.mmap_eod_id,
+      mmap_split_sentences=config.mmap_split_sentences,
+      blend_cache_dir=config.blend_cache_dir,
+      blend_index_dir=config.blend_index_dir,
+      num_samples=num_samples,
+      seed=seed,
+      split_ratio=split_ratio,
+      split_index=split_index,
+  )
+
+
+def _make_mmap_multiprocessing_options(dataset, config, grain_worker_count, grain_per_worker_buffer_size):
+  """Return Grain multiprocessing options without changing dataset ordering."""
+  if grain_worker_count == -1:
+    return grain.experimental.pick_performance_config(
+        ds=dataset, ram_budget_mb=config.grain_ram_budget_mb, max_workers=None, max_buffer_size=None
+    ).multiprocessing_options
+  return grain.MultiprocessingOptions(num_workers=grain_worker_count, per_worker_buffer_size=grain_per_worker_buffer_size)
+
+
 def get_datasets(
     data_file_pattern,
     data_file_type,
@@ -96,8 +123,10 @@ def get_datasets(
     grain_data_source_max_workers,
     mixture_config_path=None,
     elastic=False,
+    dataset_config=None,
+    split="train",
 ):
-  """Load dataset from array_record files for using with grain"""
+  """Load a Grain dataset for the selected ``grain_file_type``."""
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
@@ -213,10 +242,119 @@ def get_datasets(
     if shuffle:
       dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=shuffle_buffer_size, seed=shuffle_seed)
     return dataset
+  elif data_file_type == "mmap":
+    if elastic:
+      raise ValueError("grain_use_elastic_iterator is not supported for mmap datasets.")
+    return get_mmap_dataset(
+        data_file_pattern,
+        dataset_config.mmap_split_sentences,
+        dataset_config.max_target_length,
+        dataset_config.eod_id,
+        shuffle,
+        shuffle_seed,
+        num_epoch,
+        dataloading_host_index,
+        dataloading_host_count,
+        grain_num_threads,
+        grain_prefetch_buffer_size,
+        apply_transforms=_apply_mapdataset_transforms,
+    )
+  elif data_file_type == "mmap_npy":
+    if elastic:
+      raise ValueError("grain_use_elastic_iterator is not supported for mmap_npy datasets.")
+    return get_mmap_npy_dataset(
+        data_file_pattern,
+        dataset_config.mmap_split_sentences,
+        dataset_config.max_target_length,
+        dataset_config.eod_id,
+        num_epoch,
+        dataloading_host_index,
+        dataloading_host_count,
+        grain_num_threads,
+        grain_prefetch_buffer_size,
+        dataset_config.blend_cache_dir or None,
+        dataset_config.blend_index_dir or None,
+        split,
+        apply_transforms=_apply_mapdataset_transforms,
+        num_samples=dataset_config.num_samples,
+        seed=dataset_config.seed,
+        split=dataset_config.split_ratio,
+        split_index=dataset_config.split_index,
+    )
   else:
     raise ValueError(
-        f"grain pipeline supports (arrayrecord, tfrecord, parquet) as grain_file_type, but got {data_file_type}"
+        f"grain pipeline supports (arrayrecord, tfrecord, parquet, mmap, mmap_npy) as grain_file_type, "
+        f"but got {data_file_type}"
     )
+
+
+def _mmap_pretrain_pipeline(
+    dataset,
+    config,
+    text_column,
+    grain_worker_count,
+    grain_per_worker_buffer_size,
+):
+  """Pretrain pipeline for Megatron-compatible mmap / mmap_npy pre-tokenized formats."""
+  # Match Megatron's EOD, position, and loss semantics.
+  eod_id = config.mmap_eod_id
+  is_npy = config.grain_file_type == "mmap_npy"
+
+  # Split or rekey
+  if is_npy:
+    # MegatronNpyDataSource returns seq_length+1 tokens; split into
+    # inputs[:-1] / targets[1:] with EOD-aware segmentation.
+    dataset = dataset.map(
+        input_pipeline_utils.MegatronSplitInputsTargets(
+            eod_id=eod_id,
+            reset_attention_mask=config.reset_attention_mask,
+            eod_mask_loss=config.eod_mask_loss,
+            min_segment_length=input_pipeline_utils.megatron_min_segment_length(config),
+        )
+    )
+  else:
+    data_columns = ("inputs", "targets")
+    rekey_dict = {col: text_column for col in data_columns}
+    dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict))
+    # Samples are already exactly max_target_length with EOD tokens between
+    # documents.  Generate doc-boundary-aware segmentation, skip packing.
+    dataset = dataset.map(
+        input_pipeline_utils.GenerateDocSegmentIds(
+            eod_id=eod_id,
+            reset_attention_mask=config.reset_attention_mask,
+            eod_mask_loss=config.eod_mask_loss,
+            min_segment_length=input_pipeline_utils.megatron_min_segment_length(config),
+        )
+    )
+
+  batch_size = data_processing_utils.get_local_batch_size(config)
+
+  mp_options = _make_mmap_multiprocessing_options(dataset, config, grain_worker_count, grain_per_worker_buffer_size)
+
+  # mmap_npy: mp_prefetch BEFORE batch to preserve sample ordering in
+  # blend-then-shard.  Grain's mp_prefetch does per-worker sharding; placing
+  # it before batch ensures each worker processes a contiguous chunk and the
+  # round-robin interleaver reconstructs global order.
+  if is_npy:
+    dataset = dataset.mp_prefetch(mp_options)
+
+  batch_fn = functools.partial(grain.experimental.batch_and_pad, batch_size=batch_size, pad_value=eod_id)
+  dataset = dataset.batch(batch_size, batch_fn=batch_fn)
+
+  # mmap: shift needed (Rekey produced identical inputs/targets);
+  # mmap_npy: skip (MegatronSplitInputsTargets already split).
+  if not is_npy:
+    if not config.eod_mask_loss:
+      max_logging.log(
+          "WARNING: mmap mode with eod_mask_loss=False uses mmap_eod_id as both "
+          "padding and EOD sentinel. ShiftData will zero targets_segmentation "
+          "at all EOD positions, effectively masking EOD from loss regardless "
+          "of eod_mask_loss. Use mmap_npy mode for correct eod_mask_loss=False behavior."
+      )
+    dataset = dataset.map(input_pipeline_utils.ShiftData(ignored_ids=[eod_id], axis=1))
+    dataset = dataset.mp_prefetch(mp_options)
+
+  return dataset
 
 
 def pretrain_preprocessing_pipeline(
@@ -228,6 +366,13 @@ def pretrain_preprocessing_pipeline(
     grain_per_worker_buffer_size,
 ):
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
+  if config.grain_file_type in ("mmap", "mmap_npy"):
+    assert len(data_columns) == 1, (
+        f"grain_file_type={config.grain_file_type!r} requires exactly one pre-tokenized "
+        f"text column, got {data_columns}"
+    )
+    return _mmap_pretrain_pipeline(dataset, config, data_columns[0], grain_worker_count, grain_per_worker_buffer_size)
+
   is_offline = getattr(config, "is_offline_distillation", False)
 
   columns_to_parse = list(data_columns)
@@ -431,6 +576,18 @@ def make_grain_train_iterator(
   ), "Batch size should be divisible by number of global devices."
 
   pipeline_fn = _get_pipeline_fn(config)
+  mmap_npy_num_samples = (
+      config.steps * config.global_batch_size_to_load
+      if config.grain_file_type == "mmap_npy" and getattr(config, "steps", 0) > 0
+      else None
+  )
+  dataset_config = _build_dataset_config(
+      config,
+      num_samples=mmap_npy_num_samples,
+      seed=config.data_shuffle_seed,
+      split_ratio=config.mmap_npy_split or None,
+      split_index=0,
+  )
 
   get_ds_fn = functools.partial(
       get_datasets,
@@ -446,6 +603,8 @@ def make_grain_train_iterator(
       grain_data_source_max_workers=config.grain_data_source_max_workers,
       mixture_config_path=config.grain_train_mixture_config_path,
       elastic=config.grain_use_elastic_iterator,
+      dataset_config=dataset_config,
+      split="train",
   )
 
   preprocessing_fn = functools.partial(
@@ -532,6 +691,22 @@ def make_grain_eval_iterator(
   ), "Batch size should be divisible by number of global devices."
 
   pipeline_fn = _get_pipeline_fn(config)
+  mmap_npy_eval_num_samples = None
+  if config.grain_file_type == "mmap_npy" and hasattr(config, "eval_steps") and config.eval_steps > 0:
+    eval_interval = getattr(config, "eval_interval", 0)
+    if eval_interval > 0 and hasattr(config, "steps") and config.steps > 0:
+      eval_rounds = -(-config.steps // eval_interval)
+    else:
+      eval_rounds = 1
+    mmap_npy_eval_num_samples = eval_rounds * config.eval_steps * config.global_batch_size_to_load
+
+  dataset_config = _build_dataset_config(
+      config,
+      num_samples=mmap_npy_eval_num_samples,
+      seed=config.data_shuffle_seed,
+      split_ratio=config.mmap_npy_split or None,
+      split_index=1 if config.mmap_npy_split else 0,
+  )
 
   get_ds_fn = functools.partial(
       get_datasets,
@@ -545,6 +720,8 @@ def make_grain_eval_iterator(
       grain_num_threads=config.grain_num_threads_eval,
       grain_prefetch_buffer_size=config.grain_prefetch_buffer_size_eval,
       grain_data_source_max_workers=config.grain_data_source_max_workers,
+      dataset_config=dataset_config,
+      split="eval",
   )
 
   preprocessing_fn = functools.partial(

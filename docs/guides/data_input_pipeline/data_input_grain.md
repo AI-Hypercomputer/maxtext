@@ -29,14 +29,14 @@ Grain ensures determinism in data input pipelines by saving the pipeline's state
 
 ## Data shuffling
 
-- **Global shuffle**: This feature is only available when using Grain with [ArrayRecord](https://github.com/google/array_record) (random access) format, achieved by shuffling indices globally at the beginning of each epoch and then reading the elements according to the random order. This shuffle method effectively prevents local overfitting, leading to better training results.
+- **Global shuffle**: [ArrayRecord](https://github.com/google/array_record) and direct Megatron `mmap` are random-access sources that can shuffle indices globally before reading elements. The `mmap_npy` mode instead consumes its precomputed Megatron-compatible document and sample shuffle indices.
 - **Hierarchical shuffle**: For sequential access format [Parquet](https://arrow.apache.org/docs/python/parquet.html), shuffle is performed by these steps: file shuffling, interleave from files, and window shuffle using a fixed size buffer.
 
 (using-grain)=
 
 ## Using Grain
 
-1. Grain currently supports three data formats: [ArrayRecord](https://github.com/google/array_record) (random access), [Parquet](https://arrow.apache.org/docs/python/parquet.html) (partial random-access through row groups) and [TFRecord](https://www.tensorflow.org/tutorials/load_data/tfrecord)(sequential access). Only the ArrayRecord format supports the global shuffle mentioned above. For converting a dataset into ArrayRecord, see [Apache Beam Integration for ArrayRecord](https://github.com/google/array_record/tree/main/beam). Additionally, other random access data sources can be supported via a custom [data source](https://google-grain.readthedocs.io/en/latest/data_sources/protocol.html) class.
+1. MaxText's Grain pipeline supports [ArrayRecord](https://github.com/google/array_record) (random access), [Parquet](https://arrow.apache.org/docs/python/parquet.html) (partial random access through row groups), [TFRecord](https://www.tensorflow.org/tutorials/load_data/tfrecord) (sequential access), and [Megatron indexed datasets](data_input_megatron_mmap.md) (`.bin` / `.idx`). Megatron datasets use the `mmap` or `mmap_npy` file type; see their guide for the different ordering guarantees and configuration. ArrayRecord and direct `mmap` can use Grain's global MapDataset shuffle, while `mmap_npy` encodes Megatron-compatible document and sample shuffle in its indices. For converting a dataset into ArrayRecord, see [Apache Beam Integration for ArrayRecord](https://github.com/google/array_record/tree/main/beam). Additionally, other random access data sources can be supported via a custom [data source](https://google-grain.readthedocs.io/en/latest/data_sources/protocol.html) class.
    - **Community Resource**: The MaxText community has created a [ArrayRecord Documentation](https://array-record.readthedocs.io/). Note: we appreciate the contribution from the community, but as of now it has not been verified by the MaxText or ArrayRecord developers yet.
 2. If the dataset is hosted on a Cloud Storage bucket, the path `gs://` can be provided directly. However, for the best performance, it's recommended to read the bucket through [Cloud Storage FUSE](https://cloud.google.com/storage/docs/gcs-fuse). This will significantly improve the perf for the ArrayRecord format as it allows meta data caching to speeds up random access. The installation of Cloud Storage FUSE is included in [setup.sh](https://github.com/google/maxtext/blob/main/src/dependencies/scripts/setup.sh). The user then needs to mount the Cloud Storage bucket to a local path for each worker, using the script [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/scripts/setup_gcsfuse.sh). The script configures some parameters for the mount.
 
@@ -49,7 +49,7 @@ MOUNT_PATH=${MOUNT_PATH?} \
 
 Note that `FILE_PATH` is optional; when provided, the script runs `ls -R` for pre-filling the metadata cache (see ["Performance tuning best practices" on the Google Cloud documentation](https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/performance)).
 
-1. Set `dataset_type=grain`, `grain_file_type={arrayrecord|parquet|tfrecord}`, `grain_train_files` in `src/maxtext/configs/base.yml` or through command line arguments to match the file pattern on the mounted local path.
+1. Set `dataset_type=grain`, `grain_file_type={arrayrecord|parquet|tfrecord|mmap|mmap_npy}`, and `grain_train_files` in `src/maxtext/configs/base.yml` or through command line arguments. Megatron `mmap` modes require a local or mounted filesystem path; they do not accept a `gs://` URI directly.
 
 2. Tune `grain_worker_count` for performance. This parameter controls the number of child processes used by Grain (more details in [behind_the_scenes](https://google-grain.readthedocs.io/en/latest/behind_the_scenes.html)). If you use a large number of workers, check your config for gcsfuse in [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/scripts/setup_gcsfuse.sh) to avoid gcsfuse throttling.
 
