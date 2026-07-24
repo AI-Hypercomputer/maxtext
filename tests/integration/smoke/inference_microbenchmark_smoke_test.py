@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Smoke test for inference microbenchmark"""
+"""Smoke test for inference microbenchmark"""
 import jax
 import os.path
 import pytest

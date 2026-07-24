@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Offline inference for mlperf """
+"""Offline inference for mlperf"""
 
 from collections import defaultdict
 from typing import Any, Callable

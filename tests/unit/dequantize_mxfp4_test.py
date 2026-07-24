@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for dequantize_mxfp4.py (not run in GitHub runners). """
+"""Tests for dequantize_mxfp4.py (not run in GitHub runners)."""
 
 import unittest
 import torch

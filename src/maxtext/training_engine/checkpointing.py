@@ -43,9 +43,7 @@ class CheckpointManager:
           options=ocp.CheckpointManagerOptions(
               save_interval_steps=getattr(config, "checkpoint_period", 1),
               max_to_keep=getattr(config, "max_num_checkpoints_to_keep", None),
-              enable_async_checkpointing=getattr(
-                  config, "async_checkpointing", True
-              ),
+              enable_async_checkpointing=getattr(config, "async_checkpointing", True),
           ),
       )
 
@@ -139,17 +137,13 @@ class CheckpointManager:
     abstract_params = nnx.state(model)
     model_args = ocp.args.PyTreeRestore(
         item=abstract_params,
-        restore_args=ocp.checkpoint_utils.construct_restore_args(
-            target=abstract_params
-        ),
+        restore_args=ocp.checkpoint_utils.construct_restore_args(target=abstract_params),
     )
     if optimizer is not None and "optimizer_state" in metadata.item_metadata:
       optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
       optimizer_args = ocp.args.PyTreeRestore(
           item=optimizer_state,
-          restore_args=ocp.checkpoint_utils.construct_restore_args(
-              target=optimizer_state
-          ),
+          restore_args=ocp.checkpoint_utils.construct_restore_args(target=optimizer_state),
       )
       restore_args = {
           "model_params": model_args,

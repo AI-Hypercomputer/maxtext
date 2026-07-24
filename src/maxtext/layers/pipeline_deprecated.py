@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Pipeline layer wrapping a decoder layer(s). Supports circular pipelining """
+"""Pipeline layer wrapping a decoder layer(s). Supports circular pipelining"""
 
 import functools
 from typing import Any

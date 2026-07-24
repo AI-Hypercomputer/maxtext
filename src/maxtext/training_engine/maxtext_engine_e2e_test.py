@@ -77,9 +77,7 @@ class TrainingLoopRunner:
       self.trainer.update()
 
       if step % self.checkpoint_interval == 0:
-        self.trainer.save_checkpoint(
-            metadata={"step": step, "source": "TrainingLoopRunner"}
-        )
+        self.trainer.save_checkpoint(metadata={"step": step, "source": "TrainingLoopRunner"})
 
       if step % self.eval_interval == 0:
         eval_payload = next(eval_dataloader)
@@ -97,6 +95,7 @@ class TrainingLoopRunner:
 class MaxTextTrainingEngineE2ETest(absltest.TestCase):
 
   def setup_config(self, enable_checkpointing: bool = False):
+    """Sets up mock configuration for testing."""
     mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
     mock_config.init_weights_seed = 42
     mock_config.model_name = "llama3.1-8b"
@@ -132,15 +131,14 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
     )
 
     trainer_instance = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    trainer_instance._checkpoint_manager.restore_checkpoint.return_value = (
+    trainer_instance._checkpoint_manager.restore_checkpoint.return_value = (  # pylint: disable=protected-access
         None,
         {},
     )
+
     trainer_instance.with_loss_fn(
         lambda *args, **kwargs: (
-            abstract_engine.WeightedMetric(
-                unreduced_sum=jnp.array(1.0), denominator=jnp.array(4.0)
-            ),
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(1.0), denominator=jnp.array(4.0)),
             {},
         )
     )

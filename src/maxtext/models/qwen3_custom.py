@@ -178,6 +178,8 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
       kv_cache: None | jnp.ndarray = None,
       attention_metadata: None | dict[str, Any] = None,
   ):
+    """Applies attention layer with pre/post normalization."""
+
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx = self.pre_self_attention_layer_norm(inputs)

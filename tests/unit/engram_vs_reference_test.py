@@ -16,7 +16,7 @@
 """
 Tests for Engram: CompressedTokenizer, NgramHashMapping, MultiHeadEmbedding, ShortConv, Engram
 
-Reference implementation: 
+Reference implementation:
 https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
 
 To run the test:

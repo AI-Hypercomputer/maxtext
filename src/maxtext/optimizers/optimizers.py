@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator, too-many-positional-arguments
-""" Utils that are only interesting to MaxText. """
+"""Utils that are only interesting to MaxText."""
 
 import re
 import jax

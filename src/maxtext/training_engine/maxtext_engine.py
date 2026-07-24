@@ -60,14 +60,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if not isinstance(training_config, pyconfig.HyperParameters):
       raise TypeError(
-          "MaxTextTrainingEngine requires a pyconfig.HyperParameters instance,"
-          f" got {type(training_config).__name__}"
+          "MaxTextTrainingEngine requires a pyconfig.HyperParameters instance," f" got {type(training_config).__name__}"
       )
     self._config = training_config
     self._mesh = mesh
-    self._init_rng = jax.random.PRNGKey(
-        getattr(training_config, "init_weights_seed", 0)
-    )
+    self._init_rng = jax.random.PRNGKey(getattr(training_config, "init_weights_seed", 0))
     self._loss_fn: Callable[..., Any] | None = None
     self._gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = None
     self._compiled = False
@@ -83,9 +80,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_grads: Any = None
     self._micro_step_count = 0
     self._cached_losses: list[jax.Array] = []
-    self._learning_rate_schedule, self._optimizer = (
-        train_utils.create_training_optimizer(self._config, self._model)
-    )
+    self._learning_rate_schedule, self._optimizer = train_utils.create_training_optimizer(self._config, self._model)
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(
@@ -133,9 +128,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._loss_fn = customized_fn
     self._compiled = False
 
-  def with_gen_model_input_fn(
-      self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
-  ) -> "MaxTextTrainingEngine":
+  def with_gen_model_input_fn(self, gen_model_input_fn: Callable[[Any], dict[str, Any]]) -> "MaxTextTrainingEngine":
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
     self._gen_model_input_fn = gen_model_input_fn
     return self
@@ -158,31 +151,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       batch = self._gen_model_input_fn(payload)
     else:
       batch = payload
-    loss_callable = (
-        self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
-    )
+    loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
 
-    model = (
-        getattr(self._state, "model", None)
-        if self._state is not None
-        else self._model
-    )
+    model = getattr(self._state, "model", None) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
-      raise TypeError(
-          "MaxRL requires an NNX model (flax.nnx.Module), got"
-          f" {type(model).__name__}"
-      )
+      raise TypeError("MaxRL requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
     # TODO(mazumdera): This function call should be pre-compiled.
-    loss, _, micro_grads = (
-        gradient_accumulation.gradient_accumulation_loss_and_grad(
-            loss_callable,
-            self._config,
-            model,
-            None,
-            None,
-            batch,
-            None,
-        )
+    loss, _, micro_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        loss_callable,
+        self._config,
+        model,
+        None,
+        None,
+        batch,
+        None,
     )
 
     if isinstance(loss, abstract_engine.WeightedMetric):
@@ -192,9 +174,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._accumulated_grads is None:
       self._accumulated_grads = micro_grads
     else:
-      self._accumulated_grads = jax.tree.map(
-          jnp.add, self._accumulated_grads, micro_grads
-      )
+      self._accumulated_grads = jax.tree.map(jnp.add, self._accumulated_grads, micro_grads)
     self._micro_step_count += 1
 
   def update(self) -> None:
@@ -209,33 +189,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # TODO(mazumdera): Figure out how exactly we should normalize the losses
       # (if at all). Given that inputs are varying in size, it not correct to
       # simply divide by the number of micro-steps.
-      grads = jax.tree.map(
-          lambda g: g / max(self._micro_step_count, 1), self._accumulated_grads
-      )
+      grads = jax.tree.map(lambda g: g / max(self._micro_step_count, 1), self._accumulated_grads)
       if getattr(self._config, "gradient_clipping_threshold", 0.0) > 0:
-        grads = maxtext_utils.apply_gradient_clipping(
-            grads, None, self._config.gradient_clipping_threshold
-        )
+        grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       if hasattr(self._state, "apply_gradients"):
         if getattr(self._config, "skip_step_on_spikes", False):
           grad_norm = max_utils.l2norm_pytree(grads)
-          mean_loss = (
-              jnp.mean(jnp.array(self._cached_losses))
-              if self._cached_losses
-              else jnp.array(0.0)
-          )
-          self._state.apply_gradients(
-              grads, loss=mean_loss, grad_norm=grad_norm
-          )
+          mean_loss = jnp.mean(jnp.array(self._cached_losses)) if self._cached_losses else jnp.array(0.0)
+          self._state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
         else:
           self._state.apply_gradients(grads)
     self._cached_losses.clear()
     self._accumulated_grads = None
     self._micro_step_count = 0
-    if (
-        hasattr(self, "_learning_rate_schedule")
-        and self._learning_rate_schedule is not None
-    ):
+    if hasattr(self, "_learning_rate_schedule") and self._learning_rate_schedule is not None:
       try:
         lr = self._learning_rate_schedule(self.train_step)
         self.record_metrics("lr", lr)
@@ -243,9 +210,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         pass
     self._train_step += 1
 
-  def eval_step(
-      self, payload: abstract_engine.TrainerPayload, **kwargs: Any
-  ) -> None:
+  def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     """Executes an evaluation step on the given payload.
 
     Args:
@@ -281,12 +246,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       The metadata PyTree of the restored checkpoint.
     """
     step = kwargs.get("step", None)
-    restored_step, restored_metadata = (
-        self._checkpoint_manager.restore_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            step=step,
-        )
+    restored_step, restored_metadata = self._checkpoint_manager.restore_checkpoint(
+        model=self.model,
+        optimizer=self.optimizer,
+        step=step,
     )
     if restored_step:
       logging.info("Checkpoint restored from step %d.", restored_step)
@@ -313,9 +276,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         aggregation_fn=aggregation_fn,
     )
 
-  def get_metrics(
-      self, clear_cache: bool = True
-  ) -> abstract_engine.MetricsBuffer:
+  def get_metrics(self, clear_cache: bool = True) -> abstract_engine.MetricsBuffer:
     """Returns accumulated step metrics as an on-device MetricsBuffer.
 
     Args:
