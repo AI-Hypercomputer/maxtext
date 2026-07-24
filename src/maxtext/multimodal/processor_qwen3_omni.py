@@ -17,8 +17,10 @@
 Original implementation from HuggingFace: Qwen/Qwen3-Omni-30B-A3B-Instruct.
 """
 
+import logging
 import math
 import os
+import tempfile
 from dataclasses import dataclass
 
 import numpy as np
@@ -32,6 +34,7 @@ except ImportError:
   decord = None
 
 from maxtext.multimodal import utils as mm_utils
+from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
 # Image constants.
@@ -471,25 +474,29 @@ def _read_video_decord(video_path, video_start=0.0, video_end=None) -> tuple[np.
   }
   try:
     vr = decord.VideoReader(video_path)
-  except Exception as e:
-    raise RuntimeError(f"Failed to read video from {video_path}: {e}") from e
-  total_frames, video_fps = len(vr), vr.get_avg_fps()
-  start_frame, end_frame, total_frames = calculate_video_frame_range(
-      video_config,
-      total_frames,
-      video_fps,
-  )
-  nframes = smart_nframes(video_config, total_frames=total_frames, video_fps=video_fps)
+    total_frames, video_fps = len(vr), vr.get_avg_fps()
+    start_frame, end_frame, total_frames = calculate_video_frame_range(
+        video_config,
+        total_frames,
+        video_fps,
+    )
+    nframes = smart_nframes(video_config, total_frames=total_frames, video_fps=video_fps)
 
-  # Use numpy linspace instead of torch.linspace
-  idx = np.linspace(start_frame, end_frame, nframes).round().astype(int).tolist()
+    # Use numpy linspace instead of torch.linspace
+    idx = np.linspace(start_frame, end_frame, nframes).round().astype(int).tolist()
 
-  video = vr.get_batch(idx).asnumpy()
-  # Convert from THWC to TCHW format using numpy
-  video = np.transpose(video, (0, 3, 1, 2))
+    video = vr.get_batch(idx).asnumpy()
+    # Convert from THWC to TCHW format using numpy
+    video = np.transpose(video, (0, 3, 1, 2))
 
-  sample_fps = nframes / max(total_frames, 1e-6) * video_fps
-  return video, sample_fps
+    sample_fps = nframes / max(total_frames, 1e-6) * video_fps
+    return video, sample_fps
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.warning("Failed to read/decode video %s: %s. Using dummy video.", video_path, e)
+    # Return dummy video: 4 frames of 224x224 black pixels
+    # 224 is a multiple of 28 (patch_size * merge_size = 14 * 2 = 28)
+    dummy_video = np.zeros((4, 3, 224, 224), dtype=np.uint8)
+    return dummy_video, 2.0
 
 
 def preprocess_video(video, config):
@@ -634,31 +641,114 @@ def pre_process_audio_qwen3_omni(audio_array):
   return audio_features, audio_features_mask
 
 
+def is_video_file(path):
+  if not isinstance(path, str):
+    return False
+  video_extensions = (".mp4", ".avi", ".mkv", ".webm", ".mov", ".gif")
+  return path.lower().endswith(video_extensions)
+
+
 def preprocess_mm_data_qwen3_omni_for_training(images, config):
-  """Preprocesses image(s) for Qwen3-Omni SFT training using model config constants."""
-  images_in = [images] if isinstance(images, np.ndarray) else images
-  if config.image_size_for_vit is None:
-    force_resize = None
-  elif isinstance(config.image_size_for_vit, (list, tuple)):
-    force_resize = tuple(config.image_size_for_vit)
+  """Preprocesses image(s) or video for Qwen3-Omni SFT training using model config constants."""
+  is_video = False
+  if isinstance(images, str) and is_video_file(images):
+    is_video = True
+  elif isinstance(images, list) and len(images) > 0 and isinstance(images[0], str) and is_video_file(images[0]):
+    is_video = True
+
+  if is_video:
+    video_path = images
+    if isinstance(video_path, list):
+      if len(video_path) > 1:
+        raise ValueError("Only 1 video per example is supported for now.")
+      video_path = video_path[0]
+
+    # Auto-assemble video directory from train or eval files
+    video_dir = None
+    if config.hf_train_files:
+      video_dir = os.path.dirname(config.hf_train_files)
+    elif config.hf_eval_files:
+      video_dir = os.path.dirname(config.hf_eval_files)
+
+    if video_dir:
+      video_path = os.path.join(video_dir, video_path)
+
+    is_gcs_video = video_path.startswith("gs://")
+    temp_local_path = None
+
+    if is_gcs_video:
+      ext = os.path.splitext(video_path)[1]
+      with tempfile.NamedTemporaryFile(suffix=ext, prefix="maxtext_video_sft_", delete=False) as temp_file:
+        temp_local_path = temp_file.name
+
+      max_logging.log(f"Downloading remote video {video_path} to temp local path {temp_local_path}...")
+      try:
+        bucket_name, prefix_name = gcs_utils.parse_gcs_bucket_and_prefix(video_path)
+        storage_client = gcs_utils.storage.Client()
+        bucket = storage_client.get_bucket(bucket_name)
+        blob = bucket.blob(prefix_name)
+        blob.download_to_filename(temp_local_path)
+        video_path = temp_local_path
+      except Exception as e:
+        if os.path.exists(temp_local_path):
+          os.remove(temp_local_path)
+        raise RuntimeError(f"Failed to download video from GCS: {e}") from e
+    else:
+      if not os.path.exists(video_path):
+        raw_path = images if isinstance(images, str) else images[0]
+        if os.path.exists(raw_path):
+          video_path = raw_path
+        else:
+          raise FileNotFoundError(f"Video file not found: {video_path} (original: {raw_path})")
+
+    try:
+      video_array, _ = _read_video_decord(video_path)
+    finally:
+      if temp_local_path and os.path.exists(temp_local_path):
+        max_logging.log(f"Cleaning up temp local video file {temp_local_path}...")
+        os.remove(temp_local_path)
+    video_processed, video_grid_thw = preprocess_video(video_array, config)
+    video_values = np.reshape(
+        video_processed,
+        (
+            1,
+            config.num_channels_for_vit,
+            config.temporal_patch_size_for_vit * video_grid_thw[0, 0],
+            config.patch_size_for_vit * video_grid_thw[0, 1],
+            config.patch_size_for_vit * video_grid_thw[0, 2],
+        ),
+    )
+    video_values, video_grid_thw, video_mask = maybe_pad_video_values_to_max_grid(video_values, video_grid_thw, config)
+    return Qwen3OmniPreprocessorOutput(
+        num_videos=1,
+        video_values=video_values,
+        video_grid_thw=video_grid_thw,
+        video_mask=video_mask,
+    )
   else:
-    force_resize = (config.image_size_for_vit, config.image_size_for_vit)
-  pixel_values, pixel_grid_thw = pre_process_qwen3_image(images_in, config, force_resize=force_resize)
-  pixel_values = np.reshape(
-      pixel_values,
-      (
-          len(images_in),
-          config.num_channels_for_vit,
-          config.temporal_patch_size_for_vit * pixel_grid_thw[0, 0],
-          config.patch_size_for_vit * pixel_grid_thw[0, 1],
-          config.patch_size_for_vit * pixel_grid_thw[0, 2],
-      ),
-  )
-  return Qwen3OmniPreprocessorOutput(
-      num_images=len(images_in),
-      pixel_values=pixel_values,
-      pixel_grid_thw=pixel_grid_thw,
-  )
+    images_in = [images] if isinstance(images, np.ndarray) else images
+    if config.image_size_for_vit is None:
+      force_resize = None
+    elif isinstance(config.image_size_for_vit, (list, tuple)):
+      force_resize = tuple(config.image_size_for_vit)
+    else:
+      force_resize = (config.image_size_for_vit, config.image_size_for_vit)
+    pixel_values, pixel_grid_thw = pre_process_qwen3_image(images_in, config, force_resize=force_resize)
+    pixel_values = np.reshape(
+        pixel_values,
+        (
+            len(images_in),
+            config.num_channels_for_vit,
+            config.temporal_patch_size_for_vit * pixel_grid_thw[0, 0],
+            config.patch_size_for_vit * pixel_grid_thw[0, 1],
+            config.patch_size_for_vit * pixel_grid_thw[0, 2],
+        ),
+    )
+    return Qwen3OmniPreprocessorOutput(
+        num_images=len(images_in),
+        pixel_values=pixel_values,
+        pixel_grid_thw=pixel_grid_thw,
+    )
 
 
 def preprocess_mm_data_qwen3_omni(config):
@@ -1288,14 +1378,27 @@ def get_rope_index(
 
 
 def reformat_prompt_qwen3_omni(
-    prompt, image_placeholder="<|image|>", num_images=0, video_placeholder="<|video|>", num_videos=0
+    prompt,
+    image_placeholder="<|image|>",
+    num_images=0,
+    video_placeholder="<|video|>",
+    num_videos=0,
+    num_image_tokens=None,
+    num_video_tokens=None,
 ):
   """Reformat the prompt for Qwen3-Omni model."""
   # Qwen3-Omni vision format: <|vision_start|><|image_pad|><|vision_end|>
   # Qwen3-Omni mm token order: image_pad, video_pad, audio_pad (standalone audios), then text tokens.
   # use_audio_in_video mode: such audio tokens are interleaved within video tokens.
-  qwen3_image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
-  qwen3_video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+  if num_image_tokens is not None:
+    qwen3_image_placeholder = f"<|vision_start|>{'<|image_pad|>' * num_image_tokens}<|vision_end|>"
+  else:
+    qwen3_image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+
+  if num_video_tokens is not None:
+    qwen3_video_placeholder = f"<|vision_start|>{'<|video_pad|>' * num_video_tokens}<|vision_end|>"
+  else:
+    qwen3_video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
 
   if video_placeholder in prompt:
     prompt = prompt.replace(video_placeholder, qwen3_video_placeholder)
