@@ -416,3 +416,15 @@ jobs:
     with:
       failed_run_id: '${{ github.run_id }}'
     secrets: inherit
+
+  track_performance:
+    name: Track Test Performance
+    needs: [tpu-tests, gpu-tests, cpu-tests]
+    if: ${{ always() && (needs.cpu-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-tests.result == 'success') }}
+    uses: ./.github/workflows/track_performance.yml
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    secrets: inherit
+
