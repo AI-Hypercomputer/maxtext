@@ -39,7 +39,7 @@ def shard_single_device_arrays(pytree: Any) -> Any:
   def _ensure_mesh_sharding(x: Any) -> Any:
     if isinstance(x, (jax.Array, ShapedArray, jax.ShapeDtypeStruct)):
       sharding = getattr(x, 'sharding', None)
-      if sharding is not None and type(sharding).__name__ in ("SingleDeviceSharding", "PmapSharding"):
+      if sharding is not None and not isinstance(sharding, NamedSharding):
         if isinstance(x, jax.Array):
             return jax.device_put(x, new_sharding)
         else:
