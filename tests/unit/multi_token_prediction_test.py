@@ -428,8 +428,9 @@ class _MTPLossFnTestModel(nnx.Module):
       enable_dropout=False,
       decoder_target_tokens=None,
       decoder_target_mask=None,
+      **kwargs,
   ):
-    del encoder_images, encoder_image_masks, enable_dropout
+    del encoder_images, encoder_image_masks, enable_dropout, kwargs
     main_hidden_state = self._shared_embedding(decoder_input_tokens)
     self.mtp_block(
         self._shared_embedding,
@@ -536,8 +537,9 @@ class _TransformerWithMTP(nnx.Module):
       enable_dropout=False,
       decoder_target_tokens=None,
       decoder_target_mask=None,
+      **kwargs,
   ):
-    del enable_dropout
+    del enable_dropout, kwargs
     main_hidden_state = self._shared_embedding(decoder_input_tokens)
     self.mtp_block(
         self._shared_embedding,

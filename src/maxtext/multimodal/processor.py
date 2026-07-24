@@ -119,7 +119,16 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     return 0
 
 
-def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_placeholder="<|video|>", num_videos=0):
+def reformat_prompt(
+    prompt,
+    image_placeholder,
+    model_name,
+    num_images,
+    video_placeholder="<|video|>",
+    num_videos=0,
+    num_image_tokens=None,
+    num_video_tokens=None,
+):
   """Reformat prompt for different models."""
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import reformat_prompt_gemma3  # pylint: disable=import-outside-toplevel
@@ -149,6 +158,8 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
         num_images=num_images,
         video_placeholder=video_placeholder,
         num_videos=num_videos,
+        num_image_tokens=num_image_tokens,
+        num_video_tokens=num_video_tokens,
     )
   else:
     return prompt
