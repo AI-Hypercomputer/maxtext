@@ -25,9 +25,14 @@ DILOCO_USE_SEQUENTIAL_LAYERS=false
 DILOCO_NUM_COMM_OVERLAP_STEPS=2
 DILOCO_COMM_OVERLAP_ALPHA=0.0
 MODEL_NAME="qwen3-8b"
+WEIGHT_DTYPE="bfloat16"
 PER_DEVICE_BATCH_SIZE=8
 MAX_TARGET_LENGTH=2048
 STEPS=20
+# This short run is for profiler validation, not checkpoint production. A
+# step-zero AdamW checkpoint can stage roughly three model copies per learner.
+ENABLE_CHECKPOINTING=false
+SAVE_CHECKPOINT_ON_COMPLETION=false
 
 XLA_FLAGS=" \
   --xla_tpu_scoped_vmem_limit_kib=65536 \
@@ -71,6 +76,7 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && 
              dataset_name='c4/en:3.0.1' \
              eval_dataset_name='c4/en:3.0.1' \
              model_name=${MODEL_NAME} \
+             weight_dtype=${WEIGHT_DTYPE} \
              tokenizer_type=huggingface \
              tokenizer_path=maxtext/assets/tokenizers/qwen3-tokenizer \
              per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
@@ -92,6 +98,8 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && 
              skip_first_n_steps_for_profiler=5 \
              profiler_steps=5 \
              upload_all_profiler_results=true \
+             enable_checkpointing=${ENABLE_CHECKPOINTING} \
+             save_checkpoint_on_completion=${SAVE_CHECKPOINT_ON_COMPLETION} \
              steps=${STEPS}"
 
 # 1. Build and push the docker image manually containing your local changes
@@ -114,4 +122,3 @@ echo "Creating workload: ${RUNNAME}"
 --num-slices=$NUM_SLICES \
 --enable-debug-logs \
 --cluster "${CLUSTER}" --tpu-type "${DEVICE_TYPE}" --project "${PROJECT}" --zone "${ZONE}"
-

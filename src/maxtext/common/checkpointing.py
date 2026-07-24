@@ -1022,8 +1022,8 @@ def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
 
 
-def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None):
-  """Save checkpoint if checkpointing is enabled."""
+def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None, force=False):
+  """Save checkpoint if scheduled, or unconditionally when ``force`` is true."""
   if checkpoint_manager is None:
     return
 
@@ -1047,12 +1047,9 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
     state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
 
-  # Determine if a checkpoint save should be forced, overriding the usual `config.checkpoint_period` logic.
-  # This occurs if this function was called:
-  # without an explicit 'step' (implying it's a checkpoint save for final step),
-  # AND the 'actual_step' is a valid step,
-  # AND it's not a step that would normally trigger a checkpoint save.
-  force_ckpt_save = step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0)
+  # Force either when explicitly requested or for a legacy final-step call
+  # whose derived key would not satisfy the normal checkpoint period.
+  force_ckpt_save = force or (step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0))
 
   try:
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)

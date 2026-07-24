@@ -451,6 +451,29 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     # Assert that save_checkpoint WAS called!
     save_checkpoint_mock.assert_called_once()
 
+  def test_explicit_step_can_be_forced_outside_checkpoint_period(self):
+    """A coordinated caller can force an exact completed-step checkpoint key."""
+    state = self._build_linen_state(self.N_STEPS)
+    config = SimpleNamespace(pure_nnx=False, checkpoint_period=10_000, async_checkpointing=False)
+    mgr = mock.MagicMock()
+    mgr.latest_step.return_value = None
+    mgr.reached_preemption.return_value = False
+
+    save_checkpoint_mock = mock.MagicMock(return_value=False)
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+      checkpointing.maybe_save_checkpoint(
+          mgr,
+          state,
+          config,
+          data_iterator=None,
+          step=self.N_STEPS,
+          force=True,
+      )
+
+    call_args = save_checkpoint_mock.call_args.args
+    self.assertEqual(call_args[1], self.N_STEPS)
+    self.assertTrue(call_args[5])
+
 
 class TestLinenCheckpointFormatConverters(unittest.TestCase):
   """to_linen_checkpoint_dict / from_linen_checkpoint_dict (NNX <-> Linen on-disk layout)."""

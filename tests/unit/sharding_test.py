@@ -22,7 +22,7 @@ import jax
 import pytest
 
 from jax.sharding import PartitionSpec
-from maxtext.utils.sharding import partition_mesh_by_diloco_axis
+from maxtext.utils.mesh_utils import partition_mesh_by_diloco_axis
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.lax import with_sharding_constraint
@@ -117,7 +117,9 @@ def check_sharding(array_or_dict, expected_sharding):
   """Checks the sharding property only if the item is a JAX array."""
   if isinstance(array_or_dict, jax.Array):
     np.testing.assert_equal(
-        array_or_dict.sharding, expected_sharding, "Initial layer parameter sharding does not match expected sharding."
+        array_or_dict.sharding,
+        expected_sharding,
+        "Initial layer parameter sharding does not match expected sharding.",
     )
 
 
@@ -178,7 +180,9 @@ def test_fsdp_sharding():
 
     # assert the data sharding
     np.testing.assert_equal(
-        presharded_X.sharding, data_mesh_shardings, "Input data sharding does not match expected sharding."
+        presharded_X.sharding,
+        data_mesh_shardings,
+        "Input data sharding does not match expected sharding.",
     )
 
     # asset the parameter sharding for all layers
@@ -198,7 +202,10 @@ def test_fsdp_sharding():
     parameters = 2 * D_FF * D_EMB * NUM_LAYERS
     TFLOPs_per_device = parameters * 6 * BATCH_SIZE / 10**12 / len(jax.devices())
     time = simple_timeit(lambda: jax.block_until_ready(jit_func(presharded_X, presharded_layers)))
-    print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush=True)
+    print(
+        f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}",
+        flush=True,
+    )
 
 
 def test_partition_mesh_by_diloco_axis():
@@ -249,3 +256,32 @@ def test_partition_mesh_by_diloco_axis():
   global_mesh = Mesh(devices_grid, ["diloco", "data"])
   with pytest.raises(ValueError, match="Diloco axis size .* must match num_replicas"):
     partition_mesh_by_diloco_axis(global_mesh, num_diloco + 1)
+
+
+def test_partition_mesh_by_diloco_axis_preserves_axis_types():
+  devices = jax.devices()
+  if len(devices) < 8:
+    pytest.skip("axis type preservation test requires at least 8 devices")
+
+  devices_grid = np.asarray(devices[:8]).reshape((2, 2, 2))
+  global_mesh = Mesh(
+      devices_grid,
+      ("data", "diloco", "model"),
+      axis_types=(
+          jax.sharding.AxisType.Explicit,
+          jax.sharding.AxisType.Auto,
+          jax.sharding.AxisType.Manual,
+      ),
+  )
+
+  submeshes = partition_mesh_by_diloco_axis(global_mesh, num_replicas=2)
+
+  assert len(submeshes) == 2
+  for replica_idx, submesh in enumerate(submeshes):
+    assert submesh.axis_names == ("data", "model")
+    assert submesh.axis_types == (
+        jax.sharding.AxisType.Explicit,
+        jax.sharding.AxisType.Manual,
+    )
+    assert submesh.shape == {"data": 2, "model": 2}
+    np.testing.assert_array_equal(submesh.devices, devices_grid[:, replica_idx, :])

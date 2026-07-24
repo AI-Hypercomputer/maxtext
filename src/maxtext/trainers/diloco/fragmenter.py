@@ -14,12 +14,12 @@
 
 """FragmentedTreeManipulator for parameter tree slicing."""
 
-import functools
 import re
 from typing import Any
 import jax
 import jax.numpy as jnp
-from jax.experimental.layout import Format, Layout
+
+from maxtext.utils.mesh_utils import jit_with_layout_canonicalized_inputs
 
 
 class FragmentedTreeManipulator:
@@ -36,56 +36,68 @@ class FragmentedTreeManipulator:
     self.fragment_to_layer_indices = fragment_to_layer_indices
     self.num_fragments = num_fragments
     self.param_scan_axis = param_scan_axis
-    # Caches for null-layout-aware jit functions used by the CPU syncer path.
+    # Caches for physical-layout-aware JIT functions used by the CPU syncer.
     self._take_jit_cache: dict = {}
     self._scatter_jit_cache: dict = {}
 
   def _make_take_jit_null(self, v, indices, axis):
-    """Returns a cached jit that extracts a fragment from a null-layout CPU array.
-
-    Eager jnp.take on Pathways null-layout arrays compiles jit__take with tiled input
-    expectations (XLA always prefers tiled for data-reading ops), which Pathways then
-    rejects at the input boundary. Wrapping in a jit with explicit null-layout Format
-    forces XLA to compile with null expectations, matching what device_put produces.
-    """
-    cache_key = (v.shape, v.dtype, str(v.sharding), tuple(int(i) for i in indices), axis)
+    """Returns a cached, format-adapted JIT that extracts a fragment."""
+    cache_key = (
+        v.shape,
+        v.dtype,
+        repr(v.format),
+        tuple(int(i) for i in indices),
+        axis,
+    )
     if cache_key not in self._take_jit_cache:
-      null_layout = Layout(major_to_minor=tuple(range(len(v.shape))), tiling=None)
-      in_format = Format(layout=null_layout, sharding=v.sharding)
-      out_sharding = jax.sharding.NamedSharding(v.sharding.mesh, v.sharding.spec)
+      out_sharding = jax.sharding.NamedSharding(
+          v.sharding.mesh,
+          v.sharding.spec,
+          memory_kind=v.sharding.memory_kind,
+      )
       static_indices = jnp.array([int(i) for i in indices])
       static_axis = axis
 
-      @functools.partial(jax.jit, in_shardings=(in_format,), out_shardings=out_sharding)
       def take_fn(x):
         return jnp.take(x, static_indices, axis=static_axis)
 
-      self._take_jit_cache[cache_key] = take_fn
+      self._take_jit_cache[cache_key] = jit_with_layout_canonicalized_inputs(
+          take_fn,
+          in_shardings=(v.format,),
+          out_shardings=out_sharding,
+      )
     return self._take_jit_cache[cache_key]
 
-  def _make_scatter_jit_null(self, v, frag_example, indices, axis):
-    """Returns a cached jit that updates a null-layout CPU array with a null-layout fragment."""
+  def _make_scatter_jit_null(  # pylint: disable=too-many-positional-arguments
+      self, v, frag_example, indices, axis, donate_full_array
+  ):
+    """Returns a cached, format-adapted JIT that updates a full CPU array."""
     frag_indices = tuple(int(i) for i in indices)
     cache_key = (
-        v.shape, v.dtype, str(v.sharding),
-        frag_example.shape, frag_example.dtype, str(frag_example.sharding),
-        frag_indices, axis,
+        v.shape,
+        v.dtype,
+        repr(v.format),
+        frag_example.shape,
+        frag_example.dtype,
+        repr(frag_example.format),
+        frag_indices,
+        axis,
+        donate_full_array,
     )
     if cache_key not in self._scatter_jit_cache:
-      null_v_layout = Layout(major_to_minor=tuple(range(len(v.shape))), tiling=None)
-      null_f_layout = Layout(major_to_minor=tuple(range(len(frag_example.shape))), tiling=None)
-      in_format_v = Format(layout=null_v_layout, sharding=v.sharding)
-      in_format_f = Format(layout=null_f_layout, sharding=frag_example.sharding)
-      out_sharding = jax.sharding.NamedSharding(v.sharding.mesh, v.sharding.spec)
       static_indices = jnp.array(list(frag_indices))
       static_axis = axis
 
-      @functools.partial(jax.jit, in_shardings=(in_format_v, in_format_f), out_shardings=out_sharding)
       def scatter_fn(full_x, frag_x):
         idx_tuple = tuple(slice(None) if i != static_axis else static_indices for i in range(full_x.ndim))
         return full_x.at[idx_tuple].set(frag_x)
 
-      self._scatter_jit_cache[cache_key] = scatter_fn
+      self._scatter_jit_cache[cache_key] = jit_with_layout_canonicalized_inputs(
+          scatter_fn,
+          in_shardings=(v.format, frag_example.format),
+          out_shardings=v.format,
+          donate_argnums=(0,) if donate_full_array else (),
+      )
     return self._scatter_jit_cache[cache_key]
 
   @classmethod
@@ -126,10 +138,19 @@ class FragmentedTreeManipulator:
       serialized_path = "/" + "/".join(parts)
       keypath_to_is_scanned[jax.tree_util.keystr(keypath)] = bool(scanned_regex.search(serialized_path))
 
-    return cls(keypath_to_is_scanned, fragment_to_layer_indices, num_fragments, config.param_scan_axis)
+    return cls(
+        keypath_to_is_scanned,
+        fragment_to_layer_indices,
+        num_fragments,
+        config.param_scan_axis,
+    )
 
   def get_flat_fragment(
-      self, tree, fragment_idx: int, has_replica_dim: bool = False, use_null_layout_jit: bool = False
+      self,
+      tree,
+      fragment_idx: int,
+      has_replica_dim: bool = False,
+      use_null_layout_jit: bool = False,
   ) -> dict[str, Any]:
     """Extracts a flat dictionary containing parameters for the specified fragment index.
 
@@ -137,8 +158,9 @@ class FragmentedTreeManipulator:
       tree: The full parameter PyTree to extract from.
       fragment_idx: Which fragment to extract (0 = non-scanned, >0 = scanned layer slice).
       has_replica_dim: Whether the tree has an extra leading replica dimension.
-      use_null_layout_jit: When True, wraps jnp.take in a null-layout-Format jit to avoid
-        Pathways layout mismatches. Use for CPU syncer arrays; leave False for TPU learner arrays.
+      use_null_layout_jit: When True, wraps jnp.take in a compiled-format adapter
+        to avoid Pathways physical-layout mismatches. Retained as the public
+        argument name for compatibility.
     """
     kvs, _ = jax.tree_util.tree_flatten_with_path(tree)
     flat_frag = {}
@@ -159,13 +181,14 @@ class FragmentedTreeManipulator:
             flat_frag[keystr] = jnp.take(v, indices, axis=axis)
     return flat_frag
 
-  def apply_flat_fragment(
+  def apply_flat_fragment(  # pylint: disable=too-many-positional-arguments
       self,
       tree,
       fragment_idx: int,
       flat_fragment: dict[str, Any],
       has_replica_dim: bool = False,
       use_null_layout_jit: bool = False,
+      donate_full_array: bool = False,
   ):
     """Merges a flat fragment dictionary back into the full parameters PyTree structure.
 
@@ -174,8 +197,11 @@ class FragmentedTreeManipulator:
       fragment_idx: Which fragment to update (0 = non-scanned, >0 = scanned layer slice).
       flat_fragment: The fragment values to merge in.
       has_replica_dim: Whether the tree has an extra leading replica dimension.
-      use_null_layout_jit: When True, wraps scatter in a null-layout-Format jit to avoid
-        Pathways layout mismatches. Use for CPU syncer arrays; leave False for TPU learner arrays.
+      use_null_layout_jit: When True, wraps scatter in a compiled-format
+        adapter. Retained as the public argument name for compatibility.
+      donate_full_array: Whether scanned full-array inputs may be invalidated
+        and reused for the scatter output. Only set this when ``tree`` is
+        immediately replaced and has no live asynchronous consumer.
     """
     kvs, treedef = jax.tree_util.tree_flatten_with_path(tree)
     new_kvs = []
@@ -193,7 +219,7 @@ class FragmentedTreeManipulator:
           axis = self.param_scan_axis + 1 if has_replica_dim else self.param_scan_axis
           frag = flat_fragment[keystr]
           if use_null_layout_jit:
-            scatter_fn = self._make_scatter_jit_null(v, frag, indices, axis)
+            scatter_fn = self._make_scatter_jit_null(v, frag, indices, axis, donate_full_array)
             new_kvs.append(scatter_fn(v, frag))
           else:
             idx_tuple = tuple(slice(None) if i != axis else indices for i in range(v.ndim))

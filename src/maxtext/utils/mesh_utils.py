@@ -12,13 +12,75 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Mesh utilities for DiLoCo stack operations across submeshes."""
+"""Mesh and layout utilities for non-SPMD DiLoCo."""
 
+import functools
+import threading
 from typing import Any
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from pathwaysutils.experimental.concatenate_by_mesh_axis import concatenate_by_mesh_axis
+
+
+def jit_with_layout_canonicalized_inputs(
+    fun,
+    *,
+    in_shardings,
+    out_shardings,
+    donate_argnums=(),
+):
+  """JITs ``fun`` and adapts calls to the executable's physical formats.
+
+  A logical ``NamedSharding`` does not describe a device-local physical layout.
+  In particular, a TPU-compiled executable may require a tiled input while a
+  transferred or restored value with the same logical sharding has a different
+  layout.  The compiled executable is the authority: each call is placed into
+  its concrete ``input_formats`` before execution.
+
+  ``donate_argnums`` applies to both the format conversion and the executable.
+  Callers must not retain or use donated arguments.
+  """
+  donate_argnums = tuple(donate_argnums)
+  donated = frozenset(donate_argnums)
+  jitted = jax.jit(
+      fun,
+      in_shardings=in_shardings,
+      out_shardings=out_shardings,
+      donate_argnums=donate_argnums,
+  )
+  executable = None
+  input_formats = None
+  compile_lock = threading.Lock()
+
+  @functools.wraps(fun)
+  def call(*args):
+    nonlocal executable, input_formats
+    if executable is None:
+      with compile_lock:
+        if executable is None:
+          executable = jitted.lower(*args).compile()
+          input_formats, keyword_formats = executable.input_formats
+          if keyword_formats:
+            raise ValueError("Layout-canonicalized JIT does not support keyword arguments")
+
+    donate_mask = tuple(i in donated for i in range(len(args)))
+    formatted_args = jax.device_put(args, input_formats, donate=donate_mask)
+    return executable(*formatted_args)
+
+  return call
+
+
+@functools.cache
+def _make_layout_safe_expand_dims(input_sharding, output_sharding, shape, dtype):
+  """Caches one format-adapted leading-dimension expansion per signature."""
+  del shape, dtype  # They intentionally specialize the cache key.
+  return jit_with_layout_canonicalized_inputs(
+      lambda value: jnp.expand_dims(value, axis=0),
+      in_shardings=input_sharding,
+      out_shardings=output_sharding,
+  )
 
 
 def partition_mesh_by_diloco_axis(
@@ -36,12 +98,13 @@ def partition_mesh_by_diloco_axis(
 
   devices = global_mesh.devices
   submeshes = []
-  axis_names = list(global_mesh.axis_names)
-  axis_names.remove(diloco_axis_name)
+  retained_axes = [i for i, name in enumerate(global_mesh.axis_names) if name != diloco_axis_name]
+  axis_names = tuple(global_mesh.axis_names[i] for i in retained_axes)
+  axis_types = tuple(global_mesh.axis_types[i] for i in retained_axes)
 
   for i in range(num_replicas):
     sub_devices = np.take(devices, i, axis=diloco_axis_index)
-    submesh = jax.sharding.Mesh(sub_devices, axis_names)
+    submesh = jax.sharding.Mesh(sub_devices, axis_names, axis_types=axis_types)
     submeshes.append(submesh)
 
   return submeshes
@@ -57,33 +120,28 @@ def _expand_array_dims_with_mesh(
   submesh = sharding.mesh
 
   expanded_devices = np.expand_dims(np.array(submesh.devices), axis=0)
-  expanded_mesh = jax.sharding.Mesh(expanded_devices, axis_names=(axis_name,) + submesh.axis_names)
+  expanded_mesh = jax.sharding.Mesh(
+      expanded_devices,
+      axis_names=(axis_name,) + submesh.axis_names,
+      axis_types=(jax.sharding.AxisType.Auto,) + submesh.axis_types,
+  )
   expanded_sharding = jax.sharding.NamedSharding(
-      expanded_mesh, jax.sharding.PartitionSpec(axis_name, *sharding.spec), memory_kind=sharding.memory_kind
+      expanded_mesh,
+      jax.sharding.PartitionSpec(axis_name, *sharding.spec),
+      memory_kind=sharding.memory_kind,
   )
 
-  # Pathways caches all jit-compiled ops (expand_dims, device_put_reshard) keyed by
-  # shape/dtype/sharding WITHOUT layout. Different learner slices or jnp.take outputs
-  # can produce arrays with different layouts (null vs tiled) for the same logical tensor,
-  # causing the cached jit to reject the second layout variant.
-  # Shard-level construction avoids every layout-sensitive jit entirely: np.expand_dims
-  # is a pure-numpy op and make_array_from_single_device_arrays is a metadata operation.
-  local_arrays = [
-      jax.device_put(
-          np.expand_dims(np.asarray(shard.data), axis=0),
-          jax.sharding.SingleDeviceSharding(shard.device),
-      )
-      for shard in x.addressable_shards
-  ]
-  return jax.make_array_from_single_device_arrays(
-      shape=(1,) + x.shape,
-      sharding=expanded_sharding,
-      arrays=local_arrays,
-  )
+  # Never round-trip a remote CPU shard through controller-host NumPy. Besides
+  # doubling the fragment, np.asarray(shard.data) centralizes all remote shards
+  # in the single Pathways client. Adapt the small compiled operation to its
+  # executable-selected layout instead.
+  expand_dims = _make_layout_safe_expand_dims(sharding, expanded_sharding, x.shape, x.dtype)
+  return expand_dims(x)
 
 
 def stack_across_meshes_pytree(trees: list[Any], global_mesh: jax.sharding.Mesh, axis_name: str) -> Any:
   """Stacks a list of PyTrees across submeshes into a single global PyTree."""
+  del global_mesh  # Retained for compatibility with the existing public API.
   # 1. Expand dimensions of all arrays in all PyTrees manually
   expanded_trees = []
   for tree in trees:
