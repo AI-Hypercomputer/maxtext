@@ -1715,7 +1715,9 @@ def train_loop(config, recorder, state=None):
           python_vars["step"] += 1
 
         except jax.errors.JaxRuntimeError as e:
-          if config.elastic_enabled and elastic.is_error_due_to_slice_down(e):
+          if config.elastic_enabled and (
+              elastic.is_error_due_to_slice_down(e) or "UNAVAILABLE" in str(e)
+          ):
             # Slice Failure Recovery
             _logger.exception(
                 "[!] Elastic event detected around step %d", python_vars["step"]
