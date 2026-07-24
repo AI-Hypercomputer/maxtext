@@ -27,7 +27,11 @@ RUN apt-get update && apt-get install -y google-cloud-sdk
 ENV PATH="/usr/local/google-cloud-sdk/bin:${PATH}"
 
 # Upgrade libcusprase to work with Jax
-RUN apt-get update && apt-get install -y libcusparse-13-2
+RUN . /etc/os-release && \
+    curl -LO https://developer.download.nvidia.com/compute/cuda/repos/${ID}${VERSION_ID//./}/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    rm cuda-keyring_1.1-1_all.deb
+RUN apt-get update
 
 ARG MODE
 ENV ENV_MODE=$MODE
