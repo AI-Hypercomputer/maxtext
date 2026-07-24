@@ -6,22 +6,29 @@ import threading
 from typing import Any
 
 import jax
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+import numpy as np
 from orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter import Snapshotter as BaseSnapshotter
-import orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter as orbax_snapshotter
 
 _logger = logging.getLogger(__name__)
-
-# Monkeypatch orbax snapshotter is_shardable_array to require mesh attribute on sharding
-_original_is_shardable_array = getattr(orbax_snapshotter, "is_shardable_array", lambda x: isinstance(x, jax.Array))
-
-def _fixed_is_shardable_array(x: Any) -> bool:
-  return _original_is_shardable_array(x) and hasattr(getattr(x, "sharding", None), "mesh")
-
-orbax_snapshotter.is_shardable_array = _fixed_is_shardable_array
 
 _identity_jit = jax.jit(lambda x: x)
 _original_block_until_ready = jax.block_until_ready
 _thread_local = threading.local()
+
+
+def _ensure_mesh_sharding(x: Any) -> Any:
+  """Shards single device arrays onto a mesh of one device per replica with replicated sharding."""
+  if isinstance(x, jax.Array) and not hasattr(x.sharding, "mesh"):
+    devs = list(x.sharding.device_set)
+    mesh = Mesh(np.array(devs), ("replica",))
+    return jax.device_put(x, NamedSharding(mesh, PartitionSpec()))
+  return x
+
+
+def shard_single_device_arrays(pytree: Any) -> Any:
+  """Converts single device arrays in a PyTree to replicated NamedSharding on a 1-device-per-replica mesh."""
+  return jax.tree.map(_ensure_mesh_sharding, pytree)
 
 
 def _custom_block_until_ready(x: Any) -> Any:
@@ -51,6 +58,11 @@ def _identity_jit_block_until_ready_context():
 class Snapshotter(BaseSnapshotter):
   """Extends Orbax Snapshotter using thread-safe identity_jit during load."""
 
+  def save(self, state: Any, step: int | None = None) -> bool:
+    """Saves state after ensuring all arrays have mesh shardings."""
+    state = shard_single_device_arrays(state)
+    return super().save(state, step=step)
+
   def load(
       self,
       abstract_state: Any,
@@ -58,8 +70,11 @@ class Snapshotter(BaseSnapshotter):
       reset_snapshot_state: bool = True,
   ) -> Any:
     """Move arrays from workers onto TPU devices with thread-local identity_jit validation."""
+    abstract_state = shard_single_device_arrays(abstract_state)
     with _identity_jit_block_until_ready_context():
-      return super().load(abstract_state, reset_snapshot_state=reset_snapshot_state)
+      return super().load(
+          abstract_state, reset_snapshot_state=reset_snapshot_state
+      )
 
   def join(self) -> None:
     self._queue.join()
