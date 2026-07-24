@@ -19,8 +19,55 @@ It first ensures 'uv' is installed and then uses it to install the packages list
 """
 
 import os
+import shutil
 import subprocess
 import sys
+
+
+def ensure_cpp20_compiler():
+  """Ensures GCC/G++ >= 11.3 is available for compiling C++20 dependencies like vLLM."""
+  if sys.platform != "linux":
+    return
+  try:
+    res = subprocess.run(["gcc", "-dumpversion"], capture_output=True, text=True, check=False)
+    major_ver = int(res.stdout.strip().split(".")[0])
+    if major_ver >= 11:
+      return
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+  # If gcc-11 and g++-11 exist, point CC and CXX to them
+  if shutil.which("gcc-11") and shutil.which("g++-11"):
+    os.environ["CC"] = "gcc-11"
+    os.environ["CXX"] = "g++-11"
+    return
+
+  # If running as root (e.g. inside CI docker container), install gcc-11 g++-11 via apt
+  is_root = os.geteuid() == 0 if hasattr(os, "geteuid") else False
+  if is_root and shutil.which("apt-get"):
+    try:
+      print("Installing gcc-11 and g++-11 for C++20 compilation compatibility...")
+      subprocess.run(["apt-get", "update", "-y"], check=True, capture_output=True)
+      subprocess.run(
+          [
+              "apt-get",
+              "install",
+              "-y",
+              "--no-install-recommends",
+              "gcc-11",
+              "g++-11",
+              "build-essential",
+              "cmake",
+              "ninja-build",
+          ],
+          check=True,
+          capture_output=True,
+      )
+      if shutil.which("gcc-11") and shutil.which("g++-11"):
+        os.environ["CC"] = "gcc-11"
+        os.environ["CXX"] = "g++-11"
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"Warning: Failed to install gcc-11 via apt-get: {e}")
 
 
 def main():
@@ -30,6 +77,7 @@ def main():
   """
   os.environ["VLLM_TARGET_DEVICE"] = "tpu"
   os.environ["UV_TORCH_BACKEND"] = "cpu"
+  ensure_cpp20_compiler()
 
   current_dir = os.path.dirname(os.path.abspath(__file__))
   repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
