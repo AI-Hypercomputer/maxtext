@@ -36,7 +36,7 @@ def ensure_cpp20_compiler():
   except Exception:  # pylint: disable=broad-exception-caught
     pass
 
-  # If gcc-11 / g++-11 or clang / clang++ already exist, point CC and CXX to them
+  # If gcc-11 / g++-11 exist, point CC and CXX to them (preferred over clang to avoid mwaitxintrin header issue)
   if shutil.which("gcc-11") and shutil.which("g++-11"):
     os.environ["CC"] = "gcc-11"
     os.environ["CXX"] = "g++-11"
@@ -50,7 +50,7 @@ def ensure_cpp20_compiler():
   is_root = os.geteuid() == 0 if hasattr(os, "geteuid") else False
   if is_root and shutil.which("apt-get"):
     try:
-      print("Ensuring C++20 compiler (clang/gcc-11) for vLLM compilation...")
+      print("Ensuring C++20 compiler (gcc-11/clang) for vLLM compilation...")
       if os.path.exists("/etc/os-release"):
         with open("/etc/os-release", "r", encoding="utf-8") as f:
           os_rel = f.read()
@@ -59,11 +59,18 @@ def ensure_cpp20_compiler():
             f.write("deb http://deb.debian.org/debian bullseye-backports main\n")
       # Use check=False for apt-get update as index warnings/errors return exit code 100 on Debian
       subprocess.run(["apt-get", "update", "-y"], check=False, capture_output=True)
+      subprocess.run(
+          ["apt-get", "install", "-y", "--no-install-recommends", "-t", "bullseye-backports", "gcc-11", "g++-11"],
+          check=False,
+          capture_output=True,
+      )
       apt_cmd = [
           "apt-get",
           "install",
           "-y",
           "--no-install-recommends",
+          "gcc-11",
+          "g++-11",
           "clang",
           "llvm",
           "build-essential",
@@ -71,19 +78,14 @@ def ensure_cpp20_compiler():
           "ninja-build",
       ]
       subprocess.run(apt_cmd, check=False, capture_output=True)
-      subprocess.run(
-          ["apt-get", "install", "-y", "--no-install-recommends", "-t", "bullseye-backports", "gcc-11", "g++-11"],
-          check=False,
-          capture_output=True,
-      )
-      if shutil.which("clang") and shutil.which("clang++"):
-        os.environ["CC"] = "clang"
-        os.environ["CXX"] = "clang++"
-        print("Using C++20 compiler: CC=clang CXX=clang++")
-      elif shutil.which("gcc-11") and shutil.which("g++-11"):
+      if shutil.which("gcc-11") and shutil.which("g++-11"):
         os.environ["CC"] = "gcc-11"
         os.environ["CXX"] = "g++-11"
         print("Using C++20 compiler: CC=gcc-11 CXX=g++-11")
+      elif shutil.which("clang") and shutil.which("clang++"):
+        os.environ["CC"] = "clang"
+        os.environ["CXX"] = "clang++"
+        print("Using C++20 compiler: CC=clang CXX=clang++")
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"Warning: Failed to install C++20 compiler via apt-get: {e}")
 
