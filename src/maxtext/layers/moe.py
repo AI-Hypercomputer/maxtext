@@ -70,6 +70,7 @@ class RouteMetadata:
   # Shape [num_ep, num_ep]. all_gather of reshaped_group_sizes across EP shards.
   # [i, j] = number of tokens from batch shard i sent to expert shard j.
   all_shards_group_sizes: Optional[jax.Array]
+  precomputed_sorted_by_validity: Optional[jax.Array] = None
 
 
 @struct.dataclass
@@ -846,11 +847,12 @@ class RoutedMoE(nnx.Module):
       self,
       inputs,
       gate_logits,
-      pre_bias_logits,
+      pre_bias_logits=None,
       use_custom_sort_vjp=True,
       rngs=None,
       roll_to_expert_id=None,
       input_ids=None,
+      precomputed_sorted_by_validity=None,
   ):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
@@ -888,6 +890,7 @@ class RoutedMoE(nnx.Module):
     # local prefix of valid rows.
     use_ragged_in_permute = self.config.use_ragged_sort and self.config.use_ring_of_experts
     buffer_size = None
+    sorted_by_validity = None
     if use_ragged_in_permute:
       topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
       # roll_to_expert_id is not directly used in the kernel, ep axis id is directly called
@@ -902,8 +905,7 @@ class RoutedMoE(nnx.Module):
         )
       else:
         buffer_size = None
-
-      sorted_inputs, group_size, sorted_selected_experts = ring_ragged_sort(
+      sorted_inputs, group_size, sorted_selected_experts, sorted_by_validity = ring_ragged_sort(
           inputs_2d,
           topk_indices_2d,
           self.config.num_experts,
@@ -917,6 +919,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          precomputed_sorted_by_validity=precomputed_sorted_by_validity,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -971,6 +974,7 @@ class RoutedMoE(nnx.Module):
         lb_loss,
         bias_updates,
         local_group_size,
+        sorted_by_validity,
     )
 
   def unpermute(
@@ -1648,7 +1652,9 @@ class RoutedMoE(nnx.Module):
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
-    def roe_ag_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None):
+    def roe_ag_and_route(
+        x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None, precomputed_sorted_by_validity=None
+    ):
       # The ring-of-experts strategy first duplicates the inputs to all
       # expert shards, and then routes within each shard.
 
@@ -1668,6 +1674,7 @@ class RoutedMoE(nnx.Module):
           lb_loss,
           bias_updates,
           local_group_sizes,
+          sorted_by_validity,
       ) = self.permute(
           x,
           logits,
@@ -1676,6 +1683,7 @@ class RoutedMoE(nnx.Module):
           roll_to_expert_id=num_experts_per_shard * expert_shard_id,
           rngs=rngs,
           input_ids=input_ids,
+          precomputed_sorted_by_validity=precomputed_sorted_by_validity,
       )
       return (
           x,
@@ -1694,6 +1702,7 @@ class RoutedMoE(nnx.Module):
               all_shards_group_sizes=None,
               reshaped_group_sizes=None,
           ),
+          sorted_by_validity,
       )
 
     def ra2a_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None):
@@ -1709,6 +1718,7 @@ class RoutedMoE(nnx.Module):
           lb_loss,
           bias_updates,
           local_group_sizes,
+          _,
       ) = self.permute(
           x,
           logits,
@@ -1801,7 +1811,7 @@ class RoutedMoE(nnx.Module):
       expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
 
       if self.config.use_ring_of_experts:
-        return roe_ag_and_route(
+        routed_x, route_out, route_meta, _ = roe_ag_and_route(
             x,
             logits,
             pre_bias_logits,
@@ -1810,6 +1820,7 @@ class RoutedMoE(nnx.Module):
             rngs,
             input_ids=input_ids,
         )
+        return routed_x, route_out, route_meta
       else:
         return ra2a_and_route(
             x,
@@ -2029,7 +2040,7 @@ class RoutedMoE(nnx.Module):
       )
 
       first_x_unrouted = jax.lax.dynamic_slice_in_dim(x, 0, chunk_dim, axis=2)
-      cur_x_chunk, routing, route_metadata = roe_ag_and_route(
+      cur_x_chunk, routing, route_metadata, sorted_by_validity = roe_ag_and_route(
           first_x_unrouted,
           logits,
           pre_bias_logits,
@@ -2046,7 +2057,7 @@ class RoutedMoE(nnx.Module):
       partial_sum1 = jnp.zeros((cur_x_chunk.shape[0], w1.shape[-1]), dtype=cur_x_chunk.dtype)
 
       def scan_fn(carry, _):
-        cur_x, ps0, ps1, chunk_idx = carry
+        cur_x, ps0, ps1, chunk_idx, precomputed_sorted_by_validity = carry
 
         cur_w0 = jax.lax.dynamic_slice_in_dim(w0, chunk_idx * chunk_dim, chunk_dim, axis=1)
         cur_w1 = jax.lax.dynamic_slice_in_dim(w1, chunk_idx * chunk_dim, chunk_dim, axis=1)
@@ -2063,7 +2074,7 @@ class RoutedMoE(nnx.Module):
             partial_accum1=ps1,
         )
         next_x_unrouted = jax.lax.dynamic_slice_in_dim(x, (chunk_idx + 1) * chunk_dim, chunk_dim, axis=2)
-        next_x, _, _ = roe_ag_and_route(
+        next_x, _, _, _ = roe_ag_and_route(
             next_x_unrouted,
             logits,
             pre_bias_logits,
@@ -2071,12 +2082,13 @@ class RoutedMoE(nnx.Module):
             expert_shard_id,
             chunk_rngs_key,
             input_ids=sharded_input_ids,
+            precomputed_sorted_by_validity=precomputed_sorted_by_validity,
         )
-        return (next_x, next_ps0, next_ps1, chunk_idx + 1), None
+        return (next_x, next_ps0, next_ps1, chunk_idx + 1, precomputed_sorted_by_validity), None
 
-      (last_x_chunk, ps0, ps1, _), _ = jax.lax.scan(
+      (last_x_chunk, ps0, ps1, _, _), _ = jax.lax.scan(
           scan_fn,
-          (cur_x_chunk, partial_sum0, partial_sum1, 0),
+          (cur_x_chunk, partial_sum0, partial_sum1, 0, sorted_by_validity),
           None,
           length=self.config.num_moe_emb_chunks - 1,
       )
