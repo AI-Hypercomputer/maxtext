@@ -139,6 +139,13 @@ class Snapshotter(BaseSnapshotter):
       def _process_array(kp, x):
         if not is_shardable_array(x):
             return x
+            
+        sharding = getattr(x, 'sharding', None)
+        if sharding is not None and getattr(sharding, 'spec', None) is not None:
+            replica_axis = sharding.mesh.axis_names[self.replica_axis_index]
+            if replica_axis not in sharding.spec:
+                return x  # Bypass fully replicated arrays because split_by_mesh_axis on them crashes with DATA_LOSS
+                
         return get_active_pytree(x)
 
       active_state = jax.tree_util.tree_map_with_path(

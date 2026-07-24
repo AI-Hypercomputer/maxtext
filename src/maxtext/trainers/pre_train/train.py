@@ -1723,6 +1723,32 @@ def train_loop(config, recorder, state=None):
                 "[!] Elastic event detected around step %d", python_vars["step"]
             )
             recover(jax_device_state, python_vars, immutable_data)
+            
+            # IMMEDIATELY save a new snapshot across the newly recovered mesh layout
+            # This protects against nodes that joined during recovery and didn't have the old snapshot
+            # as well as properly distributing the checkpoint geometry to ensure the state isn't lost if the old surviving nodes die next.
+            snapshot_mgr = python_vars.get("snapshot")
+            if snapshot_mgr is not None:
+              state = jax_device_state["state"]
+              if hasattr(state, "step"): # flax case
+                state_dict = {
+                    "step": state.step,
+                    "params": state.params,
+                    "opt_state": state.opt_state,
+                }
+              else: # nnx case
+                model_state = (
+                    nnx.state(state.model) if hasattr(state, "model") else state
+                )
+                opt_state = (
+                    nnx.state(state.optimizer)
+                    if hasattr(state, "optimizer")
+                    else None
+                )
+                state_dict = {"model": nnx.to_pure_dict(model_state)}
+                if opt_state is not None:
+                  state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+              snapshot_mgr.save(python_vars["step"], state_dict)
           else:
             # Non-elastic or unrelated JAX error: log and re-raise
             _logger.exception(
