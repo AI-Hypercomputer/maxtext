@@ -1193,6 +1193,14 @@ class PipelineParallelism(BaseModel):
   scan_layers_per_stage: bool = Field(False, description="Use jax.lax.scan over layers within a stage.")
   set_remat_policy_on_pipeline_iterations: bool = Field(True, description="Set remat policy on the pipeline scan.")
   set_remat_policy_on_layers_per_stage: bool = Field(False, description="Set remat policy on the inner layer scan.")
+  pipeline_save_decoder_layer_input: bool = Field(
+      True,
+      description=(
+          "Whether to save 'decoder_layer_input' activations in the pipeline remat policy. "
+          "Setting to False reduces temporary memory (tmem) during pipeline execution at the cost "
+          "of recomputing decoder layer inputs in the backward pass."
+      ),
+  )
 
 
 class RematAndOffload(BaseModel):
@@ -3150,7 +3158,7 @@ class MaxTextConfig(
       # For AOT compilation and correctness, always prioritize the 'stage' axis for sharding when pipelining.
       for rule in self.logical_axis_rules:
         if rule and rule[0] == "activation_embed_and_logits_batch":
-          rule[1] = ["stage", "data", "fsdp", "fsdp_transpose", "expert"]
+          rule[1] = [ax for ax in ["stage", "data", "fsdp", "fsdp_transpose", "expert"] if ax in self.mesh_axes]
           break
 
       if "stage" in self.mesh_axes:

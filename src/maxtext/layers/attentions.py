@@ -556,6 +556,7 @@ class Attention(nnx.Module):
         mesh=mesh,
         shard_mode=config.shard_mode,
         debug_sharding=config.debug_sharding,
+        skip_trivial_specs=True,
     )
 
   def _logical_to_mesh_axes(self, logical_name):

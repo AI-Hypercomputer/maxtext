@@ -55,6 +55,7 @@ _F32 = VectorTypeHelper(ir.F32Type.get)
 _BF16 = VectorTypeHelper(ir.BF16Type.get)
 
 
+# fmt: off
 @jax.jit(
     static_argnames=[
         "reduce_group_size",
@@ -69,6 +70,7 @@ _BF16 = VectorTypeHelper(ir.BF16Type.get)
         "topk_wgt_zero_nan",
     ],
 )
+# fmt: on
 def sc_gather_reduce(
     op: jax.Array,
     idx: jax.Array,
