@@ -5,10 +5,18 @@ import logging
 import threading
 from typing import Any
 
-import jax
 from orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter import Snapshotter as BaseSnapshotter
+import orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter as orbax_snapshotter
 
 _logger = logging.getLogger(__name__)
+
+# Monkeypatch orbax snapshotter is_shardable_array to require mesh attribute on sharding
+_original_is_shardable_array = getattr(orbax_snapshotter, "is_shardable_array", lambda x: isinstance(x, jax.Array))
+
+def _fixed_is_shardable_array(x: Any) -> bool:
+  return _original_is_shardable_array(x) and hasattr(getattr(x, "sharding", None), "mesh")
+
+orbax_snapshotter.is_shardable_array = _fixed_is_shardable_array
 
 _identity_jit = jax.jit(lambda x: x)
 _original_block_until_ready = jax.block_until_ready
