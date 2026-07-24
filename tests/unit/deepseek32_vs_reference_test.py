@@ -751,7 +751,7 @@ def get_jax_mla_weights(pt_mla, cfg):
   }
 
 
-def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, indexer_topk):
+def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, indexer_topk, mla_qk_head_chunk_size=0):
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
       [None, get_test_config_path()],
@@ -769,6 +769,7 @@ def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, in
       max_prefill_predict_length=seq_len,
       attention=attention,
       indexer_topk=indexer_topk,
+      mla_qk_head_chunk_size=mla_qk_head_chunk_size,
       **asdict(config),
   )
   devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -831,8 +832,8 @@ class DeepseekTestBase(parameterized.TestCase):
 class DeepseekV32IndexerTest(DeepseekTestBase):
   """Tests for the Sparse Indexer (Top-K Selection)."""
 
-  # indexer_topk=4
-  def test_indexer_match(self, seq_len=8):
+  @parameterized.parameters(0, 2, 4)
+  def test_indexer_match(self, mla_qk_head_chunk_size, seq_len=8):
     """Verifies Indexer output matches PyTorch output."""
     torch_inputs, jax_inputs = self.get_data(seq_len)
     pt_mask = torch_inputs["mask"]
@@ -865,6 +866,7 @@ class DeepseekV32IndexerTest(DeepseekTestBase):
         seq_len=self.seq_len,
         attention="dot_product",
         indexer_topk=4,
+        mla_qk_head_chunk_size=mla_qk_head_chunk_size,
     )
 
     # Indexer specific RoPE (interleave=False)
@@ -937,6 +939,14 @@ class DeepseekV32MLATest(DeepseekTestBase):
           "check_norm": True,
       },
       {
+          "testcase_name": "dot_product_s128_k128_c4",
+          "attention": "dot_product",
+          "seq_len": 128,
+          "indexer_topk": 128,
+          "check_norm": True,
+          "mla_qk_head_chunk_size": 4,
+      },
+      {
           "testcase_name": "flash_s128_k4",
           "attention": "flash",
           "seq_len": 128,
@@ -951,7 +961,7 @@ class DeepseekV32MLATest(DeepseekTestBase):
           "check_norm": True,
       },
   )
-  def test_mla_parity(self, attention, seq_len, indexer_topk, check_norm=False):
+  def test_mla_parity(self, attention, seq_len, indexer_topk, check_norm=False, mla_qk_head_chunk_size=0):
     """Verifies JAX MLA output against the PyTorch reference implementation."""
     torch_inputs, jax_inputs = self.get_data(seq_len)
 
@@ -978,6 +988,7 @@ class DeepseekV32MLATest(DeepseekTestBase):
         seq_len=self.seq_len,
         attention=attention,
         indexer_topk=indexer_topk,
+        mla_qk_head_chunk_size=mla_qk_head_chunk_size,
     )
 
     jax_mla = attention_mla.MLA(
