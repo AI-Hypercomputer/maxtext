@@ -45,8 +45,52 @@ class mtp_acceptance(nnx.Intermediate):  # pylint: disable=invalid-name
   """Variable type for storing MTP acceptance predictions -> 'mtp_acceptance' collection."""
 
 
+def _shift_left_one_cp_aware(x: jnp.ndarray, axis_name: str = "context") -> jnp.ndarray:
+  """Left-shift x by 1 along axis=1, pulling the next token across CP ranks.
+
+  Standard ``jnp.roll(x, -1, axis=1)`` only rolls WITHIN a local shard. Under
+  context parallelism the sequence is split across the ``axis_name`` mesh
+  axis, so the last token of rank r should receive the first token of rank
+  r+1. We use ``jax.lax.ppermute`` to fetch that token and stitch it in.
+
+  Rank cp_size - 1 has no successor; its last position receives 0 (matching
+  the no-CP semantics where position T-1 is always masked out).
+
+  Falls back to a plain local roll when ``axis_name`` is not in scope (no
+  shard_map / no CP) or when CP size is 1.
+
+  Args:
+    x: Input array with sequence dim at axis=1.
+    axis_name: Mesh axis along which the sequence is sharded.
+
+  Returns:
+    Array shaped like x, left-shifted by 1 across CP boundaries.
+  """
+  local_rolled = jnp.roll(x, -1, axis=1)
+  local_rolled = local_rolled.at[:, -1:, ...].set(0)
+
+  try:
+    cp_size = jax.lax.psum(1, axis_name=axis_name)
+  except NameError:
+    return local_rolled
+  if cp_size == 1:
+    return local_rolled
+
+  cp_rank = jax.lax.axis_index(axis_name)
+  first_token = jax.lax.dynamic_slice_in_dim(x, 0, 1, axis=1)
+  # Backward ring: rank r sends first_token to rank r-1.
+  perm = [(r, (r - 1) % cp_size) for r in range(cp_size)]
+  next_first = jax.lax.ppermute(first_token, axis_name=axis_name, perm=perm)
+  next_first = jnp.where(cp_rank == cp_size - 1, jnp.zeros_like(next_first), next_first)
+  return local_rolled.at[:, -1:, ...].set(next_first)
+
+
 def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
   """Performs a leftward roll on sequence axis and masks invalid positions.
+
+  When ``shift=-1``, the roll is CP-aware: it pulls the next token across
+  CP rank boundaries via ``_shift_left_one_cp_aware`` rather than wrapping
+  locally.
 
   Args:
     x: Input array of shape [batch, seq_len, ...].
@@ -57,7 +101,51 @@ def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
   """
   if shift == 0:
     return x
+  if shift == -1:
+    return _shift_left_one_cp_aware(x)
   return jnp.roll(x, shift, axis=1).at[:, shift:, ...].set(0)
+
+
+def roll_and_mask_by_segment(x: jnp.ndarray, segment_ids: jnp.ndarray | None, shift: int = -1) -> jnp.ndarray:
+  """Rolls sequence left within document boundaries defined by segment_ids.
+
+  For each position, if the next position belongs to a different segment (or
+  is the last position), the rolled value is zeroed out instead of wrapping
+  around from the next document.
+
+  When ``segment_ids`` is None, this behaves like ``roll_and_mask``, only
+  zeroing the last position.
+
+  Args:
+    x: Input array of shape [batch, seq_len, ...].
+    segment_ids: Integer segment IDs of shape [batch, seq_len], or None.
+      Same segment ID = same document. 0 = padding/EOD.
+      If None, falls back to simple roll_and_mask behavior.
+    shift: Number of positions to shift left (must be -1).
+
+  Returns:
+    Rolled array with cross-boundary and tail positions zeroed.
+  """
+  assert shift == -1, f"roll_and_mask_by_segment only supports shift=-1, got {shift}"
+
+  if segment_ids is None:
+    return roll_and_mask(x, shift)
+
+  rolled = _shift_left_one_cp_aware(x)
+
+  seg_current = segment_ids
+  seg_next = _shift_left_one_cp_aware(segment_ids)
+
+  # A position is a boundary if:
+  #   1. current segment != next segment (document boundary), OR
+  #   2. current segment == 0 (padding/EOD position)
+  is_boundary = (seg_current != seg_next) | (seg_current == 0)
+
+  mask = is_boundary
+  for _ in range(x.ndim - 2):
+    mask = jnp.expand_dims(mask, axis=-1)
+
+  return jnp.where(mask, 0, rolled)
 
 
 class MultiTokenPredictionLayer(nnx.Module):
@@ -272,6 +360,12 @@ class MultiTokenPredictionBlock(nnx.Module):
     rolled_target_ids = target_ids
     rolled_target_mask = target_mask
     rolled_position_id = position_ids
+    # Track segment boundaries for segment-aware rolling.
+    # decoder_segment_ids itself is NOT rolled when passed to each MTP layer --
+    # the hidden state maintains original doc identity through properly masked
+    # self-attention. Only the rolling variables need segment-aware shift to
+    # avoid cross-document target leakage.
+    rolled_segment_ids = decoder_segment_ids
 
     mtp_losses_list = []
     mtp_weights_list = []
@@ -279,10 +373,13 @@ class MultiTokenPredictionBlock(nnx.Module):
     mtp_masks_list = []
 
     for k in range(1, cfg.mtp_num_layers + 1):
-      rolled_input_ids = roll_and_mask(rolled_input_ids)
-      rolled_target_ids = roll_and_mask(rolled_target_ids)
-      rolled_target_mask = roll_and_mask(rolled_target_mask)
-      rolled_position_id = roll_and_mask(rolled_position_id)
+      rolled_input_ids = roll_and_mask_by_segment(rolled_input_ids, rolled_segment_ids)
+      rolled_target_ids = roll_and_mask_by_segment(rolled_target_ids, rolled_segment_ids)
+      rolled_target_mask = roll_and_mask_by_segment(rolled_target_mask, rolled_segment_ids)
+      rolled_position_id = roll_and_mask_by_segment(rolled_position_id, rolled_segment_ids)
+      # Roll segment_ids itself for the next iteration (using plain roll).
+      if rolled_segment_ids is not None:
+        rolled_segment_ids = roll_and_mask(rolled_segment_ids)
 
       target_token_embedding = self.decoder._apply_embedding(
           shared_embedding,
