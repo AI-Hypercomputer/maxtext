@@ -171,8 +171,11 @@ def create_nnx_sharded_model(
   # avoiding a large intermediate allocation on a single device.
   @partial(jax.jit, out_shardings=named_sharding)
   def create_sharded_state():
-    model = init_fn()
-    return jax.lax.with_sharding_constraint(nnx.state(model), named_sharding)
+    return jax.tree.map(
+        lambda x: jnp.zeros(x.shape, dtype=x.dtype),
+        abstract_state,
+        is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+    )
 
   # Create the model with sharded parameters.
   with jax.set_mesh(mesh):
