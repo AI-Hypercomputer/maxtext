@@ -40,12 +40,14 @@ jobs:
           DAG_RUN_ID: ${{ github.event.client_payload.dag_run_id }}
           SHA: ${{ github.event.client_payload.sha }}
           GITHUB_RUN_ID: ${{ github.event.client_payload.github_run_id }}
+          TEST_TYPE: ${{ github.event.client_payload.test_type }}
         run: |
           echo "================================"
           echo "Github Run ID: ${GITHUB_RUN_ID}"
           echo "DAG ID:        ${DAG_ID}"
           echo "DAG Run ID:    ${DAG_RUN_ID}"
           echo "Commit SHA:    ${SHA}"
+          echo "Test Type:     ${TEST_TYPE}"
           echo "State:         ${STATE}"
           echo "================================"
 
@@ -66,16 +68,19 @@ jobs:
   tag_docker_image:
     name: Promote ${{ matrix.image_name }} Docker Image
     needs: handle_result
-    if: needs.handle_result.result == 'success'
+    if: needs.handle_result.result == 'success' && (github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type)
     runs-on: linux-x86-n2-16-buildkit
     container: google/cloud-sdk:524.0.0
     strategy:
       fail-fast: false
       matrix:
-        image_name:
-          - maxtext_jax_nightly
-          - maxtext_gpu_jax_nightly
-          - maxtext_post_training_nightly
+        include:
+          - test_type: pre_training
+            image_name: maxtext_jax_nightly
+          - test_type: pre_training
+            image_name: maxtext_gpu_jax_nightly
+          - test_type: post_training
+            image_name: maxtext_post_training_nightly
     steps:
       - name: Configure Docker
         run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
