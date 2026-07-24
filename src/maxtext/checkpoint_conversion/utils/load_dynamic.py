@@ -251,8 +251,11 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
   return {"params": restored_params}
 
 
-def load_safetensors_dynamic_state(path, abstract_unboxed_pre_state, maxtext_config):
+def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
   """Main entry point to dynamically build and load safetensors into MaxText format.
+
+  `abstract_params` is the weights of the target state -- Linen's `params` collection, or the
+  NNX params state -- not the full train state; the HF param mappings name weights only.
 
   Splits execution into:
   1. Deriving Mappings
@@ -349,11 +352,7 @@ def load_safetensors_dynamic_state(path, abstract_unboxed_pre_state, maxtext_con
   param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config)
   max_logging.log(f"[1/3] Mappings derived in {time.time() - t_total:.2f}s")
 
-  target_tree = (
-      abstract_unboxed_pre_state.to_pure_dict()
-      if isinstance(abstract_unboxed_pre_state, nnx.State)
-      else abstract_unboxed_pre_state.params
-  )
+  target_tree = abstract_params.to_pure_dict() if isinstance(abstract_params, nnx.State) else abstract_params
 
   t1 = time.time()
   hf_state = load_sharded_hf_state(path)

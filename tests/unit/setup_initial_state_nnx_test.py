@@ -216,7 +216,7 @@ class TestSetupInitialStateNNX(unittest.TestCase):
     trained = _init_fn(_Model, 0)()
     grads = nnx.grad(lambda m: jnp.mean(m(_TRAIN_X, deterministic=False) ** 2))(trained.model)
     trained.apply_gradients(grads)
-    overlay = nnx.state(trained)  # what _restore_emergency_linen_checkpoint_into_nnx returns
+    overlay = nnx.state(trained)  # what an emergency restore returns: the NNX state, unwrapped
     manager = mock.Mock(spec=emergency_checkpoint_manager.CheckpointManager)
 
     with mock.patch.object(checkpointing, "load_state_if_possible", return_value=(overlay, None)):
