@@ -161,7 +161,7 @@ def stitch_and_save_checkpoints(
       init_params = nnx.state(model, nnx.Param)
     else:
       model = model_creation_utils.from_config(config, jax.devices())
-      _, _, init_params = maxtext_utils.init_initial_state(model, None, config, is_training=False, init_rng=init_rng)
+      _, _, init_params = maxtext_utils.init_initial_state(model, None, config, is_training=False, key=init_rng)
 
   # Convert to pure pytree for easier processing
   is_nnx = isinstance(init_params, nnx.State)
