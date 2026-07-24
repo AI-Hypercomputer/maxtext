@@ -25,7 +25,7 @@ import sys
 
 
 def ensure_cpp20_compiler():
-  """Ensures a compiler supporting C++20 (GCC >= 11.3 or Clang >= 11) is used for building vLLM."""
+  """Ensures GCC/G++ >= 11.3 is available for compiling C++20 dependencies like vLLM."""
   if sys.platform != "linux":
     return
   try:
@@ -36,65 +36,80 @@ def ensure_cpp20_compiler():
   except Exception:  # pylint: disable=broad-exception-caught
     pass
 
-  # If gcc-11 / g++-11 exist, point CC and CXX to them (preferred over clang to avoid mwaitxintrin header issue)
+  # If gcc-11 / g++-11 already exist, point CC and CXX to them
   if shutil.which("gcc-11") and shutil.which("g++-11"):
     os.environ["CC"] = "gcc-11"
     os.environ["CXX"] = "g++-11"
-    return
-  if shutil.which("clang") and shutil.which("clang++"):
-    os.environ["CC"] = "clang"
-    os.environ["CXX"] = "clang++"
+    print("Using pre-installed C++20 compiler: CC=gcc-11 CXX=g++-11")
     return
 
-  # Install C++20 compiler via apt if root or sudo available
   is_root = os.geteuid() == 0 if hasattr(os, "geteuid") else False
   has_sudo = shutil.which("sudo") is not None
   if (is_root or has_sudo) and shutil.which("apt-get"):
     try:
-      print("Ensuring C++20 compiler (gcc-11/clang) for vLLM compilation...")
+      print("Ensuring GCC 11 for vLLM C++20 compilation...")
       prefix = [] if is_root else ["sudo", "-E"]
       if os.path.exists("/etc/os-release"):
         with open("/etc/os-release", "r", encoding="utf-8") as f:
           os_rel = f.read()
         if "bullseye" in os_rel and not os.path.exists("/etc/apt/sources.list.d/backports.list"):
+          sources_str = (
+              "deb http://deb.debian.org/debian bullseye-backports main\n"
+              "deb http://archive.debian.org/debian bullseye-backports main\n"
+          )
           backports_cmd = [
               "sh",
               "-c",
-              'echo "deb http://deb.debian.org/debian bullseye-backports main" > /etc/apt/sources.list.d/backports.list',
+              f'echo "{sources_str}" > /etc/apt/sources.list.d/backports.list',
           ]
-          subprocess.run((prefix if not is_root else []) + backports_cmd, check=False, capture_output=True)
-      # Use check=False for apt-get update as index warnings/errors return exit code 100 on Debian
-      subprocess.run(prefix + ["apt-get", "update", "-y"], check=False, capture_output=True)
-      subprocess.run(
-          prefix
-          + ["apt-get", "install", "-y", "--no-install-recommends", "-t", "bullseye-backports", "gcc-11", "g++-11"],
-          check=False,
-          capture_output=True,
-      )
-      apt_cmd = prefix + [
+          subprocess.run((prefix if not is_root else []) + backports_cmd, check=False)
+
+      update_cmd = prefix + [
+          "apt-get",
+          "update",
+          "-y",
+          "-o",
+          "Acquire::Check-Valid-Until=false",
+          "--allow-releaseinfo-change",
+      ]
+      subprocess.run(update_cmd, check=False)
+
+      install_backports = prefix + [
+          "apt-get",
+          "install",
+          "-y",
+          "--no-install-recommends",
+          "-t",
+          "bullseye-backports",
+          "gcc-11",
+          "g++-11",
+          "build-essential",
+          "cmake",
+          "ninja-build",
+      ]
+      subprocess.run(install_backports, check=False)
+
+      install_regular = prefix + [
           "apt-get",
           "install",
           "-y",
           "--no-install-recommends",
           "gcc-11",
           "g++-11",
-          "clang",
-          "llvm",
           "build-essential",
           "cmake",
           "ninja-build",
       ]
-      subprocess.run(apt_cmd, check=False, capture_output=True)
+      subprocess.run(install_regular, check=False)
+
       if shutil.which("gcc-11") and shutil.which("g++-11"):
         os.environ["CC"] = "gcc-11"
         os.environ["CXX"] = "g++-11"
-        print("Using C++20 compiler: CC=gcc-11 CXX=g++-11")
-      elif shutil.which("clang") and shutil.which("clang++"):
-        os.environ["CC"] = "clang"
-        os.environ["CXX"] = "clang++"
-        print("Using C++20 compiler: CC=clang CXX=clang++")
+        print("Successfully configured C++20 compiler: CC=gcc-11 CXX=g++-11")
+      else:
+        print("Warning: gcc-11 binary not found after apt-get execution.")
     except Exception as e:  # pylint: disable=broad-exception-caught
-      print(f"Warning: Failed to install C++20 compiler via apt-get: {e}")
+      print(f"Warning: Failed to install gcc-11 via apt-get: {e}")
 
 
 def main():
