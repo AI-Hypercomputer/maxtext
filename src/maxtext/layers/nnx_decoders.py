@@ -16,6 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import contextlib
 import functools
 import inspect
 from typing import Any
@@ -26,7 +27,7 @@ from flax import nnx
 import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 from maxtext.common.common_types import (
     Config,
     DecoderBlockType,
@@ -374,6 +375,175 @@ class NNXScannedPipelineStage(nnx.Module):
     if self.config.scan_layers:
       return final_carry, None
     return final_carry
+
+
+def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False):
+  """Applies sharding constraint and removes FSDP mesh axes from parameters."""
+  w_sharding = getattr(jax.typeof(w), "sharding", None) or getattr(w, "sharding", None)
+  if isinstance(w_sharding, NamedSharding) and w_sharding.spec is not None:
+    try:
+      w_sharding_clean = NamedSharding(mesh, w_sharding.spec)
+      w = jax.lax.with_sharding_constraint(w, w_sharding_clean)
+      w_sharding_stripped = sharding.remove_fsdp_sharding(w_sharding_clean)
+      return sharding.maybe_shard_with_name(w, w_sharding_stripped, shard_mode=shard_mode, debug_sharding=debug_sharding)
+    except TypeError:
+      return w
+  try:
+    return sharding.maybe_shard_with_name(w, w_sharding, shard_mode=shard_mode, debug_sharding=debug_sharding)
+  except TypeError:
+    return w
+
+
+def _reduce_scatter_param_grads(grad_w, orig_w, shard_mode, debug_sharding=False):
+  """Applies sharding constraint to parameter gradients matching original parameter sharding."""
+
+  def _shard(gw, ow):
+    if gw is None or ow is None:
+      return gw
+    s = getattr(jax.typeof(ow), "sharding", None) or getattr(ow, "sharding", None)
+    try:
+      return sharding.maybe_shard_with_name(gw, s, shard_mode=shard_mode, debug_sharding=debug_sharding)
+    except TypeError:
+      return gw
+
+  return jax.tree.map(_shard, grad_w, orig_w)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0, 6, 7))
+def _custom_vjp_prefetch_pipeline(
+    graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
+):
+  """Forward pipeline wrapper for custom_vjp prefetching."""
+  out, _ = _custom_vjp_prefetch_pipeline_fwd(
+      graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
+  )
+  return out
+
+
+def _custom_vjp_prefetch_pipeline_fwd(
+    graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
+):
+  """Forward autodiff pass wrapper for custom_vjp prefetching."""
+  (
+      mesh,
+      shard_mode,
+      prevent_cse,
+      policy,
+      debug_sharding,
+      static_args_leaves,
+      static_kwargs_leaves,
+      params_treedef,
+      state_treedef,
+      args_treedef,
+      kwargs_treedef,
+  ) = ctx
+  params = jax.tree_util.tree_unflatten(params_treedef, params_leaves)
+  state = jax.tree_util.tree_unflatten(state_treedef, state_leaves)
+
+  reconstructed_args_leaves = [s if s is not None else d for d, s in zip(diff_args_leaves, static_args_leaves)]
+  args_tuple = jax.tree_util.tree_unflatten(args_treedef, reconstructed_args_leaves)
+
+  reconstructed_kwargs_leaves = [s if s is not None else d for d, s in zip(diff_kwargs_leaves, static_kwargs_leaves)]
+  kwargs_tuple = jax.tree_util.tree_unflatten(kwargs_treedef, reconstructed_kwargs_leaves)
+  valid_kwargs = dict(kwargs_tuple)
+
+  def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
+    return jax.experimental.xla_metadata.set_xla_metadata(_scheduling_group_id=group_id)
+
+  def scanned_layers_fn(x_in_scan, params_diff):
+    # params_diff: the original stacked SHARDED params, the only differentiable weight
+    # input. Step i's xs slice holds layer i's sharded weights; gradients reduce-scatter
+    # directly into it. The all-gather happens INSIDE the remat region, so:
+    #   - only the sharded params_i slice is saved as a scan residual (no gathered
+    #     weights are kept alive from fwd to bwd),
+    #   - the backward pass re-gathers from the sharded slice (unless the remat policy
+    #     explicitly saves "fsdp_bsw"),
+    #   - the scheduling-group metadata lets XLA's latency-hiding scheduler overlap the
+    #     gather with surrounding compute in both fwd and bwd.
+
+    def scan_step_fn(y_curr, xs):
+      st_i, params_i = xs
+
+      def _single_layer_fn(y_inp, params_i_inp):
+        with scheduling_group(group_id=43):
+          w_ag = jax.tree.map(lambda x: _apply_sharding_hint(x, mesh, shard_mode, debug_sharding), params_i_inp)
+          w_ag = checkpoint_name(w_ag, "fsdp_bsw")
+        layer = nnx.merge(graphdef, w_ag, st_i)
+        layer_out = layer(y_inp, *args_tuple, **valid_kwargs)
+        return layer_out[0] if isinstance(layer_out, tuple) else layer_out
+
+      _single_layer_fn_remat = jax.checkpoint(_single_layer_fn, policy=policy, prevent_cse=prevent_cse)
+
+      y_out = _single_layer_fn_remat(y_curr, params_i)
+      layer = nnx.merge(graphdef, params_i, st_i)
+      _, _, new_state_i = nnx.split(layer, nnx.Param, ...)
+
+      return y_out, new_state_i
+
+    final_y, scanned_state = jax.lax.scan(scan_step_fn, x_in_scan, (state, params_diff))
+    return final_y, scanned_state
+
+  (final_y, scanned_state), scan_vjp_fn = jax.vjp(scanned_layers_fn, x_in, params)
+  # Drop the stacked sharded params residual held by the vjp closure; it is re-injected
+  # in the backward pass from params_leaves (which alias the caller's live params), so
+  # no extra full-stack copy is retained between fwd and bwd.
+  scan_vjp_fn.args_res[1] = None
+
+  return (final_y, scanned_state), (
+      scan_vjp_fn,
+      scanned_state,
+      params_leaves,
+      diff_args_leaves,
+      diff_kwargs_leaves,
+  )
+
+
+def _custom_vjp_prefetch_pipeline_bwd(_graphdef, _length, ctx, res, g_out):
+  """Backward autodiff pass wrapper for custom_vjp prefetching."""
+  scan_vjp_fn, scanned_state, params_leaves, diff_args_leaves, diff_kwargs_leaves = res
+  y_bar_final, g_scanned_state = g_out
+  (
+      _,
+      _,
+      _,
+      _,
+      _,
+      _,
+      _,
+      params_treedef,
+      _,
+      _,
+      _,
+  ) = ctx
+  # Re-inject the stacked sharded params residual dropped in fwd. params_leaves alias the
+  # caller's live params, so this holds no extra full-stack copy across the fwd/bwd gap.
+  params = jax.tree_util.tree_unflatten(params_treedef, params_leaves)
+  scan_vjp_fn.args_res[1] = params
+
+  if g_scanned_state is None:
+    g_scanned_state = jax.tree.map(
+        lambda x: jnp.zeros_like(x) if isinstance(x, jax.Array) else None,
+        scanned_state,
+    )
+
+  # Gradients flow through the in-remat gather of the sharded params, so d_params comes
+  # out of the scan VJP already sharded like the stacked sharded params (the gather's
+  # transpose is a reduce-scatter); no post-hoc resharding is needed (it would force an
+  # extra full-stack copy).
+  dx_in, d_params = scan_vjp_fn((y_bar_final, g_scanned_state))
+  params_bar_leaves = tuple(jax.tree_util.tree_leaves(d_params))
+
+  def _zero_tangent(x):
+    if isinstance(x, jax.Array) or (hasattr(jax.core, "Tracer") and isinstance(x, jax.core.Tracer)):
+      return jnp.zeros_like(x)
+    return None
+
+  diff_args_bar_leaves = tuple(_zero_tangent(x) for x in diff_args_leaves)
+  diff_kwargs_bar_leaves = tuple(_zero_tangent(x) for x in diff_kwargs_leaves)
+  return dx_in, params_bar_leaves, None, diff_args_bar_leaves, diff_kwargs_bar_leaves
+
+
+_custom_vjp_prefetch_pipeline.defvjp(_custom_vjp_prefetch_pipeline_fwd, _custom_vjp_prefetch_pipeline_bwd)
 
 
 class NNXDecoder(nnx.Module):
@@ -879,6 +1049,8 @@ class NNXDecoder(nnx.Module):
       (final_carry, updated_layers) when kv_caches_stacked is None.
       (final_carry, updated_layers, returned_kv_stacked) otherwise.
     """
+    if getattr(self.config, "prefetch_fsdp_weights", False) and kv_caches_stacked is None:
+      return self._apply_layers_sequentially_prefetch(layers, x_in, *args, length=length, **kwargs)
     if length == 0:
       return (
           x_in,
@@ -1009,6 +1181,71 @@ class NNXDecoder(nnx.Module):
       out_layers = layers
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
+
+  def _apply_layers_sequentially_prefetch(self, layers, x_in, *args, length: int, **kwargs):
+    """Runs the layer stack using nnx.scan with custom_vjp lookahead prefetching."""
+    if length == 0:
+      return x_in, layers, None
+    policy = self.get_remat_policy()
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
+    graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+
+    scan_axis = self.config.param_scan_axis
+    if scan_axis != 0:
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+
+    layer_cls = layers.__class__
+    sig = inspect.signature(layer_cls.__call__)
+    valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
+
+    args_tuple = tuple(args)
+    kwargs_tuple = tuple(valid_kwargs.items())
+
+    # jax.custom_vjp requires positional arguments (1-5) to consist strictly of differentiable JAX arrays.
+    # We split positional (args) and keyword (kwargs) arguments into two parallel structures:
+    # 1. diff_*_leaves: Contains ONLY JAX arrays/tracers (substituting non-arrays with dummy_arr).
+    # 2. static_*_leaves: Contains non-array metadata (booleans, strings, shapes), passed via static context (ctx).
+    def _is_diff_leaf(x):
+      return isinstance(x, jax.Array) or (hasattr(jax.core, "Tracer") and isinstance(x, jax.core.Tracer))
+
+    args_leaves, args_treedef = jax.tree_util.tree_flatten(args_tuple)
+    kwargs_leaves, kwargs_treedef = jax.tree_util.tree_flatten(kwargs_tuple)
+
+    dummy_arr = jnp.zeros((0,), dtype=jnp.float32)
+
+    diff_args_leaves = tuple(x if _is_diff_leaf(x) else dummy_arr for x in args_leaves)
+    static_args_leaves = tuple(None if _is_diff_leaf(x) else x for x in args_leaves)
+
+    diff_kwargs_leaves = tuple(x if _is_diff_leaf(x) else dummy_arr for x in kwargs_leaves)
+    static_kwargs_leaves = tuple(None if _is_diff_leaf(x) else x for x in kwargs_leaves)
+
+    params_leaves, params_treedef = jax.tree_util.tree_flatten(params)
+    params_leaves = tuple(params_leaves)
+    state_leaves, state_treedef = jax.tree_util.tree_flatten(state)
+    state_leaves = tuple(state_leaves)
+
+    ctx = (
+        self.mesh,
+        self.config.shard_mode,
+        prevent_cse,
+        policy,
+        self.config.debug_sharding,
+        static_args_leaves,
+        static_kwargs_leaves,
+        params_treedef,
+        state_treedef,
+        args_treedef,
+        kwargs_treedef,
+    )
+
+    final_y, scanned_state = _custom_vjp_prefetch_pipeline(
+        graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
+    )
+
+    scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, "layers")
+
+    nnx.update(layers, scanned_state)
+    return final_y, layers, None
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
@@ -1283,7 +1520,13 @@ class NNXDecoder(nnx.Module):
           raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
       if video_embeddings is not None and cfg.use_multimodal:
-        if cfg.model_name in {"qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"}:
+        if cfg.model_name in {
+            "qwen3-omni-30b-a3b",
+            "qwen3-vl-2b",
+            "qwen3-vl-4b",
+            "qwen3.5-35b-a3b",
+            "qwen3.5-397b-a17b",
+        }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=video_embeddings,
