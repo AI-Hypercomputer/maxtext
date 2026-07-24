@@ -79,10 +79,10 @@ def _identity_jit_block_until_ready_context():
 class Snapshotter(BaseSnapshotter):
   """Extends Orbax Snapshotter using thread-safe identity_jit during load and supports non-uniform meshes."""
 
-  def save(self, state: Any, step: int | None = None) -> bool:
+  def save(self, step: int, state: Any, **kwargs) -> bool:
     """Saves state after ensuring all single device arrays are sharded onto one-device-per-live-slice mesh."""
     state = shard_single_device_arrays(state)
-    return super().save(state, step)
+    return super().save(step, state, **kwargs)
 
   def load(self, abstract_state: Any, *, reset_snapshot_state: bool = True) -> Any:
     """Move arrays from workers onto TPU devices supporting non-uniform meshes."""
@@ -127,14 +127,20 @@ class Snapshotter(BaseSnapshotter):
 
       def _device_put_pinned(x, abs_x):
         if is_shardable_array(x):
-          return jax.device_put(x, getattr(abs_x, 'sharding', None).with_memory_kind("pinned_host"))
+          sharding = getattr(abs_x, 'sharding', None)
+          if sharding is not None:
+            sharding = sharding.with_memory_kind("pinned_host")
+          return jax.device_put(x, sharding)
         return x
 
       host_target_state = jax.tree.map(_device_put_pinned, active_state, abstract_state)
 
       def _device_put_to_device(x, abs_x):
         if is_shardable_array(x):
-          return jax.device_put(x, getattr(abs_x, 'sharding', None).with_memory_kind(None))
+          sharding = getattr(abs_x, 'sharding', None)
+          if sharding is not None:
+             sharding = sharding.with_memory_kind(None)
+          return jax.device_put(x, sharding)
         return x
 
       restored_state = jax.tree.map(_device_put_to_device, host_target_state, abstract_state)
