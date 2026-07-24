@@ -144,8 +144,19 @@ class Snapshotter(BaseSnapshotter):
             popped_keys[k] = pinned_state[k]
 
       # Map over pinned state to get active parts
-      active_state = jax.tree.map(
-          lambda x: get_active_pytree(x) if is_shardable_array(x) else x,
+      def _process_array(kp, x):
+        if not is_shardable_array(x):
+            return x
+        try:
+            return get_active_pytree(x)
+        except RuntimeError as e:
+            if "No active replicas" in str(e):
+                import sys
+                print(f"[FATAL] Array failed at path {jax.tree_util.keystr(kp)}: shape={x.shape}, sharding={x.sharding}", file=sys.stderr, flush=True)
+            raise e
+
+      active_state = jax.tree_util.tree_map_with_path(
+          _process_array,
           pinned_state_for_map,
       )
 
