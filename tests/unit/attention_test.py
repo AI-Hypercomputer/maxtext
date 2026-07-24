@@ -2831,6 +2831,17 @@ class CompressedAttentionTest(parameterized.TestCase):
   def test_compressed_attention_flash(self, compress_ratio, attention_kernel):
     self._run_compressed_attention(compress_ratio, attention_kernel)
 
+  @parameterized.named_parameters(
+      {"testcase_name": "csa_ratio4", "compress_ratio": 4},
+      {"testcase_name": "hca_ratio128", "compress_ratio": 128},
+  )
+  @pytest.mark.tpu_only
+  def test_compressed_attention_flash_vs_dot_product(self, compress_ratio):
+    """Direct forward-value numerical equivalence between dot_product and flash attention."""
+    out_dot = self._run_compressed_attention(compress_ratio, "dot_product")
+    out_flash = self._run_compressed_attention(compress_ratio, "flash")
+    np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
+
   def _run_compressed_attention(self, compress_ratio, attention_kernel):
     # Setup test config
     config_arguments = {
@@ -2906,6 +2917,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     )
 
     self.assertEqual(output.shape, (batch_size, seq_len, embed_dim))
+    return output
 
 
 if __name__ == "__main__":

@@ -161,7 +161,7 @@ class BaseDeepseekCompressor(nnx.Module):
   ):
     self.config = config
     self.compress_rate = compress_ratio
-    self.head_dim = config.head_dim
+    self.head_dim = rotary_embedding.head_dim if hasattr(rotary_embedding, "head_dim") else config.head_dim
     self.dtype = config.dtype
     self.weight_dtype = config.weight_dtype
     self.model_mode = model_mode
@@ -285,10 +285,15 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
     # [batch, seq_len, emb_dim] -> [batch, seq_len, head_dim]
     gate = self.gate_proj(hidden_states)
 
-    # Truncate sequence to the nearest multiple of the compression rate
-    usable = (seq_len // self.compress_rate) * self.compress_rate
-    chunk_kv = kv[:, :usable]
-    chunk_gate = gate[:, :usable]
+    # Ceil-pad sequence to nearest multiple of compression rate so all tokens are included
+    remainder = seq_len % self.compress_rate
+    if remainder > 0:
+      pad_len = self.compress_rate - remainder
+      chunk_kv = jnp.pad(kv, ((0, 0), (0, pad_len), (0, 0)))
+      chunk_gate = jnp.pad(gate, ((0, 0), (0, pad_len), (0, 0)), constant_values=-1e9)
+    else:
+      chunk_kv = kv
+      chunk_gate = gate
     first_window_position = position_ids[:, 0:1]
 
     # Process overlapping windows if there is enough sequence length
@@ -859,8 +864,8 @@ class CompressedAttention(Attention):
     # Sliding window prefix layers use rope_max_timescale (10000).
     rope_theta = self.config.compressed_rope_max_timescale if self.compress_ratio > 0 else self.config.rope_max_timescale
     self.rotary_embedding = DeepSeekV4RotaryEmbedding(
-        head_dim=self.config.head_dim,
-        partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
+        head_dim=self.head_dim,
+        partial_rotary_factor=self.config.qk_rope_head_dim / self.head_dim,
         rope_theta=rope_theta,
         fprop_dtype=self.dtype,
     )
@@ -1061,7 +1066,12 @@ class CompressedAttention(Attention):
         padding_len = compressed_kv.shape[1]
         compress_rate = self.compress_ratio
         usable = padding_len * compress_rate
-        chunked_segment_ids = decoder_segment_ids[:, :usable].reshape(
+        if decoder_segment_ids.shape[1] < usable:
+          pad_seg = usable - decoder_segment_ids.shape[1]
+          padded_seg_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_seg)), constant_values=-1)
+        else:
+          padded_seg_ids = decoder_segment_ids[:, :usable]
+        chunked_segment_ids = padded_seg_ids.reshape(
             (decoder_segment_ids.shape[0], padding_len, compress_rate)
         )
         compressed_segment_ids = jnp.max(chunked_segment_ids, axis=-1)
