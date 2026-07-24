@@ -16,39 +16,36 @@ _identity_jit = jax.jit(lambda x: x)
 _original_block_until_ready = jax.block_until_ready
 _thread_local = threading.local()
 
-def _ensure_mesh_sharding(x: Any) -> Any:
-  """Shards single device arrays onto a mesh constructed with one device per live slice."""
+def shard_single_device_arrays(pytree: Any) -> Any:
+  """Converts single device arrays in a PyTree to NamedSharding fully replicated on the global mesh."""
   import jax
   from jax.sharding import NamedSharding, PartitionSpec, Mesh
   from jax.core import ShapedArray
-  if isinstance(x, (jax.Array, ShapedArray, jax.ShapeDtypeStruct)):
-    sharding = getattr(x, 'sharding', None)
-    if sharding is not None and type(sharding).__name__ in ("SingleDeviceSharding", "PmapSharding"):
-      from maxtext.utils import elastic_utils
-      import numpy as np
-      
-      first_devices = []
-      if elastic_utils.elastic_manager is not None:
-          for slice_idx in elastic_utils.elastic_manager.active_slice_indices:
-              devices = elastic_utils.elastic_manager.slice_to_devices.get(slice_idx, None)
-              if devices:
-                  first_devices.append(devices[0])
-      
-      if not first_devices:
-          first_devices = [jax.devices()[0]]
-          
-      mesh = Mesh(np.array(first_devices), ("replica",))
-      new_sharding = NamedSharding(mesh, PartitionSpec())
-      
-      if isinstance(x, jax.Array):
-          return jax.device_put(x, new_sharding)
-      else:
-          return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=new_sharding)
-  return x
 
+  # 1. Find the global mesh by looking at the first Array with NamedSharding
+  global_mesh = None
+  for leaf in jax.tree.leaves(pytree):
+    if isinstance(leaf, (jax.Array, ShapedArray)):
+      sharding = getattr(leaf, 'sharding', None)
+      if sharding is not None and isinstance(sharding, NamedSharding):
+        global_mesh = sharding.mesh
+        break
+        
+  if global_mesh is None:
+    return pytree # No NamedSharding found to infer the global mesh
+    
+  new_sharding = NamedSharding(global_mesh, PartitionSpec())
 
-def shard_single_device_arrays(pytree: Any) -> Any:
-  """Converts single device arrays in a PyTree to NamedSharding on a one-device-per-live-slice mesh."""
+  def _ensure_mesh_sharding(x: Any) -> Any:
+    if isinstance(x, (jax.Array, ShapedArray, jax.ShapeDtypeStruct)):
+      sharding = getattr(x, 'sharding', None)
+      if sharding is not None and type(sharding).__name__ in ("SingleDeviceSharding", "PmapSharding"):
+        if isinstance(x, jax.Array):
+            return jax.device_put(x, new_sharding)
+        else:
+            return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=new_sharding)
+    return x
+
   return jax.tree.map(_ensure_mesh_sharding, pytree)
 
 
@@ -87,6 +84,7 @@ class Snapshotter(BaseSnapshotter):
   def load(self, abstract_state: Any, *, reset_snapshot_state: bool = True) -> Any:
     """Move arrays from workers onto TPU devices supporting non-uniform meshes."""
     import jax
+    from pathwaysutils.experimental import concatenate_by_mesh_axis, split_by_mesh_axis
     
     abstract_state = shard_single_device_arrays(abstract_state)
     
@@ -95,35 +93,21 @@ class Snapshotter(BaseSnapshotter):
         raise RuntimeError("No snapshots available to restore from.")
       pinned_state, step = self._latest_snapshot
 
-    def _rebuild_pinned_array(x, abs_x):
-      if not isinstance(x, jax.Array):
-        return x
+    def is_replica_active(arr):
+      try:
+        jax.block_until_ready(arr)
+        return True
+      except Exception:
+        return False
+
+    def get_active_pytree(x):
+      mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
+      all_replicas = split_by_mesh_axis.split_by_mesh_axis(x, mesh_axis_name)
         
-      # Target sharding for this array in pinned host memory
-      target_sharding = getattr(abs_x, 'sharding', None)
-      if target_sharding is None:
-        return x
-        
-      target_sharding = target_sharding.with_memory_kind("pinned_host")
-      target_devices = target_sharding.mesh.devices.flat
-      
-      # Build dictionary from logically matched devices
-      x_shards_by_device = {s.device.id: s for s in x.global_shards}
-      
-      buffers = []
-      for d in target_devices:
-        shard = x_shards_by_device.get(d.id, None)
-        if shard is None:
-            raise RuntimeError(f"Target device {d.id} not found in x's old shards!")
-            
-        try:
-            data = shard.data
-            jax.block_until_ready(data)
-            buffers.append(data)
-        except Exception as e:
-            raise RuntimeError(f"Data loss on target device {d.id} during array reconstruction: {e}")
-            
-      return jax.make_array_from_single_device_arrays(x.shape, target_sharding, buffers)
+      active_replicas = [replica for replica in all_replicas if is_replica_active(replica)]
+      if not active_replicas:
+        raise RuntimeError("No active replicas found.")
+      return concatenate_by_mesh_axis.concatenate_by_mesh_axis(active_replicas, mesh_axis_name)
 
     def is_shardable_array(x):
       return isinstance(x, jax.Array)
@@ -139,8 +123,21 @@ class Snapshotter(BaseSnapshotter):
           else:
             popped_keys[k] = pinned_state[k]
 
-      # Re-shard on host directly from live shards matching the generic abstract_state
-      host_target_state = jax.tree.map(_rebuild_pinned_array, pinned_state_for_map, abstract_state)
+      # Map over pinned state to get active parts
+      active_state = jax.tree.map(
+          lambda x: get_active_pytree(x) if is_shardable_array(x) else x,
+          pinned_state_for_map,
+      )
+
+      def _device_put_pinned(x, abs_x):
+        if is_shardable_array(x):
+          sharding = getattr(abs_x, 'sharding', None)
+          if sharding is not None:
+             sharding = sharding.with_memory_kind("pinned_host")
+          return jax.device_put(x, sharding)
+        return x
+
+      host_target_state = jax.tree.map(_device_put_pinned, active_state, abstract_state)
 
       def _device_put_to_device(x, abs_x):
         if is_shardable_array(x):
