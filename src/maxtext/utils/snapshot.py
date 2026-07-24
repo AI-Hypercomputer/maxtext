@@ -17,39 +17,29 @@ _original_block_until_ready = jax.block_until_ready
 _thread_local = threading.local()
 
 
-def get_one_device_per_replica() -> list[Any]:
-  """Constructs list containing one JAX device per active replica (slice)."""
-  devs_by_slice = {}
-  all_devs = jax.devices()
-  for d in all_devs:
-    if d is None:
-      continue
-    s_idx = getattr(
-        d, "slice_index", getattr(d, "process_index", getattr(d, "task_id", 0))
-    )
-    if s_idx not in devs_by_slice:
-      devs_by_slice[s_idx] = d
-  return [devs_by_slice[k] for k in sorted(devs_by_slice.keys())]
+def get_live_devices() -> list[Any]:
+  """Constructs list containing one device per live device."""
+  return [d for d in jax.devices() if d is not None]
 
 
 def _ensure_mesh_sharding(x: Any) -> Any:
-  """Shards single device arrays onto a mesh constructed with one device per replica (slice)."""
+  """Shards single device arrays onto a mesh constructed with one device per live device."""
   if isinstance(x, jax.Array) and not hasattr(x.sharding, "mesh"):
-    one_dev_per_replica = get_one_device_per_replica()
-    mesh = Mesh(np.array(one_dev_per_replica), ("replica",))
+    live_devs = get_live_devices()
+    mesh = Mesh(np.array(live_devs), ("replica",))
     sharding = NamedSharding(mesh, PartitionSpec("replica"))
     return jax.device_put(x, sharding)
   return x
 
 
 def shard_single_device_arrays(pytree: Any) -> Any:
-  """Converts single device arrays in a PyTree to NamedSharding on a one-device-per-replica mesh."""
+  """Converts single device arrays in a PyTree to NamedSharding on a one-device-per-live-device mesh."""
   return jax.tree.map(_ensure_mesh_sharding, pytree)
 
 
 def _custom_block_until_ready(x: Any) -> Any:
   """Thread-local override calling identity_jit(x).block_until_ready() during load."""
-  if getattr(_thread_local, "use_identity_jit", False):
+  if hasattr(_thread_local, "use_identity_jit") and _thread_local.use_identity_jit:
     try:
       return _identity_jit(x).block_until_ready()
     except Exception:
@@ -75,7 +65,7 @@ class Snapshotter(BaseSnapshotter):
   """Extends Orbax Snapshotter using thread-safe identity_jit during load."""
 
   def save(self, state: Any, step: int | None = None) -> bool:
-    """Saves state after ensuring all single device arrays are sharded onto one-device-per-replica mesh."""
+    """Saves state after ensuring all single device arrays are sharded onto one-device-per-live-device mesh."""
     state = shard_single_device_arrays(state)
     return super().save(state, step=step)
 
