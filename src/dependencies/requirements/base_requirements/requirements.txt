@@ -25,7 +25,7 @@ omegaconf
 optax
 orbax-checkpoint
 parameterized
-pathwaysutils
+pathwaysutils>=0.1.11
 pillow
 pre-commit
 protobuf
