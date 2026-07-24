@@ -102,12 +102,22 @@ class Snapshotter(BaseSnapshotter):
 
     def get_active_pytree(x):
       mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
-      all_replicas = split_by_mesh_axis.split_by_mesh_axis(x, mesh_axis_name)
+      try:
+          import sys
+          import jax.random
+          data = jax.random.key_data(x) if (hasattr(x, "dtype") and hasattr(x, "shape") and jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)) else x
+          all_replicas = split_by_mesh_axis.split_by_mesh_axis(data, mesh_axis_name)
+      except Exception as e:
+          print(f"FAILED SPLIT! x.shape={x.shape}, x.dtype={x.dtype}, type(x.sharding)={type(x.sharding)}, x.sharding={x.sharding}", flush=True)
+          raise e
         
       active_replicas = [replica for replica in all_replicas if is_replica_active(replica)]
       if not active_replicas:
         raise RuntimeError("No active replicas found.")
-      return concatenate_by_mesh_axis.concatenate_by_mesh_axis(active_replicas, mesh_axis_name)
+      reconstructed = concatenate_by_mesh_axis.concatenate_by_mesh_axis(active_replicas, mesh_axis_name)
+      if hasattr(x, "dtype") and hasattr(x, "shape") and jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key):
+          return jax.random.wrap_key_data(reconstructed, dtype=x.dtype)
+      return reconstructed
 
     def is_shardable_array(x):
       return isinstance(x, jax.Array)
