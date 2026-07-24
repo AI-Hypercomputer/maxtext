@@ -728,6 +728,36 @@ class Llama4Attention(BaseModel):
       description="Dynamically scale attention temperature based on sequence length.",
   )
 
+class ExperimentalAttentionQuantizationType(str, Enum):
+  """Experimental scaling strategies for attention quantization."""
+  NONE = "none"
+  CAST = "cast" # Tensor is cast to jnp.float8_e4m3fn without scaling factors.
+  TENSOR = "tensor"
+
+
+class ExperimentalAttentionQuantization(BaseModel):
+  """Experimental options for attention quantization."""
+  experimental_sa_quant_q_fp8: ExperimentalAttentionQuantizationType | None = Field(
+      ExperimentalAttentionQuantizationType.NONE,
+      description=(
+          "Experimental flag: If enabled, the Q tensor in splash attention is"
+          " quantized to jnp.float8_e4m3fn."
+      ),
+  )
+  experimental_sa_quant_k_fp8: ExperimentalAttentionQuantizationType | None = Field(
+      ExperimentalAttentionQuantizationType.NONE,
+      description=(
+          "Experimental flag: If enabled, the K tensor in splash attention is"
+          " quantized to jnp.float8_e4m3fn."
+      ),
+  )
+  experimental_sa_quant_v_fp8: ExperimentalAttentionQuantizationType | None = Field(
+      ExperimentalAttentionQuantizationType.NONE,
+      description=(
+          "Experimental flag: If enabled, the V tensor in splash attention is"
+          " quantized to jnp.float8_e4m3fn."
+      ),
+  )
 
 class SplashAttention(BaseModel):
   """Tunable block sizes for Splash Attention kernels."""
@@ -767,20 +797,6 @@ class SplashAttention(BaseModel):
   local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
   local_sa_fuse_reciprocal: bool | None = Field(None, description="Maps to local fuse_reciprocal in SplashConfig.")
   local_sa_use_base2_exp: bool | None = Field(None, description="Maps to local use_base2_exp in SplashConfig.")
-  experimental_sa_quant_q_fp8: bool | None = Field(
-      None,
-      description=(
-          "Experimental flag: If enabled, the Q tensor in splash attention is"
-          " quantized to jnp.float8_e4m3fn, without scaling factors."
-      ),
-  )
-  experimental_sa_quant_k_fp8: bool | None = Field(
-      None,
-      description=(
-          "Experimental flag: If enabled, the K tensor in splash attention is"
-          " quantized to jnp.float8_e4m3fn, without scaling factors."
-      ),
-  )
   use_max_logit_estimate: int = Field(
       -1,
       description="-1 means no estimate, any > 0 value will be used as max logit estimate",
@@ -2555,6 +2571,7 @@ class MaxTextConfig(
     MTP,
     LogitsAndLoss,
     # Attention Mechanisms
+    ExperimentalAttentionQuantization,
     Attention,
     MlaAttention,
     CompressedAttention,
@@ -3596,14 +3613,31 @@ class MaxTextConfig(
           "Please disable attn_logits_soft_cap when using use_qk_clip."
       )
 
-    if self.experimental_sa_quant_q_fp8 and self.attention_type != "mla":
+    if (
+        self.experimental_sa_quant_q_fp8 is not None
+        and self.experimental_sa_quant_q_fp8 != ExperimentalAttentionQuantizationType.NONE
+        and self.attention_type != "mla"
+    ):
       raise ValueError(
           "Q quantization is currently only supported with"
           f" attention_type='mla'. Found attention_type='{self.attention_type}'"
       )
-    if self.experimental_sa_quant_k_fp8 and self.attention_type != "mla":
+    if (
+        self.experimental_sa_quant_k_fp8 is not None
+        and self.experimental_sa_quant_k_fp8 != ExperimentalAttentionQuantizationType.NONE
+        and self.attention_type != "mla"
+    ):
       raise ValueError(
           "K quantization is currently only supported with"
+          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
+      )
+    if (
+        self.experimental_sa_quant_v_fp8 is not None
+        and self.experimental_sa_quant_v_fp8 != ExperimentalAttentionQuantizationType.NONE
+        and self.attention_type != "mla"
+    ):
+      raise ValueError(
+          "V quantization is currently only supported with"
           f" attention_type='mla'. Found attention_type='{self.attention_type}'"
       )
     if self.share_kv_projections and self.fused_qkv:
