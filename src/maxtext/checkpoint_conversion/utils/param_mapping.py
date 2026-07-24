@@ -29,7 +29,7 @@ It provides two key types of mappings for each model:
     **Value: corresponding Hugging Face parameters, with following forms:**
     First, the base element mapped to can be either:
     - `atomic_hf_key`: A single string representing one Hugging Face parameter.
-    - `composite_hf_key`: A tuple of strings representing multiple Hugging Face parameters that combine 
+    - `composite_hf_key`: A tuple of strings representing multiple Hugging Face parameters that combine
     into a single MaxText parameter (e.g., Qwen's qkv and z).
 
     These base elements (strings or tuples) are then structured as:
@@ -1617,7 +1617,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       or scanned with expert stacking (nested list of strings).
   """
   # Extract hf configuration parameters, without mtp
-  num_main_layers = config["num_hidden_layers"]
+  num_main_layers = min(config["num_hidden_layers"], maxtext_config.base_num_decoder_layers)
   first_num_dense_layers = config["first_k_dense_replace"]
   num_experts = config.get("n_routed_experts", 0)
 
@@ -1691,16 +1691,14 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   else:
     for i in range(first_num_dense_layers):
       for maxtext_key, hf_key in dense_layer_keys.items():
-        mapping[f"params-decoder-dense_layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+        mapping[f"params-decoder-dense_layer_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
 
     for i in range(first_num_dense_layers, num_main_layers):
-      moe_layer_idx = i - first_num_dense_layers
-
       for maxtext_key, hf_key in moe_layer_keys.items():
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+        mapping[f"params-decoder-layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
 
       for maxtext_key, hf_key in moe_expert_keys.items():
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
+        mapping[f"params-decoder-layers_{i}-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
             f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
         ]
   return mapping
@@ -1717,7 +1715,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     else:
       return input_tensor.T.reshape(target_shape)
 
-  num_main_layers = config["num_hidden_layers"]
+  num_main_layers = min(config["num_hidden_layers"], maxtext_config.base_num_decoder_layers)
   first_num_dense_layers = config["first_k_dense_replace"]
 
   mapping = {
@@ -1765,11 +1763,10 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   else:
     for i in range(first_num_dense_layers):
       for key in dense_need_reshape:
-        mapping[f"params-decoder-dense_layers_{i}-{key}"] = reshape_kernel
+        mapping[f"params-decoder-dense_layer_{i}-{key}"] = reshape_kernel
     for i in range(first_num_dense_layers, num_main_layers):
-      moe_layer_idx = i - first_num_dense_layers
       for key in moe_need_reshape:
-        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{key}"] = reshape_kernel
+        mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
 
   return mapping
 
@@ -4143,6 +4140,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
 
 
 PARAM_MAPPING = {
+    "glm5.1-744b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4196,6 +4194,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "glm5.1-744b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
