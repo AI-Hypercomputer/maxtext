@@ -43,7 +43,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec, get_logical_axis_rules_from_config
+from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec, get_logical_axis_rules
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -644,7 +644,7 @@ class RoutedMoE(nnx.Module):
     )
 
   def _logical_to_mesh_axes(self, logical_name):
-    logical_rules = get_logical_axis_rules_from_config(self.config)
+    logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
   def _maybe_shard_with_pspec(self, inputs, pspec: jax.sharding.PartitionSpec | None):

@@ -1506,7 +1506,8 @@ class FusedMoeTPUTest(unittest.TestCase):
     copy_weights(self.dense_model, sparse_model)
 
     inputs = self._inputs()
-    sparse_out, _, _ = sparse_model(inputs)
+    with nn_partitioning.axis_rules(sparse_cfg.logical_axis_rules):
+      sparse_out, _, _ = sparse_model(inputs)
     fused_out, lb_loss, bias_updates = self.fused_model(inputs)
 
     np.testing.assert_allclose(
@@ -1647,7 +1648,8 @@ class FusedMoeTPUTest(unittest.TestCase):
     copy_weights_prefused(self.dense_model, prefused_model)
 
     inputs = self._inputs()
-    sparse_out, _, _ = sparse_model(inputs)
+    with nn_partitioning.axis_rules(sparse_cfg.logical_axis_rules):
+      sparse_out, _, _ = sparse_model(inputs)
     prefused_out, lb_loss, bias_updates = prefused_model(inputs)
 
     np.testing.assert_allclose(

@@ -177,7 +177,7 @@ class MultiTokenPredictionLayer(nnx.Module):
         ("activation_batch", "activation_length", "activation_embed"),
         self.mesh,
         self.config.shard_mode,
-        self.config.logical_axis_rules,
+        sharding.get_logical_axis_rules(),
     )
 
     embedding_norm = self.embedding_norm(target_token_embedding)
@@ -200,7 +200,7 @@ class MultiTokenPredictionLayer(nnx.Module):
               x.sharding_names,
               self.mesh,
               shard_mode=self.config.shard_mode,
-              rules=self.config.logical_axis_rules,
+              rules=sharding.get_logical_axis_rules(),
           )
         return x
 

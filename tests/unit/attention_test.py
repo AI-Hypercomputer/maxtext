@@ -1190,22 +1190,23 @@ class AttentionTest(parameterized.TestCase):
     )
     generic_state = nnx.state(attention_as_mha_generic)
 
-    attention_as_mha_flash_cp = Attention(
-        config=cfg_cp,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=mesh_cp,
-        attention_kernel="flash",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
-    )
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      attention_as_mha_flash_cp = Attention(
+          config=cfg_cp,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=mesh_cp,
+          attention_kernel="flash",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          model_mode=MODEL_MODE_PREFILL,
+          rngs=self.nnx_rng,
+      )
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
     mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
@@ -1266,22 +1267,23 @@ class AttentionTest(parameterized.TestCase):
     )
     generic_state = nnx.state(attention_as_mha_generic)
 
-    attention_as_mha_flash_cp = Attention(
-        config=cfg_cp,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=mesh_cp,
-        attention_kernel="flash",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
-    )
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      attention_as_mha_flash_cp = Attention(
+          config=cfg_cp,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=mesh_cp,
+          attention_kernel="flash",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          model_mode=MODEL_MODE_PREFILL,
+          rngs=self.nnx_rng,
+      )
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
     def generic_loss(lnx):
