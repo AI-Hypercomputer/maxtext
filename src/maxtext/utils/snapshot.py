@@ -129,8 +129,18 @@ class Snapshotter(BaseSnapshotter):
       return isinstance(x, jax.Array)
 
     with _identity_jit_block_until_ready_context():
+      pinned_state_for_map = pinned_state
+      popped_keys = {}
+      if isinstance(pinned_state, dict) and isinstance(abstract_state, dict):
+        pinned_state_for_map = {}
+        for k in pinned_state.keys():
+          if k in abstract_state:
+            pinned_state_for_map[k] = pinned_state[k]
+          else:
+            popped_keys[k] = pinned_state[k]
+
       # Re-shard on host directly from live shards matching the generic abstract_state
-      host_target_state = jax.tree.map(_rebuild_pinned_array, pinned_state, abstract_state)
+      host_target_state = jax.tree.map(_rebuild_pinned_array, pinned_state_for_map, abstract_state)
 
       def _device_put_to_device(x, abs_x):
         if is_shardable_array(x):
@@ -142,6 +152,10 @@ class Snapshotter(BaseSnapshotter):
 
       restored_state = jax.tree.map(_device_put_to_device, host_target_state, abstract_state)
       jax.block_until_ready(restored_state)
+      
+      if popped_keys and isinstance(restored_state, dict):
+        for k, v in popped_keys.items():
+          restored_state[k] = v
 
     if reset_snapshot_state:
       with self._lock:
