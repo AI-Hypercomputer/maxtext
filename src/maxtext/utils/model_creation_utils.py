@@ -1094,9 +1094,15 @@ def from_pretrained(
       # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
       # Skip transient runtime variables (RngState, Cache, Intermediate, BatchStat) — they hold runtime state
       # that is not present in the checkpoint and must remain valid after the restore.
-      def _free_device_memory(node):
-        if isinstance(node, nnx.Variable) and not isinstance(
-            node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)
+      def _free_device_memory(path, node):
+        # Check if the path contains any name containing 'custom' which indicates a customized layer.
+        # If yes, skip freeing device memory for this node and its children so they can be
+        # initialized with random values.
+        is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
+        if (
+            isinstance(node, nnx.Variable)
+            and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+            and not is_custom
         ):
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
@@ -1105,12 +1111,12 @@ def from_pretrained(
           for leaf in jax.tree_util.tree_leaves(inner):
             if isinstance(leaf, jax.Array) and not leaf.is_deleted():
               leaf.delete()
-        elif isinstance(node, jax.Array) and not node.is_deleted():
+        elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
           node.delete()
 
         return node
 
-      jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+      jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
       restored = ckptr.restore(
           epath.Path(config.load_parameters_path),

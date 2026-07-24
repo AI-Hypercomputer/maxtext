@@ -2155,6 +2155,16 @@ class VisionProjector(BaseModel):
   projector_output_dim_for_vit: int = Field(4096, description="Output dimension for the vision projector.")
   pixel_shuffle_ratio_for_vit: float = Field(0.5, description="Pixel shuffle ratio for the Vision Transformer.")
   projector_dropout_for_vit: float = Field(0.0, description="Dropout rate for the vision projector.")
+  vision_projector_type: str = Field(
+      "default", description="Type of the vision projector to use. Supported: 'default', 'customized_mlp'."
+  )
+  vision_connector_num_layers: int = Field(2, description="Number of layers in custom mlp projector.")
+  vision_connector_hidden_size: int = Field(
+      0,
+      description=("Hidden size for custom mlp projector intermediate layers. 0 defaults to LLM hidden size."),
+  )
+  vision_connector_activation: str = Field("gelu", description="Activation function for custom mlp projector.")
+  vision_connector_use_bias: bool = Field(True, description="Whether to use bias in custom mlp projector layers.")
 
 
 class AudioEncoder(BaseModel):
