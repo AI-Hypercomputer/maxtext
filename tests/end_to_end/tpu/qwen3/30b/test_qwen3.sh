@@ -30,11 +30,11 @@ DATASET_PATH=gs://maxtext-dataset
 # Step 1: Run inference on the pre-converted checkpoint
 python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} tokenizer_type="huggingface" \
-    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    load_parameters_path=${SCANNED_CKPT_PATH} \
     per_device_batch_size=1 run_name=${run_id} \
     max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
-    scan_layers=false prompt='I love to' attention=\'dot_product\'
+    scan_layers=true prompt='I love to' attention=\'dot_product\'
 
 # Step 2: Run pre-training starting from the pre-converted checkpoint
 python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
