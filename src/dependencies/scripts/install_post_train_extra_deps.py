@@ -25,7 +25,7 @@ import sys
 
 
 def ensure_cpp20_compiler():
-  """Ensures GCC/G++ >= 11.3 is available for compiling C++20 dependencies like vLLM."""
+  """Ensures a compiler supporting C++20 (clang-16/gcc-11) is used for building vLLM."""
   if sys.platform != "linux":
     return
   try:
@@ -36,80 +36,51 @@ def ensure_cpp20_compiler():
   except Exception:  # pylint: disable=broad-exception-caught
     pass
 
-  # If gcc-11 / g++-11 already exist, point CC and CXX to them
+  # If clang-16 / clang++-16 or gcc-11 / g++-11 exist, use them
+  if shutil.which("clang-16") and shutil.which("clang++-16"):
+    os.environ["CC"] = "clang-16"
+    os.environ["CXX"] = "clang++-16"
+    print("Using C++20 compiler: CC=clang-16 CXX=clang++-16")
+    return
   if shutil.which("gcc-11") and shutil.which("g++-11"):
     os.environ["CC"] = "gcc-11"
     os.environ["CXX"] = "g++-11"
-    print("Using pre-installed C++20 compiler: CC=gcc-11 CXX=g++-11")
+    print("Using C++20 compiler: CC=gcc-11 CXX=g++-11")
     return
 
   is_root = os.geteuid() == 0 if hasattr(os, "geteuid") else False
   has_sudo = shutil.which("sudo") is not None
   if (is_root or has_sudo) and shutil.which("apt-get"):
     try:
-      print("Ensuring GCC 11 for vLLM C++20 compilation...")
+      print("Ensuring C++20 compiler (clang-16/gcc-11) for vLLM compilation...")
       prefix = [] if is_root else ["sudo", "-E"]
-      if os.path.exists("/etc/os-release"):
-        with open("/etc/os-release", "r", encoding="utf-8") as f:
-          os_rel = f.read()
-        if "bullseye" in os_rel and not os.path.exists("/etc/apt/sources.list.d/backports.list"):
-          sources_str = (
-              "deb http://deb.debian.org/debian bullseye-backports main\n"
-              "deb http://archive.debian.org/debian bullseye-backports main\n"
-          )
-          backports_cmd = [
-              "sh",
-              "-c",
-              f'echo "{sources_str}" > /etc/apt/sources.list.d/backports.list',
-          ]
-          subprocess.run((prefix if not is_root else []) + backports_cmd, check=False)
-
-      update_cmd = prefix + [
-          "apt-get",
-          "update",
-          "-y",
-          "-o",
-          "Acquire::Check-Valid-Until=false",
-          "--allow-releaseinfo-change",
-      ]
-      subprocess.run(update_cmd, check=False)
-
-      install_backports = prefix + [
+      subprocess.run(prefix + ["apt-get", "update", "-y"], check=False)
+      apt_cmd = prefix + [
           "apt-get",
           "install",
           "-y",
           "--no-install-recommends",
-          "-t",
-          "bullseye-backports",
-          "gcc-11",
-          "g++-11",
+          "clang-16",
+          "lld-16",
+          "llvm-16",
           "build-essential",
           "cmake",
           "ninja-build",
       ]
-      subprocess.run(install_backports, check=False)
+      subprocess.run(apt_cmd, check=False)
 
-      install_regular = prefix + [
-          "apt-get",
-          "install",
-          "-y",
-          "--no-install-recommends",
-          "gcc-11",
-          "g++-11",
-          "build-essential",
-          "cmake",
-          "ninja-build",
-      ]
-      subprocess.run(install_regular, check=False)
-
-      if shutil.which("gcc-11") and shutil.which("g++-11"):
+      if shutil.which("clang-16") and shutil.which("clang++-16"):
+        os.environ["CC"] = "clang-16"
+        os.environ["CXX"] = "clang++-16"
+        print("Successfully configured C++20 compiler: CC=clang-16 CXX=clang++-16")
+      elif shutil.which("gcc-11") and shutil.which("g++-11"):
         os.environ["CC"] = "gcc-11"
         os.environ["CXX"] = "g++-11"
         print("Successfully configured C++20 compiler: CC=gcc-11 CXX=g++-11")
       else:
-        print("Warning: gcc-11 binary not found after apt-get execution.")
+        print("Warning: C++20 compiler binary not found after apt-get execution.")
     except Exception as e:  # pylint: disable=broad-exception-caught
-      print(f"Warning: Failed to install gcc-11 via apt-get: {e}")
+      print(f"Warning: Failed to install C++20 compiler via apt-get: {e}")
 
 
 def main():
