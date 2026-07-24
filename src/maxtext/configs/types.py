@@ -1588,7 +1588,8 @@ class TrainingLoop(BaseModel):
   log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush Tensorboard.")
   eval_start_step: int = Field(
       0,
-      description="Start evaluation after training step is >= eval_start_step.",
+      ge=0,
+      description="Start evaluation when training step is >= eval_start_step.",
   )
   eval_interval: int = Field(
       -1,

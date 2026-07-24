@@ -332,6 +332,15 @@ class PyconfigTest(unittest.TestCase):
     )
     self.assertEqual(config_override.eval_start_step, 50)
 
+  def test_eval_start_step_negative_raises_error(self):
+    """Verifies that eval_start_step < 0 raises a validation error."""
+    with self.assertRaises((ValueError, Exception)):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          eval_start_step=-1,
+      )
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -718,7 +718,12 @@ def training_loop_iteration(
         all_host_upload=dump_hlo_upload_all,
     )
 
-  if eval_interval > 0 and step >= start_step and step >= eval_start_step and (step + 1) % eval_interval == 0:
+  if (
+      eval_interval > 0
+      and step >= start_step
+      and step >= eval_start_step
+      and (step - eval_start_step) % eval_interval == 0
+  ):
     assert eval_data_iterator
     # Explicitly reset the eval iterator and counters before starting the eval loop
     eval_data_iterator.reset()
