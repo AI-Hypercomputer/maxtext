@@ -96,12 +96,14 @@ class Snapshotter(BaseSnapshotter):
     def is_replica_active(arr, idx):
       try:
         import jax.random
+        import sys
+        print(f"[DEBUG] is_replica_active invoked for idx {idx}", file=sys.stderr, flush=True)
         data = jax.random.key_data(arr) if (hasattr(arr, "dtype") and hasattr(arr, "shape") and jax.dtypes.issubdtype(arr.dtype, jax.dtypes.prng_key)) else arr
         jax.block_until_ready(data)
         return True
-      except Exception as e:
+      except BaseException as e:
         import sys
-        print(f"[REPLICA DEAD] Replica {idx} failed with Exception: {e}", file=sys.stderr, flush=True)
+        print(f"[REPLICA DEAD] Replica {idx} failed with {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return False
 
     def get_active_pytree(x):
