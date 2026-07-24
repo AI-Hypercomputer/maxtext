@@ -194,8 +194,7 @@ def validate_expert_shard_attention_option(expert_shard_attention_option: str) -
     )
 
 
-def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int, enable_nnx: bool):
-  del enable_nnx  # NNX vocab tiling supported via vocab_tiling_nnx_loss in vocabulary_tiling.py
+def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int):
   if (per_device_batch_size * max_target_length) % num_vocab_tiling != 0:
     raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
 
@@ -239,9 +238,7 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
-  validate_vocab_tiling(
-      keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"]
-  )
+  validate_vocab_tiling(keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"])
   if keys["enable_rampup_batch_size"]:
     validate_rampup_batch_size(
         keys["per_device_batch_size_start"],

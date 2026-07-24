@@ -1087,11 +1087,8 @@ class HardwareAndMesh(BaseModel):
       description="Customized mesh and logical rules for evaluation.",
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
-  enable_nnx: bool = Field(True, description="Whether to use NNX for model definition.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
-  pure_nnx_decoder: bool = Field(True, description="Whether to enable pure NNX decoder.")
-  pure_nnx: bool = Field(True, description="Whether to enable pure NNX mode.")
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
@@ -2875,16 +2872,6 @@ class MaxTextConfig(
     if self.distill_beta > 0.0:
       if not self.scan_layers:
         raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
-      if not self.enable_nnx:
-        raise ValueError("a value of self.distill_beta > 0.0 requires self.enable_nnx = True")
-
-    if self.pure_nnx and not self.pure_nnx_decoder and self.use_qwix_quantization and not self.use_batch_split_schedule:
-      if self.quantization:
-        raise ValueError(
-            f"quantization='{self.quantization}' with use_qwix_quantization=True under pure_nnx=True requires "
-            "pure_nnx_decoder=True. The bridged Linen decoder (pure_nnx_decoder=False) is invisible to Qwix, "
-            "so quantization (and weight sparsity) would silently have no effect. Set pure_nnx_decoder=True."
-        )
 
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:

@@ -21,7 +21,6 @@ distill_alpha: 0.6
 distill_temperature: 1.0
 distill_beta: 1.0
 distill_layer_indices: [0,1,2,3,4,5,6,7]
-enable_nnx: True
 load_balance_loss_weight: 0.001
 
 ici_fsdp_parallelism: -1
