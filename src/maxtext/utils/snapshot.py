@@ -118,7 +118,14 @@ class Snapshotter(BaseSnapshotter):
         return x
         
       mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
-      all_replicas = split_by_mesh_axis.split_by_mesh_axis(x, mesh_axis_name)
+      try:
+        all_replicas = split_by_mesh_axis.split_by_mesh_axis(x, mesh_axis_name)
+      except Exception as e:
+        import traceback
+        print(f"CRASH in split_by_mesh_axis! x.shape={x.shape}, x.sharding={x.sharding}, mesh_axis_name={mesh_axis_name}", flush=True)
+        traceback.print_exc()
+        raise e
+        
       active_replicas = [replica for replica in all_replicas if is_replica_active(replica)]
       if not active_replicas:
         raise RuntimeError("No active replicas found.")
