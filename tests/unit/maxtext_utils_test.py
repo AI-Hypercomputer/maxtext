@@ -1171,6 +1171,9 @@ class TestGetShapedBatch(unittest.TestCase):
     cfg.use_mrope = use_mrope
     cfg.model_name = model_name
     cfg.training_objective = training_objective
+    cfg.video_max_grid_t = None
+    cfg.video_max_grid_h = None
+    cfg.video_max_grid_w = None
     if enable_diloco:
       cfg.num_diloco_replicas = 2
     return cfg
