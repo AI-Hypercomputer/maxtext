@@ -106,10 +106,18 @@ class Snapshotter(BaseSnapshotter):
     def get_active_pytree(x):
       # Accommodate non-uniform meshes by checking axis_names length
       if len(x.sharding.mesh.axis_names) == 1:
-        mesh_axis_name = x.sharding.mesh.axis_names[0]
-      else:
-        mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
+        # Fully replicated single-device array. Bypass split_by_mesh_axis to avoid std::bad_cast on Pathways.
+        if hasattr(x, 'addressable_shards'):
+          for shard in x.addressable_shards:
+            try:
+              data = shard.data
+              jax.block_until_ready(data)
+              return data
+            except Exception:
+              pass
+        return x
         
+      mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
       all_replicas = split_by_mesh_axis.split_by_mesh_axis(x, mesh_axis_name)
       active_replicas = [replica for replica in all_replicas if is_replica_active(replica)]
       if not active_replicas:
