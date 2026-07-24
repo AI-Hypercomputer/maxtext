@@ -3542,6 +3542,8 @@ class MaxTextConfig(
         self.hf_eval_split = "train"
       if self.eval_interval > 0 and not self.hf_eval_split:
         raise ValueError("Please specify hf_eval_split or set eval_interval to <=0.")
+      if self.grain_worker_count > 1:
+        raise ValueError("Only supports <= 1 for now, more workers results in duplicated data")
     elif self.dataset_type == DatasetType.GRAIN:
       if not self.grain_train_files and not self.grain_train_mixture_config_path:
         raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
