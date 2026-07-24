@@ -14,8 +14,8 @@
 
 """Tests to verify the deterministic nature of MaxText training runs.
 
-This module ensures that when the MaxText training is executed multiple times 
-with identical configurations, the loss metrics across runs are exactly 
+This module ensures that when the MaxText training is executed multiple times
+with identical configurations, the loss metrics across runs are exactly
 the same.
 """
 

@@ -43,9 +43,7 @@ class DummyTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def with_loss_fn(self, customized_fn: Any) -> None:
     self.loss_fn = customized_fn
 
-  def with_gen_model_input_fn(
-      self, gen_model_input_fn: Any
-  ) -> "DummyTrainingEngine":
+  def with_gen_model_input_fn(self, gen_model_input_fn: Any) -> "DummyTrainingEngine":
     self._gen_model_input_fn = gen_model_input_fn
     return self
 
@@ -58,9 +56,7 @@ class DummyTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def update(self) -> None:
     self.update_called += 1
 
-  def eval_step(
-      self, payload: abstract_engine.TrainerPayload, **kwargs: Any
-  ) -> None:
+  def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     pass
 
   def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
@@ -69,9 +65,7 @@ class DummyTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def restore_checkpoint(self, **kwargs: Any) -> Any:
     return self.restored_metadata
 
-  def get_metrics(
-      self, clear_cache: bool = True
-  ) -> abstract_engine.MetricsBuffer:
+  def get_metrics(self, clear_cache: bool = True) -> abstract_engine.MetricsBuffer:
     return abstract_engine.MetricsBuffer(id=1)
 
   def prepare_weight_sync(self, **kwargs: Any) -> Any:
@@ -83,7 +77,7 @@ class AbstractTrainingEngineTest(absltest.TestCase):
   def test_abstract_training_engine_cannot_be_instantiated_directly(self):
     config = abstract_engine.TrainingConfig()
     with self.assertRaises(TypeError):
-      abstract_engine.AbstractTrainingEngine(config)  # pytype: disable=not-instantiable
+      abstract_engine.AbstractTrainingEngine(config)  # pytype: disable=not-instantiable  # pylint: disable=abstract-class-instantiated
 
   def test_dummy_training_engine_implements_abstract_interface(self):
     config = abstract_engine.TrainingConfig(max_steps=100)

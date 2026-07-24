@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Unit tests for MaxText training engine."""
+
 import dataclasses
 from typing import Any
 from unittest import mock
@@ -42,6 +44,7 @@ class DummyPayload(abstract_engine.TrainerPayload):
 class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def setUp(self):
+    """Sets up test dependencies and mocks."""
     super().setUp()
     dummy_model = DummyNNXModel()
     dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
@@ -63,7 +66,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.mock_config = self.setup_config()
 
   def setup_config(self, enable_checkpointing: bool = False):
+    """Sets up mock config."""
     mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
+
     mock_config.init_weights_seed = 42
     mock_config.model_name = "llama3.1-8b"
     mock_config.learning_rate_schedule = mock.MagicMock(return_value=0.001)
@@ -93,9 +98,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       maxtext_engine.gradient_accumulation,
       "gradient_accumulation_loss_and_grad",
   )
-  def test_max_text_trainer_instantiation_with_pyconfig(
-      self, mock_ga, unused_mock_ckpt_mgr
-  ):
+  def test_max_text_trainer_instantiation_with_pyconfig(self, mock_ga, unused_mock_ckpt_mgr):
     mock_ga.return_value = (
         jnp.array(0.5),
         {},
@@ -111,14 +114,15 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         token_mask=jnp.ones((2, 2)),
     )
     t.compile(payload)
-    self.assertTrue(t._compiled)
+    self.assertTrue(t._compiled)  # pylint: disable=protected-access
     t.with_loss_fn(lambda *args, **kwargs: (jnp.array(0.5), {}))
-    self.assertFalse(t._compiled)
+    self.assertFalse(t._compiled)  # pylint: disable=protected-access
     t.fwd_bwd(payload)
-    self.assertEqual(t._micro_step_count, 1)
+    self.assertEqual(t._micro_step_count, 1)  # pylint: disable=protected-access
     t.update()
-    self.assertEqual(t._micro_step_count, 0)
-    self.assertIsNone(t._accumulated_grads)
+    self.assertEqual(t._micro_step_count, 0)  # pylint: disable=protected-access
+    self.assertIsNone(t._accumulated_grads)  # pylint: disable=protected-access
+
     metrics = t.get_metrics()
     self.assertIsInstance(metrics, list)
 
@@ -143,7 +147,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_orbax_mgr = mock.MagicMock()
     mock_orbax_mgr.latest_step.return_value = None
     mock_orbax_mgr.save.return_value = True
-    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr  # pylint: disable=protected-access
 
     t.train_step = 10
     metadata_to_save = {"worker_id": "worker_0", "run_id": "run_123"}
@@ -157,7 +161,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
     mock_orbax_mgr = mock.MagicMock()
     mock_orbax_mgr.latest_step.return_value = 10
-    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr  # pylint: disable=protected-access
     t.train_step = 10
 
     t.save_checkpoint(metadata={"key": "val"})
@@ -169,7 +173,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
     mock_orbax_mgr = mock.MagicMock()
     mock_orbax_mgr.latest_step.return_value = None
-    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr  # pylint: disable=protected-access
 
     restored_metadata = t.restore_checkpoint()
     self.assertEqual(restored_metadata, {})
@@ -183,11 +187,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     dummy_metadata = mock.MagicMock()
     mock_orbax_mgr.metadata.return_value = dummy_metadata
-    mock_orbax_mgr.restore.return_value = {
-        "model_params": {"weights": jnp.array([1.0, 2.0])}
-    }
+    mock_orbax_mgr.restore.return_value = {"model_params": {"weights": jnp.array([1.0, 2.0])}}
 
-    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr  # pylint: disable=protected-access
 
     restored_metadata = t.restore_checkpoint(step=10)
     self.assertEqual(t.train_step, 10)
@@ -199,15 +201,11 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # Record WeightedMetric
     t.record_metrics(
         name="loss",
-        metric=abstract_engine.WeightedMetric(
-            unreduced_sum=jnp.array(20.0), denominator=jnp.array(4.0)
-        ),
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(20.0), denominator=jnp.array(4.0)),
     )
     t.record_metrics(
         name="loss",
-        metric=abstract_engine.WeightedMetric(
-            unreduced_sum=jnp.array(30.0), denominator=jnp.array(6.0)
-        ),
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(30.0), denominator=jnp.array(6.0)),
     )
 
     # Record scalar
@@ -229,23 +227,17 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         jnp.array([4.0, 6.0]),
     )
     self.assertIn("lr", metrics_buffer[0].scalar_metrics)
-    np.testing.assert_array_equal(
-        metrics_buffer[0].scalar_metrics["lr"], jnp.array([0.002])
-    )
+    np.testing.assert_array_equal(metrics_buffer[0].scalar_metrics["lr"], jnp.array([0.002]))
     self.assertIn("lr", metrics_buffer[0].aggregation_fns)
-    self.assertEqual(
-        metrics_buffer[0].aggregation_fns["lr"](jnp.array([0.002])), 0.002
-    )
+    self.assertEqual(metrics_buffer[0].aggregation_fns["lr"](jnp.array([0.002])), 0.002)
 
   def test_get_metrics(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
-    t._metrics_logger._metrics_buffer = [
+    t._metrics_logger._metrics_buffer = [  # pylint: disable=protected-access
         abstract_engine.MetricsBuffer(
             id=1,
             weighted_metrics={
-                "loss": abstract_engine.WeightedMetric(
-                    unreduced_sum=jnp.array(50.0), denominator=jnp.array(10.0)
-                )
+                "loss": abstract_engine.WeightedMetric(unreduced_sum=jnp.array(50.0), denominator=jnp.array(10.0))
             },
             scalar_metrics={"lr": jnp.array(0.002)},
             aggregation_fns={"lr": lambda x: np.round(np.asarray(x), 4)},
@@ -253,21 +245,13 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     ]
     metrics = t.get_metrics(clear_cache=True)
     self.assertIn("loss", metrics[0].weighted_metrics)
-    np.testing.assert_array_equal(
-        metrics[0].weighted_metrics["loss"].unreduced_sum, jnp.array([50.0])
-    )
-    np.testing.assert_array_equal(
-        metrics[0].weighted_metrics["loss"].denominator, jnp.array([10.0])
-    )
+    np.testing.assert_array_equal(metrics[0].weighted_metrics["loss"].unreduced_sum, jnp.array([50.0]))
+    np.testing.assert_array_equal(metrics[0].weighted_metrics["loss"].denominator, jnp.array([10.0]))
     self.assertIn("lr", metrics[0].scalar_metrics)
-    np.testing.assert_array_equal(
-        metrics[0].scalar_metrics["lr"], jnp.array([0.002])
-    )
+    np.testing.assert_array_equal(metrics[0].scalar_metrics["lr"], jnp.array([0.002]))
     self.assertIn("lr", metrics[0].aggregation_fns)
-    self.assertEqual(
-        metrics[0].aggregation_fns["lr"](jnp.array([0.002])), 0.002
-    )
-    self.assertEmpty(t._metrics_logger._metrics_buffer)
+    self.assertEqual(metrics[0].aggregation_fns["lr"](jnp.array([0.002])), 0.002)
+    self.assertEmpty(t._metrics_logger._metrics_buffer)  # pylint: disable=protected-access
 
   @mock.patch.object(
       maxtext_engine.gradient_accumulation,
