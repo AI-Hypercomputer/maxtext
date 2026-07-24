@@ -238,9 +238,7 @@ def inspect_maxtext(args, remaining_args):
   print(argv)
   config = pyconfig.initialize(argv)
 
-  print(
-      f"\n--- Inspecting MaxText Architecture: {config.model_name} (Scan: {config.scan_layers}) ---"
-  )
+  print(f"\n--- Inspecting MaxText Architecture: {config.model_name} (Scan: {config.scan_layers}) ---")
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
   if getattr(config, "enable_nnx", False):
@@ -269,10 +267,14 @@ def inspect_maxtext(args, remaining_args):
 
     # Construct a MaxText-style parameter key (e.g., "params.params.layer.weight").
     key_str = ".".join(key_parts)
-    if getattr(config, "enable_nnx", False) and not key_str.startswith("params"):
-      param_key = "params.params." + key_str
+    if getattr(config, "enable_nnx", False):
+      param_key = (
+          "params.params." + key_str
+          if not key_str.startswith("params")
+          else key_str.replace("params.", "params.params.", 1)
+      )
     else:
-      param_key = "params." + key_str
+      param_key = "params." + key_str if not key_str.startswith("params") else key_str
 
     shape = abstract_leaf_value.shape
     param_dict[param_key] = f"shape: {shape}"
@@ -359,20 +361,12 @@ def main():
   )
 
   # Main parser and sub-parsers for distinct inspection modes.
-  parser = argparse.ArgumentParser(
-      description="Consolidated Model Checkpoint Inspector"
-  )
-  subparsers = parser.add_subparsers(
-      dest="mode", required=True, help="Inspection mode: hf, maxtext, orbax"
-  )
+  parser = argparse.ArgumentParser(description="Consolidated Model Checkpoint Inspector")
+  subparsers = parser.add_subparsers(dest="mode", required=True, help="Inspection mode: hf, maxtext, orbax")
 
   # Mode 1: HuggingFace
-  parser_hf = subparsers.add_parser(
-      "hf", parents=[shared_parser], help="Inspect .safetensors or .pth files"
-  )
-  parser_hf.add_argument(
-      "--path", type=str, required=True, help="Directory containing checkpoint files"
-  )
+  parser_hf = subparsers.add_parser("hf", parents=[shared_parser], help="Inspect .safetensors or .pth files")
+  parser_hf.add_argument("--path", type=str, required=True, help="Directory containing checkpoint files")
   parser_hf.add_argument(
       "--format",
       type=str,
@@ -390,9 +384,7 @@ def main():
   )
 
   # Mode 3: Orbax
-  parser_orbax = subparsers.add_parser(
-      "orbax", parents=[shared_parser], help="Inspect saved Orbax checkpoint metadata"
-  )
+  parser_orbax = subparsers.add_parser("orbax", parents=[shared_parser], help="Inspect saved Orbax checkpoint metadata")
   parser_orbax.add_argument(
       "--path",
       type=str,
