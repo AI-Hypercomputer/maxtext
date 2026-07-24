@@ -1162,6 +1162,116 @@ def QWEN3_VL_HF_WEIGHTS_TO_SHAPE(config):
 
 
 # {maxtext model name: {hf weight name: hf shape}}
+
+def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace weights path and their shape derived from HF config for Deepseek V4."""
+  hidden_size = config["hidden_size"]
+  num_hidden_layers = config["num_hidden_layers"]
+  vocab_size = config["vocab_size"]
+
+  q_lora_rank = config["q_lora_rank"]
+  kv_lora_rank = config["kv_lora_rank"]
+  num_attention_heads = config["num_attention_heads"]
+  num_key_value_heads = config.get("num_key_value_heads", 1)
+  qk_nope_head_dim = config.get("qk_nope_head_dim", 128)
+  qk_rope_head_dim = config.get("qk_rope_head_dim", 64)
+  qk_head_dim = config.get("head_dim", config.get("qk_head_dim", qk_nope_head_dim + qk_rope_head_dim))
+  v_head_dim = config["v_head_dim"]
+  
+  q_dim = num_attention_heads * qk_head_dim
+  o_proj_in_dim = config.get("o_groups", 8) * hidden_size
+  
+  moe_intermediate_size = config["moe_intermediate_size"]
+  n_routed_experts = config["n_routed_experts"]
+  n_shared_experts = config.get("n_shared_experts", 0)
+
+  compress_ratios = config.get("compress_ratios", [])
+  index_head_dim = config.get("index_head_dim", 128)
+  index_n_heads = config.get("index_n_heads", num_attention_heads)
+  mhc_expansion_rate = config.get("mhc_expansion_rate", 4)
+
+  mapping = {
+      "embed.weight": [vocab_size, hidden_size],
+      "norm.weight": [hidden_size],
+      "head.weight": [vocab_size, hidden_size],
+      "hc_head_fn": [4, hidden_size * mhc_expansion_rate],
+      "hc_head_base": [4],
+      "hc_head_scale": [1],
+  }
+  
+  for layer_idx in range(num_hidden_layers):
+    layer_prefix = f"layers.{layer_idx}"
+    layer_mapping = {
+        f"{layer_prefix}.attn_norm.weight": [hidden_size],
+        f"{layer_prefix}.ffn_norm.weight": [hidden_size],
+        
+        f"{layer_prefix}.attn.wq_a.weight": [q_lora_rank, hidden_size],
+        f"{layer_prefix}.attn.q_norm.weight": [q_lora_rank],
+        f"{layer_prefix}.attn.wq_b.weight": [q_dim, q_lora_rank],
+        f"{layer_prefix}.attn.wkv.weight": [kv_lora_rank, hidden_size],
+        f"{layer_prefix}.attn.kv_norm.weight": [kv_lora_rank],
+        f"{layer_prefix}.attn.wo_a.weight": [o_proj_in_dim, config.get("o_lora_rank", 1024)],
+        f"{layer_prefix}.attn.wo_b.weight": [hidden_size, config.get("o_groups", 8) * config.get("o_lora_rank", 1024)],
+        
+        f"{layer_prefix}.attn.attn_sink": [64],
+        
+        f"{layer_prefix}.hc_attn_fn": [6 * mhc_expansion_rate, hidden_size * mhc_expansion_rate],
+        f"{layer_prefix}.hc_attn_base": [6 * mhc_expansion_rate],
+        f"{layer_prefix}.hc_attn_scale": [3],
+        
+        f"{layer_prefix}.hc_ffn_fn": [6 * mhc_expansion_rate, hidden_size * mhc_expansion_rate],
+        f"{layer_prefix}.hc_ffn_base": [6 * mhc_expansion_rate],
+        f"{layer_prefix}.hc_ffn_scale": [3],
+    }
+
+    cr = compress_ratios[layer_idx] if layer_idx < len(compress_ratios) else 0
+    if cr > 0:
+      # In MaxText: proj_dim = 2 * head_dim for CSA, 1 * head_dim for HCA
+      # HF equivalently uses kv_lora_rank (which is 512) for this dimension
+      proj_dim = (2 * kv_lora_rank) if cr == 4 else kv_lora_rank
+      layer_mapping.update({
+          f"{layer_prefix}.attn.compressor.wgate.weight": [proj_dim, hidden_size],
+          f"{layer_prefix}.attn.compressor.wkv.weight": [proj_dim, hidden_size],
+          f"{layer_prefix}.attn.compressor.ape": [cr, proj_dim],
+          f"{layer_prefix}.attn.compressor.norm.weight": [kv_lora_rank],
+      })
+      if cr > 0:
+          wq_b_dim_out = index_n_heads * index_head_dim
+          layer_mapping.update({
+              f"{layer_prefix}.attn.indexer.compressor.wgate.weight": [256, hidden_size],
+              f"{layer_prefix}.attn.indexer.compressor.wkv.weight": [256, hidden_size],
+              f"{layer_prefix}.attn.indexer.wq_b.weight": [wq_b_dim_out, q_lora_rank],
+              f"{layer_prefix}.attn.indexer.weights_proj.weight": [index_n_heads, hidden_size],
+              f"{layer_prefix}.attn.indexer.compressor.ape": [cr, 256],
+              f"{layer_prefix}.attn.indexer.compressor.norm.weight": [index_head_dim],
+          })
+
+    if config.get("routed_bias", True):
+      layer_mapping[f"{layer_prefix}.ffn.gate.bias"] = [n_routed_experts]
+    if layer_idx < 3:
+      layer_mapping.update({
+          f"{layer_prefix}.ffn.gate.tid2eid": [vocab_size, config.get("first_num_hash_layers", 3)],
+      })
+    layer_mapping.update({
+        f"{layer_prefix}.ffn.gate.weight": [n_routed_experts, hidden_size],
+    })
+    for expert_j in range(n_routed_experts):
+      expert_prefix = f"{layer_prefix}.ffn.experts.{expert_j}"
+      layer_mapping.update({
+          f"{expert_prefix}.w1.weight": [moe_intermediate_size, hidden_size],
+          f"{expert_prefix}.w3.weight": [moe_intermediate_size, hidden_size],
+          f"{expert_prefix}.w2.weight": [hidden_size, moe_intermediate_size],
+      })
+    if n_shared_experts > 0:
+      shared_intermediate_size = moe_intermediate_size * n_shared_experts
+      layer_mapping.update({
+          f"{layer_prefix}.ffn.shared_experts.w1.weight": [shared_intermediate_size, hidden_size],
+          f"{layer_prefix}.ffn.shared_experts.w3.weight": [shared_intermediate_size, hidden_size],
+          f"{layer_prefix}.ffn.shared_experts.w2.weight": [hidden_size, shared_intermediate_size],
+      })
+
+    mapping.update(layer_mapping)
+  return mapping
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -1195,6 +1305,8 @@ HF_SHAPE = {
     "deepseek2-16b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek3.2-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
+    "deepseek4-284b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
+    "deepseek4-tiny": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,

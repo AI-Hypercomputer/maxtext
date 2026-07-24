@@ -388,7 +388,11 @@ def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, para
   processed_params_list = []
   lora_scaling = config.lora.lora_alpha / config.lora.lora_rank if config.lora.lora_rank > 0 else 1.0
   for key in MemoryMonitorTqdm(filtered_map_keys, leave=True):
-    weight = [state_dict[subkey] for subkey in key] if isinstance(key, tuple) else state_dict.get(key)
+    weight = (
+        [state_dict[k] if k in state_dict else state_dict.get(f"params-{k}") for k in key]
+        if isinstance(key, tuple)
+        else (state_dict[key] if key in state_dict else state_dict.get(f"params-{key}"))
+    )
     if weight is not None and not isinstance(key, tuple):
       delta = _get_lora_delta(key, state_dict, lora_scaling)
       if delta is not None:
