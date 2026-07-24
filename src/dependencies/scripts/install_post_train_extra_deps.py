@@ -47,22 +47,31 @@ def ensure_cpp20_compiler():
   if is_root and shutil.which("apt-get"):
     try:
       print("Installing gcc-11 and g++-11 for C++20 compilation compatibility...")
+      if os.path.exists("/etc/os-release"):
+        with open("/etc/os-release", "r", encoding="utf-8") as f:
+          os_rel = f.read()
+        if "bullseye" in os_rel and not os.path.exists("/etc/apt/sources.list.d/backports.list"):
+          with open("/etc/apt/sources.list.d/backports.list", "w", encoding="utf-8") as f:
+            f.write("deb http://deb.debian.org/debian bullseye-backports main\n")
       subprocess.run(["apt-get", "update", "-y"], check=True, capture_output=True)
-      subprocess.run(
-          [
-              "apt-get",
-              "install",
-              "-y",
-              "--no-install-recommends",
-              "gcc-11",
-              "g++-11",
-              "build-essential",
-              "cmake",
-              "ninja-build",
-          ],
-          check=True,
-          capture_output=True,
-      )
+      apt_cmd = [
+          "apt-get",
+          "install",
+          "-y",
+          "--no-install-recommends",
+          "gcc-11",
+          "g++-11",
+          "build-essential",
+          "cmake",
+          "ninja-build",
+      ]
+      res = subprocess.run(apt_cmd, check=False, capture_output=True)
+      if res.returncode != 0:
+        subprocess.run(
+            ["apt-get", "install", "-y", "--no-install-recommends", "-t", "bullseye-backports", "gcc-11", "g++-11"],
+            check=True,
+            capture_output=True,
+        )
       if shutil.which("gcc-11") and shutil.which("g++-11"):
         os.environ["CC"] = "gcc-11"
         os.environ["CXX"] = "g++-11"
