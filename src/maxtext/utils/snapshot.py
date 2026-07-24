@@ -5,6 +5,7 @@ import logging
 import threading
 from typing import Any
 
+import jax
 from orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter import Snapshotter as BaseSnapshotter
 import orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter as orbax_snapshotter
 
