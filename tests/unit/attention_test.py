@@ -379,7 +379,7 @@ class LoadBalancedMaskTest(unittest.TestCase):
         debug_sharding=False,
         eval_interval=-1,
     )
-    mesh = types.SimpleNamespace(shape={"context": 4})
+    mesh = Mesh(np.arange(4), ["context"])
     seq_len = 16
     sliding_window_size = 4
     positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
@@ -423,7 +423,7 @@ class LoadBalancedMaskTest(unittest.TestCase):
         debug_sharding=False,
         eval_interval=-1,
     )
-    mesh = types.SimpleNamespace(shape={"context": 4})
+    mesh = Mesh(np.arange(4), ["context"])
     seq_len = 16
     chunk_size = 4
     positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
