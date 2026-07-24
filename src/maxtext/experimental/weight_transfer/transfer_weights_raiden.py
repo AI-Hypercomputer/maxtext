@@ -338,12 +338,15 @@ def transfer_and_benchmark(
         start_req = build_resharding_start_request(
             flat_src, src_sharding, dst_sharding, args.dest_ip, args.dest_port + port_offset
         )
-        syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=args.source_ip, listener_port=0)
-        trigger_raiden_transfer(syncer_src, args.dest_ip, None, start_req, dest_port=args.dest_port + port_offset)
-      elif jax.process_index() == 1:
-        syncer_dst = weight_synchronizer.WeightSynchronizer(
-            flat_dst_init, local_port=args.dest_port + port_offset, listener_port=0
+        syncer_src = weight_synchronizer.WeightSynchronizer(
+            flat_src, bind_ip=args.source_ip, listener_port=args.dest_port + 100 + port_offset
         )
+        syncer_src.d2h()
+        trigger_raiden_transfer(
+            syncer_src, args.dest_ip, ws_dest=args.dest_port + port_offset, start_transfer_req=start_req
+        )
+      elif jax.process_index() == 1:
+        syncer_dst = weight_synchronizer.WeightSynchronizer(flat_dst_init, local_port=args.dest_port + port_offset)
       multihost_utils.sync_global_devices(f"warmup_end_{w}")
 
     if args.profile_dir:
@@ -361,12 +364,23 @@ def transfer_and_benchmark(
         start_req = build_resharding_start_request(
             flat_src, src_sharding, dst_sharding, args.dest_ip, args.dest_port + port_offset
         )
-        syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=args.source_ip, listener_port=0)
-        trigger_raiden_transfer(syncer_src, args.dest_ip, None, start_req, dest_port=args.dest_port + port_offset)
-      elif jax.process_index() == 1:
-        syncer_dst = weight_synchronizer.WeightSynchronizer(
-            flat_dst_init, local_port=args.dest_port + port_offset, listener_port=0
+        syncer_src = weight_synchronizer.WeightSynchronizer(
+            flat_src, bind_ip=args.source_ip, listener_port=args.dest_port + 100 + port_offset
         )
+        syncer_src.d2h()
+        src_buf = np.frombuffer(bytes(syncer_src.get_host_buffer(0, 0)), dtype=np.float32)
+        print(f"[DEBUG_HOST_BUF] src host buffer after D2H: {src_buf[:5]}", flush=True)
+        trigger_raiden_transfer(
+            syncer_src, args.dest_ip, ws_dest=args.dest_port + port_offset, start_transfer_req=start_req
+        )
+      elif jax.process_index() == 1:
+        syncer_dst = weight_synchronizer.WeightSynchronizer(flat_dst_init, local_port=args.dest_port + port_offset)
+
+      multihost_utils.sync_global_devices(f"transfer_done_{it}")
+      if jax.process_index() == 1:
+        syncer_dst.h2d()
+        dst_buf = np.frombuffer(bytes(syncer_dst.get_host_buffer(0, 0)), dtype=np.float32)
+        print(f"[DEBUG_HOST_BUF] dst host buffer after transfer & H2D: {dst_buf[:5]}", flush=True)
 
       t1 = time.perf_counter()
 
@@ -376,7 +390,6 @@ def transfer_and_benchmark(
       multihost_utils.sync_global_devices(f"iter_end_{it}")
 
     if jax.process_index() == 1:
-      syncer_dst.h2d()
       jax.tree.map(lambda x: x.block_until_ready(), flat_dst_init)
     multihost_utils.sync_global_devices("h2d_complete")
 
