@@ -17,6 +17,8 @@
 import sys
 import unittest
 import os.path
+from types import SimpleNamespace
+from unittest import mock
 
 import jax
 from jax.sharding import Mesh
@@ -122,6 +124,60 @@ class HfDataProcessingTest(unittest.TestCase):
     train_batch2 = get_first_batch(self.train_iter)
     self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
+
+
+@pytest.mark.cpu_only
+class HfEvalIteratorBranchTest(unittest.TestCase):
+  """Lightweight branch tests for make_hf_eval_iterator."""
+
+  def test_multimodal_sft_eval_uses_vision_pipeline(self):
+    config = SimpleNamespace(
+        hf_path="parquet",
+        hf_name=None,
+        hf_data_dir="",
+        hf_eval_files="eval.parquet",
+        hf_eval_split="train",
+        hf_access_token="",
+        use_sft=True,
+        use_multimodal=True,
+        eval_data_columns=("messages",),
+        eval_image_column="image",
+        global_batch_size_to_load_eval=4,
+    )
+    fake_dataset = object()
+    fake_datasets_module = SimpleNamespace(load_dataset=mock.Mock(return_value=fake_dataset))
+    sentinel = object()
+
+    with (
+        mock.patch.dict(sys.modules, {"datasets": fake_datasets_module}),
+        mock.patch.object(
+            hf_data_processing,
+            "vision_sft_preprocessing_pipeline",
+            return_value=sentinel,
+        ) as vision_pipeline,
+    ):
+      result = hf_data_processing.make_hf_eval_iterator(config, global_mesh="mesh", process_indices_eval=[0])
+
+    self.assertIs(result, sentinel)
+    fake_datasets_module.load_dataset.assert_called_once_with(
+        "parquet",
+        name=None,
+        data_dir="",
+        data_files="eval.parquet",
+        split="train",
+        streaming=True,
+        token="",
+    )
+    vision_pipeline.assert_called_once_with(
+        dataset=fake_dataset,
+        config=config,
+        dataloading_host_index=0,
+        dataloading_host_count=1,
+        global_mesh="mesh",
+        text_columns=("messages",),
+        image_column="image",
+        global_batch_size=4,
+    )
 
 
 if __name__ == "__main__":
