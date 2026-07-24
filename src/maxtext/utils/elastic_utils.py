@@ -50,9 +50,9 @@ def maybe_snapshot_state(
     }
   else:
     linen_dict = {
-        "params": getattr(state, "params", None),
-        "opt_state": getattr(state, "opt_state", None),
-        "step": getattr(state, "step", None),
+        "params": state.params if hasattr(state, "params") else None,
+        "opt_state": state.opt_state if hasattr(state, "opt_state") else None,
+        "step": state.step if hasattr(state, "step") else None,
     }
     snapshot_jax_arrays = train_state_nnx.from_linen_checkpoint_dict(linen_dict)
 
@@ -172,20 +172,22 @@ def get_local_batch_size(config) -> int:
 def live_devices(config=None):
   """Returns the list of live devices."""
   # If pathways is not used or elastic_manager is not initialized, return all devices
-  if should_use_elastic(config):
+  if config is not None and should_use_elastic(config):
     ensure_elastic_manager_initialized(config)
-    assert elastic_manager is not None
+  
+  if elastic_manager is not None:
     # Filter devices that are in active slices
     active_devices = [
-        d for d in jax.devices() if d is not None and getattr(d, "slice_index", 0) in elastic_manager.active_slice_indices
+        d for d in jax.devices() if d is not None and (d.slice_index if hasattr(d, "slice_index") else 0) in elastic_manager.active_slice_indices
     ]
-    return sorted(active_devices, key=lambda d: (getattr(d, "slice_index", 0), getattr(d, "coords", ())))
-  return jax.devices()
+    return sorted(active_devices, key=lambda d: ((d.slice_index if hasattr(d, "slice_index") else 0), (d.coords if hasattr(d, "coords") else ())))
+  
+  return [d for d in jax.devices() if d is not None]
 
 
 def live_slice_indices(config) -> set[int]:
   """Returns the set of live slice indices."""
-  return {getattr(d, "slice_index", 0) for d in live_devices(config) if d is not None}
+  return {(d.slice_index if hasattr(d, "slice_index") else 0) for d in live_devices(config) if d is not None}
 
 
 def get_devices_per_host(config):
@@ -298,7 +300,7 @@ def single_controller_mtc_init_kwargs(raw_keys):
     return kwargs
 
   active_devices = tuple(live_devices(config))
-  active_slice_indices = {getattr(device, "slice_index", 0) for device in active_devices if device is not None}
+  active_slice_indices = {(device.slice_index if hasattr(device, "slice_index") else 0) for device in active_devices if device is not None}
   if not active_devices or not active_slice_indices:
     raise ValueError("Elastic single-controller MTC initialization found no active devices.")
 

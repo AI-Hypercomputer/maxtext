@@ -16,18 +16,13 @@ _identity_jit = jax.jit(lambda x: x)
 _original_block_until_ready = jax.block_until_ready
 _thread_local = threading.local()
 
-
-def get_live_devices() -> list[Any]:
-  """Constructs list containing one device per live device."""
-  return [d for d in jax.devices() if d is not None]
-
-
 def _ensure_mesh_sharding(x: Any) -> Any:
   """Shards single device arrays onto a mesh constructed with one device per live device."""
   if isinstance(x, jax.Array) and not hasattr(x.sharding, "mesh"):
-    live_devs = get_live_devices()
+    from maxtext.utils import elastic_utils
+    live_devs = elastic_utils.live_devices()
     mesh = Mesh(np.array(live_devs), ("replica",))
-    sharding = NamedSharding(mesh, PartitionSpec("replica"))
+    sharding = NamedSharding(mesh, PartitionSpec())
     return jax.device_put(x, sharding)
   return x
 
