@@ -46,25 +46,32 @@ def ensure_cpp20_compiler():
     os.environ["CXX"] = "clang++"
     return
 
-  # If running as root (e.g. inside CI docker container), install C++20 compiler via apt
+  # Install C++20 compiler via apt if root or sudo available
   is_root = os.geteuid() == 0 if hasattr(os, "geteuid") else False
-  if is_root and shutil.which("apt-get"):
+  has_sudo = shutil.which("sudo") is not None
+  if (is_root or has_sudo) and shutil.which("apt-get"):
     try:
       print("Ensuring C++20 compiler (gcc-11/clang) for vLLM compilation...")
+      prefix = [] if is_root else ["sudo", "-E"]
       if os.path.exists("/etc/os-release"):
         with open("/etc/os-release", "r", encoding="utf-8") as f:
           os_rel = f.read()
         if "bullseye" in os_rel and not os.path.exists("/etc/apt/sources.list.d/backports.list"):
-          with open("/etc/apt/sources.list.d/backports.list", "w", encoding="utf-8") as f:
-            f.write("deb http://deb.debian.org/debian bullseye-backports main\n")
+          backports_cmd = [
+              "sh",
+              "-c",
+              'echo "deb http://deb.debian.org/debian bullseye-backports main" > /etc/apt/sources.list.d/backports.list',
+          ]
+          subprocess.run((prefix if not is_root else []) + backports_cmd, check=False, capture_output=True)
       # Use check=False for apt-get update as index warnings/errors return exit code 100 on Debian
-      subprocess.run(["apt-get", "update", "-y"], check=False, capture_output=True)
+      subprocess.run(prefix + ["apt-get", "update", "-y"], check=False, capture_output=True)
       subprocess.run(
-          ["apt-get", "install", "-y", "--no-install-recommends", "-t", "bullseye-backports", "gcc-11", "g++-11"],
+          prefix
+          + ["apt-get", "install", "-y", "--no-install-recommends", "-t", "bullseye-backports", "gcc-11", "g++-11"],
           check=False,
           capture_output=True,
       )
-      apt_cmd = [
+      apt_cmd = prefix + [
           "apt-get",
           "install",
           "-y",
