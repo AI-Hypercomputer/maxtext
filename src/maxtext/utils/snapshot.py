@@ -95,36 +95,26 @@ class Snapshotter(BaseSnapshotter):
 
     def is_replica_active(arr, idx):
       try:
-        import jax.random
-        import sys
-        print(f"[DEBUG] is_replica_active invoked for idx {idx}", file=sys.stderr, flush=True)
         data = jax.random.key_data(arr) if (hasattr(arr, "dtype") and hasattr(arr, "shape") and jax.dtypes.issubdtype(arr.dtype, jax.dtypes.prng_key)) else arr
         jax.block_until_ready(data)
         return True
       except BaseException as e:
-        import sys
-        print(f"[REPLICA DEAD] Replica {idx} failed with {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return False
 
     def get_active_pytree(x):
       mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
       try:
-          import sys
           import jax.random
           data = jax.random.key_data(x) if (hasattr(x, "dtype") and hasattr(x, "shape") and jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)) else x
           all_replicas = split_by_mesh_axis.split_by_mesh_axis(data, mesh_axis_name)
       except Exception as e:
-          print(f"FAILED SPLIT! x.shape={x.shape}, x.dtype={x.dtype}, type(x.sharding)={type(x.sharding)}, x.sharding={x.sharding}", flush=True)
           raise e
         
-      import sys
-      print(f"[DEBUG] get_active_pytree for axis={mesh_axis_name}: len(all_replicas)={len(all_replicas)}", file=sys.stderr, flush=True)
       active_replicas = []
       for i, replica in enumerate(all_replicas):
         if is_replica_active(replica, i):
           active_replicas.append(replica)
       if not active_replicas:
-        print(f"[DEBUG] No active replicas for x! shape={x.shape}", file=sys.stderr, flush=True)
         raise RuntimeError("No active replicas found.")
       reconstructed = concatenate_by_mesh_axis.concatenate_by_mesh_axis(active_replicas, mesh_axis_name)
       if hasattr(x, "dtype") and hasattr(x, "shape") and jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key):
@@ -149,13 +139,7 @@ class Snapshotter(BaseSnapshotter):
       def _process_array(kp, x):
         if not is_shardable_array(x):
             return x
-        try:
-            return get_active_pytree(x)
-        except RuntimeError as e:
-            if "No active replicas" in str(e):
-                import sys
-                print(f"[FATAL] Array failed at path {jax.tree_util.keystr(kp)}: shape={x.shape}, sharding={x.sharding}", file=sys.stderr, flush=True)
-            raise e
+        return get_active_pytree(x)
 
       active_state = jax.tree_util.tree_map_with_path(
           _process_array,
