@@ -67,8 +67,6 @@ from maxtext.kernels.attention import jax_flash_attention
 from maxtext.kernels.attention import tokamax_ring_attention
 from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha
-from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -77,6 +75,8 @@ from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec,
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
 from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
