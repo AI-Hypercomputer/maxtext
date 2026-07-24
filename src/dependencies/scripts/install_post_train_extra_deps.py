@@ -19,8 +19,68 @@ It first ensures 'uv' is installed and then uses it to install the packages list
 """
 
 import os
+import shutil
 import subprocess
 import sys
+
+
+def ensure_cpp20_compiler():
+  """Ensures a compiler supporting C++20 (clang-16/gcc-11) is used for building vLLM."""
+  if sys.platform != "linux":
+    return
+  try:
+    res = subprocess.run(["gcc", "-dumpversion"], capture_output=True, text=True, check=False)
+    major_ver = int(res.stdout.strip().split(".")[0])
+    if major_ver >= 11:
+      return
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+  # If clang-16 / clang++-16 or gcc-11 / g++-11 exist, use them
+  if shutil.which("clang-16") and shutil.which("clang++-16"):
+    os.environ["CC"] = "clang-16"
+    os.environ["CXX"] = "clang++-16"
+    print("Using C++20 compiler: CC=clang-16 CXX=clang++-16")
+    return
+  if shutil.which("gcc-11") and shutil.which("g++-11"):
+    os.environ["CC"] = "gcc-11"
+    os.environ["CXX"] = "g++-11"
+    print("Using C++20 compiler: CC=gcc-11 CXX=g++-11")
+    return
+
+  is_root = os.geteuid() == 0 if hasattr(os, "geteuid") else False
+  has_sudo = shutil.which("sudo") is not None
+  if (is_root or has_sudo) and shutil.which("apt-get"):
+    try:
+      print("Ensuring C++20 compiler (clang-16/gcc-11) for vLLM compilation...")
+      prefix = [] if is_root else ["sudo", "-E"]
+      subprocess.run(prefix + ["apt-get", "update", "-y"], check=False)
+      apt_cmd = prefix + [
+          "apt-get",
+          "install",
+          "-y",
+          "--no-install-recommends",
+          "clang-16",
+          "lld-16",
+          "llvm-16",
+          "build-essential",
+          "cmake",
+          "ninja-build",
+      ]
+      subprocess.run(apt_cmd, check=False)
+
+      if shutil.which("clang-16") and shutil.which("clang++-16"):
+        os.environ["CC"] = "clang-16"
+        os.environ["CXX"] = "clang++-16"
+        print("Successfully configured C++20 compiler: CC=clang-16 CXX=clang++-16")
+      elif shutil.which("gcc-11") and shutil.which("g++-11"):
+        os.environ["CC"] = "gcc-11"
+        os.environ["CXX"] = "g++-11"
+        print("Successfully configured C++20 compiler: CC=gcc-11 CXX=g++-11")
+      else:
+        print("Warning: C++20 compiler binary not found after apt-get execution.")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"Warning: Failed to install C++20 compiler via apt-get: {e}")
 
 
 def main():
@@ -30,6 +90,7 @@ def main():
   """
   os.environ["VLLM_TARGET_DEVICE"] = "tpu"
   os.environ["UV_TORCH_BACKEND"] = "cpu"
+  ensure_cpp20_compiler()
 
   current_dir = os.path.dirname(os.path.abspath(__file__))
   repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
@@ -37,33 +98,56 @@ def main():
   if not os.path.exists(github_deps_path):
     raise FileNotFoundError(f"Github dependencies file not found at {github_deps_path}")
 
-  # Check if 'uv' is available in the environment
+  # Ensure setuptools is installed via uv without calling pip
   try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "uv"], check=True, capture_output=True)
-    subprocess.run([sys.executable, "-m", "uv", "--version"], check=True, capture_output=True)
-  except subprocess.CalledProcessError as e:
-    print(f"Error checking uv version: {e}")
-    print(f"Stderr: {e.stderr.decode()}")
-    sys.exit(1)
+    subprocess.run([sys.executable, "-m", "uv", "pip", "install", "setuptools"], check=True, capture_output=True)
+  except (subprocess.CalledProcessError, FileNotFoundError):
+    try:
+      subprocess.run(["uv", "pip", "install", "setuptools"], check=True, capture_output=True)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"Warning: could not install setuptools via uv: {e}")
 
   github_deps_command = [
-      sys.executable,  # Use the current Python executable's pip to ensure the correct environment
-      "-m",
       "uv",
       "pip",
       "install",
+      "--python",
+      sys.executable,
       "-r",
       str(github_deps_path),
       "--no-deps",
       "--no-build-isolation",
   ]
 
-  local_vllm_install_command = [
-      sys.executable,  # Use the current Python executable's pip to ensure the correct environment
+  raiden_keyring_command = [
+      sys.executable,
       "-m",
+      "pip",
+      "install",
+      "keyrings.google-artifactregistry-auth",
+      "--extra-index-url",
+      "https://pypi.org/simple",
+  ]
+
+  raiden_deps_command = [
+      sys.executable,
+      "-m",
+      "pip",
+      "install",
+      "tpu-raiden-jax",
+      "--extra-index-url",
+      "https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/",
+      "--extra-index-url",
+      "https://pypi.org/simple",
+      "--no-deps",
+  ]
+
+  local_vllm_install_command = [
       "uv",
       "pip",
       "install",
+      "--python",
+      sys.executable,
       f"{repo_root}/maxtext/integration/vllm",  # MaxText on vllm installations
       "--no-deps",
   ]
@@ -73,6 +157,17 @@ def main():
     print(f"Installing Github dependencies: {' '.join(github_deps_command)}")
     _ = subprocess.run(github_deps_command, check=True, capture_output=True, text=True, env=os.environ)
     print("Github dependencies installed successfully!")
+
+    # Attempt optional Raiden dependencies installation (non-blocking for outside users)
+    try:
+      print(f"Installing optional Raiden keyring dependency: {' '.join(raiden_keyring_command)}")
+      _ = subprocess.run(raiden_keyring_command, check=True, capture_output=True, text=True, env=os.environ)
+      print("Raiden keyring dependency installed successfully!")
+      print(f"Installing optional Raiden dependencies: {' '.join(raiden_deps_command)}")
+      _ = subprocess.run(raiden_deps_command, check=True, capture_output=True, text=True, env=os.environ)
+      print("Raiden dependencies installed successfully!")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"Warning: Optional Raiden dependencies installation skipped/failed: {e}")
 
     # Run the command to install the MaxText vLLM directory
     print(f"Installing MaxText vLLM dependency: {' '.join(local_vllm_install_command)}")
