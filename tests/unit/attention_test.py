@@ -372,8 +372,16 @@ class LoadBalancedMaskTest(unittest.TestCase):
     np.testing.assert_array_equal((causal_mask & chunk_mask)[:, :], expected_mask)
 
   def test_dot_product_local_mask_uses_segment_positions(self):
-    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
-    mesh = types.SimpleNamespace(shape={"context": 4})
+    config = types.SimpleNamespace(
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        using_pipeline_parallelism=False,
+        logical_axis_rules=[["activation_embed_and_logits_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
+    )
+    mesh = Mesh(np.arange(4), ["context"])
     seq_len = 16
     sliding_window_size = 4
     positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
@@ -408,8 +416,16 @@ class LoadBalancedMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected_mask)
 
   def test_dot_product_chunk_mask_uses_segment_positions(self):
-    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
-    mesh = types.SimpleNamespace(shape={"context": 4})
+    config = types.SimpleNamespace(
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        using_pipeline_parallelism=False,
+        logical_axis_rules=[["activation_embed_and_logits_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
+    )
+    mesh = Mesh(np.arange(4), ["context"])
     seq_len = 16
     chunk_size = 4
     positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
