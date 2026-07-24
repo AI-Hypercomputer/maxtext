@@ -1172,11 +1172,14 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   q_lora_rank = config["q_lora_rank"]
   kv_lora_rank = config["kv_lora_rank"]
   num_attention_heads = config["num_attention_heads"]
-  qk_head_dim = config.get("qk_head_dim", config.get("qk_nope_head_dim", 0) + config.get("qk_rope_head_dim", 0))
+  num_key_value_heads = config.get("num_key_value_heads", 1)
+  qk_nope_head_dim = config.get("qk_nope_head_dim", 128)
+  qk_rope_head_dim = config.get("qk_rope_head_dim", 64)
+  qk_head_dim = config.get("head_dim", config.get("qk_head_dim", qk_nope_head_dim + qk_rope_head_dim))
   v_head_dim = config["v_head_dim"]
   
   q_dim = num_attention_heads * qk_head_dim
-  o_proj_in_dim = config.get("o_groups", num_attention_heads * v_head_dim)
+  o_proj_in_dim = config.get("o_groups", 8) * hidden_size
   
   moe_intermediate_size = config["moe_intermediate_size"]
   n_routed_experts = config["n_routed_experts"]
@@ -1191,14 +1194,13 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
       "embed.weight": [vocab_size, hidden_size],
       "norm.weight": [hidden_size],
       "head.weight": [vocab_size, hidden_size],
-      "hc_head_fn": [4, 16384],  # Was [24, hidden_size], checking actual config shapes is hard, leaving some default
+      "hc_head_fn": [4, hidden_size * mhc_expansion_rate],
       "hc_head_base": [4],
       "hc_head_scale": [1],
   }
-
+  
   for layer_idx in range(num_hidden_layers):
     layer_prefix = f"layers.{layer_idx}"
-    
     layer_mapping = {
         f"{layer_prefix}.attn_norm.weight": [hidden_size],
         f"{layer_prefix}.ffn_norm.weight": [hidden_size],
@@ -1206,30 +1208,31 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
         f"{layer_prefix}.attn.wq_a.weight": [q_lora_rank, hidden_size],
         f"{layer_prefix}.attn.q_norm.weight": [q_lora_rank],
         f"{layer_prefix}.attn.wq_b.weight": [q_dim, q_lora_rank],
-        
         f"{layer_prefix}.attn.wkv.weight": [kv_lora_rank, hidden_size],
         f"{layer_prefix}.attn.kv_norm.weight": [kv_lora_rank],
-        
         f"{layer_prefix}.attn.wo_a.weight": [o_proj_in_dim, config.get("o_lora_rank", 1024)],
-        f"{layer_prefix}.attn.wo_b.weight": [hidden_size, config.get("o_lora_rank", 1024)],
+        f"{layer_prefix}.attn.wo_b.weight": [hidden_size, config.get("o_groups", 8) * config.get("o_lora_rank", 1024)],
         
         f"{layer_prefix}.attn.attn_sink": [64],
         
-        f"{layer_prefix}.hc_attn_fn": [3 * mhc_expansion_rate, hidden_size * mhc_expansion_rate],
-        f"{layer_prefix}.hc_attn_base": [3 * mhc_expansion_rate],
+        f"{layer_prefix}.hc_attn_fn": [6 * mhc_expansion_rate, hidden_size * mhc_expansion_rate],
+        f"{layer_prefix}.hc_attn_base": [6 * mhc_expansion_rate],
         f"{layer_prefix}.hc_attn_scale": [3],
         
-        f"{layer_prefix}.hc_ffn_fn": [3 * mhc_expansion_rate, hidden_size * mhc_expansion_rate],
-        f"{layer_prefix}.hc_ffn_base": [3 * mhc_expansion_rate],
+        f"{layer_prefix}.hc_ffn_fn": [6 * mhc_expansion_rate, hidden_size * mhc_expansion_rate],
+        f"{layer_prefix}.hc_ffn_base": [6 * mhc_expansion_rate],
         f"{layer_prefix}.hc_ffn_scale": [3],
     }
 
     cr = compress_ratios[layer_idx] if layer_idx < len(compress_ratios) else 0
     if cr > 0:
+      # In MaxText: proj_dim = 2 * head_dim for CSA, 1 * head_dim for HCA
+      # HF equivalently uses kv_lora_rank (which is 512) for this dimension
+      proj_dim = (2 * kv_lora_rank) if cr == 4 else kv_lora_rank
       layer_mapping.update({
-          f"{layer_prefix}.attn.compressor.wgate.weight": [hidden_size, hidden_size],
-          f"{layer_prefix}.attn.compressor.wkv.weight": [hidden_size // cr, hidden_size],
-          f"{layer_prefix}.attn.compressor.ape": [cr, hidden_size // cr],
+          f"{layer_prefix}.attn.compressor.wgate.weight": [proj_dim, hidden_size],
+          f"{layer_prefix}.attn.compressor.wkv.weight": [proj_dim, hidden_size],
+          f"{layer_prefix}.attn.compressor.ape": [cr, proj_dim],
           f"{layer_prefix}.attn.compressor.norm.weight": [kv_lora_rank],
       })
       if cr > 0:
@@ -1237,7 +1240,7 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
           layer_mapping.update({
               f"{layer_prefix}.attn.indexer.compressor.wgate.weight": [256, hidden_size],
               f"{layer_prefix}.attn.indexer.compressor.wkv.weight": [256, hidden_size],
-              f"{layer_prefix}.attn.indexer.wq_b.weight": [wq_b_dim_out, hidden_size],
+              f"{layer_prefix}.attn.indexer.wq_b.weight": [wq_b_dim_out, q_lora_rank],
               f"{layer_prefix}.attn.indexer.weights_proj.weight": [index_n_heads, hidden_size],
               f"{layer_prefix}.attn.indexer.compressor.ape": [cr, 256],
               f"{layer_prefix}.attn.indexer.compressor.norm.weight": [index_head_dim],
@@ -1247,7 +1250,7 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
       layer_mapping[f"{layer_prefix}.ffn.gate.bias"] = [n_routed_experts]
     if layer_idx < 3:
       layer_mapping.update({
-          f"{layer_prefix}.ffn.gate.tid2eid": [vocab_size],
+          f"{layer_prefix}.ffn.gate.tid2eid": [vocab_size, config.get("first_num_hash_layers", 3)],
       })
     layer_mapping.update({
         f"{layer_prefix}.ffn.gate.weight": [n_routed_experts, hidden_size],

@@ -105,12 +105,18 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
     else:
       flattened_map_keys.add(key)
 
+  def _clean(k):
+    return k.replace("params-", "") if isinstance(k, str) else k
+
+  clean_state_keys = {_clean(k) for k in maxtext_state_keys}
+  clean_map_keys = {_clean(k) for k in flattened_map_keys}
+
   # 1 Validate: every maxtext state key must be covered by param map
-  missing_keys = {k for k in (maxtext_state_keys - flattened_map_keys) if "tid2eid" not in k}
+  missing_keys = {k for k in (clean_state_keys - clean_map_keys) if "tid2eid" not in k}
   if missing_keys:
     hint = ""
     ckpt_has_scanned = any("scanned_blocks" in k for k in missing_keys)
-    map_has_scanned = any("scanned_blocks" in k for k in flattened_map_keys)
+    map_has_scanned = any("scanned_blocks" in k for k in clean_map_keys)
     if ckpt_has_scanned and not map_has_scanned:
       hint = "\nHint: checkpoint keys contain 'scanned_blocks' but param_map does not — try scan_layers=True."
     elif map_has_scanned and not ckpt_has_scanned:
@@ -124,15 +130,15 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
     )
 
   # 2 Filter: param map may have extra keys
-  extra_keys = flattened_map_keys - maxtext_state_keys
+  extra_keys = clean_map_keys - clean_state_keys
   if extra_keys:
     max_logging.log(f"Warning: extra keys in param_map are skipped: {extra_keys}")
 
   # skip extra keys in param map
   filtered_map_keys = []
   for key in param_map_keys:
-    if (isinstance(key, str) and key in maxtext_state_keys) or (
-        isinstance(key, tuple) and all(k in maxtext_state_keys for k in key)
+    if (isinstance(key, str) and _clean(key) in clean_state_keys) or (
+        isinstance(key, tuple) and all(_clean(k) in clean_state_keys for k in key)
     ):
       filtered_map_keys.append(key)
   return filtered_map_keys
@@ -192,7 +198,7 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
 
     # Apply hooks (your hook function returns a tuple of sliced JAX arrays)
     if current_hook_fns:
-      processed_slice = apply_hook_fns(processed_slice, target_hf_shapes, current_hook_fns)
+      processed_slice = np.ascontiguousarray(apply_hook_fns(processed_slice, target_hf_shapes, current_hook_fns))
 
     # Iterate, unpack, and convert each component independently
     for path, single_slice, shape in zip(hf_path, processed_slice, target_hf_shapes):
@@ -206,7 +212,7 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
     target_hf_shape = hf_shape_map[hf_path]
 
     if current_hook_fns:
-      processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
+      processed_slice = np.ascontiguousarray(apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns))
     numpy_slice = convert_jax_weight_to_numpy(processed_slice, save_dtype).reshape(target_hf_shape)
     output_weights.append((hf_path, numpy_slice))
 
@@ -252,7 +258,10 @@ def process_maxtext_param(
   max_logging.log(f"maxtext param: {maxtext_param_key}")
 
   if maxtext_param_key not in param_map:
-    raise ValueError(f"MaxText param key '{maxtext_param_key}' not found in param_map.")
+    if f"params-{maxtext_param_key}" in param_map:
+      maxtext_param_key = f"params-{maxtext_param_key}"
+    else:
+      raise ValueError(f"MaxText param key '{maxtext_param_key}' not found in param_map.")
   hf_target_paths = param_map[maxtext_param_key]
   if hf_target_paths is None:
     return []
@@ -260,7 +269,12 @@ def process_maxtext_param(
     raise ValueError(f"No HF target paths found for MaxText key '{maxtext_param_key}'")
 
   # If maxtext_param_key is not in hook_fn_map, current_hook_fns is None, indicating identity (no transformation)
-  current_hook_fns = hook_fn_map.get(maxtext_param_key)
+  clean_key = maxtext_param_key.replace("params-", "") if isinstance(maxtext_param_key, str) else maxtext_param_key
+  current_hook_fns = (
+      hook_fn_map.get(maxtext_param_key)
+      or hook_fn_map.get(clean_key)
+      or hook_fn_map.get(f"params-{clean_key}")
+  )
 
   # This list will store tuples of (hf_path, hf_weight)
   output_weights = []
@@ -1038,13 +1052,28 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
       max_logging.log("Detected NNX-SFT checkpoint structure")
       return extract_nnx_weights(checkpoint_dict)
   else:
-    # Linen checkpoint: check if there's a nested 'params' key
-    if isinstance(actual_weights_dict, dict) and "params" in actual_weights_dict:
-      actual_weights_dict = actual_weights_dict["params"]
-      max_logging.log("Detected Linen checkpoint structure")
-    else:
-      max_logging.log("Detected Linen checkpoint structure (single params layer)")
-    return extract_linen_weights(actual_weights_dict)
+    result = {}
+    for coll_name, coll_dict in checkpoint_dict.items():
+      if coll_name == "params":
+        if isinstance(coll_dict, dict) and "params" in coll_dict:
+          for inner_coll_name, inner_dict in coll_dict.items():
+            if inner_coll_name == "params":
+              result.update(extract_linen_weights(inner_dict))
+            elif isinstance(inner_dict, dict):
+              leaves_with_paths = jax.tree_util.tree_leaves_with_path(inner_dict)
+              for path_tuple, leaf_value in leaves_with_paths:
+                path_keys = param_key_parts_from_path(path_tuple)
+                key_name = f"{inner_coll_name}-" + "-".join(path_keys)
+                result[key_name] = leaf_value
+        else:
+          result.update(extract_linen_weights(coll_dict))
+      elif isinstance(coll_dict, dict):
+        leaves_with_paths = jax.tree_util.tree_leaves_with_path(coll_dict)
+        for path_tuple, leaf_value in leaves_with_paths:
+          path_keys = param_key_parts_from_path(path_tuple)
+          key_name = f"{coll_name}-" + "-".join(path_keys)
+          result[key_name] = leaf_value
+    return result
 
 
 def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | None = None, dtype: str = "auto"):

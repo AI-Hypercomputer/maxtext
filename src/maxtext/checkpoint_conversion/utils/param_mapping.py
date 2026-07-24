@@ -4103,14 +4103,14 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
 
   def reshape_transpose_o_a(input_tensor, target_shape=None):
     arr = np.asarray(input_tensor)
-    if arr.ndim == 4:
-      arr = arr[:, 0, 0, :]
-    elif arr.ndim == 3:
-      arr = arr[:, 0, :]
     if target_shape is not None and arr.shape != tuple(target_shape):
       if arr.size == np.prod(target_shape):
         return arr.reshape(target_shape)
-      elif arr.T.size == np.prod(target_shape):
+      elif arr.size > np.prod(target_shape) and arr.ndim == 3:
+        # If sizes mismatch it might be legacy behavior for 1-group, but for V4 we expect (8, 4096, 1024) -> (32768, 1024)
+        if arr[:, 0, :].size == np.prod(target_shape):
+          return arr[:, 0, :].reshape(target_shape)
+      if arr.T.size == np.prod(target_shape):
         return arr.T.reshape(target_shape)
       else:
         return slice_embedding(arr.T if arr.ndim == 2 else arr, target_shape)
@@ -4306,18 +4306,26 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
       mapping[key] = slice_mhc_kernel
 
   def mhc_concat_fn(input_tensors, target_shape=None):
-    flat_tensors = [np.asarray(t).reshape(-1) for t in input_tensors]
-    concatenated = np.concatenate(flat_tensors, axis=0)
-    if target_shape is not None:
+    if target_shape is not None and len(target_shape) == 2:
+      # MaxText stores pre_alpha, post_alpha, res_alpha as shape (hidden_dim, k). 
+      # For HF, they must match (6*k, hidden_dim). Thus, transpose each to (k, hidden_dim) and concatenate along axis 0.
+      tensors_T = [np.transpose(np.asarray(t)) for t in input_tensors]
+      concatenated = np.concatenate(tensors_T, axis=0)
+    else:
+      # Biases (beta) are a mix of 1D and 2D arrays, and need to be flattened natively.
+      flat_tensors = [np.asarray(t).reshape(-1) for t in input_tensors]
+      concatenated = np.concatenate(flat_tensors, axis=0)
+
+    if target_shape is not None and concatenated.shape != tuple(target_shape):
       target_size = np.prod(target_shape)
       if concatenated.size == target_size:
         return concatenated.reshape(target_shape)
       elif concatenated.size < target_size:
         padded = np.zeros(target_shape, dtype=concatenated.dtype)
-        padded.reshape(-1)[: concatenated.size] = concatenated
+        padded.reshape(-1)[: concatenated.size] = concatenated.reshape(-1)
         return padded
       else:
-        return concatenated[:target_size].reshape(target_shape)
+        return concatenated.reshape(-1)[:target_size].reshape(target_shape)
     return concatenated
 
   if saving_to_hf:
