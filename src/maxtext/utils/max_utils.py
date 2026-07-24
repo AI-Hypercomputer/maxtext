@@ -111,7 +111,20 @@ def find_nans_and_infs(pytree):
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
-  return jnp.sqrt(jax.tree_util.tree_reduce(lambda x, y: x + jnp.sum(jnp.square(y)), x, initializer=0.0))
+
+  def _leaf_sq_sum(y):
+    # Safely skip non-numeric or quantized leaves (e.g., QArray, packed void dtypes, or metadata)
+    try:
+      dtype = getattr(y, "dtype", None)
+      if dtype is not None and (jnp.issubdtype(dtype, jnp.inexact) or jnp.issubdtype(dtype, jnp.number)):
+        return jnp.sum(jnp.square(y.astype(jnp.float32)))
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+    return 0.0
+
+  sq_sums = jax.tree_util.tree_map(_leaf_sq_sum, x)
+  return jnp.sqrt(jax.tree_util.tree_reduce(lambda a, b: a + b, sq_sums, initializer=0.0))
 
 
 def calculate_num_params_from_pytree(params):

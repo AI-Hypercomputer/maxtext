@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Functions for gradient accumulation (GA)"""
 
 import jax
@@ -34,59 +33,75 @@ def gradient_accumulation_loss_and_grad(
     dropout_rng,
 ):
   """
-  Calculates gradients using gradient accumulation.
+    Calculates gradients using gradient accumulation.
 
-  This function computes the gradient of `_loss_fn` over multiple microbatches
-  and accumulates them before returning a single, averaged gradient. It uses
-  `jax.lax.scan` for efficient accumulation on device.
+    This function computes the gradient of `_loss_fn` over multiple microbatches
+    and accumulates them before returning a single, averaged gradient. It uses
+    `jax.lax.scan` for efficient accumulation on device.
 
-  It also supports a `shard_optimizer_over_data` mode (e.g., ZeRO-1) where
-  parameters are cast to bf16 and sharded *before* the accumulation loop
-  to perform the all-gather in lower precision.
+    It also supports a `shard_optimizer_over_data` mode (e.g., ZeRO-1) where
+    parameters are cast to bf16 and sharded *before* the accumulation loop
+    to perform the all-gather in lower precision.
 
-  Args:
-      _loss_fn: The loss function to differentiate. Its signature is expected
-          to be: `(model, config, data, dropout_rng, params, *extra_args, is_train=True)`.
-      config: Model and training configuration object. Must contain
-          `gradient_accumulation_steps` and `shard_optimizer_over_data`.
-      model: The model module.
-      params: The model parameters (PyTree). This is only used for Linen. For NNX,
-          we can get the params from the model.
-      params_shardings: The sharding constraints for the parameters (PyTree).
-      data: A PyTree of batched data. The leading dimension is assumed
-          to be the total batch size (microbatch_size * num_accumulations).
-      dropout_rng: JAX PRNGKey for dropout.
+    Args:
+        _loss_fn: The loss function to differentiate. Its signature is expected
+            to be: `(model, config, data, dropout_rng, params, *extra_args, is_train=True)`.
+        config: Model and training configuration object. Must contain
+            `gradient_accumulation_steps` and `shard_optimizer_over_data`.
+        model: The model module.
+        params: The model parameters (PyTree). This is only used for Linen. For NNX,
+            we can get the params from the model.
+        params_shardings: The sharding constraints for the parameters (PyTree).
+        data: A PyTree of batched data. The leading dimension is assumed
+            to be the total batch size (microbatch_size * num_accumulations).
+        dropout_rng: JAX PRNGKey for dropout.
 
-  Returns:
-      A tuple containing:
-      - total_loss (Array): The mean loss, averaged over all microbatches.
-      - final_aux (PyTree): Auxiliary outputs, summed across microbatches.
-      - raw_grads (PyTree): The accumulated and averaged gradients.
-  """
+    Returns:
+        A tuple containing:
+        - total_loss (Array): The mean loss, averaged over all microbatches.
+        - final_aux (PyTree): Auxiliary outputs, summed across microbatches.
+        - raw_grads (PyTree): The accumulated and averaged gradients.
+    """
 
   def _maybe_shard_with_name(inputs, sharding_names):
     """Wrapper of maybe_shard_with_name with fixed shard_mode"""
-    return maybe_shard_with_name(inputs, sharding_names, config.shard_mode, debug_sharding=config.debug_sharding)
+    val = inputs.get_value() if isinstance(inputs, nnx.Variable) else inputs
+    sharded_val = maybe_shard_with_name(val,
+                                        sharding_names,
+                                        config.shard_mode,
+                                        debug_sharding=config.debug_sharding)
+    return (inputs.replace(
+        value=sharded_val) if isinstance(inputs, nnx.Variable) else sharded_val)
 
   is_nnx = isinstance(model, nnx.Module)
+  _is_leaf = ((lambda x: isinstance(x, (nnx.Variable, NamedSharding)))
+              if is_nnx else None)
+
+  if is_nnx:
+    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+    params = params.to_pure_dict() if hasattr(params,
+                                              "to_pure_dict") else params
+    params_shardings = (params_shardings.to_pure_dict() if hasattr(
+        params_shardings, "to_pure_dict") else params_shardings)
+
+    def _filter_tree_to_match(target_tree, source_tree):
+      if isinstance(target_tree, dict) and isinstance(source_tree, dict):
+        return {
+            k: _filter_tree_to_match(target_tree[k], source_tree[k])
+            for k in target_tree
+            if k in source_tree
+        }
+      return source_tree
+
+    params_shardings = _filter_tree_to_match(params, params_shardings)
 
   # For ZeRO-1 + GA, read the resolved "data" axis size from the mesh rather than
   # config.ici_data_parallelism, which may be -1 (auto-fill) and resolves to 1 when
   # FSDP already consumes every device — in which case data parallelism is not active.
   param_mesh = jax.tree.leaves(params_shardings)[0].mesh
-  data_parallel_active = config.shard_mode == ShardMode.EXPLICIT and param_mesh.shape.get("data", 1) > 1
-  if data_parallel_active:
-    # reduced/unreduced PartitionSpecs are rejected inside a jax.lax.scan carry: scan
-    # traces its body against an AbstractMesh whose axis types are all Auto, and the
-    # annotations require Explicit axes. Keep plain params_shardings in the carry and
-    # apply the data-parallel all-reduce to the gradients after the scan instead.
-    ga_params_shardings = params_shardings
-    grad_shardings = params_shardings
-  else:
-    ga_params_shardings = grad_shardings = params_shardings
-
-  if is_nnx:
-    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+  data_parallel_active = (config.shard_mode == ShardMode.EXPLICIT and
+                          param_mesh.shape.get("data", 1) > 1)
+  ga_params_shardings = grad_shardings = params_shardings
 
   # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
   # so that all-gather is done once in the lower precision before the gradient accumulation loop
@@ -101,7 +116,10 @@ def gradient_accumulation_loss_and_grad(
   else:
     ga_params = params
 
-  ga_params = jax.tree.map(_maybe_shard_with_name, ga_params, ga_params_shardings)
+  ga_params = jax.tree.map(_maybe_shard_with_name,
+                           ga_params,
+                           ga_params_shardings,
+                           is_leaf=_is_leaf)
   if is_nnx:
     grad_func = nnx.value_and_grad(_loss_fn, argnums=0, has_aux=True)
   else:
@@ -116,37 +134,57 @@ def gradient_accumulation_loss_and_grad(
     if is_nnx:
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.
-      local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
+      local_model = nnx.merge(graphdef,
+                              ga_params,
+                              acc_grad_and_loss["rest_state"],
+                              copy=True)
       with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
-        (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, is_train=True)
+        (_, aux), cur_batch_gradient = grad_func(local_model,
+                                                 config,
+                                                 data,
+                                                 None,
+                                                 None,
+                                                 is_train=True)
+      cur_batch_gradient = (cur_batch_gradient.to_pure_dict() if hasattr(
+          cur_batch_gradient, "to_pure_dict") else cur_batch_gradient)
       _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
     else:
-      rng = (
-          jax.random.fold_in(dropout_rng, acc_grad_and_loss["total_weights"].astype(jnp.int32))
-          if dropout_rng is not None
-          else None
-      )
+      rng = (jax.random.fold_in(
+          dropout_rng, acc_grad_and_loss["total_weights"].astype(jnp.int32))
+             if dropout_rng is not None else None)
       with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
-        (_, aux), cur_batch_gradient = grad_func(model, config, data, rng, ga_params, is_train=True)
+        (_, aux), cur_batch_gradient = grad_func(model,
+                                                 config,
+                                                 data,
+                                                 rng,
+                                                 ga_params,
+                                                 is_train=True)
     acc_grad_and_loss["loss"] += aux["xent_sum"] + aux.get("dpo_loss", 0.0)
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["indexer_loss"] += aux["indexer_loss"]
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
-    acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
+    acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
+        lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
     return acc_grad_and_loss, aux
 
   def reshape_to_microbatch_accumulations(batch_arr):
     """Reshape global batch to microbatches, assuming batch axis is leading."""
     num_microbatches = config.gradient_accumulation_steps
-    microbatch_shape = (batch_arr.shape[0] // num_microbatches, num_microbatches) + batch_arr.shape[1:]
+    microbatch_shape = (
+        batch_arr.shape[0] // num_microbatches,
+        num_microbatches,
+    ) + batch_arr.shape[1:]
     reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
     return jnp.swapaxes(reshaped_batch_arr, 0, 1)
 
   data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
   init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
-  init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, grad_shardings)
+  init_grad = jax.tree.map(_maybe_shard_with_name,
+                           init_grad,
+                           grad_shardings,
+                           is_leaf=_is_leaf)
   init_grad_and_loss = {
       "loss": 0.0,  # accumulates xent_sum across microbatches
       "grad": init_grad,
@@ -160,27 +198,39 @@ def gradient_accumulation_loss_and_grad(
     init_grad_and_loss["rest_state"] = rest  # pyrefly: ignore[unbound-name]
 
   grad_and_loss, aux = jax.lax.scan(
-      accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+      accumulate_gradient,
+      init_grad_and_loss,
+      data,
+      length=config.gradient_accumulation_steps,
   )
-  loss = (
-      grad_and_loss["loss"] / grad_and_loss["total_weights"]
-      + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-      + grad_and_loss["indexer_loss"] / config.gradient_accumulation_steps
-      + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
-  )
+  loss = (grad_and_loss["loss"] / grad_and_loss["total_weights"] +
+          grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps +
+          grad_and_loss["indexer_loss"] / config.gradient_accumulation_steps +
+          grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps)
   raw_grads = grad_and_loss["grad"]
   if data_parallel_active:
     # Mark the gradients unreduced over the "data" axis now that we're outside the
     # scan; this triggers the cross-replica all-reduce. The annotation can't live in
     # the scan carry (see above), so it's applied here instead.
-    unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
-    raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
-  raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
-  raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
+    unreduced_shardings = jax.tree.map(update_sharding_for_unreduced,
+                                       params_shardings)
+    raw_grads = jax.tree.map(_maybe_shard_with_name,
+                             raw_grads,
+                             unreduced_shardings,
+                             is_leaf=_is_leaf)
+  raw_grads = jax.tree.map(_maybe_shard_with_name,
+                           raw_grads,
+                           params_shardings,
+                           is_leaf=_is_leaf)
+  raw_grads = jax.tree_util.tree_map(
+      lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
 
   if is_nnx:
     nnx.update(model, grad_and_loss["rest_state"])
+    raw_grads_state = nnx.state(model, nnx.Param)
+    raw_grads_state.replace_by_pure_dict(raw_grads)
+    raw_grads = raw_grads_state
 
   return loss, aux, raw_grads
 
@@ -188,13 +238,13 @@ def gradient_accumulation_loss_and_grad(
 # GA helper functions
 def update_sharding_for_reduced(sharding: NamedSharding) -> NamedSharding:
   """
-  Add reduced on data axis of given NamedSharding
-  """
+    Add reduced on data axis of given NamedSharding
+    """
   return sharding.update(spec=sharding.spec.update(reduced={"data"}))
 
 
 def update_sharding_for_unreduced(sharding: NamedSharding) -> NamedSharding:
   """
-  Add unreduced on data axis of given NamedSharding
-  """
+    Add unreduced on data axis of given NamedSharding
+    """
   return sharding.update(spec=sharding.spec.update(unreduced={"data"}))

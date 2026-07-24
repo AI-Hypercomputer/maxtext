@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# pylint: disable=import-outside-toplevel, protected-access
 """Tests for Qwix LoRA utils in lora_utils.py"""
+
 import re
 import sys
 import tempfile
@@ -22,6 +24,7 @@ from unittest import mock
 from etils import epath
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import pytest
 from flax import nnx
@@ -301,7 +304,7 @@ class LoraUtilsTest(unittest.TestCase):
     restored_state = nnx.state(model, nnx.LoRAParam)
 
     with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=restored_state) as mock_restore:
-      with mock.patch("flax.nnx.update") as mock_update:
+      with mock.patch("maxtext.utils.lora_utils.checkpointing._update_nnx_state_from_pure_dict") as mock_update:
         lora_utils.restore_lora_from_path(model, cfg)
         mock_restore.assert_called_once()
         args, kwargs = mock_restore.call_args
@@ -497,6 +500,102 @@ class LoraUtilsTest(unittest.TestCase):
 
     for path in non_matching_paths:
       self.assertFalse(compiled.search(path), f"Incorrectly matched invalid path: {path}")
+
+  def test_l2norm_pytree_void_quantized_arrays(self):
+    """Test that max_utils.l2norm_pytree safely skips non-numeric, void, or custom wrapper leaves."""
+    from maxtext.utils import max_utils
+
+    void_arr = np.frombuffer(b"\x00\x01\x02\x03", dtype="V4")
+
+    class MockWithAux:
+      dtype = np.dtype("V4")
+
+    tree = {
+        "float_param": jnp.array([3.0, 4.0], dtype=jnp.float32),
+        "int_param": jnp.array([1, 2], dtype=jnp.int8),
+        "quantized_void_param": void_arr,
+        "custom_with_aux_param": MockWithAux(),
+    }
+    norm = max_utils.l2norm_pytree(tree)
+    self.assertAlmostEqual(float(norm), 5.4772255, places=4)
+
+  def test_other_lora_format_to_jax_format_mlp(self):
+    """Test that gate_proj, up_proj, and down_proj map to MaxText MLP modules."""
+    raw_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    mapping = {
+        "q_proj": "query",
+        "k_proj": "key",
+        "v_proj": "value",
+        "o_proj": "out",
+        "gate_proj": "wi_0",
+        "up_proj": "wi_1",
+        "down_proj": "wo",
+    }
+    mapped = [mapping.get(m, m) for m in raw_target_modules]
+    self.assertIn("wi_0", mapped)
+    self.assertIn("wi_1", mapped)
+    self.assertIn("wo", mapped)
+
+  def test_reshard_obj_to_mesh(self):
+    """Test reshard_obj_to_mesh with NNX state and variables."""
+
+    class DummyNNXModule(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.ones((4, 4)))
+
+    mod = DummyNNXModule()
+    config = _make_config()
+    res = lora_utils.reshard_obj_to_mesh(mod, None, config)
+    self.assertIs(res, mod)
+
+  def test_restore_qlora_base_weights(self):
+    qstate = nnx.State(
+        {
+            "layer": {
+                "qvalue": jnp.array([1, 2], dtype=jnp.int8),
+                "scale": jnp.array([0.1, 0.2]),
+            }
+        }
+    )
+    restored = lora_utils.restore_qlora_base_weights(qstate)
+    self.assertTrue(isinstance(restored["layer"], jax.ShapeDtypeStruct))
+
+  def test_restore_qlora_base_weights_edge_cases(self):
+    """Test restore_qlora_base_weights with missing keys, partial dicts, or non-dict structures."""
+    # 1. Non-dict leaf (e.g. raw float array) should return as-is
+    raw_array = jnp.array([1.0, 2.0])
+    np.testing.assert_array_equal(lora_utils.restore_qlora_base_weights(raw_array), raw_array)
+
+    # 2. Dict missing scale (only qvalue) should not convert to QArray
+    partial_qval = {"qvalue": jnp.array([1, 2], dtype=jnp.int8)}
+    res_qval = lora_utils.restore_qlora_base_weights(partial_qval)
+    self.assertNotIn("scale", res_qval)
+
+    # 3. Dict missing qvalue (only scale) should not convert
+    partial_scale = {"scale": jnp.array([0.1, 0.2])}
+    res_scale = lora_utils.restore_qlora_base_weights(partial_scale)
+    self.assertNotIn("qvalue", res_scale)
+
+    # 4. None input
+    self.assertIsNone(lora_utils.restore_qlora_base_weights(None))
+
+  def test_l2norm_pytree_non_numeric_and_bool_leaves(self):
+    """Test l2norm_pytree with boolean masks, string metadata, None, and empty PyTrees."""
+    from maxtext.utils import max_utils
+
+    tree = {
+        "float_val": jnp.array([3.0, 4.0], dtype=jnp.float32),
+        "bool_mask": jnp.array([True, False, True]),
+        "str_meta": "metadata_string",
+        "none_leaf": None,
+        "nested": {
+            "empty_list": [],
+            "another_float": jnp.array([0.0], dtype=jnp.float32),
+        },
+    }
+    norm = max_utils.l2norm_pytree(tree)
+    self.assertAlmostEqual(float(norm), 5.0, places=4)
 
 
 if __name__ == "__main__":

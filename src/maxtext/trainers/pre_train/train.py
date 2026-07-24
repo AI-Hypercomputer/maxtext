@@ -397,7 +397,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     else:
       owg_type = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
       custom_param_filter = nnx.Any(owg_type)
-      model_graphdef, curr_params, custom_params, rest = nnx.split(state.model, nnx.Param, custom_param_filter, ...)
+      train_param_type = (
+          getattr(nnx, "LoRAParam", nnx.Param)
+          if getattr(getattr(config, "lora", None), "enable_lora", False)
+          else nnx.Param
+      )
+      nnx.pop(state.model, nnx.Intermediate)
+      model_graphdef, curr_params, custom_params, rest = nnx.split(
+          state.model, train_param_type, custom_param_filter, ...
+      )
       if config.parameter_memory_host_offload:
         # Params are kept on host (pinned_host) in in_shardings. Move only Param
         # variables to device before the forward/backward pass so that all dot_general
@@ -412,22 +420,33 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         curr_params = jax.device_put(curr_params, device_param_shardings)
         nnx.update(state.model, curr_params)  # ensure state.model has device params for optimizer update
       if config.shard_optimizer_over_data:
-        curr_params = jax.tree.map(
-            functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+        param_sharding_lookup = {}
+        for p, s in jax.tree_util.tree_leaves_with_path(
+            params_shardings, is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding, jax.sharding.Sharding))
+        ):
+          param_sharding_lookup[p] = s.get_value() if isinstance(s, nnx.Variable) else s
+
+        def _maybe_shard_param(path, var):
+          if path in param_sharding_lookup:
+            return sharding.maybe_shard_with_name(var, param_sharding_lookup[path], shard_mode=config.shard_mode)
+          return var
+
+        curr_params = jax.tree_util.tree_map_with_path(
+            _maybe_shard_param,
             curr_params,
-            params_shardings,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
         nnx.update(state.model, curr_params)
 
       def diff_wrapper(curr_params, custom_params, rest, config, data):
         local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
         loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
-        _, _, _, new_rest = nnx.split(local_model, nnx.Param, custom_param_filter, ...)
-        return loss, (aux, new_rest)
+        non_param_rest = nnx.state(local_model, nnx.Not(nnx.Any(nnx.Param, nnx.Intermediate)))
+        return loss, (aux, non_param_rest)
 
       grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
-      (loss, (aux, new_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
-      nnx.update(state.model, nnx.State.merge(custom_grads, new_rest))
+      (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
+      nnx.update(state.model, nnx.State.merge(custom_grads, non_param_rest))
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,

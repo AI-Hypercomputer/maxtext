@@ -24,6 +24,7 @@ gemma3: "decoder/(scanned_blocks|layers_remainder|layers)/.*(self_attention/(que
 gemma4: "decoder/((scanned_blocks|layers_remainder)/)?layers.*/.*(self_attention/(query|key|value|out)|mlp/.*(wi_0|wi_1|wo|shared_experts/(wi_0|wi_1|wo)))"
 olmo3: "decoder/layers/.*(attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))"
 gpt3: "decoder/layers/(self_attention/(qkv_proj|out)|mlp/(wi|wo))"
+gpt-oss: "decoder/layers/.*((GptOssAttention|self_attention)/(query|key|value|out)|(GptOssMlp|mlp)/(wi_0|wi_1|wo))"
 
 # Fallback for unverified models
 default: "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))"

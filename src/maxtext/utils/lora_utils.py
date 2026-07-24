@@ -34,7 +34,6 @@ from maxtext.configs import pyconfig
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
-from maxtext.utils import maxtext_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 
 # NNX-only imports (train_state_nnx, model_creation_utils) are loaded lazily
@@ -213,7 +212,11 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
       init_state_fn = create_train_state_fn
     else:
+      from maxtext.utils import maxtext_utils  # pylint: disable=import-outside-toplevel
+
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
+    from maxtext.utils import maxtext_utils  # pylint: disable=import-outside-toplevel
+
     unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
 
     lora_config_path = lora_adapter_path + "adapter_config.json"
@@ -396,7 +399,10 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
           lora_params[name] = None
 
   def get_lora_annotations(lora_abstract_params):
-    return jax.tree_util.tree_map(lambda x: x.sharding.spec, lora_abstract_params)
+    return jax.tree_util.tree_map(
+        lambda x: x.sharding.spec if getattr(x, "sharding", None) is not None else None,
+        lora_abstract_params,
+    )
 
   add_lora_params(lora_abstract_params, "", base_abstract_params, lora_rank, lora_target_modules)
 
@@ -422,9 +428,26 @@ def _get_lora_module_path(mt_config: pyconfig.HyperParameters) -> str:
   config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "lora_module_path.yml")
   lora_configs = pyconfig._load_config(config_path)  # pylint: disable=protected-access
   model_name = mt_config.model_name.lower()
+  # Find matching model name or architecture prefix in lora_module_path.yml
+  matched_key = "default"
+  for key in lora_configs:
+    if key == "default":
+      continue
+    key_lower = key.lower()
+    if model_name == key_lower or model_name.startswith(key_lower):
+      matched_key = key
+      break
 
-  # Find the first matching architecture prefix or use 'default'
-  matched_key = next((k for k in lora_configs if k != "default" and model_name.startswith(k)), "default")
+  # Fallback to normalized match (ignoring hyphens and underscores) if direct prefix match fails
+  if matched_key == "default":
+    model_name_norm = model_name.replace("-", "").replace("_", "")
+    for key in lora_configs:
+      if key == "default":
+        continue
+      key_norm = key.lower().replace("-", "").replace("_", "")
+      if model_name_norm == key_norm or model_name_norm.startswith(key_norm):
+        matched_key = key
+        break
 
   if matched_key == "default":
     max_logging.log(f"Warning: Model '{model_name}' is unverified; falling back to default LoRA path.")
@@ -434,9 +457,9 @@ def _get_lora_module_path(mt_config: pyconfig.HyperParameters) -> str:
   raw_path = lora_configs.get(matched_key, "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))")
 
   # This regex makes the layer index optional, matching scanned, unscanned named (layers_0),
-  # and unscanned index (layers/0) layer paths.
-  layer_pattern = r"layers(?:_[0-9]+|/[0-9]+)?/"
-  final_path = str(raw_path).replace("layers/", layer_pattern)
+  # unscanned index (layers/0), and alternative block prefixes (blocks, decoder_layers).
+  layer_pattern = r"(?:_[0-9]+|/[0-9]+)?/"
+  final_path = re.sub(r"(layers|blocks|decoder_layers)/", r"\1" + layer_pattern, str(raw_path))
 
   max_logging.log(f"Using lora_module_path: {final_path}")
   return final_path
@@ -593,12 +616,12 @@ def apply_lora_to_model(
 
   lora_provider = _build_lora_provider(mt_config)
 
-  dp_size = 1
-  if mesh is not None and "data" in mesh.shape:
-    dp_size = mesh.shape["data"]
-
   model_rngs = getattr(model.decoder, "rngs", None)
-  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(dummy_bs=dp_size)
+  batch_partition_size = 1
+  if mesh is not None and hasattr(mesh, "shape"):
+    batch_partition_size = mesh.shape.get("data", 1) * mesh.shape.get("fsdp", 1)
+  dummy_bs = int(max(getattr(mt_config, "per_device_batch_size", 1) * batch_partition_size, batch_partition_size))
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(dummy_bs=dummy_bs)
 
   lora_model = qwix.apply_lora_to_model(
       model,
@@ -609,13 +632,16 @@ def apply_lora_to_model(
   )
 
   if mesh is not None:
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+
+    def _apply_sharding():
+      nonlocal lora_model
       graph_def, state = nnx.split(lora_model)
 
       # We handle explicit replication for LoRA to ensure safety and efficiency.
       state = jax.tree_util.tree_map(
           lambda x: x.replace(sharding=jax.sharding.PartitionSpec(), out_sharding=None, sharding_names=None)
-          if isinstance(x, nnx.LoRAParam)
+          if isinstance(x, (nnx.LoRAParam, nnx.Param, nnx.Variable))
+          and (isinstance(x, nnx.LoRAParam) or getattr(x, "sharding", None) is None)
           else x,
           state,
           is_leaf=lambda x: isinstance(x, nnx.Variable),
@@ -641,9 +667,48 @@ def apply_lora_to_model(
 
       lora_model = nnx.merge(graph_def, state)
 
-  _verify_lora_parameters(lora_model, mt_config)
+    try:
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+        _apply_sharding()
+    except ValueError:
+      with nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+        _apply_sharding()
 
+  _verify_lora_parameters(lora_model, mt_config)
+  nnx.pop(lora_model, nnx.Intermediate)
   return lora_model
+
+
+def reshard_obj_to_mesh(obj, mesh, mt_config):
+  """Reshards an NNX model or optimizer object to the given mesh using its partition specs.
+
+  Args:
+    obj: The NNX model or optimizer state object.
+    mesh: The JAX mesh object for parameter sharding.
+    mt_config: The HyperParameters configuration containing logical axis rules.
+
+  Returns:
+    The resharded NNX object.
+  """
+  if mesh is None:
+    return obj
+  graph_def, state = nnx.split(obj)
+  dst_shardings = nn.logical_to_mesh_sharding(nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules)
+
+  def _safe_reshard(var, sharding_spec):
+    if not isinstance(var, nnx.Variable):
+      return var
+    spec = sharding_spec.value if hasattr(sharding_spec, "value") else sharding_spec
+    if not isinstance(spec, jax.sharding.Sharding):
+      return var
+    val = var.value
+    if isinstance(val, jax.Array) and val.sharding != spec:
+      resharded_val = jax.make_array_from_callback(val.shape, spec, lambda idx: val[idx])
+      return var.replace(value=resharded_val)
+    return var
+
+  state = jax.tree_util.tree_map(_safe_reshard, state, dst_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  return nnx.merge(graph_def, state)
 
 
 def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameters) -> nnx.Module:
@@ -679,7 +744,7 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
   abstract_lora_params = nnx.state(model, nnx.LoRAParam)
 
   target_for_restore = jax.tree.map(
-      lambda v: {"value": v.value},
+      lambda v: {"value": v.get_value() if hasattr(v, "get_value") else v[...] if hasattr(v, "__getitem__") else v},
       abstract_lora_params,
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
@@ -701,38 +766,7 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
     max_logging.log(f"Guided restore failed: {e}. Falling back to basic restore.")
     restored_lora_params = ocp.PyTreeCheckpointer().restore(lora_restore_path)
 
-  # Post processing
-  def _map_to_state(path, variable):
-    if not isinstance(variable, nnx.Variable):
-      return
-
-    str_path = [str(k.key if hasattr(k, "key") else (k.name if hasattr(k, "name") else k)) for k in path]
-
-    curr = restored_lora_params
-    for p in str_path:
-      if isinstance(curr, dict) and p in curr:
-        curr = curr[p]
-      elif hasattr(curr, p):
-        curr = getattr(curr, p)
-      else:
-        return
-
-    if isinstance(curr, dict) and "value" in curr:
-      matched_val = curr["value"]
-    elif hasattr(curr, "value"):
-      matched_val = getattr(curr, "value")
-    else:
-      matched_val = curr
-
-    variable.value = matched_val
-
-  jax.tree_util.tree_map_with_path(
-      _map_to_state,
-      abstract_lora_params,
-      is_leaf=lambda n: isinstance(n, nnx.Variable),
-  )
-
-  nnx.update(model, abstract_lora_params)
+  checkpointing._update_nnx_state_from_pure_dict(model, restored_lora_params)  # pylint: disable=protected-access
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
   return model
 
@@ -913,10 +947,28 @@ def get_lora_abstract_state_nnx(base_abstract_params, lora_config):
       step=0,
       apply_fn=None,
       params=jax.tree_util.tree_map(
-          lambda x: x.sharding.spec if x.sharding is not None else None,
+          lambda x: x.sharding.spec if getattr(x, "sharding", None) is not None else None,
           lora_abstract_params,
       ),
       tx=None,  # type: ignore
       opt_state={},
   )
   return unboxed_abstract_lora_state, lora_state_mesh_annotations
+
+
+def restore_qlora_base_weights(val):
+  """Restores qwix custom quantized types from nnx.State representation into unquantized abstract specs."""
+  if isinstance(val, (nnx.State, dict)):
+    pure_dict = {k: restore_qlora_base_weights(v) for k, v in val.items()}
+    if "array" in pure_dict:
+      return pure_dict["array"]
+    if "qvalue" in pure_dict and "scale" in pure_dict:
+      qval = pure_dict["qvalue"]
+      scale = pure_dict["scale"]
+      dtype = getattr(scale, "dtype", jnp.float32)
+      sharding = getattr(qval, "sharding", getattr(scale, "sharding", None))
+      return jax.ShapeDtypeStruct(shape=qval.shape, dtype=dtype, sharding=sharding)
+    return pure_dict
+  if isinstance(val, nnx.Variable):
+    return restore_qlora_base_weights(val.get_value())
+  return val
