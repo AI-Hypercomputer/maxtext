@@ -17,17 +17,33 @@ _original_block_until_ready = jax.block_until_ready
 _thread_local = threading.local()
 
 
+def get_one_device_per_replica() -> list[Any]:
+  """Constructs list containing one JAX device per active replica (slice)."""
+  devs_by_slice = {}
+  all_devs = jax.devices()
+  for d in all_devs:
+    if d is None:
+      continue
+    s_idx = getattr(
+        d, "slice_index", getattr(d, "process_index", getattr(d, "task_id", 0))
+    )
+    if s_idx not in devs_by_slice:
+      devs_by_slice[s_idx] = d
+  return [devs_by_slice[k] for k in sorted(devs_by_slice.keys())]
+
+
 def _ensure_mesh_sharding(x: Any) -> Any:
-  """Shards single device arrays onto a mesh of one device per replica with replicated sharding."""
+  """Shards single device arrays onto a mesh constructed with one device per replica (slice)."""
   if isinstance(x, jax.Array) and not hasattr(x.sharding, "mesh"):
-    devs = list(x.sharding.device_set)
-    mesh = Mesh(np.array(devs), ("replica",))
-    return jax.device_put(x, NamedSharding(mesh, PartitionSpec()))
+    one_dev_per_replica = get_one_device_per_replica()
+    mesh = Mesh(np.array(one_dev_per_replica), ("replica",))
+    sharding = NamedSharding(mesh, PartitionSpec("replica"))
+    return jax.device_put(x, sharding)
   return x
 
 
 def shard_single_device_arrays(pytree: Any) -> Any:
-  """Converts single device arrays in a PyTree to replicated NamedSharding on a 1-device-per-replica mesh."""
+  """Converts single device arrays in a PyTree to NamedSharding on a one-device-per-replica mesh."""
   return jax.tree.map(_ensure_mesh_sharding, pytree)
 
 
@@ -59,7 +75,7 @@ class Snapshotter(BaseSnapshotter):
   """Extends Orbax Snapshotter using thread-safe identity_jit during load."""
 
   def save(self, state: Any, step: int | None = None) -> bool:
-    """Saves state after ensuring all arrays have mesh shardings."""
+    """Saves state after ensuring all single device arrays are sharded onto one-device-per-replica mesh."""
     state = shard_single_device_arrays(state)
     return super().save(state, step=step)
 
