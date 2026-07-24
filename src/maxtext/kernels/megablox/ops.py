@@ -581,11 +581,7 @@ def _compute_dlhs(
     lhs_vma_axes: tuple,
 ) -> jnp.ndarray:
   """Routes execution of DLHS based on backend choices."""
-  if not use_tokamax_backend:
-    return _dlhs_run_megablox(
-        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs, interpret, lhs_vma_axes
-    )
-  elif not use_gmm_v2_dlhs:
+  if use_tokamax_backend and not use_gmm_v2_dlhs:
     return _dlhs_run_tokamax_v1(
         dlhs_dout,
         rhs,
@@ -599,8 +595,12 @@ def _compute_dlhs(
         use_manual_quantization,
         public_interface=not use_gmm_v2_fwd,
     )
-  else:
+  elif use_tokamax_backend and use_gmm_v2_dlhs:
     return _dlhs_run_tokamax_v2(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs)
+  else:
+    return _dlhs_run_megablox(
+        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs, interpret, lhs_vma_axes
+    )
 
 
 def _dlhs_run_tokamax_v1(
@@ -766,14 +766,14 @@ def _compute_drhs(
     quantization_rule: qwix.QtRule | None,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
-  if not use_tokamax_backend:
+  if use_tokamax_backend and not use_gmm_v2_drhs:
+    drhs = _drhs_run_tokamax_v1(drhs_dout, lhs, group_sizes, rhs_dtype, use_manual_quantization)
+  elif use_tokamax_backend and use_gmm_v2_drhs:
+    drhs = _drhs_run_tokamax_v2(drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling)
+  else:
     drhs = _drhs_run_megablox(
         drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, interpret, rhs_vma_axes
     )
-  elif not use_gmm_v2_drhs:
-    drhs = _drhs_run_tokamax_v1(drhs_dout, lhs, group_sizes, rhs_dtype, use_manual_quantization)
-  else:
-    drhs = _drhs_run_tokamax_v2(drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling)
 
   if use_tokamax_backend and quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
     drhs = _drhs_scatter_weight(drhs, weight_gather_axes)
