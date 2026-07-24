@@ -38,7 +38,7 @@ concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
   group: >
     ${{
-      github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
+      github.event_name == 'pull_request' && format('{0}-pr-{1}-v2', github.workflow, github.event.pull_request.number) ||
       github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
       github.run_id
     }}
@@ -185,8 +185,8 @@ jobs:
       - id: set-params
         name: Formalize Test Suite Parameters
         run: |
-          TPU_UNIT_TOTAL_WORKERS=2
-          TPU_UNIT_WORKER_GROUPS='[1, 2]'
+          TPU_UNIT_TOTAL_WORKERS=3
+          TPU_UNIT_WORKER_GROUPS='[1, 2, 3]'
           echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
           echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
 

@@ -193,11 +193,40 @@ jobs:
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split
-            if [ "${INPUTS_DEVICE_TYPE}" = "tpu" ]; then
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP}"
-            else
+            if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
               $PYTHON_EXE -m pip install --quiet pytest-xdist
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto --splitting-algorithm least_duration"
+            else
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} --splitting-algorithm least_duration"
+            fi
+            # Remove any existing .test_durations to ensure we don't use stale data if download fails
+            rm -f .test_durations
+            # Download and convert durations
+            CURL_URL="https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/dev/bench/per_test_baseline.json"
+            echo "Downloading from ${CURL_URL}"
+            if curl -sSf "${CURL_URL}" -o per_test_baseline.json; then
+              echo "Downloaded per_test_baseline.json successfully."
+              if $PYTHON_EXE tools/dev/convert_durations.py per_test_baseline.json .test_durations; then
+                echo "Successfully converted durations to .test_durations"
+              else
+                echo "Failed to convert durations."
+              fi
+              rm -f per_test_baseline.json
+            else
+              echo "Warning: Failed to download historical durations from ${CURL_URL}."
+              UPSTREAM_URL="https://raw.githubusercontent.com/AI-Hypercomputer/maxtext/gh-pages/dev/bench/per_test_baseline.json"
+              echo "Trying upstream fallback: ${UPSTREAM_URL}"
+              if curl -sSf "${UPSTREAM_URL}" -o per_test_baseline.json; then
+                echo "Downloaded from upstream successfully."
+                if $PYTHON_EXE tools/dev/convert_durations.py per_test_baseline.json .test_durations; then
+                  echo "Successfully converted durations to .test_durations"
+                else
+                  echo "Failed to convert durations."
+                fi
+                rm -f per_test_baseline.json
+              else
+                echo "Warning: Failed to download from upstream as well. Falling back to default split."
+              fi
             fi
           else
             SPLIT_ARGS=""
