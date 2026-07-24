@@ -299,6 +299,8 @@ def train(mt_config, goodput_recorder=None):
     trainer = train_model(mt_config, trainer, mesh)
     _job_completed_gracefully = True
   finally:
+    if hasattr(trainer, 'checkpoint_manager') and hasattr(trainer.checkpoint_manager, 'wait_until_finished'):
+      trainer.checkpoint_manager.wait_until_finished()
     if _job_completed_gracefully:
       record_goodput(goodput_recorder, RECORD_JOB_END_TIME)
   return trainer, mesh
