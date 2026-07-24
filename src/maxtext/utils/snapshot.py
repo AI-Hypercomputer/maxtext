@@ -93,7 +93,7 @@ class Snapshotter(BaseSnapshotter):
         raise RuntimeError("No snapshots available to restore from.")
       pinned_state, step = self._latest_snapshot
 
-    def is_replica_active(arr):
+    def is_replica_active(arr, idx):
       try:
         import jax.random
         data = jax.random.key_data(arr) if (hasattr(arr, "dtype") and hasattr(arr, "shape") and jax.dtypes.issubdtype(arr.dtype, jax.dtypes.prng_key)) else arr
@@ -101,7 +101,7 @@ class Snapshotter(BaseSnapshotter):
         return True
       except Exception as e:
         import sys
-        print(f"[REPLICA DEAD] Exception: {e}", file=sys.stderr)
+        print(f"[REPLICA DEAD] Replica {idx} failed with Exception: {e}", file=sys.stderr, flush=True)
         return False
 
     def get_active_pytree(x):
@@ -115,8 +115,14 @@ class Snapshotter(BaseSnapshotter):
           print(f"FAILED SPLIT! x.shape={x.shape}, x.dtype={x.dtype}, type(x.sharding)={type(x.sharding)}, x.sharding={x.sharding}", flush=True)
           raise e
         
-      active_replicas = [replica for replica in all_replicas if is_replica_active(replica)]
+      import sys
+      print(f"[DEBUG] get_active_pytree for axis={mesh_axis_name}: len(all_replicas)={len(all_replicas)}", file=sys.stderr, flush=True)
+      active_replicas = []
+      for i, replica in enumerate(all_replicas):
+        if is_replica_active(replica, i):
+          active_replicas.append(replica)
       if not active_replicas:
+        print(f"[DEBUG] No active replicas for x! shape={x.shape}", file=sys.stderr, flush=True)
         raise RuntimeError("No active replicas found.")
       reconstructed = concatenate_by_mesh_axis.concatenate_by_mesh_axis(active_replicas, mesh_axis_name)
       if hasattr(x, "dtype") and hasattr(x, "shape") and jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key):
