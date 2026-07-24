@@ -560,8 +560,8 @@ class DistillationMetricsTest(unittest.TestCase):
       t = t_features.at[:, :, -1, :].set(pad_filler)
       # Build an L2 strategy directly (constructor override).
       strategy = distillation_utils.CombinedDistillationStrategy(
-          student_forward_fn=lambda *_a, **_k: None,
-          teacher_forward_fn=lambda *_a, **_k: None,
+          student_forward_fn=lambda *_a, **_k: distillation_utils.DistillationForwardOutput(logits=s_logits),
+          teacher_forward_fn=lambda *_a, **_k: distillation_utils.DistillationForwardOutput(logits=s_logits),
           pad_id=0,
           temperature=1.0,
           alpha=0.0,

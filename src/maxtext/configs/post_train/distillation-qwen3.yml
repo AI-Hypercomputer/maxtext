@@ -1,0 +1,68 @@
+# Soft Distillation Configuration
+
+# Inherit MaxText defaults
+base_config: "base.yml"
+override_model_config: True
+enable_nnx: True
+enable_checkpointing: True
+
+# --- Student Specifics ---
+# These are passed as kwargs to the Student config initialization
+student_overrides:
+  model_name: "qwen3-30b-a3b-base"
+  decoder_block: "qwen3_moe"
+  learn_to_init_mode: False
+  student_params_to_update: ["decoder/layers/self_attention/", "scale"]
+  load_parameters_path: "gs://agagik-us/distillation/lti_qwen30b_v3_merged/checkpoints/5000/model_params"
+
+
+# --- Teacher Specifics ---
+# These are passed as kwargs to the Teacher config initialization
+teacher_overrides:
+  model_name: "qwen3-30b-a3b-base"
+  load_parameters_path: "gs://yujiedeng-maxtext-dev/distillation/maxtext-converted-qwen3-30b-base/0/items"
+
+
+# --- Distillation Loss ---
+distill_alpha: 0.5
+distill_beta: 0.0 #0.5
+distill_temperature: 1.0
+
+# attention is changed, so will be initialized randomly
+
+# --- Dataset & Tokenizer ---
+dataset_type: "grain"
+grain_file_type: "arrayrecord"
+grain_train_files: "gs://maxtext-dataset/array-record/climbmix/*.arrayrecord"
+grain_worker_count: 16
+grain_ram_budget_mb: 1024
+grain_per_worker_buffer_size: 2
+grain_prefetch_buffer_size: 1024
+
+tokenizer_path: "src/maxtext/assets/tokenizers/qwen3-tokenizer"
+tokenizer_type: "huggingface"
+
+max_target_length: 1024
+
+# --- Training Loop ---
+steps: 1000
+checkpoint_period: 10000
+log_period: 10
+save_checkpoint_on_completion: True
+
+# --- Batch Size Strategy ---
+# Global Batch Size = per_device_batch_size * num_devices * gradient_accumulation_steps
+per_device_batch_size: 1
+gradient_accumulation_steps: 1
+
+
+# --- Learning Rate Schedule ---
+learning_rate_schedule_steps: 5000
+
+# --- Learning Rate Schedule ---
+learning_rate: 5.0e-5
+adam_b1: 0.9
+adam_b2: 0.95
+adam_eps: 1.e-5
+adam_weight_decay: 0.1
+warmup_steps_fraction: 0.1
