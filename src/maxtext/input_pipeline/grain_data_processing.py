@@ -32,6 +32,7 @@ from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import grain_tokenizer
 from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import multihost_dataloading
+# Placeholder: internal array_record_module
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
@@ -40,6 +41,7 @@ def find_data_files(data_file_pattern):
   """Find data files matching the pattern."""
   if data_file_pattern.startswith("gs://"):
     data_files = gcs_utils.gcs_glob_pattern(data_file_pattern)
+  # Placeholder: internal storage glob
   else:
     # Local files
     data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
