@@ -213,6 +213,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     state_map = {
         "['optimizer']['step'].value": ("step", None),
         "['optimizer']['opt_state'][0]['count'].value": ("opt_states_0.no_prefix_0.count", None),
+        "['optimizer']['opt_state']['count'].value": ("opt_states_0.no_prefix_0.count", None),
     }
   else:
     state_map = {
@@ -237,7 +238,15 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
           f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
           transform_fn,
       )
+      state_map[f"['optimizer']['opt_state']['mu']{keystr_maxtext}.value"] = (
+          f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
+          transform_fn,
+      )
       state_map[f"['optimizer']['opt_state'][0]['nu']{keystr_maxtext}.value"] = (
+          f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
+          transform_fn,
+      )
+      state_map[f"['optimizer']['opt_state']['nu']{keystr_maxtext}.value"] = (
           f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
           transform_fn,
       )
@@ -254,6 +263,8 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   def verify_fn(key_path, _):
     keystr = jax.tree_util.keystr(key_path)
+    if "['rngs']" in keystr:
+      return
     assert keystr in state_map, f"{keystr} not found"
 
   jax.tree_util.tree_map_with_path(verify_fn, state)
@@ -264,6 +275,8 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   def map_fn(key_path, value):
     key_path_str = jax.tree_util.keystr(key_path)
+    if "['rngs']" in key_path_str:
+      return value
     file_path, transform_fn = state_map[key_path_str]
     full_path = os.path.join(paxml_ckpt_prefix, file_path)
     spec = {"driver": "zarr", "metadata_key": ".zarray", "kvstore": {}}
@@ -303,6 +316,8 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   max_utils.print_mem_stats("converted state finished")
 
   step_value = int(converted_state.optimizer.step.value) if cfg.pure_nnx else converted_state.step
+  if cfg.pure_nnx:
+    converted_state = train_state_nnx.to_checkpoint_dict(converted_state)
   if checkpointing.save_checkpoint(checkpoint_manager, step_value, converted_state):
     max_logging.log(f"saved a checkpoint at step {step_value}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
