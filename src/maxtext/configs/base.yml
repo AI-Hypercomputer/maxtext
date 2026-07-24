@@ -51,6 +51,7 @@ load_full_state_path: ""
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: true
+save_checkpoint_on_start: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
 checkpoint_period: 10_000
@@ -141,7 +142,7 @@ kv_quant_dtype: "int8"
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
 # saves params quantized on fly at following path
 save_quantized_params_path: ""
-#used to configure the mode in which model is called
+# used to configure the mode in which model is called
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
@@ -266,6 +267,13 @@ wo_tile_drhs_embed_dim: 1024
 wo_tile_drhs_mlp_dim: 1024
 
 merge_gating_gmm: false
+
+# Use tokamax library for gmm kernel implementation
+use_tokamax_gmm: false
+# Whether to use GMM v2 for MoE forward/backward passes. (Requires use_tokamax_gmm: true)
+# Can be a single boolean (e.g., true)
+# or list (e.g., [true, true, true]) for fwd, dlhs, drhs
+use_gmm_v2: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
@@ -1263,11 +1271,6 @@ use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
 
-# Use tokamax library for gmm kernel implementation
-use_tokamax_gmm: false
-# Whether to use GMM v2 for MoE.
-# Requires use_tokamax_gmm: true. Currently incompatible with quantization.
-use_gmm_v2: false
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
 use_jax_splash: false

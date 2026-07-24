@@ -358,6 +358,7 @@ class Checkpointing(BaseModel):
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
   )
+  save_checkpoint_on_start: bool = Field(True, description="If True, saves an initial checkpoint upon training start.")
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
   )
@@ -450,7 +451,7 @@ class Quantization(BaseModel):
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
       False,
-      description="Whether to use manual quantization for batch split. Only used if use_batch_split_schedule is True.",
+      description="Whether to use manual quantization for batch split. Only used if `use_batch_split_schedule=True`.",
   )
   weight_quantization_calibration_method: str = Field(
       "absmax",
@@ -626,20 +627,6 @@ class Attention(BaseModel):
   use_post_attn_norm: bool = Field(False, description="Apply LayerNorm after the attention block.")
   use_post_ffw_norm: bool = Field(False, description="Apply LayerNorm after the feed-forward block.")
   use_ragged_attention: bool = Field(False, description="Whether to use ragged attention kernels.")
-  use_tokamax_gmm: bool = Field(
-      False,
-      description="Whether to use the Tokamax library for GMM kernel implementation.",
-  )
-  use_gmm_v2: bool = Field(
-      False,
-      description=(
-          "Whether to use GMM v2 (with bf16 activations and weights) for MoE."
-          " Requires use_tokamax_gmm: true. Currently incompatible with quantization."
-      ),
-  )
-  num_moe_emb_chunks: int = Field(
-      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
-  )
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for Transformer Engine padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
@@ -986,6 +973,39 @@ class MoEKernels(BaseModel):
   wo_tile_drhs_mlp_dim: int = Field(1024, description="bwd pass drhs tiling dimension for MLP in GMM for wo.")
 
   merge_gating_gmm: bool = Field(False, description="whether to merge the two gating gmm kernels into one.")
+
+  # tokamax gmm
+  use_tokamax_gmm: bool = Field(
+      False,
+      description="Whether to use the Tokamax library for GMM kernel implementation.",
+  )
+  use_gmm_v2: bool | tuple[bool, bool, bool] = Field(
+      (False, False, False),
+      description=(
+          "Whether to use GMM v2 for MoE forward/backward passes. "
+          "Can be a single boolean (shorthand for all True or all False) or a "
+          "3-tuple of booleans representing (fwd, dlhs, drhs)."
+      ),
+  )
+
+  @field_validator("use_gmm_v2", mode="before")
+  @classmethod
+  def validate_use_gmm_v2(cls, v: Any) -> tuple[bool, bool, bool]:
+    """Validate and preprocess use_gmm_v2 configuration input."""
+    # preprocessing single boolean to tuple
+    if isinstance(v, bool):
+      return (v, v, v)
+    # check if it is a list or tuple of 3 booleans
+    if isinstance(v, (list, tuple)):
+      if len(v) != 3 or not all(isinstance(x, bool) for x in v):
+        raise ValueError("use_gmm_v2 tuple must contain exactly 3 booleans.")
+      return tuple(v)
+    # unsupported type
+    raise ValueError("use_gmm_v2 must be a boolean or a tuple/list of 3 booleans.")
+
+  num_moe_emb_chunks: int = Field(
+      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
+  )
 
 
 class DeepSeekMoE(BaseModel):
@@ -2701,7 +2721,8 @@ class MaxTextConfig(
     Validates that num_moe_emb_chunks is used with supported settings.
     """
     if self.num_moe_emb_chunks > 0:
-      if not self.use_gmm_v2 or not self.use_ring_of_experts:
+      # If any value in use_gmm_v2 is False (e.g., [True, False, True]), raise an error.
+      if not all(self.use_gmm_v2) or not self.use_ring_of_experts:
         raise ValueError(
             f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
@@ -2970,6 +2991,10 @@ class MaxTextConfig(
             "WARNING: AQT quantization is deprecated and will be removed in a future release. "
             "Please migrate to Qwix by setting use_qwix_quantization=True."
         )
+
+    # Check quant config is non-empty for Qwix quantization
+    if self.use_qwix_quantization and not self.quantization:
+      raise ValueError("Qwix quantization is enabled but quantization is not set.")
 
     # Default quantization sharding count to number of local devices if not set.
     if self.quantization_local_shard_count == -1:
@@ -3611,10 +3636,28 @@ class MaxTextConfig(
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
-    if self.use_gmm_v2 and (self.quantization or self.use_qwix_quantization):
-      raise ValueError("Quantization with GMM v2 is not supported yet.")
-    if self.use_gmm_v2 and not self.use_tokamax_gmm:
-      raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
+    if self.use_manual_quantization and not self.use_batch_split_schedule:
+      raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
+
+    if self.use_tokamax_gmm and self.megablox:
+      raise ValueError("`use_tokamax_gmm` and `megablox` cannot both be set to True. Please choose a single backend.")
+
+    # Validation for GMM v2
+    if any(self.use_gmm_v2):
+      if not self.use_tokamax_gmm:
+        raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
+      if self.use_batch_split_schedule:
+        raise ValueError("GMM v2 is not supported with a batch split schedule.")
+
+    valid_combos = {(False, False, False), (True, True, True), (True, False, True)}
+    if self.use_gmm_v2 not in valid_combos:
+      raise ValueError(
+          "Invalid GMM v2 configuration combination. Allowed combinations are:\n"
+          "  - [False, False, False] (v1+v1+v1)\n"
+          "  - [True, True, True] (v2+v2+v2)\n"
+          "  - [True, False, True] (v2+v1+v2)\n"
+          f"But got: {list(self.use_gmm_v2)}"
+      )
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

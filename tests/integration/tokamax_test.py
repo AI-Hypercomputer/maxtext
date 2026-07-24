@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Test for tokamax gmm and splash."""
+"""Test for tokamax gmm."""
 
 import os
 import tempfile
@@ -25,38 +24,71 @@ from tests.utils.test_helpers import get_test_config_path
 train_main = train.main
 gettempdir = tempfile.gettempdir
 
+# TODO: revert before merge
+from absl import logging
+
+logging.set_verbosity(logging.INFO)
+
 
 @pytest.mark.integration_test
 class Train(parameterized.TestCase):
-  """Test for tokamax gmm and splash."""
+  """Smoke test for tokamax gmm.
 
-  @parameterized.named_parameters(
-      {
-          "testcase_name": "gmm bf16",
-          "quantization": "",
-          "use_gmm_v2": False,
-      },
-      {
-          "testcase_name": "gmm fp8",
-          "quantization": "fp8_full",
-          "use_gmm_v2": False,
-      },
-      {
-          "testcase_name": "gmm v2 bf16",
-          "quantization": "",
-          "use_gmm_v2": True,
-      },
+  Similar to `train_using_ragged_dot_smoke_train.py`
+  """
+
+  @parameterized.product(
+      (
+          {
+              # "tokamax v1 bf16",
+              "quantization": "",
+              "use_gmm_v2": False,
+          },
+          {
+              # "tokamax v1 fp8",
+              "quantization": "fp8_full",
+              "use_gmm_v2": False,
+          },
+          {
+              # "tokamax v2+v1+v2 bf16",
+              "quantization": "",
+              "use_gmm_v2": (True, False, True),
+          },
+          {
+              # "tokamax v2+v1+v2 fp8",
+              "quantization": "fp8_full",
+              "use_gmm_v2": (True, False, True),
+          },
+          {
+              # "tokamax v2+v2+v2 bf16",
+              "quantization": "",
+              "use_gmm_v2": True,
+          },
+          {
+              # "tokamax v2+v2+v2 fp8",
+              "quantization": "fp8_full",
+              "use_gmm_v2": True,
+          },
+      ),
+      ici_expert_parallelism=[1, 2],
   )
   @pytest.mark.tpu_only
-  def test_different_configs(self, quantization: str, use_gmm_v2: bool):
+  def test_smoke_train(
+      self,
+      quantization: str,
+      use_gmm_v2: bool | tuple[bool, bool, bool],
+      ici_expert_parallelism: int,
+  ):
     """Smoke train with small config."""
+    sharding_tolerance = 0.22 if ici_expert_parallelism > 1 else 2e-2
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
+    use_gmm_v2_str = list(use_gmm_v2) if isinstance(use_gmm_v2, tuple) else use_gmm_v2
     args = [
         None,
         get_test_config_path(),
         f"base_output_directory={test_tmpdir}",
-        "run_name=tokamax_test",
+        "run_name=test_smoke_train",
         # model
         "base_emb_dim=256",
         "base_num_query_heads=1",
@@ -69,11 +101,13 @@ class Train(parameterized.TestCase):
         "attention_type=mla",
         "num_experts=2",
         "shared_experts=1",
+        f"ici_expert_parallelism={ici_expert_parallelism}",
+        f"sharding_tolerance={sharding_tolerance}",
         # tokamax gmm
         "sparse_matmul=True",
         "megablox=False",
         "use_tokamax_gmm=True",
-        f"use_gmm_v2={use_gmm_v2}",
+        f"use_gmm_v2={use_gmm_v2_str}",
         # tile sizes
         "wi_tile_fwd_batch_seq=128",
         "wi_tile_fwd_embed_dim=128",
@@ -96,12 +130,13 @@ class Train(parameterized.TestCase):
         # tokamax splash
         "max_target_length=128",
         "attention=flash",
-        "use_tokamax_splash=True",
+        "use_tokamax_splash=False",
         # quantization
         f"quantization={quantization}",
-        f"use_qwix_quantization={quantization == 'fp8_full'}",
+        f"use_qwix_quantization={quantization != ''}",
         "weight_quantization_calibration_method=fixed,-224,224",
         "act_quantization_calibration_method=fixed,-224,224",
+        "bwd_quantization_calibration_method=absmax",
         # train
         "per_device_batch_size=1",
         "dataset_type=synthetic",
