@@ -973,7 +973,8 @@ class MoEKernels(BaseModel):
   @field_validator("use_gmm_v2", mode="before")
   @classmethod
   def validate_use_gmm_v2(cls, v: Any) -> tuple[bool, bool, bool]:
-    # preprocesssing single boolean to tuple
+    """Validate and preprocess use_gmm_v2 configuration input."""
+    # preprocessing single boolean to tuple
     if isinstance(v, bool):
       return (v, v, v)
     # check if it is a list or tuple of 3 booleans
@@ -3600,14 +3601,17 @@ class MaxTextConfig(
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
 
-    if any(self.use_gmm_v2) and not self.use_tokamax_gmm:
-      raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
+    if self.use_tokamax_gmm and self.megablox:
+      raise ValueError("`use_tokamax_gmm` and `megablox` cannot both be set to True. Please choose a single backend.")
 
-    valid_combos = {
-        (False, False, False),  # 111 (v1+v1+v1)
-        (True, True, True),  # 222 (v2+v2+v2)
-        (True, False, True),  # 212 (v2+v1+v2)
-    }
+    # Validation for GMM v2
+    if any(self.use_gmm_v2):
+      if not self.use_tokamax_gmm:
+        raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
+      if self.use_batch_split_schedule:
+        raise ValueError("GMM v2 is not supported with a batch split schedule.")
+
+    valid_combos = {(False, False, False), (True, True, True), (True, False, True)}
     if self.use_gmm_v2 not in valid_combos:
       raise ValueError(
           "Invalid GMM v2 configuration combination. Allowed combinations are:\n"

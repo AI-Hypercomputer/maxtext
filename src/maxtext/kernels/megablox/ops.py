@@ -25,13 +25,12 @@ from maxtext.kernels.megablox import backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.layers import quantizations
-from maxtext.utils import max_logging
 import qwix
 import qwix.pallas as qpl
 import tokamax
 from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_kernel as tokamax_backend
 
-
+# from maxtext.utils import max_logging
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
     dot_dimension_numbers=(([1], [2]), ([], [])),
     lhs_ragged_dimensions=[0],
@@ -179,12 +178,12 @@ def _gmm_fwd(
         jnp.ndarray | None,
     ],
 ]:
-  use_gmm_v2_fwd, use_gmm_v2_dlhs, use_gmm_v2_drhs = use_gmm_v2
   """Forward function for GMM VJP.
 
   - lhs: [m, k]
   - rhs: [g, k, n] if transpose_rhs=False. [g, n, k] if transpose_rhs=True
   """
+  use_gmm_v2_fwd = use_gmm_v2[0]
 
   # Quantize activation and weight
   if quantization_rule:

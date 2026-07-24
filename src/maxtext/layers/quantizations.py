@@ -915,7 +915,7 @@ def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_
   Args:
     tensor: The tensor to quantize.
     dtype: The logical type of the quantized value, e.g. jnp.float8_e4m3fn
-    calibration_method: A string specifying the calibration method. Currently only support 
+    calibration_method: A string specifying the calibration method. Currently only support
     symmetric fixed range calibration: Expected format is "fixed,{-max_val},{max_val}".
 
   Returns:

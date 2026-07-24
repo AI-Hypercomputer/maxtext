@@ -50,15 +50,15 @@ def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
     raise ValueError("Reference and actual pytrees must have the same structure.")
 
   log_lines = ["CALCULATE DIFF"]
-  for (path, a), (_, b) in zip(leaves_a, leaves_b):
+  for (path, val_a), (_, val_b) in zip(leaves_a, leaves_b):
     path = "-".join([k.key for k in path if hasattr(k, "key")]) or "root"
 
-    assert a.dtype in (jnp.float32, jnp.bfloat16, jnp.float16)
-    a = a.astype(jnp.float32)
-    b = b.astype(jnp.float32)
+    assert val_a.dtype in (jnp.float32, jnp.bfloat16, jnp.float16)
+    val_a = val_a.astype(jnp.float32)
+    val_b = val_b.astype(jnp.float32)
 
-    max_abs_diff = jnp.max(jnp.abs(a - b))
-    relative_norm_diff = jnp.linalg.norm(a - b) / jnp.linalg.norm(a)
+    max_abs_diff = jnp.max(jnp.abs(val_a - val_b))
+    relative_norm_diff = jnp.linalg.norm(val_a - val_b) / jnp.linalg.norm(val_a)
 
     log_line = f"{path}" f" | max_abs_diff: {max_abs_diff}" f" | relative_norm_diff: | {relative_norm_diff}"
     log_lines.append(log_line)
@@ -1568,7 +1568,7 @@ class RoutedMoeTest(parameterized.TestCase):
 
     with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
       variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      (loss_ref, output_ref), (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+      (_, output_ref), (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
 
     # Target run: custom configuration (sparse, GMM, EP, quantization)
     cfg_tgt = _build_cfg(
@@ -1587,7 +1587,7 @@ class RoutedMoeTest(parameterized.TestCase):
       # Re-initialize variables for the target run to ensure they are sharded correctly
       # for the target mesh, but use the same RNG to get the same initial values.
       variables_tgt = model_tgt.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      (loss_tgt, output_tgt), (grads_tgt, x_grad_tgt) = _loss_and_grad(model_tgt, variables_tgt, hidden_states)
+      (_, output_tgt), (grads_tgt, x_grad_tgt) = _loss_and_grad(model_tgt, variables_tgt, hidden_states)
 
     # Compare results
     tree_ref = {
