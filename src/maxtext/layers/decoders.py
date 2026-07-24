@@ -215,7 +215,7 @@ class DecoderLayer(nn.Module):
           logical_axis_names,
       )
 
-    if cfg.record_internal_nn_metrics:
+    if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
@@ -1269,11 +1269,11 @@ class Decoder(nn.Module):
     # When initializing with vLLM RPA attention, we need to run the output head to
     # initialize any parameters associated with it.
     # Same case applicable to vocab tiling
-    if self.is_initializing() and (cfg.num_vocab_tiling > 1 or cfg.attention == "vllm_rpa"):
+    if self.is_initializing() and (cfg.num_vocab_tiling > 1 or cfg.attention in ("vllm_rpa", "vllm_batched_rpa")):
       _ = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
-    if cfg.attention == "vllm_rpa":
+    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa"):
       logits = None
     # When in the Indexer Dense Warm-up stage, skip the expensive output head projection
     # for efficiency, as the main model is frozen and the LM loss is not needed.

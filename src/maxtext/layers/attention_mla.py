@@ -361,18 +361,57 @@ class Indexer(nnx.Module):
     if k.shape[1] <= self.indexer_topk:
       return None, None, None
 
-    # Compute Index Scores
-    # QK product: relu(q @ k.T), [b, t, s, h]
-    # Similar to MQA, each key is shared by h query head
-    logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
-    logits = jax.nn.relu(logits)
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q)
     # Weights scaling affect indexer_score, but does not affect topk_indices. Keep scaling for numerical stability.
     # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
     weights = weights * (self.n_heads**-0.5) * self.softmax_scale
-    # Aggregate head-wise logits: logits @ weights
-    indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
+
+    # Compute Index Scores
+    # When qk_head_chunk_size > 0, compute Index Scores by chunking the 'heads' dimension to reduce memory
+    # The naive evaluation materializes [b, t, s, h].
+    # We use jax.lax.scan to compute the score iteratively over head chunks.
+    b, t, h, d = q.shape
+    # Control the HBM footprint of QK tensor: [batch, q_len, s_len, heads]
+    # If set to 0 (defaults), it falls back to native materialization.
+    head_chunk_size = getattr(self.config, "mla_qk_head_chunk_size", 0)
+
+    def chunked_head_loop(chunk_size):
+
+      num_chunks = h // chunk_size
+      # q: [b, t, h, d] -> [h, b, t, d] -> [num_chunks, head_chunk_size, b, t, d]
+      q_h = q.transpose(2, 0, 1, 3).reshape(num_chunks, chunk_size, b, t, d)
+      # weights: [b, t, h] -> [h, b, t] -> [num_chunks, head_chunk_size, b, t]
+      w_h = weights.transpose(2, 0, 1).reshape(num_chunks, chunk_size, b, t)
+
+      def scan_body_indexer(carry, xs):
+        q_c = xs["q"]  # [h_chunk, b, t, d]
+        w_c = xs["w"]  # [h_chunk, b, t]
+
+        # Directly use the chunked shapes in einsum to avoid transposes inside the loop
+        logits_inner = jnp.einsum("hbtd, bsd -> btsh", q_c, k, precision=self.config.matmul_precision)
+        logits_inner = jax.nn.relu(logits_inner)
+
+        score_chunk = jnp.einsum(
+            "btsh, hbt -> bts",
+            logits_inner,
+            w_c,
+            precision=self.config.matmul_precision,
+        )
+        return carry + score_chunk.astype(jnp.float32), None
+
+      init_score = jnp.zeros((b, t, k.shape[1]), dtype=jnp.float32)
+      idx_score, _ = jax.lax.scan(jax.checkpoint(scan_body_indexer), init_score, {"q": q_h, "w": w_h})
+      return idx_score.astype(q.dtype)
+
+    if head_chunk_size > 0:
+      indexer_score = chunked_head_loop(head_chunk_size)
+
+    else:
+      # Aggregate head-wise logits: logits @ weights natively
+      logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
+      logits = jax.nn.relu(logits)
+      indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)
 
     internal_padding_mask = None
     if cached_s is not None:
@@ -1086,25 +1125,65 @@ class MLA(Attention):
     query = jax.lax.stop_gradient(query)
     key = jax.lax.stop_gradient(key)
 
-    # Compute attention scores: [b, t, h, d] @ [b, s, h, d] -> [b, h, t, s]
-    attention_scores = jnp.einsum("bthd, bshd -> bhts", query, key, precision=self.config.matmul_precision)
-
+    # Ensure indexer_score updates identically in all branches
     if sparse_loss:
-      # indexer_mask is already pre-filtered with the attention_mask if any
-      attention_scores = attention_scores + indexer_mask[:, None, :, :]
       indexer_score = indexer_score + indexer_mask
-    elif attention_mask is not None:
-      # indexer_score already applies attention_mask; updating attention_scores only
-      attention_scores = attention_scores + attention_mask[:, None, :, :]
-
-    # Use float32 for softmax numerical stability.
-    attention_probs = jax.nn.softmax(attention_scores.astype(jnp.float32), axis=-1)
     indexer_probs = jax.nn.softmax(indexer_score.astype(jnp.float32), axis=-1)
 
-    # Aggregate heads: [b, h, t, s] -> [b, t, s]
-    attention_probs = jnp.sum(attention_probs, axis=1)
-    # Force materialization and prevent fusion across this point to reuse the intermediate tensor
-    attention_probs = jax.lax.optimization_barrier(attention_probs)
+    batch, q_len, heads, dim = query.shape
+
+    # Chunk across the 'heads' dimension manually using jax.lax.scan
+    # Control the HBM footprint of QK tensor: [batch, q_len, s_len, heads]
+    # If set to 0, it falls back to native implementation.
+    head_chunk_size = getattr(self.config, "mla_qk_head_chunk_size", 0)
+    if head_chunk_size > 0:
+
+      num_chunks = heads // head_chunk_size
+
+      # Transpose and reshape to put chunk dimension first for jax.lax.scan
+      # query: [b, t, h, d] -> [h, b, t, d] -> [num_chunks, head_chunk_size, b, t, d]
+      q_h = query.transpose(2, 0, 1, 3).reshape(num_chunks, head_chunk_size, batch, q_len, dim)
+      k_h = key.transpose(2, 0, 1, 3).reshape(num_chunks, head_chunk_size, batch, key.shape[1], dim)
+
+      def scan_body_heads(carry, xs):
+        q_c = xs["q"]  # [h_chunk, b, t, d]
+        k_c = xs["k"]  # [h_chunk, b, s, d]
+
+        # Directly use the chunked shapes in einsum to avoid transposes inside the loop
+        attn_chunk = jnp.einsum(
+            "hbtd, hbsd -> bhts",
+            q_c,
+            k_c,
+            precision=self.config.matmul_precision,
+        )
+
+        if sparse_loss:
+          attn_chunk = attn_chunk + indexer_mask[:, None, :, :]
+        elif attention_mask is not None:
+          attn_chunk = attn_chunk + attention_mask[:, None, :, :]
+
+        probs_chunk = jax.nn.softmax(attn_chunk.astype(jnp.float32), axis=-1)
+        probs_chunk_sum = jnp.sum(probs_chunk, axis=1)  # [b, t, s]
+
+        return carry + probs_chunk_sum, None
+
+      init_probs = jnp.zeros((batch, q_len, key.shape[1]), dtype=jnp.float32)
+      attention_probs, _ = jax.lax.scan(scan_body_heads, init_probs, {"q": q_h, "k": k_h})
+
+    else:
+      # Native implementation (default) if chunking is disabled
+      attention_scores = jnp.einsum(
+          "bthd, bshd -> bhts",
+          query,
+          key,
+          precision=self.config.matmul_precision,
+      )
+      if sparse_loss:
+        attention_scores = attention_scores + indexer_mask[:, None, :, :]
+      elif attention_mask is not None:
+        attention_scores = attention_scores + attention_mask[:, None, :, :]
+      attention_probs = jnp.sum(jax.nn.softmax(attention_scores.astype(jnp.float32), axis=-1), axis=1)
+      attention_probs = jax.lax.optimization_barrier(attention_probs)
     # L1 normalize aggregated target distribution
     attention_probs = attention_probs / (jnp.sum(attention_probs, axis=-1, keepdims=True) + EPS)
 

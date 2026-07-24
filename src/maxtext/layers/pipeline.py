@@ -38,6 +38,7 @@ from maxtext.utils.sharding import (
     create_sharding,
     logical_to_mesh_axes,
     logical_to_mesh,
+    get_logical_axis_rules,
 )
 from maxtext.utils import pipeline_utils
 
@@ -61,13 +62,13 @@ class PipelineBase(nnx.Module):
     self.spmd_axis_name = "stage" if self.config.shard_mode == ShardMode.AUTO else None
 
     self.stages_in_logical = ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed")
-    self.stages_in_spec = logical_to_mesh_axes(self.stages_in_logical, self.mesh, rules=self.config.logical_axis_rules)
+    self.stages_in_spec = logical_to_mesh_axes(self.stages_in_logical, self.mesh, rules=get_logical_axis_rules())
     self.stages_in_sharding = (
         NamedSharding(self.mesh, self.stages_in_spec) if self.config.shard_mode == ShardMode.EXPLICIT else None
     )
 
     self.state_io_logical = ("activation_stage", None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed")
-    self.state_io_spec = logical_to_mesh_axes(self.state_io_logical, self.mesh, rules=self.config.logical_axis_rules)
+    self.state_io_spec = logical_to_mesh_axes(self.state_io_logical, self.mesh, rules=get_logical_axis_rules())
     self.state_io_sharding = (
         NamedSharding(self.mesh, self.state_io_spec) if self.config.shard_mode == ShardMode.EXPLICIT else None
     )
@@ -75,7 +76,7 @@ class PipelineBase(nnx.Module):
         create_sharding(
             self.mesh,
             (None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
-            rules=self.config.logical_axis_rules,
+            rules=get_logical_axis_rules(),
         )
         if self.config.shard_mode == ShardMode.EXPLICIT
         else None
@@ -84,7 +85,7 @@ class PipelineBase(nnx.Module):
         create_sharding(
             self.mesh,
             (self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
-            rules=self.config.logical_axis_rules,
+            rules=get_logical_axis_rules(),
         )
         if self.config.shard_mode == ShardMode.EXPLICIT
         else None
@@ -114,7 +115,7 @@ class PipelineBase(nnx.Module):
         logical_axes,
         shard_mode=self.config.shard_mode,
         mesh=self.mesh,
-        rules=self.config.logical_axis_rules,
+        rules=get_logical_axis_rules(),
         debug_sharding=self.config.debug_sharding,
         extra_stack_level=1,
     )

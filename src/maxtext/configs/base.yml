@@ -23,8 +23,6 @@ run_name: ""
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
 override_model_config: false # When set to true allows overriding model parameters via CLI (or kwargs or env vars) for the purpose of debugging/testing.
 override_logical_axis_rules: false # When set overrides logical axis rules instead of merging them.
-debug:
-  rl: false # RL-specific debugging
 
 normalization_layer_epsilon: 1.e-05 # epsilon value for rmsnorm, layernorm.
 
@@ -193,6 +191,7 @@ logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embed
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
+mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix across the unsharded local heads dimension natively.
 float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
 float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
 
@@ -624,6 +623,9 @@ input_data_sharding_logical_axes: ['activation_embed_and_logits_batch', 'activat
 # Determines which physical axis plays the role of context parallelism for input data processing and load balancing
 # only supports "context" or "expert" (when custom_mesh_and_rule=ep-as-cp)
 context_sharding: "context"
+# Customized mesh and logical rules for evaluation (e.g. "ep-as-cp")
+custom_mesh_and_rule_for_eval: ""
+logical_axis_rules_for_eval: []
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02
@@ -991,6 +993,7 @@ decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
 decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
+eval_start_step: 0 # start eval after train step is >= eval_start_step
 eval_interval: -1  # the specific number of train step between eval_step
 eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
@@ -1339,3 +1342,5 @@ elastic_enabled: false
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
+
+

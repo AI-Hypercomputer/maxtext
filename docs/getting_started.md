@@ -54,7 +54,7 @@ To run inference (decoding) using MaxText models, refer to the [Inference Tutori
 
 ## Running MaxText on Multiple Hosts
 
-Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple hosts. It provides a managed environment for deploying and scaling containerized applications, including those that require TPUs or GPUs. See [Running Maxtext with XPK](run_maxtext/run_maxtext_via_xpk.md) for details.
+Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple hosts. It provides a managed environment for deploying and scaling containerized applications, including those that require TPUs or GPUs. See [Running MaxText with Cluster Toolkit](run_maxtext/run_maxtext_via_cluster_toolkit.md) or [Running Maxtext with XPK](run_maxtext/run_maxtext_via_xpk.md) for details.
 
 ## Running MaxText in Notebooks
 

@@ -72,7 +72,10 @@ def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
 def assert_moe_close(actual, expected, dtype):
   """Asserts that the actual and expected MoE outputs are close."""
   assert np.isfinite(actual).all(), "Actual output contains NaNs or Infs!"
-  if dtype == jnp.bfloat16:
+
+  if jax.default_backend() == "tpu" or dtype == jnp.bfloat16:
+    # TPU float32 (which is downcasted/accumulates differently) and bfloat16
+    # both exhibit accumulation drift, especially on newer hardware like v7x.
     rtol, atol = 2e-2, 1e-2
   else:
     rtol, atol = 1e-5, 1e-6
@@ -1731,7 +1734,8 @@ class FusedMoeTPUTest(unittest.TestCase):
     copy_weights(self.dense_model, sparse_model)
 
     inputs = self._inputs()
-    sparse_out, _, _ = sparse_model(inputs)
+    with nn_partitioning.axis_rules(sparse_cfg.logical_axis_rules):
+      sparse_out, _, _ = sparse_model(inputs)
     fused_out, lb_loss, bias_updates = self.fused_model(inputs)
 
     np.testing.assert_allclose(
@@ -1872,7 +1876,8 @@ class FusedMoeTPUTest(unittest.TestCase):
     copy_weights_prefused(self.dense_model, prefused_model)
 
     inputs = self._inputs()
-    sparse_out, _, _ = sparse_model(inputs)
+    with nn_partitioning.axis_rules(sparse_cfg.logical_axis_rules):
+      sparse_out, _, _ = sparse_model(inputs)
     prefused_out, lb_loss, bias_updates = prefused_model(inputs)
 
     np.testing.assert_allclose(

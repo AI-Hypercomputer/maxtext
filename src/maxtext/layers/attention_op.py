@@ -75,7 +75,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec
+from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules
 import numpy as np
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -481,7 +481,14 @@ class AttentionOp(nnx.Module):
     self.kv_quant = kv_quant
     self.attention_type = attention_type
     # Block sizes are only used by TPU splash attention kernels. Exclude non-splash kernels
-    if self.attention_kernel not in ("dot_product", "paged", "vllm_rpa", "cudnn_flash_te", "cudnn_flash_jax"):
+    if self.attention_kernel not in (
+        "dot_product",
+        "paged",
+        "vllm_rpa",
+        "vllm_batched_rpa",
+        "cudnn_flash_te",
+        "cudnn_flash_jax",
+    ):
       if self.attention_type == AttentionType.LOCAL_SLIDING:
         self.block_q = self.config.local_sa_block_q
         self.block_kv = self.config.local_sa_block_kv
@@ -527,8 +534,6 @@ class AttentionOp(nnx.Module):
           raise ValueError("TPU Tokamax ring attention requires use_tokamax_splash=True.")
         if self.config.use_jax_splash:
           raise ValueError("TPU Tokamax ring attention requires use_jax_splash=False.")
-        if self.config.context_parallel_load_balance:
-          raise ValueError("TPU Tokamax ring attention does not support context_parallel_load_balance yet.")
         if self.config.packing:
           raise ValueError("TPU Tokamax ring attention does not support packing yet.")
         if self.attention_type != AttentionType.GLOBAL:
@@ -628,7 +633,7 @@ class AttentionOp(nnx.Module):
       self.AqtEinsum_3 = jnp.einsum
 
   def _logical_to_mesh_axes(self, logical_name):
-    logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
+    logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
@@ -1069,7 +1074,7 @@ class AttentionOp(nnx.Module):
         or (self.attention_kernel == "autoselected" and model_mode == MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
         or (self.attention_kernel == "paged")
-        or (self.attention_kernel == "vllm_rpa")
+        or (self.attention_kernel in ("vllm_rpa", "vllm_batched_rpa"))
     ):
       return self.apply_attention_dot(
           query,

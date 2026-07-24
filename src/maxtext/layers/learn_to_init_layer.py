@@ -388,14 +388,7 @@ def apply_lti_model_update(student_model, student_config):
   if student_config.attn_module_name is None:
     return
 
-  if getattr(student_config, "scan_layers", True):
-    layer_modules = [student_model.decoder.layers]
-  else:
-    layer_modules = []
-    # Collect all possible layer names (e.g. layers_0, dense_layers_0, moe_layers_0)
-    for name, module in vars(student_model.decoder).items():
-      if name.startswith(LTI_LAYER_PATH_PREFIXES):
-        layer_modules.append(module)
+  layer_modules = student_model.decoder.get_layers()
 
   for layer_module in layer_modules:
     attn_state_dict = layer_module.get(student_config.attn_module_name)

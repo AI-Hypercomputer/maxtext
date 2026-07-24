@@ -1401,42 +1401,118 @@ class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
       height: int,
       width: int,
       token_mask: Array | None = None,
-      valid_grid: tuple[int, int, int] | None = None,
+      valid_grid: Array | None = None,
   ) -> Array:
     """Apply rotary position embeddings directly to inputs (Q or K tensors).
 
     Args:
-      inputs: Input tensor of shape [B, T*H*W, N, head_dim] (batch, sequence, heads, head_dim)
-             where T=num_frames, H=height, W=width (all static)
+      inputs: Input tensor of shape [B, S, N, head_dim] (batch, sequence, heads, head_dim)
+             where sequence length S = num_frames * height * width (static maximum).
       num_frames: Number of temporal frames (static)
       height: Height in patches (static)
       width: Width in patches (static)
       token_mask: Optional mask identifying valid tokens in the padded sequence.
-      valid_grid: Optional unpadded `(frames, height, width)` grid used to compute
-        RoPE for valid tokens.
+      valid_grid: Optional actual video grid with shape (batch, 3) (dynamic)
 
     Returns:
-      Rotated inputs with same shape [B, T*H*W, N, head_dim]
+      Rotated inputs with same shape [B, S, N, head_dim]
     """
-    cos_emb, sin_emb = self.compute_cos_sin(num_frames, height, width)
-    if token_mask is not None and valid_grid is not None:
-      valid_cos, valid_sin = self.compute_cos_sin(*valid_grid)
-      valid_len = math.prod(valid_grid)
-      valid_indices = jnp.nonzero(token_mask[0], size=valid_len)[0]
-      cos_emb = jnp.ones_like(cos_emb).at[valid_indices].set(valid_cos)
-      sin_emb = jnp.zeros_like(sin_emb).at[valid_indices].set(valid_sin)
+    is_3d = inputs.ndim == 3
+    if is_3d:
+      inputs = inputs[None, :, :, :]
 
-    if len(inputs.shape) == 4:
-      cos_emb = cos_emb[None, :, None, :]  # [1, S, 1, H]
-      sin_emb = sin_emb[None, :, None, :]
-    elif len(inputs.shape) == 3:
-      # For [S, N, H] case
-      cos_emb = cos_emb[:, None, :]  # [S, 1, H]
-      sin_emb = sin_emb[:, None, :]
+    batch_size = inputs.shape[0]
+    max_patches = num_frames * height * width
+
+    if valid_grid is not None:
+      if isinstance(valid_grid, (tuple, list)):
+        valid_grid = jnp.array([valid_grid], dtype=jnp.int32)
+      elif valid_grid.ndim == 1:
+        valid_grid = valid_grid[None, :]
+    else:
+      valid_grid = jnp.tile(
+          jnp.array([[num_frames, height, width]], dtype=jnp.int32),
+          (batch_size, 1),
+      )
+
+    # Generate coordinates in block-based order
+    row, col = generate_block_coords(valid_grid, max_patches, self.spatial_merge_size)
+
+    # Compute frequencies dynamically using coordinates
+    max_hw = max(height, width)
+    freq_table = self._compute_freq_table(max_hw)  # [max_hw, head_dim//4]
+
+    row_freqs = freq_table[row]  # [B, max_patches, head_dim//4]
+    col_freqs = freq_table[col]  # [B, max_patches, head_dim//4]
+
+    # Concatenate row and column frequencies
+    embeddings = jnp.concatenate([row_freqs, col_freqs], axis=-1)  # [B, max_patches, head_dim//2]
+
+    # Double the embeddings to match head_dim
+    embeddings = jnp.concatenate([embeddings, embeddings], axis=-1)  # [B, max_patches, head_dim]
+
+    cos_emb = jnp.cos(embeddings)
+    sin_emb = jnp.sin(embeddings)
+
+    # Mask out invalid (padded) tokens by setting cos to 1 and sin to 0
+    if token_mask is not None:
+      is_valid = token_mask[:, :, None]  # [B, max_patches, 1]
+      cos_emb = jnp.where(is_valid, cos_emb, 1.0)
+      sin_emb = jnp.where(is_valid, sin_emb, 0.0)
+
+    if self.cast_as_fprop_dtype:
+      cos_emb = cos_emb.astype(self.fprop_dtype)
+      sin_emb = sin_emb.astype(self.fprop_dtype)
+
+    # Reshape for broadcasting to inputs [B, S, N, H]
+    cos_emb = cos_emb[:, :, None, :]  # [B, S, 1, H]
+    sin_emb = sin_emb[:, :, None, :]
 
     rotated = inputs * cos_emb + self._rotate_half(inputs) * sin_emb
 
+    if is_3d:
+      rotated = rotated[0]
+
     return rotated
+
+
+def generate_block_coords(video_grid_thw: Array, max_patches: int, merge_size: int) -> tuple[Array, Array]:
+  """Generate row and col coordinates in block-based order for padded video.
+
+  Args:
+    video_grid_thw: Actual video grid with shape (batch, 3), in Qwen grid units.
+    max_patches: Maximum number of patches (static).
+    merge_size: Spatial merge block size (static).
+
+  Returns:
+    Tuple of (row, col) each of shape [batch, max_patches]
+  """
+  V_T = video_grid_thw[:, 0:1]  # [B, 1]
+  V_H = video_grid_thw[:, 1:2]
+  V_W = video_grid_thw[:, 2:3]
+
+  merged_w = V_W // merge_size
+  V_len = V_T * V_H * V_W
+
+  idx = jnp.arange(max_patches, dtype=jnp.int32)[None, :]  # [1, max_patches]
+  is_valid = idx < V_len  # [B, max_patches]
+
+  stride_lh = V_H * V_W
+  safe_stride_lh = jnp.maximum(stride_lh, 1)
+  s_idx = idx % safe_stride_lh
+
+  intra_col = s_idx % merge_size
+  intra_row = (s_idx // merge_size) % merge_size
+
+  safe_merged_w = jnp.maximum(merged_w, 1)
+  block_elements = merge_size * merge_size
+  block_col = (s_idx // block_elements) % safe_merged_w
+  block_row = s_idx // (safe_merged_w * block_elements)
+
+  row = jnp.where(is_valid, block_row * merge_size + intra_row, 0)
+  col = jnp.where(is_valid, block_col * merge_size + intra_col, 0)
+
+  return row, col
 
 
 def qwen3omnimoe_vision_pos_embed_interpolate_as_linen(
@@ -1596,46 +1672,87 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
 
     return indices, weights
 
-  def __call__(self, num_frames: int, height: int, width: int) -> Array:
+  def __call__(
+      self,
+      num_frames: int,
+      height: int,
+      width: int,
+      video_grid_thw: Array | None = None,
+      attention_mask: Array | None = None,
+  ) -> Array:
     """Interpolate positional embeddings for given static grid dimensions.
 
     Args:
       num_frames: Number of temporal frames (static)
       height: Height in patches (static)
       width: Width in patches (static)
+      video_grid_thw: Optional actual video grid with shape (batch, 3) (dynamic)
+      attention_mask: Optional attention mask with shape (batch, max_patches) (dynamic)
 
     Returns:
-      Interpolated positional embeddings of shape [num_frames * height * width, hidden_size]
+      Interpolated positional embeddings of shape [batch, num_frames * height * width, hidden_size]
     """
-    # Get interpolation indices and weights
-    indices, weights = self._interpolate_single(num_frames, height, width)  # [4, h*w], [4, h*w]
+    if video_grid_thw is not None:
+      if isinstance(video_grid_thw, (tuple, list)):
+        video_grid_thw = jnp.array([video_grid_thw], dtype=jnp.int32)
+      elif video_grid_thw.ndim == 1:
+        video_grid_thw = video_grid_thw[None, :]
+      batch_size = video_grid_thw.shape[0]
+    elif attention_mask is not None:
+      batch_size = attention_mask.shape[0]
+    else:
+      batch_size = 1
 
-    # Lookup embeddings for all 4 corners
-    corner_embeds = self.pos_embed.value[indices]  # [4, h*w, hidden_size]
+    max_patches = num_frames * height * width
 
-    # Apply bilinear weights and sum
-    weighted_embeds = corner_embeds * weights[:, :, None]  # [4, h*w, hidden_size]
-    interpolated = jnp.sum(weighted_embeds, axis=0)  # [h*w, hidden_size]
+    if video_grid_thw is None:
+      video_grid_thw = jnp.tile(
+          jnp.array([[num_frames, height, width]], dtype=jnp.int32),
+          (batch_size, 1),
+      )
+    if attention_mask is None:
+      attention_mask = jnp.ones((batch_size, max_patches), dtype=jnp.int32)
 
-    # Repeat for temporal frames
-    if num_frames > 1:
-      interpolated = jnp.tile(interpolated, (num_frames, 1))  # [t*h*w, hidden_size]
+    # Generate coordinates in block-based order
+    row, col = generate_block_coords(video_grid_thw, max_patches, self.spatial_merge_size)
 
-    # Apply spatial merge permutation
-    # Reshape to [t, h, w, hidden_size] then permute for block-based processing
-    merge_size = self.spatial_merge_size
-    merged_h = height // merge_size
-    merged_w = width // merge_size
+    # Normalize coordinates to [0, 1] range based on valid grid sizes
+    V_H = video_grid_thw[:, 1:2]
+    V_W = video_grid_thw[:, 2:3]
+    row_norm = row / jnp.maximum(V_H - 1, 1)
+    col_norm = col / jnp.maximum(V_W - 1, 1)
 
-    # Reshape: [t*h*w, hidden_size] -> [t, h, w, hidden_size]
-    interpolated = interpolated.reshape(num_frames, height, width, self.hidden_size)
+    # Interpolate from N x N grid
+    N = self.num_grid_per_side
+    table = self.pos_embed.value.reshape(N, N, self.hidden_size)
 
-    # Permute for spatial merging: [t, merged_h, merge_size, merged_w, merge_size, hidden_size]
-    interpolated = interpolated.reshape(num_frames, merged_h, merge_size, merged_w, merge_size, self.hidden_size)
-    # -> [t, merged_h, merged_w, merge_size, merge_size, hidden_size]
-    interpolated = jnp.transpose(interpolated, (0, 1, 3, 2, 4, 5))
-    # Flatten back to [t*merged_h*merged_w*merge_size*merge_size, hidden_size]
-    interpolated = interpolated.reshape(-1, self.hidden_size)
+    y = row_norm * (N - 1)
+    x = col_norm * (N - 1)
+
+    y0 = jnp.floor(y).astype(jnp.int32)
+    x0 = jnp.floor(x).astype(jnp.int32)
+    y1 = jnp.minimum(y0 + 1, N - 1)
+    x1 = jnp.minimum(x0 + 1, N - 1)
+
+    dy = y - y0
+    dx = x - x0
+
+    # Gather 4 corners
+    embed_00 = table[y0, x0]
+    embed_01 = table[y0, x1]
+    embed_10 = table[y1, x0]
+    embed_11 = table[y1, x1]
+
+    # Apply bilinear weights
+    dy = dy[:, :, None]
+    dx = dx[:, :, None]
+
+    interpolated = (
+        (1.0 - dy) * (1.0 - dx) * embed_00 + (1.0 - dy) * dx * embed_01 + dy * (1.0 - dx) * embed_10 + dy * dx * embed_11
+    )
+
+    # Mask out invalid (padded) tokens by setting their embeddings to zero
+    interpolated = interpolated * attention_mask[:, :, None]
 
     if self.cast_as_fprop_dtype:
       interpolated = interpolated.astype(self.fprop_dtype)

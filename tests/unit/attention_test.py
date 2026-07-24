@@ -15,6 +15,7 @@
 """Tests for Attentions."""
 
 import itertools
+import os
 import random
 import sys
 import types
@@ -28,6 +29,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.sharding import AxisType, Mesh
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
 
@@ -1140,8 +1142,12 @@ class AttentionTest(parameterized.TestCase):
         f"are not close. context_parallel_load_balance={context_parallel_load_balance}.",
     )
 
+  @parameterized.named_parameters(
+      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
+      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
+  )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ring_context_parallel(self):
+  def test_tpu_flash_attention_ring_context_parallel(self, context_parallel_load_balance):
     """Test equivalence between dot_product and flash attention + ring context parallelism"""
 
     cfg_cp = pyconfig.initialize(
@@ -1149,7 +1155,7 @@ class AttentionTest(parameterized.TestCase):
         **self.config_arguments,
         attention="flash",
         context_parallel_strategy="ring",
-        context_parallel_load_balance=False,
+        context_parallel_load_balance=context_parallel_load_balance,
         ici_context_parallelism=2,
         use_tokamax_splash=True,
         use_jax_splash=False,
@@ -1184,22 +1190,23 @@ class AttentionTest(parameterized.TestCase):
     )
     generic_state = nnx.state(attention_as_mha_generic)
 
-    attention_as_mha_flash_cp = Attention(
-        config=cfg_cp,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=mesh_cp,
-        attention_kernel="flash",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
-    )
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      attention_as_mha_flash_cp = Attention(
+          config=cfg_cp,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=mesh_cp,
+          attention_kernel="flash",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          model_mode=MODEL_MODE_PREFILL,
+          rngs=self.nnx_rng,
+      )
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
     mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
@@ -1216,11 +1223,16 @@ class AttentionTest(parameterized.TestCase):
 
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
-        msg="Logits from generic dot product and flash attention + ring context parallelism are not close.",
+        msg="Logits from generic dot product and flash attention + ring context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}.",
     )
 
+  @parameterized.named_parameters(
+      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
+      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
+  )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ring_context_parallel_grad(self):
+  def test_tpu_flash_attention_ring_context_parallel_grad(self, context_parallel_load_balance):
     """Test gradient equivalence between dot_product and flash attention + ring context parallelism"""
 
     cfg_cp = pyconfig.initialize(
@@ -1228,7 +1240,7 @@ class AttentionTest(parameterized.TestCase):
         **self.config_arguments,
         attention="flash",
         context_parallel_strategy="ring",
-        context_parallel_load_balance=False,
+        context_parallel_load_balance=context_parallel_load_balance,
         ici_context_parallelism=2,
         use_tokamax_splash=True,
         use_jax_splash=False,
@@ -1255,22 +1267,23 @@ class AttentionTest(parameterized.TestCase):
     )
     generic_state = nnx.state(attention_as_mha_generic)
 
-    attention_as_mha_flash_cp = Attention(
-        config=cfg_cp,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=mesh_cp,
-        attention_kernel="flash",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        model_mode=MODEL_MODE_PREFILL,
-        rngs=self.nnx_rng,
-    )
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      attention_as_mha_flash_cp = Attention(
+          config=cfg_cp,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=mesh_cp,
+          attention_kernel="flash",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          model_mode=MODEL_MODE_PREFILL,
+          rngs=self.nnx_rng,
+      )
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
     def generic_loss(lnx):
@@ -1285,11 +1298,19 @@ class AttentionTest(parameterized.TestCase):
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
     def ring_loss(lnx):
+      if context_parallel_load_balance:
+        context_parallel_size = cfg_cp.ici_context_parallelism
+        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
+        ring_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
+        ring_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+      else:
+        ring_decoder_segment_ids = decoder_segment_ids
+        ring_decoder_positions = decoder_positions
       output, _ = attention_as_mha_flash_cp(
           lnx,
           lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
+          decoder_segment_ids=ring_decoder_segment_ids,
+          inputs_positions=ring_decoder_positions,
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
@@ -1303,7 +1324,8 @@ class AttentionTest(parameterized.TestCase):
 
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
-        msg="Input gradients from generic dot product and flash attention + ring context parallelism are not close.",
+        msg="Input gradients from generic dot product and flash attention + ring context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}.",
     )
 
   @pytest.mark.tpu_only
@@ -1715,7 +1737,7 @@ class AttentionTest(parameterized.TestCase):
 
   @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
   @pytest.mark.tpu_only
-  @mock.patch("tpu_inference.layers.jax.attention_interface.sharded_ragged_paged_attention", create=True)
+  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
   def test_forward_serve_vllm(self, mock_sharded_ragged_paged_attention):
     """Tests the forward_serve_vllm method with mocked RPA attention."""
     # Setup config for vLLM RPA
@@ -1764,8 +1786,7 @@ class AttentionTest(parameterized.TestCase):
     mock_output = jnp.ones(mock_output_shape, dtype=self.dtype)
     mock_updated_kv_cache = [jnp.zeros((1,))]
 
-    mock_callable = mock.Mock(return_value=(mock_output, mock_updated_kv_cache))
-    mock_sharded_ragged_paged_attention.return_value = mock_callable
+    mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
 
     # Call the attention layer
     output, updated_kv_cache = attention_vllm(
@@ -1781,8 +1802,83 @@ class AttentionTest(parameterized.TestCase):
 
     # Assertions
     mock_sharded_ragged_paged_attention.assert_called_once()
-    mock_callable.assert_called_once()
     self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+
+    # The output of forward_serve_vllm is reshaped back to (batch, seq, ...)
+    reshaped_mock_output = mock_output.reshape(self.global_batch_size, seq_len, self.num_query_heads, self.head_dim)
+    expected_output = attention_vllm.out_projection(reshaped_mock_output)
+    self.assertTrue(jnp.allclose(output, expected_output))
+    self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
+
+  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
+  @pytest.mark.tpu_only
+  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
+  def test_forward_serve_vllm_batched_rpa(self, mock_sharded_ragged_paged_attention):
+    """Tests the forward_serve_vllm method with mocked batched RPA attention."""
+    # Setup config for vLLM Batched RPA
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_batched_rpa"
+    vllm_config_arguments["chunk_attn_window_size"] = 128
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+
+    # Create Attention instance
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+
+    # Prepare inputs
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
+    mock_kv_cache = [jnp.ones((1,))]
+
+    mock_attention_metadata = mock.Mock()
+    mock_attention_metadata.seq_lens = jnp.array([1] * self.global_batch_size)
+    mock_attention_metadata.block_tables = jnp.array([[0]] * self.global_batch_size)
+    mock_attention_metadata.query_start_loc = jnp.array(list(range(self.global_batch_size)))
+    mock_attention_metadata.request_distribution = jnp.array([self.global_batch_size])
+
+    # Mock the return value of sharded_ragged_paged_attention
+    total_tokens = self.global_batch_size * seq_len
+    mock_output_shape = (total_tokens, self.num_query_heads, self.head_dim)
+    mock_output = jnp.ones(mock_output_shape, dtype=self.dtype)
+    mock_updated_kv_cache = [jnp.zeros((1,))]
+
+    mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
+
+    # Call the attention layer
+    output, updated_kv_cache = attention_vllm(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        kv_cache=mock_kv_cache,
+        attention_metadata=mock_attention_metadata,
+    )
+
+    # Assertions
+    mock_sharded_ragged_paged_attention.assert_called_once()
+    self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+    self.assertEqual(os.environ.get("USE_BATCHED_RPA_KERNEL"), "1")
 
     # The output of forward_serve_vllm is reshaped back to (batch, seq, ...)
     reshaped_mock_output = mock_output.reshape(self.global_batch_size, seq_len, self.num_query_heads, self.head_dim)

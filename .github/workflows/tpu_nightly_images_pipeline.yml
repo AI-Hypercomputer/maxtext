@@ -107,6 +107,38 @@ jobs:
       maxtext_sha: ${{ github.sha }}
     secrets: inherit
 
+  # TODO: This is a workaround, to be removed when promote_docker_image.yml workflow is stable
+  tag_docker_image:
+    name: Promote ${{ matrix.image_name }} Docker Image
+    needs: run_ci_tests
+    if: needs.run_ci_tests.result == 'success'
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        image_name:
+          - maxtext_jax_stable
+          - maxtext_jax_nightly
+          - maxtext_post_training_nightly
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+      - name: Add tags to Docker image
+        shell: bash
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          image_name=${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${image_name}"
+
+          # Add the traceability tag to confirm it passed validation suite
+          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
+            "${SOURCE_IMAGE}:verified-${GITHUB_RUN_ID}" --quiet
+
+          # Add "latest" tag
+          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" "${SOURCE_IMAGE}:latest" --quiet
+
   notify_failure:
     name: Notify failed build
     needs: [build_and_push_docker_images, run_ci_tests, run_e2e_tests]

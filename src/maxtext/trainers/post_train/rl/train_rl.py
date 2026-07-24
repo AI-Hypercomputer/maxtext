@@ -117,7 +117,7 @@ def _tpu_inference_compat_patches():
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
 
-from maxtext.configs import pyconfig
+from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
@@ -134,14 +134,14 @@ def get_dataset(
 ) -> grain.MapDataset:
   """Download data"""
   if data_files is None:
-    data = datasets.load_dataset(dataset_name, name=tmvp_config.hf_name, split=split)
+    data = datasets.load_dataset(dataset_name, name=tmvp_config.hf_subset, split=split)
   else:  # data_files have been provided, useful for using slices of large datasets like nvidia/OpenMathInstruct-2
     data = datasets.load_dataset(
         "parquet",
         data_files={split: data_files},
         split=split,
     )
-  if tmvp_config.debug.rl:
+  if tmvp_config.debug:
     max_logging.log(f"Loaded Hugging Face dataset {dataset_name} with split {split}. Size: {len(data)}")
 
   return data
@@ -205,16 +205,6 @@ def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
   rollout_kwargs["expert_parallel_size"] = ep
 
   return rollout_kwargs
-
-
-def get_max_train_steps(trainer_config):
-  """Calculate the total number of training steps."""
-  return int(
-      trainer_config.num_batches
-      * trainer_config.rl.num_iterations
-      * trainer_config.train_fraction
-      * trainer_config.num_epoch
-  )
 
 
 def prepare_train_and_eval_dataset(
@@ -391,7 +381,7 @@ def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
   ]
 
 
-def create_rl_components(
+def create_rl_components(  # pylint: disable=too-many-positional-arguments
     trainer_config,
     sampler_config,
     sampler_devices,
@@ -401,11 +391,10 @@ def create_rl_components(
     reference_mesh,
     rollout_mesh,
     model_tokenizer,
-    max_train_steps,
 ):
   """Setup RL cluster, trainer, and optimizer."""
   # Setup optimizer
-  optimizer = utils_rl.get_optimizer(trainer_config, max_train_steps)
+  optimizer = utils_rl.get_optimizer(trainer_config)
 
   # Setup checkpointing
   if trainer_config.enable_checkpointing:
@@ -451,7 +440,7 @@ def create_rl_components(
   # We need to parse vLLM config to get the logical axis rules for the sampler config.
   vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
   argv_list = ["", str(vllm_config_path), "log_config=False"]
-  vllm_config = pyconfig.initialize(argv_list)
+  vllm_config = pyconfig.initialize(argv_list, config_class=types.RLConfig)
 
   rl_rollout_engine = (
       functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
@@ -475,7 +464,7 @@ def create_rl_components(
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
           eval_every_n_steps=trainer_config.eval_interval,
-          max_steps=max_train_steps,
+          max_steps=trainer_config.train_steps,
           mini_batch_size=trainer_config.batch_size,
           train_micro_batch_size=train_micro_batch_size,
           rollout_micro_batch_size=rollout_micro_batch_size,
@@ -656,28 +645,13 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     _rl_train_impl(argv, kwargs)
 
 
-def validate_config(config):
-  """Validates the configuration parameters for RL training."""
-  if config.optimizer_memory_host_offload:
-    raise ValueError(
-        "optimizer_memory_host_offload=True is not supported on the post-training "
-        "RL path because the underlying Tunix RLCluster/Trainer does not "
-        "support host offloading of the optimizer state."
-    )
-
-  if config.num_vocab_tiling > 1:
-    raise ValueError(
-        f"Vocab Tiling is not supported with RL. "
-        f"num_vocab_tiling was configured to {config.num_vocab_tiling}, but it must be 1 when running train_rl."
-    )
-
-
 def _rl_train_impl(argv: Sequence[str], kwargs: dict):
   """rl_train body — kept separate so _tpu_inference_compat_patches wraps it cleanly."""
   trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
-      argv, kwargs
+      argv,
+      kwargs,
+      config_class=types.RLConfig,
   )
-  validate_config(trainer_config)
 
   # Create model tokenizer first so we can plumb its pad_id into the model
   # adapter (used to synthesize segment_ids that mask pad positions from
@@ -697,7 +671,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       tokenizer_pad_id=model_tokenizer.pad_token_id,
   )
 
-  if not trainer_config.debug.rl:
+  if not trainer_config.debug:
     # Apply filter to suppress noisy logs
     noise_filter = max_logging.NoisyLogFilter()
     logging.getLogger().addFilter(noise_filter)
@@ -710,11 +684,9 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
   if not epath.Path(trainer_config.checkpoint_dir).exists():
     epath.Path(trainer_config.checkpoint_dir).mkdir(parents=True)
 
-  max_train_steps = get_max_train_steps(trainer_config)
-
   train_dataset, test_dataset = prepare_datasets(trainer_config, model_tokenizer)
 
-  if trainer_config.debug.rl:
+  if trainer_config.debug:
     max_logging.log("Train dataset samples:")
     for i, ele in enumerate(train_dataset):
       if i >= 5:
@@ -727,7 +699,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
           break
         pprint(ele)
 
-  if trainer_config.debug.rl:
+  if trainer_config.debug:
     max_logging.log("Reference Model initialized successfully")
     nnx.display(reference_model)
     max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
@@ -746,7 +718,6 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       reference_mesh,
       rollout_mesh,
       model_tokenizer,
-      max_train_steps,
   )
 
   # Run evaluation before training

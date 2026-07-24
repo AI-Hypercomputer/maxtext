@@ -88,7 +88,7 @@ class LoraUtilsTest(unittest.TestCase):
     path = lora_utils._get_lora_module_path(mock_config)
     self.assertEqual(
         path,
-        "decoder/layers/(?:[0-9]+/)?.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
+        "decoder/layers(?:_[0-9]+|/[0-9]+)?/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
     )
 
     mock_config.model_name = "gemma4-9b"
@@ -106,7 +106,7 @@ class LoraUtilsTest(unittest.TestCase):
     # Fallback to default
     self.assertEqual(
         path,
-        "decoder/layers/(?:[0-9]+/)?.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
+        "decoder/layers(?:_[0-9]+|/[0-9]+)?/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
     )
 
     mock_config.lora.lora_module_path = "custom/path"
@@ -243,6 +243,15 @@ class LoraUtilsTest(unittest.TestCase):
 
     # Verify it IS now LoRA enabled
     self.assertTrue(lora_utils.is_lora_enabled(lora_model))
+
+    # Verify quantization if weight_qtype is set
+    flat_state_paths = [".".join(str(p) for p in path) for path, _ in state.flat_state()]
+    if weight_qtype is not None:
+      self.assertTrue(any("qvalue" in path for path in flat_state_paths), "Expected quantized weights (qvalue) in state")
+    else:
+      self.assertFalse(
+          any("qvalue" in path for path in flat_state_paths), "Did not expect quantized weights (qvalue) in state"
+      )
 
     # Test fit for PeftTrainer
     trainer_cfg = peft_trainer.TrainingConfig(eval_every_n_steps=10)

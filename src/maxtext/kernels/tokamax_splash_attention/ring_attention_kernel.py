@@ -604,6 +604,7 @@ class RingSplashAttentionKernel:
           if mask_info.partial_mask_blocks is not None
           else None,
           q_sequence=_resolve_spec(mask_info.q_sequence),
+          kv_sequence=jax.sharding.PartitionSpec() if mask_info.kv_sequence is not None else None,
       )
 
     return RingSplashAttentionKernel(

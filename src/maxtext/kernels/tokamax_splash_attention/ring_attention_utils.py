@@ -41,12 +41,15 @@ def dynamic_slice_mask_info(mask_info: MaskInfo, kv_shard_idx: jax.Array, ring_s
       block_mask=slice_if_exists(mask_info.block_mask),
       partial_mask_blocks=mask_info.partial_mask_blocks,  # partial mask blocks are global
       q_sequence=mask_info.q_sequence,  # Q sequence stays stationary
+      kv_sequence=slice_if_exists(mask_info.kv_sequence),
   )
 
 
 def offset_q_sequence_for_kv_shard(mask_info: MaskInfo, kv_shard_idx: jax.Array, kv_seq_len: int) -> MaskInfo:
   """Converts lazy mask Q ids to the current local KV coordinate frame."""
   if mask_info.q_sequence is None:
+    return mask_info
+  if mask_info.kv_sequence is not None:
     return mask_info
 
   kv_shard_offset = jnp.asarray(kv_shard_idx, dtype=mask_info.q_sequence.dtype) * kv_seq_len

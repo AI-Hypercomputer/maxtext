@@ -647,7 +647,7 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
-  if config.use_batch_split_schedule and config.quantization:
+  if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
     if config.quantization == "fp8_full" and not config.use_manual_quantization:
       return QwixQuantization(
@@ -825,6 +825,9 @@ def get_quantization_rule(config: Config):
     case "int8":
       return make_qt_rule(jnp.int8)
 
+    case "fp4" | "fp4_e2m1":
+      return make_qt_rule(jnp.float4_e2m1fn)
+
     case "fp8_e5m2":
       return make_qt_rule(jnp.float8_e5m2)
 
@@ -842,7 +845,7 @@ def get_quantization_rule(config: Config):
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
-    case "int4" | "int8" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
+    case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
       return qwix.QtProvider(get_quantization_rule(config))
     case "fp8_gpu":
       return NvidaFp8Provider(get_quantization_rule(config))

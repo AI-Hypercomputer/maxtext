@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-base_config: "base.yml"
 attention: "vllm_rpa"
 model_call_mode: "inference"
 
@@ -26,6 +25,11 @@ scan_layers: false
 weight_dtype: bfloat16
 # Allow model config to be overridden by CLI kwargs
 override_model_config: true
+
+# vLLM Adapter Configurations
+vllm_hf_config_path: ""
+vllm_hf_overrides: {}
+vllm_additional_config: {}
 
 
 # -------------- Logical Axis Rules --------------

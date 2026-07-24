@@ -25,6 +25,7 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from maxtext.common import checkpointing
+from maxtext.common import emergency_checkpointing
 from maxtext.common import train_state_nnx
 from maxtext.common.common_types import ReorderStrategy
 from maxtext.common.data_loader import create_dataloader
@@ -52,7 +53,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
   # pass in model for muon
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
-    checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+    checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager(
         config.local_checkpoint_directory,
         config.local_checkpoint_period,
         mesh,
@@ -60,7 +61,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
     )
   elif config.enable_emergency_checkpoint:
     abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
-    checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
+    checkpoint_manager = emergency_checkpointing.create_emergency_checkpoint_manager(
         config.local_checkpoint_directory,
         config.checkpoint_dir,
         mesh,
@@ -191,13 +192,14 @@ def jit_train_and_eval_step(
   if config.enable_diloco:
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
     train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
-  data_sharding = sharding.get_input_data_sharding(config, mesh)
+  data_sharding_for_train = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules)
+  data_sharding_for_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
   p_train_step = jit_train_step(
-      config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=mesh
+      config, model, state, state_mesh_shardings, data_sharding_for_train, train_step, params_shardings, mesh=mesh
   )
   p_eval_step = None
   if eval_data_iterator:
-    p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
+    p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding_for_eval, eval_step)
 
   return p_train_step, p_eval_step
 
