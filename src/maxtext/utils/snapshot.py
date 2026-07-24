@@ -87,7 +87,6 @@ class Snapshotter(BaseSnapshotter):
   def load(self, abstract_state: Any, *, reset_snapshot_state: bool = True) -> Any:
     """Move arrays from workers onto TPU devices supporting non-uniform meshes."""
     import jax
-    from pathwaysutils.experimental import concatenate_by_mesh_axis, split_by_mesh_axis
     
     abstract_state = shard_single_device_arrays(abstract_state)
     
@@ -96,59 +95,42 @@ class Snapshotter(BaseSnapshotter):
         raise RuntimeError("No snapshots available to restore from.")
       pinned_state, step = self._latest_snapshot
 
-    def is_replica_active(arr):
-      try:
-        jax.block_until_ready(arr)
-        return True
-      except Exception:
-        return False
-
-    def get_active_pytree(x):
-      # Accommodate non-uniform meshes by checking axis_names length
-      if len(x.sharding.mesh.axis_names) == 1:
-        # Fully replicated single-device array. Bypass split_by_mesh_axis to avoid std::bad_cast on Pathways.
-        if hasattr(x, 'addressable_shards'):
-          for shard in x.addressable_shards:
-            try:
-              data = shard.data
-              jax.block_until_ready(data)
-              return data
-            except Exception:
-              pass
+    def _rebuild_pinned_array(x, abs_x):
+      if not isinstance(x, jax.Array):
         return x
         
-      mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
-      try:
-        all_replicas = split_by_mesh_axis.split_by_mesh_axis(x, mesh_axis_name)
-      except Exception as e:
-        import traceback
-        print(f"CRASH in split_by_mesh_axis! x.shape={x.shape}, x.sharding={x.sharding}, mesh_axis_name={mesh_axis_name}", flush=True)
-        traceback.print_exc()
-        raise e
+      # Target sharding for this array in pinned host memory
+      target_sharding = getattr(abs_x, 'sharding', None)
+      if target_sharding is None:
+        return x
         
-      active_replicas = [replica for replica in all_replicas if is_replica_active(replica)]
-      if not active_replicas:
-        raise RuntimeError("No active replicas found.")
-      return concatenate_by_mesh_axis.concatenate_by_mesh_axis(active_replicas, mesh_axis_name)
+      target_sharding = target_sharding.with_memory_kind("pinned_host")
+      target_devices = target_sharding.mesh.devices.flat
+      
+      # Build dictionary from logically matched devices
+      x_shards_by_device = {s.device.id: s for s in x.global_shards}
+      
+      buffers = []
+      for d in target_devices:
+        shard = x_shards_by_device.get(d.id, None)
+        if shard is None:
+            raise RuntimeError(f"Target device {d.id} not found in x's old shards!")
+            
+        try:
+            data = shard.data
+            jax.block_until_ready(data)
+            buffers.append(data)
+        except Exception as e:
+            raise RuntimeError(f"Data loss on target device {d.id} during array reconstruction: {e}")
+            
+      return jax.make_array_from_single_device_arrays(x.shape, target_sharding, buffers)
 
     def is_shardable_array(x):
       return isinstance(x, jax.Array)
 
     with _identity_jit_block_until_ready_context():
-      active_state = jax.tree.map(
-          lambda x: get_active_pytree(x) if is_shardable_array(x) else x,
-          pinned_state,
-      )
-
-      def _device_put_pinned(x, abs_x):
-        if is_shardable_array(x):
-          sharding = getattr(abs_x, 'sharding', None)
-          if sharding is not None:
-            sharding = sharding.with_memory_kind("pinned_host")
-          return jax.device_put(x, sharding)
-        return x
-
-      host_target_state = jax.tree.map(_device_put_pinned, active_state, abstract_state)
+      # Re-shard on host directly from live shards matching the generic abstract_state
+      host_target_state = jax.tree.map(_rebuild_pinned_array, pinned_state, abstract_state)
 
       def _device_put_to_device(x, abs_x):
         if is_shardable_array(x):
