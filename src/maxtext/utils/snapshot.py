@@ -67,7 +67,7 @@ class Snapshotter(BaseSnapshotter):
   def save(self, state: Any, step: int | None = None) -> bool:
     """Saves state after ensuring all single device arrays are sharded onto one-device-per-live-device mesh."""
     state = shard_single_device_arrays(state)
-    return super().save(state, step=step)
+    return super().save(state, step)
 
   def load(
       self,
