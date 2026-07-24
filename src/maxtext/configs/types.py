@@ -281,6 +281,10 @@ ModelName = Literal[
     "olmo3-7b",
     "olmo3-7b-pt",
     "olmo3-32b",
+    "envy-test",
+    "envy-switch-base",
+    "envy-switch-large",
+    "envy-switch-xxl",
 ]
 
 
@@ -3485,6 +3489,12 @@ class MaxTextConfig(
         )
       if self.num_experts_per_tok > 1:
         raise ValueError("Only top-1 routing is supported for Llama4 for now!")
+      if self.base_num_decoder_layers % self.interleave_moe_layer_step != 0:
+        raise ValueError(
+            f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
+            f"({self.interleave_moe_layer_step})"
+        )
+    if self.decoder_block == DecoderBlockType.ENVY:
       if self.base_num_decoder_layers % self.interleave_moe_layer_step != 0:
         raise ValueError(
             f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "

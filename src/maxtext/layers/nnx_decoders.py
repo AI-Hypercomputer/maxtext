@@ -48,6 +48,7 @@ from maxtext.models import (
     deepseek4,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
+    envy,
     gemma,
     gemma2,
     gemma3,
@@ -684,6 +685,11 @@ class NNXDecoder(nnx.Module):
           "nope_layer_interval": self.config.nope_layer_interval,
           "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
       }
+    if config.decoder_block == DecoderBlockType.ENVY:
+      layer_kwargs = {
+          "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
+      }
+
 
     if num_layers > 0:
       self.layers = self._create_scanned_layers(
@@ -727,6 +733,11 @@ class NNXDecoder(nnx.Module):
             "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
             "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
         }
+      elif config.decoder_block == DecoderBlockType.ENVY:
+        layer_kwargs = {
+            "is_moe_layer": (lyr + 1) % self.config.interleave_moe_layer_step == 0,
+        }
+
       elif config.decoder_block in {
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
@@ -1044,6 +1055,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
+        DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1203,6 +1215,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
+        DecoderBlockType.ENVY,
     }:
       return functools.partial(
           RMSNorm,
