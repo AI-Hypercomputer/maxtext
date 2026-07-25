@@ -1684,7 +1684,7 @@ def setup_initial_state(
 
   # Initialization
   elastic_manager = elastic_utils.elastic_manager
-  if elastic_manager and elastic_manager.new_slice_event.is_set():
+  if elastic_manager and elastic_manager.available_inactive_slices:
     raise elastic_utils.manager.ScaleUpSignalError("Scale up during setup (before load_state)")
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(

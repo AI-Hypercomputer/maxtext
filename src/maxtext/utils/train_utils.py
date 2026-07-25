@@ -263,7 +263,7 @@ def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, ch
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     elastic_manager = elastic_utils.elastic_manager
-    if elastic_manager and elastic_manager.new_slice_event.is_set():
+    if elastic_manager and elastic_manager.available_inactive_slices:
       raise elastic_utils.manager.ScaleUpSignalError("Scale up during setup (before data iterator)")
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
@@ -310,7 +310,7 @@ def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, ch
     # Create data_loader AFTER reordering wrapper is applied
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
-    if elastic_manager and elastic_manager.new_slice_event.is_set():
+    if elastic_manager and elastic_manager.available_inactive_slices:
       raise elastic_utils.manager.ScaleUpSignalError("Scale up during setup (before state restore)")
     state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager if restore_checkpoint else None, init_state_fn
@@ -487,3 +487,45 @@ def maybe_cleanup_dcn_throttling(config):
     max_logging.log("DCN Bandwidth throttling cleaned up successfully.")
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.error(f"Failed to clean up DCN bandwidth throttling: {e}")
+
+
+def replicate_single_device_sharded_arrays(pytree):
+  """Replicates any single-device sharded arrays across the whole mesh."""
+  mesh = None
+  for leaf in jax.tree.leaves(pytree):
+    if isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
+        leaf.sharding, jax.sharding.NamedSharding
+    ):
+      mesh = leaf.sharding.mesh
+      break
+  if mesh is None:
+    return pytree
+  replicated_sharding = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec()
+  )
+
+  def _replicate(x):
+    if isinstance(x, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
+        x.sharding, jax.sharding.SingleDeviceSharding
+    ):
+      if isinstance(x, jax.ShapeDtypeStruct):
+        return jax.ShapeDtypeStruct(
+            x.shape, x.dtype, sharding=replicated_sharding
+        )
+      return jax.device_put(x, replicated_sharding)
+    return x
+
+  return jax.tree.map(_replicate, pytree)
+
+
+def restore_original_shardings(restored_pytree, original_abstract_pytree):
+  """Puts restored state back onto the original abstract state shardings."""
+  def _put(restored_leaf, abstract_leaf):
+    if isinstance(restored_leaf, jax.Array) and isinstance(
+        abstract_leaf, (jax.Array, jax.ShapeDtypeStruct)
+    ):
+      if restored_leaf.sharding != abstract_leaf.sharding:
+        return jax.device_put(restored_leaf, abstract_leaf.sharding)
+    return restored_leaf
+
+  return jax.tree.map(_put, restored_pytree, original_abstract_pytree)

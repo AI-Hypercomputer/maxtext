@@ -786,6 +786,7 @@ def training_loop_iteration(
       state_dict = {"model": nnx.to_pure_dict(model_state)}
       if opt_state is not None:
         state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+    state_dict = train_utils.replicate_single_device_sharded_arrays(state_dict)
     snapshot_mgr.save(step, state_dict)
 
   # Pack mutated state back to dicts
@@ -859,6 +860,9 @@ def recover(
           timeout=config.elastic_timeout_seconds,
       )
       elastic_manager.active_slice_indices = all_active_slices
+      elastic_manager.inactive_slice_indices = (
+          elastic_manager.all_slice_indices - elastic_manager.active_slice_indices
+      )
       jax.config.update("jax_default_device", elastic_manager.default_device)
       _logger.info(
           "Active slices after recovery: %s",
@@ -1117,7 +1121,9 @@ def recover(
               "params": state.params,
               "opt_state": state.opt_state,
           }
-          restored_dict = snapshot_mgr.load(abstract_dict)
+          replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+          restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+          restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
           restored_state = state.replace(
               step=restored_dict["step"],
               params=restored_dict["params"],
@@ -1135,7 +1141,9 @@ def recover(
           abstract_dict = {"model": nnx.to_pure_dict(model_state)}
           if opt_state is not None:
             abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
-          restored_dict = snapshot_mgr.load(abstract_dict)
+          replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+          restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+          restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
           if hasattr(state, "model") and "model" in restored_dict:
             nnx.update(state.model, restored_dict["model"])
           if hasattr(state, "optimizer") and "optimizer" in restored_dict:
@@ -1148,7 +1156,6 @@ def recover(
           except Exception:
             pass
         if metric_logger_instance is not None:
-          metric_logger_instance.recover_metrics(restored_dict.get("metrics"))
           metric_logger_instance.learning_rate_schedule = learning_rate_schedule
 
       # Update jax_device_state with the newly built JAX objects
@@ -1200,8 +1207,6 @@ def recover(
       _logger.info(
           "ScaleUpSignalError caught during recovery: %s. Retrying recovery.", e
       )
-      if elastic_manager is not None:
-        elastic_manager.new_slice_event.clear()
 
 
 def scale_up(
@@ -1223,7 +1228,6 @@ def scale_up(
   elastic_manager.active_slice_indices = elastic.get_active_slice_indices(
       elastic_manager.slice_to_devices
   )
-  elastic_manager.new_slice_event.clear()
 
   recover(
       jax_device_state,
@@ -1302,7 +1306,7 @@ def train_loop(config, recorder, state=None):
       init_done = init_complete_event.wait(timeout=1)
 
       if elastic_manager and elastic_utils.elastic_enabled(config):
-        new_slice = elastic_manager.new_slice_event.is_set()
+        new_slice = bool(elastic_manager.available_inactive_slices)
 
         if new_slice and not init_done:
           max_logging.log(
@@ -1426,6 +1430,7 @@ def train_loop(config, recorder, state=None):
       state_dict = {"model": nnx.to_pure_dict(model_state)}
       if opt_state is not None:
         state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+    state_dict = train_utils.replicate_single_device_sharded_arrays(state_dict)
     snapshot_mgr.save(start_step, state_dict)
     # Block on the first snapshot at startup to guarantee it is secured before training begins
     snapshot_mgr.join()
@@ -1493,7 +1498,7 @@ def train_loop(config, recorder, state=None):
           # Scale-up check at the end of the step (only if elastic)
           if (
               config.elastic_enabled
-              and elastic_manager.new_slice_event.is_set()
+              and elastic_manager.available_inactive_slices
           ):
             scale_up(
                 jax_device_state,
@@ -1501,18 +1506,6 @@ def train_loop(config, recorder, state=None):
                 immutable_data,
                 active_state=jax_device_state["state"],
             )
-            # Restart monitor thread because it exited
-            _logger.info("Restarting monitor thread after scale-up...")
-            if monitor_thread is not None:
-              stop_event.set()
-              monitor_thread.join()
-            stop_event = threading.Event()
-            monitor_thread = threading.Thread(
-                target=elastic_manager._monitor_new_slices,  # pylint: disable=protected-access
-                args=(stop_event, config.elastic_new_slice_check_period),
-                daemon=True,
-            )
-            monitor_thread.start()
             # Start snapshot save immediately on the new mesh
             snapshot_mgr = python_vars["snapshot"]
             state = jax_device_state["state"]
@@ -1534,14 +1527,16 @@ def train_loop(config, recorder, state=None):
               state_dict = {"model": nnx.to_pure_dict(model_state)}
               if opt_state is not None:
                 state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+            state_dict = train_utils.replicate_single_device_sharded_arrays(state_dict)
             snapshot_mgr.save(python_vars["step"], state_dict)
 
           training_loop_iteration(jax_device_state, python_vars, immutable_data)
           python_vars["step"] += 1
 
-        except jax.errors.JaxRuntimeError as e:
+        except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
           if config.elastic_enabled and (
-              elastic.is_error_due_to_slice_down(e) or "UNAVAILABLE" in str(e) or "DATA_LOSS" in str(e)
+              isinstance(e, pathways_manager.ScaleUpSignalError)
+              or elastic.is_error_due_to_slice_down(e)
           ):
             _logger.error(
                 "[!] Elastic event detected around step %d", python_vars["step"]
@@ -1595,6 +1590,7 @@ def train_loop(config, recorder, state=None):
               state_dict = {"model": nnx.to_pure_dict(model_state)}
               if opt_state is not None:
                 state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+            state_dict = train_utils.replicate_single_device_sharded_arrays(state_dict)
             snapshot_mgr.save(python_vars["step"], state_dict)
           continue
 

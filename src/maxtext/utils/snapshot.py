@@ -2,8 +2,11 @@
 
 import logging
 import threading
+import time
 import sys
 import jax
+import jax.numpy as jnp
+import numpy as np
 
 from etils import epath
 from orbax.checkpoint.experimental.v1 import training
@@ -15,13 +18,36 @@ from pathwaysutils.experimental import concatenate_by_mesh_axis
 from pathwaysutils.experimental import split_by_mesh_axis
 
 
+
 class Snapshotter(BaseSnapshotter):
+  def save(self, step: int, state: tree_types.PyTree) -> None:
+    if self._queue.full():
+      logging.warning("Snapshotter busy. Skipping snapshot for step %d", step)
+      return
+    first_mesh = None
+    for x in jax.tree.leaves(state):
+      if not is_shardable_array(x):
+        continue
+      if isinstance(x.sharding, jax.sharding.SingleDeviceSharding) or not isinstance(x.sharding, jax.sharding.NamedSharding):
+        raise ValueError(
+            f"Cannot snapshot single device sharded array: sharding is {x.sharding}. All arrays must be on the same mesh and replicated on the replica axis index."
+        )
+      mesh = x.sharding.mesh
+      if first_mesh is None:
+        first_mesh = mesh
+      elif mesh != first_mesh:
+        raise ValueError(
+            f"All arrays must be on the same mesh. Found {mesh} and {first_mesh}."
+        )
+      replica_axis_name = mesh.axis_names[self.replica_axis_index]
+      if replica_axis_name in x.sharding.spec:
+        raise ValueError(
+            f"Array is sharded along replica axis {replica_axis_name} (spec: {x.sharding.spec}); all arrays must be replicated on the replica axis index."
+        )
+    super().save(step, state)
+
   def join(self) -> None:
     self._queue.join()
-
-  @jax.jit(donate_argnums=0)
-  def identity(array):
-    return array
 
   def load(
       self,
@@ -52,12 +78,11 @@ class Snapshotter(BaseSnapshotter):
 
     def is_replica_active(array):
       try:
-        identity(_unpack_if_prng_key(array)).block_until_ready()
-      except jax.errors.JaxRuntimeError:
-        return False
-      else:
+        data = _unpack_if_prng_key(array)
+        data[...].block_until_ready()
         return True
-
+      except (jax.errors.JaxRuntimeError, RuntimeError):
+        return False
 
     def get_active_pytree(x):
       mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
@@ -124,5 +149,6 @@ class Snapshotter(BaseSnapshotter):
         self._latest_snapshot = (host_target_state, step)
 
     return restored_state
+
 
 
