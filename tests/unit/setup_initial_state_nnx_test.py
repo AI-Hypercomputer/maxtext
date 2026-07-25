@@ -158,7 +158,7 @@ class TestSetupInitialStateNNX(unittest.TestCase):
     ts.apply_gradients(grads)
     saved = nnx.state(ts).to_pure_dict()
     checkpointing.maybe_save_checkpoint(manager, nnx.state(ts), config, data_iterator=None, step=1)
-    manager.wait_until_finished()
+    checkpointing.wait_until_finished(manager)
     return saved
 
   def test_restores_full_state_via_overlay(self):
