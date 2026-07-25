@@ -161,7 +161,7 @@ class BaseDeepseekCompressor(nnx.Module):
   ):
     self.config = config
     self.compress_rate = compress_ratio
-    self.head_dim = rotary_embedding.head_dim if hasattr(rotary_embedding, "head_dim") else config.head_dim
+    self.head_dim = config.head_dim
     self.dtype = config.dtype
     self.weight_dtype = config.weight_dtype
     self.model_mode = model_mode
@@ -864,8 +864,8 @@ class CompressedAttention(Attention):
     # Sliding window prefix layers use rope_max_timescale (10000).
     rope_theta = self.config.compressed_rope_max_timescale if self.compress_ratio > 0 else self.config.rope_max_timescale
     self.rotary_embedding = DeepSeekV4RotaryEmbedding(
-        head_dim=self.head_dim,
-        partial_rotary_factor=self.config.qk_rope_head_dim / self.head_dim,
+        head_dim=self.config.head_dim,
+        partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
         rope_theta=rope_theta,
         fprop_dtype=self.dtype,
     )
