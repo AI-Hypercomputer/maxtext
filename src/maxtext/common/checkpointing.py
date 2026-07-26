@@ -465,7 +465,7 @@ def load_state_if_possible(
       max_logging.log(f"restoring from this run's directory step {step}")
 
       def map_to_pspec(data):
-        if not enable_single_replica_ckpt_restoring:
+        if not enable_single_replica_ckpt_restoring or not isinstance(data.sharding, jax.sharding.NamedSharding):
           return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
         pspec = data.sharding.spec
         mesh = data.sharding.mesh
@@ -791,6 +791,26 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
 
 
+def _promote_unmeshed_arrays_to_replicated(state):
+  """Promotes single-device or un-meshed arrays to uniform global replicated sharding."""
+  global_mesh = None
+  for leaf in jax.tree.leaves(state):
+    if isinstance(leaf, jax.Array) and isinstance(leaf.sharding, jax.sharding.NamedSharding):
+      global_mesh = leaf.sharding.mesh
+      break
+  if global_mesh is None:
+    return state
+  replicated_sharding = jax.sharding.NamedSharding(global_mesh, jax.sharding.PartitionSpec())
+
+  def _promote(x):
+    if isinstance(x, jax.Array):
+      if not isinstance(x.sharding, jax.sharding.NamedSharding) or x.sharding.mesh != global_mesh:
+        return jax.device_put(x, replicated_sharding)
+    return x
+
+  return jax.tree.map(_promote, state)
+
+
 def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
@@ -814,6 +834,8 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   chunk_byte_size = (
       config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
   )
+
+  state = _promote_unmeshed_arrays_to_replicated(state)
 
   checkpoint_args = ocp.args.PyTreeSave(
       item=state,
