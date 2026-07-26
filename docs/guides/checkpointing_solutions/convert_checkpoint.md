@@ -12,6 +12,8 @@ The following models are supported:
 | :---------------------- | :--------------------- | :-------------------: | :---------------------: | :-------------------: | :---------------------: |
 | **Gemma2**              | 2B, 9B, 27B            |           √           |            √            |           √           |            √            |
 | **Gemma3** (Multimodal) | 4B, 12B, 27B           |           √           |            √            |           √           |            √            |
+| **Gemma4**              | 26B (MoE), 31B         |           √           |            √            |           √           |            √            |
+| **Gemma4 Small**        | E2B, E4B               |           -           |            √            |           -           |            √            |
 | **Llama3.1**            | 8B, 70B, 450B          |           √           |            √            |           √           |            √            |
 | **Qwen2.5**             | 1.5B, 7B, 14B          |           √           |            √            |           √           |            √            |
 | **Qwen3**               | 0.6B, 4B, 8B, 14B, 32B |           √           |            √            |           √           |            √            |
@@ -22,6 +24,8 @@ The following models are supported:
 | **DeepSeek3**           | 671B                   |           √           |            √            |           √           |            √            |
 | **DeepSeek3.2**         | 671B                   |           √           |            √            |           -           |            -            |
 | **Qwen3 Next**          | 80B                    |           √           |            √            |           √           |            √            |
+
+> **Note:** *Gemma4 Small* (E2B / E4B) uses the `gemma4_small` decoder block, which has per-layer KV sharing and is incompatible with `nn.scan`. Only unscanned (`scan_layers=False`) conversion is supported for these variants.
 
 ## Prerequisites
 
@@ -36,6 +40,8 @@ The following models are supported:
 Use the `to_maxtext.py` script to convert a Hugging Face model checkpoint into a MaxText checkpoint. The script will automatically download the specified model from the Hugging Face Hub, perform conversion, and save converted checkpoints to the given output directory.
 
 > **Note:** For more information, checkout [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/4b/test_qwen3_to_mt.sh) and [gemma3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma3/4b/test_gemma3_to_mt.sh).
+
+> **Note (Gemma 4 E2B / E4B):** The `gemma4-e2b` and `gemma4-e4b` variants use the `gemma4_small` decoder block, which has per-layer KV sharing and is **incompatible with `nn.scan`**. Conversion must therefore be run with `scan_layers=False` (unscanned), and any downstream training/inference run must also use `scan_layers=False`. Additionally, if you want to convert the **base** (pretrained) model rather than the instruction-tuned default, pass `--hf_model_path=google/gemma-4-E4B` (or `google/gemma-4-E2B`) explicitly — `HF_IDS` defaults to the `-it` repository. See [convert_gemma4_base.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma4/e4b/convert_gemma4_base.sh) for a full example.
 
 ### Setup Environment
 
@@ -93,6 +99,8 @@ You can find your converted checkpoint files under `${BASE_OUTPUT_DIRECTORY}/0/i
 Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugging Face format. This is useful for sharing your models or integrating them with the Hugging Face ecosystem.
 
 > **Note:** For more information, checkout [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/4b/test_qwen3_to_hf.sh).
+
+> **Note (Gemma 4 E2B / E4B):** The `gemma4-e2b` and `gemma4-e4b` variants use the `gemma4_small` decoder block and must be converted with `scan_layers=False`. If your MaxText checkpoint was fine-tuned from the base model, also pass `--hf_model_path=google/gemma-4-E4B` (or `google/gemma-4-E2B`) so the exported checkpoint bundles the base tokenizer — otherwise `to_huggingface` sources the tokenizer from `HF_IDS[gemma4-e4b]` = `google/gemma-4-E4B-it`.
 
 ### Setup Environment
 

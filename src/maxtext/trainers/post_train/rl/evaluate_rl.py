@@ -81,7 +81,7 @@ def generate_responses(
     )
     responses = responses.text
 
-    if tmvp_config.debug.rl:
+    if tmvp_config.debug:
       max_logging.log(f"Pass {p+1}/{num_passes}, responses: {responses}")
 
     for idx, response in enumerate(responses):
@@ -101,13 +101,13 @@ def _score_single(
   has_correct_format = match_format.search(raw_response) is not None
   try:
     is_correct, is_partially_correct = utils_rl.check_correctness(extracted_response, answers, tmvp_config)
-    if tmvp_config.debug.rl:
+    if tmvp_config.debug:
       max_logging.log(f"Result has_correct_format: {has_correct_format}")
       max_logging.log(f"Result is_correct: {is_correct}")
       max_logging.log(f"Result is_partially_correct: {is_partially_correct}")
   except Exception as e:  # pylint: disable=broad-exception-caught
     is_correct, is_partially_correct = False, False
-    if tmvp_config.debug.rl:
+    if tmvp_config.debug:
       max_logging.log(f"Evaluation Exception: {e} — SKIPPED")
   return is_correct, is_partially_correct, has_correct_format
 
@@ -124,7 +124,7 @@ def score_responses(tmvp_config, question, responses, answers):
   Returns:
       Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
-  if tmvp_config.debug.rl:
+  if tmvp_config.debug:
     max_logging.log("========================================")
     max_logging.log(f"Evaluation Question: {question}")
     max_logging.log(f"Evaluation Answer: {answers}")
@@ -142,7 +142,7 @@ def score_responses(tmvp_config, question, responses, answers):
     # extract the single-most frequent response
     counter = collections.Counter(extracted_responses)
     majority = counter.most_common(1)[0][0]
-    if tmvp_config.debug.rl:
+    if tmvp_config.debug:
       max_logging.log(f"Majority Response: {majority} (Count: {counter[majority]})")
 
     # Check the format for the majority response
@@ -174,7 +174,7 @@ def score_responses(tmvp_config, question, responses, answers):
     frac_correct = sum(s[0] for s in scores) / n_samples
     frac_partial = sum(s[1] for s in scores) / n_samples
     frac_format = sum(s[2] for s in scores) / n_samples
-    if tmvp_config.debug.rl:
+    if tmvp_config.debug:
       max_logging.log(f"{frac_correct*n_samples:.0f}/{n_samples} correct")
       max_logging.log(f"{frac_partial*n_samples:.0f}/{n_samples} partial")
       max_logging.log(f"{frac_format*n_samples:.0f}/{n_samples} format")

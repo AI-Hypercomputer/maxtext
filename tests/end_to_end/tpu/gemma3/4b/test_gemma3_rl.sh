@@ -43,6 +43,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     rollout_tensor_parallelism=1 \
+    use_standalone_converter=true \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     vllm_additional_config='{"maxtext_config": {"model_name": "gemma3-4b", "log_config": "false"}}'
 

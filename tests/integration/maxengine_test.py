@@ -74,8 +74,8 @@ class MaxEngineTest(unittest.TestCase):
     cfg = self._init_nnx_pyconfig(stack_prefill_result_cache=True, scan_layers=False)
     engine = maxengine.MaxEngine(cfg, jax.devices())
     num_layers = engine.config.num_decoder_layers
-    # scan_layers=False keeps the per-layer subtrees under decoder/layers, keyed by layer index.
-    cache = {"decoder": {"layers": {i: {"a": jnp.ones((1, 10)), "b": jnp.ones((1, 9))} for i in range(num_layers)}}}
+    # scan_layers=False keeps the per-layer subtrees under decoder, keyed by layers_i.
+    cache = {"decoder": {f"layers_{i}": {"a": jnp.ones((1, 10)), "b": jnp.ones((1, 9))} for i in range(num_layers)}}
 
     expected_stacked = {
         "decoder": {

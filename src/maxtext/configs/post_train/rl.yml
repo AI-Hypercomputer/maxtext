@@ -15,8 +15,6 @@
 # RL Configuration
 # This config consolidates common parameters for RL training across different model sizes
 
-base_config: "../base.yml"
-
 # ====== Hardware =====
 trainer_devices_fraction: 0.5
 sampler_devices_fraction: 0.5
@@ -72,7 +70,6 @@ rl:
   # If null, the entire model is resharded at once.
   reshard_chunk_size: null
 
-
 # ====== Models ======
 # for MaxText
 # Model and Tokenizer Configuration
@@ -95,15 +92,16 @@ decoder_layer_input: 'offload'
 query_proj: 'offload'
 key_proj: 'offload'
 value_proj: 'offload'
-checkpoint_storage_use_ocdbt: false # For Pathways
-checkpoint_storage_use_zarr3: false # For Pathways
 use_pathways: true
 log_period: 20
+
+# ====== Checkpointing configs ======
+checkpoint_storage_use_ocdbt: false # For Pathways
+checkpoint_storage_use_zarr3: false # For Pathways
 convert_checkpoint_if_possible: true
 
 # ====== Debugging ======
-debug:
-  rl: true
+debug: false
 # If true, Tunix-managed metrics measurement will be enabled. The metrics will be
 # uploaded to tensorboard.
 enable_tunix_perf_metrics: false
@@ -190,7 +188,6 @@ checkpoint_period: 50
 max_num_checkpoints_to_keep: 10
 
 # ====== Reward ======
-
 reward_exact_answer: 1.0
 reward_white_space_format_match: 1.0
 reward_exact_format_match: 0.1
@@ -199,6 +196,13 @@ reward_ratio_guess_to_answer_high:  0.0
 reward_ratio_guess_to_answer_low: 0.0
 penalty_incorrect_format: 0.0
 penalty_incorrect_answer: 0.0
+# Optional: path to a user-provided Python file with custom reward functions,
+# AND a comma-separated list of function names to import from that file.
+# Each function signature: fn(prompts, completions, tmvp_config, **kwargs) -> list[float].
+# When both are set, the built-in [match_format_exactly, match_format_approximately,
+# check_numbers] reward list is REPLACED entirely.
+reward_functions_path: ''
+reward_functions: ''
 
 # ====== Configuration for math_verify Pool ======
 # Global timeout (seconds) for math_verify calls across all examples in a batch
@@ -235,19 +239,80 @@ eval_dataset_name: 'openai/gsm8k'
 # tmvp_config, x) -> dict with keys {prompts, question, answer}. When empty
 # (default), the built-in utils_rl.process_data is used.
 dataset_processor_path: ''
-# Optional: path to a user-provided Python file with custom reward functions,
-# AND a comma-separated list of function names to import from that file.
-# Each function signature: fn(prompts, completions, tmvp_config, **kwargs) -> list[float].
-# When both are set, the built-in [match_format_exactly, match_format_approximately,
-# check_numbers] reward list is REPLACED entirely.
-reward_functions_path: ''
-reward_functions: ''
 train_split: 'train'
 eval_split: 'test'
-hf_name: 'main' # subset of Hugging Face dataset
-tokenizer_type: 'huggingface'
+hf_subset: 'main' # subset of Hugging Face dataset
 
 ##### MaxText to VLLM Converter validation parameters
 vllm_load_format: dummy # Format to load the model for conversion. Options are "auto", "dummy"
 debug_converter: false # If true, run key coverage check, weight stats, and GCS upload then exit without generation.
 gcs_debug_path: "" # If set and debug_converter=true, upload converted layer-0 and global tensors as .npy to this GCS prefix.
+
+# Logical Axis Rules
+logical_axis_rules: [
+      ['circular_repeats', []],
+
+      # Vocabulary Embedding
+      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
+      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'expert']],
+      ['activation_vocab', ['tensor', 'tensor_sequence']],
+      ['activation_vocab', ['tensor']],
+      ['activation_vocab', 'tensor_sequence'],
+      ['vocab', ['tensor', 'tensor_sequence', 'autoregressive']],
+      ['embed_vocab', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
+
+      # Attention
+      ['activation_batch_attn', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+      ['activation_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+      ['activation_kv_heads', ['tensor', 'tensor_sequence']],
+      ['activation_length_attn', ['context']],
+      ['activation_q_length', ['context']],
+      ['activation_kv_length', []],
+      ['activation_embed_attn', ['tensor']],
+      ['activation_kv', ['tensor', 'tensor_sequence']],
+      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+      ['activation_kv_head_dim', ['tensor', 'tensor_sequence']],
+      ['heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+      ['q_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+      ['kv_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+      ['qkv', []],
+      ['kv', []],
+      ['kv_head_dim', []],
+      ['q_lora', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
+      ['q_lora', ['fsdp', 'context', 'expert']],
+      ["q_lora_up_proj", []],
+      ['kv_lora', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
+      ['kv_lora', ['fsdp', 'context', 'expert']],
+      ["kv_lora_up_proj", []],
+
+      # Mixture of Experts (MoE)
+      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+      ['activation_length_moe', ['context']],
+      ['activation_norm_length_moe', ['tensor_sequence', 'context']],
+      ['activation_embed_moe', ['tensor']],
+      ['activation_mlp_moe', ['tensor', 'tensor_sequence']],
+      ['activation_exp', ['expert']],
+      ['exp', 'expert'],
+      ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+      ['embed_moe', ['fsdp', 'fsdp_transpose', 'context']],
+      ['embed_moe', ['fsdp', 'context']],
+
+      # Standard MLP / Dense Layers / Model Structure
+      ['activation_mlp', ['tensor', 'tensor_sequence']],
+      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+      ['activation_length', ['context']],
+      ['activation_norm_length', ['tensor_sequence', 'context']],
+      ['activation_embed', ['tensor']],
+      ['activation_stage', 'stage'],
+      ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+      ['gdn_head', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+      ['embed', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
+      ['embed', ['fsdp', 'context', 'expert']],
+      ['norm', ['tensor']],
+      ['layers', 'stage'],
+      ['diloco', 'diloco'],
+      ['engram_dim', ['tensor']],
+      ['dense_layers', []],
+      ['moe_layers', []],
+      ['mhc', []],
+  ]

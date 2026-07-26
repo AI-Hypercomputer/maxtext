@@ -73,8 +73,8 @@ class TestEmergencyReplicatorCheckpointManager(unittest.TestCase):
     mesh = object()
 
     with mock.patch.object(
-        checkpointing,
-        "EmergencyReplicatorCheckpointManager",
+        checkpointing.emergency_checkpointing,
+        "ReplicatorCheckpointManager",
         return_value=checkpoint_manager,
     ) as manager_cls:
       result = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(

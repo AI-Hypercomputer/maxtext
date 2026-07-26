@@ -26,6 +26,7 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
   """Converts MaxText Qwen3.5 (Scanned Block) layout to vLLM execution layout."""
 
   def convert(self, model_state: dict):
+    """Converts model_state parameters to vLLM format."""
     logging.info("\n%sStarting Qwen 3.5 Conversion (Hybrid MoE)...%s", GREEN, RESET)
     self.vllm_state = {}
 
@@ -59,6 +60,7 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
     )
 
   def _convert_attn(self, params):
+    """Converts attention weights."""
     decoder = params["base"]["decoder"]
     blocks = decoder.get("scanned_blocks", decoder.get("layers"))
     slot_prefix = "layers" if "scanned_blocks" in decoder else "layer"
@@ -180,7 +182,9 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
       gc.collect()
 
   def _convert_moe(self, params):
+    """Converts Mixture of Experts (MoE) weights."""
     decoder = params["base"]["decoder"]
+
     blocks = decoder.get("scanned_blocks", decoder.get("layers"))
     slot_prefix = "layers" if "scanned_blocks" in decoder else "layer"
 

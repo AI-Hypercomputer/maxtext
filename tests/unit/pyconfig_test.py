@@ -317,6 +317,21 @@ class PyconfigTest(unittest.TestCase):
     self.assertEqual(config.local_sa_v_layout, "SEQ_MINOR")
     self.assertFalse(config.local_use_splash_scheduler)
 
+  def test_eval_start_step_config(self):
+    """Verifies that eval_start_step defaults to 0 and can be overridden via pyconfig."""
+    config_default = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+    )
+    self.assertEqual(config_default.eval_start_step, 0)
+
+    config_override = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        eval_start_step=50,
+    )
+    self.assertEqual(config_override.eval_start_step, 50)
+
 
 if __name__ == "__main__":
   unittest.main()

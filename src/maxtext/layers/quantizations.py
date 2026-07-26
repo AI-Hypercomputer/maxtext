@@ -647,7 +647,7 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
-  if config.use_batch_split_schedule and config.quantization:
+  if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
     if config.quantization == "fp8_full" and not config.use_manual_quantization:
       return QwixQuantization(
@@ -824,6 +824,9 @@ def get_quantization_rule(config: Config):
     case "int8":
       return make_qt_rule(jnp.int8)
 
+    case "fp4" | "fp4_e2m1":
+      return make_qt_rule(jnp.float4_e2m1fn)
+
     case "fp8_e5m2":
       return make_qt_rule(jnp.float8_e5m2)
 
@@ -841,7 +844,7 @@ def get_quantization_rule(config: Config):
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
-    case "int4" | "int8" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
+    case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
       return qwix.QtProvider(get_quantization_rule(config))
     case "fp8_gpu":
       return NvidaFp8Provider(get_quantization_rule(config))
@@ -861,6 +864,12 @@ def maybe_quantize_model(model, config):
         dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+        # The MTP block reads the decoder targets, so the qwix forward pass needs them.
+        # The Linen path supplies them from the is_initializing() guard in Transformer.
+        dummy_targets = {}
+        if config.mtp_num_layers > 0:
+          dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
+          dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
         model = qwix.quantize_model(
             model,
             quantization_provider,
@@ -868,6 +877,7 @@ def maybe_quantize_model(model, config):
             dummy_positions,
             dummy_segment_ids,
             enable_dropout=False,
+            **dummy_targets,
         )
         # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
         # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches

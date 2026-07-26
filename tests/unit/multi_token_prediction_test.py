@@ -23,9 +23,11 @@ from flax import nnx
 from maxtext.configs import pyconfig
 from maxtext.layers import multi_token_prediction  # The class under test
 from maxtext.layers import embeddings
+from maxtext.layers import quantizations
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.common_types import Config
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
+from maxtext.trainers.pre_train import train as pre_train
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 
@@ -120,6 +122,24 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     max_logging.log(f"  Output shape: {output_hidden_state.shape}")
 
 
+class _MockDecoderForMTP:
+  """A mock decoder that simulates the behavior needed by MTPBlock."""
+
+  def __init__(self, config: Config):
+    self.config = config
+    self.model_mode = MODEL_MODE_TRAIN
+
+  def _apply_embedding(self, _shared_embedding, input_ids, _position_ids, _deterministic, model_mode):
+    """Returns a zero tensor with the correct embedding shape."""
+    batch_size, seq_len = input_ids.shape
+    return jnp.zeros((batch_size, seq_len, self.config.base_emb_dim), dtype=self.config.dtype)
+
+  def apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode):
+    """Returns a zero tensor with the correct logit shape."""
+    batch_size, seq_len, _ = hidden_state.shape
+    return jnp.zeros((batch_size, seq_len, self.config.vocab_size), dtype=self.config.dtype)
+
+
 # A lightweight wrapper model for robustly testing the MTPBlock.
 class MTPBlockTestModel(nnx.Module):
   """A lightweight wrapper model for testing the MTPBlock."""
@@ -137,25 +157,7 @@ class MTPBlockTestModel(nnx.Module):
         rngs=self.rngs,
     )
 
-    class MockDecoderForMTP:
-      """A mock decoder that simulates the behavior needed by MTPBlock."""
-
-      def __init__(self, config: Config):
-        self.config = config
-        self.model_mode = MODEL_MODE_TRAIN
-
-      def _apply_embedding(self, _shared_embedding, input_ids, _position_ids, _deterministic, model_mode):
-        """Returns a zero tensor with the correct embedding shape."""
-        batch_size, seq_len = input_ids.shape
-        embed_dim = self.config.base_emb_dim
-        return jnp.zeros((batch_size, seq_len, embed_dim), dtype=self.config.dtype)
-
-      def apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode):
-        """Returns a zero tensor with the correct logit shape."""
-        batch_size, seq_len, _ = hidden_state.shape
-        return jnp.zeros((batch_size, seq_len, self.config.vocab_size), dtype=self.config.dtype)
-
-    self.decoder = MockDecoderForMTP(config=self.config)
+    self.decoder = _MockDecoderForMTP(config=self.config)
 
     self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
         config=self.config,
@@ -381,6 +383,219 @@ class TestRollAndMask(unittest.TestCase):
     # This should result in no change to the tensor.
     rolled_by_0 = multi_token_prediction.roll_and_mask(input_tensor, shift=0)
     self.assertTrue(jnp.array_equal(rolled_by_0, input_tensor), "A shift of 0 should be a no-op.")
+
+
+class _MTPLossFnTestModel(nnx.Module):
+  """Tiny NNX model exposing the interface loss_fn's NNX branch drives.
+
+  Wraps the real MultiTokenPredictionBlock so the production loss_fn pop
+  sequence and calculate_mtp_loss run against real mtp_losses variables. The
+  decoder body and output head are mocked; only the MTP sow and pop path
+  matters for the regression under test.
+  """
+
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    self.rngs = rngs
+    self._shared_embedding = embeddings.Embed(
+        num_embeddings=config.vocab_size,
+        num_features=config.base_emb_dim,
+        config=config,
+        mesh=mesh,
+        rngs=rngs,
+    )
+
+    self.decoder = _MockDecoderForMTP(config)
+    self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
+        config=config,
+        mesh=mesh,
+        transformer_layer_module=NNXDecoderLayer,
+        decoder=self.decoder,
+        rngs=rngs,
+    )
+
+  def __call__(
+      self,
+      decoder_input_tokens,
+      decoder_positions,
+      decoder_segment_ids=None,
+      encoder_images=None,
+      encoder_image_masks=None,
+      enable_dropout=False,
+      decoder_target_tokens=None,
+      decoder_target_mask=None,
+  ):
+    del encoder_images, encoder_image_masks, enable_dropout
+    main_hidden_state = self._shared_embedding(decoder_input_tokens)
+    self.mtp_block(
+        self._shared_embedding,
+        main_hidden_state,
+        decoder_input_tokens,
+        decoder_target_tokens,
+        decoder_target_mask,
+        position_ids=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
+    return jnp.zeros(
+        (decoder_input_tokens.shape[0], decoder_input_tokens.shape[1], self.config.vocab_size),
+        dtype=self.config.dtype,
+    )
+
+
+class MTPLossFnZeroRegressionTest(unittest.TestCase):
+  """Regression test: the NNX loss_fn must not silently zero the MTP loss.
+
+  mtp_losses and mtp_acceptance subclass nnx.Intermediate, and nnx type filters
+  match subclasses. If the generic nnx.pop(model, nnx.Intermediate) in loss_fn
+  runs before the mtp-specific pops it consumes them, and calculate_mtp_loss
+  falls back to its 0.0 default. This drives the real production loss_fn on a
+  tiny NNX model that wraps the real MultiTokenPredictionBlock and asserts the
+  reported MTP loss is non-zero.
+  """
+
+  def setUp(self):
+    super().setUp()
+    num_devices = jax.device_count()
+    self.cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="mtp_lossfn_zero_regression_test",
+        skip_jax_distributed_system=True,
+        mtp_num_layers=2,
+        attention="dot_product",
+        enable_dropout=False,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        max_target_length=8,
+        per_device_batch_size=1,
+        vocab_size=128,
+    )
+    self.rng = jax.random.PRNGKey(43)
+    self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
+
+    self.batch_size, self.seq_len = num_devices, 8
+    key = jax.random.PRNGKey(7)
+    self.data = {
+        "inputs": jax.random.randint(key, (self.batch_size, self.seq_len), 0, self.cfg.vocab_size),
+        "inputs_position": jnp.arange(self.seq_len, dtype=jnp.int32).reshape(1, -1).repeat(self.batch_size, axis=0),
+        "inputs_segmentation": jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32),
+        "targets": jax.random.randint(key, (self.batch_size, self.seq_len), 0, self.cfg.vocab_size),
+        "targets_segmentation": jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32),
+    }
+    self.model = _MTPLossFnTestModel(config=self.cfg, mesh=self.mesh, rngs=self.rngs)
+
+  def test_mtp_loss_is_nonzero_through_real_loss_fn(self):
+    """Assert the real NNX loss_fn reports a positive MTP loss (not silently zeroed)."""
+    _, aux = pre_train.loss_fn(self.model, self.cfg, self.data, None, None, is_train=True)
+    self.assertGreater(float(aux["mtp_loss"]), 0.0)
+
+
+class _TransformerWithMTP(nnx.Module):
+  """Smallest NNX model that reads decoder targets through a real MTP block.
+
+  The call signature matches what quantizations.maybe_quantize_model passes into
+  qwix.quantize_model. decoder_target_tokens and decoder_target_mask default to
+  None, mirroring the pure-NNX forward where nothing supplies them unless
+  maybe_quantize_model does.
+  """
+
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    self._shared_embedding = embeddings.Embed(
+        num_embeddings=config.vocab_size,
+        num_features=config.base_emb_dim,
+        config=config,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    self.decoder = _MockDecoderForMTP(config)
+    self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
+        config=config,
+        mesh=mesh,
+        transformer_layer_module=NNXDecoderLayer,
+        decoder=self.decoder,
+        rngs=rngs,
+    )
+
+  def __call__(
+      self,
+      decoder_input_tokens,
+      decoder_positions,
+      decoder_segment_ids=None,
+      enable_dropout=False,
+      decoder_target_tokens=None,
+      decoder_target_mask=None,
+  ):
+    del enable_dropout
+    main_hidden_state = self._shared_embedding(decoder_input_tokens)
+    self.mtp_block(
+        self._shared_embedding,
+        main_hidden_state,
+        decoder_input_tokens,
+        decoder_target_tokens,
+        decoder_target_mask,
+        position_ids=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
+    return self.decoder.apply_output_head(self._shared_embedding, main_hidden_state, True, MODEL_MODE_TRAIN)
+
+
+class MaybeQuantizeModelMTPTest(unittest.TestCase):
+  """Qwix must forward dummy decoder targets so the MTP block's roll does not see None."""
+
+  def _build(self, mtp_num_layers):
+    """Builds a tiny pure-NNX model with qwix int8 quantization configured."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="maybe_quantize_model_mtp_test",
+        skip_jax_distributed_system=True,
+        per_device_batch_size=1,
+        mtp_num_layers=mtp_num_layers,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        max_target_length=16,
+        vocab_size=32,
+        pure_nnx=True,
+        pure_nnx_decoder=True,
+        use_qwix_quantization=True,
+        quantization="int8",
+        enable_dropout=False,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = _TransformerWithMTP(cfg, mesh, rngs=nnx.Rngs(params=0, dropout=0, aqt=0))
+    return cfg, mesh, model
+
+  def test_quantize_with_mtp_supplies_decoder_targets(self):
+    """With MTP enabled, quantizing the model runs the qwix forward pass without error.
+
+    Before the fix, maybe_quantize_model called qwix.quantize_model without the
+    decoder targets, so the MTP block rolled a None target and jnp.roll raised a
+    TypeError during tracing.
+    """
+    cfg, mesh, model = self._build(mtp_num_layers=1)
+    with mesh:
+      quantized = quantizations.maybe_quantize_model(model, cfg)
+    self.assertIsNotNone(quantized)
+
+  def test_quantize_without_mtp_still_works(self):
+    """The mtp_num_layers=0 path (no dummy targets needed) must remain unaffected."""
+    cfg, mesh, model = self._build(mtp_num_layers=0)
+    with mesh:
+      quantized = quantizations.maybe_quantize_model(model, cfg)
+    self.assertIsNotNone(quantized)
 
 
 if __name__ == "__main__":

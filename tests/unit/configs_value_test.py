@@ -121,6 +121,28 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.attention, "flash")
     self.assertTrue(config.use_tokamax_splash)
 
+  def test_tpu_tokamax_ring_config_validation_accepts_load_balance(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=True",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.context_parallel_load_balance)
+
   def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
     base_args = [
         "",
@@ -148,9 +170,21 @@ class ConfigTest(absltest.TestCase):
         (["attention_type=full"], [], "global causal"),
         (["packing=True"], ["packing=False"], "packing"),
         (
-            ["context_parallel_load_balance=True"],
+            [
+                "context_parallel_load_balance=True",
+                "ici_context_parallelism=3",
+                "max_target_length=2304",
+            ],
+            ["context_parallel_load_balance=False", "ici_context_parallelism=2"],
+            "even context_parallel_size",
+        ),
+        (
+            [
+                "context_parallel_load_balance=True",
+                "mtp_num_layers=1",
+            ],
             ["context_parallel_load_balance=False"],
-            "context_parallel_load_balance",
+            "MTP",
         ),
         (["use_ragged_attention=True"], [], "ragged attention"),
         (["attention_sink=True"], [], "attention sinks"),

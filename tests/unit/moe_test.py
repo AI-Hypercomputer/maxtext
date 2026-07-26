@@ -29,10 +29,32 @@ from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization
-from maxtext.utils import maxtext_utils
+from maxtext.utils import max_logging, maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
 import pytest
+
+
+def assert_moe_close(actual, expected, dtype):
+  """Asserts that the actual and expected MoE outputs are close."""
+  assert np.isfinite(actual).all(), "Actual output contains NaNs or Infs!"
+
+  if jax.default_backend() == "tpu" or dtype == jnp.bfloat16:
+    # TPU float32 (which is downcasted/accumulates differently) and bfloat16
+    # both exhibit accumulation drift, especially on newer hardware like v7x.
+    rtol, atol = 2e-2, 1e-2
+  else:
+    rtol, atol = 1e-5, 1e-6
+
+  max_diff = float(np.max(np.abs(actual - expected)))
+  rms_expected = float(np.sqrt(np.mean(np.square(expected))))
+  max_logging.debug(
+      f"\n[assert_moe_close] dtype={dtype}, max_diff={max_diff:.6f}, max_diff/RMS={max_diff/rms_expected:.6f}"
+  )
+
+  np.testing.assert_allclose(
+      np.array(actual, dtype=np.float32), np.array(expected, dtype=np.float32), rtol=rtol, atol=atol, equal_nan=False
+  )
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -156,7 +178,7 @@ class TokenDroppingTest(unittest.TestCase):
     actual_dispatch_mask, actual_combine_mask = self.model.generate_masks(top_k_indices, softmax_probs)
 
     self.assertTrue((expected_dispatch_mask == actual_dispatch_mask).all())
-    self.assertTrue(jax.numpy.allclose(expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02))
+    assert_moe_close(actual_combine_mask, expected_combine_mask, self.cfg.dtype)
 
 
 class MlpBlockTest(unittest.TestCase):
@@ -280,7 +302,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
     expected_updates = jnp.array([-0.01, 0.0, 0.01, 0.0])
     actual_updates = moe.calculate_load_balance_updates(top_k_indices, num_experts, rate)
 
-    self.assertTrue(jax.numpy.allclose(expected_updates, actual_updates, rtol=1e-05, atol=1e-05, equal_nan=False))
+    assert_moe_close(actual_updates, expected_updates, jnp.float32)
 
 
 class MoeLoopBlock(nnx.Module):
@@ -394,7 +416,7 @@ class RoutedMoeTest(unittest.TestCase):
         num_experts_per_tok=cfg.num_experts_per_tok,
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
-        dtype=cfg.dtype,
+        dtype=jnp.float32,
         weight_dtype=cfg.weight_dtype,
     )
     variables = model.init(
@@ -404,8 +426,8 @@ class RoutedMoeTest(unittest.TestCase):
         ),
     )
 
-    output = jax.jit(model.apply)(variables, hidden_states)  # pylint: disable=not-callable
-    return variables, output
+    output = jax.jit(model.apply)(variables, hidden_states.astype(jnp.float32))  # pylint: disable=not-callable
+    return variables, output.astype(cfg.dtype)
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
     """retrieve expected output from MoE"""
@@ -462,6 +484,7 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=True,
         per_device_batch_size=1,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(1234)
@@ -477,7 +500,7 @@ class RoutedMoeTest(unittest.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+    assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
   def test_ragged_dot(self):
@@ -491,6 +514,7 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=True,
         per_device_batch_size=1,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(1234)
@@ -506,7 +530,7 @@ class RoutedMoeTest(unittest.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+    assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
   def test_dense(self):
@@ -520,6 +544,7 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=False,
         per_device_batch_size=1,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -535,7 +560,7 @@ class RoutedMoeTest(unittest.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+    assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
   def test_moe_emb_chunking_random_routing(self):
@@ -556,6 +581,7 @@ class RoutedMoeTest(unittest.TestCase):
         mlp_bias=True,
         per_device_batch_size=1,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     cfg_non_chunked = pyconfig.initialize(
@@ -575,6 +601,7 @@ class RoutedMoeTest(unittest.TestCase):
         mlp_bias=True,
         per_device_batch_size=1,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(1234)
@@ -639,6 +666,7 @@ class RoutedMoeTest(unittest.TestCase):
         mlp_bias=True,
         per_device_batch_size=1,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(1234)
@@ -654,7 +682,7 @@ class RoutedMoeTest(unittest.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+    assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
@@ -669,6 +697,7 @@ class RoutedMoeTest(unittest.TestCase):
         per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
         ici_expert_parallelism=4,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -685,7 +714,7 @@ class RoutedMoeTest(unittest.TestCase):
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+      assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
   def test_ring_of_expert_and_tensor_parallelism(self):
@@ -702,6 +731,7 @@ class RoutedMoeTest(unittest.TestCase):
         use_ring_of_experts=True,
         ici_tensor_parallelism=2,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -718,7 +748,7 @@ class RoutedMoeTest(unittest.TestCase):
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+      assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   def _run_ragged_sort_loss_and_grad(
       self,
@@ -754,6 +784,7 @@ class RoutedMoeTest(unittest.TestCase):
           ici_expert_parallelism=2,
           use_ring_of_experts=use_ring_of_experts,
           max_target_length=128,
+          float32_gate_logits=True,
           use_ragged_sort=use_ragged_sort,
           ragged_buffer_factor=effective_buffer_factor,
           ragged_gather_fallback=ragged_gather_fallback,
@@ -890,6 +921,7 @@ class RoutedMoeTest(unittest.TestCase):
         ici_fsdp_transpose_parallelism=2,
         moe_fsdp_use_two_stage_all_gather=True,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -906,7 +938,7 @@ class RoutedMoeTest(unittest.TestCase):
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+      assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
   def test_megablox_context_parallelism(self):
@@ -921,6 +953,7 @@ class RoutedMoeTest(unittest.TestCase):
         per_device_batch_size=1,
         ici_context_parallelism=4,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -937,7 +970,7 @@ class RoutedMoeTest(unittest.TestCase):
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+      assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
   def test_megablox_expert_context_parallelism(self):
@@ -954,6 +987,7 @@ class RoutedMoeTest(unittest.TestCase):
         ici_expert_parallelism=2,
         packing=False,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -970,7 +1004,7 @@ class RoutedMoeTest(unittest.TestCase):
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+      assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
   def test_megablox_expert_tensor_parallelism(self):
@@ -986,6 +1020,7 @@ class RoutedMoeTest(unittest.TestCase):
         ici_tensor_parallelism=2,
         ici_expert_parallelism=2,
         max_target_length=128,
+        float32_gate_logits=True,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -1002,7 +1037,7 @@ class RoutedMoeTest(unittest.TestCase):
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+      assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   def test_random_routing(self):
     bs, seq_len, num_experts, num_experts_per_tok = 12, 1024, 8, 2
@@ -1471,7 +1506,8 @@ class FusedMoeTPUTest(unittest.TestCase):
     copy_weights(self.dense_model, sparse_model)
 
     inputs = self._inputs()
-    sparse_out, _, _ = sparse_model(inputs)
+    with nn_partitioning.axis_rules(sparse_cfg.logical_axis_rules):
+      sparse_out, _, _ = sparse_model(inputs)
     fused_out, lb_loss, bias_updates = self.fused_model(inputs)
 
     np.testing.assert_allclose(
@@ -1612,7 +1648,8 @@ class FusedMoeTPUTest(unittest.TestCase):
     copy_weights_prefused(self.dense_model, prefused_model)
 
     inputs = self._inputs()
-    sparse_out, _, _ = sparse_model(inputs)
+    with nn_partitioning.axis_rules(sparse_cfg.logical_axis_rules):
+      sparse_out, _, _ = sparse_model(inputs)
     prefused_out, lb_loss, bias_updates = prefused_model(inputs)
 
     np.testing.assert_allclose(

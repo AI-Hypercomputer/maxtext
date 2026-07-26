@@ -27,8 +27,6 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import pallas as pl
-from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
-from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
@@ -75,8 +73,10 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec
+from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules
 import numpy as np
+from tokamax._src.ops.attention import base as tokamax_attention_base
+from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
@@ -481,7 +481,14 @@ class AttentionOp(nnx.Module):
     self.kv_quant = kv_quant
     self.attention_type = attention_type
     # Block sizes are only used by TPU splash attention kernels. Exclude non-splash kernels
-    if self.attention_kernel not in ("dot_product", "paged", "vllm_rpa", "cudnn_flash_te", "cudnn_flash_jax"):
+    if self.attention_kernel not in (
+        "dot_product",
+        "paged",
+        "vllm_rpa",
+        "vllm_batched_rpa",
+        "cudnn_flash_te",
+        "cudnn_flash_jax",
+    ):
       if self.attention_type == AttentionType.LOCAL_SLIDING:
         self.block_q = self.config.local_sa_block_q
         self.block_kv = self.config.local_sa_block_kv
@@ -527,8 +534,6 @@ class AttentionOp(nnx.Module):
           raise ValueError("TPU Tokamax ring attention requires use_tokamax_splash=True.")
         if self.config.use_jax_splash:
           raise ValueError("TPU Tokamax ring attention requires use_jax_splash=False.")
-        if self.config.context_parallel_load_balance:
-          raise ValueError("TPU Tokamax ring attention does not support context_parallel_load_balance yet.")
         if self.config.packing:
           raise ValueError("TPU Tokamax ring attention does not support packing yet.")
         if self.attention_type != AttentionType.GLOBAL:
@@ -628,7 +633,7 @@ class AttentionOp(nnx.Module):
       self.AqtEinsum_3 = jnp.einsum
 
   def _logical_to_mesh_axes(self, logical_name):
-    logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
+    logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
@@ -1079,7 +1084,7 @@ class AttentionOp(nnx.Module):
         or (self.attention_kernel == "autoselected" and model_mode == MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
         or (self.attention_kernel == "paged")
-        or (self.attention_kernel == "vllm_rpa")
+        or (self.attention_kernel in ("vllm_rpa", "vllm_batched_rpa"))
     ):
       return self.apply_attention_dot(
           query,
@@ -1145,27 +1150,12 @@ class AttentionOp(nnx.Module):
           )
         else:
           validate_gpu_flash_attention(sinks, record_max_logits)
-          head_axis = -2
-          num_query_heads = query.shape[head_axis]
-          num_kv_heads = key.shape[head_axis]
-          if num_query_heads != num_kv_heads:
-            # Handle cases where the number of query heads is different from the number of key/value heads.
-            if num_query_heads % num_kv_heads != 0:
-              raise ValueError(
-                  f"Number of query heads ({num_query_heads}) must be divisible"
-                  f" by number of key/value heads ({num_kv_heads})."
-              )
-            # TODO Investigate if the KV copy can be eliminated. It's likely redundant.
-            q_heads_per_kv_head = num_query_heads // num_kv_heads
-
-            key = jnp.repeat(
-                key, q_heads_per_kv_head, axis=head_axis
-            )  # key shape [batch_size, kv_seq_len, num_kv_heads, head_dim]
-            value = jnp.repeat(
-                value, q_heads_per_kv_head, axis=head_axis
-            )  # value shape [batch_size, kv_seq_len, num_kv_heads, head_dim]
-
-          out = gpu_pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
+          mask = tokamax_attention_base.Mask(is_causal=True)
+          if decoder_segment_ids is not None:
+            seg_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+            mask = mask & tokamax_attention_base.Mask(seg_mask[:, None, :, :])
+          gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
+          out = gpu_flash_attn(query, key, value, logits_scale=1.0, mask=mask)
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
       validate_gpu_flash_attention(sinks, record_max_logits)
@@ -1207,52 +1197,49 @@ class AttentionOp(nnx.Module):
     """gpu ragged attention"""
     batch_size, q_length, q_heads, head_dim = q.shape
 
-    # Reshape q to match gqa's expected shape
-    q_for_gqa = q.squeeze(axis=1)
-
     # Define logical axis names - clearer and avoids repeated calls.
     b = self._logical_to_mesh_axes(self.ragged_lengths_names)
     bsnd = self._logical_to_mesh_axes(self.cache_logical_axis_names)
-    bnd = self._logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS, CACHE_KV))
-    bn = self._logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS))
+    bht = self._logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE))
 
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
-        in_specs=(bnd, bsnd, bsnd, b, None),
-        out_specs=(bnd, bn, bn),
+        in_specs=(bsnd, bsnd, bsnd, b, None),
+        out_specs=(bsnd, bht, bht),
         check_vma=False,
     )
     def wrap_ragged_attention(
         q: Array, k: Array, v: Array, lengths: Array, block_size: int
     ) -> Tuple[Array, Array, Array]:
-      # Use the original gqa function to get the attention output
-      """Wraps the GQA function with appropriate sharding.
+      """Wraps the tokamax attention with appropriate sharding.
 
       Args:
-          q: Query tensor.
-          k: Key tensor.
-          v: Value tensor.
+          q: Query tensor [batch, 1, num_heads, head_dim].
+          k: Key tensor [batch, kv_seq_len, num_kv_heads, head_dim].
+          v: Value tensor [batch, kv_seq_len, num_kv_heads, head_dim].
           lengths: Sequence lengths.
           block_size: Block size for attention.
 
       Returns:
           A tuple containing the output, max, and sum tensors.
       """
-      # Use the original gqa function to get the attention output
-      local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
-          q=q,
-          k=k,
-          v=v,
-          kv_seq_len=lengths,
-          block_k=block_size,
-          sm_scale=1.0,
+      mask = tokamax_attention_base.Mask(
+          k_end=lengths[..., None],
+      )
+      gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
+      local_out, (local_max, local_sum) = gpu_flash_attn(
+          q,
+          k,
+          v,
+          logits_scale=1.0,
+          mask=mask,
           return_residuals=True,
           normalize_output=False,
       )
       return local_out, local_max, local_sum
 
-    local_out, local_max, local_sum = wrap_ragged_attention(q_for_gqa, k, v, lengths, block_size)
+    local_out, local_max, local_sum = wrap_ragged_attention(q, k, v, lengths, block_size)
 
     # Reshape local_out, local_max and local_sum to match Maxtext requirements
     local_out = local_out.reshape(batch_size, q_length, q_heads, head_dim)

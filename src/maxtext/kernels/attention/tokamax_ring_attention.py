@@ -25,11 +25,13 @@ from typing import Any
 
 import jax
 from jax.experimental import pallas as pl
+import numpy as np
 
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.kernels.tokamax_splash_attention import ring_attention_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
+from maxtext.utils import max_utils
 
 
 def is_context_parallel_ring_requested(config: Any) -> bool:
@@ -245,6 +247,11 @@ def build_splash_config(
   block_q_dkv = min(config.sa_block_q_dkv, q_seq_len_per_shard)
   block_kv_dkv = min(config.sa_block_kv_dkv, kv_seq_len_per_shard)
   block_kv_dkv_compute = min(config.sa_block_kv_dkv_compute, kv_seq_len_per_shard)
+  if config.context_parallel_load_balance and block_q_dkv % tokamax_splash_kernel.NUM_LANES != 0:
+    raise ValueError(
+        "TPU Tokamax ring attention with context_parallel_load_balance=True requires "
+        f"sa_block_q_dkv ({block_q_dkv}) to be a multiple of {tokamax_splash_kernel.NUM_LANES} after clamping."
+    )
   return tokamax_splash_kernel.SplashConfig(
       block_q=block_q,
       block_kv=block_kv,
@@ -270,11 +277,18 @@ def build_splash_config(
   )
 
 
-def _make_causal_mask(shape: tuple[int, int], context_parallel_size: int):
+def _make_causal_mask(shape: tuple[int, int], context_parallel_size: int, *, load_balanced: bool = False):
   """Builds a lazy causal mask for ring attention."""
   if context_parallel_size <= 1:
     raise ValueError("context_parallel_size must be > 1 for ring attention.")
-  return tokamax_splash_mask.CausalMask(shape=shape, shard_count=context_parallel_size)
+  mask = tokamax_splash_mask.CausalMask(shape=shape, shard_count=context_parallel_size)
+  if load_balanced:
+    sequence_indices = max_utils.reorder_mask_load_balancing(
+        np.arange(shape[0], dtype=np.int32), context_parallel_size, 0
+    )
+    mask.q_sequence = sequence_indices
+    mask.kv_sequence = sequence_indices
+  return mask
 
 
 def make_sharded_ring_attention_kernel(
@@ -301,6 +315,7 @@ def make_sharded_ring_attention_kernel(
   mask = _make_causal_mask(
       (query.shape[2], key.shape[2]),
       context_parallel_size,
+      load_balanced=config.context_parallel_load_balance,
   )
 
   @functools.partial(jax.jit, static_argnames=["single_head_mask"])

@@ -197,18 +197,22 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
     )
+    # mtp_losses and mtp_acceptance subclass nnx.Intermediate, and nnx type filters match
+    # subclasses. Pop them before the generic Intermediate pop below, which would otherwise
+    # take them too and leave the MTP loss silently reading as 0.
+    mtp_losses_state, mtp_acceptance_state = None, None
+    if config.mtp_num_layers > 0:
+      mtp_losses_state = nnx.pop(model, mtp_losses)
+      mtp_acceptance_state = nnx.pop(model, mtp_acceptance)
+
     intermediates = nnx.pop(model, nnx.Intermediate)
     intermediate_outputs = intermediates.to_pure_dict()
 
-    # MTP sows mtp_losses/mtp_acceptance as custom Variable subclasses, not
-    # Intermediate, so the nnx.pop above misses them. Pop them here under their
-    # collection names so calculate_mtp_loss / calculate_mtp_acceptance_rate
-    # find them. Otherwise the MTP loss is silently zeroed. They are also
-    # excluded from the returned state below so they don't leak into
-    # out_shardings.
-    if config.mtp_num_layers > 0:
-      intermediate_outputs["mtp_losses"] = nnx.pop(model, mtp_losses).to_pure_dict()
-      intermediate_outputs["mtp_acceptance"] = nnx.pop(model, mtp_acceptance).to_pure_dict()
+    # Store them under the collection name so calculate_mtp_loss and
+    # calculate_mtp_acceptance_rate find them at the same path as the Linen collections.
+    if mtp_losses_state is not None and mtp_acceptance_state is not None:
+      intermediate_outputs["mtp_losses"] = mtp_losses_state.to_pure_dict()
+      intermediate_outputs["mtp_acceptance"] = mtp_acceptance_state.to_pure_dict()
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
@@ -583,7 +587,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "scalar": scalar_metrics,
       "scalars": {},
   }
-  if config.record_internal_nn_metrics:
+  if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
   if isinstance(model, nn.Module):
@@ -663,12 +667,14 @@ def training_loop_iteration(
 
   # Unpack immutable_data
   config = immutable_data["config"]  # for helpers
-  logical_axis_rules = immutable_data["logical_axis_rules"]
+  logical_axis_rules_for_train = immutable_data["logical_axis_rules_for_train"]
+  logical_axis_rules_for_eval = immutable_data["logical_axis_rules_for_eval"]
   shard_optimizer_over_data = immutable_data["shard_optimizer_over_data"]
   shard_mode = immutable_data["shard_mode"]
   eval_interval = immutable_data["eval_interval"]
   eval_steps = immutable_data["eval_steps"]
   start_step = immutable_data["start_step"]
+  eval_start_step = immutable_data["eval_start_step"]
 
   # HLO dump config
   dump_hlo = immutable_data["dump_hlo"]
@@ -692,7 +698,7 @@ def training_loop_iteration(
     else:
       step_rng_args = ()
     with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules):
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_train):
         if shard_optimizer_over_data and isinstance(model, nn.Module):
           state = sharding.maybe_shard_with_name(state, state_mesh_shardings, shard_mode)
         state, metrics = p_train_step(state, example_batch, *step_rng_args)
@@ -712,7 +718,7 @@ def training_loop_iteration(
         all_host_upload=dump_hlo_upload_all,
     )
 
-  if eval_interval > 0 and step > start_step and (step + 1) % eval_interval == 0:
+  if eval_interval > 0 and step >= start_step and step >= eval_start_step and (step + 1) % eval_interval == 0:
     assert eval_data_iterator
     # Explicitly reset the eval iterator and counters before starting the eval loop
     eval_data_iterator.reset()
@@ -724,10 +730,12 @@ def training_loop_iteration(
     # pylint: disable=not-callable
     for eval_batch in eval_data_iterator:
       # Shard input eval data
-      eval_batch = jax.device_put(eval_batch, sharding.get_input_data_sharding(config, mesh))
+      eval_batch = jax.device_put(
+          eval_batch, sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+      )
       if 0 < eval_steps <= eval_step_count:
         break
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules):
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_eval):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
       eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
       last_eval_step_completion = datetime.datetime.now()
@@ -857,12 +865,14 @@ def train_loop(config, recorder, state=None):
 
   immutable_data = {
       "config": config,
-      "logical_axis_rules": config.logical_axis_rules,
+      "logical_axis_rules_for_train": config.logical_axis_rules,
+      "logical_axis_rules_for_eval": config.logical_axis_rules_for_eval,
       "shard_optimizer_over_data": config.shard_optimizer_over_data,
       "shard_mode": config.shard_mode,
       "steps": config.steps,
       "eval_interval": config.eval_interval,
       "eval_steps": config.eval_steps,
+      "eval_start_step": config.eval_start_step,
       "save_checkpoint_on_completion": config.save_checkpoint_on_completion,
       "start_step": start_step,
       "dump_hlo": config.dump_hlo,
@@ -891,7 +901,7 @@ def train_loop(config, recorder, state=None):
 
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
-      checkpoint_manager.wait_until_finished()
+      checkpointing.wait_until_finished(checkpoint_manager)
     _job_completed_gracefully = True
   except exceptions.StopTraining as e:
     prof.deactivate()

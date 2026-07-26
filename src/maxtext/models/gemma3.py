@@ -216,6 +216,8 @@ class Gemma3DecoderLayer(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        slot=slot,
         bidirectional_mask=bidirectional_mask,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
@@ -241,7 +243,7 @@ class Gemma3DecoderLayer(nnx.Module):
     layer_output = next_layer_addition_dropped_out
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
-    if cfg.record_internal_nn_metrics:
+    if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
       self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(

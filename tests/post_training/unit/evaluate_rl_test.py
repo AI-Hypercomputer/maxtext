@@ -41,7 +41,7 @@ def _make_config(eval_mode="pass"):
       penalty_incorrect_format=-0.5,
       penalty_incorrect_answer=-0.5,
       dataset_name="test",
-      debug=SimpleNamespace(rl=False),
+      debug=False,
       eval_mode=eval_mode,
   )
 

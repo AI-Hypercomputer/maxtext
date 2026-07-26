@@ -42,7 +42,7 @@ This demo shows recovery via *checkpoint restore* on a fixed mesh: when a slice 
 
 This guide assumes you already have a **Pathways-enabled GKE cluster** created with `xpk`, and a MaxText Docker image in your Artifact Registry. If you don't:
 
-1. **Install XPK and create a Pathways GKE cluster.** Follow [Running MaxText with XPK](run_maxtext_via_xpk.md) and the [Pathways & XPK cluster guide](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster#xpk). Cluster creation and management is out of scope for this page.
+1. **Install XPK and create a Pathways GKE cluster.** Follow [Running MaxText with XPK](run_maxtext_via_xpk.md) and the [Pathways & XPK cluster guide](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster#xpk). Cluster creation and management is out of scope for this page.
 2. **Build and upload the MaxText Docker image.** See [Build MaxText](../build_maxtext.md).
 
 ```{note}

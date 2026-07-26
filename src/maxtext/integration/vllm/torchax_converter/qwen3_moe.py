@@ -38,6 +38,7 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
     logging.info("_convert_global: done")
 
   def _convert_attn(self, params):
+    """Converts attention layer weights."""
     logging.info("_convert_attn: pre_self_attention_layer_norm...")
     pre_ln = params["base"]["decoder"]["layers"]["pre_self_attention_layer_norm"]["scale"]
     convert_pre_ln = self._transpose_unstack(pre_ln)
@@ -64,6 +65,8 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
     gc.collect()
 
   def _convert_moe(self, params):
+    """Converts Mixture of Experts (MoE) weights."""
+
     logging.info("_convert_moe: extracting moe_block...")
     moe = params["base"]["decoder"]["layers"]["moe_block"].to_pure_dict()
     prefix = "vllm_model.model.layers"

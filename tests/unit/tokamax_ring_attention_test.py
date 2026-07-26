@@ -39,6 +39,14 @@ class TokamaxRingAttentionTest(absltest.TestCase):
 
     self.assertEqual(mask.shape, (16, 16))
     self.assertEqual(mask.q_sequence.tolist(), list(range(16)))
+    self.assertIsNone(mask.kv_sequence)
+
+  def test_make_causal_mask_sets_load_balanced_original_positions(self):
+    mask = tokamax_ring_attention._make_causal_mask((16, 16), 4, load_balanced=True)
+
+    expected_sequence = [0, 1, 14, 15, 2, 3, 12, 13, 4, 5, 10, 11, 6, 7, 8, 9]
+    self.assertEqual(mask.q_sequence.tolist(), expected_sequence)
+    self.assertEqual(mask.kv_sequence.tolist(), expected_sequence)
 
   def test_validate_ring_mesh_axis_requires_key_value_sequence_sharding(self):
     mesh = types.SimpleNamespace(shape={"context": 4})

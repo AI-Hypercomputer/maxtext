@@ -176,7 +176,7 @@ class MistralDecoderLayer(nnx.Module):
     layer_output = self.dropout(layer_output, deterministic=deterministic)
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
-    if cfg.record_internal_nn_metrics:
+    if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
       self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(
