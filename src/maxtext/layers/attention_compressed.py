@@ -285,15 +285,9 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
     # [batch, seq_len, emb_dim] -> [batch, seq_len, head_dim]
     gate = self.gate_proj(hidden_states)
 
-    # Ceil-pad sequence to nearest multiple of compression rate so all tokens are included
-    remainder = seq_len % self.compress_rate
-    if remainder > 0:
-      pad_len = self.compress_rate - remainder
-      chunk_kv = jnp.pad(kv, ((0, 0), (0, pad_len), (0, 0)))
-      chunk_gate = jnp.pad(gate, ((0, 0), (0, pad_len), (0, 0)), constant_values=-1e9)
-    else:
-      chunk_kv = kv
-      chunk_gate = gate
+    usable = (seq_len // self.compress_rate) * self.compress_rate
+    chunk_kv = kv[:, :usable]
+    chunk_gate = gate[:, :usable]
     first_window_position = position_ids[:, 0:1]
 
     # Process overlapping windows if there is enough sequence length
@@ -1074,7 +1068,10 @@ class CompressedAttention(Attention):
         chunked_segment_ids = padded_seg_ids.reshape(
             (decoder_segment_ids.shape[0], padding_len, compress_rate)
         )
-        compressed_segment_ids = jnp.max(chunked_segment_ids, axis=-1)
+        min_seg = jnp.min(chunked_segment_ids, axis=-1)
+        max_seg = jnp.max(chunked_segment_ids, axis=-1)
+        # Windows containing boundary tokens across different documents are assigned -1 (invalidated)
+        compressed_segment_ids = jnp.where(min_seg == max_seg, max_seg, -1)
         decoder_segment_ids_kv = jnp.concatenate([decoder_segment_ids, compressed_segment_ids], axis=1)
 
     kv = checkpoint_name(kv, "kv_proj")
@@ -1082,7 +1079,9 @@ class CompressedAttention(Attention):
     unpadded_kv = kv
     pad_kv_total = 0
 
-    # Pad total KV length to tile size multiple for Tokamax block alignment
+    # Pad total KV length to tile size multiple (config.sa_block_kv) for SPMD sequence divisibility and
+    # Tokamax dynamic splash tile boundary alignment. Note: Tokamax kernel inside AttentionOp additionally
+    # sets inner block size as min(block_kv, key_len) during kernel invocation.
     if self.attention_kernel == "flash":
       block_size = self.config.sa_block_kv
       pad_kv_total = (block_size - (kv.shape[1] % block_size)) % block_size

@@ -1642,6 +1642,8 @@ class AttentionOp(nnx.Module):
 
       if self.config.use_tokamax_splash:
         if indexer_mask is not None:
+          # Convert additive mask: 0.0 is ALLOW (attendable -> True), non-zero is DENY (masked out -> False)
+          indexer_mask = jnp.isclose(indexer_mask, 0.0)
           pad_q = mask_shape[0] - indexer_mask.shape[-2]
           pad_kv = mask_shape[1] - indexer_mask.shape[-1]
           if pad_q > 0 or pad_kv > 0:
@@ -1649,7 +1651,7 @@ class AttentionOp(nnx.Module):
             indexer_mask = jnp.pad(
                 indexer_mask,
                 pad_width,
-                constant_values=0.0,
+                constant_values=False,
             )
           # Construct the splash kernel call with dynamic mask
           def dynamic_mask_splash_kernel(q, k, v, segment, sinks, indexer_mask):
@@ -1660,14 +1662,13 @@ class AttentionOp(nnx.Module):
             kernel = partial(splash_kernel, max_logit_value=max_logit_value)
 
             if record_max_logits:
-              out, stats = kernel(q, k, v, None, sinks=sinks, save_residuals=True)
+              out, stats = kernel(q, k, v, segment, sinks=sinks, save_residuals=True)
               return out, stats["max_logits"]
             else:
-              return kernel(q, k, v, None, sinks=sinks), None
+              return kernel(q, k, v, segment, sinks=sinks), None
 
           # Iterate over batch dimension for (query, key, value, segment, sinks, mask)
           attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
-          indexer_mask = jnp.isclose(indexer_mask, 0.0)
 
           if record_max_logits:
             attention_output, max_logits = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
