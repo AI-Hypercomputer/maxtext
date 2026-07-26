@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785084708127,
+  "lastUpdate": 1785099087918,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -950,6 +950,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total GPU-UNIT Tests Duration",
             "value": 1003.1649999999955,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 2260,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Angel Mau",
+            "username": "angel-core",
+            "email": "angelmau@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "e50e394587a83a8859743de86faf11f5ef73694a",
+          "message": "Use helper functions for CheckpointManager operations.\n\nRefactors code to interact with the CheckpointManager through dedicated helper functions instead of direct method calls. This is necessary because:\n- The underlying CheckpointManager operations (`.wait_until_finished`, `.latest_step`, `.reached_preemption`) have different semantics in v1 compared to v0.\n- We need to ensure the v0 emergency checkpointer functionality remains intact.\n\nThis abstraction layer isolates the core logic from the specific CheckpointManager version\n\nPiperOrigin-RevId: 953793325",
+          "timestamp": "2026-07-25T09:14:35Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/e50e394587a83a8859743de86faf11f5ef73694a"
+        },
+        "date": 1785099087058,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total CPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 306.56399999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-POST-TRAINING-UNIT Tests Count",
+            "value": 176,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1580.9459999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total CPU-UNIT Tests Duration",
+            "value": 7901.515,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-UNIT Tests Count",
+            "value": 265,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 775.8649999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 45,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 1533.879999999991,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 2392,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 132.61700000000005,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total CPU-TORCH-REFERENCE Tests Duration",
+            "value": 214.323,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-TORCH-REFERENCE Tests Count",
+            "value": 54,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 90.799,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 1044.2749999999949,
             "unit": "sec"
           },
           {
