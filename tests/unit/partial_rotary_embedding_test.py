@@ -30,7 +30,12 @@ from jax.sharding import Mesh
 from flax import nnx
 import numpy as np
 
-from maxtext.layers.embeddings import PartialRotaryEmbedding, RotaryEmbedding, Gemma4PartialRotaryEmbedding
+from maxtext.layers.embeddings import (
+    PartialRotaryEmbedding,
+    RotaryEmbedding,
+    Gemma4PartialRotaryEmbedding,
+    Qwen3OmniMoeThinkerTextRotaryEmbedding,
+)
 from maxtext.configs import pyconfig
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -307,6 +312,100 @@ class Gemma4PartialRotaryEmbeddingTest(unittest.TestCase):
 
     expected = jnp.array([[[[1.0, 1.0, 1.0, 1.0]], [[-0.300781, 1.0, 1.38281, 1.0]]]])
     np.testing.assert_allclose(outputs, expected, atol=1e-5)
+
+
+class MropePartialRotaryEmbeddingTest(unittest.TestCase):
+  """Partial rotary on the MRoPE path (`use_mrope: true`).
+
+  Models such as qwen3.5-35b-a3b and qwen3.5-397b-a17b set both `use_mrope` and
+  `partial_rotary_factor`, so the MRoPE rotary layer has to honour the factor the
+  same way `PartialRotaryEmbedding` does on the non-MRoPE path.
+  """
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        run_name="test_mrope_partial_rotary",
+        enable_checkpointing=False,
+    )
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
+    self.nnx_rng = nnx.Rngs(params=0)
+    self.batch, self.seq, self.heads, self.head_dim = 2, 8, 4, 16
+    self.inputs = jax.random.normal(
+        jax.random.PRNGKey(0), (self.batch, self.seq, self.heads, self.head_dim), dtype=jnp.float32
+    )
+    self.positions = jnp.broadcast_to(jnp.arange(self.seq, dtype=jnp.int32), (self.batch, self.seq))
+
+  def _layer(self, partial_rotary_factor=None):
+    kwargs = {} if partial_rotary_factor is None else {"partial_rotary_factor": partial_rotary_factor}
+    return Qwen3OmniMoeThinkerTextRotaryEmbedding(
+        min_timescale=1,
+        max_timescale=10000,
+        embedding_dims=self.head_dim,
+        cast_as_fprop_dtype=False,
+        mrope_section=(2, 1, 1),
+        rngs=self.nnx_rng,
+        **kwargs,
+    )
+
+  def test_trailing_dims_pass_through(self):
+    """Only the leading `head_dim * factor` channels are rotated."""
+    factor = 0.25
+    rotary_dim = int(self.head_dim * factor)
+    outputs = self._layer(factor)(self.inputs, self.positions)
+
+    self.assertEqual(outputs.shape, self.inputs.shape)
+    np.testing.assert_array_equal(
+        np.asarray(outputs[..., rotary_dim:]),
+        np.asarray(self.inputs[..., rotary_dim:]),
+        err_msg="Channels beyond rotary_dim must be passed through untouched.",
+    )
+    self.assertFalse(
+        np.allclose(np.asarray(outputs[..., :rotary_dim]), np.asarray(self.inputs[..., :rotary_dim])),
+        msg="The leading rotary_dim channels should have been rotated.",
+    )
+
+  def test_factor_is_not_ignored(self):
+    """A partial factor must not produce the fully rotated result.
+
+    This is the regression: the layer previously ignored the factor and rotated
+    every channel, silently disagreeing with the reference implementation for
+    every model that configures both MRoPE and a partial factor.
+    """
+    partial = self._layer(0.25)(self.inputs, self.positions)
+    full = self._layer(1.0)(self.inputs, self.positions)
+    self.assertFalse(
+        np.allclose(np.asarray(partial), np.asarray(full)),
+        msg="partial_rotary_factor had no effect on the MRoPE path.",
+    )
+
+  def test_default_factor_is_unchanged(self):
+    """Callers that do not pass a factor keep the previous full-rotation behaviour."""
+    explicit_full = self._layer(1.0)(self.inputs, self.positions)
+    default = self._layer()(self.inputs, self.positions)
+    np.testing.assert_allclose(np.asarray(default), np.asarray(explicit_full), rtol=1e-6, atol=1e-6)
+
+  def test_matches_non_mrope_partial_rotary(self):
+    """With 1D (text-only) positions MRoPE degenerates to ordinary RoPE.
+
+    The two code paths must therefore agree channel for channel, which is what
+    makes the MRoPE path safe for text-only training and inference.
+    """
+    factor = 0.25
+    mrope_out = self._layer(factor)(self.inputs, self.positions)
+    reference = PartialRotaryEmbedding(
+        min_timescale=1,
+        max_timescale=10000,
+        mesh=self.mesh,
+        embedding_dims=self.head_dim,
+        partial_rotary_factor=factor,
+        cast_as_fprop_dtype=False,
+        rngs=self.nnx_rng,
+    )(self.inputs, self.positions)
+
+    np.testing.assert_allclose(np.asarray(mrope_out), np.asarray(reference), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

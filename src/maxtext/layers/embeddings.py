@@ -1668,6 +1668,7 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
       fprop_dtype: DType = jnp.bfloat16,
       mrope_section: tuple[int, int, int] | None = None,
       attention_scaling: float = 1.0,
+      partial_rotary_factor: float = 1.0,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the Qwen3OmniMoeThinkerTextRotaryEmbedding module.
@@ -1681,13 +1682,19 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
       mrope_section: Tuple of (temporal_dim, height_dim, width_dim) for MRoPE.
                      Defaults to [24, 20, 20] if None.
       attention_scaling: Scaling factor applied to cos/sin embeddings. Defaults to 1.0.
+      partial_rotary_factor: Ratio of leading head dimensions to apply ROPE to;
+        the remaining dims pass through unchanged (Qwen3.5 uses 0.25). Defaults
+        to 1.0 (rotate the full head dim).
       rngs: rng keys passed in by nnx.bridge.to_linen.
     """
+    self.head_dim = embedding_dims
+    self.partial_rotary_factor = partial_rotary_factor
+    self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
     super().__init__(
         min_timescale=min_timescale,
         max_timescale=max_timescale,
         mesh=None,
-        embedding_dims=embedding_dims,
+        embedding_dims=self.rotary_dim,
         cast_as_fprop_dtype=cast_as_fprop_dtype,
         fprop_dtype=fprop_dtype,
         rngs=rngs,
@@ -1748,10 +1755,16 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     """
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, head_dim].")
-    if self.embedding_dims != inputs.shape[3]:
+    if self.head_dim != inputs.shape[3]:
       raise ValueError(
           "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
       )
+
+    # Partial rotary: only the first `rotary_dim` channels are rotated, the rest pass through.
+    if self.rotary_dim < self.head_dim:
+      inputs_rot, inputs_pass = jnp.split(inputs, [self.rotary_dim], axis=-1)
+    else:
+      inputs_rot, inputs_pass = inputs, None
 
     # Handle both 2D (text-only) and 3D (multimodal) position IDs
     if position.ndim == 2:
@@ -1760,25 +1773,27 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     elif position.ndim != 3 or position.shape[0] != 3:
       raise ValueError(f"Position IDs must be 2D (batch, seq) or 3D (3, batch, seq), got shape {position.shape}")
 
-    # Compute frequencies: (3, batch, seq, 1) @ (head_dim // 2, 1) -> (3, batch, seq, head_dim // 2)
-    inv_freq_expanded = (1.0 / self.timescale)[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (1, 1, 1, head_dim//2)
+    # Compute frequencies: (3, batch, seq, 1) @ (rotary_dim // 2, 1) -> (3, batch, seq, rotary_dim // 2)
+    inv_freq_expanded = (1.0 / self.timescale)[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (1, 1, 1, rotary_dim//2)
     position_expanded = position[..., jnp.newaxis]  # (3, batch, seq, 1)
-    freqs = position_expanded * inv_freq_expanded  # (3, batch, seq, head_dim//2)
+    freqs = position_expanded * inv_freq_expanded  # (3, batch, seq, rotary_dim//2)
 
     # Apply interleaved MRoPE pattern for 3D positions
-    freqs = self._apply_interleaved_mrope(freqs)  # (batch, seq, head_dim//2)
+    freqs = self._apply_interleaved_mrope(freqs)  # (batch, seq, rotary_dim//2)
 
     # Compute sin and cos
-    # Concatenate to get full head_dim: (batch, seq, head_dim//2) -> (batch, seq, head_dim)
+    # Concatenate to get full rotary_dim: (batch, seq, rotary_dim//2) -> (batch, seq, rotary_dim)
     emb = jnp.concatenate([freqs, freqs], axis=-1)  # Duplicate for both halves
-    cos_emb = jnp.cos(emb) * self.attention_scaling  # (batch, seq, head_dim)
-    sin_emb = jnp.sin(emb) * self.attention_scaling  # (batch, seq, head_dim)
+    cos_emb = jnp.cos(emb) * self.attention_scaling  # (batch, seq, rotary_dim)
+    sin_emb = jnp.sin(emb) * self.attention_scaling  # (batch, seq, rotary_dim)
 
-    # Expand for heads dimension: (batch, seq, head_dim) -> (batch, seq, 1, head_dim)
+    # Expand for heads dimension: (batch, seq, rotary_dim) -> (batch, seq, 1, rotary_dim)
     cos_emb = cos_emb[:, :, jnp.newaxis, :]
     sin_emb = sin_emb[:, :, jnp.newaxis, :]
 
-    x_out = self.apply_rotary(inputs, cos_emb, sin_emb)
+    x_out = self.apply_rotary(inputs_rot, cos_emb, sin_emb)
+    if inputs_pass is not None:
+      x_out = jnp.concatenate([x_out, inputs_pass], axis=-1)
 
     if self.cast_as_fprop_dtype:
       x_out = x_out.astype(self.fprop_dtype)
