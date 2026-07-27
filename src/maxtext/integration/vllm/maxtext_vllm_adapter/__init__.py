@@ -14,6 +14,7 @@
 
 """MaxText vLLM adapter package."""
 
+import os
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import register_model
 from .adapter import MaxTextForCausalLM
@@ -22,13 +23,21 @@ from .adapter import MaxTextForCausalLM
 logger = init_logger(__name__)
 
 
-def register():
+def register(config=None):
   """Register MaxTextForCausalLM model with tpu_inference and vllm.
 
   Note, this function is invoked directly by the vLLM engine during startup. As such,
   it leverages vLLM logging to report its status.
   """
-  logger.info("Registering MaxTextForCausalLM model with tpu_inference and vllm.")
+  model_name = os.environ.get("MAXTEXT_MODEL_NAME")
+  if config:
+    model_name = config.model_name
+    os.environ["MAXTEXT_MODEL_NAME"] = model_name
+
+  if model_name and model_name.startswith("qwen3-vl"):
+    MaxTextForCausalLM.supports_multimodal = True
+    logger.info("Setting supports_multimodal = True for %s", model_name)
+
   register_model("MaxTextForCausalLM", MaxTextForCausalLM)
 
   # Dynamically apply KVCacheManager patch when registering the adapter
@@ -36,5 +45,23 @@ def register():
   from .adapter import patch_kv_cache_manager
 
   patch_kv_cache_manager()
+
+  if model_name and model_name.startswith("qwen3-vl"):
+    try:
+      from vllm.multimodal import MULTIMODAL_REGISTRY
+      from vllm.model_executor.models.qwen3_vl import (
+          Qwen3VLMultiModalProcessor,
+          Qwen3VLProcessingInfo,
+          Qwen3VLDummyInputsBuilder,
+      )
+
+      logger.info("Registering Qwen3VLMultiModalProcessor for MaxTextForCausalLM.")
+      MULTIMODAL_REGISTRY.register_processor(
+          Qwen3VLMultiModalProcessor,
+          info=Qwen3VLProcessingInfo,
+          dummy_inputs=Qwen3VLDummyInputsBuilder,
+      )(MaxTextForCausalLM)
+    except ImportError as e:
+      logger.warning("Failed to register Qwen3VLMultiModalProcessor: %s", e)
 
   logger.info("Successfully registered MaxTextForCausalLM model.")

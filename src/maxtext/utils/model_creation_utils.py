@@ -1112,10 +1112,16 @@ def from_pretrained(
 
       jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
+      transforms = {}
+      if not is_nnx_checkpoint and not config.scan_layers:
+        transforms = {
+            r"params/params/decoder/layers_(\d+)/(.*)": ocp.Transform(original_key=r"params/params/decoder/layers/\1/\2")
+        }
+
       restored = ckptr.restore(
           epath.Path(config.load_parameters_path),
           item=item_to_restore,
-          transforms={},
+          transforms=transforms,
           restore_args=restore_args,
       )
 
