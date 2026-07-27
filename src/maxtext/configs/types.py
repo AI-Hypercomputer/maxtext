@@ -3738,6 +3738,7 @@ class MaxTextConfig(
 
 class RLConfig(
     LogitsAndLoss,
+    Engram,
     RematAndOffload,
     Attention,
     LayoutAndSharding,
