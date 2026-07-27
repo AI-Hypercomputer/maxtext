@@ -169,12 +169,16 @@ class FragmentedTreeManipulator:
 
     return cls(keypath_to_is_scanned, fragment_to_layer_indices, num_fragments)
 
-  def get_flat_fragment(self, tree, fragment_idx: int, has_replica_dim: bool = False) -> dict[str, Any]:
+  def get_flat_fragment(
+      self, tree, fragment_idx: int, has_replica_dim: bool = False, exclude_router: bool = False
+  ) -> dict[str, Any]:
     """Extracts a flat dictionary containing parameters for the specified fragment index."""
     kvs, _ = jax.tree_util.tree_flatten_with_path(tree)
     flat_frag = {}
     for k, v in kvs:
       keystr = jax.tree_util.keystr(k)
+      if exclude_router and ("gate" in keystr.lower() or "router" in keystr.lower()):
+        continue
       is_scanned = self.keypath_to_is_scanned.get(keystr, False)
       if fragment_idx == 0:
         if not is_scanned:
@@ -188,12 +192,17 @@ class FragmentedTreeManipulator:
             flat_frag[keystr] = v[indices]  # Slice first dimension (layer axis)
     return flat_frag
 
-  def apply_flat_fragment(self, tree, fragment_idx: int, flat_fragment: dict[str, Any], has_replica_dim: bool = False):
+  def apply_flat_fragment(
+      self, tree, fragment_idx: int, flat_fragment: dict[str, Any], has_replica_dim: bool = False, exclude_router: bool = False
+  ):
     """Merges a flat fragment dictionary back into the full parameters PyTree structure."""
     kvs, treedef = jax.tree_util.tree_flatten_with_path(tree)
     new_kvs = []
     for k, v in kvs:
       keystr = jax.tree_util.keystr(k)
+      if exclude_router and ("gate" in keystr.lower() or "router" in keystr.lower()):
+        new_kvs.append(v)
+        continue
       is_scanned = self.keypath_to_is_scanned.get(keystr, False)
       if fragment_idx == 0:
         if not is_scanned:
@@ -211,6 +220,30 @@ class FragmentedTreeManipulator:
         else:
           new_kvs.append(v)
     return jax.tree_util.tree_unflatten(treedef, new_kvs)
+
+
+def get_flat_router_params(tree, has_replica_dim: bool = False) -> dict[str, Any]:
+  """Extracts a flat dictionary containing router/gate parameters."""
+  kvs, _ = jax.tree_util.tree_flatten_with_path(tree)
+  flat = {}
+  for k, v in kvs:
+    keystr = jax.tree_util.keystr(k)
+    if "gate" in keystr.lower() or "router" in keystr.lower():
+      flat[keystr] = v
+  return flat
+
+
+def apply_flat_router_params(tree, flat_router: dict[str, Any]):
+  """Merges a flat router parameter dictionary back into PyTree structure."""
+  kvs, treedef = jax.tree_util.tree_flatten_with_path(tree)
+  new_kvs = []
+  for k, v in kvs:
+    keystr = jax.tree_util.keystr(k)
+    if "gate" in keystr.lower() or "router" in keystr.lower():
+      new_kvs.append(flat_router[keystr])
+    else:
+      new_kvs.append(v)
+  return jax.tree_util.tree_unflatten(treedef, new_kvs)
 
 
 def extract_router_params(tree):
@@ -455,6 +488,73 @@ def build_diloco_train_step(
       nesterov=True,
   )
 
+  moe_router_period = getattr(config, "moe_router_syncing_period", -1)
+  exclude_router = (moe_router_period > 0)
+
+  def synchronize_router(state):
+    outer_router_params = get_flat_router_params(state.params, has_replica_dim=False)
+    if not outer_router_params:
+      return state
+
+    inner_model_params = (
+        nnx.filter_state(state.inner_state.model, nnx.Param) if config.pure_nnx else state.inner_state.params
+    )
+    inner_router_params = get_flat_router_params(inner_model_params, has_replica_dim=True)
+
+    broadcast_outer_router = drjax.broadcast(outer_router_params, mesh=mesh)
+    unreduced_grads = jax.tree.map(lambda x, y: x - y, broadcast_outer_router, inner_router_params)
+
+    averaged_pseudo_grad = drjax.reduce_mean(unreduced_grads)
+
+    trace_router = get_flat_router_params(state.outer_opt_state[0].trace, has_replica_dim=False)
+    opt_state_router = (optax.TraceState(trace=trace_router), optax.EmptyState())
+
+    updates_router, new_opt_state_router = outer_optimizer.update(
+        averaged_pseudo_grad, opt_state_router, params=outer_router_params
+    )
+    new_outer_router_params = optax.apply_updates(outer_router_params, updates_router)
+
+    new_params = apply_flat_router_params(state.params, new_outer_router_params)
+    new_trace = apply_flat_router_params(state.outer_opt_state[0].trace, new_opt_state_router[0].trace)
+    new_outer_opt_state = (optax.TraceState(trace=new_trace), state.outer_opt_state[1])
+
+    broadcast_new_outer_router = drjax.broadcast(new_outer_router_params, mesh=mesh)
+
+    def replace_nnx_router_params(s, outer_router_replica):
+      full_params = nnx.filter_state(s.model, nnx.Param)
+      if config.communication_overlapping_alpha > 0.0:
+        inner_router = get_flat_router_params(full_params, has_replica_dim=False)
+        alpha = config.communication_overlapping_alpha
+        merged_router = jax.tree.map(lambda i, o: alpha * i + (1 - alpha) * o, inner_router, outer_router_replica)
+      else:
+        merged_router = outer_router_replica
+      new_full_params = apply_flat_router_params(full_params, merged_router)
+      non_param_model = nnx.filter_state(s.model, nnx.Not(nnx.Param))
+      new_model = nnx.merge_state(non_param_model, new_full_params)
+      result = type(s)({})
+      result["model"] = new_model
+      result["optimizer"] = s["optimizer"]
+      return result
+
+    def replace_linen_router_params(s, outer_router_replica):
+      if config.communication_overlapping_alpha > 0.0:
+        inner_router = get_flat_router_params(s.params, has_replica_dim=False)
+        alpha = config.communication_overlapping_alpha
+        merged_router = jax.tree.map(lambda i, o: alpha * i + (1 - alpha) * o, inner_router, outer_router_replica)
+      else:
+        merged_router = outer_router_replica
+      new_params = apply_flat_router_params(s.params, merged_router)
+      return s.replace(params=new_params)
+
+    replace_fn = replace_nnx_router_params if config.pure_nnx else replace_linen_router_params
+    new_inner_state = drjax.map_fn(replace_fn, (state.inner_state, broadcast_new_outer_router), mesh=mesh)
+
+    return state.replace(
+        params=new_params,
+        outer_opt_state=new_outer_opt_state,
+        inner_state=new_inner_state,
+    )
+
   def synchronize(state):
     # Calculate the delta between the current replica's state and the global
     # state (since last synchronization).
@@ -569,6 +669,10 @@ def build_diloco_train_step(
         pre_sync_loss=new_pre_sync_loss,
     )
 
+    if moe_router_period > 0:
+      is_router_sync_step = jax.lax.bitwise_and(new_step > 0, new_step % moe_router_period == 0)
+      state = jax.lax.cond(is_router_sync_step, synchronize_router, lambda s: s, state)
+
     if config.enable_streaming_diloco:
       manipulator = FragmentedTreeManipulator.create(state.params, config)
 
@@ -581,11 +685,11 @@ def build_diloco_train_step(
 
       def synchronize_fragment(state, idx):
         # 1. Extract global and local parameters for the fragment
-        outer_params_frag = manipulator.get_flat_fragment(state.params, idx, has_replica_dim=False)
+        outer_params_frag = manipulator.get_flat_fragment(state.params, idx, has_replica_dim=False, exclude_router=exclude_router)
         inner_model_params = (
             nnx.filter_state(state.inner_state.model, nnx.Param) if config.pure_nnx else state.inner_state.params
         )
-        inner_params_frag = manipulator.get_flat_fragment(inner_model_params, idx, has_replica_dim=True)
+        inner_params_frag = manipulator.get_flat_fragment(inner_model_params, idx, has_replica_dim=True, exclude_router=exclude_router)
 
         # 2. Compute the pseudo-gradient: outer - inner
         broadcast_outer_frag = drjax.broadcast(outer_params_frag, mesh=mesh)
@@ -595,7 +699,7 @@ def build_diloco_train_step(
         averaged_pseudo_grad = drjax.reduce_mean(unreduced_grads)
 
         # 4. Extract outer optimizer state for this fragment (TraceState is (trace, EmptyState))
-        trace_frag = manipulator.get_flat_fragment(state.outer_opt_state[0].trace, idx, has_replica_dim=False)
+        trace_frag = manipulator.get_flat_fragment(state.outer_opt_state[0].trace, idx, has_replica_dim=False, exclude_router=exclude_router)
         opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
 
         # 5. Run outer optimizer on the fragment
@@ -605,9 +709,9 @@ def build_diloco_train_step(
         new_outer_params_frag = optax.apply_updates(outer_params_frag, updates_frag)
 
         # 6. Re-merge updated params and optimizer states back to full PyTree
-        new_params = manipulator.apply_flat_fragment(state.params, idx, new_outer_params_frag, has_replica_dim=False)
+        new_params = manipulator.apply_flat_fragment(state.params, idx, new_outer_params_frag, has_replica_dim=False, exclude_router=exclude_router)
         new_trace = manipulator.apply_flat_fragment(
-            state.outer_opt_state[0].trace, idx, new_opt_state_frag[0].trace, has_replica_dim=False
+            state.outer_opt_state[0].trace, idx, new_opt_state_frag[0].trace, has_replica_dim=False, exclude_router=exclude_router
         )
         new_outer_opt_state = (optax.TraceState(trace=new_trace), state.outer_opt_state[1])
 
@@ -618,7 +722,7 @@ def build_diloco_train_step(
 
       def apply_fragment(state, idx):
         # Get synced global params fragment
-        outer_params_frag = manipulator.get_flat_fragment(state.params, idx, has_replica_dim=False)
+        outer_params_frag = manipulator.get_flat_fragment(state.params, idx, has_replica_dim=False, exclude_router=exclude_router)
 
         # Broadcast to replicas
         broadcast_outer_frag = drjax.broadcast(outer_params_frag, mesh=mesh)
@@ -627,13 +731,13 @@ def build_diloco_train_step(
         def replace_nnx_model_params_frag(s, outer_frag_replica):
           full_params = nnx.filter_state(s.model, nnx.Param)
           if config.communication_overlapping_alpha > 0.0:
-            inner_frag = manipulator.get_flat_fragment(full_params, idx, has_replica_dim=False)
+            inner_frag = manipulator.get_flat_fragment(full_params, idx, has_replica_dim=False, exclude_router=exclude_router)
             alpha = config.communication_overlapping_alpha
             merged_frag = jax.tree.map(lambda i, o: alpha * i + (1 - alpha) * o, inner_frag, outer_frag_replica)
           else:
             merged_frag = outer_frag_replica
 
-          new_full_params = manipulator.apply_flat_fragment(full_params, idx, merged_frag, has_replica_dim=False)
+          new_full_params = manipulator.apply_flat_fragment(full_params, idx, merged_frag, has_replica_dim=False, exclude_router=exclude_router)
           non_param_model = nnx.filter_state(s.model, nnx.Not(nnx.Param))
           new_model = nnx.merge_state(non_param_model, new_full_params)
 
@@ -644,12 +748,12 @@ def build_diloco_train_step(
 
         def replace_linen_model_params_frag(s, outer_frag_replica):
           if config.communication_overlapping_alpha > 0.0:
-            inner_frag = manipulator.get_flat_fragment(s.params, idx, has_replica_dim=False)
+            inner_frag = manipulator.get_flat_fragment(s.params, idx, has_replica_dim=False, exclude_router=exclude_router)
             alpha = config.communication_overlapping_alpha
             merged_frag = jax.tree.map(lambda i, o: alpha * i + (1 - alpha) * o, inner_frag, outer_frag_replica)
           else:
             merged_frag = outer_frag_replica
-          new_params = manipulator.apply_flat_fragment(s.params, idx, merged_frag, has_replica_dim=False)
+          new_params = manipulator.apply_flat_fragment(s.params, idx, merged_frag, has_replica_dim=False, exclude_router=exclude_router)
           return s.replace(params=new_params)
 
         # Apply to replica inner states

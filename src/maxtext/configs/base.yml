@@ -884,6 +884,7 @@ init_weights_seed: 0
 # DiLoCo params.
 enable_diloco: false
 diloco_sync_period: 36
+moe_router_syncing_period: -1
 diloco_outer_lr: 0.3
 diloco_outer_momentum: 0.9
 # DCN bandwidth throttling parameters (used for simulating slow networks).

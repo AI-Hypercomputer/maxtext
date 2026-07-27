@@ -1518,6 +1518,32 @@ class DilocoParams(BaseModel):
 
   enable_diloco: bool = Field(False, description="Enable Diloco parallelism")
   diloco_sync_period: int = Field(36, description="Diloco sync period.")
+  moe_router_syncing_period: int = Field(
+      -1,
+      description=(
+          "Period (in steps) for synchronizing MoE router parameters across replicas."
+          " Must divide diloco_sync_period when > 0. Defaults to -1."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_moe_router_syncing_period(self) -> "DilocoParams":
+    if self.moe_router_syncing_period != -1:
+      if self.moe_router_syncing_period <= 0:
+        raise ValueError(
+            f"moe_router_syncing_period must be > 0 or -1, got {self.moe_router_syncing_period}"
+        )
+      if self.moe_router_syncing_period > self.diloco_sync_period:
+        raise ValueError(
+            f"moe_router_syncing_period ({self.moe_router_syncing_period}) cannot be greater than"
+            f" diloco_sync_period ({self.diloco_sync_period})"
+        )
+      if self.diloco_sync_period % self.moe_router_syncing_period != 0:
+        raise ValueError(
+            f"diloco_sync_period ({self.diloco_sync_period}) must be divisible by"
+            f" moe_router_syncing_period ({self.moe_router_syncing_period})"
+        )
+    return self
   diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
   diloco_outer_momentum: float = Field(0.9, description="momentum for outer optimizer.")
   dcn_bandwidth_limit: str = Field(
