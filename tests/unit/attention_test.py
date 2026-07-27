@@ -2093,7 +2093,6 @@ class MLATest(attention_test_util.MLATestBase):
       self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
       self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=2e-02, atol=2e-02, equal_nan=False))
 
-  @pytest.mark.tpu_only
   def test_sliced_mla_projections(self):
     config_arguments = self.config_arguments.copy()
 
@@ -2102,7 +2101,7 @@ class MLATest(attention_test_util.MLATestBase):
     config_arguments_sliced["use_sliced_mla_projections"] = True
 
     cfg_normal, mla_normal = self.init_mla(config_arguments, rope_type="default")
-    cfg_sliced, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")
+    _, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")
 
     # Sync weights
     nnx.update(mla_sliced, nnx.state(mla_normal))
@@ -2128,9 +2127,7 @@ class MLATest(attention_test_util.MLATestBase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    self.assertTrue(
-        jnp.allclose(out_normal_train, out_sliced_train, rtol=1e-05, atol=1e-05, equal_nan=False)
-    )
+    self.assertTrue(jnp.allclose(out_normal_train, out_sliced_train, rtol=1e-05, atol=1e-05, equal_nan=False))
 
     # Test PREFILL mode followed by AUTOREGRESSIVE mode to test caching
     prefill_length = cfg_normal.max_prefill_predict_length
@@ -2138,7 +2135,7 @@ class MLATest(attention_test_util.MLATestBase):
 
     # Re-initialize to ensure clean cache
     cfg_normal, mla_normal = self.init_mla(config_arguments, rope_type="default")
-    cfg_sliced, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")
+    _, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")
     nnx.update(mla_sliced, nnx.state(mla_normal))
 
     lnx_prefill = lnx[:, 0:prefill_length, :]
@@ -2163,9 +2160,7 @@ class MLATest(attention_test_util.MLATestBase):
         model_mode=MODEL_MODE_PREFILL,
     )
 
-    self.assertTrue(
-        jnp.allclose(out_normal_prefill, out_sliced_prefill, rtol=1e-05, atol=1e-05, equal_nan=False)
-    )
+    self.assertTrue(jnp.allclose(out_normal_prefill, out_sliced_prefill, rtol=1e-05, atol=1e-05, equal_nan=False))
 
     # Run autoregressive steps
     for idx in range(prefill_length, decode_total_length):
@@ -2188,9 +2183,7 @@ class MLATest(attention_test_util.MLATestBase):
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
 
-      self.assertTrue(
-          jnp.allclose(out_normal_idx, out_sliced_idx, rtol=1e-05, atol=1e-05, equal_nan=False)
-      )
+      self.assertTrue(jnp.allclose(out_normal_idx, out_sliced_idx, rtol=1e-05, atol=1e-05, equal_nan=False))
 
   def test_projection_initialization(self):
     """Tests that MLA and Attention layers initialize the correct projection weights."""
