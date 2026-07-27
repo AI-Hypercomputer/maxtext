@@ -20,14 +20,7 @@ base_num_kv_heads: 64
 base_mlp_dim: 12288
 base_moe_mlp_dim: 2048
 
-# -----------------------------------------------------------------------------
-# SANITY CHECK / INITIAL ONBOARDING CONFIG:
-# We are currently using 4 decoder layers to run training on a single 8-device VM.
-# In production / scaled runs, set base_num_decoder_layers to 78.
-# -----------------------------------------------------------------------------
-base_num_decoder_layers: 4
-# Original full layer count:
-# base_num_decoder_layers: 78
+base_num_decoder_layers: 78
 
 first_num_dense_layers: 3
 mlp_activations: ["silu","linear"]
