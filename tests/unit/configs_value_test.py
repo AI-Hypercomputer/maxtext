@@ -143,6 +143,49 @@ class ConfigTest(absltest.TestCase):
 
     self.assertTrue(config.context_parallel_load_balance)
 
+  def test_tpu_tokamax_ring_config_validation_accepts_packing(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.packing)
+
+  def test_tpu_tokamax_ring_config_validation_accepts_packed_load_balance(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=True",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.context_parallel_load_balance)
+    self.assertTrue(config.packing)
+
   def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
     base_args = [
         "",
@@ -168,7 +211,6 @@ class ConfigTest(absltest.TestCase):
         (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
         (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),
         (["attention_type=full"], [], "global causal"),
-        (["packing=True"], ["packing=False"], "packing"),
         (
             [
                 "context_parallel_load_balance=True",
