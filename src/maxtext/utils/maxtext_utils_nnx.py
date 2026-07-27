@@ -174,7 +174,7 @@ def create_nnx_sharded_model(
     return jax.tree.map(
         lambda x: jnp.zeros(x.shape, dtype=x.dtype),
         abstract_state,
-        is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.ShapeDtypeStruct)),
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
   # Create the model with sharded parameters.

@@ -630,7 +630,7 @@ def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=
     return jax.tree.map(
         lambda x: jnp.zeros(x.shape, dtype=x.dtype),
         abstract_state,
-        is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.ShapeDtypeStruct)),
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
   with mesh:
