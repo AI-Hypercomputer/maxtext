@@ -624,6 +624,11 @@ def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=
   # avoiding a large intermediate allocation on a single device.
   with nn.logical_axis_rules(config.logical_axis_rules):
     out_shardings = nn.logical_to_mesh_sharding(specs, mesh)
+    out_shardings = jax.tree.map(
+        lambda x: x.get_value() if isinstance(x, nnx.Variable) else (x.value if hasattr(x, "value") else x),
+        out_shardings,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
 
   @partial(jax.jit, out_shardings=out_shardings)
   def create_sharded_zeros():

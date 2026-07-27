@@ -109,14 +109,9 @@ if [ -n "$ABSOLUTE_LINKS" ]; then
   exit 1
 fi
 
-# Check if the base image exists locally
-if ! docker image inspect "${LOCAL_IMAGE_NAME}" &> /dev/null; then
-  echo "ERROR: Base image '${LOCAL_IMAGE_NAME}' not found locally."
-  echo "Please build it first by running 'build_maxtext_docker_image'."
-  exit 1
-fi
+BASEIMAGE="${BASEIMAGE:-${LOCAL_IMAGE_NAME}}"
 
-docker build --no-cache --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
+docker build --no-cache --build-arg BASEIMAGE=${BASEIMAGE} \
              --build-arg PACKAGE_DIR=${PACKAGE_DIR} \
              -f "$PACKAGE_DIR"'/dependencies/dockerfiles/maxtext_runner.Dockerfile' \
              -t ${LOCAL_IMAGE_NAME_RUNNER} .
