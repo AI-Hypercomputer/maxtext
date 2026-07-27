@@ -1529,6 +1529,7 @@ def train_loop(config, recorder, state=None):
                 state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
             state_dict = train_utils.replicate_single_device_sharded_arrays(state_dict)
             snapshot_mgr.save(python_vars["step"], state_dict)
+            snapshot_mgr.join()
 
           training_loop_iteration(jax_device_state, python_vars, immutable_data)
           python_vars["step"] += 1
@@ -1592,6 +1593,7 @@ def train_loop(config, recorder, state=None):
                 state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
             state_dict = train_utils.replicate_single_device_sharded_arrays(state_dict)
             snapshot_mgr.save(python_vars["step"], state_dict)
+            snapshot_mgr.join()
           continue
 
     # Unpack state for post-loop actions

@@ -29,69 +29,6 @@ import pathwaysutils
 from pathwaysutils.elastic import manager
 
 elastic_manager: manager.Manager | None = None
-
-
-def _patch_pathwaysutils_manager():
-  if not hasattr(manager.Manager, "_original_init_patched"):
-    _orig_init = manager.Manager.__init__
-
-    def _patched_init(self, *args, **kwargs):
-      _orig_init(self, *args, **kwargs)
-      self._active_slice_indices = frozenset()
-      self.available_inactive_slices = frozenset()
-
-    manager.Manager.__init__ = _patched_init
-    manager.Manager._original_init_patched = True
-
-  def _patched_get_active_slice_indices(self) -> frozenset[int]:
-    return self._active_slice_indices
-
-  def _patched_set_active_slice_indices(self, value) -> None:
-    self._active_slice_indices = frozenset(value)
-    if self.available_inactive_slices:
-      self.available_inactive_slices = frozenset(
-          self.available_inactive_slices - self._active_slice_indices
-      )
-
-  manager.Manager.active_slice_indices = property(
-      _patched_get_active_slice_indices, _patched_set_active_slice_indices
-  )
-
-  def _patched_check_inactive_slices(self) -> None:
-    self.inactive_slice_indices = (
-        self.all_slice_indices - self.active_slice_indices
-    )
-    if not self.inactive_slice_indices:
-      if self.available_inactive_slices:
-        self.available_inactive_slices = frozenset()
-      return
-    inactive_slice_to_devices = {
-        i: self.slice_to_devices[i] for i in self.inactive_slice_indices
-    }
-    from pathwaysutils.elastic import elastic as _pw_elastic
-
-    found_slices = _pw_elastic.get_active_slice_indices(
-        inactive_slice_to_devices
-    )
-    found_slices = found_slices - self.active_slice_indices
-    if found_slices != self.available_inactive_slices:
-      self.available_inactive_slices = frozenset(found_slices)
-
-  manager.Manager._check_inactive_slices = _patched_check_inactive_slices
-
-  def _persistent_monitor_new_slices(self, stop_event, poll_interval) -> None:
-    max_logging.log("Elastic monitor thread started (persistent monkeypatch).")
-    while not stop_event.wait(poll_interval):
-      try:
-        self._check_inactive_slices()
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        max_logging.log(f"Error in monitor thread loop: {e}")
-    max_logging.log("Elastic monitor thread stopped.")
-
-  manager.Manager._monitor_new_slices = _persistent_monitor_new_slices
-
-
-_patch_pathwaysutils_manager()
 pending_reinit_recorder = None
 pending_elastic_event_type = None
 

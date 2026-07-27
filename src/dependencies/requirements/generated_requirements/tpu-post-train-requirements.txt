@@ -229,7 +229,7 @@ parameterized>=0.9.0
 parso>=0.8.7
 partial-json-parser>=0.2.1.1.post7
 pathspec>=1.1.1
-pathwaysutils>=0.1.9
+pathwaysutils @ git+https://github.com/AI-Hypercomputer/pathways-utils.git@test_954057947
 peft>=0.19.1
 perfetto>=0.56.0
 pexpect>=4.9.0 ; sys_platform != 'emscripten' and sys_platform != 'win32'
