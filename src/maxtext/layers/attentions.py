@@ -1120,6 +1120,7 @@ class Attention(nnx.Module):
       attention_metadata: Optional[dict[str, Any]] = None,
       shared_key: Array | None = None,
       shared_value: Array | None = None,
+      prompt_mask: Array | None = None,
   ):
     """Applies Attention on the input data.
 
@@ -1183,6 +1184,11 @@ class Attention(nnx.Module):
         value = key
       else:
         value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=qkv_sharding)
+
+    if self.config.debug_stop_grad_prompt and prompt_mask is not None:
+      m = prompt_mask[..., None, None]
+      key = jnp.where(m, jax.lax.stop_gradient(key), key)
+      value = jnp.where(m, jax.lax.stop_gradient(value), value)
 
     gate = None
     if self.is_qwen3_hybrid:

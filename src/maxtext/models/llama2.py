@@ -148,6 +148,7 @@ class LlamaDecoderLayer(nnx.Module):
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
+      prompt_mask=None,
   ):
     cfg = self.config
 
@@ -179,6 +180,7 @@ class LlamaDecoderLayer(nnx.Module):
         out_sharding=lnx_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
+        prompt_mask=prompt_mask,
     )
 
     attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)

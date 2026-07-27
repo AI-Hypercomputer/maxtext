@@ -98,6 +98,7 @@ class DecoderLayer(nn.Module):
       slot: None | int = None,
       kv_cache: jax.Array | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      prompt_mask=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -171,6 +172,7 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
+        prompt_mask=prompt_mask,
     )
 
     if model_mode == MODEL_MODE_PREFILL:
@@ -292,6 +294,25 @@ def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
   # Only add where mask is True: hidden_states += visual_embeds * mask
   hidden_states = hidden_states + visual_embeds_scattered * mask_expanded
   return hidden_states
+
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def tap(x, mask, tag):
+  return x
+
+def _tap_fwd(x, mask, tag):
+  return x, mask
+
+def _tap_bwd(tag, mask, g):
+  g32 = g.astype(jnp.float32)
+  m = mask[..., None]
+  p_norm = float(jnp.linalg.norm(jnp.where(m, g32, 0.0)))
+  c_norm = float(jnp.linalg.norm(jnp.where(m, 0.0, g32)))
+  print(f"TAP {tag}: |g_prompt|={p_norm:.6e}  |g_compl|={c_norm:.6e}")
+  return (g, None)
+
+tap.defvjp(_tap_fwd, _tap_bwd)
 
 
 class Decoder(nn.Module):
@@ -769,7 +790,7 @@ class Decoder(nn.Module):
     return y
 
   @nn.compact
-  def apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
+  def apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode, prompt_mask=None):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
@@ -786,6 +807,8 @@ class Decoder(nn.Module):
         kernel_axes=("norm",),
         parameter_memory_host_offload=cfg.parameter_memory_host_offload,
     )(y, out_sharding=norm_out_sharding)
+    if cfg.debug_tap_prompt_grads and prompt_mask is not None:
+      y = tap(y, prompt_mask, "post_final_norm")
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
@@ -849,6 +872,7 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      prompt_mask=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -863,6 +887,10 @@ class Decoder(nn.Module):
         model_mode,
         multimodal_input=multimodal_input,
     )
+    if cfg.debug_stop_grad_prompt and prompt_mask is not None:
+      y = jnp.where(prompt_mask[..., None], jax.lax.stop_gradient(y), y)
+    if cfg.debug_tap_prompt_grads and prompt_mask is not None:
+      y = tap(y, prompt_mask, "layer_0_in")
 
     mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
     if cfg.mhc_expansion_rate > 1:
@@ -1219,6 +1247,8 @@ class Decoder(nn.Module):
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             if cfg.decoder_block == DecoderBlockType.OLMO3:
               layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
+            if lyr > 0 and cfg.debug_tap_prompt_grads and prompt_mask is not None:
+              y = tap(y, prompt_mask, f"layer_{lyr}_in")
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
@@ -1232,6 +1262,7 @@ class Decoder(nn.Module):
                 slot=slot,
                 kv_cache=kv_cache,
                 attention_metadata=attention_metadata,
+                prompt_mask=prompt_mask,
                 **layer_call_kwargs,
             )
             if kv_caches is not None and returned_cache is not None:
@@ -1289,7 +1320,7 @@ class Decoder(nn.Module):
       self.sow("intermediates", "hidden_states", hidden_state)
 
     else:
-      logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+      logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode, prompt_mask=prompt_mask)
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.

@@ -137,6 +137,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         model_vars["batch_stats"] = sparsity_state
     else:
       model_vars = params
+    prompt_mask = (data["targets_segmentation"] == 0) & (data["inputs_segmentation"] != 0)
     logits, intermediate_outputs = model.apply(
         model_vars,
         data["inputs"],
@@ -149,6 +150,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         mutable=mutable_collections,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
+        prompt_mask=prompt_mask,
     )
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
@@ -196,6 +198,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
+        prompt_mask=prompt_mask,
     )
     # mtp_losses and mtp_acceptance subclass nnx.Intermediate, and nnx type filters match
     # subclasses. Pop them before the generic Intermediate pop below, which would otherwise
