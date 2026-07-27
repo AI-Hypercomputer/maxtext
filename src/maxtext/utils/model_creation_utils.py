@@ -626,16 +626,23 @@ def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=
     out_shardings = nn.logical_to_mesh_sharding(specs, mesh)
 
   @partial(jax.jit, out_shardings=out_shardings)
-  def create_sharded_state():
-    # This will be JIT-compiled. JAX knows the output sharding and can
-    # initialize the parameters directly on the target devices in a sharded way.
-    model = _create_model_partial()
-    return nnx.state(model)
+  def create_sharded_zeros():
+    return jax.tree.map(
+        lambda x: jnp.zeros(x.shape, dtype=x.dtype),
+        abstract_state,
+        is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.ShapeDtypeStruct)),
+    )
 
   with mesh:
     # Create the model with sharded parameters.
     with nn.logical_axis_rules(config.logical_axis_rules):
-      sharded_state = create_sharded_state()
+      sharded_zeros = create_sharded_zeros()
+      sharded_state = jax.tree.map(
+          lambda var, val: var.replace(value=val),
+          abstract_state,
+          sharded_zeros,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
     model = nnx.merge(graphdef, sharded_state)
 
     # print weights sharding info under debug sharding mode

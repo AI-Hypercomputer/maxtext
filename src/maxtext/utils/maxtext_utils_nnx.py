@@ -170,13 +170,22 @@ def create_nnx_sharded_model(
   # By providing out_shardings, we instruct JAX to produce sharded output directly,
   # avoiding a large intermediate allocation on a single device.
   @partial(jax.jit, out_shardings=named_sharding)
-  def create_sharded_state():
-    model = init_fn()
-    return jax.lax.with_sharding_constraint(nnx.state(model), named_sharding)
+  def create_sharded_zeros():
+    return jax.tree.map(
+        lambda x: jnp.zeros(x.shape, dtype=x.dtype),
+        abstract_state,
+        is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.ShapeDtypeStruct)),
+    )
 
   # Create the model with sharded parameters.
   with jax.set_mesh(mesh):
-    sharded_state = create_sharded_state()
+    sharded_zeros = create_sharded_zeros()
+    sharded_state = jax.tree.map(
+        lambda var, val: var.replace(value=val),
+        abstract_state,
+        sharded_zeros,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
   return nnx.merge(graphdef, sharded_state)
 
 
