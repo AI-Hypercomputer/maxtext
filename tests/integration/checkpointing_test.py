@@ -232,5 +232,5 @@ def test_scan_layers_mismatch_tpu():
   # reports them as missing rather than leaving them at their init values.
   message = str(excinfo.value)
   assert "Checkpoint does not match the model" in message
-  assert "decoder/layers/0/" in message
+  assert "decoder/layers_0/" in message
   assert "scan_layers" in message
