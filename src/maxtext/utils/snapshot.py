@@ -79,7 +79,7 @@ class Snapshotter(BaseSnapshotter):
     def is_replica_active(array):
       try:
         data = _unpack_if_prng_key(array)
-        jax.block_until_ready(data)
+        data[...].block_until_ready()
         return True
       except (jax.errors.JaxRuntimeError, RuntimeError):
         return False
