@@ -690,14 +690,24 @@ class Decoder(nn.Module):
       deterministic,
       model_mode,
       multimodal_input=None,
+      decoder_input_embeddings=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
+
     cfg = self.config
 
-    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    # vLLM passes token IDs for text-only requests, but passes complete, premerged
+    # text and multimodal embeddings for multimodal requests. The latter enter
+    # through `decoder_input_embeddings` to avoid embedding and merging them again.
+    y = (
+        decoder_input_embeddings
+        if decoder_input_embeddings is not None
+        else shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    )
 
-    # Merge the image embeddings with the text embeddings for multimodal models
-    if multimodal_input is not None:
+    # Precomputed embeddings are complete (including any multimodal replacements),
+    # so only merge modality embeddings when token embeddings were created here.
+    if decoder_input_embeddings is None and multimodal_input is not None:
       image_embeddings = multimodal_input.image_embeddings
       bidirectional_mask = multimodal_input.bidirectional_mask
       image_masks = multimodal_input.image_masks
@@ -864,6 +874,7 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      decoder_input_embeddings=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -877,6 +888,7 @@ class Decoder(nn.Module):
         deterministic,
         model_mode,
         multimodal_input=multimodal_input,
+        decoder_input_embeddings=decoder_input_embeddings,
     )
 
     mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)

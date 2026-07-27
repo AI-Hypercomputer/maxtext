@@ -28,6 +28,8 @@ from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from tpu_inference.models.jax.utils.multi_modal_utils import merge_multimodal_embeddings
+from .multimodal import get_multimodal_handler
 
 
 try:
@@ -198,6 +200,7 @@ class MaxTextForCausalLM(nnx.Module):
   # JIT-sharded initialization (via create_nnx_model with out_shardings).
   # When True, model_loader skips wrapping __init__ in an outer bare @jax.jit,
   _self_manages_sharding: bool = True
+  supports_multimodal: bool = False
 
   def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
     """Initializes the MaxTextForCausalLM model.
@@ -210,6 +213,7 @@ class MaxTextForCausalLM(nnx.Module):
     self.vllm_config = vllm_config
     self.cfg = vllm_config.model_config
     self.maxtext_config = generate_maxtext_config(vllm_config)
+    self.multimodal_handler = get_multimodal_handler(self.maxtext_config.model_name)
 
     # Model configuration
     self.mesh = mesh
@@ -284,7 +288,17 @@ class MaxTextForCausalLM(nnx.Module):
     # MaxText decode treats vLLM's flattened tokens as a batch with seq_len=1.
     # MRoPE positions arrive channel-first and must also move their 3 channels
     # to MaxText's trailing dimension.
-    input_ids = jnp.expand_dims(input_ids, axis=1)
+    inputs_embeds = args[0] if args else None
+    if inputs_embeds is not None:
+      decoder_input_embeddings = inputs_embeds[:, None, :].astype(self.maxtext_config.dtype)
+      # tpu-inference passes input_ids=None with precomputed embeddings. The
+      # decoder still requires a shape-compatible token array, but does not use
+      # its values when decoder_input_embeddings is present.
+      input_ids = jnp.zeros((inputs_embeds.shape[0], 1), dtype=jnp.int32)
+    else:
+      decoder_input_embeddings = None
+      input_ids = jnp.expand_dims(input_ids, axis=1)
+
     input_positions = normalize_vllm_input_positions(attention_metadata.input_positions)
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
@@ -292,6 +306,7 @@ class MaxTextForCausalLM(nnx.Module):
       expert_indices = None
       res = self.model(
           decoder_input_tokens=input_ids,
+          decoder_input_embeddings=decoder_input_embeddings,
           decoder_positions=input_positions,
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
@@ -333,11 +348,26 @@ class MaxTextForCausalLM(nnx.Module):
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       return self.model.token_embedder.embedding
 
-  def embed_input_ids(self, input_ids: jax.Array) -> jax.Array:
+  def embed_multimodal(self, **kwargs) -> list[jax.Array]:
+    """Computes embeddings using the configured model family's handler."""
+    if not isinstance(self.model, nnx.Module):
+      raise ValueError("Model is not initialized.")
+    if self.multimodal_handler is None:
+      raise ValueError(f"No vLLM multimodal handler is registered for {self.maxtext_config.model_name!r}.")
+    return self.multimodal_handler.embed_multimodal(self.model, self.maxtext_config, self.mesh, **kwargs)
+
+  def embed_input_ids(
+      self,
+      input_ids: jax.Array,
+      multimodal_embeddings: jax.Array | None = None,
+      is_multimodal: jax.Array | None = None,
+  ) -> jax.Array:
     """Embeds the input token IDs using the model's token embedder.
 
     Args:
       input_ids: A JAX array of input token IDs.
+      multimodal_embeddings: Optional modality embeddings to merge.
+      is_multimodal: Optional mask identifying multimodal inputs.
 
     Returns:
       A JAX array of embedded input tokens.
@@ -346,7 +376,20 @@ class MaxTextForCausalLM(nnx.Module):
       raise ValueError("Model is not initialized.")
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
-      return self.model.token_embedder(input_ids)
+      inputs_embeds = self.model.token_embedder(input_ids)
+
+      if multimodal_embeddings is not None:
+        if self.multimodal_handler is None:
+          raise ValueError(f"No vLLM multimodal handler is registered for {self.maxtext_config.model_name!r}.")
+        placeholder_ids = self.multimodal_handler.placeholder_token_ids(self.cfg.hf_config)
+
+        inputs_embeds = merge_multimodal_embeddings(
+            input_ids,
+            inputs_embeds,
+            multimodal_embeddings,
+            placeholder_ids,
+        )
+      return inputs_embeds
 
   def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
     """Computes the logits from the hidden states using the underlying decoder model.

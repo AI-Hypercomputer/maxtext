@@ -473,6 +473,7 @@ class Transformer(nnx.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
       forced_routed_experts: jnp.ndarray | None = None,
+      decoder_input_embeddings: jax.Array | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -482,6 +483,7 @@ class Transformer(nnx.Module):
     Args:
       decoder_input_tokens: Input tokens for the decoder.
       decoder_positions: Positional encodings for the decoder inputs.
+      decoder_input_embeddings: Precomputed token embeddings (optional).
       decoder_segment_ids: Segment IDs for the decoder inputs (optional).
       encoder_images: Encoder images for multimodal models (optional).
       enable_dropout: Whether to enable dropout. Defaults to True.
@@ -563,6 +565,7 @@ class Transformer(nnx.Module):
       res = self.decoder(
           shared_embedding=self.token_embedder,
           decoder_input_tokens=decoder_input_tokens,
+          decoder_input_embeddings=decoder_input_embeddings,
           decoder_positions=decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           deterministic=not enable_dropout,
@@ -587,6 +590,7 @@ class Transformer(nnx.Module):
       res = self.decoder(
           shared_embedding=self.token_embedder,
           decoder_input_tokens=decoder_input_tokens,
+          decoder_input_embeddings=decoder_input_embeddings,
           decoder_positions=decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           deterministic=not enable_dropout,
