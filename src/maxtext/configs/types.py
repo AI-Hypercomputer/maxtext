@@ -746,6 +746,54 @@ class CompressedAttention(BaseModel):
   )
 
 
+class KdaAttention(BaseModel):
+  """KDA (Kimi Delta Attention) configuration.
+
+  These fields are placed in a separate class from MlaAttention for clear responsibility separation.
+  """
+
+  linear_conv_kernel_dim: int = Field(
+      4,
+      description=(
+          "Convolution kernel dimension for linear attention layers (KDA). "
+          "This specifies the size of the 1D convolution applied to keys for local dependency modeling. "
+          "Default 4 matches the reference Megatron implementation."
+      ),
+  )
+  use_kda_lora: bool = Field(
+      False,
+      description=(
+          "Whether to use LoRA (Low-Rank Adaptation) style decomposition in KDA layers. "
+          "When True, uses low-rank factorization for KDA computation. "
+          "When False, uses full-rank projections. "
+          "Default matches the reference Megatron implementation."
+      ),
+  )
+  use_kda_safe_gate: bool = Field(
+      False,
+      description=(
+          "Whether to use numerically safe gate computation in KDA layers. "
+          "When True, applies value clamping and safe operations to prevent gate value explosion "
+          "during training."
+      ),
+  )
+  kda_lower_bound: float = Field(
+      0.0,
+      description=(
+          "Lower bound for gate values in KDA layers. Prevents gate values from "
+          "becoming too small (highly negative) during training, which can cause numerical instability. "
+          "Default 0.0 means no lower bound; -5.0 is a common choice."
+      ),
+  )
+  kda_backend: str = Field(
+      "tokamax",
+      description=(
+          "Which KDA kernel backend to use. "
+          "'tokamax' uses tokamax kimi_delta_attention (head-first, native [B,T] segment_ids)."
+      ),
+  )
+
+
 class AttentionIndexer(BaseModel):
   """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
 
@@ -3174,6 +3222,7 @@ class MaxTextConfig(
     # Attention Mechanisms
     Attention,
     MlaAttention,
+    KdaAttention,
     CompressedAttention,
     MoBa,
     AttentionIndexer,
