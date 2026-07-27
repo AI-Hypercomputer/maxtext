@@ -998,10 +998,16 @@ def from_pretrained(
             if "layers" in dec_meta and any(isinstance(x, str) and x.startswith("layers_") for x in v.keys()):
               new_dec_target = {}
               layers_dict = {}
+              layers_meta = dec_meta["layers"]
               for dk, dv in v.items():
                 if isinstance(dk, str) and dk.startswith("layers_") and dk[7:].isdigit():
                   idx_str = dk[7:]
-                  layers_dict[idx_str] = _adjust_target_for_moe_fusion(dv, dec_meta.get("layers", {}).get(idx_str, {}), is_nnx)
+                  layer_meta = {}
+                  if isinstance(layers_meta, dict):
+                    layer_meta = layers_meta.get(idx_str, layers_meta.get(int(idx_str), {}))
+                  elif isinstance(layers_meta, (list, tuple)) and int(idx_str) < len(layers_meta):
+                    layer_meta = layers_meta[int(idx_str)]
+                  layers_dict[idx_str] = _adjust_target_for_moe_fusion(dv, layer_meta, is_nnx)
                 else:
                   new_dec_target[dk] = _adjust_target_for_moe_fusion(dv, dec_meta.get(dk, {}), is_nnx)
               new_dec_target["layers"] = layers_dict
