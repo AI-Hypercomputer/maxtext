@@ -261,11 +261,6 @@ def setup_train_loop(config, recorder, devices=None):
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()
     if context_parallel_size > 1 and config.packing:
-      if config.dataset_type == "synthetic":
-        raise ValueError(
-            "Context parallelism with sequence packing is not supported with synthetic data. "
-            "Please disable sequence packing (set packing=False)."
-        )
       if context_parallel_strategy not in ("all_gather", "ring"):
         raise ValueError(
             "Context parallelism with sequence packing supports context_parallel_strategy='all_gather' or 'ring'."
