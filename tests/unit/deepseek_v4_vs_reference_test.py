@@ -192,7 +192,7 @@ class DeepSeekV4RotaryEmbeddingTest(unittest.TestCase):
     # 5. Final Validation
     # --------------------------------------------------------------------------
     # Validate the full mathematical rotation is perfectly equivalent.
-    np.testing.assert_allclose(mt_rotated_np, ref_rotated_np, rtol=3e-2, atol=3e-2)
+    np.testing.assert_allclose(mt_rotated_np, ref_rotated_np, rtol=2.5e-2, atol=2.5e-2)
     print(f"Rotary Embedding test ({layer_type}) passed successfully.")
 
 
@@ -667,8 +667,7 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
       print(f"top_k_indices mismatches: {num_mismatches}")
 
     # 6. Execute MaxText
-    segs_arg = segs_mt
-    mt_out, _ = mt_attn(x_mt, x_mt, segs_arg, pos_mt, deterministic=True, model_mode=MODEL_MODE_TRAIN)
+    mt_out, _ = mt_attn(x_mt, x_mt, segs_mt, pos_mt, deterministic=True, model_mode=MODEL_MODE_TRAIN)
 
     # 7. Asserts
     if not is_packed:
@@ -739,9 +738,9 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
       if check_norm:
         expected = pt_out_np / np.linalg.norm(pt_out_np)
         actual = mt_out_np / np.linalg.norm(mt_out_np)
-        np.testing.assert_allclose(actual, expected, rtol=2e-2, atol=2e-2)
+        np.testing.assert_allclose(actual, expected, rtol=5e-3, atol=5e-3)
       else:
-        np.testing.assert_allclose(mt_out_np, pt_out_np, rtol=1e-2, atol=1e-2)
+        np.testing.assert_allclose(mt_out_np, pt_out_np, rtol=2e-3, atol=2e-3)
     else:
       # Since PyTorch leaks cross-document compressed blocks due to its bug (ignoring attention_mask
       # when appending block_bias), the outputs will NOT match.
@@ -820,7 +819,6 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
       self._run_e2e_test("heavily_compressed_attention", attention_kernel="flash", check_norm=True)
     finally:
       self.seq_len = old_seq_len
-
 
 
 class DeepSeekV4MoERouterTest(unittest.TestCase):

@@ -3275,8 +3275,8 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention not in ("dot_product", "flash"):
-      raise ValueError("DeepSeek4 decoder block currently supports dot_product and flash attention.")
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
+      raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
     if self.mla_qk_head_chunk_size > 0:
       if self.attention != "dot_product":
         raise ValueError("`mla_qk_head_chunk_size` is only supported with `dot_product` attention.")
