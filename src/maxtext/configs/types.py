@@ -666,6 +666,13 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+  use_sliced_mla_projections: bool = Field(
+      False,
+      description=(
+          "Whether to slice projection kernel weights before contraction in MLA"
+          " instead of running full projection + jnp.split."
+      ),
+  )
 
 
 class CompressedAttention(BaseModel):
