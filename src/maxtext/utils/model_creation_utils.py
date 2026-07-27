@@ -402,6 +402,15 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
       if raw in node:
         node = node[raw]
         continue
+      if name.startswith("layers_") and name[7:].isdigit() and "layers" in node:
+        idx_str = name[7:]
+        layers_node = node["layers"]
+        if isinstance(layers_node, dict) and idx_str in layers_node:
+          node = layers_node[idx_str]
+          continue
+        elif isinstance(layers_node, (list, tuple)) and int(idx_str) < len(layers_node):
+          node = layers_node[int(idx_str)]
+          continue
       return None
     return node
 
@@ -984,6 +993,21 @@ def from_pretrained(
           return target
         new_target = {}
         for k, v in target.items():
+          if k == "decoder" and isinstance(v, dict) and isinstance(meta_tree.get("decoder"), dict):
+            dec_meta = meta_tree["decoder"]
+            if "layers" in dec_meta and any(isinstance(x, str) and x.startswith("layers_") for x in v.keys()):
+              new_dec_target = {}
+              layers_dict = {}
+              for dk, dv in v.items():
+                if isinstance(dk, str) and dk.startswith("layers_") and dk[7:].isdigit():
+                  idx_str = dk[7:]
+                  layers_dict[idx_str] = _adjust_target_for_moe_fusion(dv, dec_meta.get("layers", {}).get(idx_str, {}), is_nnx)
+                else:
+                  new_dec_target[dk] = _adjust_target_for_moe_fusion(dv, dec_meta.get(dk, {}), is_nnx)
+              new_dec_target["layers"] = layers_dict
+              new_target[k] = new_dec_target
+              continue
+
           if k == "wi" and "wi" not in meta_tree and "wi_0" in meta_tree and "wi_1" in meta_tree:
             if not is_nnx:
               arr = v
@@ -1140,6 +1164,12 @@ def from_pretrained(
         )
       else:
         checkpoint = restored["params"]["params"]
+        if isinstance(checkpoint, dict) and "decoder" in checkpoint and "layers" in checkpoint["decoder"]:
+          dec = checkpoint["decoder"]
+          layers_dict = dec.pop("layers", {})
+          if isinstance(layers_dict, dict):
+            for idx_str, layer_val in layers_dict.items():
+              dec[f"layers_{idx_str}"] = layer_val
 
       if checkpoint:
         # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
