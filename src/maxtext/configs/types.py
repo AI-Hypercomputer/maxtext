@@ -1989,6 +1989,12 @@ class HloDump(BaseModel):
   dump_jaxpr_gcs_dir: PathStr = Field("", description="GCS directory to upload jaxpr dumps.")
 
 
+class Debug(BaseModel):
+  """Configuration for debugging options."""
+
+  rl: bool = Field(False, description="RL-specific debugging")
+
+
 class Metrics(BaseModel):
   """General configuration for metrics and monitoring."""
 
@@ -2633,6 +2639,7 @@ class MaxTextConfig(
   Every field is explicitly defined to prevent misconfigurations (`extra='forbid'`).
   """
 
+  debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
   dpo: DPO = Field(
       default_factory=DPO,
       description="Configuration for DPO and ORPO alignment algorithms.",
@@ -2818,6 +2825,9 @@ class MaxTextConfig(
     # If steps is -1, it defaults to the length of the learning rate schedule.
     if self.steps == -1:
       self.steps = self.learning_rate_schedule_steps
+
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention == "flash":
+      self.use_tokamax_splash = True
 
     # Validate deepstack + scan_layers incompatibility
     if self.deepstack_visual_indexes_for_vit and self.scan_layers:
@@ -3275,8 +3285,8 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
-      raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention not in ("dot_product", "flash"):
+      raise ValueError("DeepSeek4 decoder block currently supports dot_product and flash attention.")
     if self.mla_qk_head_chunk_size > 0:
       if self.attention != "dot_product":
         raise ValueError("`mla_qk_head_chunk_size` is only supported with `dot_product` attention.")

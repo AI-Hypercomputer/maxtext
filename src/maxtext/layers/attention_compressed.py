@@ -285,6 +285,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
     # [batch, seq_len, emb_dim] -> [batch, seq_len, head_dim]
     gate = self.gate_proj(hidden_states)
 
+    # Truncate sequence to the nearest multiple of the compression rate
     usable = (seq_len // self.compress_rate) * self.compress_rate
     chunk_kv = kv[:, :usable]
     chunk_gate = gate[:, :usable]
@@ -1060,11 +1061,7 @@ class CompressedAttention(Attention):
         padding_len = compressed_kv.shape[1]
         compress_rate = self.compress_ratio
         usable = padding_len * compress_rate
-        if decoder_segment_ids.shape[1] < usable:
-          pad_seg = usable - decoder_segment_ids.shape[1]
-          padded_seg_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_seg)), constant_values=-1)
-        else:
-          padded_seg_ids = decoder_segment_ids[:, :usable]
+        padded_seg_ids = decoder_segment_ids[:, :usable]
         chunked_segment_ids = padded_seg_ids.reshape(
             (decoder_segment_ids.shape[0], padding_len, compress_rate)
         )
@@ -1083,7 +1080,14 @@ class CompressedAttention(Attention):
     # Tokamax dynamic splash tile boundary alignment. Note: Tokamax kernel inside AttentionOp additionally
     # sets inner block size as min(block_kv, key_len) during kernel invocation.
     if self.attention_kernel == "flash":
-      block_size = self.config.sa_block_kv
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        block_size = (
+            self.config.local_sa_block_kv
+            if self.config.local_sa_block_kv is not None
+            else self.config.sa_block_kv
+        )
+      else:
+        block_size = self.config.sa_block_kv
       pad_kv_total = (block_size - (kv.shape[1] % block_size)) % block_size
 
       if pad_kv_total > 0:
@@ -1129,7 +1133,7 @@ class CompressedAttention(Attention):
       )
 
       if indexer_mask is not None:
-        # Robustly extract the first head & first key dimension slices to match splash expectations
+        # Extract single KV head and Query-per-KV head group axes [batch, 1, 1, Q, KV] -> [batch, Q, KV]
         indexer_mask = indexer_mask[:, 0, 0, :, :]
 
     # Compute Attention
