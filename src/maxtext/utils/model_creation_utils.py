@@ -1152,7 +1152,7 @@ def from_pretrained(
 
         return node
 
-      jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+      # jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
       restored = ckptr.restore(
           epath.Path(config.load_parameters_path),
