@@ -657,6 +657,9 @@ check_vma: False
 # Enable ZeRO-1 optimizer sharding over data axis
 shard_optimizer_over_data: false
 
+# when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
+dense_fsdp_use_two_stage_all_gather: false
+
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
@@ -938,7 +941,7 @@ mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inher
 # Muon optimizer parameters
 # https://github.com/google-deepmind/optax/blob/main/optax/contrib/_muon.py
 # "mu_dtype", "adam_eps" are shared by AdamW
-# "nesterov", "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" use default
+# "nesterov", "weight_decay_mask", "adaptive" use default
 muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).

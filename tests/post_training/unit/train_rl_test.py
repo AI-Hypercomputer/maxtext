@@ -43,6 +43,14 @@ class TrainRLTest(unittest.TestCase):
   """Tests for train_rl.py."""
 
   @pytest.mark.cpu_only
+  def test_rl_config_includes_decoder_engram_defaults(self):
+    """RL models must expose Engram fields consumed by the shared decoder."""
+    config = types.RLConfig(model_name="gemma4-26b")
+
+    self.assertEqual(config.engram_layers, [])
+    self.assertEqual(config.engram_max_ngram_size, 3)
+
+  @pytest.mark.cpu_only
   def test_setup_configs_and_devices_pathways_split(self):
     """Test setup_configs_and_devices with multiple VMs and Pathways."""
     mock_devices = _get_mock_devices(8)

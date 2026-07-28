@@ -1155,6 +1155,7 @@ if __name__ == "__main__":
   local_args, remaining_args = parser.parse_known_args()
   # Reconstruct model_args (script name + the args MaxText needs)
   model_args = [sys.argv[0]] + remaining_args
+  sys.argv = model_args
 
   # Set jax environment
   jax.config.update("jax_platforms", "cpu")
