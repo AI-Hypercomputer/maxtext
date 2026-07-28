@@ -55,9 +55,7 @@ def halo_exchange_for_conv(
     return zero_padded
 
   # Forward ring: each rank sends its tail to the next rank.
-  tail = jax.lax.dynamic_slice_in_dim(
-      x, x.shape[seq_axis] - halo_size, halo_size, axis=seq_axis
-  )
+  tail = jax.lax.dynamic_slice_in_dim(x, x.shape[seq_axis] - halo_size, halo_size, axis=seq_axis)
   perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
   halo = jax.lax.ppermute(tail, axis_name=axis_name, perm=perm)
 

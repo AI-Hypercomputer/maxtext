@@ -140,7 +140,7 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 
 ## Key Constraints
 
-1. **CPContext availability**: Assert with a clear error message when CPContext is unavailable; do not silently fall back.
+1. **CPContext availability**: Raise `ImportError` with a clear message when CPContext is unavailable; do not silently fall back.
 
 2. **ShortConvolution halo shard_map is required**: Under CP, conv needs to read historical tokens across ranks. Without shard_map → each rank independently left-zero-pads → causal sequence is split into independent segments → **correctness bug**. Without CP, falls back to `jnp.pad`, zero overhead.
 
@@ -154,7 +154,7 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 
 - `halo_exchange_for_conv`: degrades to `jnp.pad` when no CP, zero overhead
 - ShortConv shard_map: only activated when `context_parallel_size > 1`
-- CPContext import: `try/except`, assert with clear error if unavailable
+- CPContext import: `try/except`, raise `ImportError` with clear message if unavailable
 - segment_ids dummy: auto-construct `jnp.ones` when no varlen + CP
 
 ## Test Plan

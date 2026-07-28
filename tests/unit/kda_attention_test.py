@@ -677,8 +677,11 @@ class TestShortConvolution:
     rngs = nnx.Rngs(0)
     kernel_size, features = 4, 8
     conv = ShortConvolution(
-        kernel_size=kernel_size, features=features,
-        dtype=jnp.float32, weight_dtype=jnp.float32, rngs=rngs,
+        kernel_size=kernel_size,
+        features=features,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        rngs=rngs,
     )
 
     B, T = 2, 16
@@ -693,8 +696,7 @@ class TestShortConvolution:
 
     # With segment_ids: cross-segment contributions should be masked out.
     seg_ids = jnp.array(
-        [[1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-         [1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 0, 0, 0, 0, 0, 0]],
+        [[1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0], [1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 0, 0, 0, 0, 0, 0]],
         dtype=jnp.int32,
     )
     out_seg = conv(x, segment_ids=seg_ids)
@@ -705,14 +707,11 @@ class TestShortConvolution:
 
     # Row independence: changing row 1's segment_ids should not affect row 0.
     seg_alt = jnp.array(
-        [[1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-         [1, 1, 1, 4, 4, 4, 2, 2, 5, 5, 0, 0, 0, 0, 0, 0]],
+        [[1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0], [1, 1, 1, 4, 4, 4, 2, 2, 5, 5, 0, 0, 0, 0, 0, 0]],
         dtype=jnp.int32,
     )
     out_alt = conv(x, segment_ids=seg_alt)
-    assert jnp.allclose(out_seg[0], out_alt[0], atol=0.0), (
-        "Row 0 output changed when only row 1 segments changed"
-    )
+    assert jnp.allclose(out_seg[0], out_alt[0], atol=0.0), "Row 0 output changed when only row 1 segments changed"
 
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   def test_short_conv_cp_halo(self):
@@ -733,8 +732,11 @@ class TestShortConvolution:
     kernel_size, features = 4, 8
     rngs = nnx.Rngs(0)
     conv = ShortConvolution(
-        kernel_size=kernel_size, features=features,
-        dtype=jnp.float32, weight_dtype=jnp.float32, rngs=rngs,
+        kernel_size=kernel_size,
+        features=features,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        rngs=rngs,
     )
 
     B, T = 2, 32  # divisible by cp_size
@@ -771,9 +773,7 @@ class TestShortConvolution:
     cp_out = _conv_cp(xs, segs)
     # All-gather: replicate across context axis so we can compare.
     cp_out_full = jax.device_get(
-        jax.lax.with_sharding_constraint(
-            cp_out, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-        )
+        jax.lax.with_sharding_constraint(cp_out, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
     )
 
     # With uniform segment_ids (no segmentation), CP conv with halo should
@@ -827,14 +827,14 @@ class TestKdaCp:
     g = jax.nn.log_sigmoid(jax.random.normal(keys[3], (B, T, H, K))) * 0.3
     beta = jax.nn.sigmoid(jax.random.normal(keys[4], (B, T, H)))
     seg_ids = jnp.ones((B, T), dtype=jnp.int32)
-    scale = float(K ** -0.5)
+    scale = float(K**-0.5)
 
     # --- Reference: non-CP run ---
-    ref_o, _ = chunk_kda(q, k, v, g, beta, scale=scale, chunk_size=64,
-                         segment_ids=seg_ids, N_max=1)
+    ref_o, _ = chunk_kda(q, k, v, g, beta, scale=scale, chunk_size=64, segment_ids=seg_ids, N_max=1)
 
     # --- CP run: shard along T, call chunk_kda with cp_context ---
     from tokamax._src.ops.experimental.kda.cp_utils import CPContext
+
     cp_ctx = CPContext(mesh=mesh_cp, axis_name="context")
 
     # Shard all inputs along T (axis 1).
@@ -843,9 +843,7 @@ class TestKdaCp:
     pspec_2d = jax.sharding.PartitionSpec(None, "context")
 
     def _shard(arr, pspec):
-      return jax.lax.with_sharding_constraint(
-          arr, jax.sharding.NamedSharding(mesh_cp, pspec)
-      )
+      return jax.lax.with_sharding_constraint(arr, jax.sharding.NamedSharding(mesh_cp, pspec))
 
     qs = _shard(q, pspec_4d)
     ks = _shard(k, pspec_4d)
@@ -854,24 +852,32 @@ class TestKdaCp:
     betas = _shard(beta, pspec_3d)
     segs = _shard(seg_ids, pspec_2d)
 
-    @functools.partial(jax.shard_map, mesh=mesh_cp,
-                       in_specs=(pspec_4d, pspec_4d, pspec_4d, pspec_4d, pspec_3d, pspec_2d),
-                       out_specs=pspec_4d, check_vma=False)
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh_cp,
+        in_specs=(pspec_4d, pspec_4d, pspec_4d, pspec_4d, pspec_3d, pspec_2d),
+        out_specs=pspec_4d,
+        check_vma=False,
+    )
     def _kda_cp(q_loc, k_loc, v_loc, g_loc, beta_loc, seg_loc):
       o_loc, _ = chunk_kda(
-          q_loc, k_loc, v_loc, g_loc, beta_loc,
-          scale=scale, chunk_size=64,
+          q_loc,
+          k_loc,
+          v_loc,
+          g_loc,
+          beta_loc,
+          scale=scale,
+          chunk_size=64,
           segment_ids=seg_loc,
-          disable_recompute=True, N_max=1,
+          disable_recompute=True,
+          N_max=1,
           cp_context=cp_ctx,
       )
       return o_loc
 
     cp_o = _kda_cp(qs, ks, vs, gs, betas, segs)
     cp_o_full = jax.device_get(
-        jax.lax.with_sharding_constraint(
-            cp_o, jax.sharding.NamedSharding(mesh_cp, jax.sharding.PartitionSpec())
-        )
+        jax.lax.with_sharding_constraint(cp_o, jax.sharding.NamedSharding(mesh_cp, jax.sharding.PartitionSpec()))
     )
 
     # CP output should match reference within tolerance.
@@ -889,7 +895,10 @@ class TestKdaCp:
     rngs = nnx.Rngs(0)
     with mesh:
       attn = attention_kda.KimiDeltaAttention(
-          config=cfg, layer_idx=0, mesh=mesh, rngs=rngs,
+          config=cfg,
+          layer_idx=0,
+          mesh=mesh,
+          rngs=rngs,
       )
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
     with pytest.raises(ValueError, match="load_balance"):
@@ -905,7 +914,10 @@ class TestKdaCp:
     rngs = nnx.Rngs(0)
     with mesh:
       attn = attention_kda.KimiDeltaAttention(
-          config=cfg, layer_idx=0, mesh=mesh, rngs=rngs,
+          config=cfg,
+          layer_idx=0,
+          mesh=mesh,
+          rngs=rngs,
       )
     x = jax.random.normal(jax.random.PRNGKey(0), (1, 64, 128))
     with mesh:

@@ -69,7 +69,11 @@ def chunk_kda(
     raise NotImplementedError("output_final_state is not supported")
 
   return tokamax_chunk_kda(
-      q=q, k=k, v=v, g=g, beta=beta,
+      q=q,
+      k=k,
+      v=v,
+      g=g,
+      beta=beta,
       scale=scale,
       chunk_size=chunk_size,
       A_log=A_log,
