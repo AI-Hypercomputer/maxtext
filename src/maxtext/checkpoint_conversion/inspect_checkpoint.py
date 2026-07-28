@@ -48,7 +48,7 @@ Usage Examples:
   
   [Mode 2: MaxText Architecture]
     python -m maxtext.checkpoint_conversion.inspect_checkpoint maxtext \
-        model_name=<maxtext_model_name> scan_layers=<True | False> 
+        model_name=<maxtext_model_name> scan_layers=<True | False> enable_nnx=<True | False>
         (Optional: other maxtext config)
   
   [Mode 3: Orbax]
@@ -68,6 +68,8 @@ import pathlib
 import absl
 from maxtext.inference.inference_utils import str2bool
 from maxtext.checkpoint_conversion.utils.utils import print_peak_memory
+from maxtext.utils.model_creation_utils import create_nnx_abstract_model
+from flax import nnx
 
 
 def natural_sort_key(s: str):
@@ -239,14 +241,12 @@ def inspect_maxtext(args, remaining_args):
   config = pyconfig.initialize(argv)
 
   print(
-      f"\n--- Inspecting MaxText Architecture: {config.model_name} (Scan: {config.scan_layers}) ---"
+      f"\n--- Inspecting MaxText Architecture: {config.model_name} "
+      f"(scan_layers: {config.scan_layers}, enable_nnx: {config.enable_nnx}) ---"
   )
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
-  if getattr(config, "enable_nnx", False):
-    from maxtext.utils.model_creation_utils import create_nnx_abstract_model
-    from flax import nnx
-
+  if config.enable_nnx:
     _, abstract_model = create_nnx_abstract_model(config, mesh=mesh)
     _, abstract_param, _ = nnx.split(abstract_model, nnx.Param, ...)
   else:
@@ -267,9 +267,11 @@ def inspect_maxtext(args, remaining_args):
   for path_tuple, abstract_leaf_value in abstract_params_flat:
     key_parts = param_key_parts_from_path(path_tuple)
 
-    # Construct a MaxText-style parameter key (e.g., "params.params.layer.weight").
+    # Construct a MaxText-style parameter key. Examples:
+    # "params.params.decoder.decoder_norm.scale" (for standard model weights)
+    # "params.Tid2EidVar.decoder.layers_0.mlp.MoeBlock_0.tid2eid" (for legacy custom collections)
     key_str = ".".join(key_parts)
-    if getattr(config, "enable_nnx", False) and not key_str.startswith("params"):
+    if config.enable_nnx and not key_str.startswith(("params", "Tid2EidVar")):
       param_key = "params.params." + key_str
     else:
       param_key = "params." + key_str
@@ -304,6 +306,7 @@ def inspect_orbax(args):
   # Defer imports to avoid overhead when running in other modes.
   import orbax.checkpoint as ocp
   from etils import epath
+  from maxtext.checkpoint_conversion.utils.utils import param_key_parts_from_path
 
   path = epath.Path(args.path)
 
@@ -319,9 +322,13 @@ def inspect_orbax(args):
   # Filter strictly for parameter keys and format them.
   param_dict = {}
   for k, v in dictionary.items():
-    # `k` is a tuple representing the path hierarchy; join it into a single string.
-    # `v` is a metadata object containing `.shape` and `.dtype`.
-    param_key = ".".join(k)
+    # `k` is a tuple representing the path hierarchy.
+    # `v` is a shape-dtype struct.
+    # Pass it through param_key_parts_from_path to normalize NNX structures
+    # (folding list indices like "0" into "layers_0" and dropping "value").
+    key_parts = param_key_parts_from_path(k)
+    param_key = ".".join(key_parts)
+
     if not param_key.startswith("params"):
       continue
 
@@ -344,35 +351,19 @@ def main():
   # Shared parser for arguments common across all modes.
   shared_parser = argparse.ArgumentParser(add_help=False)
   shared_parser.add_argument(
-      "--check_dtype",
-      type=str2bool,
-      required=False,
-      default=False,
-      help="Whether to append dtype info to the output",
+      "--check_dtype", type=str2bool, required=False, default=False, help="Whether to append dtype info to the output"
   )
   shared_parser.add_argument(
-      "--output_file",
-      type=str,
-      required=False,
-      default="",
-      help="Path to save the output structure",
+      "--output_file", type=str, required=False, default="", help="Path to save the output structure"
   )
 
   # Main parser and sub-parsers for distinct inspection modes.
-  parser = argparse.ArgumentParser(
-      description="Consolidated Model Checkpoint Inspector"
-  )
-  subparsers = parser.add_subparsers(
-      dest="mode", required=True, help="Inspection mode: hf, maxtext, orbax"
-  )
+  parser = argparse.ArgumentParser(description="Consolidated Model Checkpoint Inspector")
+  subparsers = parser.add_subparsers(dest="mode", required=True, help="Inspection mode: hf, maxtext, orbax")
 
   # Mode 1: HuggingFace
-  parser_hf = subparsers.add_parser(
-      "hf", parents=[shared_parser], help="Inspect .safetensors or .pth files"
-  )
-  parser_hf.add_argument(
-      "--path", type=str, required=True, help="Directory containing checkpoint files"
-  )
+  parser_hf = subparsers.add_parser("hf", parents=[shared_parser], help="Inspect .safetensors or .pth files")
+  parser_hf.add_argument("--path", type=str, required=True, help="Directory containing checkpoint files")
   parser_hf.add_argument(
       "--format",
       type=str,
@@ -383,22 +374,11 @@ def main():
   )
 
   # Mode 2: MaxText Architecture
-  subparsers.add_parser(
-      "maxtext",
-      parents=[shared_parser],
-      help="Inspect MaxText theoretical architecture",
-  )
+  subparsers.add_parser("maxtext", parents=[shared_parser], help="Inspect MaxText theoretical architecture")
 
   # Mode 3: Orbax
-  parser_orbax = subparsers.add_parser(
-      "orbax", parents=[shared_parser], help="Inspect saved Orbax checkpoint metadata"
-  )
-  parser_orbax.add_argument(
-      "--path",
-      type=str,
-      required=True,
-      help="Path to checkpoint items (local or GCS)",
-  )
+  parser_orbax = subparsers.add_parser("orbax", parents=[shared_parser], help="Inspect saved Orbax checkpoint metadata")
+  parser_orbax.add_argument("--path", type=str, required=True, help="Path to checkpoint items (local or GCS)")
 
   args, remaining_args = parser.parse_known_args()
 
@@ -409,7 +389,7 @@ def main():
   if args.mode == "hf":
     inspect_hf(args)
   elif args.mode == "maxtext":
-    # remaining_args accepts maxtext config, like `model_name=<maxtext_model_name> scan_layers=<True | False>`
+    # remaining_args accepts maxtext config, like `model_name=<maxtext_model_name> scan_layers=<True | False> enable_nnx=<True | False>`
     inspect_maxtext(args, remaining_args)
   elif args.mode == "orbax":
     inspect_orbax(args)
