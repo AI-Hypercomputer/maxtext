@@ -1,58 +1,80 @@
 #!/bin/bash
 
-# Validates the GPTOSS-20B pre-training pipeline starting from converted MaxText checkpoint.
+# Validates the GPT-OSS-20b pre-training pipeline using a pre-converted MaxText checkpoint.
+
+# The flow of this script is as follows:
+# 1. Run inference on the pre-converted checkpoint.
+# 2. Run pre-training starting from the pre-converted checkpoint.
+# 3. Run inference on the checkpoint produced by the pre-training run.
+
+# Usage:
+# export HF_TOKEN=<your Hugging Face access token>
+# export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
+# bash test_gpt_oss_to_mt.sh $RUN_ID
+# bash test_gpt_oss.sh $RUN_ID
 
 set -ex
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
-export MODEL_NAME='gpt-oss-20b'
-export TOKENIZER_PATH='openai/gpt-oss-20b'
+MODEL_NAME='gpt-oss-20b'
 
-if [ -z "${BASE_OUTPUT_PATH}" ]; then
-  export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/${MODEL_NAME}
-fi
-BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
+# Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you have the scanned and unscanned checkpoints stored
+BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
+UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
 
-export SCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/scanned/${run_id}/0/items
-export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/unscanned/${run_id}/0/items
+# Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
+DATASET_PATH=gs://maxtext-dataset
 
-export SPARSE_MATMUL="True"
-export MEGABLOX="True"
-export PRETRAIN_ATTENTION="flash"
-
-# 1. Run Pre-training using synthetic dataset with Megablocks
-python3 -m maxtext.trainers.pre_train.train \
-    "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
-    base_output_directory=${BASE_OUTPUT_PATH}/train \
+# Step 1: Run inference on the original checkpoint converted from Hugging Face
+    python3 -m maxtext.inference.decode \
+    model_name=${MODEL_NAME} \
+    tokenizer_type="huggingface" \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    per_device_batch_size=1 \
     run_name=${run_id} \
-    model_name=${MODEL_NAME} \
-    tokenizer_type=huggingface \
-    tokenizer_path=${TOKENIZER_PATH} \
-    dataset_type=synthetic \
-    enable_checkpointing=true \
+    max_prefill_predict_length=8 \
+    max_target_length=16 \
+    steps=1 \
     async_checkpointing=false \
-    load_parameters_path=${SCANNED_CKPT_PATH} \
-    attention=${PRETRAIN_ATTENTION} \
-    sparse_matmul=${SPARSE_MATMUL} \
-    megablox=${MEGABLOX} \
-    dtype=bfloat16 \
-    weight_dtype=bfloat16 \
-    per_device_batch_size=4 \
-    steps=5 \
-    max_target_length=1024 \
-    ici_fsdp_parallelism=4 \
-    gcs_metrics=true
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    scan_layers=false \
+    prompt='I love to' \
+    attention=\'dot_product\'
 
-# 2. Run Verification Decoding from the converted checkpoint
-python3 -m maxtext.inference.decode \
-    base_output_directory=${BASE_OUTPUT_PATH} \
-    run_name=decode \
+# Step 2: Run Pre-training on the converted checkpoint
+# We can also run training by using the scanned converted checkpoint
+# Note that scanned checkpoint helps with efficient training
+python3 -m maxtext.trainers.pre_train.train \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/train \
+    dataset_path=${DATASET_PATH} \
+    tokenizer_type="huggingface" \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    per_device_batch_size=1 \
+    run_name=${run_id} \
+    max_target_length=1024 \
+    steps=5 \
+    weight_dtype=bfloat16 \
+    async_checkpointing=false \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
     model_name=${MODEL_NAME} \
-    tokenizer_path=${TOKENIZER_PATH} \
-    load_parameters_path=${BASE_OUTPUT_PATH}/train/${run_id}/checkpoints/4/items \
-    scan_layers=True \
-    attention=dot_product \
-    sparse_matmul=${SPARSE_MATMUL} \
-    megablox=${MEGABLOX} \
-    prompt="I love to" \
-    ici_tensor_parallelism=4
+    scan_layers=false \
+    use_multimodal=false
+
+# Step 3: Run inference on the checkpoint generated from the previous run
+    python3 -m maxtext.inference.decode \
+    model_name=${MODEL_NAME} \
+    tokenizer_type="huggingface" \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/4/items \
+    per_device_batch_size=1 \
+    run_name=${run_id} \
+    max_prefill_predict_length=8 \
+    max_target_length=16 \
+    steps=1 \
+    async_checkpointing=false \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    scan_layers=false \
+    prompt='I love to' \
+    attention=\'dot_product\'
