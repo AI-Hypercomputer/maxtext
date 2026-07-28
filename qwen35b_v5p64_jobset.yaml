@@ -123,7 +123,7 @@ spec:
                 - name: ENABLE_PATHWAYS_PERSISTENCE
                   value: "1"
                 - name: PYTHONPATH
-                  value: "/deps"
+                  value: "/deps/src"
                 - name: WANDB_API_KEY
                   value: "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"
                 - name: WANDB_ENTITY
