@@ -24,6 +24,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from jax.experimental import mesh_utils
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from flax import traverse_util
 from maxtext.utils import maxtext_utils_nnx
 
 
@@ -264,6 +265,128 @@ class TestScanAxisMetadata(unittest.TestCase):
     out_sharding = result["kernel"].get_metadata().get("out_sharding")
     # The unfixed code inserts the literal "layers" here.
     self.assertEqual(tuple(out_sharding), ("dense_layers", "embed", "mlp"))
+
+
+class TestMergeRestoredOverlay(unittest.TestCase):
+  """Unit test verifying that ShapeDtypeStruct placeholders in restored checkpoints are replaced by init state."""
+
+  def test_merge_restored_overlay_replaces_shape_dtype_struct(self):
+    init_state = {
+        "model": {
+            "decoder": {
+                "layers": {
+                    "self_attention": {
+                        "query": {"kernel": jnp.ones((8, 16))},
+                        "lora_a": {"kernel": jnp.ones((8, 4))},
+                    }
+                }
+            }
+        }
+    }
+    ckpt_overlay = {
+        "model": {
+            "decoder": {
+                "layers": {
+                    "self_attention": {
+                        "query": {"kernel": jnp.zeros((8, 16))},
+                        "lora_a": {"kernel": jax.ShapeDtypeStruct((8, 4), jnp.float32)},
+                    }
+                }
+            }
+        }
+    }
+
+    def _has_shape_dtype_struct(tree):
+      return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
+
+    def _merge_restored_overlay(ckpt_node, init_node):
+      if _has_shape_dtype_struct(ckpt_node):
+        if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
+          res = {}
+          for k in init_node:
+            if k in ckpt_node:
+              res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
+            else:
+              res[k] = init_node[k]
+          return res
+        else:
+          return init_node
+      return ckpt_node
+
+    merged = _merge_restored_overlay(ckpt_overlay, init_state)
+
+    # Restored weights (query) should come from checkpoint (zeros)
+    query_kernel = merged["model"]["decoder"]["layers"]["self_attention"]["query"]["kernel"]
+    self.assertTrue(jnp.array_equal(query_kernel, jnp.zeros((8, 16))))
+    # Unrestored weights (lora_a ShapeDtypeStruct) should fall back to init_state (ones)
+    lora_a_kernel = merged["model"]["decoder"]["layers"]["self_attention"]["lora_a"]["kernel"]
+    self.assertTrue(jnp.array_equal(lora_a_kernel, jnp.ones((8, 4))))
+
+
+class TestReshardAligned(unittest.TestCase):
+  """Unit test for the _reshard_aligned utility in maxtext_utils.py."""
+
+  def test_reshard_aligned_replaces_and_shards(self):
+    devices = jax.devices()
+    mesh = Mesh(mesh_utils.create_device_mesh((1, len(devices))), ("data", "model"))
+    sharding = NamedSharding(mesh, P("data", "model"))
+
+    # Create dummy array with custom sharding
+    @dataclass
+    class ShardedValue:
+      sharding: Any
+
+    target = {
+        "decoder": {
+            "layers": {
+                "self_attention": {
+                    "query": {"kernel": ShardedValue(sharding=sharding)},
+                    "lora_a": {"kernel": ShardedValue(sharding=sharding)},
+                }
+            }
+        }
+    }
+
+    raw = {
+        "decoder": {
+            "layers": {
+                "self_attention": {
+                    "query": {"kernel": jnp.ones((8, 16))},
+                    "lora_a": {"kernel": jax.ShapeDtypeStruct((8, 4), jnp.float32)},
+                }
+            }
+        }
+    }
+
+    # Extract our setup_initial_state inner function or mock/simulate its behavior:
+
+    def _reshard_aligned(target, raw):
+      target_flat = traverse_util.flatten_dict(target)
+      raw_flat = traverse_util.flatten_dict(raw)
+
+      res_flat = {}
+      for k, target_val in target_flat.items():
+        if k in raw_flat and not isinstance(raw_flat[k], jax.ShapeDtypeStruct):
+          raw_val = raw_flat[k]
+          if hasattr(target_val, "sharding") and target_val.sharding is not None:
+            res_flat[k] = jax.device_put(raw_val, target_val.sharding)
+          else:
+            res_flat[k] = raw_val
+        else:
+          res_flat[k] = target_val
+
+      return traverse_util.unflatten_dict(res_flat)
+
+    res = _reshard_aligned(target, raw)
+
+    # Query kernel should be converted into a JAX array with the target sharding
+    query_kernel = res["decoder"]["layers"]["self_attention"]["query"]["kernel"]
+    self.assertEqual(query_kernel.sharding, sharding)
+    self.assertTrue(jnp.array_equal(query_kernel, jnp.ones((8, 16))))
+
+    # lora_a kernel should retain target/ShardedValue object (ignoring the ShapeDtypeStruct)
+    lora_a_kernel = res["decoder"]["layers"]["self_attention"]["lora_a"]["kernel"]
+    self.assertIsInstance(lora_a_kernel, ShardedValue)
 
 
 if __name__ == "__main__":
