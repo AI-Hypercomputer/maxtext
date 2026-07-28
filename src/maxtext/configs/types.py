@@ -974,17 +974,22 @@ class MoEKernels(BaseModel):
 
   merge_gating_gmm: bool = Field(False, description="whether to merge the two gating gmm kernels into one.")
 
+  num_moe_emb_chunks: int = Field(
+      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
+  )
+
   # tokamax gmm
   use_tokamax_gmm: bool = Field(
       False,
       description="Whether to use the Tokamax library for GMM kernel implementation.",
   )
-  use_gmm_v2: bool | tuple[bool, bool, bool] = Field(
+
+  use_gmm_v2: tuple[bool, bool, bool] = Field(
       (False, False, False),
       description=(
           "Whether to use GMM v2 for MoE forward/backward passes. "
-          "Can be a single boolean (shorthand for all True or all False) or a "
-          "3-tuple of booleans representing (fwd, dlhs, drhs)."
+          "Can be specified as a single boolean (shorthand for all True or all False) "
+          "or a list/tuple of 3 booleans representing (fwd, dlhs, drhs)."
       ),
   )
 
@@ -992,20 +997,15 @@ class MoEKernels(BaseModel):
   @classmethod
   def validate_use_gmm_v2(cls, v: Any) -> tuple[bool, bool, bool]:
     """Validate and preprocess use_gmm_v2 configuration input."""
-    # preprocessing single boolean to tuple
+    # expand single boolean to tuple
     if isinstance(v, bool):
       return (v, v, v)
-    # check if it is a list or tuple of 3 booleans
-    if isinstance(v, (list, tuple)):
-      if len(v) != 3 or not all(isinstance(x, bool) for x in v):
-        raise ValueError("use_gmm_v2 tuple must contain exactly 3 booleans.")
-      return tuple(v)
-    # unsupported type
-    raise ValueError("use_gmm_v2 must be a boolean or a tuple/list of 3 booleans.")
 
-  num_moe_emb_chunks: int = Field(
-      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
-  )
+    # validation for list/tuple of 3 booleans
+    if isinstance(v, (list, tuple)) and len(v) == 3 and all(isinstance(x, bool) for x in v):
+      return tuple(v)
+
+    raise ValueError("use_gmm_v2 must be a boolean or a list/tuple of 3 booleans.")
 
 
 class DeepSeekMoE(BaseModel):
@@ -3644,9 +3644,6 @@ class MaxTextConfig(
 
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
-
-    if self.use_tokamax_gmm and self.megablox:
-      raise ValueError("`use_tokamax_gmm` and `megablox` cannot both be set to True. Please choose a single backend.")
 
     # Validation for GMM v2
     if any(self.use_gmm_v2):
