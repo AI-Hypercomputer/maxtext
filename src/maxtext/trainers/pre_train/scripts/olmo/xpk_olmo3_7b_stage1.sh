@@ -145,6 +145,18 @@ submit_workload() {
   # pod mounts its own copy at startup, no cluster-side configuration required.
   # VENV_PATH=/__skip_venv__ skips the venv lookup so the launcher falls
   # through to the runner image's system Python.
+  if command -v gcluster &> /dev/null || [ "${USE_GCLUSTER:-0}" = "1" ]; then
+    echo "Submitting via Cluster Toolkit (gcluster)..."
+    gcluster job submit \
+      --cluster "$XPK_CLUSTER" \
+      --name "$XPK_WORKLOAD" \
+      --priority="$XPK_PRIORITY" \
+      --compute-type="$XPK_DEVICE_TYPE" \
+      --num-slices="$XPK_NUM_SLICES" \
+      --project="$XPK_PROJECT" \
+      --location="$XPK_ZONE" \
+      --image="$XPK_DOCKER_IMAGE" \
+  else
   xpk workload create \
     --cluster "$XPK_CLUSTER" \
     --workload "$XPK_WORKLOAD" \
@@ -154,6 +166,7 @@ submit_workload() {
     --project="$XPK_PROJECT" \
     --zone="$XPK_ZONE" \
     --docker-image="$XPK_DOCKER_IMAGE" \
+  fi
     --command "set -euo pipefail; \
 export PYTHONPATH=/deps/src; \
 export HF_TOKEN='${HF_TOKEN}'; \

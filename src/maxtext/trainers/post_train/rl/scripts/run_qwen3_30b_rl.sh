@@ -6,8 +6,8 @@
 set -e
 
 # --- Environment Setup ---
-if ! pip show xpk &> /dev/null; then
-    echo "xpk not found in the environment. Please install maxtext[runner] before running this script."
+if ! command -v gcluster &> /dev/null && ! pip show xpk &> /dev/null; then
+    echo "Neither gcluster nor xpk found in environment. Please install gcluster CLI or maxtext[runner]."
     exit 1
 fi
 
@@ -138,6 +138,20 @@ vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-30b-a3b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
 # Workload Creation
+if command -v gcluster &> /dev/null || [ "${USE_GCLUSTER:-0}" = "1" ]; then
+    echo "Submitting workload via Cluster Toolkit (gcluster)..."
+    gcluster job submit --pathways \
+      --cluster="$CLUSTER_NAME" \
+      --project="$PROJECT_ID" \
+      --location="$ZONE" \
+      --priority=medium \
+      --compute-type="$TPU_TYPE" \
+      --num-slices=1 \
+      --image="${DOCKER_IMAGE}" \
+      --name="${WORKLOAD_NAME}" \
+      --command="${MAXTEXT_COMMAND}"
+else
+
 xpk workload create-pathways \
   --cluster=$CLUSTER_NAME \
   --project=$PROJECT_ID \
@@ -150,3 +164,5 @@ xpk workload create-pathways \
   --workload="${WORKLOAD_NAME}" \
   --custom-pathways-proxy-server-args='${XLA_FLAGS}' \
   --command="${MAXTEXT_COMMAND}"
+
+fi

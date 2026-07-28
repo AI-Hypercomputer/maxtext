@@ -320,7 +320,23 @@ The schedule values above are a strong default for same-size pruning recovery. S
 
 > **Note:** `distill_layer_indices` is applied to **both** student and teacher activations identically. When the two have different depths (Pattern A or a depth-pruned Pattern B), every index must be valid on the *smaller* side, and same-numbered layers are aligned across the two models. The trainer cannot map student layer *i* to teacher layer *f(i)* for arbitrary *f*. If the depths differ significantly, prefer logit-only distillation (`distill_beta=0`).
 
-#### Multi-host on GKE via XPK
+#### Multi-host on GKE via Cluster Toolkit or XPK
+
+Multi-host distillation workloads can be submitted using **Cluster Toolkit (`gcluster job submit`)** or **XPK**.
+
+##### Using Cluster Toolkit (`gcluster`):
+
+```bash
+gcluster job submit \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --base-image ${IMAGE_NAME?} \
+  --build-context . \
+  --command "python3 -m maxtext.trainers.post_train.distillation.train_distill maxtext/configs/post_train/distillation_qwen3_30b_base.yml run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?}"
+```
+
+##### Using XPK:
 
 A reference launcher is provided at `src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh`. It handles image preparation (`prep_image` layers Tunix on top of the MaxText base image), workload submission, log streaming, and an auto-resume loop for long-running jobs.
 

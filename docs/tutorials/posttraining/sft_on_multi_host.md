@@ -34,7 +34,7 @@ Before starting, ensure you have:
   - **Artifact Registry Writer** (`roles/artifactregistry.writer`) to upload Docker images.
   - **Storage Admin** (`roles/storage.admin`) or **Storage Object Admin** (`roles/storage.objectAdmin`) combined with **Storage Legacy Bucket Reader** (`roles/storage.legacyBucketReader`) on your GCS bucket to read/write checkpoints and logs. (Note: A bucket-level read permission like `storage.buckets.get` is required by JAX/TensorStore to verify bucket existence and metadata; using `roles/storage.objectAdmin` alone will cause a misleading "bucket not found" error).
 - A Hugging Face account with an access token for downloading models.
-- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+- Prerequisites for Cluster Toolkit installed (follow [Cluster Toolkit CLI Installation Guide](https://cloud.google.com/cluster-toolkit/docs/install-cli)) or XPK (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
   - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
@@ -153,6 +153,22 @@ This section provides the command to run SFT on a GKE cluster.
 
 ### SFT with Multi-Controller JAX (McJAX)
 
+#### Option 1: Using Cluster Toolkit (`gcluster`)
+
+```bash
+gcluster job submit \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --base-image ${DOCKER_IMAGE?} \
+  --build-context . \
+  --command "python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane hf_path=${DATASET_NAME?} train_split=${TRAIN_SPLIT?} train_data_columns=${TRAIN_DATA_COLUMNS?}"
+```
+
+#### Option 2: Using XPK
+
+
+
 ```bash
 xpk workload create \
 --cluster=${GKE_CLUSTER?} \
@@ -168,6 +184,22 @@ xpk workload create \
 Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
 
 ### SFT with Pathways
+
+#### Option 1: Using Cluster Toolkit (`gcluster`)
+
+```bash
+gcluster job submit --pathways \
+  --name ${RUN_NAME?} \
+  --compute-type ${COMPUTE_TYPE?} \
+  --topology ${TOPOLOGY?} \
+  --base-image ${DOCKER_IMAGE?} \
+  --build-context . \
+  --command "JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=0 checkpoint_storage_use_ocdbt=0 enable_single_controller=True"
+```
+
+#### Option 2: Using XPK
+
+
 
 ```bash
 export USE_PATHWAYS=1

@@ -319,6 +319,18 @@ submit_workload() {
   # scratch off the image filesystem — it does NOT consume RAM. Make /dev/shm
   # Memory-backed via a kubectl patch if you want true tmpfs. (Comment lives here,
   # not inline: a `#` in the quoted --command would comment out the rest.)
+  if command -v gcluster &> /dev/null || [ "${USE_GCLUSTER:-0}" = "1" ]; then
+    echo "Submitting via Cluster Toolkit (gcluster)..."
+    gcluster job submit \
+      --cluster "$XPK_CLUSTER" \
+      --name "$XPK_WORKLOAD" \
+      --priority="$XPK_PRIORITY" \
+      --compute-type="$XPK_DEVICE_TYPE" \
+      --num-slices="$XPK_NUM_SLICES" \
+      --project="$XPK_PROJECT" \
+      --location="$XPK_ZONE" \
+      --image="$XPK_BASE_IMAGE" \
+  else
   xpk workload create \
     --cluster "$XPK_CLUSTER" \
     --workload "$XPK_WORKLOAD" \
@@ -328,6 +340,7 @@ submit_workload() {
     --project="$XPK_PROJECT" \
     --zone="$XPK_ZONE" \
     "$image_flag=$XPK_BASE_IMAGE" \
+  fi
     --command "export PYTHONPATH=/deps/src:/app/src; \
 export BASE_OUTPUT_DIRECTORY=${OUTPUT_DIR}; \
 export LIBTPU_INIT_ARGS='${libtpu_init_args}'; \
