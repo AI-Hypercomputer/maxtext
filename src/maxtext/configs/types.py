@@ -1666,6 +1666,14 @@ class ManifoldConstrainedHyperConnections(BaseModel):
           "Practical only for a small mhc_expansion_rate (e.g., k=4)."
       ),
   )
+  use_mhc_pallas_kernel: bool = Field(
+      False,
+      description=(
+          "Use the optimized Pallas TPU kernel for mHC-lite connectivity. "
+          "Requires enable_mhc_lite=True, mhc_expansion_rate=4, bfloat16 activations, "
+          "tensor parallelism of 1, and a per-device token count divisible by 16."
+      ),
+  )
 
 
 class DilocoParams(BaseModel):

@@ -983,6 +983,34 @@ class TrainCompile(parameterized.TestCase):
     )
 
   @pytest.mark.cpu_only
+  def test_mhc_pallas_integration(self):
+    """AOT test for the optimized mHC-lite Pallas kernel."""
+    compiled_trainstep_file = "/tmp/test_mhc_pallas_integration"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek-custom",
+            "per_device_batch_size=4",
+            "scan_layers=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "max_target_length=1024",
+            # override
+            "override_model_config=True",
+            "mhc_expansion_rate=4",
+            "enable_mhc_lite=True",
+            "use_mhc_pallas_kernel=True",
+            "ici_tensor_parallelism=1",
+            "dcn_tensor_parallelism=1",
+            "engram_layers=[]",
+        )
+    )
+
+  @pytest.mark.cpu_only
   def test_engram_integration(self):
     """AOT test for Engram implementation"""
     compiled_trainstep_file = "/tmp/test_engram_integration"

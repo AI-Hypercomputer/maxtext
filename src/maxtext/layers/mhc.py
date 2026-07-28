@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
+from maxtext.kernels import mhc as mhc_kernel
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import RMSNorm
@@ -105,6 +106,17 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.dtype = self.config.dtype
     self.weight_dtype = self.config.weight_dtype
     self.matmul_precision = jax.lax.Precision(self.config.matmul_precision)
+
+    if self.config.use_mhc_pallas_kernel:
+      if not self.config.enable_mhc_lite:
+        raise ValueError("use_mhc_pallas_kernel requires enable_mhc_lite=True.")
+      if self.k != 4:
+        raise ValueError("use_mhc_pallas_kernel currently requires mhc_expansion_rate=4.")
+      tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
+      if tensor_parallelism != 1:
+        raise ValueError(
+            "use_mhc_pallas_kernel currently requires ici_tensor_parallelism=1 and dcn_tensor_parallelism=1."
+        )
 
     # Norm layer
     self.mhc_norm = RMSNorm(
@@ -249,32 +261,47 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # x shape: [batch, seq, expansion_rate, emb]
     b, s, k, d = x.shape
 
-    # 1. Flatten the tensor, and RMS normalization
-    norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
+    if self.config.use_mhc_pallas_kernel:
+      dtype = self.dtype
+      layer_input, mhc_context = mhc_kernel.pre(
+          x,
+          jnp.asarray(self.mhc_norm.scale[...], dtype) + self.mhc_norm.scale_offset,
+          jnp.asarray(self.pre_alpha[...], dtype),
+          jnp.asarray(self.pre_beta[...], dtype),
+          jnp.asarray(self.pre_alpha_scale[...], dtype),
+          jnp.asarray(self.post_alpha[...], dtype),
+          jnp.asarray(self.post_beta[...], dtype),
+          jnp.asarray(self.post_alpha_scale[...], dtype),
+          jnp.asarray(self.res_alpha[...], dtype),
+          jnp.asarray(self.res_beta[...], dtype),
+          jnp.asarray(self.res_alpha_scale[...], dtype),
+          self.permutation_matrices.astype(dtype),
+          rms_epsilon=self.config.normalization_layer_epsilon,
+          interpret=self.mesh.devices.flat[0].platform != "tpu",
+      )
+    else:
+      # 1. Flatten the tensor, and RMS normalization
+      norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
 
-    # Fused Projections
-    pre_alpha = jnp.asarray(self.pre_alpha[...], self.dtype)
-    post_alpha = jnp.asarray(self.post_alpha[...], self.dtype)
-    res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
+      # Fused projections
+      pre_alpha = jnp.asarray(self.pre_alpha[...], self.dtype)
+      post_alpha = jnp.asarray(self.post_alpha[...], self.dtype)
+      res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
+      alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
+      h_concat = jnp.einsum("bsm,mn -> bsn", norm_x, alpha_concat, precision=self.matmul_precision)
+      h_pre = h_concat[..., : self.k]
+      h_post = h_concat[..., self.k : 2 * self.k]
+      h_res = h_concat[..., 2 * self.k :]
 
-    alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
-
-    # MatMul on normalized input
-    h_concat = jnp.einsum("bsm,mn -> bsn", norm_x, alpha_concat, precision=self.matmul_precision)
-
-    h_pre = h_concat[..., : self.k]
-    h_post = h_concat[..., self.k : 2 * self.k]
-    h_res = h_concat[..., 2 * self.k :]
-
-    # 2. Pre mapping
-    pre_mapping = self.mapping(
-        h_pre,
-        self.pre_alpha_scale[...],
-        self.pre_beta[...],
-        1.0,
-        eps=1e-6,
-    )
-    layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
+      # 2. Pre mapping
+      pre_mapping = self.mapping(
+          h_pre,
+          self.pre_alpha_scale[...],
+          self.pre_beta[...],
+          1.0,
+          eps=1e-6,
+      )
+      layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
 
     # 3. Pre-norm
     layer_input = norm_fn(layer_input)
@@ -292,24 +319,32 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     else:
       raise ValueError(f"Unsupported type: {mhc_type}")
 
-    # 5. Post mapping
-    post_mapping = self.mapping(
-        h_post,
-        self.post_alpha_scale[...],
-        self.post_beta[...],
-        2.0,
-    )
-    post_out = jnp.einsum(
-        "bsd,bsk -> bskd",
-        layer_out,
-        post_mapping,
-        precision=self.matmul_precision,
-    )
+    if self.config.use_mhc_pallas_kernel:
+      output = mhc_kernel.post(
+          layer_out,
+          mhc_context,
+          interpret=self.mesh.devices.flat[0].platform != "tpu",
+      )
+    else:
+      # 5. Post mapping
+      post_mapping = self.mapping(
+          h_post,
+          self.post_alpha_scale[...],
+          self.post_beta[...],
+          2.0,
+      )
+      post_out = jnp.einsum(
+          "bsd,bsk -> bskd",
+          layer_out,
+          post_mapping,
+          precision=self.matmul_precision,
+      )
 
-    # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
-    res_mapping = self.res_mapping(h_res)
-    res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
-    return res_out + post_out, metadata
+      # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
+      res_mapping = self.res_mapping(h_res)
+      res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
+      output = res_out + post_out
+    return output, metadata
 
 
 class DeepSeek4HyperHead(nnx.Module):

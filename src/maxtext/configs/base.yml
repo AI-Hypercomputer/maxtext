@@ -1302,6 +1302,10 @@ sinkhorn_iterations: 20
 #   the expensive sinkhorn iterations, the downside to this approach is that
 #   it is factorial in k.
 enable_mhc_lite: False
+# Use the normalize-late Pallas TPU kernel for mHC-lite. Requires
+# enable_mhc_lite=True, mhc_expansion_rate=4, bfloat16 activations, tensor
+# parallelism of 1, and a per-device token count divisible by 16.
+use_mhc_pallas_kernel: False
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
@@ -1345,5 +1349,3 @@ elastic_backup_kind: "snapshot"
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
-
-
