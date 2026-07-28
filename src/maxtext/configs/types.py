@@ -1637,12 +1637,10 @@ class ManifoldConstrainedHyperConnections(BaseModel):
       ),
   )
   enable_mhc_pallas_kernel: bool = Field(
-      False,
-      description="Whether to use the custom TPU Pallas kernel for mHC computation."
+      False, description="Whether to use the custom TPU Pallas kernel for mHC computation."
   )
   mhc_pallas_block_t: PositiveInt = Field(
-      64,
-      description="The block size along the sequence dimension for the mHC Pallas kernel."
+      64, description="The block size along the sequence dimension for the mHC Pallas kernel."
   )
 
 
