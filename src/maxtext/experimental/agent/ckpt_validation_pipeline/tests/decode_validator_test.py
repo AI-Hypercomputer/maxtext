@@ -29,32 +29,28 @@ class TestCheckpointValidationAgent(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "REQUIRED: You must provide 'scan_layers'"):
       # Missing scan_layers
       validate_checkpoint(
-          "test-run", "qwen", "gs://fake", "", ["tokenizer_path=fake/path"]
+          "", ["run_name=test-run", "model_name=qwen", "load_parameters_path=gs://fake", "tokenizer_path=fake/path"]
       )
 
-    with self.assertRaisesRegex(
-        ValueError, "REQUIRED: You must provide 'tokenizer_path'"
-    ):
+    with self.assertRaisesRegex(ValueError, "REQUIRED: You must provide 'tokenizer_path'"):
       # Missing tokenizer_path
-      validate_checkpoint("test-run", "qwen", "gs://fake", "", ["scan_layers=false"])
+      validate_checkpoint(
+          "", ["run_name=test-run", "model_name=qwen", "load_parameters_path=gs://fake", "scan_layers=false"]
+      )
 
-  @patch(
-      "maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator.subprocess.run"
-  )
+  @patch("maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator.subprocess.run")
   @patch("os.makedirs")
   @patch("builtins.open")
-  def test_successful_command_generation(
-      self, _mock_open, _mock_makedirs, mock_subprocess
-  ):
+  def test_successful_command_generation(self, _mock_open, _mock_makedirs, mock_subprocess):
     """test that the script correctly builds the right MaxText command."""
     mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
 
     validate_checkpoint(
-        "success-test",
-        "qwen3-4b",
-        "gs://path/to/checkpoint",
         "",
         [
+            "run_name=success-test",
+            "model_name=qwen3-4b",
+            "load_parameters_path=gs://path/to/checkpoint",
             "tokenizer_path=Qwen/Qwen3-4B",
             "scan_layers=False",
             "per_device_batch_size=16.0",
@@ -70,24 +66,23 @@ class TestCheckpointValidationAgent(unittest.TestCase):
     self.assertIn("scan_layers=False", executed_command)
     self.assertIn("per_device_batch_size=16.0", executed_command)
 
-  @patch(
-      "maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator.subprocess.run"
-  )
+  @patch("maxtext.experimental.agent.ckpt_validation_pipeline.decode_validator.subprocess.run")
   @patch("os.makedirs")
   @patch("builtins.open")
   @patch("maxtext.utils.gcs_utils.upload_blob")
-  def test_upload_to_gcs(
-      self, mock_upload_blob, _mock_open, _mock_makedirs, mock_subprocess
-  ):
+  def test_upload_to_gcs(self, mock_upload_blob, _mock_open, _mock_makedirs, mock_subprocess):
     """test that GCS upload uses the official maxtext utility."""
     mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
 
     validate_checkpoint(
-        "success-test",
-        "qwen3-4b",
-        "gs://path/to/checkpoint",
         "gs://my-bucket/reports",
-        ["tokenizer_path=Qwen/Qwen3-4B", "scan_layers=False"],
+        [
+            "run_name=success-test",
+            "model_name=qwen3-4b",
+            "load_parameters_path=gs://path/to/checkpoint",
+            "tokenizer_path=Qwen/Qwen3-4B",
+            "scan_layers=False",
+        ],
     )
 
     mock_upload_blob.assert_called_once()

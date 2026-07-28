@@ -389,7 +389,8 @@ def main():
   if args.mode == "hf":
     inspect_hf(args)
   elif args.mode == "maxtext":
-    # remaining_args accepts maxtext config, like `model_name=<maxtext_model_name> scan_layers=<True | False> enable_nnx=<True | False>`
+    # remaining_args accepts maxtext config, like `model_name=<maxtext_model_name>
+    # scan_layers=<True | False> enable_nnx=<True | False>`
     inspect_maxtext(args, remaining_args)
   elif args.mode == "orbax":
     inspect_orbax(args)

@@ -12,7 +12,7 @@ If a step fails, the Overwatch Agent analyzes the divergence, attempts to fix th
 
 2. **Task B: Checkpoint Inspection**
    Inspects the structure of the Orbax/MaxText checkpoint to ensure all required files and layers are present in GCS.
-   Script: `inspect_checkpoint.py`
+   Script: [`inspect_checkpoint.py`](/src/maxtext/checkpoint_conversion/inspect_checkpoint.py)
 
 3. **Task C: Forward Pass Logit Verification** (WIP)
    Runs the model on PyTorch and MaxText simultaneously and compares the intermediate layer outputs (using Flax `sow`) to catch the exact layer where a conversion bug exists.
@@ -45,7 +45,9 @@ While the primary interaction is via the Airflow UI, you can execute the validat
 
 ## Manual Run Instructions (For Debugging)
 
-### Step 1: Shape Validation (CPU-only)
+### Step 1: Shape Validation (No TPU Required)
+
+> **Note on Device Expectations**: Steps 1 and 2 rely on abstract shape tracing (`jax.eval_shape`) and mock tensors. Because they do not execute actual math, they are extremely cheap and **do not require a TPU** (they can run on a standard CPU VM or a TPU VM without locking the chips). In contrast, the subsequent downstream steps (Logit Verification and Decoding) execute the actual model weights and explicitly require TPU hardware (e.g. v4-8) to run.
 
 ```bash
 python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/checkpoint_shape_validator.py \

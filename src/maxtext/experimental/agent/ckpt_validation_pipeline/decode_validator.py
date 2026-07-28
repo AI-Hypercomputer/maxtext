@@ -18,6 +18,7 @@ import maxtext
 import subprocess
 import json
 import os
+import sys
 import argparse
 import absl.logging
 from maxtext.utils import gcs_utils
@@ -28,41 +29,38 @@ from maxtext.utils import max_logging as logger
 absl.logging.set_verbosity(absl.logging.INFO)
 
 
-def validate_checkpoint(
-    run_name, internal_model_name, checkpoint_path, report_gcs_dir, unknown_args
-):
+def validate_checkpoint(report_gcs_dir, maxtext_args):
   """Validate MaxText checkpoint using passed arguments."""
-  logger.info(f"Validating {run_name}...")
-  logger.info(f"Reading weights from: {checkpoint_path}")
-
   # Check mandatory overrides (tokenizer_path, scan_layers)
   overrides_dict = {}
-  for arg in unknown_args:
+  for arg in maxtext_args:
     if "=" in arg:
       k, v = arg.split("=", 1)
       overrides_dict[k] = v
 
+  run_name = overrides_dict.get("run_name", "default_run")
+  internal_model_name = overrides_dict.get("model_name", "unknown")
+  checkpoint_path = overrides_dict.get("load_parameters_path", "unknown")
+
+  logger.info(f"Validating {run_name}...")
+  logger.info(f"Reading weights from: {checkpoint_path}")
+
   if "tokenizer_path" not in overrides_dict:
     raise ValueError("REQUIRED: You must provide 'tokenizer_path' as an override.")
   if "scan_layers" not in overrides_dict:
-    raise ValueError(
-        "REQUIRED: You must provide 'scan_layers' (true/false) as an override."
-    )
+    raise ValueError("REQUIRED: You must provide 'scan_layers' (true/false) as an override.")
 
   # base command
   command = [
       "python3",
       "src/maxtext/inference/decode.py",
       "src/maxtext/configs/base.yml",
-      f"run_name={run_name}",
-      f"load_parameters_path={checkpoint_path}",
-      f"model_name={internal_model_name}",
   ]
 
-  # append additional maxtext configs from unknown args
-  if unknown_args:
+  # append additional maxtext configs from maxtext_args
+  if maxtext_args:
     logger.info("Applying additional flags from MaxText overrides...")
-    for arg in unknown_args:
+    for arg in maxtext_args:
       command.append(arg)
       logger.info(f"  -> {arg}")
 
@@ -70,18 +68,14 @@ def validate_checkpoint(
   maxtext_module_dir = os.path.dirname(maxtext.__file__)
   repo_root = os.path.abspath(os.path.join(maxtext_module_dir, "../../"))
   # run subprocess (from the top level repo directory)
-  result = subprocess.run(
-      command, text=True, capture_output=True, check=False, cwd=repo_root
-  )
+  result = subprocess.run(command, text=True, capture_output=True, check=False, cwd=repo_root)
 
   # generate report
   report = {
       "run_name": run_name,
       "model": internal_model_name,
       "success": result.returncode == 0,  # if returncode is 0, command worked
-      "stderr": (
-          result.stderr if result.returncode != 0 else "Success"
-      ),  # store error message if there's a failure
+      "stderr": (result.stderr if result.returncode != 0 else "Success"),  # store error message if there's a failure
       "checkpoint_used": checkpoint_path,
   }
 
@@ -102,38 +96,19 @@ def validate_checkpoint(
     gcs_utils.upload_blob(f"{gcs_dir}report_{run_name}.json", output_path)
 
   if result.returncode != 0:
-    raise RuntimeError(
-        f"Subprocess decode.py failed with exit code {result.returncode}. Stderr: {result.stderr}"
-    )
+    raise RuntimeError(f"Subprocess decode.py failed with exit code {result.returncode}. Stderr: {result.stderr}")
 
-
-import sys
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Validate MaxText Checkpoints")
-  parser.add_argument("--run_name", type=str, required=True, help="Validation run name")
-  parser.add_argument(
-      "--maxtext_model_name",
-      type=str,
-      required=True,
-      help="Internal MaxText model name",
-  )
-  parser.add_argument(
-      "--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint"
-  )
-  parser.add_argument(
-      "--report_gcs_dir", type=str, default="", help="GCS directory for reports"
-  )
+  parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS directory for reports")
 
-  args, unknown = parser.parse_known_args()
+  args, _maxtext_args = parser.parse_known_args()
 
   try:
     validate_checkpoint(
-        args.run_name,
-        args.maxtext_model_name,
-        args.checkpoint_gcs_path,
         args.report_gcs_dir,
-        unknown,
+        _maxtext_args,
     )
   except (KeyError, ValueError, FileNotFoundError, RuntimeError) as e:
     logger.error(f"FAILED: {e}")
