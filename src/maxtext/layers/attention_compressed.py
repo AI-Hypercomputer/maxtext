@@ -1084,14 +1084,7 @@ class CompressedAttention(Attention):
     # Tokamax dynamic splash tile boundary alignment. Note: Tokamax kernel inside AttentionOp additionally
     # sets inner block size as min(block_kv, key_len) during kernel invocation.
     if self.attention_kernel == "flash":
-      if self.attention_type == AttentionType.LOCAL_SLIDING:
-        block_size = (
-            self.config.local_sa_block_kv
-            if self.config.local_sa_block_kv is not None
-            else self.config.sa_block_kv
-        )
-      else:
-        block_size = self.config.sa_block_kv
+      block_size = self.config.sa_block_kv
       pad_kv_total = (block_size - (kv.shape[1] % block_size)) % block_size
 
       if pad_kv_total > 0:

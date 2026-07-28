@@ -690,11 +690,16 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
         usable = (seq_len // pt_comp.compress_rate) * pt_comp.compress_rate
         n_windows = usable // pt_comp.compress_rate
         pt_chunk_kv = pt_kv[:, :usable].view(batch, n_windows, pt_comp.compress_rate, -1)
-        pt_chunk_gate = pt_gate[:, :usable].view(batch, n_windows, pt_comp.compress_rate, -1) + pt_comp.position_bias
+        pt_chunk_gate = (
+            pt_gate[:, :usable].view(batch, n_windows, pt_comp.compress_rate, -1) + pt_comp.position_bias
+        )
 
         # [batch, seq_len, head_dim] -> [batch, n_windows, compress_rate, head_dim]
         mt_chunk_kv = mt_kv[:, :usable].reshape((batch, n_windows, mt_comp.compress_rate, -1))
-        mt_chunk_gate = mt_gate[:, :usable].reshape((batch, n_windows, mt_comp.compress_rate, -1)) + mt_comp.position_bias.value
+        mt_chunk_gate = (
+            mt_gate[:, :usable].reshape((batch, n_windows, mt_comp.compress_rate, -1))
+            + mt_comp.position_bias.value
+        )
         print(f"chunk_gate error: {np.max(np.abs(pt_chunk_gate.detach().numpy() - np.array(mt_chunk_gate)))}")
 
         pt_gate_weights = pt_chunk_gate.softmax(dim=2, dtype=torch.float32).to(pt_chunk_kv.dtype)
@@ -817,6 +822,16 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
     self.seq_len = 489
     try:
       self._run_e2e_test("heavily_compressed_attention", attention_kernel="flash", check_norm=True)
+    finally:
+      self.seq_len = old_seq_len
+
+  @pytest.mark.tpu_only
+  def test_forward_csa_flash_true_unaligned_489(self):
+    """Verifies CSA Flash Attention compiles and runs on true unaligned sequence length 489."""
+    old_seq_len = self.seq_len
+    self.seq_len = 489
+    try:
+      self._run_e2e_test("compressed_sparse_attention", attention_kernel="flash", check_norm=True)
     finally:
       self.seq_len = old_seq_len
 
