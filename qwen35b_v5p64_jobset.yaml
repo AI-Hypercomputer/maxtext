@@ -1,10 +1,10 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: non-agentic-0727-qwen35-35b-3
+  name: ym-qw35-4
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: non-agentic-0727-qwen35-35b-3
+    xpk.google.com/workload: ym-qw35-4
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -123,7 +123,7 @@ spec:
                 - name: ENABLE_PATHWAYS_PERSISTENCE
                   value: "1"
                 - name: PYTHONPATH
-                  value: "/app"
+                  value: "/deps"
                 - name: WANDB_API_KEY
                   value: "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"
                 - name: WANDB_ENTITY
@@ -164,7 +164,7 @@ spec:
                   
                   python3 -m maxtext.trainers.post_train.rl.train_rl \
                   src/maxtext/configs/post_train/rl_gsm8k_qwen35_35b_v5p64.yml \
-                  run_name=non-agentic-0727-qwen35-35b-3 \
+                  run_name=ym-qw35-4 \
                   base_output_directory=gs://yixuanm-maxtext-logs/ConvergenceTesting \
                   load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items & PID=$!;
                   
@@ -201,7 +201,7 @@ spec:
         template:
           metadata:
             labels:
-              xpk.google.com/workload: non-agentic-0727-qwen35-35b-3
+              xpk.google.com/workload: ym-qw35-4
             annotations:
               cloud.google.com/skip-tpu-webhook-check: "true"
           spec:
