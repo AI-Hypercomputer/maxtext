@@ -35,10 +35,11 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 
-DEFAULT_BLOCK_SIZE = 16
+DEFAULT_BLOCK_SIZE = 64
 DEFAULT_VMEM_LIMIT_BYTES = 64 * 1024 * 1024
 _PARALLEL = ("parallel",)
 _SEQUENTIAL = ("arbitrary",)
+_MHCContext = tuple[jax.Array, jax.Array, jax.Array]
 
 
 def _whole(shape):
@@ -900,29 +901,50 @@ def _validate_inputs(x, block_size, permutations_shape=None):
 
 
 def pre(
-    x,
-    norm_scale,
-    pre_alpha,
-    pre_bias,
-    pre_scale,
-    post_alpha,
-    post_bias,
-    post_scale,
-    res_alpha,
-    res_bias,
-    res_scale,
-    permutations,
+    x: jax.Array,
+    norm_scale: jax.Array,
+    pre_alpha: jax.Array,
+    pre_bias: jax.Array,
+    pre_scale: jax.Array,
+    post_alpha: jax.Array,
+    post_bias: jax.Array,
+    post_scale: jax.Array,
+    res_alpha: jax.Array,
+    res_bias: jax.Array,
+    res_scale: jax.Array,
+    permutations: jax.Array,
     *,
-    rms_epsilon,
-    pre_mapping_epsilon=1e-6,
-    block_size=DEFAULT_BLOCK_SIZE,
-    vmem_limit_bytes=DEFAULT_VMEM_LIMIT_BYTES,
-    interpret=False,
-):
+    rms_epsilon: float,
+    pre_mapping_epsilon: float = 1e-6,
+    block_size: int = DEFAULT_BLOCK_SIZE,
+    vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
+    interpret: bool = False,
+) -> tuple[jax.Array, _MHCContext]:
   """Runs the coefficient and pre-application kernels.
 
-  Returns ``(layer_input, context)``. Pass ``context`` unchanged to :func:`post`
-  after running the attention or feed-forward branch on ``layer_input``.
+  Args:
+    x: Input streams with shape [batch, sequence, streams, embedding].
+    norm_scale: RMSNorm scale with shape [streams * embedding].
+    pre_alpha: Pre-gate projection with shape [streams * embedding, streams].
+    pre_bias: Pre-gate bias with shape [streams].
+    pre_scale: Pre-gate scalar scale with shape [1].
+    post_alpha: Post-gate projection with shape [streams * embedding, streams].
+    post_bias: Post-gate bias with shape [streams].
+    post_scale: Post-gate scalar scale with shape [1].
+    res_alpha: Residual projection with shape [streams * embedding, streams!].
+    res_bias: Residual bias with shape [streams!].
+    res_scale: Residual scalar scale with shape [1].
+    permutations: Permutation matrices with shape [streams!, streams, streams].
+    rms_epsilon: Epsilon used by RMSNorm.
+    pre_mapping_epsilon: Epsilon added to the pre-gate output.
+    block_size: Token-axis Pallas block size.
+    vmem_limit_bytes: Scoped VMEM limit passed to the Mosaic compiler.
+    interpret: Whether to run the Pallas calls in interpret mode.
+
+  Returns:
+    A pair containing the branch input and opaque context. Pass the context
+    unchanged to :func:`post` after running the attention or feed-forward
+    branch on the branch input.
   """
   _validate_inputs(x, block_size, permutations.shape)
   return _pre_op(
@@ -947,14 +969,26 @@ def pre(
 
 
 def post(
-    layer_output,
-    context,
+    layer_output: jax.Array,
+    context: _MHCContext,
     *,
-    block_size=DEFAULT_BLOCK_SIZE,
-    vmem_limit_bytes=DEFAULT_VMEM_LIMIT_BYTES,
-    interpret=False,
-):
-  """Runs the fused post-gate and residual-mixing kernel."""
+    block_size: int = DEFAULT_BLOCK_SIZE,
+    vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
+    interpret: bool = False,
+) -> jax.Array:
+  """Runs the fused post-gate and residual-mixing kernel.
+
+  Args:
+    layer_output: Wrapped branch output with shape [batch, sequence, embedding].
+    context: Opaque context returned by :func:`pre`.
+    block_size: Token-axis Pallas block size. Must match the value passed to
+      :func:`pre`.
+    vmem_limit_bytes: Scoped VMEM limit passed to the Mosaic compiler.
+    interpret: Whether to run the Pallas call in interpret mode.
+
+  Returns:
+    Mixed output streams with shape [batch, sequence, streams, embedding].
+  """
   x, h_post, residual = context
   _validate_inputs(x, block_size)
   return _post_op(

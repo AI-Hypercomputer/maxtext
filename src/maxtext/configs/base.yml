@@ -1304,8 +1304,11 @@ sinkhorn_iterations: 20
 enable_mhc_lite: False
 # Use the normalize-late Pallas TPU kernel for mHC-lite. Requires
 # enable_mhc_lite=True, mhc_expansion_rate=4, bfloat16 activations, tensor
-# parallelism of 1, and a per-device token count divisible by 16.
+# parallelism of 1, and a per-device token count divisible by
+# mhc_pallas_block_size.
 use_mhc_pallas_kernel: False
+# Token-axis (T = batch * sequence) block size. Must be a multiple of 8.
+mhc_pallas_block_size: 64
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.

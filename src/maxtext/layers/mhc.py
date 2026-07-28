@@ -117,6 +117,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         raise ValueError(
             "use_mhc_pallas_kernel currently requires ici_tensor_parallelism=1 and dcn_tensor_parallelism=1."
         )
+      if self.config.mhc_pallas_block_size % 8:
+        raise ValueError("mhc_pallas_block_size must be a multiple of 8.")
 
     # Norm layer
     self.mhc_norm = RMSNorm(
@@ -277,6 +279,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
           jnp.asarray(self.res_alpha_scale[...], dtype),
           self.permutation_matrices.astype(dtype),
           rms_epsilon=self.config.normalization_layer_epsilon,
+          block_size=self.config.mhc_pallas_block_size,
           interpret=self.mesh.devices.flat[0].platform != "tpu",
       )
     else:
@@ -323,6 +326,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       output = mhc_kernel.post(
           layer_out,
           mhc_context,
+          block_size=self.config.mhc_pallas_block_size,
           interpret=self.mesh.devices.flat[0].platform != "tpu",
       )
     else:

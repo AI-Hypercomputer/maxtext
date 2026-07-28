@@ -39,6 +39,7 @@ _NAMES = (
     "res_scale",
     "branch_weight",
 )
+_BLOCK_SIZE = 8
 
 
 def _make_inputs():
@@ -113,10 +114,11 @@ def _kernel_pipeline(permutations, *args):
       res_scale,
       permutations,
       rms_epsilon=1e-6,
+      block_size=_BLOCK_SIZE,
       interpret=True,
   )
   layer_output = jnp.dot(layer_input, branch_weight, preferred_element_type=jnp.float32)
-  return mhc.post(layer_output, context, interpret=True)
+  return mhc.post(layer_output, context, block_size=_BLOCK_SIZE, interpret=True)
 
 
 def _reference_pipeline(permutations, *args):
