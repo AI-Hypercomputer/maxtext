@@ -807,7 +807,7 @@ class TestKdaCp:
 
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
-  def test_kda_ag_cp_equivalence(self):
+  def test_kda_cp_equivalence(self):
     """KDA with CP should produce equivalent output to non-CP KDA."""
     from maxtext.layers.attention_kda import _l2_normalize
     from maxtext.kernels.kda import chunk_kda
@@ -875,7 +875,7 @@ class TestKdaCp:
     )
 
     # CP output should match reference within tolerance.
-    _assert_close(cp_o_full, ref_o, "kda_ag_cp_equivalence", atol=5e-3, rtol=1e-3)
+    _assert_close(cp_o_full, ref_o, "kda_cp_equivalence", atol=5e-3, rtol=1e-3)
 
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
   def test_kda_cp_rejects_load_balance(self):

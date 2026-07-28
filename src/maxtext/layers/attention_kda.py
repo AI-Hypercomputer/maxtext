@@ -454,6 +454,13 @@ class KimiDeltaAttention(nnx.Module):
     scale = self.key_head_dim**-0.5
     safe_gate = cfg.use_kda_safe_gate
     lower_bound = cfg.kda_lower_bound if safe_gate else None
+    if not safe_gate and cfg.kda_lower_bound != 0.0:
+      import warnings
+      warnings.warn(
+          f"kda_lower_bound={cfg.kda_lower_bound} is ignored because use_kda_safe_gate=False. "
+          "Set use_kda_safe_gate=True to enable lower_bound clamping.",
+          stacklevel=2,
+      )
     n_max = cfg.packing_max_segments_per_sample if cfg.packing_max_segments_per_sample > 0 else None
 
     # KDA Delta Rule relies on sequential recurrent state S_t = f(S_{t-1}, ...).

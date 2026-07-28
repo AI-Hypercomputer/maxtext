@@ -754,6 +754,7 @@ class KdaAttention(BaseModel):
 
   linear_conv_kernel_dim: int = Field(
       4,
+      ge=0,
       description=(
           "Convolution kernel dimension for linear attention layers (KDA). "
           "This specifies the size of the 1D convolution applied to keys for local dependency modeling. "
@@ -785,6 +786,13 @@ class KdaAttention(BaseModel):
           "Default 0.0 means no lower bound; -5.0 is a common choice."
       ),
   )
+
+  @field_validator("kda_lower_bound")
+  @classmethod
+  def _check_kda_lower_bound_finite(cls, v: float) -> float:
+    if not math.isfinite(v):
+      raise ValueError(f"kda_lower_bound must be finite, got {v}")
+    return v
 
 
 class AttentionIndexer(BaseModel):
