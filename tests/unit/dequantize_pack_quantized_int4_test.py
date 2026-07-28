@@ -59,7 +59,6 @@ def _quantize_per_group(w_fp32: torch.Tensor, group_size: int = INT4_GROUP_SIZE)
 
 class DequantizePackQuantizedInt4Test(unittest.TestCase):
 
-
   def setUp(self):
     torch.manual_seed(0)
 
@@ -72,6 +71,7 @@ class DequantizePackQuantizedInt4Test(unittest.TestCase):
     w_int, _ = _quantize_per_group(w_fp)
     packed = pack_to_int32(w_int, num_bits=_NUM_BITS)
     self.assertEqual(packed.dtype, torch.int32)
+
     self.assertEqual(tuple(packed.shape), (out_features, in_features // 8))
 
     canonical = unpack_from_int32(packed, num_bits=_NUM_BITS, shape=torch.Size([out_features, in_features]))
