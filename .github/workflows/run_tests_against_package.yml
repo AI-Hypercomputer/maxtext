@@ -223,8 +223,9 @@ jobs:
       - name: Run Targeted Decoupled Tests
         if: inputs.flavor == 'cpu-unit'
         run: |
-          echo "Running targeted fragile tests in decoupled mode (DECOUPLE_GCLOUD=TRUE)..."
+          echo "Running targeted tests in decoupled mode (DECOUPLE_GCLOUD=TRUE)..."
           export DECOUPLE_GCLOUD=TRUE
+
           $PYTHON_EXE -m pytest -v -n auto -m "decoupled_target" \
             --junitxml=test-results-decoupled-targeted.xml
 
