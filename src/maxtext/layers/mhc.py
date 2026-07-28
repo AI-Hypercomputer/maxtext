@@ -257,6 +257,10 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # x shape: [batch, seq, expansion_rate, emb]
     b, s, k, d = x.shape
 
+    if getattr(self.config, 'enable_mhc_pallas_kernel', False):
+      from maxtext.kernels.residual.mhc_kernel import run_mhc_pallas
+      return run_mhc_pallas(self, norm_fn, branch_fn, x, mhc_type, **kwargs)
+
     # 1. Flatten the tensor, and RMS normalization
     norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
 

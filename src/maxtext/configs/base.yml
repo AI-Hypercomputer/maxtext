@@ -1300,6 +1300,8 @@ sinkhorn_iterations: 20
 #   the expensive sinkhorn iterations, the downside to this approach is that
 #   it is factorial in k.
 enable_mhc_lite: False
+enable_mhc_pallas_kernel: False
+mhc_pallas_block_t: 16
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.

@@ -1636,6 +1636,14 @@ class ManifoldConstrainedHyperConnections(BaseModel):
           "Practical only for a small mhc_expansion_rate (e.g., k=4)."
       ),
   )
+  enable_mhc_pallas_kernel: bool = Field(
+      False,
+      description="Whether to use the custom TPU Pallas kernel for mHC computation."
+  )
+  mhc_pallas_block_t: PositiveInt = Field(
+      16,
+      description="The block size along the sequence dimension for the mHC Pallas kernel."
+  )
 
 
 class DilocoParams(BaseModel):
