@@ -1073,6 +1073,7 @@ class AttentionOp(nnx.Module):
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
+        or (self.attention_kernel == "autoselected" and target_hardware == "cpu")
         or (self.attention_kernel == "paged")
         or (self.attention_kernel in ("vllm_rpa", "vllm_batched_rpa"))
     ):
