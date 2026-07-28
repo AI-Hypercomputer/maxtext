@@ -2996,10 +2996,6 @@ class MaxTextConfig(
             "Please migrate to Qwix by setting use_qwix_quantization=True."
         )
 
-    # Check quant config is non-empty for Qwix quantization
-    if self.use_qwix_quantization and not self.quantization:
-      raise ValueError("Qwix quantization is enabled but quantization is not set.")
-
     # Default quantization sharding count to number of local devices if not set.
     if self.quantization_local_shard_count == -1:
       try:

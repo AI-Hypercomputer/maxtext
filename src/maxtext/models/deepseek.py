@@ -446,7 +446,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # in `Decoder`, since they will never be executed together.
     if self.config.use_batch_split_schedule:
       # The older version of batch-split that fully uses qwix quantization.
-      if self.config.use_qwix_quantization and not self.config.use_manual_quantization:
+      if self.config.quantization and self.config.use_qwix_quantization and not self.config.use_manual_quantization:
         activation_pspec = jax.sharding.PartitionSpec(
             ("data", "fsdp", "fsdp_transpose", "expert", "context"),
             None,

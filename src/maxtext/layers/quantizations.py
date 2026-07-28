@@ -658,7 +658,7 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     # The pure JAX version of batch-split that uses manual quantization for dot general.
     return None
 
-  if config.use_qwix_quantization:
+  if config.quantization and config.use_qwix_quantization:
     return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
@@ -857,7 +857,7 @@ def get_qt_provider(config):
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   # Batch split is not using Qwix's interception feature but manual plumbing
-  if config.use_qwix_quantization and not config.use_batch_split_schedule:
+  if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       if config.pure_nnx:

@@ -1516,7 +1516,7 @@ class RoutedMoE(nnx.Module):
             group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
+            use_qwix_quantization=bool(self.config.quantization) and self.config.use_qwix_quantization,
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,

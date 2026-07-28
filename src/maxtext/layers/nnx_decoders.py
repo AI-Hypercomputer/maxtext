@@ -1707,7 +1707,7 @@ class NNXDecoder(nnx.Module):
               policy = self.get_remat_policy()
               mock_params = self._build_linen_params(self.moe_layers)
 
-              if cfg.use_qwix_quantization and not cfg.use_manual_quantization:
+              if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
                 y = deepseek_batchsplit_fp8.scan_batch_split_layers(
                     y,
                     mock_params,

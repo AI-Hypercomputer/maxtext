@@ -1483,7 +1483,7 @@ class RoutedMoeTest(parameterized.TestCase):
           use_tokamax_gmm=use_tokamax_gmm,
           use_gmm_v2=use_gmm_v2,
           quantization=quantization,
-          use_qwix_quantization=quantization != "",
+          use_qwix_quantization=True,
           weight_quantization_calibration_method="fixed,-224,224",
           act_quantization_calibration_method="fixed,-224,224",
           bwd_quantization_calibration_method="absmax",

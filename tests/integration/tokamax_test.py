@@ -133,7 +133,7 @@ class Train(parameterized.TestCase):
         "use_tokamax_splash=False",
         # quantization
         f"quantization={quantization}",
-        f"use_qwix_quantization={quantization != ''}",
+        "use_qwix_quantization=True",
         "weight_quantization_calibration_method=fixed,-224,224",
         "act_quantization_calibration_method=fixed,-224,224",
         "bwd_quantization_calibration_method=absmax",
