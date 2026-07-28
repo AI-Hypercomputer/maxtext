@@ -1052,6 +1052,7 @@ class Attention(nnx.Module):
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
       from tpu_inference.layers.common.attention_interface import sharded_ragged_paged_attention as rpa_ops
+      from tpu_inference.layers.common.quantization import quantize_kv
     except ImportError as e:
       raise ImportError(
           "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
@@ -1072,7 +1073,15 @@ class Attention(nnx.Module):
     else:
       attention_chunk_size = None
 
+    # fp8 KV cache: the RPA v3 kernel requires kv_cache.dtype == k.dtype == v.dtype
+    # and expects KV quantization to happen outside the kernel. Mirror the native
+    # vLLM backend (flash_attn.py): when the cache is a 1-byte float (fp8), quantize
+    # k/v to the cache dtype here via quantize_kv and thread the scales through.
+    # Non-fp8 caches are a no-op (scales stay None).
     q_scale, k_scale, v_scale = None, None, None
+    if jnp.issubdtype(rpa_kv_cache.dtype, jnp.floating) and rpa_kv_cache.dtype.itemsize == 1:
+      k_scale = v_scale = 1.0
+      key, value = quantize_kv(rpa_kv_cache.dtype, key, value, k_scale, v_scale)
 
     md = rpa_metadata
 
