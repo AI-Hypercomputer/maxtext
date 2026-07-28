@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.configs import pyconfig
-from maxtext.kernels.residual import mhc_kernel
+from maxtext.kernels.residual import mhc_fwd_kernels as mhc_kernel
 from maxtext.layers import attention_mla, linears, mhc, moe
 from maxtext.layers.initializers import nd_dense_init
 from maxtext.layers.normalizations import RMSNorm
@@ -37,6 +37,7 @@ ATOL = 2e-2
 
 
 def assert_close_or_eq(r, p, rtol=None, atol=None):
+  """Asserts that two arrays are close or equal."""
   if not isinstance(r, (np.ndarray, jax.Array)):
     assert r == p
     return
@@ -63,21 +64,26 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
   Compares outputs and gradients against the reference JAX implementation.
   """
 
-  def _setup_mhc_configs(self, rate, enable_pallas, per_device_batch_size=None, fsdp=None, data=None, tensor=None, dtype=None):
+  def _setup_mhc_configs(
+      self, rate, enable_pallas, per_device_batch_size=None, fsdp=None, data=None, tensor=None, dtype=None
+  ):
     """Sets up the configurations and modules for MHC testing."""
     self.dim = 16
     if per_device_batch_size is None:
       per_device_batch_size = jax.device_count()
 
     extra_kwargs = {}
-    if fsdp is not None: extra_kwargs['ici_fsdp_parallelism'] = fsdp
-    if data is not None: extra_kwargs['ici_data_parallelism'] = data
-    if tensor is not None: extra_kwargs['ici_tensor_parallelism'] = tensor
+    if fsdp is not None:
+      extra_kwargs["ici_fsdp_parallelism"] = fsdp
+    if data is not None:
+      extra_kwargs["ici_data_parallelism"] = data
+    if tensor is not None:
+      extra_kwargs["ici_tensor_parallelism"] = tensor
     if dtype is not None:
-      extra_kwargs['dtype'] = dtype
-      extra_kwargs['weight_dtype'] = dtype
+      extra_kwargs["dtype"] = dtype
+      extra_kwargs["weight_dtype"] = dtype
       if dtype == "float32":
-        extra_kwargs['matmul_precision'] = "highest"
+        extra_kwargs["matmul_precision"] = "highest"
 
     config = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -104,21 +110,37 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
     )
     return config
 
-  def _run_equivalence_test(self, rate, mhc_type, setup_branch_fn, per_device_batch_size=None, fsdp=None, data=None, tensor=None, dtype=None):
+  def _run_equivalence_test(
+      self, rate, mhc_type, setup_branch_fn, per_device_batch_size=None, fsdp=None, data=None, tensor=None, dtype=None
+  ):
     """Helper to run equivalence tests for forward and backward passes."""
-    config_ref = self._setup_mhc_configs(rate, enable_pallas=False, per_device_batch_size=per_device_batch_size, fsdp=fsdp, data=data, tensor=tensor, dtype=dtype)
-    config_pal = self._setup_mhc_configs(rate, enable_pallas=True, per_device_batch_size=per_device_batch_size, fsdp=fsdp, data=data, tensor=tensor, dtype=dtype)
+    config_ref = self._setup_mhc_configs(
+        rate,
+        enable_pallas=False,
+        per_device_batch_size=per_device_batch_size,
+        fsdp=fsdp,
+        data=data,
+        tensor=tensor,
+        dtype=dtype,
+    )
+    config_pal = self._setup_mhc_configs(
+        rate,
+        enable_pallas=True,
+        per_device_batch_size=per_device_batch_size,
+        fsdp=fsdp,
+        data=data,
+        tensor=tensor,
+        dtype=dtype,
+    )
 
     devices_array = maxtext_utils.create_device_mesh(config_ref)
     mesh = Mesh(devices_array, config_ref.mesh_axes)
 
     rngs = nnx.Rngs(params=jax.random.key(0), dropout=jax.random.key(42))
 
-    resolved_fsdp = mesh.shape.get('fsdp', 1)
-    resolved_data = mesh.shape.get('data', 1)
+    resolved_fsdp = mesh.shape.get("fsdp", 1)
+    resolved_data = mesh.shape.get("data", 1)
     global_batch_size = config_ref.per_device_batch_size * resolved_fsdp * resolved_data
-
-
 
     x = jax.random.normal(
         jax.random.PRNGKey(123),
@@ -156,12 +178,8 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
       # Copy branch state
       nnx.update(branch_pal, nnx.state(branch_ref))
 
-      mhc_ref = mhc.ManifoldConstrainedHyperConnections(
-          config_ref, self.dim, mesh, rngs
-      )
-      mhc_pal = mhc.ManifoldConstrainedHyperConnections(
-          config_pal, self.dim, mesh, rngs
-      )
+      mhc_ref = mhc.ManifoldConstrainedHyperConnections(config_ref, self.dim, mesh, rngs)
+      mhc_pal = mhc.ManifoldConstrainedHyperConnections(config_pal, self.dim, mesh, rngs)
       # Copy mHC state (includes alpha/beta parameters)
       nnx.update(mhc_pal, nnx.state(mhc_ref))
 
@@ -180,21 +198,14 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
       if mhc_type == HyperConnectionType.ATTENTION:
         kwargs = {
             "decoder_segment_ids": jnp.ones(x.shape[:2], dtype=jnp.int32),
-            "inputs_positions": jnp.arange(x.shape[1], dtype=jnp.int32)[
-                None, :
-            ],
+            "inputs_positions": jnp.arange(x.shape[1], dtype=jnp.int32)[None, :],
             "deterministic": True,
         }
       else:
         kwargs = {"deterministic": True}
 
-      out_ref, meta_ref = mhc_ref_fwd(
-          norm_ref_fwd, branch_ref_fwd, x, mhc_type, **kwargs
-      )
-      out_pal, meta_pal = mhc_pal_fwd(
-          norm_pal_fwd, branch_pal_fwd, x, mhc_type, **kwargs
-      )
-
+      out_ref, meta_ref = mhc_ref_fwd(norm_ref_fwd, branch_ref_fwd, x, mhc_type, **kwargs)
+      out_pal, meta_pal = mhc_pal_fwd(norm_pal_fwd, branch_pal_fwd, x, mhc_type, **kwargs)
 
       np.testing.assert_allclose(out_ref, out_pal, rtol=RTOL, atol=ATOL)
 
@@ -219,9 +230,7 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
       # 2. Backward Pass Comparison
       # --------------------------------------------------------------------------------
       def loss_fn_nnx(mhc_mod, norm_mod, branch_mod, inputs_x):
-        out_local, metadata_local = mhc_mod(
-            norm_mod, branch_mod, inputs_x, mhc_type, **kwargs
-        )
+        out_local, metadata_local = mhc_mod(norm_mod, branch_mod, inputs_x, mhc_type, **kwargs)
         loss = jnp.sum(out_local)
         if "load_balance_loss" in metadata_local:
           loss += metadata_local["load_balance_loss"]
@@ -276,7 +285,7 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
       np.testing.assert_allclose(loss_ref, loss_pal, rtol=RTOL, atol=ATOL)
 
       # Check gradients
-      is_bf16 = (config_ref.dtype == jnp.bfloat16)
+      is_bf16 = config_ref.dtype == jnp.bfloat16
       grad_rtol = 2e-1 if is_bf16 else 1e-2
       grad_atol = 4e-1 if is_bf16 else 1e-2
 
@@ -347,8 +356,7 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
       )
 
     self._run_equivalence_test(
-        rate, HyperConnectionType.MLP_DENSE, setup_mlp,
-        per_device_batch_size=1, fsdp=-1, data=1, tensor=1
+        rate, HyperConnectionType.MLP_DENSE, setup_mlp, per_device_batch_size=1, fsdp=-1, data=1, tensor=1
     )
 
   @pytest.mark.tpu_only
@@ -372,9 +380,14 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
 
     with jax.default_matmul_precision("highest"):
       self._run_equivalence_test(
-          rate, HyperConnectionType.MLP_DENSE, setup_mlp,
-          per_device_batch_size=1, fsdp=-1, data=1, tensor=1,
-          dtype="float32"
+          rate,
+          HyperConnectionType.MLP_DENSE,
+          setup_mlp,
+          per_device_batch_size=1,
+          fsdp=-1,
+          data=1,
+          tensor=1,
+          dtype="float32",
       )
 
   @pytest.mark.tpu_only
@@ -419,8 +432,7 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
       )
 
     self._run_equivalence_test(
-        rate, HyperConnectionType.ATTENTION, setup_mla,
-        per_device_batch_size=1, fsdp=-1, data=1, tensor=1
+        rate, HyperConnectionType.ATTENTION, setup_mla, per_device_batch_size=1, fsdp=-1, data=1, tensor=1
     )
 
   @pytest.mark.tpu_only
@@ -466,9 +478,14 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
 
     with jax.default_matmul_precision("highest"):
       self._run_equivalence_test(
-          rate, HyperConnectionType.ATTENTION, setup_mla,
-          per_device_batch_size=1, fsdp=-1, data=1, tensor=1,
-          dtype="float32"
+          rate,
+          HyperConnectionType.ATTENTION,
+          setup_mla,
+          per_device_batch_size=1,
+          fsdp=-1,
+          data=1,
+          tensor=1,
+          dtype="float32",
       )
 
   # @pytest.mark.tpu_only
@@ -490,9 +507,7 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
           rngs=rngs,
       )
 
-    self._run_equivalence_test(
-        rate, HyperConnectionType.MLP_MOE, setup_moe
-    )
+    self._run_equivalence_test(rate, HyperConnectionType.MLP_MOE, setup_moe)
 
   def test_pre_apply_bwd_equivalence(self):
     rate = 3
@@ -565,7 +580,16 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       H_pre_pl, H_post_pl, res_M_pl = mhc_kernel.coeff_fwd_sharded(
-          x, phi, norm_scale, pre_s, pre_beta, post_s, post_beta, res_s, res_beta, perm,
+          x,
+          phi,
+          norm_scale,
+          pre_s,
+          pre_beta,
+          post_s,
+          post_beta,
+          res_s,
+          res_beta,
+          perm,
           bt=config.mhc_pallas_block_t,
           vmem=mhc_kernel.VMEM_LIMIT_BYTES,
           interpret=False,
@@ -620,7 +644,6 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
     dH_pre_flat = dH_pre.reshape(T, k)
     dH_post_flat = dH_post.reshape(T, k)
     dres_M_flat = dres_M.reshape(T, k, k)
-    dx_acc_flat = dx_acc.reshape(T, k, d)
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       dx_pl, dphi_pl, dns_pl, dps_pl, dpb_pl, dqs_pl, dqb_pl, drs_pl, drb_pl = mhc_kernel.coeff_bwd_sharded(
@@ -646,9 +669,7 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
       )
 
     def ref_fwd(x_in, phi_in, norm_scale_in, ps_in, pb_in, qs_in, qb_in, rs_in, rb_in):
-      return mhc_kernel.mhc_coeffs(
-          x_in, phi_in, norm_scale_in, ps_in, pb_in, qs_in, qb_in, rs_in, rb_in, perm
-      )
+      return mhc_kernel.mhc_coeffs(x_in, phi_in, norm_scale_in, ps_in, pb_in, qs_in, qb_in, rs_in, rb_in, perm)
 
     _, ref_vjp = jax.vjp(
         ref_fwd,
@@ -679,7 +700,10 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
 
     print("MHC_TEST_DEBUG: dx max diff:", jnp.max(jnp.abs(dx_ref.astype(jnp.float32) - dx_pl.astype(jnp.float32))))
     print("MHC_TEST_DEBUG: dphi max diff:", jnp.max(jnp.abs(dphi_ref.astype(jnp.float32) - dphi_pl.astype(jnp.float32))))
-    print("MHC_TEST_DEBUG: dns max diff:", jnp.max(jnp.abs(dnorm_scale_ref.astype(jnp.float32) - dns_pl.astype(jnp.float32))))
+    print(
+        "MHC_TEST_DEBUG: dns max diff:",
+        jnp.max(jnp.abs(dnorm_scale_ref.astype(jnp.float32) - dns_pl.astype(jnp.float32))),
+    )
     print("MHC_TEST_DEBUG: dps max diff:", jnp.max(jnp.abs(dps_ref.astype(jnp.float32) - dps_pl.astype(jnp.float32))))
     print("MHC_TEST_DEBUG: dpb max diff:", jnp.max(jnp.abs(dpb_ref.astype(jnp.float32) - dpb_pl.astype(jnp.float32))))
     print("MHC_TEST_DEBUG: dqs max diff:", jnp.max(jnp.abs(dqs_ref.astype(jnp.float32) - dqs_pl.astype(jnp.float32))))
@@ -773,7 +797,7 @@ class TestMHCPallasCorrectness(parameterized.TestCase):
     res_s = jax.random.normal(keys[8], (1,), dtype=jnp.bfloat16)
     res_beta = jax.random.normal(keys[9], (P,), dtype=jnp.bfloat16)
 
-    H_pre_flat, H_post_flat, res_M_flat = mhc_kernel.mhc_coeffs(
+    _, H_post_flat, res_M_flat = mhc_kernel.mhc_coeffs(
         x_flat, phi, norm_scale, pre_s, pre_beta, post_s, post_beta, res_s, res_beta, perm
     )
 
