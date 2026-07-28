@@ -213,6 +213,7 @@ def process_maxtext_param(
     hook_fn_map: dict[str, Any],
     hf_shape_map: dict[str, Any],
     maxtext_config: Any,
+    enable_parallel_conversion: bool = False,
 ) -> list[tuple[str, np.ndarray]]:
   """Processes a single MaxText parameter (or a group of parameters) for conversion, used in to_huggingface.
 
@@ -238,6 +239,7 @@ def process_maxtext_param(
       expected shapes.
     maxtext_config: The MaxText configuration object, used to determine
       details like `param_scan_axis` and `base_num_decoder_layers`.
+    enable_parallel_conversion: Whether to parallelize unstacking across threads.
 
   Returns:
     A list of tuples, where each tuple contains:
@@ -292,24 +294,46 @@ def process_maxtext_param(
       # Case 3: Unscanned MoE layer. Stacked ONLY on the expert axis. Assuming expert is axis 0.
       axis_to_slice = 0
 
-    # Iterate through the slices of the MaxText weight along the determined stacking axis.
-    for i, hf_path in enumerate(hf_target_paths):
-      if isinstance(maxtext_param_weight, list):
-        # Handles `composite_mt_key` mappings where weight is a list of tensors.
-        weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
-      else:
-        # Handles `atomic_mt_key` mappings by slicing the single tensor.
-        weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
-      _process(
-          hf_path,
-          weight_slice,
-          output_weights,
-          current_hook_fns,
-          hf_shape_map,
-          save_dtype=maxtext_config.weight_dtype,
-      )
+    if enable_parallel_conversion and len(hf_target_paths) > 1:
+      def _process_single_slice(i_path):
+        i, hf_path = i_path
+        if isinstance(maxtext_param_weight, list):
+          w_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
+        else:
+          w_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
+        slice_outputs = []
+        _process(
+            hf_path,
+            w_slice,
+            slice_outputs,
+            current_hook_fns,
+            hf_shape_map,
+            save_dtype=maxtext_config.weight_dtype,
+        )
+        return slice_outputs
 
-    return output_weights
+      with ThreadPoolExecutor(max_workers=min(len(hf_target_paths), 32)) as executor:
+        for res in executor.map(_process_single_slice, enumerate(hf_target_paths)):
+          output_weights.extend(res)
+      return output_weights
+    else:
+      # Iterate through the slices of the MaxText weight along the determined stacking axis.
+      for i, hf_path in enumerate(hf_target_paths):
+        if isinstance(maxtext_param_weight, list):
+          # Handles `composite_mt_key` mappings where weight is a list of tensors.
+          weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
+        else:
+          # Handles `atomic_mt_key` mappings by slicing the single tensor.
+          weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
+        _process(
+            hf_path,
+            weight_slice,
+            output_weights,
+            current_hook_fns,
+            hf_shape_map,
+            save_dtype=maxtext_config.weight_dtype,
+        )
+      return output_weights
 
   # Case 4: Multi-axis stacked. Two sub-cases (the inverse of _build_multi_axis_stacked_tensor):
   #   - Scanned MoE: the tensor is stacked on (experts, layers) at the LEADING two axes, so we
@@ -328,32 +352,76 @@ def process_maxtext_param(
     outer_axis_to_slice = 0
     inner_axis_to_slice = 0
 
-  # Outer loop (experts for MoE, blocks for gemma4 local)
-  for outer_idx, inner_paths in enumerate(hf_target_paths):
-    if isinstance(maxtext_param_weight, list):
-      outer_slice = [
-          jax.lax.index_in_dim(x, outer_idx, axis=outer_axis_to_slice, keepdims=False) for x in maxtext_param_weight
-      ]
-    else:
-      outer_slice = jax.lax.index_in_dim(maxtext_param_weight, outer_idx, axis=outer_axis_to_slice, keepdims=False)
+  if enable_parallel_conversion and hf_target_paths:
+    num_outer = len(hf_target_paths)
+    num_inner = len(hf_target_paths[0])
+    flat_tasks = [
+        (out_idx, in_idx, hf_target_paths[out_idx][in_idx])
+        for out_idx in range(num_outer)
+        for in_idx in range(num_inner)
+    ]
 
-    # Inner loop (layers for MoE, local layers for gemma4)
-    for inner_idx, hf_path in enumerate(inner_paths):
-      if isinstance(outer_slice, list):
-        inner_slice = [jax.lax.index_in_dim(x, inner_idx, axis=inner_axis_to_slice, keepdims=False) for x in outer_slice]
+    def _process_grid_cell(task):
+      out_idx, in_idx, hf_path = task
+      if isinstance(maxtext_param_weight, list):
+        cell_slice = [
+            jax.lax.index_in_dim(
+                jax.lax.index_in_dim(x, out_idx, axis=outer_axis_to_slice, keepdims=False),
+                in_idx,
+                axis=inner_axis_to_slice,
+                keepdims=False,
+            )
+            for x in maxtext_param_weight
+        ]
       else:
-        inner_slice = jax.lax.index_in_dim(outer_slice, inner_idx, axis=inner_axis_to_slice, keepdims=False)
-
+        cell_slice = jax.lax.index_in_dim(
+            jax.lax.index_in_dim(maxtext_param_weight, out_idx, axis=outer_axis_to_slice, keepdims=False),
+            in_idx,
+            axis=inner_axis_to_slice,
+            keepdims=False,
+        )
+      cell_outputs = []
       _process(
           hf_path,
-          inner_slice,
-          output_weights,
+          cell_slice,
+          cell_outputs,
           current_hook_fns,
           hf_shape_map,
           save_dtype=maxtext_config.weight_dtype,
       )
+      return cell_outputs
 
-  return output_weights
+    with ThreadPoolExecutor(max_workers=min(len(flat_tasks), 32)) as executor:
+      for res in executor.map(_process_grid_cell, flat_tasks):
+        output_weights.extend(res)
+    return output_weights
+  else:
+    # Outer loop (experts for MoE, blocks for gemma4 local)
+    for outer_idx, inner_paths in enumerate(hf_target_paths):
+      if isinstance(maxtext_param_weight, list):
+        outer_slice = [
+            jax.lax.index_in_dim(x, outer_idx, axis=outer_axis_to_slice, keepdims=False) for x in maxtext_param_weight
+        ]
+      else:
+        outer_slice = jax.lax.index_in_dim(maxtext_param_weight, outer_idx, axis=outer_axis_to_slice, keepdims=False)
+
+      # Inner loop (layers for MoE, local layers for gemma4)
+      for inner_idx, hf_path in enumerate(inner_paths):
+        if isinstance(outer_slice, list):
+          inner_slice = [jax.lax.index_in_dim(x, inner_idx, axis=inner_axis_to_slice, keepdims=False) for x in outer_slice]
+        else:
+          inner_slice = jax.lax.index_in_dim(outer_slice, inner_idx, axis=inner_axis_to_slice, keepdims=False)
+
+        _process(
+            hf_path,
+            inner_slice,
+            output_weights,
+            current_hook_fns,
+            hf_shape_map,
+            save_dtype=maxtext_config.weight_dtype,
+        )
+
+    return output_weights
 
 
 def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):
@@ -1114,12 +1182,22 @@ def load_hf_dict_from_safetensors(model_id_or_path, token, revision, framework="
     )
   # load safetensors
   ckpt_paths = sorted(pathlib.Path(local_path).glob("[!.]*.safetensors"))
-  hf_state_dict = {}
-  max_logging.log(f"Loading {len(ckpt_paths)} checkpoints")
-  for ckpt_path in tqdm(ckpt_paths, total=len(ckpt_paths)):
+  max_logging.log(f"Loading {len(ckpt_paths)} checkpoints in parallel...")
+
+  def _load_single_shard(ckpt_path):
+    shard_dict = {}
     with safe_open(ckpt_path, framework=framework, device="cpu") as f:
       for key in f.keys():
-        hf_state_dict[key] = f.get_tensor(key)
+        shard_dict[key] = f.get_tensor(key)
+    return shard_dict
+
+  num_workers = min(len(ckpt_paths), os.cpu_count() or 16, 32)
+  with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    shard_dicts = list(tqdm(executor.map(_load_single_shard, ckpt_paths), total=len(ckpt_paths), desc="Loading HF shards"))
+
+  hf_state_dict = {}
+  for shard_dict in shard_dicts:
+    hf_state_dict.update(shard_dict)
   return hf_state_dict
 
 

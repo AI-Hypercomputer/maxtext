@@ -46,6 +46,8 @@ Optional Flags:
   --override_model_architecture: If set, overrides the HF model configuration
                                  with values from the MaxText configuration
                                  (e.g., num_heads, hidden_size) instead of failing.
+  --enable_parallel_conversion: If True, parallelizes weight transformation across CPU threads
+                                (Parameter groups, layer slices, and MoE expert-layer grids). Default is False.
 
 Environment Variables:
   HF_AUTH_TOKEN: (Required) A HuggingFace authentication token. This is needed
@@ -54,16 +56,15 @@ Environment Variables:
                  is a Hub repo ID (e.g., "hf://my-user/my-model").
 
 Example Usage:
-  To merge a LoRA adapter into a base model and save as a full HF model:
+  To convert a MaxText checkpoint to HuggingFace format with parallel transformation:
 
-  export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
   python -m maxtext.checkpoint_conversion.to_huggingface \
     src/maxtext/configs/base.yml \
-    model_name="gemma3-4b" \
-    load_parameters_path="/path/to/base/checkpoint/" \
-    lora.lora_restore_path="/path/to/lora/checkpoint/" \
+    model_name="qwen3.5-35b-a3b" \
+    load_parameters_path="/path/to/base/checkpoint/0/items" \
     base_output_directory="/path/to/output/" \
-    scan_layers=True
+    scan_layers=True \
+    --enable_parallel_conversion=True
 """
 
 import jax
@@ -115,6 +116,13 @@ flags.DEFINE_string(
     "from. If not specified, defaults to maxtext.utils.globals.HF_IDS[model_name]. Use this to "
     "bundle a different tokenizer than the default (e.g., the base model's tokenizer instead of "
     "the instruction-tuned one).",
+)
+
+flags.DEFINE_bool(
+    "enable_parallel_conversion",
+    False,
+    "If True, parallelizes weight transformations across CPU threads (Strategies 1, 2, & 3). "
+    "Enables multi-threaded execution across parameter groups, scanned layer slices, and MoE grids.",
 )
 
 FLAGS = flags.FLAGS
@@ -383,11 +391,13 @@ def _transform_weights_to_adapter(param_map, state_dict):
   return dict(processed_params_list), found_hf_modules
 
 
-def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, param_map, hook_fn_map, shape_map):
+def _transform_weights_to_full_model(
+    config, filtered_map_keys, state_dict, param_map, hook_fn_map, shape_map, enable_parallel_conversion: bool = False
+):
   """Transforms MaxText weights to HF full model format, with optional LoRA merging."""
-  processed_params_list = []
   lora_scaling = config.lora.lora_alpha / config.lora.lora_rank if config.lora.lora_rank > 0 else 1.0
-  for key in MemoryMonitorTqdm(filtered_map_keys, leave=True):
+
+  def _process_single_key(key):
     weight = [state_dict[subkey] for subkey in key] if isinstance(key, tuple) else state_dict.get(key)
     if weight is not None and not isinstance(key, tuple):
       delta = _get_lora_delta(key, state_dict, lora_scaling)
@@ -396,7 +406,30 @@ def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, para
           delta = delta.reshape(weight.shape)
         weight = (jnp.asarray(weight, dtype=jnp.float32) + delta).astype(weight.dtype)
     if weight is not None:
-      processed_params_list.extend(process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config))
+      return process_maxtext_param(
+          key, weight, param_map, hook_fn_map, shape_map, config, enable_parallel_conversion=enable_parallel_conversion
+      )
+    return []
+
+  if not enable_parallel_conversion:
+    processed_params_list = []
+    for key in MemoryMonitorTqdm(filtered_map_keys, leave=True):
+      processed_params_list.extend(_process_single_key(key))
+  else:
+    max_logging.log("Parallel to_huggingface weight transformation ENABLED (Strategies 1, 2, & 3)")
+    num_workers = min(os.cpu_count() or 16, 32)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+      nested_results = list(
+          MemoryMonitorTqdm(
+              executor.map(_process_single_key, filtered_map_keys),
+              total=len(filtered_map_keys),
+              desc="Transforming to HF (parallel)",
+              leave=True,
+          )
+      )
+    processed_params_list = [item for sublist in nested_results for item in sublist]
+
   return dict(processed_params_list)
 
 
@@ -416,6 +449,7 @@ def _transform_and_save_weights(
 ):
   """Orchestrates weight transformation and saving based on conversion mode."""
   start = time.time()
+  enable_parallel_conversion = getattr(FLAGS, "enable_parallel_conversion", False)
   if lora_restore_path and not load_parameters_path:
     # Adapter Mode
     transformed_hf_weights, found_hf_modules = _transform_weights_to_adapter(param_map, maxtext_state_dict)
@@ -424,7 +458,7 @@ def _transform_and_save_weights(
   else:
     # Base or Merged Mode
     transformed_hf_weights = _transform_weights_to_full_model(
-        config, filtered_map_keys, maxtext_state_dict, param_map, hook_fn_map, shape_map
+        config, filtered_map_keys, maxtext_state_dict, param_map, hook_fn_map, shape_map, enable_parallel_conversion=enable_parallel_conversion
     )
 
     if not transformed_hf_weights:

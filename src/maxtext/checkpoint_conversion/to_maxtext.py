@@ -30,7 +30,10 @@ Key Parameters (to be set in the config file or as command-line overrides):
   hf_lora_adapter_path: (Optional) For Adapter or Merged mode, path to the HF LoRA adapter.
   scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
   --lazy_load_tensors: (bool) If True, uses an on-demand loading strategy to minimize RAM
-             usage during conversion. Recommended for large models.
+             usage during conversion. Recommended for memory-constrained hosts.
+  --enable_parallel_conversion: (bool) If True, parallelizes weight transformations across CPU
+             threads using Parameter-Group Parallelism (Strategy 1), Layer-Parallel Transformation (Strategy 2),
+             and MoE Grid Parallelism (Strategy 3). Default is False.
   --hf_model_path: (Optional) Specifies a local or remote directory containing the base HF weights.
   --save_dtype: (Optional) Data type of saved weights. Default to `bfloat16`.
 
@@ -38,18 +41,18 @@ Environment Variables:
   HF_AUTH_TOKEN: (Required) HuggingFace authentication token.
 
 Example Usage:
-  To merge a HF LoRA adapter into base weights and save as a MaxText checkpoint:
+  To convert a HF checkpoint to MaxText format with multi-threaded parallel transformation:
 
    python -m maxtext.checkpoint_conversion.to_maxtext \
-    maxtext/configs/base.yml model_name="gemma3-4b" \
-    load_parameters_path="gs://my-bucket/maxtext-base-weights" \
-    hf_lora_adapter_path="my-user/my-lora-adapter" \
-    base_output_directory="gs://my-bucket/maxtext-merged-output" \
-    hf_access_token=${HF_TOKEN?} hardware=cpu skip_jax_distributed_system=True \
-    scan_layers=True
+    src/maxtext/configs/base.yml model_name="qwen3.5-35b-a3b" \
+    --hf_model_path="/path/to/HF_weights" \
+    base_output_directory="/path/to/output_checkpoint" \
+    scan_layers=True attention=dot_product \
+    --lazy_load_tensors=False --enable_parallel_conversion=True
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import json
 import os
@@ -406,6 +409,7 @@ def _build_multi_axis_stacked_tensor(
     target_shape: tuple,
     config,
     mt_key: str = "",
+    enable_parallel_conversion: bool = False,
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along two axes.
 
@@ -426,6 +430,7 @@ def _build_multi_axis_stacked_tensor(
       target_shape: The final shape of the target MaxText tensor.
       config: The MaxText pyconfig object.
       mt_key: The MaxText parameter key, used to detect the gemma4 nested-scan case.
+      enable_parallel_conversion: Whether to parallelize layer transformations across threads.
 
   Returns:
       The final, assembled NumPy array for the MaxText parameter.
@@ -443,24 +448,57 @@ def _build_multi_axis_stacked_tensor(
   stacked_axes = {outer_axis, inner_axis}
   mt_slice_shape = tuple(d for i, d in enumerate(target_shape) if i not in stacked_axes)
 
-  all_outer_tensors = []
-  # Outer loop iterates the outer stack axis (experts, or blocks for gemma4 local)
-  for inner_keys in hf_source_keys:
-    inner_tensors = []
-    # Inner loop iterates the inner stack axis (layers, or local layers for gemma4)
-    for hf_key_single in inner_keys:
+  if enable_parallel_conversion and hf_source_keys:
+    num_outer = len(hf_source_keys)
+    num_inner = len(hf_source_keys[0])
+
+    flat_tasks = [
+        (out_idx, in_idx, hf_source_keys[out_idx][in_idx])
+        for out_idx in range(num_outer)
+        for in_idx in range(num_inner)
+    ]
+
+    def _process_grid_cell(task):
+      out_idx, in_idx, hf_key_single = task
       if isinstance(hf_key_single, (list, tuple)):
         hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
       else:
         hf_tensor_numpy = tensor_getter_fn(hf_key_single)
-      inner_tensors.append(apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns))
-    all_outer_tensors.append(np.stack(inner_tensors, axis=0))
-  stacked = np.stack(all_outer_tensors, axis=0)  # (outer, inner, *slice)
+      processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
+      return (out_idx, in_idx, processed_hf_tensor)
 
-  # Move the (outer, inner) axes from leading positions to their targets.
-  if (outer_axis, inner_axis) != (0, 1):
-    stacked = np.moveaxis(stacked, (0, 1), (outer_axis, inner_axis))
-  return stacked
+    with ThreadPoolExecutor(max_workers=min(len(flat_tasks), 32)) as executor:
+      results = list(executor.map(_process_grid_cell, flat_tasks))
+
+    sample_tensor = results[0][2]
+    stacked_result = np.empty((num_outer, num_inner) + sample_tensor.shape, dtype=sample_tensor.dtype)
+
+    for out_idx, in_idx, processed_tensor in results:
+      stacked_result[out_idx, in_idx] = processed_tensor
+
+    if (outer_axis, inner_axis) != (0, 1):
+      stacked_result = np.moveaxis(stacked_result, (0, 1), (outer_axis, inner_axis))
+
+    return stacked_result
+  else:
+    all_outer_tensors = []
+    # Outer loop iterates the outer stack axis (experts, or blocks for gemma4 local)
+    for inner_keys in hf_source_keys:
+      inner_tensors = []
+      # Inner loop iterates the inner stack axis (layers, or local layers for gemma4)
+      for hf_key_single in inner_keys:
+        if isinstance(hf_key_single, (list, tuple)):
+          hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
+        else:
+          hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+        inner_tensors.append(apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns))
+      all_outer_tensors.append(np.stack(inner_tensors, axis=0))
+    stacked = np.stack(all_outer_tensors, axis=0)  # (outer, inner, *slice)
+
+    # Move the (outer, inner) axes from leading positions to their targets.
+    if (outer_axis, inner_axis) != (0, 1):
+      stacked = np.moveaxis(stacked, (0, 1), (outer_axis, inner_axis))
+    return stacked
 
 
 def _build_single_axis_stacked_tensor(
@@ -469,6 +507,7 @@ def _build_single_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
+    enable_parallel_conversion: bool = False,
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along a single axis.
 
@@ -481,12 +520,11 @@ def _build_single_axis_stacked_tensor(
       hook_fns: The hook function(s) to apply to each individual weight.
       target_shape: The final shape of the target MaxText tensor.
       config: The MaxText pyconfig object.
+      enable_parallel_conversion: Whether to parallelize layer transformations across threads.
 
   Returns:
       The final, assembled NumPy array for the MaxText parameter.
   """
-  tensors_to_stack = []
-
   if config.scan_layers:
     # If it's a standard scanned layer, we use the configured param_scan_axis.
     axis_to_stack = config.param_scan_axis
@@ -500,19 +538,39 @@ def _build_single_axis_stacked_tensor(
   del mt_slice_shape_list[axis_to_stack]
   mt_slice_shape = tuple(mt_slice_shape_list)
 
-  for hf_key_single in hf_source_keys:
-    if isinstance(hf_key_single, (list, tuple)):
-      hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
-    else:
-      hf_tensor_numpy = tensor_getter_fn(hf_key_single)
-    processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
-    tensors_to_stack.append(processed_hf_tensor)
+  if enable_parallel_conversion and len(hf_source_keys) > 1:
+    def _fetch_and_process(hf_key_single):
+      if isinstance(hf_key_single, (list, tuple)):
+        hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
+      else:
+        hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      return apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
+
+    with ThreadPoolExecutor(max_workers=min(len(hf_source_keys), 32)) as executor:
+      tensors_to_stack = list(executor.map(_fetch_and_process, hf_source_keys))
+  else:
+    tensors_to_stack = []
+    for hf_key_single in hf_source_keys:
+      if isinstance(hf_key_single, (list, tuple)):
+        hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
+      else:
+        hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
+      tensors_to_stack.append(processed_hf_tensor)
 
   # Stack all processed tensors along the determined axis.
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
-def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config, mt_key=""):
+def _get_hf_loading_function(
+    hf_source_keys_or_key,
+    tensor_getter,
+    hook_fn,
+    mt_target_shape_or_shapes,
+    config,
+    mt_key: str = "",
+    enable_parallel_conversion: bool = False,
+):
   """Determine the loading function for HF keys.
 
   This function natively supports `composite_hf_key` mapping (where multiple HF keys
@@ -565,6 +623,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hook_fn,
         mt_target_shape_or_shapes,
         config,
+        enable_parallel_conversion=enable_parallel_conversion,
     )
   else:
     # isinstance(hf_source_keys_or_key[0], list)
@@ -576,7 +635,8 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hook_fn,
         mt_target_shape_or_shapes,
         config,
-        mt_key,
+        mt_key=mt_key,
+        enable_parallel_conversion=enable_parallel_conversion,
     )
   return load_fn
 
@@ -934,6 +994,7 @@ def main(
     revision: str | None = None,
     save_dtype: str = "bfloat16",
     simulated_cpu_devices_count: int = 16,
+    enable_parallel_conversion: bool = False,
 ) -> None:
   overall_start = time.time()
   # Check if the user is using an Instruct version. If so, use the base model architecture
@@ -1025,9 +1086,7 @@ def main(
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/config.json#L54
         hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, revision=revision, dtype="auto")
       elif eager_load_method == "safetensors":
-        max_logging.log("Eager load with Safetensors backend, safe_open with pt framework")
-        # For safe_open, loaded dtype is the same as original safetensor
-        # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/model.safetensors.index.json
+        max_logging.log("Eager load with Safetensors backend, safe_open with pt framework (zero-copy mmap)")
         hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, token=hf_token, revision=revision, framework="pt")
       else:
         raise NotImplementedError
@@ -1036,10 +1095,6 @@ def main(
       max_logging.log(f"HuggingFace model loaded. dtypes: {unique_dtypes}")
       print_ram_usage("After full HF model load")
 
-      # transformers>=5.8 removed the intermediate `vision_model` attribute,
-      # so keys are now `model.vision_tower.embeddings.*` instead
-      # of `model.vision_tower.vision_model.embeddings.*`.
-      # Remap to the old format so that the param_mapping continues to work.
       if eager_load_method == "transformers" and config.use_multimodal:
         old_prefix = "model.vision_tower.vision_model."
         new_prefix = "model.vision_tower."
@@ -1091,19 +1146,14 @@ def main(
           else:
             raise ValueError(f"HuggingFace key {key} not found in state_dict.")
         v = hf_state_dict_numpy[key]
-        # target dtype is "float32"
-        if save_dtype == DType.FLOAT32:
-          return v.to(torch.float32).numpy()
-        # target dtype is "bfloat16"
-        elif save_dtype == DType.BFLOAT16:
-          # - torch.bfloat16 -> torch.float32 -> np.float32 -> ml_dtypes.bfloat16
-          #   As numpy doesn't accept bfloat16 directly, we convert to float32 first
-          # - torch.float16 -> np.float16 -> ml_dtypes.bfloat16
-          # - torch.float32 -> np.float32 -> ml_dtypes.bfloat16
-          if v.dtype == torch.bfloat16:
-            v = v.to(torch.float32)
-          return v.numpy().astype(ml_dtypes.bfloat16)
-        raise NotImplementedError(f"Save dtype {save_dtype} is not currently implemented.")
+        if hasattr(v, "numpy"):
+          if str(getattr(v, "dtype", "")) == "torch.bfloat16":
+            import ml_dtypes
+            import torch
+            v = v.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
+          else:
+            v = v.numpy()
+        return v
 
       tensor_getter = _eager_getter
 
@@ -1135,50 +1185,97 @@ def main(
     # Preprocess key
     filtered_map_keys = validate_and_filter_param_map_keys(param_map_mt_to_hf.keys(), maxtext_abstract_dict.keys())
 
-    for mt_param_key_or_keys in MemoryMonitorTqdm(
-        filtered_map_keys,
-        desc="Transforming weights",
-        unit="param",
-        leave=True,
-        dynamic_ncols=True,
-        smoothing=0,
-    ):
-      if not lazy_load_tensors:
-        max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
+    if not enable_parallel_conversion:
+      for mt_param_key_or_keys in MemoryMonitorTqdm(
+          filtered_map_keys,
+          desc="Transforming weights",
+          unit="param",
+          leave=True,
+          dynamic_ncols=True,
+          smoothing=0,
+      ):
+        if not lazy_load_tensors:
+          max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
-      if mt_param_key_or_keys not in param_map_mt_to_hf:
-        raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
-      hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
-      hook_fn = hook_fn_map_mt.get(mt_param_key_or_keys)
+        hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
+        if hf_source_keys_or_key is None:
+          raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
+        hook_fn = hook_fn_map_mt.get(mt_param_key_or_keys)
 
-      # Step 1: Resolves MaxText key(s) to target indices and shapes
-      # based on MaxText key form (`atomic_mt_key` or `composite_mt_key`)
-      mt_target_idx_or_indices, mt_target_shape_or_shapes = _get_maxtext_indices_and_shapes(
-          mt_param_key_or_keys, maxtext_abstract_dict
-      )
+        # Step 1: Resolves MaxText key(s) to target indices and shapes
+        # based on MaxText key form (`atomic_mt_key` or `composite_mt_key`)
+        mt_target_idx_or_indices, mt_target_shape_or_shapes = _get_maxtext_indices_and_shapes(
+            mt_param_key_or_keys, maxtext_abstract_dict
+        )
 
-      # Step 2: Determine the loading function for hf key
-      # based on hf_key form (unscanned, scanned, unscanned with expert stacking, or scanned with expert stacking)
-      load_fn = _get_hf_loading_function(
-          hf_source_keys_or_key,
-          tensor_getter,
-          hook_fn,
-          mt_target_shape_or_shapes,
-          config,
-          mt_param_key_or_keys,
-      )
+        # Step 2: Determine the loading function for hf key
+        # based on hf_key form (unscanned, scanned, unscanned with expert stacking, or scanned with expert stacking)
+        load_fn = _get_hf_loading_function(
+            hf_source_keys_or_key,
+            tensor_getter,
+            hook_fn,
+            mt_target_shape_or_shapes,
+            config,
+            mt_key=mt_param_key_or_keys,
+            enable_parallel_conversion=False,
+        )
 
-      # Step 3: Load hf keys and convert to maxtext keys
-      # based on tensor load mode (lazy, eager) and MaxText key form (`atomic_mt_key` or `composite_mt_key`)
-      _get_maxtext_weight(
-          load_fn,
-          mt_target_idx_or_indices,
-          mt_target_shape_or_shapes,
-          mt_param_key_or_keys,
-          final_mt_weights,
-          save_dtype,
-          lazy_load_tensors,
-      )
+        # Step 3: Load hf keys and convert to maxtext keys
+        # based on tensor load mode (lazy, eager) and MaxText key form (`atomic_mt_key` or `composite_mt_key`)
+        _get_maxtext_weight(
+            load_fn,
+            mt_target_idx_or_indices,
+            mt_target_shape_or_shapes,
+            mt_param_key_or_keys,
+            final_mt_weights,
+            save_dtype,
+            lazy_load_tensors,
+        )
+    else:
+      max_logging.log("Parallel weight transformation ENABLED (Strategy 1 & 2)")
+
+      def _process_single_mt_key(mt_param_key_or_keys):
+        if mt_param_key_or_keys not in param_map_mt_to_hf:
+          raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
+        hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
+        hook_fn = hook_fn_map_mt.get(mt_param_key_or_keys)
+
+        mt_target_idx_or_indices, mt_target_shape_or_shapes = _get_maxtext_indices_and_shapes(
+            mt_param_key_or_keys, maxtext_abstract_dict
+        )
+
+        load_fn = _get_hf_loading_function(
+            hf_source_keys_or_key,
+            tensor_getter,
+            hook_fn,
+            mt_target_shape_or_shapes,
+            config,
+            enable_parallel_conversion=True,
+        )
+
+        _get_maxtext_weight(
+            load_fn,
+            mt_target_idx_or_indices,
+            mt_target_shape_or_shapes,
+            mt_param_key_or_keys,
+            final_mt_weights,
+            save_dtype,
+            lazy_load_tensors,
+        )
+
+      num_workers = min(os.cpu_count() or 16, 32)
+      with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        list(
+            MemoryMonitorTqdm(
+                executor.map(_process_single_mt_key, filtered_map_keys),
+                total=len(filtered_map_keys),
+                desc="Transforming weights (parallel)",
+                unit="param",
+                leave=True,
+                dynamic_ncols=True,
+                smoothing=0,
+            )
+        )
 
     del hf_state_dict_numpy
     max_logging.log("Weight transformation preparation complete.")
@@ -1284,6 +1381,18 @@ if __name__ == "__main__":
   parser.add_argument(
       "--simulated_cpu_devices_count", type=int, required=False, default=16, help="Sharding of checkpoint"
   )
+  parser.add_argument(
+      "--enable_parallel_conversion",
+      type=str2bool,
+      required=False,
+      default=False,
+      help=(
+          "Whether to parallelize weight transformations across CPU worker threads. "
+          "Enables multi-threaded execution across parameter groups (Strategy 1), "
+          "scanned layer slices (Strategy 2), and MoE expert-layer grids (Strategy 3). "
+          "Recommended for maximum performance on multi-core hosts."
+      ),
+  )
   # Parse local arguments
   # Parse known args returns the namespace AND the list of remaining arguments
   local_args, remaining_args = parser.parse_known_args()
@@ -1302,4 +1411,5 @@ if __name__ == "__main__":
       revision=local_args.revision,
       save_dtype=local_args.save_dtype,
       simulated_cpu_devices_count=local_args.simulated_cpu_devices_count,
+      enable_parallel_conversion=local_args.enable_parallel_conversion,
   )
