@@ -785,13 +785,6 @@ class KdaAttention(BaseModel):
           "Default 0.0 means no lower bound; -5.0 is a common choice."
       ),
   )
-  kda_backend: str = Field(
-      "tokamax",
-      description=(
-          "Which KDA kernel backend to use. "
-          "'tokamax' uses tokamax kimi_delta_attention (head-first, native [B,T] segment_ids)."
-      ),
-  )
 
 
 class AttentionIndexer(BaseModel):

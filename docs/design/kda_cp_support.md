@@ -1,26 +1,18 @@
-# Design Doc: KDA AG-CP (All-Gather Context Parallelism)
+# Design Doc: KDA CP (Context Parallelism) Support
 
 ## Summary
 
-After the KDA base implementation (`attention_kda.py` + `kernels/kda/`) is merged via the prerequisite PR, this PR adds AG-CP (all_gather) strategy support. It uses `CPContext` to pass context information to the `chunk_kda` kernel, and provides CP-aware causal convolution boundary handling for ShortConvolution.
-
-## Prerequisites
-
-- KDA base implementation merged via prerequisite PR, providing:
-  - `attention_kda.py`: `KimiDeltaAttention`, `ShortConvolution`, QKV/beta/gate projections
-  - `kernels/kda/__init__.py`: `chunk_kda()` entry point, `kda_backend` dual-backend dispatch
-  - `configs/types.py`: `KdaAttention` config model
-- Runtime dependency providing `CPContext` + `chunk_kda`'s `cp_context` argument
+This PR integrates KDA (Kimi Delta Attention) into MaxText with tokamax backend and CP (context parallelism) support. It adds the `KimiDeltaAttention` layer, `ShortConvolution`, QKV/beta/gate projections, and CP-aware causal convolution boundary handling. The `CPContext` mechanism passes context information to the `chunk_kda` kernel for coordinated recurrent state across CP ranks.
 
 ## Design
 
-### AG-CP Data Flow Overview
+### CP Data Flow Overview
 
 ```
 No CP:
   [B, T, E] → QKV proj → ShortConv → SiLU → L2Norm → chunk_kda → output
 
-AG-CP (cp_size > 1):
+CP (cp_size > 1):
   [B, T/cp, E] → QKV proj → SHARD_MAP(ShortConv w/ halo)  ← independent conv shard_map
                            → SiLU + L2Norm
                            → CPContext(mesh, "context")      ← constructed outside shard_map
@@ -29,7 +21,7 @@ AG-CP (cp_size > 1):
                            → [B, T/cp, E]
 ```
 
-Key difference from MLA AG-CP: MLA relies on splash attention kernel internally doing implicit all_gather K/V → local attention; KDA does not rely on all_gather. Instead, `CPContext` lets the kernel coordinate recurrent state across ranks during forward/backward.
+Key difference from MLA CP: MLA relies on splash attention kernel internally doing implicit all_gather K/V → local attention; KDA does not rely on all_gather. Instead, `CPContext` lets the kernel coordinate recurrent state across ranks during forward/backward.
 
 ### Plan 1: `halo_exchange_for_conv` (`utils/cp_utils.py`, new file)
 
@@ -90,13 +82,13 @@ Applied to `qkv_pspec`, `beta_pspec`, `seg_pspec` when CP is enabled, followed b
 
 #### 3c. chunk_kda shard_map
 
-The `kda_backend` parameter selects the backend. Under AG-CP, pass through `cp_context=cp_ctx`, `kda_backend`, and `segment_ids`.
+Under CP, pass through `cp_context=cp_ctx` and `segment_ids` to the `chunk_kda` kernel.
 
 segment_ids handling:
 - **varlen**: pass through as-is
-- **non-varlen + AG-CP**: construct dummy `jnp.ones(q.shape[:2], dtype=jnp.int32)` (used internally by the kernel to derive per-rank cu_seqlens)
+- **non-varlen + CP**: construct dummy `jnp.ones(q.shape[:2], dtype=jnp.int32)` (used internally by the kernel to derive per-rank cu_seqlens)
 
-### Plan 4: AG-CP and load_balance Mutual Exclusion
+### Plan 4: CP and load_balance Mutual Exclusion
 
 The Delta Rule's recurrent state `S_t = f(S_{t-1}, k_t, v_t, beta_t)` depends on strict token ordering. load_balance's DUAL_CHUNK_SWAP reorder scrambles token order, breaking the sequential dependency.
 
@@ -106,7 +98,7 @@ Runtime check (added at the `__call__` entry of `attention_kda.py`):
 if (getattr(cfg, "context_parallel_size", 1) > 1
         and getattr(cfg, "context_parallel_load_balance", False)):
     raise ValueError(
-        "KDA AG-CP does not support context_parallel_load_balance. "
+        "KDA CP does not support context_parallel_load_balance. "
         "Recurrent state S depends on exact token order; DUAL_CHUNK_SWAP "
         "reorder breaks the sequential dependency. Set "
         "context_parallel_load_balance=false when using KDA with CP."
@@ -130,23 +122,21 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
     │
     └── shard_map(chunk_kda):
             - real seg → pass chunk_kda(segment_ids=seg)
-            - no seg + AG-CP → pass dummy jnp.ones
+            - no seg + CP → pass dummy jnp.ones
 ```
 
 ## Files Changed
 
 | File | Change | Lines |
 |------|--------|:----:|
-| `utils/cp_utils.py` | **New file**: `halo_exchange_for_conv` | ~55 |
-| `layers/attention_kda.py` | ShortConv shard_map + CPContext + pspec injection + load_balance mutual exclusion | ~115 |
-| `tests/unit/kda_cp_test.py` | **New file**: conv halo / KDA AG-CP equivalence + load_balance mutual exclusion tests | ~80 |
-| **Total** | | **~250** |
-
-### Out of Scope for This PR
-
-- `kernels/kda/`, `attention_kda.py` base implementation — handled by prerequisite PR
-- tokamax backend — handled by prerequisite PR
-- `attention_op.py` — KDA does not go through the `apply_attention` dispatcher
+| `layers/attention_kda.py` | **New**: `KimiDeltaAttention`, `ShortConvolution`, CP support | ~586 |
+| `kernels/kda/__init__.py` | **New**: `chunk_kda()` entry point | ~84 |
+| `kernels/kda/tokamax.py` | **New**: tokamax backend adapter | ~99 |
+| `utils/cp_utils.py` | **New**: `halo_exchange_for_conv` | ~66 |
+| `configs/types.py` | **Modified**: `KdaAttention` config class | +48 |
+| `tests/unit/kda_attention_test.py` | **New**: KDA layer + conv halo + CP equivalence tests | ~914 |
+| `docs/design/kda_cp_support.md` | **New**: design doc | — |
+| **Total** | | **~1979** |
 
 ## Key Constraints
 
@@ -158,14 +148,14 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 
 4. **KDA does not use the `apply_attention` dispatcher**: KDA has its own QKV projection + SiLU + L2Norm + beta/gate projections and does not share the interface with `AttentionOp`.
 
-5. **AG-CP + load_balance are mutually exclusive**: Recurrent state sequential dependency is irreversible. Runtime `ValueError`.
+5. **CP + load_balance are mutually exclusive**: Recurrent state sequential dependency is irreversible. Runtime `ValueError`.
 
 ## Backward Compatibility
 
 - `halo_exchange_for_conv`: degrades to `jnp.pad` when no CP, zero overhead
 - ShortConv shard_map: only activated when `context_parallel_size > 1`
 - CPContext import: `try/except`, assert with clear error if unavailable
-- segment_ids dummy: auto-construct `jnp.ones` when no varlen + AG-CP
+- segment_ids dummy: auto-construct `jnp.ones` when no varlen + CP
 
 ## Test Plan
 
@@ -173,5 +163,5 @@ KimiDeltaAttention.__call__(decoder_segment_ids)
 |------|----------|
 | `test_short_conv_no_cp` | halo degrades to causal pad without CP |
 | `test_short_conv_cp_halo` | conv under CP>1 equals single-rank reference |
-| `test_kda_ag_cp_equivalence` | AG-CP multi-rank forward equals single-rank |
+| `test_kda_cp_equivalence` | CP multi-rank forward equals single-rank |
 | `test_kda_cp_rejects_load_balance` | CP+load_balance raises ValueError |

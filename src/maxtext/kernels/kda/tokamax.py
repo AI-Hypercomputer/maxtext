@@ -69,8 +69,10 @@ def tokamax_chunk_kda(
   """
   from tokamax._src.ops.experimental.kda.api import kimi_delta_attention
 
-  assert initial_state is None, "initial_state not supported with tokamax backend"
-  assert not output_final_state, "output_final_state not supported with tokamax backend"
+  if initial_state is not None:
+    raise NotImplementedError("initial_state is not supported with tokamax backend")
+  if output_final_state:
+    raise NotImplementedError("output_final_state is not supported with tokamax backend")
 
   q_h, k_h, v_h, g_h, beta_h = _to_tokamax(q, k, v, g, beta)
 
@@ -91,7 +93,7 @@ def tokamax_chunk_kda(
       lower_bound=lower_bound,
       disable_recompute=disable_recompute,
       N_max=N_max,
-      implementation="pallas_tpu",
+      implementation="pallas_tpu",  # "pallas_tpu" is tokamax's internal TPU kernel implementation name (see tokamax._src.ops.experimental.kda.api.Implementation)
       cp_context=cp_context,
   )
 

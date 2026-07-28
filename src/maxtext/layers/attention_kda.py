@@ -92,7 +92,8 @@ class ShortConvolution(nnx.Module):
 
   def __call__(self, x: jnp.ndarray, segment_ids: jnp.ndarray | None = None) -> jnp.ndarray:
     B, T, F = x.shape
-    assert F == self.features, f"Input features {F} != {self.features}"
+    if F != self.features:
+      raise ValueError(f"Input features {F} != {self.features}")
 
     x_padded = halo_exchange_for_conv(x, self.kernel_size - 1, axis_name="context")
 
@@ -460,7 +461,7 @@ class KimiDeltaAttention(nnx.Module):
     # the sequential dependency.  Reject this combination at runtime.
     if getattr(cfg, "context_parallel_size", 1) > 1 and getattr(cfg, "context_parallel_load_balance", False):
       raise ValueError(
-          "KDA AG-CP does not support context_parallel_load_balance. "
+          "KDA CP does not support context_parallel_load_balance. "
           "Recurrent state S depends on exact token order; DUAL_CHUNK_SWAP "
           "reorder breaks the sequential dependency. Set "
           "context_parallel_load_balance=false when using KDA with CP."
@@ -500,8 +501,8 @@ class KimiDeltaAttention(nnx.Module):
         if decoder_segment_ids is not None:
           decoder_segment_ids = _wsc(decoder_segment_ids, seg_pspec)
 
-      # AG-CP: tokamax kernel derives CP metadata from segment_ids.
-      # Always pass a seg arg when AG-CP is active so the kernel can
+      # CP: tokamax kernel derives CP metadata from segment_ids.
+      # Always pass a seg arg when CP is active so the kernel can
       # compute cu_seqlens / chain fields via one small all_gather.
       has_seg = decoder_segment_ids is not None or getattr(cfg, "context_parallel_size", 1) > 1
       base_in_specs = (qkv_pspec, qkv_pspec, qkv_pspec, qkv_pspec, beta_pspec, a_log_pspec, dt_bias_2d_pspec)
@@ -513,12 +514,13 @@ class KimiDeltaAttention(nnx.Module):
       # segment_ids, then passes the completed context to the kernel.
       cp_ctx = None
       if getattr(cfg, "context_parallel_size", 1) > 1:
-        assert TokamaxCPContext is not None, (
-            "KDA all_gather context parallelism requires "
-            "tokamax._src.ops.experimental.kda.cp_utils.CPContext, "
-            "but it failed to import.  Refusing to run: CP would silently "
-            "break recurrent state across ranks."
-        )
+        if TokamaxCPContext is None:
+          raise ImportError(
+              "KDA context parallelism requires "
+              "tokamax._src.ops.experimental.kda.cp_utils.CPContext, "
+              "but it failed to import. Refusing to run: CP would silently "
+              "break recurrent state across ranks."
+          )
         cp_ctx = TokamaxCPContext(mesh=self.mesh, axis_name="context")
 
       @functools.partial(jax.shard_map, mesh=self.mesh, in_specs=in_specs, out_specs=qkv_pspec, check_vma=False)
@@ -526,7 +528,7 @@ class KimiDeltaAttention(nnx.Module):
         q, k, v, g, beta, A_log, dt_bias_2d, *rest = args
         seg = rest[0] if rest else None
 
-        # AG-CP: provide a dummy seg (all-ones) so the kernel has
+        # CP: provide a dummy seg (all-ones) so the kernel has
         # segment_ids to derive cu_seqlens from, even when the user
         # hasn't supplied real segmentation info.
         if seg is None and getattr(cfg, "context_parallel_size", 1) > 1:
@@ -552,7 +554,6 @@ class KimiDeltaAttention(nnx.Module):
             lower_bound=lower_bound,
             disable_recompute=True,
             N_max=n_max,
-            kda_backend="tokamax",
             cp_context=cp_ctx,
         )
         return o
@@ -562,7 +563,7 @@ class KimiDeltaAttention(nnx.Module):
         if decoder_segment_ids is not None:
           kda_args = kda_args + (decoder_segment_ids,)
         else:
-          # AG-CP without varlen: pass None; the shard_map function
+          # CP without varlen: pass None; the shard_map function
           # synthesises a dummy seg internally.
           kda_args = kda_args + (None,)
       o = _shard_map_chunk_kda(*kda_args)

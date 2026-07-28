@@ -120,7 +120,6 @@ class _MockKdaConfig:
     self.use_qk_norm = True
     self.use_kda_safe_gate = True
     self.kda_lower_bound = -5.0
-    self.kda_backend = "tokamax"
     self.packing_max_segments_per_sample = 25
 
     for k, v in overrides.items():
@@ -786,12 +785,12 @@ class TestShortConvolution:
 
 
 # ---------------------------------------------------------------------------
-# AG-CP (All-Gather Context Parallelism) tests
+# CP (Context Parallelism) tests
 # ---------------------------------------------------------------------------
 
 
 class TestKdaCp:
-  """Tests for KDA all-gather context parallelism."""
+  """Tests for KDA context parallelism."""
 
   def _cp_mesh(self, cp_size=2):
     devices = jax.devices()
@@ -809,7 +808,7 @@ class TestKdaCp:
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
   @pytest.mark.skipif(len(jax.devices()) < 2, reason="need >=2 devices for CP test")
   def test_kda_ag_cp_equivalence(self):
-    """KDA with AG-CP should produce equivalent output to non-CP KDA."""
+    """KDA with CP should produce equivalent output to non-CP KDA."""
     from maxtext.layers.attention_kda import _l2_normalize
     from maxtext.kernels.kda import chunk_kda
 
@@ -880,7 +879,7 @@ class TestKdaCp:
 
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
   def test_kda_cp_rejects_load_balance(self):
-    """KDA AG-CP should raise ValueError when load_balance is enabled."""
+    """KDA CP should raise ValueError when load_balance is enabled."""
     mesh = jax.sharding.Mesh(jax.devices(), ("x",))
     cfg = _MockKdaConfig(
         context_parallel_size=2,
@@ -897,8 +896,8 @@ class TestKdaCp:
       attn(x)
 
   @pytest.mark.skipif(not TOKAMAX_AVAILABLE, reason="tokamax not available")
-  def test_kda_cp_no_load_balance_ok(self):
-    """KDA AG-CP without load_balance should succeed."""
+  def test_kda_no_cp_without_load_balance_ok(self):
+    """KDA without CP (cp_size=1) should succeed."""
     mesh = jax.sharding.Mesh(jax.devices(), ("x",))
     cfg = _MockKdaConfig(
         context_parallel_size=1,  # CP=1, no actual CP but validates config check path

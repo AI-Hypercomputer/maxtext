@@ -3,7 +3,7 @@
 Entry point that delegates to tokamax ``kimi_delta_attention`` with
 native ``[B, T]`` segment_ids (head-first layout internally).
 
-Supports AG-CP (all-gather context parallelism) via ``cp_context``.
+Supports CP (context parallelism) via ``cp_context``.
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ def chunk_kda(
     segment_ids: jnp.ndarray | None = None,
     disable_recompute: bool = False,
     N_max: int | None = None,
-    kda_backend: str = "tokamax",
     cp_context: object | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray | None]:
   """KDA entry point via tokamax backend.
@@ -57,16 +56,17 @@ def chunk_kda(
       lower_bound: gate value lower bound.
       segment_ids: [B, T] segment IDs for varlen mode (2D, 1-based, 0=padding).
       N_max: max segments per sample.
-      kda_backend: ``"tokamax"``.
-      cp_context: Optional ``CPContext`` for AG-CP.  When set, the
+      cp_context: Optional ``CPContext`` for CP.  When set, the
           kernel derives cross-rank metadata from ``segment_ids``
           and coordinates recurrent state across CP ranks.
 
   Returns:
       (o, final_state) where o is [B, T, H, V] and final_state is None.
   """
-  assert initial_state is None, "initial_state not supported"
-  assert not output_final_state, "output_final_state not supported"
+  if initial_state is not None:
+    raise NotImplementedError("initial_state is not supported")
+  if output_final_state:
+    raise NotImplementedError("output_final_state is not supported")
 
   return tokamax_chunk_kda(
       q=q, k=k, v=v, g=g, beta=beta,
