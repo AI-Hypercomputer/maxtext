@@ -1,0 +1,38 @@
+# PathwaysJob manifest to run pathways_null_layout_repro_test.py on GKE via Pathways.
+# Apply directly with:
+#   gcloud container clusters get-credentials mlperf-v5p --zone europe-west4-b --project cloud-tpu-multipod-dev
+#   kubectl apply -f scripts/diloco/run_pathways_null_layout_repro.yaml
+
+apiVersion: pathways-job.pathways.domain/v1
+kind: PathwaysJob
+metadata:
+  name: pwr-07280340
+  namespace: default
+  annotations:
+    xpk.google.com/cluster: "mlperf-v5p"
+    xpk.google.com/project: "cloud-tpu-multipod-dev"
+    xpk.google.com/zone: "europe-west4-b"
+spec:
+  maxRestarts: 0
+  pathwaysDir: "gs://chriszuo-maxtext-logs/pw-null-layout-repro"
+  controller:
+    deploymentMode: "default"
+    mainContainerName: "maxtext-runner"
+    template:
+      spec:
+        containers:
+        - name: maxtext-runner
+          image: gcr.io/cloud-tpu-multipod-dev/pw-null-layout-repro:latest
+          imagePullPolicy: Always
+          command:
+          - /bin/bash
+          - -c
+          - |
+            export PYTHONPATH=/app/src:$PYTHONPATH && \
+            export RUN_PATHWAYS_REPRO=1 && \
+            cd /app/ && \
+            python3 -m pytest tests/unit/pathways_colocated_cpu_null_layout_test.py -v -s
+  workers:
+  - numSlices: 1
+    type: ct5p-hightpu-4t
+    topology: 2x2x1
