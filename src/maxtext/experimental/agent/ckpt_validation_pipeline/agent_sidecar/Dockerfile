@@ -3,8 +3,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Install necessary dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir google-cloud-storage google-generativeai
 
 # Copy the agent_sidecar code
 COPY src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar /app/agent_sidecar

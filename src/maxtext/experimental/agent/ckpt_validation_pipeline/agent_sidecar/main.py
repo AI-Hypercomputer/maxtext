@@ -15,9 +15,14 @@
 """Overwatch Sidecar: Monitors Airflow pipelines and spawns autonomous agents on failure."""
 
 import time
-import subprocess
+import os
 from pathlib import Path
 import logging
+
+try:
+  import google.generativeai as genai
+except ImportError:
+  genai = None
 
 from monitor.state_manager import load_state, save_state, MAX_RETRIES
 from monitor.alerter import dispatch_email_alert
@@ -60,11 +65,24 @@ def spawn_agent(run_id, model_name, failure_log, **kwargs):
     logger.error("Prompt template missing: %s", e)
     return
   logger.info("Spawning agent for Run ID %s...", run_id)
+
+  if not genai:
+    logger.error("google-generativeai package is not installed.")
+    return
+
+  api_key = os.environ.get("GEMINI_API_KEY")
+  if not api_key:
+    logger.error("GEMINI_API_KEY environment variable is missing. Cannot spawn Gemini agent.")
+    return
+
+  genai.configure(api_key=api_key)
+  model = genai.GenerativeModel("gemini-2.5-pro")
+
   try:
-    subprocess.run(["agentapi", "new-conversation", "--title", f"Fix {model_name} Pipeline", prompt], check=True)
-    logger.info("Agent spawned successfully.")
-  except subprocess.CalledProcessError as e:
-    logger.error("Failed to spawn agent: %s", e)
+    response = model.generate_content(prompt)
+    logger.info("Agent responded successfully: %s", response.text)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.error("Failed to spawn agent via Gemini API: %s", e)
 
 
 def run_loop():
