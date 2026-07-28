@@ -24,7 +24,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
-from maxtext.kernels import mhc as mhc_kernel
+from maxtext.kernels.residual import mhc_fwd_kernels as mhc_kernel
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import RMSNorm
@@ -107,15 +107,15 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.weight_dtype = self.config.weight_dtype
     self.matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
-    if self.config.use_mhc_pallas_kernel:
+    if self.config.enable_mhc_pallas_kernel:
       if not self.config.enable_mhc_lite:
-        raise ValueError("use_mhc_pallas_kernel requires enable_mhc_lite=True.")
+        raise ValueError("enable_mhc_pallas_kernel requires enable_mhc_lite=True.")
       if self.k != 4:
-        raise ValueError("use_mhc_pallas_kernel currently requires mhc_expansion_rate=4.")
+        raise ValueError("enable_mhc_pallas_kernel currently requires mhc_expansion_rate=4.")
       tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
       if tensor_parallelism != 1:
         raise ValueError(
-            "use_mhc_pallas_kernel currently requires ici_tensor_parallelism=1 and dcn_tensor_parallelism=1."
+            "enable_mhc_pallas_kernel currently requires ici_tensor_parallelism=1 and dcn_tensor_parallelism=1."
         )
       if self.config.mhc_pallas_block_size % 8:
         raise ValueError("mhc_pallas_block_size must be a multiple of 8.")
@@ -263,7 +263,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # x shape: [batch, seq, expansion_rate, emb]
     b, s, k, d = x.shape
 
-    if self.config.use_mhc_pallas_kernel:
+    if self.config.enable_mhc_pallas_kernel:
       dtype = self.dtype
       layer_input, mhc_context = mhc_kernel.pre(
           x,
@@ -322,7 +322,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     else:
       raise ValueError(f"Unsupported type: {mhc_type}")
 
-    if self.config.use_mhc_pallas_kernel:
+    if self.config.enable_mhc_pallas_kernel:
       output = mhc_kernel.post(
           layer_out,
           mhc_context,

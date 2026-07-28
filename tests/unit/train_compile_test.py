@@ -1003,7 +1003,7 @@ class TrainCompile(parameterized.TestCase):
             "override_model_config=True",
             "mhc_expansion_rate=4",
             "enable_mhc_lite=True",
-            "use_mhc_pallas_kernel=True",
+            "enable_mhc_pallas_kernel=True",
             "mhc_pallas_block_size=8",
             "ici_tensor_parallelism=1",
             "dcn_tensor_parallelism=1",

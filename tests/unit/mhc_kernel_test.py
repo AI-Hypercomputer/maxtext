@@ -19,7 +19,7 @@ import math
 
 import jax
 import jax.numpy as jnp
-from maxtext.kernels import mhc
+from maxtext.kernels.residual import mhc_fwd_kernels as mhc
 import numpy as np
 import pytest
 

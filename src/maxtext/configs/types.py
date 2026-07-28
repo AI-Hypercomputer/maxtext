@@ -1666,7 +1666,7 @@ class ManifoldConstrainedHyperConnections(BaseModel):
           "Practical only for a small mhc_expansion_rate (e.g., k=4)."
       ),
   )
-  use_mhc_pallas_kernel: bool = Field(
+  enable_mhc_pallas_kernel: bool = Field(
       False,
       description=(
           "Use the optimized Pallas TPU kernel for mHC-lite connectivity. "
