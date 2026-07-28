@@ -1506,7 +1506,7 @@ class AttentionOp(nnx.Module):
         )
         return splash_kernel
 
-      head_physical_axes = logical_to_mesh_axes((HEAD,), self.mesh)[0]
+      head_physical_axes = self._logical_to_mesh_axes((HEAD,))[0]
       head_physical_axes = (head_physical_axes,) if isinstance(head_physical_axes, str) else (head_physical_axes or ())
       shard_head_size = math.prod(self.mesh.shape.get(ax, 1) for ax in head_physical_axes)
       splash_kernel = wrap_jax_splash_kernel(multi_head_mask, shard_head_size)
