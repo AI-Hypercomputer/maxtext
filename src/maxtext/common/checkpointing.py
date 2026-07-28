@@ -16,6 +16,7 @@
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
 import datetime
+import importlib
 import time
 from typing import Any
 
@@ -41,7 +42,6 @@ from orbax.checkpoint import v1 as ocp_v1
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 from orbax.checkpoint._src.checkpoint_managers import preservation_policy as preservation_policy_lib
 from orbax.checkpoint._src.checkpoint_managers import save_decision_policy as save_decision_policy_lib
-
 
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
 Composite = ocp.args.Composite
@@ -157,33 +157,58 @@ def _load_linen_checkpoint_into_nnx(
   restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
-  _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored))
-  return _linen_items_to_nnx(restored, abstract_nnx_state)
+  return _restored_linen_to_nnx(restored, abstract_nnx_state)
 
 
-def _restore_emergency_linen_checkpoint_into_nnx(
-    checkpoint_manager,
-    step,
-    abstract_nnx_state,
-    map_to_pspec,
-):
-  """Restores an emergency Linen-layout checkpoint into an NNX state.
+def _restored_linen_to_nnx(restored_linen, abstract_nnx_state):
+  """Reshapes a restored Linen-layout tree into the NNX state.
 
-  The `nnx_aux` subtree is stored inside `items`, so an emergency checkpoint
-  carries it too; it's restored when present and otherwise kept at its fresh
-  init value. A genuinely-missing weight raises.
+  Raises if the checkpoint is missing a weight. Every NNX restore path ends here: the load
+  itself is the Linen one, since pure_nnx reads and writes the Linen on-disk layout.
   """
-  max_logging.log(f"Restoring emergency Linen-layout checkpoint into NNX state at step {step}")
-  linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
-  restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
-  checkpoint_args = ocp.args.PyTreeRestore(
-      item=linen_abstract,
-      restore_args=restore_args,
-      partial_restore=True,
-  )
-  restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
-  _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored))
-  return _linen_items_to_nnx(restored, abstract_nnx_state)
+  _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen))
+  return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
+
+
+def _abstract_params(abstract_unboxed_pre_state):
+  """Returns the state's weights: the NNX Param subtree, or Linen's `params` collection."""
+  if isinstance(abstract_unboxed_pre_state, nnx.State):
+    return nnx.split_state(abstract_unboxed_pre_state.model, nnx.Param, ...)[0]
+  return abstract_unboxed_pre_state.params
+
+
+def _bare_weights(tree):
+  """Strips the Flax `params` collection wrapper so weights compare at the same depth.
+
+  A Linen params tree is the collection, an NNX one the bare weights; the dynamic
+  safetensors loader always returns the collection.
+  """
+  return tree["params"] if isinstance(tree, dict) and len(tree) == 1 and "params" in tree else tree
+
+
+def _resolve_conversion_fn(checkpoint_conversion_fn):
+  """Returns `checkpoint_conversion_fn` as a callable.
+
+  Config carries it as a dotted string ("my_pkg.my_module.my_fn"), so it has to be imported
+  before it can be called. A callable is used as is.
+  """
+  if checkpoint_conversion_fn is None:
+    raise ValueError(
+        "source_checkpoint_layout='safetensors' needs `checkpoint_conversion_fn` to map the "
+        "checkpoint's weights onto the model's, e.g. checkpoint_conversion_fn=my_pkg.my_module.my_fn."
+    )
+  if callable(checkpoint_conversion_fn):
+    return checkpoint_conversion_fn
+  module_name, _, fn_name = str(checkpoint_conversion_fn).rpartition(".")
+  if not module_name:
+    raise ValueError(f"`checkpoint_conversion_fn` must be a dotted path to a function, got {checkpoint_conversion_fn!r}.")
+  try:
+    fn = getattr(importlib.import_module(module_name), fn_name, None)
+  except ImportError as e:
+    raise ValueError(f"Could not import `checkpoint_conversion_fn` {checkpoint_conversion_fn!r}: {e}") from e
+  if not callable(fn):
+    raise ValueError(f"`checkpoint_conversion_fn` {checkpoint_conversion_fn!r} is not a function.")
+  return fn
 
 
 def _load_full_state_from_path(
@@ -226,6 +251,8 @@ def _load_full_state_from_path(
       with context:
         return ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
     elif source_checkpoint_layout == "safetensors":
+      # Resolved first, so a bad config fails before the weights are read.
+      conversion_fn = _resolve_conversion_fn(checkpoint_conversion_fn)
       context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
       with context:
         metadata = ocp_v1.pytree_metadata(path)
@@ -237,7 +264,11 @@ def _load_full_state_from_path(
 
         sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
         pre_transformed_state = ocp_v1.load_pytree(path, sharded_abstract_state)
-      state = checkpoint_conversion_fn(pre_transformed_state)
+      state = conversion_fn(pre_transformed_state)
+      # The conversion fn returns MaxText's on-disk (Linen) layout, which is what pure_nnx reads,
+      # so NNX needs the same reshape as every other restore. An NNX state passes through.
+      if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(state, nnx.State):
+        state = _restored_linen_to_nnx(state, abstract_unboxed_pre_state)
       return state
     else:
       raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
@@ -362,6 +393,21 @@ def print_save_message(step, async_checkpointing):
     max_logging.log(f"Saved a checkpoint at step {step}.")
 
 
+def latest_step(checkpoint_manager):
+  """Latest saved step or None, across the v0 emergency manager and the v1 Checkpointer."""
+  return checkpoint_manager.latest_step()
+
+
+def wait_until_finished(checkpoint_manager):
+  """Blocks until pending saves finish, across the v0 emergency manager and the v1 Checkpointer."""
+  return checkpoint_manager.wait_until_finished()
+
+
+def reached_preemption(checkpoint_manager, step: int) -> bool:
+  """Whether a preemption sync point has been reached at `step`, across the v0 emergency manager and the v1 Checkpointer."""
+  return checkpoint_manager.reached_preemption(step)
+
+
 def load_state_if_possible(
     checkpoint_manager: CheckpointManager | None,
     data_iterator: MultiHostDataLoadIterator | list[MultiHostDataLoadIterator] | None,
@@ -406,10 +452,15 @@ def load_state_if_possible(
      set.
   """
 
+  # pure_nnx saves in the Linen on-disk layout, so every branch below loads the same tree Linen
+  # does: the NNX abstract is converted to that layout going in, and what comes back is reshaped
+  # into the NNX state on the way out.
+  is_nnx = isinstance(abstract_unboxed_pre_state, nnx.State)
+
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
 
-    step = checkpoint_manager.latest_step() if step < 0 else step  # pyrefly: ignore[bad-assignment]
+    step = latest_step(checkpoint_manager) if step < 0 else step  # pyrefly: ignore[bad-assignment]
     if step is not None:
       max_logging.log(f"restoring from this run's directory step {step}")
 
@@ -437,49 +488,9 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
-      # pure_nnx saves in the Linen on-disk layout; restore that layout (weights +
-      # opt_state + step + nnx_aux), restoring the grain iterator in place when
-      # present, then reshape it back into the NNX state.
-      # (Emergency managers use their own restore path below.)
-      if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(
-          checkpoint_manager,
-          (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
-      ):
-        linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_unboxed_pre_state)
-        restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
-        checkpoint_args = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
-        if (
-            dataset_type == "grain"
-            and data_iterator
-            and not isinstance(data_iterator, PlaceHolderDataIterator)
-            and (checkpoint_manager.directory / str(step) / "iter").exists()
-        ):
-          restored, _ = grain_utility.restore_grain_iterator(
-              checkpoint_manager, step, data_iterator, checkpoint_args, expansion_factor_real_data
-          )
-        else:
-          restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
-        _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_unboxed_pre_state, restored["items"]))
-        restored_nnx = _linen_items_to_nnx(restored["items"], abstract_unboxed_pre_state)
-        return ({"items": restored_nnx}, None)
-
-      if isinstance(abstract_unboxed_pre_state, nnx.State) and isinstance(
-          checkpoint_manager,
-          (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
-      ):
-        restored = _restore_emergency_linen_checkpoint_into_nnx(
-            checkpoint_manager,
-            step,
-            abstract_unboxed_pre_state,
-            map_to_pspec,
-        )
-        return (
-            restored,
-            None,
-        )
-
-      # Only Linen TrainState reaches here; the NNX cases returned above.
-      restore_target = abstract_unboxed_pre_state
+      restore_target = (
+          train_state_nnx.to_checkpoint_dict(abstract_unboxed_pre_state) if is_nnx else abstract_unboxed_pre_state
+      )
       restore_args = jax.tree_util.tree_map(map_to_pspec, restore_target)
       checkpoint_args = ocp.args.PyTreeRestore(
           item=restore_target,
@@ -499,6 +510,8 @@ def load_state_if_possible(
             ),
         ):
           restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
+          if is_nnx:
+            restored = _restored_linen_to_nnx(restored, abstract_unboxed_pre_state)
           return (
               restored,
               None,
@@ -515,30 +528,43 @@ def load_state_if_possible(
             and not isinstance(data_iterator, PlaceHolderDataIterator)
             and (checkpoint_manager.directory / str(step) / "iter").exists()
         ):
-          return grain_utility.restore_grain_iterator(
+          restored, iterator = grain_utility.restore_grain_iterator(
               checkpoint_manager,
               step,
               data_iterator,
               checkpoint_args,
               expansion_factor_real_data,
           )
+          if is_nnx:
+            restored = {"items": _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state)}
+          return (restored, iterator)
         # Case 3: Default/Fallback case.
         # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
         case _:
           restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
+          if is_nnx:
+            restored = {"items": _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state)}
           return (restored, None)
 
   if source_checkpoint_layout == "safetensors_dynamic":
     path = load_parameters_from_path or load_full_state_from_path
     max_logging.log(f"Dynamic On-the-Fly Formatting: Loading SafeTensors from {path}")
 
-    return load_safetensors_dynamic_state(path, abstract_unboxed_pre_state, maxtext_config)
+    # Weights-only for both paths, so the loader gets the weights rather than the whole state:
+    # the HF param mappings name weights, and an NNX state hides them under `model`.
+    params = _abstract_params(abstract_unboxed_pre_state)
+    restored, restored_params = load_safetensors_dynamic_state(path, params, maxtext_config)
+    # A weight no HF mapping covered comes back unmaterialized and would reach the model as an
+    # untrained init value. Same check the Orbax weights-only load makes.
+    _raise_on_weight_mismatch(_bare_weights(params.to_pure_dict() if is_nnx else params), _bare_weights(restored_params))
+    if is_nnx:
+      # The loader returns the Linen `params` collection; NNX holds bare weights, so unwrap it
+      # back into the params state, the shape load_params_from_path returns.
+      nnx.replace_by_pure_dict(params, restored_params["params"])
+      return restored, params
+    return restored, restored_params
   elif load_parameters_from_path != "":
-    if isinstance(abstract_unboxed_pre_state, nnx.State):
-      _, params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.Param, ...)
-    else:
-      params = abstract_unboxed_pre_state.params
-
+    params = _abstract_params(abstract_unboxed_pre_state)
     restored_params = load_params_from_path(
         load_parameters_from_path,
         params,
@@ -681,16 +707,18 @@ def _should_save_checkpoint_at_step(checkpoint_manager, step, config, force):
   else:
     base_checkpoint_due = step % config.checkpoint_period == 0
   local_checkpoint_due = _uses_local_checkpoint_period(config) and step % config.local_checkpoint_period == 0
-  autocheckpoint_due = config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step)
+  autocheckpoint_due = config.enable_autocheckpoint and reached_preemption(checkpoint_manager, step)
   return base_checkpoint_due or local_checkpoint_due or autocheckpoint_due
 
 
 def _handle_post_checkpoint_preemption(checkpoint_manager, step, force_ckpt_save):
   """Waits on final/preemption saves and raises if preempted."""
-  reached_preemption = checkpoint_manager.reached_preemption(step)
-  if force_ckpt_save or reached_preemption:
-    checkpoint_manager.wait_until_finished()
-  if reached_preemption:
+  # Named is_preempted (not reached_preemption) so it doesn't shadow the module-level
+  # reached_preemption dispatcher we call below.
+  is_preempted = reached_preemption(checkpoint_manager, step)
+  if force_ckpt_save or is_preempted:
+    wait_until_finished(checkpoint_manager)
+  if is_preempted:
     raise exceptions.StopTraining("Job is preempted.")
 
 
@@ -724,7 +752,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
     return
 
-  if checkpoint_manager.latest_step() == actual_step:
+  if latest_step(checkpoint_manager) == actual_step:
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
@@ -773,7 +801,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         force
         or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
         or (_uses_local_checkpoint_period(config) and step % config.local_checkpoint_period == 0)
-        or (config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step))
+        or (config.enable_autocheckpoint and reached_preemption(checkpoint_manager, step))
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")

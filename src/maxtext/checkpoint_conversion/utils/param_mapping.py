@@ -29,7 +29,7 @@ It provides two key types of mappings for each model:
     **Value: corresponding Hugging Face parameters, with following forms:**
     First, the base element mapped to can be either:
     - `atomic_hf_key`: A single string representing one Hugging Face parameter.
-    - `composite_hf_key`: A tuple of strings representing multiple Hugging Face parameters that combine 
+    - `composite_hf_key`: A tuple of strings representing multiple Hugging Face parameters that combine
     into a single MaxText parameter (e.g., Qwen's qkv and z).
 
     These base elements (strings or tuples) are then structured as:

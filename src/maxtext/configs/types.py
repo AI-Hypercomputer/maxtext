@@ -1143,6 +1143,10 @@ class LayoutAndSharding(BaseModel):
       "with auto sharding, megablox kernel, and EP / FSDP parallelisms.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
+  dense_fsdp_use_two_stage_all_gather: bool = Field(
+      False,
+      description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",
@@ -3567,6 +3571,8 @@ class MaxTextConfig(
         self.hf_eval_split = "train"
       if self.eval_interval > 0 and not self.hf_eval_split:
         raise ValueError("Please specify hf_eval_split or set eval_interval to <=0.")
+      if self.grain_worker_count > 1:
+        raise ValueError("Only supports <= 1 for now, more workers results in duplicated data")
     elif self.dataset_type == DatasetType.GRAIN:
       if not self.grain_train_files and not self.grain_train_mixture_config_path:
         raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
@@ -3775,6 +3781,7 @@ class MaxTextConfig(
 
 class RLConfig(
     LogitsAndLoss,
+    Engram,
     RematAndOffload,
     Attention,
     LayoutAndSharding,

@@ -1,0 +1,86 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This is a reusable workflow for tracking test performance, individual limits, and regressions.
+
+name: Track Performance
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  track:
+    name: Track Test Performance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Mark git repositories as safe
+        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
+
+      - name: Download all test results
+        uses: actions/download-artifact@v4
+        with:
+          path: test-results
+          pattern: test-results-*-${{ github.run_id }}
+          merge-multiple: true
+
+      - name: Fetch per-test baseline from gh-pages
+        continue-on-error: true
+        run: |
+          git fetch origin gh-pages || true
+          git show origin/gh-pages:dev/bench/per_test_baseline.json > per_test_baseline.json || echo "{}" > per_test_baseline.json
+
+      - name: Process Test Results (Limits, Regressions, and Dashboard Formatting)
+        run: |
+          python3 tests/utils/process_test_results.py test-results \
+            --baseline per_test_baseline.json \
+            --save-baseline new_per_test_baseline.json \
+            --output-benchmark benchmark-results.json \
+            ${{ (github.event_name == 'schedule' && github.ref == 'refs/heads/main' || github.head_ref == 'ci/test-duration-tracking') && '--warn-only' || '' }}
+
+      - name: Push per-test baseline to gh-pages
+        if: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
+        run: |
+          git fetch origin gh-pages || true
+          git worktree add gh-pages origin/gh-pages
+          mkdir -p gh-pages/dev/bench
+          cp new_per_test_baseline.json gh-pages/dev/bench/per_test_baseline.json
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dev/bench/per_test_baseline.json
+          git diff-index --quiet HEAD || git commit -m "Update per-test baseline [skip ci]"
+          git push origin HEAD:refs/heads/gh-pages
+          cd ..
+          git worktree remove gh-pages
+
+      - name: Track Test Durations (Macro-level Dashboard)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: MaxText Test Execution Times
+          tool: 'customSmallerIsBetter'
+          output-file-path: benchmark-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          alert-threshold: '115%'
+          comment-on-alert: true
+          fail-on-alert: ${{ github.ref != 'refs/heads/main' && github.head_ref != 'ci/test-duration-tracking' }}
+          auto-push: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
+          gh-pages-branch: 'gh-pages'
+          benchmark-data-dir-path: 'dev/bench'

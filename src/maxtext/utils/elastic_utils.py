@@ -224,7 +224,13 @@ def maybe_elastic_scale_up(config, checkpoint_manager):
         " checkpoint to finish before interrupting."
     )
     if checkpoint_manager is not None:
-      checkpoint_manager.wait_until_finished()
+      # The v1 Checkpointer exposes `.wait()`, the v0 emergency/replicator
+      # managers expose `.wait_until_finished()`; this module cannot import
+      # `checkpointing`'s dispatcher (checkpointing imports elastic_utils).
+      if hasattr(checkpoint_manager, "wait"):
+        checkpoint_manager.wait()
+      else:
+        checkpoint_manager.wait_until_finished()
     max_logging.log("Checkpoint save completed. Interrupting")
     raise manager.ScaleUpSignalError()
 

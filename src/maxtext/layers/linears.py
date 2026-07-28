@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from jax import lax
-from jax.sharding import NamedSharding, Mesh
+from jax.sharding import NamedSharding, Mesh, PartitionSpec
 from jax.ad_checkpoint import checkpoint_name
 
 from flax import nnx
@@ -38,6 +38,9 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import maybe_shard_with_logical
+from maxtext.utils.sharding import maybe_shard_with_name
+from maxtext.utils.sharding import get_physical_spec_without_axes
+from maxtext.utils.sharding import FSDP_MESH_AXES
 
 
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
@@ -121,6 +124,9 @@ class DenseGeneral(nnx.Module):
       shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
       parameter_memory_host_offload: bool = False,
+      mesh: Mesh | None = None,
+      use_two_stage_all_gather: bool = False,
+      debug_sharding: bool = False,
       *,  # Following arguments are keyword-only
       rngs: nnx.Rngs = None,
   ):
@@ -140,6 +146,13 @@ class DenseGeneral(nnx.Module):
       shard_mode: auto or explicit shard mode.
       matmul_precision: Precision for matrix multiplication.
       parameter_memory_host_offload: Determines whether to offload params to host
+      mesh: Mesh of devices and physical axes, needed for two-stage all-gather.
+      use_two_stage_all_gather: when the kernel is sharded on both the fsdp and
+        fsdp_transpose axes, gather the two axes with two separate all-gather
+        calls (separated by an optimization barrier) to avoid the relayout
+        transpose XLA emits for a single combined 2-axis all-gather.
+      debug_sharding: when True, log the logical/physical sharding of the
+        two-stage all-gather constraints to the sharding dump files.
       rngs: RNG state for initialization in nnx.
     """
     self.in_features_shape = canonicalize_tuple(in_features_shape)
@@ -154,6 +167,9 @@ class DenseGeneral(nnx.Module):
     self.shard_mode = shard_mode
     self.matmul_precision = matmul_precision
     self.parameter_memory_host_offload = parameter_memory_host_offload
+    self.mesh = mesh
+    self.use_two_stage_all_gather = use_two_stage_all_gather
+    self.debug_sharding = debug_sharding
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -200,6 +216,39 @@ class DenseGeneral(nnx.Module):
       return None
     return getattr(self, self._quant_dot_general_name)
 
+  def _maybe_two_stage_all_gather(self, kernel):
+    """Gather a 2D-FSDP-sharded MLP kernel with two single-axis all-gathers.
+
+    When the kernel is sharded on both the `fsdp` and `fsdp_transpose` mesh axes,
+    a single combined 2-axis all-gather forces XLA to materialize an interleave
+    transpose to fix the layout. Splitting into two single-axis gathers separated
+    by an `optimization_barrier` makes each stage produce a contiguous layout, so
+    no transpose is emitted. Mirrors `moe_fsdp_use_two_stage_all_gather`.
+    """
+    if (
+        not self.use_two_stage_all_gather
+        or self.mesh is None
+        or self.mesh.shape.get("fsdp", 1) <= 1
+        or self.mesh.shape.get("fsdp_transpose", 1) <= 1
+    ):
+      return kernel
+
+    # kernel_axes is a plain tuple of logical names; wrap it so the logical-to-physical
+    # lookup treats it as a single spec rather than a pytree of strings.
+    full_logical = PartitionSpec(*self.kernel_axes)
+    # Stage 1 gathers fsdp_transpose, stage 2 gathers the remaining fsdp.
+    stage1 = get_physical_spec_without_axes(full_logical, self.mesh, ("fsdp_transpose",))
+    stage2 = get_physical_spec_without_axes(full_logical, self.mesh, FSDP_MESH_AXES)
+    if stage1.spec == stage2.spec:
+      # Not sharded on both FSDP axes, so a single all-gather is already optimal.
+      return kernel
+
+    shard = functools.partial(maybe_shard_with_name, shard_mode=self.shard_mode, debug_sharding=self.debug_sharding)
+    kernel = shard(kernel, stage1)
+    kernel = jax.lax.optimization_barrier(kernel)
+    kernel = shard(kernel, stage2)
+    return kernel
+
   def __call__(self, inputs: Array, _initializing: bool = False, out_sharding: NamedSharding | None = None) -> Array:
     """Applies a linear transformation to the inputs along multiple dimensions.
 
@@ -229,6 +278,8 @@ class DenseGeneral(nnx.Module):
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
         kernel = jax.device_put(kernel, max_utils.device_space())
       kernel = jnp.asarray(kernel, self.dtype)
+
+    kernel = self._maybe_two_stage_all_gather(kernel)
 
     # out_sharding should be None for auto mesh axis
     if self.shard_mode != ShardMode.EXPLICIT:
@@ -422,6 +473,9 @@ class MlpBlock(nnx.Module):
           use_bias=self.use_bias,
           shard_mode=self.config.shard_mode,
           matmul_precision=self.config.matmul_precision,
+          mesh=self.mesh,
+          use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
+          debug_sharding=self.config.debug_sharding,
           rngs=rngs,
       )
     else:
@@ -438,6 +492,9 @@ class MlpBlock(nnx.Module):
             use_bias=self.use_bias,
             shard_mode=self.config.shard_mode,
             matmul_precision=self.config.matmul_precision,
+            mesh=self.mesh,
+            use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
+            debug_sharding=self.config.debug_sharding,
             rngs=rngs,
         )
         setattr(self, dense_name, module)
@@ -453,6 +510,9 @@ class MlpBlock(nnx.Module):
         use_bias=self.use_bias,
         shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
+        mesh=self.mesh,
+        use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
+        debug_sharding=self.config.debug_sharding,
         rngs=rngs,
     )
 
