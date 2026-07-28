@@ -28,6 +28,9 @@ import unittest
 import pytest
 import torch
 
+pytestmark = [pytest.mark.cpu_only, pytest.mark.decoupled_target]
+
+
 from compressed_tensors.compressors.quantized_compressors.pack_quantized import (
     pack_to_int32,
     unpack_from_int32,
@@ -54,8 +57,8 @@ def _quantize_per_group(w_fp32: torch.Tensor, group_size: int = INT4_GROUP_SIZE)
   return w_int.reshape(out_features, in_features), scale.squeeze(-1)
 
 
-@pytest.mark.cpu_only
 class DequantizePackQuantizedInt4Test(unittest.TestCase):
+
 
   def setUp(self):
     torch.manual_seed(0)

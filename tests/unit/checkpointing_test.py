@@ -35,7 +35,10 @@ from maxtext.common import checkpointing
 from maxtext.common import grain_utility
 import numpy as np
 import optax
+import pytest
 import safetensors.numpy
+
+pytestmark = [pytest.mark.decoupled_target]
 
 
 class BinaryChunkedStackTest(parameterized.TestCase):

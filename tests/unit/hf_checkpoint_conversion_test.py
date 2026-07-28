@@ -18,6 +18,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 import numpy as np
+import pytest
+
+pytestmark = [pytest.mark.decoupled_target]
+
 from maxtext.utils.max_utils import permute_to_match_maxtext_rope, unpermute_from_match_maxtext_rope
 from maxtext.checkpoint_conversion import to_huggingface as to_hf
 from maxtext.checkpoint_conversion.to_huggingface import (

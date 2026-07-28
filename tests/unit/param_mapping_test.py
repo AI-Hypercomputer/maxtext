@@ -17,6 +17,10 @@
 import unittest
 from unittest import mock
 import numpy as np
+import pytest
+
+pytestmark = [pytest.mark.decoupled_target]
+
 
 from maxtext.checkpoint_conversion.utils import param_mapping
 

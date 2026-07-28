@@ -23,7 +23,7 @@ import pytest
 
 from maxtext.checkpoint_conversion import to_maxtext
 
-pytestmark = [pytest.mark.integration_test]
+pytestmark = [pytest.mark.integration_test, pytest.mark.decoupled_target]
 
 
 class Qwen3CheckpointConversionTest(unittest.TestCase):

@@ -15,7 +15,11 @@
 """Tests for dequantize_mxfp4.py (not run in GitHub runners)."""
 
 import unittest
+import pytest
 import torch
+
+pytestmark = [pytest.mark.decoupled_target]
+
 from maxtext.checkpoint_conversion.standalone_scripts import dequantize_mxfp4
 
 

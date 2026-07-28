@@ -17,6 +17,10 @@
 import os
 import sys
 import unittest
+import pytest
+
+pytestmark = [pytest.mark.decoupled_target]
+
 
 # pylint: disable=import-outside-toplevel, reimported
 import jax

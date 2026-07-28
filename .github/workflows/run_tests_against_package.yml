@@ -220,6 +220,15 @@ jobs:
               ${INPUTS_PYTEST_EXTRA_ARGS}
           fi
 
+      - name: Run Targeted Decoupled Tests
+        if: inputs.flavor == 'cpu-unit'
+        run: |
+          echo "Running targeted fragile tests in decoupled mode (DECOUPLE_GCLOUD=TRUE)..."
+          export DECOUPLE_GCLOUD=TRUE
+          $PYTHON_EXE -m pytest -v -n auto -m "decoupled_target" \
+            --junitxml=test-results-decoupled-targeted.xml
+
+
         env:
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
