@@ -1,0 +1,283 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: non-agentic-0727-qwen35-35b-3
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+    xpk.google.com/workload: non-agentic-0727-qwen35-35b-3
+spec:
+  coordinator:
+    replicatedJob: pathways-head
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  failurePolicy:
+    restartStrategy: Recreate
+  replicatedJobs:
+  - name: pathways-head
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            annotations:
+              alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+          spec:
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            priorityClassName: very-high
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            initContainers:
+              - name: pathways-proxy
+                image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+                imagePullPolicy: Always
+                args:
+                - --server_port=29000
+                - --resource_manager_address=$(PATHWAYS_HEAD):29001
+                - --gcs_scratch_location=gs://yixuanm-maxtext-logs/pathways_scratch
+                - --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=1800s
+                env:
+                - name: PATHWAYS_HEAD
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: PATHWAYS_HEARTBEAT_TIMEOUT_SECS
+                  value: "1800"
+                - name: MEGASCALE_HEARTBEAT_TIMEOUT_SECS
+                  value: "1800"
+                ports:
+                - containerPort: 29000
+                  protocol: TCP
+                resources:
+                  limits:
+                    cpu: "16"
+                    memory: 240G
+                restartPolicy: Always
+              - name: pathways-rm
+                image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+                imagePullPolicy: Always
+                args:
+                - --server_port=29001
+                - --gcs_scratch_location=gs://yixuanm-maxtext-logs/pathways_scratch
+                - --node_type=resource_manager
+                - --instance_count=1
+                - --instance_type=tpuv5:4x4x4 # 64 TPU chips (1x 4x4x4)
+                - --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=1800s
+                env:
+                - name: REPLICATED_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+                - name: JOBSET_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+                - name: HOST_ADDRESS
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: TPU_SKIP_MDS_QUERY
+                  value: "true"
+                - name: PATHWAYS_HEARTBEAT_TIMEOUT_SECS
+                  value: "1800"
+                - name: MEGASCALE_HEARTBEAT_TIMEOUT_SECS
+                  value: "1800"
+                ports:
+                - containerPort: 29001
+                  protocol: TCP
+                - containerPort: 29002
+                  protocol: TCP
+                resources:
+                  limits:
+                    cpu: "16"
+                    memory: 80G
+                restartPolicy: Always
+            containers:
+              - name: jax-tpu
+                image: gcr.io/tpu-prod-env-multipod/yixuanm-dev-v1:latest
+                imagePullPolicy: Always
+                env:
+                - name: PATHWAYS_HEAD
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: JAX_PLATFORMS
+                  value: "proxy,cpu"
+                - name: XCLOUD_ENVIRONMENT
+                  value: GCP
+                - name: JAX_BACKEND_TARGET
+                  value: "grpc://127.0.0.1:29000"
+                - name: TPU_MIN_LOG_LEVEL
+                  value: "0"
+                - name: TF_CPP_MIN_LOG_LEVEL
+                  value: "0"
+                - name: TPU_STDERR_LOG_LEVEL
+                  value: "0"
+                - name: NUM_SLICES
+                  value: "1"
+                - name: ENABLE_PATHWAYS_PERSISTENCE
+                  value: "1"
+                - name: PYTHONPATH
+                  value: "/app"
+                - name: WANDB_API_KEY
+                  value: "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"
+                - name: WANDB_ENTITY
+                  value: "google-trellis"
+                - name: SKIP_JAX_PRECOMPILE
+                  value: "1"
+                - name: NEW_MODEL_DESIGN
+                  value: "1"
+                - name: TPU_LOG_DIR
+                  value: "/root/tpu_logs"
+                - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                  value: "false"
+                - name: PATHWAYS_HEARTBEAT_TIMEOUT_SECS
+                  value: "1800"
+                - name: MEGASCALE_HEARTBEAT_TIMEOUT_SECS
+                  value: "1800"
+                - name: PATHWAYS_TASK_TIMEOUT_SECS
+                  value: "1800"
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  echo PYTHONPATH=$PYTHONPATH;
+                  python3 -c "import sys; print('sys.path:', sys.path)";
+                  echo XPK Start: $(date);
+                  _sigterm() (kill -SIGTERM $! 2>/dev/null;);
+                  trap _sigterm SIGTERM;
+                  
+                  python3 -m maxtext.trainers.post_train.rl.train_rl \
+                  src/maxtext/configs/post_train/rl_gsm8k_qwen35_35b_v5p64.yml \
+                  run_name=non-agentic-0727-qwen35-35b-3 \
+                  base_output_directory=gs://yixuanm-maxtext-logs/ConvergenceTesting \
+                  load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items & PID=$!;
+                  
+                  while kill -0 $PID 2>/dev/null;
+                      do sleep 5;
+                  done;
+                  wait $PID;
+                  EXIT_CODE=$?;
+                  
+                  echo XPK End: $(date);
+                  echo EXIT_CODE=$EXIT_CODE;
+                  exit $EXIT_CODE
+                resources:
+                  limits:
+                    cpu: "24"
+                    memory: 120G
+                volumeMounts:
+                - mountPath: /tmp
+                  name: shared-tmp
+            restartPolicy: Never
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  - name: worker
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 32
+        completionMode: Indexed
+        completions: 16 # 16 worker pods for 1x 4x4x4 slice (64 chips total)
+        parallelism: 16
+        template:
+          metadata:
+            labels:
+              xpk.google.com/workload: non-agentic-0727-qwen35-35b-3
+            annotations:
+              cloud.google.com/skip-tpu-webhook-check: "true"
+          spec:
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            terminationGracePeriodSeconds: 30
+            priorityClassName: very-high
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x4x4
+            containers:
+              - name: pathways-worker
+                image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+                imagePullPolicy: Always
+                args:
+                - --server_port=29005
+                - --resource_manager_address=$(PATHWAYS_HEAD):29001
+                - --gcs_scratch_location=gs://yixuanm-maxtext-logs/pathways_scratch
+                - --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=1800s
+                env:
+                - name: TPU_MIN_LOG_LEVEL
+                  value: "0"
+                - name: TF_CPP_MIN_LOG_LEVEL
+                  value: "0"
+                - name: XCLOUD_ENVIRONMENT
+                  value: GCP
+                - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                  value: "false"
+                - name: PATHWAYS_HEARTBEAT_TIMEOUT_SECS
+                  value: "1800"
+                - name: MEGASCALE_HEARTBEAT_TIMEOUT_SECS
+                  value: "1800"
+                - name: PATHWAYS_TASK_TIMEOUT_SECS
+                  value: "1800"
+                - name: MEGASCALE_NUM_SLICES
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+                - name: JOBSET_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+                - name: REPLICATED_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+                - name: MEGASCALE_SLICE_ID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['job-index']
+                - name: PATHWAYS_HEAD
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: MEGASCALE_COORDINATOR_ADDRESS
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                ports:
+                - containerPort: 29005
+                  protocol: TCP
+                - containerPort: 29006
+                  protocol: TCP
+                - containerPort: 8471
+                  protocol: TCP
+                - containerPort: 8080
+                  protocol: TCP
+                resources:
+                  limits:
+                    google.com/tpu: "4"
+                volumeMounts:
+                - mountPath: /tmp
+                  name: shared-tmp
+            restartPolicy: OnFailure
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
