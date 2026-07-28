@@ -106,9 +106,10 @@ jobs:
           echo "dockerfile: ${{ inputs.dockerfile }}"
 
       - name: Checkout MaxText
-        uses: actions/checkout@v5
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           ref: ${{ inputs.maxtext_sha }}
+          persist-credentials: false
 
       - name: Mark git repositories as safe
         run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
@@ -117,19 +118,19 @@ jobs:
         run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
 
       - name: Set up Docker BuildX
-        uses: docker/setup-buildx-action@v3.11.1
+        uses: docker/setup-buildx-action@c237e3ad6a89efb36e9ff98585970c6d59c636f3  # v3.11.1
         with:
           driver: remote
           endpoint: tcp://localhost:1234
 
       - name: Download MaxText wheel
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5.0.0
         with:
           name: maxtext-wheel
           path: .
 
       - name: Install uv and set Python version
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c  # v7.0.0
         with:
           python-version: '3.12'
           enable-cache: true
@@ -151,7 +152,7 @@ jobs:
           cp ${PWD}/pytest.ini .venv/lib/python3.12/site-packages/
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@ca052bb54ab0790a636c92959dbad8278489c4d8  # v6.0.0
         with:
           push: true
           context: .

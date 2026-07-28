@@ -54,14 +54,17 @@ jobs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           fetch-depth: 0
           ref: ${{ inputs.maxtext_sha || github.sha }}
+          persist-credentials: false
       - name: Check for Code Changes
         id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "Not a pull request, running all tests"
             echo "run_tests=true" >> $GITHUB_OUTPUT
             echo "run_notebooks=true" >> $GITHUB_OUTPUT

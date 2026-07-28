@@ -43,10 +43,11 @@ jobs:
       maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
     steps:
       - name: Checkout MaxText
-        uses: actions/checkout@v5
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           ref: ${{ inputs.release_tag || github.event.release.tag_name }}
           fetch-depth: 1
+          persist-credentials: false
       - name: Resolve SHA
         id: vars
         shell: bash

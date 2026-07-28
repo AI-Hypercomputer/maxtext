@@ -105,9 +105,10 @@ jobs:
     steps:
       - name: Checkout MaxText
         if: ${{ !inputs.maxtext_installed }}
-        uses: actions/checkout@v5
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           ref: ${{ inputs.maxtext_sha }}
+          persist-credentials: false
           fetch-depth: 0
       - name: Download the maxtext wheel
         if: ${{ !inputs.maxtext_installed }}
@@ -233,14 +234,14 @@ jobs:
           INPUTS_IS_UPDATE_HLO: ${{ inputs.is_update_hlo }}
       - name: Upload Reference HLO
         if: ${{ inputs.is_update_hlo }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: reference-hlo
           path: tests/utils/reference_hlo_*.txt
           if-no-files-found: ignore
       - name: Upload results to Codecov
         if: ${{ !inputs.maxtext_installed }} # Skip code coverage upload for maxtext image testing
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0565863a31f2c77d5900227181059f3320c2b291  # v5.0.0
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -250,7 +251,7 @@ jobs:
           verbose: true
       - name: Upload Test Results XML
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: test-results-${{ inputs.flavor }}-${{ inputs.worker_group }}-${{ github.run_id }}
           path: test-results-*.xml
