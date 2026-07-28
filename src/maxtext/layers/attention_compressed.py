@@ -1066,9 +1066,7 @@ class CompressedAttention(Attention):
           padded_seg_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_seg)), constant_values=-1)
         else:
           padded_seg_ids = decoder_segment_ids[:, :usable]
-        chunked_segment_ids = padded_seg_ids.reshape(
-            (decoder_segment_ids.shape[0], padding_len, compress_rate)
-        )
+        chunked_segment_ids = padded_seg_ids.reshape((decoder_segment_ids.shape[0], padding_len, compress_rate))
         min_seg = jnp.min(chunked_segment_ids, axis=-1)
         max_seg = jnp.max(chunked_segment_ids, axis=-1)
         # Windows containing boundary tokens across different documents are assigned -1 (invalidated)
@@ -1105,9 +1103,7 @@ class CompressedAttention(Attention):
           # Fallback: Pad at the end if no compressed blocks exist
           kv = jnp.pad(kv, ((0, 0), (0, pad_kv_total), (0, 0), (0, 0)))
           if decoder_segment_ids_kv is not None:
-            decoder_segment_ids_kv = jnp.pad(
-                decoder_segment_ids_kv, ((0, 0), (0, pad_kv_total)), constant_values=-1
-            )
+            decoder_segment_ids_kv = jnp.pad(decoder_segment_ids_kv, ((0, 0), (0, pad_kv_total)), constant_values=-1)
 
     # Prepare the mask shape for the underlying AttentionOp
     if compressed_mask is not None:

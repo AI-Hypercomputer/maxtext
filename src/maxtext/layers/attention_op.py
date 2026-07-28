@@ -1640,6 +1640,7 @@ class AttentionOp(nnx.Module):
                 pad_width,
                 constant_values=False,
             )
+
           # Construct the splash kernel call with dynamic mask
           def dynamic_mask_splash_kernel(q, k, v, segment, sinks, indexer_mask):
             splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mha(

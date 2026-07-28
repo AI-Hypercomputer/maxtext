@@ -407,6 +407,7 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
   """Tests to validate MaxText CompressedAttention implementation against PyTorch reference."""
 
   def setUp(self):
+    """Set up test parameters and configuration."""
     self.batch_size = 2
     self.seq_len = 4096
 
@@ -690,15 +691,12 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
         usable = (seq_len // pt_comp.compress_rate) * pt_comp.compress_rate
         n_windows = usable // pt_comp.compress_rate
         pt_chunk_kv = pt_kv[:, :usable].view(batch, n_windows, pt_comp.compress_rate, -1)
-        pt_chunk_gate = (
-            pt_gate[:, :usable].view(batch, n_windows, pt_comp.compress_rate, -1) + pt_comp.position_bias
-        )
+        pt_chunk_gate = pt_gate[:, :usable].view(batch, n_windows, pt_comp.compress_rate, -1) + pt_comp.position_bias
 
         # [batch, seq_len, head_dim] -> [batch, n_windows, compress_rate, head_dim]
         mt_chunk_kv = mt_kv[:, :usable].reshape((batch, n_windows, mt_comp.compress_rate, -1))
         mt_chunk_gate = (
-            mt_gate[:, :usable].reshape((batch, n_windows, mt_comp.compress_rate, -1))
-            + mt_comp.position_bias.value
+            mt_gate[:, :usable].reshape((batch, n_windows, mt_comp.compress_rate, -1)) + mt_comp.position_bias.value
         )
         print(f"chunk_gate error: {np.max(np.abs(pt_chunk_gate.detach().numpy() - np.array(mt_chunk_gate)))}")
 
@@ -1047,7 +1045,6 @@ class DeepSeekV4SwiGLUClampTest(unittest.TestCase):
 
     # Validate that both clamped outputs match identically
     np.testing.assert_allclose(mx_out, pt_out.numpy(), rtol=1e-5, atol=1e-5)
-
 
 
 class DeepSeekV4ProductionMoERouterTest(unittest.TestCase):
@@ -1606,7 +1603,6 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
     mean_diff = np.mean(np.abs(mt_out - pt_out))
     print(f"HYPER HEAD PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
     np.testing.assert_allclose(mt_out, pt_out, rtol=5e-5, atol=5e-5)
-
 
 
 if __name__ == "__main__":

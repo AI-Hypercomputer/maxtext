@@ -2908,6 +2908,7 @@ class CompressedAttentionTest(parameterized.TestCase):
   """Parity and compilation tests for CompressedAttention (DeepSeek-V4)."""
 
   def setUp(self):
+    """Setup test dependencies and configuration."""
     super().setUp()
     if not is_decoupled():
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
@@ -2939,6 +2940,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
 
   def _run_compressed_attention(self, compress_ratio, attention_kernel):
+    """Runs CompressedAttention forward pass with specified compression ratio and kernel."""
     # Setup test config
     config_arguments = {
         "per_device_batch_size": 1.0,
@@ -2977,9 +2979,7 @@ class CompressedAttentionTest(parameterized.TestCase):
         shape=(batch_size, seq_len, embed_dim),
         dtype=jnp.float32,
     )
-    decoder_positions = jnp.stack(
-        [jnp.arange(seq_len, dtype=jnp.int32) for _ in range(batch_size)]
-    )
+    decoder_positions = jnp.stack([jnp.arange(seq_len, dtype=jnp.int32) for _ in range(batch_size)])
     decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
     # Instantiate CompressedAttention
