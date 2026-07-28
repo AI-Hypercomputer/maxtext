@@ -1301,7 +1301,7 @@ sinkhorn_iterations: 20
 #   it is factorial in k.
 enable_mhc_lite: False
 enable_mhc_pallas_kernel: False
-mhc_pallas_block_t: 16
+mhc_pallas_block_t: 64
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
