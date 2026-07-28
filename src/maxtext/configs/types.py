@@ -999,13 +999,23 @@ class MoEKernels(BaseModel):
     """Validate and preprocess use_gmm_v2 configuration input."""
     # expand single boolean to tuple
     if isinstance(v, bool):
-      return (v, v, v)
-
+      processed_v = (v, v, v)
     # validation for list/tuple of 3 booleans
-    if isinstance(v, (list, tuple)) and len(v) == 3 and all(isinstance(x, bool) for x in v):
-      return tuple(v)
+    elif isinstance(v, (list, tuple)) and len(v) == 3 and all(isinstance(x, bool) for x in v):
+      processed_v = tuple(v)
+    else:
+      raise ValueError("use_gmm_v2 must be a boolean or a list/tuple of 3 booleans.")
 
-    raise ValueError("use_gmm_v2 must be a boolean or a list/tuple of 3 booleans.")
+    valid_combos = {(False, False, False), (True, True, True), (True, False, True)}
+    if processed_v not in valid_combos:
+      raise ValueError(
+          "Invalid GMM v2 configuration combination. Allowed combinations are:\n"
+          "  - [False, False, False] (v1 for FWD, DLHS, DRHS)\n"
+          "  - [True, True, True] (v2 for FWD, DLHS, DRHS)\n"
+          "  - [True, False, True] (v2 for FWD, v1 for DLHS, v2 for DRHS)\n"
+          f"But got: {list(processed_v)} (representing [FWD, DLHS, DRHS])"
+      )
+    return processed_v
 
 
 class DeepSeekMoE(BaseModel):
@@ -3647,16 +3657,6 @@ class MaxTextConfig(
         raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
-
-    valid_combos = {(False, False, False), (True, True, True), (True, False, True)}
-    if self.use_gmm_v2 not in valid_combos:
-      raise ValueError(
-          "Invalid GMM v2 configuration combination. Allowed combinations are:\n"
-          "  - [False, False, False] (v1+v1+v1)\n"
-          "  - [True, True, True] (v2+v2+v2)\n"
-          "  - [True, False, True] (v2+v1+v2)\n"
-          f"But got: {list(self.use_gmm_v2)}"
-      )
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

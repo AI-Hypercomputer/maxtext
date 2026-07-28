@@ -22,7 +22,6 @@ from maxtext.configs import pyconfig
 from maxtext.configs import types
 from maxtext.utils import globals as maxtext_globals
 import pydantic
-import pytest
 
 # Path to the base.yml config.
 _BASE_CONFIG_PATH = os.path.join(maxtext_globals.MAXTEXT_CONFIGS_DIR, "base.yml")
@@ -267,7 +266,6 @@ class ConfigTest(absltest.TestCase):
           ]
       )
 
-  @pytest.mark.cpu_only
   def test_gmm_v2_validation(self):
     """Tests that use_gmm_v2 accepts bools and valid tuples, but rejects invalid ones."""
     # valid bool
