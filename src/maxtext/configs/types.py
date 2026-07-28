@@ -1989,12 +1989,6 @@ class HloDump(BaseModel):
   dump_jaxpr_gcs_dir: PathStr = Field("", description="GCS directory to upload jaxpr dumps.")
 
 
-class Debug(BaseModel):
-  """Configuration for debugging options."""
-
-  rl: bool = Field(False, description="RL-specific debugging")
-
-
 class Metrics(BaseModel):
   """General configuration for metrics and monitoring."""
 
@@ -2639,7 +2633,6 @@ class MaxTextConfig(
   Every field is explicitly defined to prevent misconfigurations (`extra='forbid'`).
   """
 
-  debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
   dpo: DPO = Field(
       default_factory=DPO,
       description="Configuration for DPO and ORPO alignment algorithms.",

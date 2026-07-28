@@ -1061,7 +1061,11 @@ class CompressedAttention(Attention):
         padding_len = compressed_kv.shape[1]
         compress_rate = self.compress_ratio
         usable = padding_len * compress_rate
-        padded_seg_ids = decoder_segment_ids[:, :usable]
+        if decoder_segment_ids.shape[1] < usable:
+          pad_seg = usable - decoder_segment_ids.shape[1]
+          padded_seg_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_seg)), constant_values=-1)
+        else:
+          padded_seg_ids = decoder_segment_ids[:, :usable]
         chunked_segment_ids = padded_seg_ids.reshape(
             (decoder_segment_ids.shape[0], padding_len, compress_rate)
         )
