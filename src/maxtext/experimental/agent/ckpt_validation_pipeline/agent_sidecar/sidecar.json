@@ -1,0 +1,6 @@
+{
+  "command": "python3",
+  "args": ["main.py"],
+  "restart_policy": "always",
+  "description": "Overwatch Agent: Polls Airflow/GCS for pipeline failures and spawns an agent to fix the codebase."
+}

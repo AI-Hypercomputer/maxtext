@@ -1,0 +1,30 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+### **Step 3: Verification Trigger**
+**Objective:** Trigger the Airflow validation pipeline to verify your patched branch.
+
+**Action Required:**
+1. Execute the following tool in your terminal:
+   `python3 /Users/fiyinbenstowe/Desktop/project/maxtext/src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/fixer/tools/trigger_airflow_dag.py --branch fix-val-{model_name}-{run_id}`
+2. Wait for the tool to return a status code confirming the run has started.
+3. If the pipeline run **fails**, report the failure back to the Meta-Agent so it can restart the cycle.
+4. If the pipeline run **succeeds**, you must generate the final **Remediation Report (Victory Lap)**. 
+   - Write this report to a markdown file in the root of the project: `remediation_report_{run_id}.md`
+   - The report MUST contain:
+     - An introductory description of the issue that was fixed.
+     - The results of the pipeline (Success).
+     - A summary of the actions taken by the agents.
+     - A link to the generated Pull Request.
+5. Notify the Meta-Agent that the pipeline has succeeded and the report is ready.
