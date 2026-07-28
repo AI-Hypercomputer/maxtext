@@ -48,10 +48,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "TPU Pre-Training Stable"
-            build_mode: stable
-            workflow: pre-training
-            image_name: maxtext_jax_stable
           - name: "TPU Pre-Training Nightly"
             build_mode: nightly
             workflow: pre-training
@@ -80,9 +76,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "Pre-Training Stable"
-            image_name: maxtext_jax_stable
-            workflow: pre-training
           - name: "Pre-Training Nightly"
             image_name: maxtext_jax_nightly
             workflow: pre-training
@@ -118,7 +111,6 @@ jobs:
       fail-fast: false
       matrix:
         image_name:
-          - maxtext_jax_stable
           - maxtext_jax_nightly
           - maxtext_post_training_nightly
     steps:

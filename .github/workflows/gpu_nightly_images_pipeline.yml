@@ -48,10 +48,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "GPU Pre-Training Stable"
-            build_mode: stable
-            workflow: pre-training
-            image_name: maxtext_gpu_jax_stable
           - name: "GPU Pre-Training Nightly"
             build_mode: nightly
             workflow: pre-training
@@ -67,6 +63,52 @@ jobs:
       include_test_assets: true
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  run_ci_tests:
+    name: Run ${{ matrix.name }} CI Tests
+    needs: build_and_push_docker_images
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Pre-Training Nightly"
+            image_name: maxtext_gpu_jax_nightly
+            workflow: pre-training
+    uses: ./.github/workflows/run_ci_tests.yml
+    with:
+      image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+      image_tag: ${{ github.run_id }}
+      device: gpu
+      workflow: ${{ matrix.workflow }}
+
+  tag_docker_image:
+    name: Promote ${{ matrix.image_name }} Docker Image
+    needs: run_ci_tests
+    if: needs.run_ci_tests.result == 'success'
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        image_name:
+          - maxtext_gpu_jax_nightly
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+      - name: Add tags to Docker image
+        shell: bash
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          image_name=${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${image_name}"
+
+          # Add the traceability tag to confirm it passed validation suite
+          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
+            "${SOURCE_IMAGE}:verified-${GITHUB_RUN_ID}" --quiet
+
+          # Add "latest" tag
+          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" "${SOURCE_IMAGE}:latest" --quiet
 
   notify_failure:
     name: Notify failed build
