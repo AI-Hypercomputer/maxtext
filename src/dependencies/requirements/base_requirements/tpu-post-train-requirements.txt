@@ -11,7 +11,7 @@ gspread
 ipykernel
 ipywidgets
 ijson
-llguidance
+llguidance<1.8.0
 loguru
 lxml
 mistral_common
