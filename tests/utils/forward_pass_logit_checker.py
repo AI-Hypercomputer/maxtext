@@ -85,7 +85,6 @@ from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_t
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
 from maxtext.models import models
-from flax.linen import partitioning as nn_partitioning
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -397,25 +396,24 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
       ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
       max_logging.log("maxtext forward pass")
-      with nn_partitioning.axis_rules(config.logical_axis_rules):
-        if state is None:
-          full_train_logits = model(
-              decoder_input_tokens=ids,
-              decoder_positions=decoder_positions,
-              decoder_segment_ids=decoder_segment_ids,
-              encoder_images=images,
-              enable_dropout=False,
-          )
-        else:
-          full_train_logits = model.apply(
-              state.params,
-              ids,
-              decoder_positions,
-              decoder_segment_ids,
-              encoder_images=images,
-              enable_dropout=False,
-              rngs={"aqt": init_rng},
-          )
+      if state is None:
+        full_train_logits = model(
+            decoder_input_tokens=ids,
+            decoder_positions=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            encoder_images=images,
+            enable_dropout=False,
+        )
+      else:
+        full_train_logits = model.apply(
+            state.params,
+            ids,
+            decoder_positions,
+            decoder_segment_ids,
+            encoder_images=images,
+            enable_dropout=False,
+            rngs={"aqt": init_rng},
+        )
 
       full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits, tiled=True)
       # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
@@ -649,23 +647,22 @@ def main(config, test_args):  # pylint: disable=W0621
         hf_logits_torch = hf_model(**inputs).logits
 
       # --- MaxText Forward Pass ---
-      with nn_partitioning.axis_rules(config.logical_axis_rules):
-        if maxtext_state is None:
-          mt_logits_jax = maxtext_model(
-              decoder_input_tokens=mt_ids,
-              decoder_positions=mt_decoder_positions,
-              decoder_segment_ids=mt_decoder_segment_ids,
-              enable_dropout=False,
-          )
-        else:
-          mt_logits_jax = maxtext_model.apply(
-              maxtext_state.params,
-              mt_ids,
-              mt_decoder_positions,
-              mt_decoder_segment_ids,
-              enable_dropout=False,
-              rngs={"aqt": init_rng},
-          )
+      if maxtext_state is None:
+        mt_logits_jax = maxtext_model(
+            decoder_input_tokens=mt_ids,
+            decoder_positions=mt_decoder_positions,
+            decoder_segment_ids=mt_decoder_segment_ids,
+            enable_dropout=False,
+        )
+      else:
+        mt_logits_jax = maxtext_model.apply(
+            maxtext_state.params,
+            mt_ids,
+            mt_decoder_positions,
+            mt_decoder_segment_ids,
+            enable_dropout=False,
+            rngs={"aqt": init_rng},
+        )
       mt_logits_jax_sliced = mt_logits_jax[:, :actual_seq_len, :]
       mt_logits_torch = convert_jax_weight_to_torch(mt_logits_jax_sliced)
 
