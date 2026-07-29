@@ -33,6 +33,9 @@ import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "0")
 del os
 
+import torch  # pylint: disable=unused-import
+import transformers  # pylint: disable=unused-import
+from transformers import AutoModelForCausalLM  # pylint: disable=unused-import
 from jax.sharding import Mesh
 
 from maxtext.configs import pyconfig
