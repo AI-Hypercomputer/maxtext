@@ -1063,7 +1063,9 @@ class CompressedAttention(Attention):
         usable = padding_len * compress_rate
         if decoder_segment_ids.shape[1] < usable:
           pad_seg = usable - decoder_segment_ids.shape[1]
-          padded_seg_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_seg)), constant_values=-1)
+          last_seg = decoder_segment_ids[:, -1:]
+          pad_block = jnp.repeat(last_seg, pad_seg, axis=1)
+          padded_seg_ids = jnp.concatenate([decoder_segment_ids, pad_block], axis=1)
         else:
           padded_seg_ids = decoder_segment_ids[:, :usable]
         chunked_segment_ids = padded_seg_ids.reshape((decoder_segment_ids.shape[0], padding_len, compress_rate))
