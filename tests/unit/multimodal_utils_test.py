@@ -375,5 +375,47 @@ class TestLlama4PostProcessing(unittest.TestCase):
     np.testing.assert_array_equal(merged[0, 5:], text_embeddings[0, 5:])
 
 
+class TestKLRangeMasking(unittest.TestCase):
+  """Test the range-based masking logic implemented in forward_pass_logit_checker."""
+
+  def test_vision_range_masking(self):
+    slice_ids = np.array([100, 101, 151652, 151655, 151655, 151653, 102, 103], dtype=np.int32)
+    mask = np.ones_like(slice_ids, dtype=np.bool_)
+
+    vision_start = 151652
+    vision_end = 151653
+
+    in_vision = False
+    for idx, tok_id in enumerate(slice_ids):
+      if tok_id == vision_start:
+        in_vision = True
+      if in_vision:
+        mask[idx] = False
+      if tok_id == vision_end:
+        in_vision = False
+
+    expected_mask = np.array([True, True, False, False, False, False, True, True], dtype=np.bool_)
+    np.testing.assert_array_equal(mask, expected_mask)
+
+  def test_audio_range_masking(self):
+    slice_ids = np.array([100, 101, 151669, 151675, 151675, 151670, 102, 103], dtype=np.int32)
+    mask = np.ones_like(slice_ids, dtype=np.bool_)
+
+    audio_start = 151669
+    audio_end = 151670
+
+    in_audio = False
+    for idx, tok_id in enumerate(slice_ids):
+      if tok_id == audio_start:
+        in_audio = True
+      if in_audio:
+        mask[idx] = False
+      if tok_id == audio_end:
+        in_audio = False
+
+    expected_mask = np.array([True, True, False, False, False, False, True, True], dtype=np.bool_)
+    np.testing.assert_array_equal(mask, expected_mask)
+
+
 if __name__ == "__main__":
   unittest.main()
