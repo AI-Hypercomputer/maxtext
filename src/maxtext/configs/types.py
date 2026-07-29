@@ -1018,6 +1018,7 @@ class DeepSeekMoE(BaseModel):
 
   first_num_dense_layers: NonNegativeInt = Field(0, description="Number of initial dense layers in the model.")
   shared_experts: NonNegativeInt = Field(0, description="Number of shared experts.")
+  moe_shared_expert_gate: bool = Field(False, description="Whether to use a gate on shared experts.")
   routed_scaling_factor: float = Field(1.0, description="Scaling factor for routing scores.")
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
@@ -1085,6 +1086,7 @@ class HardwareAndMesh(BaseModel):
   )
   shard_mode: ShardMode = Field("auto", description="can be either auto or explicit")
   inhomogeneous_layer_cycle_interval: int = Field(1, description="The interval of repeated inhomogeneous layer patterns.")
+  full_attention_layer_offset: int = Field(0, description="Offset for full attention layer.")
   scan_layers: bool = Field(
       True,
       description=(
@@ -3538,8 +3540,12 @@ class MaxTextConfig(
           )
       if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
-      if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if (
+          self.routed_bias
+          and self.routed_bias_update_rate > 0.0
+          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.QWEN3_NEXT)
+      ):
+        raise ValueError("Loss-free load balancing is only supported for the DeepSeek and Qwen3-Next decoder blocks.")
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()

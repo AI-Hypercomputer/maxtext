@@ -1081,12 +1081,13 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         rngs=rngs,
     )
 
-    # 2. Instantiate and apply the shared expert.
+    # 2. Instantiate and apply the shared expert(s).
+    shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(cfg)
     self.shared_expert = MlpBlock(
         config=cfg,
         mesh=mesh,
         in_features=cfg.emb_dim,
-        intermediate_dim=cfg.moe_mlp_dim,
+        intermediate_dim=cfg.shared_experts * shared_expert_mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
@@ -1096,17 +1097,20 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         rngs=rngs,
     )
 
-    # 3. Instantiate and apply the gate for the shared expert.
-    self.shared_expert_gate = DenseGeneral(
-        in_features_shape=cfg.emb_dim,
-        out_features_shape=1,
-        use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
-        dtype=cfg.dtype,
-        kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        matmul_precision=cfg.matmul_precision,
-        rngs=rngs,
-    )
+    # 3. Instantiate the (optional) gate for the shared expert.
+    if cfg.moe_shared_expert_gate:
+      self.shared_expert_gate = DenseGeneral(
+          in_features_shape=cfg.emb_dim,
+          out_features_shape=1,
+          use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
+          dtype=cfg.dtype,
+          kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          matmul_precision=cfg.matmul_precision,
+          rngs=rngs,
+      )
+    else:
+      self.shared_expert_gate = None
 
   def __call__(self, hidden_states: Array, deterministic: bool) -> tuple[Array, Array | None]:
     """
@@ -1127,11 +1131,12 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     # 2. Apply the shared expert.
     shared_expert_output = self.shared_expert(hidden_states, deterministic=deterministic)
 
-    # 3. Apply the gate for the shared expert.
-    shared_gate_output = self.shared_expert_gate(hidden_states)
-
-    # 4. Combine the outputs.
-    final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
+    # 3. Apply the shared expert gate if configured.
+    if self.shared_expert_gate is not None:
+      shared_gate_output = self.shared_expert_gate(hidden_states)
+      final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
+    else:
+      final_output = routed_output + shared_expert_output
 
     return final_output, load_balance_loss
 
@@ -1238,7 +1243,15 @@ class Qwen3NextDecoderLayer(nnx.Module):
   """
 
   def __init__(
-      self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      layer_idx: int,
+      quant: None | Quant = None,
+      *,
+      is_dense_layer: bool | None = None,
+      rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
@@ -1247,6 +1260,10 @@ class Qwen3NextDecoderLayer(nnx.Module):
     self.quant = quant
     cfg = self.config
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
+    if is_dense_layer is None:
+      is_dense_layer = layer_idx < cfg.first_num_dense_layers
+    self.is_dense_layer = is_dense_layer
 
     # First LayerNorm, applied before the attention block.
     self.input_layernorm = Qwen3NextRMSNorm(
@@ -1258,7 +1275,12 @@ class Qwen3NextDecoderLayer(nnx.Module):
     )
 
     # Determine the type of attention mechanism for the current layer.
-    is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+    full_attention_offset = cfg.full_attention_layer_offset % cfg.inhomogeneous_layer_cycle_interval
+    is_full_attention_layer = (
+        self.is_dense_layer
+        or self.layer_idx % cfg.inhomogeneous_layer_cycle_interval == full_attention_offset
+    )
+    self.is_full_attention_layer = is_full_attention_layer
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
@@ -1286,8 +1308,23 @@ class Qwen3NextDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    # Instantiate our `Qwen3NextSparseMoeBlock`.
-    self.mlp = Qwen3NextSparseMoeBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    # Dense layers use a plain MLP; all other layers use `Qwen3NextSparseMoeBlock`.
+    if self.is_dense_layer:
+      self.mlp = MlpBlock(
+          in_features=cfg.emb_dim,
+          intermediate_dim=cfg.mlp_dim,
+          activations=cfg.mlp_activations,
+          intermediate_dropout_rate=cfg.dropout_rate,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          config=cfg,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=model_mode,
+          rngs=rngs,
+      )
+    else:
+      self.mlp = Qwen3NextSparseMoeBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
 
   def __call__(
       self,
@@ -1341,13 +1378,15 @@ class Qwen3NextDecoderLayer(nnx.Module):
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
-    # Instantiate and call our `Qwen3NextSparseMoeBlock`.
-    mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
-
-    # We sow the load balancing loss so it can be collected and added to the total loss
-    # during training.
-    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
+    # Apply the dense MLP or `Qwen3NextSparseMoeBlock`.
+    if self.is_dense_layer:
+      mlp_output = self.mlp(hidden_states, deterministic=deterministic)
+    else:
+      mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
+      # We sow the load balancing loss so it can be collected and added to the total loss
+      # during training.
+      if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+        self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 
     # Final residual connection (after the MoE block)
     layer_output = residual + mlp_output

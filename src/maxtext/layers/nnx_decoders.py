@@ -785,7 +785,11 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
       }:
-        layer_kwargs = {"layer_idx": lyr}
+        if config.decoder_block in {DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5}:
+          is_dense = lyr < config.first_num_dense_layers
+          layer_kwargs = {"layer_idx": lyr, "is_dense_layer": is_dense}
+        else:
+          layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
         layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
       elif config.decoder_block == DecoderBlockType.OLMO3:
@@ -1920,7 +1924,8 @@ class NNXDecoder(nnx.Module):
                 "vllm_rpa",
                 "vllm_batched_rpa",
             ):
-              if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
+              is_full_attn = getattr(layer, "is_full_attention_layer", (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0)
+              if is_full_attn:
                 kv_cache = (
                     kv_caches["key_cache"][lyr],
                     kv_caches["value_cache"][lyr],
@@ -1961,7 +1966,8 @@ class NNXDecoder(nnx.Module):
                 "vllm_rpa",
                 "vllm_batched_rpa",
             ):
-              if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
+              is_full_attn = getattr(layer, "is_full_attention_layer", (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0)
+              if is_full_attn:
                 kv_caches["key_cache"][lyr] = kv_cache[0]
                 kv_caches["value_cache"][lyr] = kv_cache[1]
             else:
