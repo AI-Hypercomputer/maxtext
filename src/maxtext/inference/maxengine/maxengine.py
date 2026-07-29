@@ -145,11 +145,16 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       # nnx.merge. `rest` (RNG state etc.) is materialized in load_params.
       graphdef, _, _, _ = nnx.split(abstract_model, nnx.Param, nnx.Cache, ...)
       self.graphdef = graphdef
+      # Layers may bake their construction-time model_mode into static attributes,
+      # so a call must be merged with the graphdef built for that same mode.
+      graphdef_ar, _, _, _ = nnx.split(abstract_model_ar, nnx.Param, nnx.Cache, ...)
+      self.graphdef_ar = graphdef_ar
       self._create_model_fn = _create_model
       self._nnx_rest_state = None
     else:
       self.model = models.transformer_as_linen(config, mesh=self._mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
       self.graphdef = None
+      self.graphdef_ar = None
       self._create_model_fn = None
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
 
@@ -218,10 +223,14 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     """NNX equivalent of `model.apply(..., mutable=["cache"])`. Returns (logits, new_cache_dict)."""
     cache_state = self._nnx_cache_state_template(mode=model_mode)
     nnx.replace_by_pure_dict(cache_state, cache_dict)
+    # Merge with the graphdef built for this mode. Layers that captured their
+    # model_mode at construction (e.g. the DeepSeek layers) would otherwise run
+    # the prefill attention path during autoregressive decode.
+    graphdef = self.graphdef_ar if model_mode == MODEL_MODE_AUTOREGRESSIVE else self.graphdef
     # copy=True avoids reusing Variable objects across traces (TraceContextError),
     # mirroring the workaround in train.py's diff_wrapper.
     model = nnx.merge(
-        self.graphdef, params, cache_state, self._nnx_rest_state, copy=True
+        graphdef, params, cache_state, self._nnx_rest_state, copy=True
     )  # pyrefly: ignore[no-matching-overload]
     logits = model(
         decoder_input_tokens,

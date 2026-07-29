@@ -756,6 +756,7 @@ class RoutedMoeTest(unittest.TestCase):
       ragged_buffer_factor: float = -1.0,
       ragged_gather_fallback: bool = False,
       ragged_gather_reduce_fallback: bool = False,
+      ragged_sort_use_single_sparsecore: bool = False,
   ):
     """Loss and gradient correctness for the use_ragged_sort flag.
 
@@ -789,6 +790,7 @@ class RoutedMoeTest(unittest.TestCase):
           ragged_buffer_factor=effective_buffer_factor,
           ragged_gather_fallback=ragged_gather_fallback,
           ragged_gather_reduce_fallback=ragged_gather_reduce_fallback,
+          ragged_sort_use_single_sparsecore=ragged_sort_use_single_sparsecore,
       )
 
     def _build_model(cfg, mesh):
@@ -899,6 +901,14 @@ class RoutedMoeTest(unittest.TestCase):
     self._run_ragged_sort_loss_and_grad(
         use_ring_of_experts=False, ragged_gather_fallback=True, ragged_gather_reduce_fallback=True
     )
+
+  @pytest.mark.tpu_only
+  def test_ragged_sort_single_sparsecore_ring_of_experts(self):
+    self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True, ragged_sort_use_single_sparsecore=True)
+
+  @pytest.mark.tpu_only
+  def test_ragged_sort_single_sparsecore_no_ring_of_experts(self):
+    self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False, ragged_sort_use_single_sparsecore=True)
 
   @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):

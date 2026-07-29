@@ -864,6 +864,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
   )
+  ragged_sort_use_single_sparsecore: bool = Field(
+      False,
+      description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -1600,7 +1604,8 @@ class TrainingLoop(BaseModel):
   log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush Tensorboard.")
   eval_start_step: int = Field(
       0,
-      description="Start evaluation after training step is >= eval_start_step.",
+      ge=0,
+      description="Start evaluation when training step is >= eval_start_step.",
   )
   eval_interval: int = Field(
       -1,
@@ -2035,6 +2040,10 @@ class ElasticTraining(BaseModel):
   """
 
   elastic_enabled: bool = Field(False, description="Whether to enable elastic training.")
+  elastic_backup_kind: str = Field(
+      "snapshot",
+      description=("The kind of backup to use for elastic training: 'snapshot' or 'checkpoint'."),
+  )
   elastic_timeout_seconds: int = Field(
       300,
       description=(
@@ -3227,6 +3236,10 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
+      raise ValueError(
+          "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."
+      )
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
           "Colocated python data input is only supported with Pathways (single"
