@@ -927,11 +927,8 @@ def from_pretrained(
   _, _abs_state_for_specs = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(_abs_state_for_specs)
 
-  if config.pure_nnx:
-    model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
-    # TODO: print debug_sharding info
-  else:
-    model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
+  model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
+  # TODO: print debug_sharding info
 
   sharded_state = nnx.state(model)
 

@@ -153,16 +153,11 @@ def build_abstract_diloco_state(
       momentum=config.diloco_outer_momentum,
       nesterov=True,
   )
-  # For NNX, model params (Param variables only) live under abstract_state.model;
-  # for Linen under abstract_state.params.
-  if config.pure_nnx:
-    _, model_params, _ = nnx.split(abstract_state.model, nnx.Param, ...)
-    model_params = model_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-    _, model_params_sharding, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
-    model_params_sharding = model_params_sharding.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-  else:
-    model_params = abstract_state.params
-    model_params_sharding = state_mesh_shardings.params
+  # Model params (Param variables only) live under abstract_state.model.
+  _, model_params, _ = nnx.split(abstract_state.model, nnx.Param, ...)
+  model_params = model_params.to_pure_dict()
+  _, model_params_sharding, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
+  model_params_sharding = model_params_sharding.to_pure_dict()
   outer_opt_state = jax.eval_shape(outer_optimizer.init, model_params)
 
   # Create abstract step
@@ -215,17 +210,13 @@ def build_diloco_state(
     # mesh automatically when jax.set_mesh is used.
     inner_state = drjax.broadcast(state, mesh=mesh)
     # Outer state retains a single copy of the model parameters and optimizer state.
-    # For NNX, model params (Param variables only) live under state.model;
-    # for Linen under state.params.
-    if config.pure_nnx:
-      _, outer_params, _ = nnx.split(state.model, nnx.Param, ...)
-      outer_params = outer_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-    else:
-      outer_params = state.params
+    # Model params (Param variables only) live under state.model.
+    _, outer_params, _ = nnx.split(state.model, nnx.Param, ...)
+    outer_params = outer_params.to_pure_dict()
     outer_opt_state = outer_optimizer.init(outer_params)
     outer_opt_state_sharding = jax.tree_util.tree_map(lambda x: x.sharding, outer_opt_state)
-    # For NNX, the step counter lives at state.optimizer.step; for Linen at state.step.
-    step = state.optimizer.step if config.pure_nnx else state.step
+    # The step counter lives at state.optimizer.step.
+    step = state.optimizer.step
     return (
         DiLoCoTrainState(inner_state=inner_state, params=outer_params, outer_opt_state=outer_opt_state, step=step),
         outer_opt_state_sharding,
@@ -262,60 +253,55 @@ def build_diloco_train_step(
     # Calculate the delta between the current replica's state and the global
     # state (since last synchronization).
     broadcast_outer_params = drjax.broadcast(state.params, mesh=mesh)
-    # For NNX, model Param vars live under inner_state.model; for Linen under inner_state.params.
-    if config.pure_nnx:
-      _, inner_model_params, _ = nnx.split(state.inner_state.model, nnx.Param, ...)
-      inner_model_params = inner_model_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-    else:
-      inner_model_params = state.inner_state.params
+    # Model Param vars live under inner_state.model.
+    _, inner_model_params, _ = nnx.split(state.inner_state.model, nnx.Param, ...)
+    inner_model_params = inner_model_params.to_pure_dict()
     model_delta = jax.tree.map(lambda x, y: y - x, inner_model_params, broadcast_outer_params)
     # Treat the average delta as the outer optimizer's gradient and apply to
     # the global (outer) model params.
     averaged_pseudo_grad = drjax.reduce_mean(model_delta)
     updates, new_opt_state = outer_optimizer.update(averaged_pseudo_grad, state.outer_opt_state, state.params)
     new_outer_params = optax.apply_updates(state.params, updates)
+
     # Replace inner model params with the new global model params.
     # NOTE: inner optimizer state is retained despite the change in parameters,
     # see section 6.1 in https://arxiv.org/pdf/2311.08105.
-    if config.pure_nnx:
-      # For NNX: merge new Param vars back with the non-Param model vars (e.g. RNG state).
-      def replace_nnx_model_params(s, new_params):
-        s_model = s["model"] if hasattr(s, "keys") else s.model
-        s_opt = s["optimizer"] if hasattr(s, "keys") else s.optimizer
+    # Merge new Param vars back with the non-Param model vars (e.g. RNG state).
+    def replace_nnx_model_params(s, new_params):
+      s_model = s["model"] if hasattr(s, "keys") else s.model
+      s_opt = s["optimizer"] if hasattr(s, "keys") else s.optimizer
 
-        graphdef, _, non_param_state = nnx.split(s_model, nnx.Param, ...)
-        new_model = nnx.merge(graphdef, new_params, non_param_state)
+      graphdef, _, non_param_state = nnx.split(s_model, nnx.Param, ...)
+      new_model = nnx.merge(graphdef, new_params, non_param_state)
 
-        if type(s_model).__name__ == "State":
-          new_model = nnx.state(new_model)
-        elif isinstance(s_model, dict):
-          new_model = nnx.to_pure_dict(new_model)
+      if type(s_model).__name__ == "State":
+        new_model = nnx.state(new_model)
+      elif isinstance(s_model, dict):
+        new_model = nnx.to_pure_dict(new_model)
 
-        if hasattr(s, "keys"):
-          # Replace "model" leaves by path, keeping s's treedef. Picking by position
-          # (leaves[N:]) breaks if a key sorts before "model"; reconstructing via
-          # type(s)({...}) breaks the lax.cond match — nnx.State recursive-wraps.
-          leaves_with_paths, treedef = jax.tree_util.tree_flatten_with_path(s)
-          new_model_iter = iter(jax.tree_util.tree_leaves(new_model))
+      if hasattr(s, "keys"):
+        # Replace "model" leaves by path, keeping s's treedef. Picking by position
+        # (leaves[N:]) breaks if a key sorts before "model"; reconstructing via
+        # type(s)({...}) breaks the lax.cond match — nnx.State recursive-wraps.
+        leaves_with_paths, treedef = jax.tree_util.tree_flatten_with_path(s)
+        new_model_iter = iter(jax.tree_util.tree_leaves(new_model))
 
-          def _is_model_leaf(path):
-            if not path:
-              return False
-            k = path[0]
-            return getattr(k, "key", None) == "model" or getattr(k, "name", None) == "model"
+        def _is_model_leaf(path):
+          if not path:
+            return False
+          k = path[0]
+          return getattr(k, "key", None) == "model" or getattr(k, "name", None) == "model"
 
-          new_leaves = [next(new_model_iter) if _is_model_leaf(p) else leaf for p, leaf in leaves_with_paths]
-          return jax.tree_util.tree_unflatten(treedef, new_leaves)
-        else:
-          return TrainStateNNX(new_model, s_opt)
+        new_leaves = [next(new_model_iter) if _is_model_leaf(p) else leaf for p, leaf in leaves_with_paths]
+        return jax.tree_util.tree_unflatten(treedef, new_leaves)
+      else:
+        return TrainStateNNX(new_model, s_opt)
 
-      new_inner_state = drjax.map_fn(
-          lambda s: replace_nnx_model_params(s, new_outer_params),
-          state.inner_state,
-          mesh=mesh,
-      )
-    else:
-      new_inner_state = drjax.map_fn(lambda s: s.replace(params=new_outer_params), state.inner_state, mesh=mesh)
+    new_inner_state = drjax.map_fn(
+        lambda s: replace_nnx_model_params(s, new_outer_params),
+        state.inner_state,
+        mesh=mesh,
+    )
     return state.replace(
         params=new_outer_params,
         outer_opt_state=new_opt_state,
@@ -333,8 +319,8 @@ def build_diloco_train_step(
     broadcast_rng = drjax.broadcast(prng, mesh=mesh)
     inner_state, metrics = drjax.map_fn(train_step, (state.inner_state, batch, broadcast_rng), mesh=mesh)
     avg_metrics = typed_reduce_mean(metrics)
-    # For NNX, the step counter lives at inner_state.optimizer.step; for Linen at inner_state.step.
-    new_step = inner_state.optimizer.step[0] if config.pure_nnx else inner_state.step[0]
+    # The step counter lives at inner_state.optimizer.step.
+    new_step = inner_state.optimizer.step[0]
     state = state.replace(
         inner_state=inner_state,
         step=new_step,
