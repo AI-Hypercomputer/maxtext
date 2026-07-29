@@ -28,4 +28,5 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
     load_parameters_path=${CKPT_PATH} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
-    scan_layers=$SCAN_LAYERS
+    scan_layers=$SCAN_LAYERS \
+    weight_dtype=bfloat16
