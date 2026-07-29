@@ -12,118 +12,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Overwatch Sidecar: Monitors Airflow pipelines and spawns autonomous agents on failure."""
+"""Overwatch Cloud Run Job Entrypoint."""
 
-import time
 import os
-from pathlib import Path
 import logging
-
-try:
-  import google.generativeai as genai
-except ImportError:
-  genai = None
+import sys
 
 from monitor.state_manager import load_state, save_state, MAX_RETRIES
 from monitor.alerter import dispatch_email_alert
 from monitor.gcs_poller import check_for_failures
+from adk_agent import run_agent_workflow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-
-def spawn_agent(run_id, model_name, failure_log, **kwargs):
-  """Uses the agentapi CLI to spawn a new contextualized agent conversation using the prompt chain."""
-  prompts_dir = Path(__file__).parent / "fixer" / "prompts"
-
-  maxtext_branch = kwargs.get("maxtext_branch", "main")
-  hf_ref_code_url = kwargs.get("hf_ref_code_url", "")
-  hf_config_url = kwargs.get("hf_config_url", "")
-
-  try:
-    with open(prompts_dir / "01_diagnose.txt", "r", encoding="utf-8") as f:
-      p1 = f.read()
-    with open(prompts_dir / "02_patch.txt", "r", encoding="utf-8") as f:
-      p2 = f.read()
-    with open(prompts_dir / "03_verify.txt", "r", encoding="utf-8") as f:
-      p3 = f.read()
-    with open(prompts_dir / "meta_agent.txt", "r", encoding="utf-8") as f:
-      meta_prompt_template = f.read()
-
-    prompt = meta_prompt_template.format(
-        model_name=model_name,
-        run_id=run_id,
-        failure_log=failure_log,
-        maxtext_branch=maxtext_branch,
-        hf_ref_code_url=hf_ref_code_url,
-        hf_config_url=hf_config_url,
-        p1=p1,
-        p2=p2,
-        p3=p3,
-    )
-  except FileNotFoundError as e:
-    logger.error("Prompt template missing: %s", e)
-    return
-  logger.info("Spawning agent for Run ID %s...", run_id)
-
-  if not genai:
-    logger.error("google-generativeai package is not installed.")
-    return
-
-  api_key = os.environ.get("GEMINI_API_KEY")
-  if not api_key:
-    logger.error("GEMINI_API_KEY environment variable is missing. Cannot spawn Gemini agent.")
-    return
-
-  genai.configure(api_key=api_key)
-  model = genai.GenerativeModel("gemini-2.5-pro")
-
-  try:
-    response = model.generate_content(prompt)
-    logger.info("Agent responded successfully: %s", response.text)
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    logger.error("Failed to spawn agent via Gemini API: %s", e)
-
-
-def run_loop():
-  """Main polling loop for the sidecar."""
-  logger.info("Overwatch Sidecar started. Monitoring pipeline...")
-  while True:
+def main():
+    """Entrypoint for the Cloud Run Job. Executes once and terminates."""
+    logger.info("Overwatch Cloud Run Job started. Checking for pipeline failures...")
+    
     try:
-      failure = check_for_failures()
-      if failure:
+        failure = check_for_failures()
+        if not failure:
+            logger.info("No failures detected in GCS. Exiting cleanly.")
+            return
+
         run_id = failure.get("run_id")
         model_name = failure.get("model_name")
-        maxtext_branch = failure.get("maxtext_branch", "main")
-        hf_ref_code_url = failure.get("hf_ref_code_url", "")
-        hf_config_url = failure.get("hf_config_url", "")
+        failure_log = failure.get("log", "")
 
         state = load_state()
         retries = state.get(run_id, 0)
 
         if retries >= MAX_RETRIES:
-          logger.info("Run ID %s has hit the maximum of %s retries. Escalating to human.", run_id, MAX_RETRIES)
-          dispatch_email_alert(run_id, model_name)
-          state[run_id] = retries + 1  # Mark as handled
-          save_state(state)
+            logger.info("Run ID %s has hit the maximum of %s retries. Escalating to human.", run_id, MAX_RETRIES)
+            dispatch_email_alert(run_id, model_name)
+            state[run_id] = retries + 1  # Mark as handled
+            save_state(state)
         elif retries < MAX_RETRIES:
-          logger.info("Detected failure for %s. Attempt %s/%s.", run_id, retries + 1, MAX_RETRIES)
-          spawn_agent(
-              run_id,
-              model_name,
-              failure.get("log", ""),
-              maxtext_branch=maxtext_branch,
-              hf_ref_code_url=hf_ref_code_url,
-              hf_config_url=hf_config_url,
-          )
-          state[run_id] = retries + 1
-          save_state(state)
+            logger.info("Detected failure for %s. Attempt %s/%s.", run_id, retries + 1, MAX_RETRIES)
+            
+            # Trigger the ADK workflow instead of shelling out to agentapi CLI
+            run_agent_workflow(run_id, model_name, failure_log)
+            
+            state[run_id] = retries + 1
+            save_state(state)
 
-      time.sleep(10)
-    except (ValueError, IOError, KeyError, TypeError, OSError) as e:
-      logger.error("Error in polling loop: %s", e)
-      time.sleep(10)
-
+    except Exception as e:
+        logger.error("Error during job execution: %s", e)
+        sys.exit(1)
 
 if __name__ == "__main__":
-  run_loop()
+    main()
