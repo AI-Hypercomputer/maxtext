@@ -15,7 +15,6 @@
 """Common LoRA utils needed to support LoRA adapters."""
 
 from collections.abc import Mapping
-from functools import partial
 import json
 import os
 import re
@@ -122,9 +121,8 @@ def unapply_lora_from_base_params(base_params, lora_params, lora_scale_factor=1.
 def load_adapter(config, base_abstract_state_params, adapter_config_path, adapter_weights_path):
   """Load a LoRA adapter from disk and return its parameters.
 
-  When `config.pure_nnx` is True, `base_abstract_state_params` is the NNX
-  abstract param state (no outer `params` wrapper) and the returned
-  `lora_params` follows the same shape. Otherwise both use the Linen tree.
+  `base_abstract_state_params` is the NNX abstract param state (no outer
+  `params` wrapper) and the returned `lora_params` follows the same shape.
 
   Args:
     config: Top-level MaxText config.
@@ -152,10 +150,7 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
     if not gcs_utils.gcs_path_exists(f"{adapter_weights_path}/commit_success.txt"):
       raise FileNotFoundError(f"Failed to read lora_weights from {adapter_weights_path}.")
 
-    if config.pure_nnx:
-      lora_state, _ = get_lora_abstract_state_nnx(base_abstract_state_params, lora_config)
-    else:
-      lora_state, _ = get_lora_abstract_state(base_abstract_state_params, lora_config)
+    lora_state, _ = get_lora_abstract_state_nnx(base_abstract_state_params, lora_config)
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       lora_params = checkpointing.load_params_from_path(
@@ -199,32 +194,26 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
-    if config.pure_nnx:
-      # pylint: disable=import-outside-toplevel
-      from maxtext.common import train_state_nnx
-      from maxtext.utils import model_creation_utils
+    # pylint: disable=import-outside-toplevel
+    from maxtext.common import train_state_nnx
+    from maxtext.utils import model_creation_utils
 
-      _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
-      def create_train_state_fn():
-        nnx_model = _create_model_partial()
-        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+    def create_train_state_fn():
+      nnx_model = _create_model_partial()
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
+    init_state_fn = create_train_state_fn
     unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
 
     lora_config_path = lora_adapter_path + "adapter_config.json"
 
     lora_config = gcs_utils.read_json_from_gcs(lora_config_path)
 
-    if config.pure_nnx:
-      base_abstract_params = _nnx_param_subtree(unboxed_abstract_state)
-      lora_state, lora_state_annotations = get_lora_abstract_state_nnx(base_abstract_params, lora_config)
-    else:
-      lora_state, lora_state_annotations = get_lora_abstract_state(unboxed_abstract_state.params, lora_config)
+    base_abstract_params = _nnx_param_subtree(unboxed_abstract_state)
+    lora_state, lora_state_annotations = get_lora_abstract_state_nnx(base_abstract_params, lora_config)
 
     lora_weights_path = f"{lora_adapter_path}/0/items"
 

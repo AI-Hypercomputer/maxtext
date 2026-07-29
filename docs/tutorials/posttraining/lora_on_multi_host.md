@@ -186,8 +186,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
   max_target_length=${MAX_TARGET_LENGTH?} \
   learning_rate=${LEARNING_RATE?} \
   chat_template_path=${CHAT_TEMPLATE_PATH?} \
-  enable_nnx=True \
-  pure_nnx_decoder=True \
   lora.enable_lora=True \
   lora.lora_rank=${LORA_RANK?} \
   lora.lora_alpha=${LORA_ALPHA?} \
@@ -267,8 +265,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
   lora.lora_restore_path=${LORA_RESTORE_PATH?} \
   learning_rate=${LEARNING_RATE?} \
   chat_template_path=${CHAT_TEMPLATE_PATH?} \
-  enable_nnx=True \
-  pure_nnx_decoder=True \
   lora.enable_lora=True \
   lora.lora_rank=${LORA_RANK?} \
   lora.lora_alpha=${LORA_ALPHA?} \
