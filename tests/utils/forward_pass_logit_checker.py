@@ -510,9 +510,33 @@ def main(config, test_args):  # pylint: disable=W0621
 
       if ignore_token_ids:
         slice_ids = ids[0, start_index:token_size]
-        mask = jnp.ones_like(slice_ids, dtype=jnp.bool_)
+        mask = np.ones_like(slice_ids, dtype=np.bool_)
         for ignore_id in ignore_token_ids:
           mask = mask & (slice_ids != ignore_id)
+
+        # Mask out everything between vision_start and vision_end (inclusive)
+        if qwen_tokens.vision_start is not None and qwen_tokens.vision_end is not None:
+          in_vision = False
+          for idx, tok_id in enumerate(slice_ids):
+            if tok_id == qwen_tokens.vision_start:
+              in_vision = True
+            if in_vision:
+              mask[idx] = False
+            if tok_id == qwen_tokens.vision_end:
+              in_vision = False
+
+        # Mask out everything between audio_start and audio_end (inclusive)
+        if hasattr(qwen_tokens, "audio_start") and hasattr(qwen_tokens, "audio_end"):
+          if qwen_tokens.audio_start is not None and qwen_tokens.audio_end is not None:
+            in_audio = False
+            for idx, tok_id in enumerate(slice_ids):
+              if tok_id == qwen_tokens.audio_start:
+                in_audio = True
+              if in_audio:
+                mask[idx] = False
+              if tok_id == qwen_tokens.audio_end:
+                in_audio = False
+
         kl_div = jnp.where(mask, kl_div, 0.0)
 
       max_kl_div_val = jax.numpy.max(kl_div)
