@@ -1091,11 +1091,29 @@ class HardwareAndMesh(BaseModel):
       description="Customized mesh and logical rules for evaluation.",
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
-  enable_nnx: bool = Field(True, description="Whether to use NNX for model definition.")
+  enable_nnx: bool = Field(
+      True,
+      description=(
+          "Whether to use NNX for model definition. Setting this to False selects the Linen path, "
+          "which will be deprecated in the near future."
+      ),
+  )
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
-  pure_nnx_decoder: bool = Field(True, description="Whether to enable pure NNX decoder.")
-  pure_nnx: bool = Field(True, description="Whether to enable pure NNX mode.")
+  pure_nnx_decoder: bool = Field(
+      True,
+      description=(
+          "Whether to enable pure NNX decoder. Setting this to False selects the Linen decoder, "
+          "which will be deprecated in the near future."
+      ),
+  )
+  pure_nnx: bool = Field(
+      True,
+      description=(
+          "Whether to enable pure NNX mode. Setting this to False selects the Linen path, "
+          "which will be deprecated in the near future."
+      ),
+  )
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
@@ -2898,6 +2916,24 @@ class MaxTextConfig(
             "pure_nnx_decoder=True. The bridged Linen decoder (pure_nnx_decoder=False) is invisible to Qwix, "
             "so quantization (and weight sparsity) would silently have no effect. Set pure_nnx_decoder=True."
         )
+
+    # TODO: Remove this block once the Linen code path and the enable_nnx, pure_nnx and pure_nnx_decoder flags are deleted.
+    linen_flags = [
+        name
+        for name, value in (
+            ("enable_nnx", self.enable_nnx),
+            ("pure_nnx", self.pure_nnx),
+            ("pure_nnx_decoder", self.pure_nnx_decoder),
+        )
+        if not value
+    ]
+    if linen_flags:
+      logger.warning("=" * 80)
+      logger.warning("MAXTEXT DEPRECATION NOTICE: you are running on the Linen code path.")
+      logger.warning("Selected by: %s", ", ".join(f"{name}=False" for name in linen_flags))
+      logger.warning("Linen will be deprecated in the near future and removed after that.")
+      logger.warning("Plan to migrate to NNX: leave enable_nnx, pure_nnx and pure_nnx_decoder at their default of True.")
+      logger.warning("=" * 80)
 
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
