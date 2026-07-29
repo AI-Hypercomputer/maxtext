@@ -10,13 +10,20 @@ JOB_NAME="maxtext-validation-job"
 echo "1. Configuring GCP Project..."
 gcloud config set project $PROJECT_ID
 
-echo "2. Building Docker Image..."
-# We build the image locally. Assuming this is run from maxtext/src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/
+echo "2. Building Docker Image remotely via Google Cloud Build..."
+# We build the image in the cloud. Assuming this is run from maxtext/src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/
 cd ../../../../../../ # Go to root of project
-docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:latest -f maxtext/src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/Dockerfile .
 
-echo "3. Pushing to Artifact Registry..."
-docker push $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:latest
+# Copy Dockerfile to root temporarily so Cloud Build finds it easily
+cp maxtext/src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/Dockerfile ./Dockerfile
+
+# Submit build to Google Cloud Build (bypasses need for local Docker)
+gcloud builds submit --tag $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:latest --project $PROJECT_ID .
+
+# Clean up
+rm ./Dockerfile
+
+echo "3. Image built and pushed successfully by Cloud Build."
 
 echo "4. Deploying to Google Cloud Run Jobs..."
 # We use 'jobs deploy' instead of 'run deploy' (which is for Services)
