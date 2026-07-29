@@ -313,36 +313,42 @@ def process_maxtext_param(
 
     return output_weights
 
-  # Case 4: Multi-axis stacked (Scanned MoE layer)
-  # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
-  # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
-  max_logging.log("\tscan moe")
-  expert_axis_to_slice = 0
+  # Case 4: Multi-axis stacked. Two sub-cases (the inverse of _build_multi_axis_stacked_tensor):
+  #   - Scanned MoE: the tensor is stacked on (experts, layers) at the LEADING two axes, so we
+  #     slice axis 0 (experts) then axis 0 again (layers, after the expert axis is removed).
+  #   - Gemma4 nested block scan (scanned_blocks-local_layers): the block's local layers are an
+  #     inner scan nested in the block scan, so the two axes are at (param_scan_axis,
+  #     param_scan_axis + 1) -- outer = blocks, inner = local. We slice param_scan_axis (blocks),
+  #     then param_scan_axis again (local shifts down into that slot once blocks is removed).
+  key_str = maxtext_param_key[0] if isinstance(maxtext_param_key, tuple) else maxtext_param_key
+  if isinstance(key_str, str) and "scanned_blocks-local_layers" in key_str:
+    max_logging.log("\tscan gemma4 local")
+    outer_axis_to_slice = maxtext_config.param_scan_axis
+    inner_axis_to_slice = maxtext_config.param_scan_axis
+  else:
+    max_logging.log("\tscan moe")
+    outer_axis_to_slice = 0
+    inner_axis_to_slice = 0
 
-  # Outer loop for experts
-  for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
-    # Slice along the expert axis to get the tensor for the current expert across all layers.
+  # Outer loop (experts for MoE, blocks for gemma4 local)
+  for outer_idx, inner_paths in enumerate(hf_target_paths):
     if isinstance(maxtext_param_weight, list):
-      expert_tensor_slice = [
-          jax.lax.index_in_dim(x, expert_idx, axis=expert_axis_to_slice, keepdims=False) for x in maxtext_param_weight
+      outer_slice = [
+          jax.lax.index_in_dim(x, outer_idx, axis=outer_axis_to_slice, keepdims=False) for x in maxtext_param_weight
       ]
     else:
-      expert_tensor_slice = jax.lax.index_in_dim(
-          maxtext_param_weight, expert_idx, axis=expert_axis_to_slice, keepdims=False
-      )
+      outer_slice = jax.lax.index_in_dim(maxtext_param_weight, outer_idx, axis=outer_axis_to_slice, keepdims=False)
 
-    # Inner loop for layers
-    for layer_idx, hf_path in enumerate(expert_paths_for_layer):
-      # Slice the expert tensor along the layer axis to get the final individual weight.
-      # axis is 0 on the new sliced tensor
-      if isinstance(expert_tensor_slice, list):
-        layer_tensor_slice = [jax.lax.index_in_dim(x, layer_idx, axis=0, keepdims=False) for x in expert_tensor_slice]
+    # Inner loop (layers for MoE, local layers for gemma4)
+    for inner_idx, hf_path in enumerate(inner_paths):
+      if isinstance(outer_slice, list):
+        inner_slice = [jax.lax.index_in_dim(x, inner_idx, axis=inner_axis_to_slice, keepdims=False) for x in outer_slice]
       else:
-        layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
+        inner_slice = jax.lax.index_in_dim(outer_slice, inner_idx, axis=inner_axis_to_slice, keepdims=False)
 
       _process(
           hf_path,
-          layer_tensor_slice,
+          inner_slice,
           output_weights,
           current_hook_fns,
           hf_shape_map,
