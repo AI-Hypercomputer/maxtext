@@ -176,6 +176,7 @@ def _gmm_fwd(
         jnp.ndarray | qpl.QArray,
         jnp.ndarray,
         jnp.ndarray | None,
+        jnp.ndarray | None,
     ],
 ]:
   """Forward function for GMM VJP.
@@ -188,7 +189,7 @@ def _gmm_fwd(
   # Quantize activation and weight
   if quantization_rule:
     lhs, rhs = _fwd_quantize_activation_and_weight(
-        lhs, rhs, quantization_rule, use_gmm_v2_fwd, use_manual_quantization, transpose_rhs
+        lhs, rhs, quantization_rule, use_manual_quantization, transpose_rhs
     )
 
   # Quantization All-Gather (QAG) for weight: only supported for following conditions
@@ -227,15 +228,14 @@ def _gmm_fwd(
 
 
 def _fwd_quantize_activation_and_weight(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    lhs: jnp.ndarray | qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
     quantization_rule: qwix.QtRule,
-    use_gmm_v2_fwd: bool,
     use_manual_quantization: bool,
     transpose_rhs: bool,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
-  if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2_fwd:
+  if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
     lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
         lhs,
         quantization_rule.act_qtype,
@@ -327,8 +327,8 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
 
 
 def _fwd_run_tokamax_v2(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    lhs: jnp.ndarray | qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype,
     tiling: tuple,
@@ -337,6 +337,8 @@ def _fwd_run_tokamax_v2(
     transpose_rhs: bool,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass."""
+  lhs_operand = lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs
+
   # if transpose_rhs=False, rhs is [g, k, n], remain unchanged
   # if transpose_rhs=True, rhs [g, n, k], explicit transpose to [g, k, n]
   rhs_operand = rhs if not transpose_rhs else rhs.swapaxes(1, 2)
@@ -352,8 +354,8 @@ def _fwd_run_tokamax_v2(
       tile_n=tiling[2],
   )
 
-  return gmm_v2.gmm_v2(
-      lhs=lhs,
+  out = gmm_v2.gmm_v2(
+      lhs=lhs_operand,
       rhs=rhs_operand,
       group_sizes=group_sizes,
       rhs_scale=rhs_scale,
@@ -362,6 +364,11 @@ def _fwd_run_tokamax_v2(
       partial_sum=partial_sum,
       group_offset=group_offset,
   )
+
+  if isinstance(lhs, qpl.QArray):
+    out *= lhs.scale.astype(out.dtype)
+
+  return out
 
 
 def _fwd_run_megablox(
@@ -839,10 +846,6 @@ def _drhs_run_tokamax_v2(
   """Executes Tokamax TGMM V2 backend for DRHS."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
   drhs_lhs = lhs
-
-  # TGMM kernel requires matching sublane sizes (dtypes) for hardware packing.
-  if drhs_lhs.dtype != drhs_rhs.dtype:
-    drhs_lhs = drhs_lhs.astype(drhs_rhs.dtype)
 
   rhs_scale = None
   if isinstance(drhs_dout, qpl.QArray):

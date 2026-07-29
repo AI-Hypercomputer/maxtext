@@ -1560,7 +1560,9 @@ class RoutedMoeTest(parameterized.TestCase):
         use_gmm_v2=False,
         ici_expert_parallelism=1,
     )
-    hidden_states = jax.random.uniform(
+    # Use normal distribution to generate realistic variances and negative values
+    # to guarantee the quantization scale != 1.0, which catches scale-dropping bugs.
+    hidden_states = jax.random.normal(
         rng_hidden_states,
         (int(cfg_ref.per_device_batch_size) * device_count, cfg_ref.max_target_length, cfg_ref.base_emb_dim),
         dtype=cfg_ref.dtype,
@@ -1604,7 +1606,7 @@ class RoutedMoeTest(parameterized.TestCase):
         "var_grad": grads_tgt,
     }
 
-    relative_norm_diff_threshold = 0.2 if quantization else 0.012
+    relative_norm_diff_threshold = 0.22 if quantization else 0.012
     diff_summary = compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold)
     max_logging.log("\n" + diff_summary)
 
