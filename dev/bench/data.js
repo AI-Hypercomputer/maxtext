@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785342070574,
+  "lastUpdate": 1785346816610,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -2563,6 +2563,138 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU-UNIT Tests Count",
             "value": 1198,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "484fec1fe67a345a89028bfa76e48e51cd4f43b0",
+          "message": "Merge pull request #4637 from ROCm:upstream-fix-decoupled-load-dynamic-gcs\n\nPiperOrigin-RevId: 955940966",
+          "timestamp": "2026-07-29T17:14:15Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/484fec1fe67a345a89028bfa76e48e51cd4f43b0"
+        },
+        "date": 1785346815897,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total CPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 324.26000000000005,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-POST-TRAINING-UNIT Tests Count",
+            "value": 177,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1586.1319999999987,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total CPU-UNIT Tests Duration",
+            "value": 7165.732999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-UNIT Tests Count",
+            "value": 265,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 752.8589999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 45,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 1544.1939999999902,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 2396,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 136.14800000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total CPU-TORCH-REFERENCE Tests Duration",
+            "value": 305.1329999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-TORCH-REFERENCE Tests Count",
+            "value": 54,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1856.1180000000008,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 2324.7870000002467,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 2396,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 90.88500000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 1076.5649999999837,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 2263,
             "unit": "count"
           }
         ]
