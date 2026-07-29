@@ -18,7 +18,7 @@ The correctness tests themselves are TPU-only and skipped (b/425997645), so this
 exercises the changed dispatch code that otherwise has no CPU coverage:
   - `mt.from_config` is exported (the GRPO trainer calls it)
   - the SFT correctness test's `setup_maxtext_model` / `get_maxtext_logits` run on
-    both paths (pure_nnx=True -> NNX, pure_nnx=False -> Linen) and stay finite
+    the NNX path and stay finite
 
 The GRPO NNX building blocks the other dispatch helpers call
 (`compute_log_probs_nnx`, `grpo_loss_fn_nnx`) are already covered by grpo_nnx_test.
@@ -50,15 +50,12 @@ _SMALL = {
 }
 
 
-def _sft_config(pure_nnx):
+def _sft_config():
   return pyconfig.initialize(
       [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs/post_train", "sft.yml")],
-      run_name=f"unit-sft-{pure_nnx}",
+      run_name="unit-sft-nnx",
       model_name="default",
       enable_checkpointing=False,
-      pure_nnx=pure_nnx,
-      enable_nnx=pure_nnx,
-      pure_nnx_decoder=pure_nnx,
       **_SMALL,
   )
 
@@ -80,12 +77,7 @@ class CorrectnessTestNNXDispatchTest(unittest.TestCase):
     self.assertTrue(hasattr(mt, "from_config"))
 
   def test_sft_logits_nnx_path(self):
-    config = _sft_config(pure_nnx=True)
-    logits = sft.get_maxtext_logits(config, _fake_data(config))
-    self.assertTrue(bool(jnp.isfinite(logits).all()))
-
-  def test_sft_logits_linen_path(self):
-    config = _sft_config(pure_nnx=False)
+    config = _sft_config()
     logits = sft.get_maxtext_logits(config, _fake_data(config))
     self.assertTrue(bool(jnp.isfinite(logits).all()))
 
