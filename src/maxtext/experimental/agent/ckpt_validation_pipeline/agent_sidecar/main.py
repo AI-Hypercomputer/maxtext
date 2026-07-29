@@ -20,7 +20,7 @@ import sys
 
 from monitor.state_manager import load_state, save_state, MAX_RETRIES
 from monitor.alerter import dispatch_email_alert
-from monitor.gcs_poller import check_for_failures
+from monitor.gcs_poller import check_for_failures, mark_handled
 from adk_agent import run_agent_workflow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -31,14 +31,14 @@ def main():
     logger.info("Overwatch Cloud Run Job started. Checking for pipeline failures...")
     
     try:
-        failure = check_for_failures()
+        failure, blob_name = check_for_failures()
         if not failure:
             logger.info("No failures detected in GCS. Exiting cleanly.")
             return
 
-        run_id = failure.get("run_id")
-        model_name = failure.get("model_name")
-        failure_log = failure.get("log", "")
+        run_id = failure.get("run_id") or failure.get("task")  # Fallback to task if run_id missing
+        model_name = failure.get("model_name", "unknown")
+        failure_log = failure.get("log", "") or failure.get("error_message", "")
 
         state = load_state()
         retries = state.get(run_id, 0)
@@ -48,6 +48,7 @@ def main():
             dispatch_email_alert(run_id, model_name)
             state[run_id] = retries + 1  # Mark as handled
             save_state(state)
+            mark_handled(blob_name)
         elif retries < MAX_RETRIES:
             logger.info("Detected failure for %s. Attempt %s/%s.", run_id, retries + 1, MAX_RETRIES)
             
@@ -56,6 +57,7 @@ def main():
             
             state[run_id] = retries + 1
             save_state(state)
+            mark_handled(blob_name)
 
     except Exception as e:
         logger.error("Error during job execution: %s", e)

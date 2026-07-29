@@ -27,25 +27,44 @@ def check_for_failures():
   """
   Polls GCS for pipeline failures.
   Reads JSON reports from gs://maxtext-validation-agent-reports/
-  Returns a dict with run_id, model_name, and log if a failure is found, else None.
+  Returns a tuple (report_data, blob_name) if a failure is found, else (None, None).
   """
   logger.info("Checking for failures in gs://%s/", GCS_BUCKET_NAME)
   try:
     client = storage.Client()
     bucket = client.bucket(GCS_BUCKET_NAME)
-    blobs = bucket.list_blobs()
+    blobs = list(bucket.list_blobs())
     
-    for blob in blobs:
-      if not blob.name.endswith(".json") or "handled" in blob.name:
-        continue
-
+    # Filter for unhandled json reports
+    valid_blobs = [b for b in blobs if b.name.endswith(".json") and "handled" not in b.name]
+    
+    # Sort by creation time descending (newest first)
+    valid_blobs.sort(key=lambda b: b.time_created, reverse=True)
+    
+    for blob in valid_blobs:
       content = blob.download_as_string()
       report_data = json.loads(content)
-      if report_data and report_data.get("status") == "failed":
+      # Check for "failed" (shape check) or "FAILURE" (mock tensor)
+      if report_data and (report_data.get("status") == "failed" or report_data.get("status") == "FAILURE"):
         logger.info("Detected failure report: %s", blob.name)
-        return report_data
+        return report_data, blob.name
 
   except Exception as e:
     logger.error("Error checking GCS for failures: %s", e)
 
-  return None
+  return None, None
+
+
+def mark_handled(blob_name):
+  """Renames a blob to include 'handled_' so it is ignored in future polls."""
+  try:
+    client = storage.Client()
+    bucket = client.bucket(GCS_BUCKET_NAME)
+    blob = bucket.blob(blob_name)
+    if blob.exists():
+      # Prepend "handled_" to the original filename
+      new_name = "handled_" + blob_name
+      bucket.rename_blob(blob, new_name)
+      logger.info("Successfully marked %s as handled.", blob_name)
+  except Exception as e:
+    logger.error("Failed to mark blob %s as handled: %s", blob_name, e)

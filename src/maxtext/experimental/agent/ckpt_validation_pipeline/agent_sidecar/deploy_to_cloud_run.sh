@@ -11,11 +11,11 @@ echo "1. Configuring GCP Project..."
 gcloud config set project $PROJECT_ID
 
 echo "2. Building Docker Image remotely via Google Cloud Build..."
-# We build the image in the cloud. Assuming this is run from maxtext/src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/
-cd ../../../../../../ # Go to root of project
+# Navigate to the root of the git repository securely regardless of where you ran this from
+cd "$(git rev-parse --show-toplevel)"
 
 # Copy Dockerfile to root temporarily so Cloud Build finds it easily
-cp maxtext/src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/Dockerfile ./Dockerfile
+cp src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/Dockerfile ./Dockerfile
 
 # Submit build to Google Cloud Build (bypasses need for local Docker)
 gcloud builds submit --tag $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:latest --project $PROJECT_ID .
@@ -33,20 +33,4 @@ gcloud run jobs deploy $JOB_NAME \
   --service-account=ml-auto-solutions@$PROJECT_ID.iam.gserviceaccount.com \
   --set-env-vars=PYTHONUNBUFFERED=1
 
-echo "5. Checking/Creating Cloud Scheduler Trigger..."
-# Trigger every 15 minutes (or 5 minutes, depending on preference)
-# We use '|| true' on create and 'update' to ensure idempotency if it already exists
-gcloud scheduler jobs create http $JOB_NAME-trigger \
-  --location $REGION \
-  --schedule "*/15 * * * *" \
-  --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
-  --http-method POST \
-  --oauth-service-account-email=ml-auto-solutions@$PROJECT_ID.iam.gserviceaccount.com 2>/dev/null || \
-gcloud scheduler jobs update http $JOB_NAME-trigger \
-  --location $REGION \
-  --schedule "*/15 * * * *" \
-  --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
-  --http-method POST \
-  --oauth-service-account-email=ml-auto-solutions@$PROJECT_ID.iam.gserviceaccount.com
-
-echo "Deployment Complete! The Overwatch Agent is now scheduled as a Serverless Job."
+echo "Deployment Complete! The Overwatch Agent is now deployed as a Serverless Job and is triggered exclusively by Airflow on failure."
