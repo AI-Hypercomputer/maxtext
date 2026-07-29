@@ -210,6 +210,9 @@ def use_maxtext_loss_function(trainer, mt_config):
       targets,
       targets_position,
       targets_segmentation,
+      images=None,
+      image_masks=None,
+      **kwargs,
   ):
     data = {
         "inputs": inputs,
@@ -219,6 +222,10 @@ def use_maxtext_loss_function(trainer, mt_config):
         "targets_position": targets_position,
         "targets_segmentation": targets_segmentation,
     }
+    if images is not None:
+      data["images"] = images
+    if image_masks is not None:
+      data["image_masks"] = image_masks
     return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=True)
 
   trainer = trainer.with_loss_fn(loss_func, has_aux=True)
