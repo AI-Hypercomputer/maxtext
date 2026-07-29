@@ -218,6 +218,7 @@ def process_maxtext_param(
     hook_fn_map: dict[str, Any],
     hf_shape_map: dict[str, Any],
     maxtext_config: Any,
+    enable_parallel_conversion: bool = False,
 ) -> list[tuple[str, np.ndarray]]:
   """Processes a single MaxText parameter (or a group of parameters) for conversion, used in to_huggingface.
 
@@ -243,6 +244,7 @@ def process_maxtext_param(
       expected shapes.
     maxtext_config: The MaxText configuration object, used to determine
       details like `param_scan_axis` and `base_num_decoder_layers`.
+    enable_parallel_conversion: Whether to parallelize unstacking across threads.
 
   Returns:
     A list of tuples, where each tuple contains:
@@ -294,24 +296,46 @@ def process_maxtext_param(
       # Case 3: Unscanned MoE layer. Stacked ONLY on the expert axis. Assuming expert is axis 0.
       axis_to_slice = 0
 
-    # Iterate through the slices of the MaxText weight along the determined stacking axis.
-    for i, hf_path in enumerate(hf_target_paths):
-      if isinstance(maxtext_param_weight, list):
-        # Handles `composite_mt_key` mappings where weight is a list of tensors.
-        weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
-      else:
-        # Handles `atomic_mt_key` mappings by slicing the single tensor.
-        weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
-      _process(
-          hf_path,
-          weight_slice,
-          output_weights,
-          current_hook_fns,
-          hf_shape_map,
-          save_dtype=maxtext_config.weight_dtype,
-      )
+    if enable_parallel_conversion and len(hf_target_paths) > 1:
+      def _process_single_slice(i_path):
+        i, hf_path = i_path
+        if isinstance(maxtext_param_weight, list):
+          w_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
+        else:
+          w_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
+        slice_outputs = []
+        _process(
+            hf_path,
+            w_slice,
+            slice_outputs,
+            current_hook_fns,
+            hf_shape_map,
+            save_dtype=maxtext_config.weight_dtype,
+        )
+        return slice_outputs
 
-    return output_weights
+      with ThreadPoolExecutor(max_workers=min(len(hf_target_paths), 32)) as executor:
+        for res in executor.map(_process_single_slice, enumerate(hf_target_paths)):
+          output_weights.extend(res)
+      return output_weights
+    else:
+      # Iterate through the slices of the MaxText weight along the determined stacking axis.
+      for i, hf_path in enumerate(hf_target_paths):
+        if isinstance(maxtext_param_weight, list):
+          # Handles `composite_mt_key` mappings where weight is a list of tensors.
+          weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
+        else:
+          # Handles `atomic_mt_key` mappings by slicing the single tensor.
+          weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
+        _process(
+            hf_path,
+            weight_slice,
+            output_weights,
+            current_hook_fns,
+            hf_shape_map,
+            save_dtype=maxtext_config.weight_dtype,
+        )
+      return output_weights
 
   # Case 4: Multi-axis stacked (Scanned MoE layer)
   # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
@@ -319,37 +343,81 @@ def process_maxtext_param(
   max_logging.log("\tscan moe")
   expert_axis_to_slice = 0
 
-  # Outer loop for experts
-  for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
-    # Slice along the expert axis to get the tensor for the current expert across all layers.
-    if isinstance(maxtext_param_weight, list):
-      expert_tensor_slice = [
-          jax.lax.index_in_dim(x, expert_idx, axis=expert_axis_to_slice, keepdims=False) for x in maxtext_param_weight
-      ]
-    else:
-      expert_tensor_slice = jax.lax.index_in_dim(
-          maxtext_param_weight, expert_idx, axis=expert_axis_to_slice, keepdims=False
-      )
+  if enable_parallel_conversion and hf_target_paths:
+    num_experts = len(hf_target_paths)
+    num_layers = len(hf_target_paths[0])
+    flat_tasks = [
+        (e_idx, l_idx, hf_target_paths[e_idx][l_idx])
+        for e_idx in range(num_experts)
+        for l_idx in range(num_layers)
+    ]
 
-    # Inner loop for layers
-    for layer_idx, hf_path in enumerate(expert_paths_for_layer):
-      # Slice the expert tensor along the layer axis to get the final individual weight.
-      # axis is 0 on the new sliced tensor
-      if isinstance(expert_tensor_slice, list):
-        layer_tensor_slice = [jax.lax.index_in_dim(x, layer_idx, axis=0, keepdims=False) for x in expert_tensor_slice]
+    def _process_grid_cell(task):
+      e_idx, l_idx, hf_path = task
+      if isinstance(maxtext_param_weight, list):
+        cell_slice = [
+            jax.lax.index_in_dim(
+                jax.lax.index_in_dim(x, e_idx, axis=0, keepdims=False),
+                l_idx,
+                axis=0,
+                keepdims=False,
+            )
+            for x in maxtext_param_weight
+        ]
       else:
-        layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
-
+        cell_slice = jax.lax.index_in_dim(
+            jax.lax.index_in_dim(maxtext_param_weight, e_idx, axis=0, keepdims=False),
+            l_idx,
+            axis=0,
+            keepdims=False,
+        )
+      cell_outputs = []
       _process(
           hf_path,
-          layer_tensor_slice,
-          output_weights,
+          cell_slice,
+          cell_outputs,
           current_hook_fns,
           hf_shape_map,
           save_dtype=maxtext_config.weight_dtype,
       )
+      return cell_outputs
 
-  return output_weights
+    with ThreadPoolExecutor(max_workers=min(len(flat_tasks), 32)) as executor:
+      for res in executor.map(_process_grid_cell, flat_tasks):
+        output_weights.extend(res)
+    return output_weights
+  else:
+    # Outer loop for experts
+    for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
+      # Slice along the expert axis to get the tensor for the current expert across all layers.
+      if isinstance(maxtext_param_weight, list):
+        expert_tensor_slice = [
+            jax.lax.index_in_dim(x, expert_idx, axis=expert_axis_to_slice, keepdims=False) for x in maxtext_param_weight
+        ]
+      else:
+        expert_tensor_slice = jax.lax.index_in_dim(
+            maxtext_param_weight, expert_idx, axis=expert_axis_to_slice, keepdims=False
+        )
+
+      # Inner loop for layers
+      for layer_idx, hf_path in enumerate(expert_paths_for_layer):
+        # Slice the expert tensor along the layer axis to get the final individual weight.
+        # axis is 0 on the new sliced tensor
+        if isinstance(expert_tensor_slice, list):
+          layer_tensor_slice = [jax.lax.index_in_dim(x, layer_idx, axis=0, keepdims=False) for x in expert_tensor_slice]
+        else:
+          layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
+
+        _process(
+            hf_path,
+            layer_tensor_slice,
+            output_weights,
+            current_hook_fns,
+            hf_shape_map,
+            save_dtype=maxtext_config.weight_dtype,
+        )
+
+    return output_weights
 
 
 def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):

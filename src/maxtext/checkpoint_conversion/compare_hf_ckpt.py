@@ -70,7 +70,10 @@ def _load_gcs_shard(gcs_path: str, fs: gcsfs.GCSFileSystem) -> Dict[str, np.ndar
   # Convert to Numpy
   shard_dict = {}
   for key, tensor in loaded_tensors.items():
-    shard_dict[key] = tensor.numpy()
+    try:
+      shard_dict[key] = tensor.numpy()
+    except TypeError:
+      shard_dict[key] = tensor.float().numpy()
 
   return shard_dict
 
@@ -83,7 +86,10 @@ def _load_local_shard(file_path: str) -> Dict[str, np.ndarray]:
   with safe_open(file_path, framework="pt", device="cpu") as f:
     for key in f.keys():
       loaded_tensors = f.get_tensor(key)
-      shard_dict[key] = loaded_tensors.numpy()
+      try:
+        shard_dict[key] = loaded_tensors.numpy()
+      except TypeError:
+        shard_dict[key] = loaded_tensors.float().numpy()
 
   return shard_dict
 
@@ -136,7 +142,12 @@ def get_hf_model_state_dict(model_id: str, token: str) -> Dict[str, np.ndarray]:
   max_logging.log(f"Loading reference model from HuggingFace: {model_id}...")
 
   state_dict = load_hf_dict_from_transformers(model_id, token)
-  numpy_state_dict = {k: v.numpy() for k, v in state_dict.items()}
+  numpy_state_dict = {}
+  for k, v in state_dict.items():
+    try:
+      numpy_state_dict[k] = v.numpy()
+    except TypeError:
+      numpy_state_dict[k] = v.float().numpy()
 
   return numpy_state_dict
 
