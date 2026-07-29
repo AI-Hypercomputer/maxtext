@@ -867,12 +867,26 @@ def load_orbax_checkpoint(config) -> dict:
   for i, path in enumerate(paths):
     checkpoint_path = epath.Path(path)
     metadata = ckptr.metadata(checkpoint_path)
+    checkpoint_tree = metadata.item_metadata.tree
+    if isinstance(checkpoint_tree, dict):
+      if "params" in checkpoint_tree:
+        checkpoint_tree = {"params": checkpoint_tree["params"]}
+        max_logging.log(f"Filtering checkpoint to only load 'params' from {path}")
+      else:
+        filtered_tree = {k: v for k, v in checkpoint_tree.items() if k not in ("opt_state", "optimizer")}
+        if len(filtered_tree) < len(checkpoint_tree):
+          checkpoint_tree = filtered_tree
+          max_logging.log(f"Filtering checkpoint to exclude optimizer keys from {path}")
+
     restore_args = jax.tree_util.tree_map(
         lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
-        metadata.item_metadata.tree,
+        checkpoint_tree,
         is_leaf=lambda x: hasattr(x, "shape"),
     )
-    restored = ckptr.restore(checkpoint_path, restore_args=restore_args)
+    restored = ckptr.restore(
+        checkpoint_path,
+        args=ocp.args.PyTreeRestore(item=checkpoint_tree, restore_args=restore_args, partial_restore=True),
+    )
 
     if i == 0:
       merged_dict = restored

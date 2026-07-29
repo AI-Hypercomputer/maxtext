@@ -15,6 +15,7 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
+import contextlib
 import datetime
 import importlib
 import time
@@ -716,7 +717,35 @@ def _handle_post_checkpoint_preemption(checkpoint_manager, step, force_ckpt_save
   if force_ckpt_save or is_preempted:
     wait_until_finished(checkpoint_manager)
   if is_preempted:
-    raise exceptions.StopTraining("Job is preempted.")
+    raise exceptions.StopTraining("Job received termination signal (SIGTERM).")
+
+
+@contextlib.contextmanager
+def checkpoint_exception_guard(config, checkpoint_manager, handler_fn=None):
+  """Context manager that wraps checkpointing save Exception handling.
+
+  On block success (checkpoint written without errors): runs the scale-up check
+  if elastic training is active.
+  On block failure: bubbles up JAX/ScaleUp errors if elastic training is active;
+  otherwise delegates to `handler_fn`.
+
+  Args:
+    config: maxtext configuration object.
+    checkpoint_manager: The CheckpointManager instance.
+    handler_fn: Optional callback function(Exception) that handles/wraps
+      non-elastic exceptions. If this handler raises a new exception, that new
+      exception is propagated. If it returns normally (returns None) or is not
+      provided, the original exception is re-raised (preserving its traceback).
+  """
+  try:
+    yield
+    elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
+  except Exception as e:  # pylint: disable=broad-except
+    elastic_utils.maybe_bubble_elastic_exception(config, e)
+    if handler_fn:
+      handler_fn(e)
+    else:
+      raise
 
 
 def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None):
@@ -753,38 +782,21 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
-  if config.pure_nnx:
-    # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
-    if config.enable_diloco:
-      # DiLoCoTrainState: persist the synchronized global model (outer params).
-      # The per-replica inner optimizer / outer-momentum state is not checkpointed.
-      step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
-      state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
-    else:
-      # rngs/dropout/batch-stats are packed under items/nnx_aux so the RNG/dropout
-      # stream continues across resumes instead of resetting to a base key.
-      state = train_state_nnx.to_checkpoint_dict(state)
+  def _checkpoint_error_handler(err):
+    """Handles checkpointing errors, when not in an elastic context."""
+    raise exceptions.StopTraining(f"Checkpointing failed. {str(err)}") from err
 
-  try:
-    checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
-    if checkpoint_saved:
-      print_save_message(actual_step, config.async_checkpointing)
-    if config.elastic_enabled:
-      elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
-  except elastic_utils.manager.ScaleUpSignalError as e:
-    if config.elastic_enabled:
-      max_logging.log(f"Elastic event detected, letting exception bubble up: {e}")
-      raise
-    else:
-      raise exceptions.StopTraining("Job is preempted.") from e
-  except jax.errors.JaxRuntimeError as e:
-    if config.elastic_enabled:
-      max_logging.log(f"Elastic event detected, letting exception bubble up: {e}")
-      raise
-    else:
-      raise exceptions.StopTraining("Job is preempted.") from e
-  except Exception as e:
-    raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
+  with checkpoint_exception_guard(config, checkpoint_manager, _checkpoint_error_handler):
+    checkpoint_saved = save_checkpoint(
+        checkpoint_manager,
+        actual_step,
+        state,
+        config,
+        data_iterator,
+        force_ckpt_save,
+    )
+  if checkpoint_saved:
+    print_save_message(actual_step, config.async_checkpointing)
 
   # Wait for any pending checkpoint save to finish during preemption or final
   # step save, then raise upon preemption.
@@ -793,12 +805,26 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
 
 def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
   """Wrapper for saving checkpoint."""
-  if config and config.enable_checkpointing:
+  if not isinstance(state, (dict, nnx.State, train_state.TrainState)):
+    if isinstance(state, train_state_nnx.TrainStateNNX):
+      state = nnx.state(state)
+    elif not isinstance(state, (dict, nnx.State)):
+      state = {}
+
+  if config and getattr(config, "pure_nnx", False) and isinstance(state, nnx.State):
+    # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
+    if getattr(config, "enable_diloco", False):
+      step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
+      state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
+    else:
+      state = train_state_nnx.to_checkpoint_dict(state)
+
+  if config and getattr(config, "enable_checkpointing", False):
     if (
         force
-        or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
+        or (step % config.checkpoint_period == 0 and not getattr(config, "enable_continuous_checkpointing", False))
         or (_uses_local_checkpoint_period(config) and step % config.local_checkpoint_period == 0)
-        or (config.enable_autocheckpoint and reached_preemption(checkpoint_manager, step))
+        or (getattr(config, "enable_autocheckpoint", False) and reached_preemption(checkpoint_manager, step))
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
@@ -812,7 +838,13 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
 
   # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
   chunk_byte_size = (
-      config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+      getattr(
+          config,
+          "checkpoint_storage_target_data_file_size_bytes",
+          DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE,
+      )
+      if config
+      else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
   )
 
   checkpoint_args = ocp.args.PyTreeSave(
@@ -822,7 +854,11 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   )
   save_args_composite = {"items": checkpoint_args}
 
-  if config and config.dataset_type == "grain" and not isinstance(data_iterator, PlaceHolderDataIterator):
+  if (
+      config
+      and getattr(config, "dataset_type", None) == "grain"
+      and not isinstance(data_iterator, PlaceHolderDataIterator)
+  ):
     if isinstance(data_iterator, RemoteIteratorWrapper):
       # Pass the wrapper directly; GrainCheckpointHandler will call save_state with the step
       save_args_composite["iter"] = grain_utility.GrainCheckpointSave(
