@@ -285,10 +285,15 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
     # [batch, seq_len, emb_dim] -> [batch, seq_len, head_dim]
     gate = self.gate_proj(hidden_states)
 
-    # Truncate sequence to the nearest multiple of the compression rate
-    usable = (seq_len // self.compress_rate) * self.compress_rate
-    chunk_kv = kv[:, :usable]
-    chunk_gate = gate[:, :usable]
+    # Ceil-pad sequence to nearest multiple of compression rate so all tokens are included
+    remainder = seq_len % self.compress_rate
+    if remainder > 0:
+      pad_len = self.compress_rate - remainder
+      chunk_kv = jnp.pad(kv, ((0, 0), (0, pad_len), (0, 0)))
+      chunk_gate = jnp.pad(gate, ((0, 0), (0, pad_len), (0, 0)), constant_values=-1e9)
+    else:
+      chunk_kv = kv
+      chunk_gate = gate
     first_window_position = position_ids[:, 0:1]
 
     # Process overlapping windows if there is enough sequence length
