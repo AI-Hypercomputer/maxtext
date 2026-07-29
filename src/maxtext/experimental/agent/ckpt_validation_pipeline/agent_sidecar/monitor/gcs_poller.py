@@ -15,11 +15,12 @@
 """GCS poller for detecting Airflow validation failures."""
 
 import logging
-from maxtext.utils.gcs_utils import gcs_glob_pattern, read_json_from_gcs
+import json
+from google.cloud import storage
 
 logger = logging.getLogger(__name__)
 
-GCS_REPORTS_DIR = "gs://maxtext-validation-agent-reports/"
+GCS_BUCKET_NAME = "maxtext-validation-agent-reports"
 
 
 def check_for_failures():
@@ -28,20 +29,23 @@ def check_for_failures():
   Reads JSON reports from gs://maxtext-validation-agent-reports/
   Returns a dict with run_id, model_name, and log if a failure is found, else None.
   """
-  logger.info("Checking for failures in %s", GCS_REPORTS_DIR)
+  logger.info("Checking for failures in gs://%s/", GCS_BUCKET_NAME)
   try:
-    # Glob for all unhandled JSON reports
-    report_files = gcs_glob_pattern(GCS_REPORTS_DIR + "*.json")
-    for report_file in report_files:
-      if "handled" in report_file:
+    client = storage.Client()
+    bucket = client.bucket(GCS_BUCKET_NAME)
+    blobs = bucket.list_blobs()
+    
+    for blob in blobs:
+      if not blob.name.endswith(".json") or "handled" in blob.name:
         continue
 
-      report_data = read_json_from_gcs(report_file)
+      content = blob.download_as_string()
+      report_data = json.loads(content)
       if report_data and report_data.get("status") == "failed":
-        logger.info("Detected failure report: %s", report_file)
+        logger.info("Detected failure report: %s", blob.name)
         return report_data
 
-  except (ValueError, IOError, KeyError, TypeError, OSError) as e:
+  except Exception as e:
     logger.error("Error checking GCS for failures: %s", e)
 
   return None
