@@ -1,60 +1,68 @@
 #!/bin/bash
 
-# Validates the GPTOSS-20B Supervised Fine-Tuning (SFT) pipeline.
+# Validates the GPT-OSS-20b SFT pipeline using a pre-converted MaxText checkpoint.
+
+# The flow of this script is as follows:
+# 1. Run inference on the pre-converted checkpoint.
+# 2. Run SFT starting from the pre-converted checkpoint.
+# 3. Run inference on the checkpoint produced by the SFT run.
+
+# Usage:
+# export HF_TOKEN=<your Hugging Face access token>
+# export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
+# bash test_gpt_oss_to_mt.sh $RUN_ID
+# bash test_gpt_oss_sft.sh $RUN_ID
+
 
 set -ex
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
+use_pathways=${2:-false}
 export MODEL_NAME='gpt-oss-20b'
-export TOKENIZER_PATH='openai/gpt-oss-20b'
 
-if [ -z "${BASE_OUTPUT_PATH}" ]; then
-  export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/${MODEL_NAME}
-fi
-BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
+# Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you have the scanned and unscanned checkpoints stored
+BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
+UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
+SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
-export SCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/scanned/${run_id}/0/items
 
-export SPARSE_MATMUL="True"
-export MEGABLOX="True"
-export SFT_ATTENTION="flash"
-
-# 1. Run Supervised Fine-Tuning
-python3 -m maxtext.trainers.post_train.sft.train_sft_native \
-    "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs/post_train}"/sft.yml \
-    base_output_directory=${BASE_OUTPUT_PATH}/sft \
-    run_name=${run_id} \
+# Step 1: Run inference on the original checkpoint converted from Hugging Face
+python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
-    tokenizer_type=huggingface \
-    tokenizer_path=${TOKENIZER_PATH} \
-    dataset_type=hf \
-    enable_checkpointing=true \
-    async_checkpointing=false \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    tokenizer_path='unsloth/gpt-oss-20b-BF16' \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    hbm_utilization_vllm=0.7 \
+    prompt="Suggest some famous landmarks in London." \
+    use_chat_template=True \
+    scan_layers=false \
+    enable_single_controller=${use_pathways} \
+    ici_tensor_parallelism=8
+
+
+# Step 2: Run SFT on the converted checkpoint
+python3 -m maxtext.trainers.post_train.sft.train_sft \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
-    scan_layers=True \
-    attention=${SFT_ATTENTION} \
-    sparse_matmul=${SPARSE_MATMUL} \
-    megablox=${MEGABLOX} \
-    dtype=bfloat16 \
-    weight_dtype=bfloat16 \
-    per_device_batch_size=4 \
+    per_device_batch_size=1 \
+    run_name=${run_id} \
     steps=5 \
-    max_target_length=1024 \
-    ici_fsdp_parallelism=1 \
-    ici_expert_parallelism=4 \
-    gcs_metrics=true \
-    abort_on_nan_loss=false
-
-# 2. Run Decoding on the newly produced SFT checkpoint
-python3 -m maxtext.inference.decode \
-    base_output_directory=${BASE_OUTPUT_PATH} \
-    run_name=decode_sft \
+    scan_layers=true \
     model_name=${MODEL_NAME} \
-    tokenizer_path=${TOKENIZER_PATH} \
-    load_parameters_path=${BASE_OUTPUT_PATH}/sft/${run_id}/checkpoints/4/items \
-    scan_layers=True \
-    attention=dot_product \
-    sparse_matmul=${SPARSE_MATMUL} \
-    megablox=${MEGABLOX} \
-    prompt="I love to" \
-    ici_tensor_parallelism=4
+    tokenizer_path='unsloth/gpt-oss-20b-BF16' \
+    enable_single_controller=${use_pathways} \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False
+
+# Step 3: Run inference on the checkpoint generated from the previous run
+python3 -m maxtext.inference.vllm_decode \
+    model_name=${MODEL_NAME} \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/5/model_params \
+    tokenizer_path='unsloth/gpt-oss-20b-BF16' \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    hbm_utilization_vllm=0.7 \
+    prompt="Suggest some famous landmarks in London." \
+    use_chat_template=True \
+    scan_layers=true \
+    enable_single_controller=${use_pathways} \
+    ici_tensor_parallelism=8

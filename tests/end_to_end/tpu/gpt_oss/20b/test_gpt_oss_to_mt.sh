@@ -1,60 +1,78 @@
 #!/bin/bash
 
-# Converts GPTOSS-20B HuggingFace checkpoint to MaxText format and validates logit correctness.
+# Converts GPT-OSS-20b HuggingFace checkpoint to MaxText format and validates logit correctness.
+
+# The flow of this script is as follows:
+# 1. Install PyTorch (CPU) required for checkpoint conversion.
+# 2. Convert the HuggingFace checkpoint to MaxText format in both unscanned and scanned formats.
+# 3. Run a forward pass logits check to verify the converted checkpoint matches the original HF model.
+
+# Usage:
+# export HF_TOKEN=<your Hugging Face access token>
+# export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
+# bash test_gpt_oss_to_mt.sh $RUN_ID - to convert the checkpoint and run logit check
 
 set -ex
 
 export PYTHONPATH=src
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
-export MODEL_NAME='gpt-oss-20b'
-export TOKENIZER_PATH='openai/gpt-oss-20b'
+MODEL_NAME='gpt-oss-20b'
 
-if [ -z "${BASE_OUTPUT_PATH}" ]; then
-  export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/${MODEL_NAME}
-fi
-BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
-echo "Using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
+# Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you want to store scanned and unscanned checkpoints
+BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
 
-if [ -z "${CKPT_DISK_LOCATION}" ]; then
-  export CKPT_BUCKET=gs://maxtext-model-checkpoints/gpt-oss-20b/hf-bf16
-  gcloud storage cp -r ${CKPT_BUCKET} /tmp
-  export CKPT_DISK_LOCATION=/tmp/hf-bf16
-fi
+# Step 1: Install torch
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# 1. Convert to scanned checkpoint (for training)
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_ckpt \
-    --base-model-path ${CKPT_DISK_LOCATION} \
-    --maxtext-model-path ${BASE_OUTPUT_PATH}/scanned/${run_id} \
-    --model-size ${MODEL_NAME}
+# Step 2: Convert the checkpoint from Hugging Face to make it compatible with MaxText
 
-SCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/scanned/${run_id}/0/items
-echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
+# Step 2.a: Convert to unscanned checkpoint (for inference)
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    --hf_model_path="unsloth/gpt-oss-20b-BF16" \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id} \
+    use_multimodal=false \
+    scan_layers=false \
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    attention=\'dot_product\'
 
-# 2. Convert to unscanned checkpoint (for inference)
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_unscanned_ckpt \
-    --base-model-path ${CKPT_DISK_LOCATION} \
-    --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned/${run_id} \
-    --model-size ${MODEL_NAME}
-
-UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/unscanned/${run_id}/0/items
+UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id}/0/items
 echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
 
-# 3. Logit correctness check
+# Step 2.b: Convert to scanned checkpoint (for training)
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    --hf_model_path="unsloth/gpt-oss-20b-BF16" \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id} \
+    use_multimodal=false \
+    scan_layers=true \
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    attention=\'dot_product\'
+
+SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
+echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
+
+# Step 3: Test whether the forward pass logits match the original HF model
+# to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
+# ToDo: improve forward_pass_logit_checker to test multi-modal prompt
 if [ ! -f /tmp/golden_data_gpt-oss-20b.jsonl ]; then
   gcloud storage cp gs://maxtext-test-assets/golden_data_gpt-oss-20b.jsonl /tmp/golden_data_gpt-oss-20b.jsonl
 fi
 
-SPARSE_MATMUL="True"
-MEGABLOX="True"
-
-python3 -m tests.utils.forward_pass_logit_checker \
-    base_output_directory=${BASE_OUTPUT_PATH} \
-    model_name=${MODEL_NAME} \
-    load_parameters_path=${UNSCANNED_CKPT_PATH} \
-    scan_layers=false \
-    attention=dot_product \
-    sparse_matmul=${SPARSE_MATMUL} \
-    megablox=${MEGABLOX} \
-    --golden_logits_path=/tmp/golden_data_gpt-oss-20b.jsonl \
-    --max_kl_div=0.01
+    python3 -m tests.utils.forward_pass_logit_checker \
+        load_parameters_path=${UNSCANNED_CKPT_PATH} \
+        model_name=${MODEL_NAME} \
+        use_multimodal=false \
+        scan_layers=false \
+        global_batch_size_to_train_on=1 \
+        per_device_batch_size=1 \
+        max_target_length=512 \
+        --golden_logits_path=/tmp/golden_data_gpt-oss-20b.jsonl \
+        --max_kl_div=0.01

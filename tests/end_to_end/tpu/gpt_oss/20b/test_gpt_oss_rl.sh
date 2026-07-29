@@ -1,55 +1,70 @@
 #!/bin/bash
 
-# Validates the GPTOSS-20B Reinforcement Learning (RL) pipeline using GRPO.
+# Validates the GPT-OSS-20b RL pipeline using a pre-converted MaxText checkpoint.
+
+# The flow of this script is as follows:
+# 1. Run inference on the pre-converted checkpoint.
+# 2. Run RL starting from the pre-converted checkpoint.
+# 3. Run inference on the checkpoint produced by the RL run.
+
+# Usage:
+# export HF_TOKEN=<your Hugging Face access token>
+# export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
+# bash test_gpt_oss_to_mt.sh $RUN_ID
+# bash test_gpt_oss_rl.sh $RUN_ID
 
 set -ex
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
+use_pathways=${2:-false}
 export MODEL_NAME='gpt-oss-20b'
-export TOKENIZER_PATH='openai/gpt-oss-20b'
 
-if [ -z "${BASE_OUTPUT_PATH}" ]; then
-  export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/${MODEL_NAME}
-fi
-BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
+# Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you have the scanned and unscanned checkpoints stored
+BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
+UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
+SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
-export SCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/scanned/${run_id}/0/items
 
-export SPARSE_MATMUL="True"
-export MEGABLOX="True"
-export ATTENTION="flash"
-export VLLM_ADDITIONAL_CONFIG='{"maxtext_config": {"model_name": "gpt-oss-20b", "log_config": "false"}}'
+# Step 1: Run inference on the original checkpoint converted from Hugging Face
+python3 -m maxtext.inference.vllm_decode \
+    model_name=${MODEL_NAME} \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    hbm_utilization_vllm=0.7 \
+    prompt="Suggest some famous landmarks in London." \
+    use_chat_template=True \
+    scan_layers=false \
+    enable_single_controller=${use_pathways} \
+    prefuse_moe_weights=True \
+    ici_tensor_parallelism=8
 
-# 1. Run GRPO Reinforcement Learning
+# Step 2: Run RL on the converted checkpoint
 python3 -m maxtext.trainers.post_train.rl.train_rl \
-    base_output_directory=${BASE_OUTPUT_PATH}/rl \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     run_name=${run_id} \
     rl.loss_algo='grpo' \
     scan_layers=true \
     num_batches=5 \
-    batch_size=1 \
+    batch_size=16 \
     num_test_batches=5 \
     model_name=${MODEL_NAME} \
+    enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
-    rollout_tensor_parallelism=1 \
-    attention=${ATTENTION} \
-    sparse_matmul=${SPARSE_MATMUL} \
-    megablox=${MEGABLOX} \
+    rollout_tensor_parallelism=4 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    vllm_additional_config="${VLLM_ADDITIONAL_CONFIG}"
+    vllm_additional_config='{"maxtext_config": {"model_name": "gpt-oss-20b", "log_config": "false", "prefuse_moe_weights": "true"}}'
 
-# 2. Run Verification Decoding on the newly produced actor checkpoint
-python3 -m maxtext.inference.decode \
-    base_output_directory=${BASE_OUTPUT_PATH} \
-    run_name=decode_rl \
+# Step 3: Run inference on the checkpoint generated from the previous run
+python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
-    tokenizer_path=${TOKENIZER_PATH} \
-    load_parameters_path=${BASE_OUTPUT_PATH}/rl/${run_id}/checkpoints/actor/4/items \
-    scan_layers=True \
-    attention=dot_product \
-    sparse_matmul=${SPARSE_MATMUL} \
-    megablox=${MEGABLOX} \
-    prompt="I love to" \
-    ici_tensor_parallelism=4
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/5/model_params \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    hbm_utilization_vllm=0.85 \
+    prompt='Suggest some famous landmarks in London.' \
+    use_chat_template=True \
+    scan_layers=true \
+    enable_single_controller=${use_pathways} \
+    prefuse_moe_weights=True \
+    ici_tensor_parallelism=8
