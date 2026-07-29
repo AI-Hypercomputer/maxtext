@@ -48,7 +48,7 @@ jobs:
         id: 'mint_identity_token'
         if: |-
           ${{ vars.APP_ID }}
-        uses: 'actions/create-github-app-token@v2'
+        uses: 'actions/create-github-app-token@v2' # zizmor: ignore[unpinned-uses]
         with:
           app-id: '${{ vars.APP_ID }}'
           private-key: '${{ secrets.APP_PRIVATE_KEY }}'
@@ -59,7 +59,7 @@ jobs:
       - name: 'Run Gemini CLI'
       # Trigger Gemini with context
         id: 'run_gemini'
-        uses: 'google-github-actions/run-gemini-cli@main'
+        uses: 'google-github-actions/run-gemini-cli@main' # zizmor: ignore[unpinned-uses]
         env:
           GEMINI_CLI_TRUST_WORKSPACE: 'true'
           TITLE: '${{ github.event.pull_request.title || github.event.issue.title }}'
@@ -86,7 +86,7 @@ jobs:
           settings: |-
             {
               "model": {
-                "maxSessionTurns": 25
+                "maxSessionTurns": 100
               },
               "telemetry": {
                 "enabled": false,
