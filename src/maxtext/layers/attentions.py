@@ -90,16 +90,6 @@ class L2Norm(nnx.Module):
     return x * jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
 
 
-def l2_norm_as_linen(self, eps: float = 1e-6):
-  """
-  Initializes the L2Norm module and returns it as a Linen module.
-
-  Args:
-    eps: float, epsilon used for numerical stability (default value should be ok for most cases).
-  """
-  return nnx_wrappers.to_linen(L2Norm, eps=eps, metadata_fn=variable_to_logically_partitioned)
-
-
 def attention_as_linen(
     *,
     config: Config,

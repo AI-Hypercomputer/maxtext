@@ -16,14 +16,11 @@
 
 from typing import Type
 
-from flax import linen as nn
 from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config, DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
-from maxtext.layers.decoders import DecoderLayer
-from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.layers.normalizations import RMSNorm
@@ -385,37 +382,3 @@ def calculate_mtp_acceptance_rate(intermediate_outputs, config):
   total_valid_tokens = jnp.sum(valid_mask)
 
   return (correct_predictions / (total_valid_tokens + EPS)) * 100
-
-
-def multi_token_prediction_block_as_linen(
-    *,
-    config: Config,
-    mesh: Mesh,
-    transformer_layer_module: Type[DecoderLayer],
-    decoder: nnx.Module,
-    rngs: nnx.Rngs,
-    name: str | None = None,
-) -> nn.Module:
-  """Initializes MultiTokenPredictionBlock as a Linen module.
-
-  Args:
-    config: Configuration object containing model hyperparameters.
-    mesh: JAX Mesh for model parallelism.
-    transformer_layer_module: The Transformer Decoder Layer class to use.
-    decoder: The decoder module that provides embedding and output head.
-    rngs: Random number generators for initialization.
-    name: Optional name for the module.
-
-  Returns:
-    An instance of MultiTokenPredictionBlock wrapped as a Linen module.
-  """
-  return nnx.bridge.to_linen(
-      MultiTokenPredictionBlock,
-      config=config,
-      mesh=mesh,
-      transformer_layer_module=transformer_layer_module,
-      decoder=decoder,
-      rngs=rngs,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )
