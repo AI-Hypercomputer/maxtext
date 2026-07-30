@@ -3805,6 +3805,9 @@ class RLConfig(
     MoEGeneral,
     MoEKernels,
     DeepSeekMoE,
+    Qwen3Next,
+    MultimodalGeneral,
+    VisionTower,
     # General MaxText Configs
     RunInfo,
     Checkpointing,

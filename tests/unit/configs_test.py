@@ -132,6 +132,16 @@ def test_base_configs(config_file):
   run_config_validation(config_file)
 
 
+def test_qwen35_model_config_validates_for_rl():
+  model_config_path = os.path.join(CONFIGS_DIR, "models", "qwen3.5-35b-a3b.yml")
+  model_config = load_and_merge_yamls(model_config_path)
+
+  config = pydantic_types.RLConfig(model_name="qwen3.5-35b-a3b", **model_config)
+
+  assert config.gdn_conv_kernel_dim == 4
+  assert config.vision_encoder_block == pydantic_types.VisionEncoderBlockType.QWEN3_5
+
+
 # --- Test Group 2: Gemma Model Family ---
 
 GEMMA_CONFIGS = [
