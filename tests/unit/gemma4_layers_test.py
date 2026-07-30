@@ -16,6 +16,40 @@
 
 import os
 import unittest
+import pytest
+
+try:
+  import torch
+  from transformers.models.gemma4.configuration_gemma4 import (
+      Gemma4VisionConfig,
+      Gemma4TextConfig,
+  )
+  from transformers.models.gemma4.modeling_gemma4 import (
+      Gemma4VisionPatchEmbedder as TorchGemma4VisionPatchEmbedder,
+      Gemma4VisionRotaryEmbedding as TorchGemma4VisionRotaryEmbedding,
+      Gemma4VisionAttention as TorchGemma4VisionAttention,
+      Gemma4VisionEncoderLayer as TorchGemma4VisionEncoderLayer,
+      Gemma4VisionPooler as TorchGemma4VisionPooler,
+      Gemma4VisionModel as TorchGemma4VisionModel,
+      Gemma4MultimodalEmbedder as TorchGemma4MultimodalEmbedder,
+      apply_multidimensional_rope,
+  )
+  from tests.utils.multimodal_test_utils import (
+      assert_all_close_jax_torch,
+      copy_linear_weights,
+      copy_rmsnorm_weights,
+      create_random_jax_torch,
+  )
+
+  HAS_TORCH = True
+except ImportError:
+  HAS_TORCH = False
+
+pytestmark = [
+    pytest.mark.cpu_only,
+    pytest.mark.scheduled_only,
+    pytest.mark.skipif(not HAS_TORCH, reason="Torch or transformers not available"),
+]
 
 from flax import nnx
 import jax
@@ -34,30 +68,7 @@ from maxtext.models.gemma4_vision import (
     Gemma4VisionProjector as JaxGemma4VisionProjector,
     patchify,
 )
-from tests.utils.multimodal_test_utils import (
-    assert_all_close_jax_torch,
-    copy_linear_weights,
-    copy_rmsnorm_weights,
-    create_random_jax_torch,
-)
 import numpy as np
-import torch
-
-# PyTorch/transformers imports
-from transformers.models.gemma4.configuration_gemma4 import (
-    Gemma4VisionConfig,
-    Gemma4TextConfig,
-)
-from transformers.models.gemma4.modeling_gemma4 import (
-    Gemma4VisionPatchEmbedder as TorchGemma4VisionPatchEmbedder,
-    Gemma4VisionRotaryEmbedding as TorchGemma4VisionRotaryEmbedding,
-    Gemma4VisionAttention as TorchGemma4VisionAttention,
-    Gemma4VisionEncoderLayer as TorchGemma4VisionEncoderLayer,
-    Gemma4VisionPooler as TorchGemma4VisionPooler,
-    Gemma4VisionModel as TorchGemma4VisionModel,
-    Gemma4MultimodalEmbedder as TorchGemma4MultimodalEmbedder,
-    apply_multidimensional_rope,
-)
 
 # Initialize config once for all tests
 base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
@@ -76,33 +87,38 @@ jax_config = pyconfig.initialize(
     float32_qk_product=True,
 )
 
-# PyTorch vision encoder config
-torch_vision_config = Gemma4VisionConfig(
-    hidden_size=jax_config.hidden_size_for_vit,
-    intermediate_size=jax_config.intermediate_size_for_vit,
-    num_hidden_layers=jax_config.num_hidden_layers_for_vit,
-    num_attention_heads=jax_config.num_attention_heads_for_vit,
-    num_key_value_heads=jax_config.num_attention_heads_for_vit,
-    head_dim=jax_config.hidden_size_for_vit // jax_config.num_attention_heads_for_vit,
-    patch_size=jax_config.patch_size_for_vit,
-    position_embedding_size=jax_config.num_position_embeddings_for_vit,
-    rope_parameters={"rope_type": "default", "rope_theta": jax_config.rope_theta_for_vit},
-    pooling_kernel_size=3,
-    standardize=True,
-    rms_norm_eps=jax_config.normalization_layer_epsilon,
-)
-torch_vision_config._attn_implementation = "eager"  # pylint: disable=protected-access
+if HAS_TORCH:
+  # PyTorch vision encoder config
+  torch_vision_config = Gemma4VisionConfig(
+      hidden_size=jax_config.hidden_size_for_vit,
+      intermediate_size=jax_config.intermediate_size_for_vit,
+      num_hidden_layers=jax_config.num_hidden_layers_for_vit,
+      num_attention_heads=jax_config.num_attention_heads_for_vit,
+      num_key_value_heads=jax_config.num_attention_heads_for_vit,
+      head_dim=jax_config.hidden_size_for_vit // jax_config.num_attention_heads_for_vit,
+      patch_size=jax_config.patch_size_for_vit,
+      position_embedding_size=jax_config.num_position_embeddings_for_vit,
+      rope_parameters={"rope_type": "default", "rope_theta": jax_config.rope_theta_for_vit},
+      pooling_kernel_size=3,
+      standardize=True,
+      rms_norm_eps=jax_config.normalization_layer_epsilon,
+  )
+  torch_vision_config._attn_implementation = "eager"  # pylint: disable=protected-access
 
-# PyTorch text config for multimodal embedder
-torch_text_config = Gemma4TextConfig(hidden_size=jax_config.emb_dim)
+  # PyTorch text config for multimodal embedder
+  torch_text_config = Gemma4TextConfig(hidden_size=jax_config.emb_dim)
 
-torch.set_grad_enabled(False)
+  torch.set_grad_enabled(False)
+else:
+  torch_vision_config = None
+  torch_text_config = None
 
 
 def setup_test_seeds():
   """Set random seeds for reproducibility."""
   np.random.seed(42)
-  torch.manual_seed(42)
+  if HAS_TORCH:
+    torch.manual_seed(42)
 
 
 # =============================================================================
