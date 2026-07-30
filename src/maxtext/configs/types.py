@@ -3499,8 +3499,6 @@ class MaxTextConfig(
         raise ValueError("TPU ring context parallelism requires use_jax_splash=False.")
       if self.attention_type != "global":
         raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
-      if self.packing:
-        raise ValueError("TPU Tokamax ring attention does not support packing yet.")
       if self.context_parallel_load_balance:
         if context_parallel_size % 2 != 0:
           raise ValueError("TPU Tokamax ring load balancing requires an even context_parallel_size.")
@@ -3523,9 +3521,8 @@ class MaxTextConfig(
       if self.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
-    # The AUTO + packing case, which training resolves to STRIPED, is not
-    # validated here because test code paths may load the same config but use a
-    # different reorder path. Training's runtime path enforces this.
+    # AUTO is resolved in training because test code paths may load the same
+    # config but use a different reorder path.
     if (
         context_parallel_size > 1
         and "gpu" not in self.hardware
