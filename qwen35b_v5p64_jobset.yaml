@@ -1,10 +1,10 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: ym-qw35-10
+  name: ym-qw35-11
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: ym-qw35-10
+    xpk.google.com/workload: ym-qw35-11
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -164,9 +164,11 @@ spec:
                   
                   python3 -m maxtext.trainers.post_train.rl.train_rl \
                   src/maxtext/configs/post_train/rl_gsm8k_qwen35_35b_v5p64.yml \
-                  run_name=ym-qw35-10 \
+                  run_name=ym-qw35-11 \
                   base_output_directory=gs://yixuanm-maxtext-logs/ConvergenceTesting \
-                  load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items & PID=$!;
+                  load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items \
+                  vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
+                  vllm_additional_config='{maxtext_config: {model_name: qwen3.5-35b-a3b, model_call_mode: inference, allow_split_physical_axes: true, log_config: false, weight_dtype: bfloat16}}' & PID=$!;
                   
                   while kill -0 $PID 2>/dev/null;
                       do sleep 5;
@@ -201,7 +203,7 @@ spec:
         template:
           metadata:
             labels:
-              xpk.google.com/workload: ym-qw35-10
+              xpk.google.com/workload: ym-qw35-11
             annotations:
               cloud.google.com/skip-tpu-webhook-check: "true"
           spec:
