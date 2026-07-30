@@ -1,10 +1,10 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: ym-qw35-14
+  name: ym-qw35-15
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: ym-qw35-14
+    xpk.google.com/workload: ym-qw35-15
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -164,7 +164,7 @@ spec:
                   
                   python3 -m maxtext.trainers.post_train.rl.train_rl \
                   src/maxtext/configs/post_train/rl_gsm8k_qwen35_35b_v5p64.yml \
-                  run_name=ym-qw35-14 \
+                  run_name=ym-qw35-15 \
                   base_output_directory=gs://yixuanm-maxtext-logs/ConvergenceTesting \
                   load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items \
                   vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
@@ -203,7 +203,7 @@ spec:
         template:
           metadata:
             labels:
-              xpk.google.com/workload: ym-qw35-14
+              xpk.google.com/workload: ym-qw35-15
             annotations:
               cloud.google.com/skip-tpu-webhook-check: "true"
           spec:
