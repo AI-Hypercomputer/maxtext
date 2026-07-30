@@ -3786,7 +3786,10 @@ class RLConfig(
     Engram,
     RematAndOffload,
     Attention,
+    MlaAttention,
+    CompressedAttention,
     Llama4Attention,
+    SplashAttention,
     LayoutAndSharding,
     InferenceLayout,
     InferenceGeneral,
@@ -3795,6 +3798,7 @@ class RLConfig(
     DcnParallelism,
     HardwareAndMesh,
     ModelArchitecture,
+    Qwen3Next,
     MoBa,
     # Positional Embeddings
     PositionalEmbedding,
@@ -3806,6 +3810,7 @@ class RLConfig(
     DeepSeekMoE,
     # General MaxText Configs
     RunInfo,
+    TrainingLoop,
     Checkpointing,
     OrbaxStorage,
     DataTypes,
@@ -3816,6 +3821,8 @@ class RLConfig(
     # Debugging and Profiling
     DevelopmentAndDebugging,
     Profiling,
+    # Multimodal Configs
+    Multimodal,
     # For compatibility with trainer in post_train/rl
     RL,
     RLCluster,
@@ -3837,6 +3844,8 @@ class RLConfig(
   enable_dropout: bool = Field(True, description="Enables dropout in the model.")
   dropout_rate: float = Field(0.0, ge=0.0, le=1.0, description="The dropout rate.")
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
+  debug_converter: bool = Field(False, description="Enable converter debug checks.")
+  vllm_load_format: str = Field("dummy", description="vLLM load format (dummy or auto).")
   log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush to Tensorboard.")
   hf_access_token: None | str = Field(None, description="Hugging Face API access token.")
   enable_tunix_perf_metrics: bool = Field(

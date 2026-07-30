@@ -109,8 +109,10 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
               jnp.concatenate([q_tp_shards[t], k_tp_shards[t], v_tp_shards[t]], axis=0) for t in range(tp_size)
           ]
 
-          self.vllm_state[f"{prefix}.self_attn.qkv_proj.weight"] = jnp.concatenate(tp_interleaved, axis=0)
-          self.vllm_state[f"{prefix}.self_attn.o_proj.weight"] = jnp.transpose(o_layers[rep], (1, 0))
+          self.vllm_state[f"{prefix}.self_attn.qkv_proj.weight"] = jnp.transpose(
+              jnp.concatenate(tp_interleaved, axis=0), (1, 0)
+          )
+          self.vllm_state[f"{prefix}.self_attn.o_proj.weight"] = o_layers[rep]
           self.vllm_state[f"{prefix}.self_attn.q_norm.weight"] = qnorm_layers[rep]
           self.vllm_state[f"{prefix}.self_attn.k_norm.weight"] = knorm_layers[rep]
 
@@ -157,7 +159,9 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
           qkvz_interleaved = [
               jnp.concatenate([q_shards[s], k_shards[s], v_shards[s], z_shards[s]], axis=0) for s in range(tp_size)
           ]
-          self.vllm_state[f"{prefix}.linear_attn.in_proj_qkvz.weight"] = jnp.concatenate(qkvz_interleaved, axis=0)
+          self.vllm_state[f"{prefix}.linear_attn.in_proj_qkvz.weight"] = jnp.transpose(
+              jnp.concatenate(qkvz_interleaved, axis=0), (1, 0)
+          )
 
           # Extract MaxText GDN BA Layout
           t_m_ba = jnp.transpose(ba_layers[rep], (1, 0))
@@ -171,9 +175,11 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
           a_shards = jnp.split(a, tp_size, axis=0)
 
           ba_interleaved = [jnp.concatenate([b_shards[s], a_shards[s]], axis=0) for s in range(tp_size)]
-          self.vllm_state[f"{prefix}.linear_attn.in_proj_ba.weight"] = jnp.concatenate(ba_interleaved, axis=0)
+          self.vllm_state[f"{prefix}.linear_attn.in_proj_ba.weight"] = jnp.transpose(
+              jnp.concatenate(ba_interleaved, axis=0), (1, 0)
+          )
 
-          self.vllm_state[f"{prefix}.linear_attn.out_proj.weight"] = jnp.transpose(out_layers[rep], (1, 0))
+          self.vllm_state[f"{prefix}.linear_attn.out_proj.weight"] = out_layers[rep]
           self.vllm_state[f"{prefix}.linear_attn.conv1d.weight"] = jnp.transpose(conv_layers[rep], (2, 1, 0))
           self.vllm_state[f"{prefix}.linear_attn.A_log"] = A_log_layers[rep]
           self.vllm_state[f"{prefix}.linear_attn.dt_bias"] = dt_bias_layers[rep]
@@ -263,8 +269,8 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
               axis=1,
           ).reshape(-1, sh_g.shape[1])
 
-          self.vllm_state[f"{p}.mlp.shared_expert.gate_up_proj.weight"] = shared_gate_up
-          self.vllm_state[f"{p}.mlp.shared_expert.down_proj.weight"] = sh_down_layers[rep]
+          self.vllm_state[f"{p}.mlp.shared_expert.gate_up_proj.weight"] = jnp.transpose(shared_gate_up, (1, 0))
+          self.vllm_state[f"{p}.mlp.shared_expert.down_proj.weight"] = jnp.transpose(sh_down_layers[rep], (1, 0))
 
           if "shared_expert_gate" in mlp_block:
             self.vllm_state[f"{p}.mlp.shared_expert_gate.weight"] = sh_gate_router_layers[rep]

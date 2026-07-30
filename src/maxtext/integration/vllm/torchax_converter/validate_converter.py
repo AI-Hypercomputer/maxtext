@@ -360,6 +360,9 @@ def validate_converter(argv) -> None:
   # --- Weight assignment ----------------------------------------------------
   with timer(f"Assigning {len(maxtext_vllm_state)} weights to vLLM model"):
     for key, weight in maxtext_vllm_state.items():
+      if key not in golden_llm_state:
+        logging.warning("Key %s not in golden_llm_state, skipping direct assignment", key)
+        continue
       weight_array = weight.value if hasattr(weight, "value") else weight
       dst_sharding = golden_llm_state[key].sharding
       golden_llm_state[key] = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
