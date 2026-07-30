@@ -37,6 +37,8 @@ from maxtext.utils.sharding import logical_to_mesh_axes, get_logical_axis_rules
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
+from maxtext.layers import mhc
+from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate, PositionalEmbedding
@@ -1294,6 +1296,15 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Instantiate our `Qwen3NextSparseMoeBlock`.
     self.mlp = Qwen3NextSparseMoeBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
 
+    self.is_mhc_enabled = getattr(cfg, "mhc_expansion_rate", 1) > 1
+    if self.is_mhc_enabled:
+      self.mhc_attention = mhc.ManifoldConstrainedHyperConnections(
+          config=cfg, dim=cfg.emb_dim, mesh=self.mesh, rngs=rngs
+      )
+      self.mhc_mlp = mhc.ManifoldConstrainedHyperConnections(
+          config=cfg, dim=cfg.emb_dim, mesh=self.mesh, rngs=rngs
+      )
+
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -1309,6 +1320,58 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
+
+    if self.is_mhc_enabled:
+      new_kv_cache = None
+
+      def attention_branch(inputs):
+        nonlocal new_kv_cache
+        if isinstance(self.attention, Qwen3NextFullAttention):
+          out, new_kv_cache = cast(Qwen3NextFullAttention, self.attention)(
+              inputs,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              kv_cache=kv_cache,
+              attention_metadata=attention_metadata,
+          )
+        else:
+          out, new_kv_cache = cast(Qwen3NextGatedDeltaNet, self.attention)(
+              inputs,
+              model_mode=model_mode,
+              kv_cache=kv_cache,
+              decoder_segment_ids=decoder_segment_ids,
+              attention_metadata=attention_metadata,
+          )
+        return out
+
+      intermediate_inputs, _ = self.mhc_attention(
+          self.input_layernorm,
+          attention_branch,
+          x=inputs,
+          mhc_type=HyperConnectionType.MLP_DENSE,
+      )
+
+      def mlp_branch(inputs):
+        mlp_output, load_balance_loss = self.mlp(inputs, deterministic=deterministic)
+        if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+          self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
+        return mlp_output
+
+      layer_output, _ = self.mhc_mlp(
+          self.post_attention_layernorm,
+          mlp_branch,
+          x=intermediate_inputs,
+          mhc_type=HyperConnectionType.MLP_DENSE,
+      )
+
+      layer_output = nn.with_logical_constraint(
+          layer_output,
+          self.activation_axis_names,
+      )
+      return layer_output, new_kv_cache
+
     residual = inputs
 
     # First LayerNorm, applied before the attention block.
