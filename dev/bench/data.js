@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785400039675,
+  "lastUpdate": 1785403829389,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -3251,6 +3251,128 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total GPU-UNIT Tests Count",
             "value": 2292,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "ca420634a9e9e73feaacc8001f605163d2d80ea1",
+          "message": "Merge pull request #4530 from AI-Hypercomputer:aireen/pr-gemma4-scan-rewrite\n\nPiperOrigin-RevId: 956306607",
+          "timestamp": "2026-07-30T06:41:41Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/ca420634a9e9e73feaacc8001f605163d2d80ea1"
+        },
+        "date": 1785403828508,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total CPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 325.98199999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-POST-TRAINING-UNIT Tests Count",
+            "value": 181,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1572.8680000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total CPU-UNIT Tests Duration",
+            "value": 7636.072000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-UNIT Tests Count",
+            "value": 267,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 777.5749999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 45,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 1694.3699999999903,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 2436,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 133.37200000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 101,
+            "unit": "count"
+          },
+          {
+            "name": "Total CPU-TORCH-REFERENCE Tests Duration",
+            "value": 218.10700000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-TORCH-REFERENCE Tests Count",
+            "value": 54,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1836.768999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 91.03300000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 101,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 1142.5499999999904,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 2297,
             "unit": "count"
           }
         ]
