@@ -643,13 +643,27 @@ class NNXDecoder(nnx.Module):
         is_dense_layer=True,
     )
 
+    policy = self.get_remat_policy()
+    layer_kwargs = {
+        "num_of_layers": cycle,
+        "layer_idx_offset": n_dense,
+        "remat_policy_fn": policy,
+        "apply_internal_remat": True,
+    }
+    rem_layer_kwargs = {
+        "num_of_layers": num_remaining,
+        "layer_idx_offset": n_dense + scan_length * cycle,
+        "remat_policy_fn": policy,
+        "apply_internal_remat": True,
+    }
+
     if scan_length > 0:
       self.layers = self._create_scanned_layers(
           qwen3.Qwen3NextScannableBlock,
           length=scan_length,
           metadata_axis_name="layers",
           rngs=rngs,
-          layer_idx_offset=n_dense,
+          **layer_kwargs,
       )
     else:
       self.layers = nnx.List([])
@@ -660,9 +674,8 @@ class NNXDecoder(nnx.Module):
           mesh=self.mesh,
           model_mode=self.model_mode,
           quant=self.quant,
-          num_of_layers=num_remaining,
-          layer_idx_offset=n_dense + scan_length * cycle,
           rngs=rngs,
+          **rem_layer_kwargs,
       )
     else:
       self.layers_remainder = None
@@ -2111,23 +2124,48 @@ class NNXDecoder(nnx.Module):
     cycle = cfg.inhomogeneous_layer_cycle_interval
     scan_length = remaining // cycle
     if scan_length > 0:
-      y, self.layers, _ = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length)
+      graphdef, state = nnx.split(self.layers)
+      params, rest = state.split(nnx.Param, ...)
+      scan_axis = cfg.param_scan_axis
+      if scan_axis != 0:
+        params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+
+      per_block_states = []
+      for i in range(scan_length):
+        current_params = jax.tree.map(lambda x, i=i: x[i], params)
+        current_rest = jax.tree.map(lambda x, i=i: x[i], rest)
+        block = nnx.merge(graphdef, current_params, current_rest)
+        out = block(
+            y,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            previous_chunk=previous_chunk,
+            slot=slot,
+        )
+        y = out[0] if isinstance(out, tuple) else out
+        per_block_states.append(nnx.state(block))
+
+      stacked_state = jax.tree.map(lambda *xs: jnp.stack(xs), *per_block_states)
+      if scan_axis != 0:
+        stacked_params, stacked_other = stacked_state.split(nnx.Param, ...)
+        stacked_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), stacked_params)
+        stacked_state = nnx.State.merge(stacked_params, stacked_other)
+      nnx.update(self.layers, stacked_state)
 
     num_remaining = remaining % cycle
     if num_remaining > 0:
-      policy = self.get_remat_policy()
-      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
-
-      def pure_qwen3_next_fn(graphdef, state_in, y_in):
-        merged_layer = nnx.merge(graphdef, state_in)
-        out_y, _ = merged_layer(y_in, *layer_args, previous_chunk=previous_chunk, slot=slot)
-        return out_y, nnx.state(merged_layer)
-
-      checkpointed_qwen3_next_fn = jax.checkpoint(pure_qwen3_next_fn, policy=policy, prevent_cse=prevent_cse)
-
-      graphdef, state = nnx.split(self.layers_remainder)
-      y, new_state = checkpointed_qwen3_next_fn(graphdef, state, y)
-      nnx.update(self.layers_remainder, new_state)
+      out = self.layers_remainder(
+          y,
+          decoder_segment_ids=decoder_segment_ids,
+          decoder_positions=decoder_positions,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+      )
+      y = out[0] if isinstance(out, tuple) else out
 
     return y
 
