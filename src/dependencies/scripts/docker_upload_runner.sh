@@ -116,7 +116,13 @@ if ! docker image inspect "${LOCAL_IMAGE_NAME}" &> /dev/null; then
   exit 1
 fi
 
-docker build --no-cache --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
+CACHE_FLAG="--no-cache"
+if [[ "${FAST_REBUILD:-false}" == "true" || "${NO_CACHE:-true}" == "false" ]]; then
+  CACHE_FLAG=""
+  echo "Fast rebuild enabled: reusing Docker layer cache for runner image build."
+fi
+
+docker build ${CACHE_FLAG} --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
              --build-arg PACKAGE_DIR=${PACKAGE_DIR} \
              -f "$PACKAGE_DIR"'/dependencies/dockerfiles/maxtext_runner.Dockerfile' \
              -t ${LOCAL_IMAGE_NAME_RUNNER} .
