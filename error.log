@@ -1,130 +1,41 @@
-ERROR 2026-07-30T21:46:31.584577326Z [resource.labels.containerName: jax-tpu] Traceback (most recent call last): File "<frozen runpy>", line 198, in _run_module_as_main File "<frozen runpy>", line 88, in _run_code File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 796, in <module> app.run(main) File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run _run_main(main, args) File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main sys.exit(main(argv))
-  {
-    "textPayload": "Traceback (most recent call last):\n  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/deps/src/maxtext/trainers/post_train/rl/train_rl.py\", line 796, in <module>\n    app.run(main)\n  File \"/usr/local/lib/python3.12/site-packages/absl/app.py\", line 367, in run\n    _run_main(main, args)\n  File \"/usr/local/lib/python3.12/site-packages/absl/app.py\", line 312, in _run_main\n    sys.exit(main(argv))",
-    "insertId": "tb99x62pspglyqqn",
-    "resource": {
-      "type": "k8s_container",
-      "labels": {
-        "location": "europe-west4",
-        "cluster_name": "mlperf-v5p",
-        "pod_name": "ym-qw35-14-pathways-head-0-0-xp56v",
-        "container_name": "jax-tpu",
-        "namespace_name": "default",
-        "project_id": "cloud-tpu-multipod-dev"
-      }
-    },
-    "timestamp": "2026-07-30T21:46:31.584577326Z",
-    "severity": "ERROR",
-    "labels": {
-      "k8s-pod/batch_kubernetes_io/job-name": "ym-qw35-14-pathways-head-0",
-      "k8s-pod/batch_kubernetes_io/job-completion-index": "0",
-      "k8s-pod/jobset_sigs_k8s_io/replicatedjob-replicas": "1",
-      "k8s-pod/kueue_x-k8s_io/podset": "pathways-head",
-      "k8s-pod/jobset_sigs_k8s_io/job-key": "c93e9030286d68d148ef5ef54a1801805045bd30",
-      "logging.gke.io/top_level_controller_type": "Job",
-      "k8s-pod/jobset_sigs_k8s_io/job-index": "0",
-      "compute.googleapis.com/resource_name": "gke-mlperf-v5p-cpu-np-b188bf3f-ceqh",
-      "k8s-pod/topology_kubernetes_io/zone": "europe-west4-b",
-      "k8s-pod/jobset_sigs_k8s_io/global-replicas": "2",
-      "k8s-pod/job-name": "ym-qw35-14-pathways-head-0",
-      "k8s-pod/jobset_sigs_k8s_io/coordinator": "ym-qw35-14-pathways-head-0-0.ym-qw35-14",
-      "k8s-pod/jobset_sigs_k8s_io/job-global-index": "0",
-      "k8s-pod/batch_kubernetes_io/controller-uid": "ba47429d-22a1-4588-ae6f-1a19c86cd777",
-      "k8s-pod/topology_kubernetes_io/region": "europe-west4",
-      "k8s-pod/jobset_sigs_k8s_io/priority": "1000",
-      "k8s-pod/jobset_sigs_k8s_io/replicatedjob-name": "pathways-head",
-      "k8s-pod/controller-uid": "ba47429d-22a1-4588-ae6f-1a19c86cd777",
-      "k8s-pod/jobset_sigs_k8s_io/jobset-name": "ym-qw35-14",
-      "k8s-pod/jobset_sigs_k8s_io/restart-attempt": "0",
-      "logging.gke.io/top_level_controller_name": "ym-qw35-14-pathways-head-0"
-    },
-    "logName": "projects/cloud-tpu-multipod-dev/logs/stderr",
-    "receiveTimestamp": "2026-07-30T21:46:34.388641735Z",
-    "errorGroups": [
-      {
-        "id": "CJGSwuHl_N32Cg"
-      }
-    ]
-  }
-ERROR 2026-07-30T21:46:31.584923336Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.584929856Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 792, in main
-ERROR 2026-07-30T21:46:31.585181386Z [resource.labels.containerName: jax-tpu] rl_train(argv, kwargs)
-ERROR 2026-07-30T21:46:31.585191816Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 645, in rl_train
-ERROR 2026-07-30T21:46:31.585453086Z [resource.labels.containerName: jax-tpu] _rl_train_impl(argv, kwargs)
-ERROR 2026-07-30T21:46:31.585464686Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 711, in _rl_train_impl
-ERROR 2026-07-30T21:46:31.585668426Z [resource.labels.containerName: jax-tpu] rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
-ERROR 2026-07-30T21:46:31.585680146Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.585685276Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 530, in create_rl_components
-ERROR 2026-07-30T21:46:31.585829896Z [resource.labels.containerName: jax-tpu] rl_cluster = rl_cluster_lib.RLCluster(
-ERROR 2026-07-30T21:46:31.585840726Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.585845966Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 271, in __init__
-ERROR 2026-07-30T21:46:31.585904916Z [resource.labels.containerName: jax-tpu] self._init_cluster()
-ERROR 2026-07-30T21:46:31.585915906Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 486, in _init_cluster
-ERROR 2026-07-30T21:46:31.586058236Z [resource.labels.containerName: jax-tpu] self._rollout = self.cluster_config.rollout_engine(
-ERROR 2026-07-30T21:46:31.586068916Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.586073896Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 299, in __init__
-ERROR 2026-07-30T21:46:31.586172856Z [resource.labels.containerName: jax-tpu] self._sampler = MaxTextVllmSampler(
-ERROR 2026-07-30T21:46:31.586180496Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.586185676Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 167, in __init__
-ERROR 2026-07-30T21:46:31.586280946Z [resource.labels.containerName: jax-tpu] super().__init__(tokenizer=tokenizer, config=config)
-ERROR 2026-07-30T21:46:31.586301036Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py", line 163, in __init__
-ERROR 2026-07-30T21:46:31.586374926Z [resource.labels.containerName: jax-tpu] self.llm = LLM(**self.args)
-ERROR 2026-07-30T21:46:31.586388916Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.586394256Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/vllm/entrypoints/llm.py", line 338, in __init__
-ERROR 2026-07-30T21:46:31.586492006Z [resource.labels.containerName: jax-tpu] self.llm_engine = LLMEngine.from_engine_args(
-ERROR 2026-07-30T21:46:31.586498166Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.586501886Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 171, in from_engine_args
-ERROR 2026-07-30T21:46:31.586557536Z [resource.labels.containerName: jax-tpu] vllm_config = engine_args.create_engine_config(usage_context)
-ERROR 2026-07-30T21:46:31.586595726Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.586600406Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/vllm/engine/arg_utils.py", line 1880, in create_engine_config
-ERROR 2026-07-30T21:46:31.586922376Z [resource.labels.containerName: jax-tpu] model_config = self.create_model_config()
-ERROR 2026-07-30T21:46:31.586931966Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.586935736Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/vllm/engine/arg_utils.py", line 1639, in create_model_config
-ERROR 2026-07-30T21:46:31.587220026Z [resource.labels.containerName: jax-tpu] return ModelConfig(
-ERROR 2026-07-30T21:46:31.587232796Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^
-ERROR 2026-07-30T21:46:31.587237986Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/pydantic/_internal/_dataclasses.py", line 121, in __init__
-ERROR 2026-07-30T21:46:31.587316606Z [resource.labels.containerName: jax-tpu] s.__pydantic_validator__.validate_python(ArgsKwargs(args, kwargs), self_instance=s)
-ERROR 2026-07-30T21:46:31.587376856Z [resource.labels.containerName: jax-tpu] pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig
-ERROR 2026-07-30T21:46:31.587391346Z [resource.labels.containerName: jax-tpu] Value error, Model architectures ['\\"MaxTextForCausalLM\\"'] are not supported for now. Supported architectures: dict_keys(['AfmoeForCausalLM', 'ApertusForCausalLM', 'ArceeForCausalLM', 'ArcticForCausalLM', 'AXK1ForCausalLM', 'BailingMoeForCausalLM', 'BailingMoeV2ForCausalLM', 'BailingMoeV2_5ForCausalLM', 'BloomForCausalLM', 'ChatGLMModel', 'ChatGLMForConditionalGeneration', 'CohereForCausalLM', 'Cohere2ForCausalLM', 'Cohere2MoeForCausalLM', 'CwmForCausalLM', 'DbrxForCausalLM', 'DeciLMForCausalLM', 'DeepseekForCausalLM', 'DeepseekV2ForCausalLM', 'DeepseekV3ForCausalLM', 'DeepseekV32ForCausalLM', 'DeepseekV4ForCausalLM', 'Ernie4_5ForCausalLM', 'Ernie4_5_MoeForCausalLM', 'ExaoneForCausalLM', 'Exaone4ForCausalLM', 'ExaoneMoEForCausalLM', 'Fairseq2LlamaForCausalLM', 'FalconForCausalLM', 'FalconMambaForCausalLM', 'FalconH1ForCausalLM', 'FlexOlmoForCausalLM', 'GemmaForCausalLM', 'Gemma2ForCausalLM', 'Gemma3ForCausalLM', 'Rnj1ForCausalLM', 'Gemma3nForCausalLM', 'Gemma4ForCausalLM', 'Qwen3NextForCausalLM', 'GlmForCausalLM', 'Glm4ForCausalLM', 'Glm4MoeForCausalLM', 'Glm4MoeLiteForCausalLM', 'GlmMoeDsaForCausalLM', 'GptOssForCausalLM', 'GPT2LMHeadModel', 'GPTJForCausalLM', 'GPTNeoXForCausalLM', 'GraniteForCausalLM', 'GraniteMoeForCausalLM', 'GraniteMoeHybridForCausalLM', 'GraniteMoeSharedForCausalLM', 'GritLM', 'HrmTextForCausalLM', 'HunYuanMoEV1ForCausalLM', 'HunYuanDenseV1ForCausalLM', 'HYV3ForCausalLM', 'HCXVisionForCausalLM', 'HCXVisionV2ForCausalLM', 'HyperCLOVAXForCausalLM', 'InternLM2ForCausalLM', 'InternLM3ForCausalLM', 'IQuestCoderForCausalLM', 'IQuestLoopCoderForCausalLM', 'Jais2ForCausalLM', 'JambaForCausalLM', 'KimiLinearForCausalLM', 'Lfm2ForCausalLM', 'Lfm2MoeForCausalLM', 'LagunaForCausalLM', 'LlamaForCausalLM', 'Llama4ForCausalLM', 'LLaMAForCausalLM', 'LongcatFlashForCausalLM', 'LongcatFlashNgramForCausalLM', 'MambaForCausalLM', 'Mamba2ForCausalLM', 'MellumForCausalLM', 'MiniCPMForCausalLM', 'MiniCPM3ForCausalLM', 'MiniMaxM2ForCausalLM', 'MiniMaxM3SparseForCausalLM', 'InklingForCausalLM', 'InklingForConditionalGeneration', 'Ministral3ForCausalLM', 'MistralForCausalLM', 'MistralLarge3ForCausalLM', 'MixtralForCausalLM', 'MptForCausalLM', 'MPTForCausalLM', 'MiMoForCausalLM', 'MiMoV2FlashForCausalLM', 'MiMoV2ForCausalLM', 'NemotronForCausalLM', 'NemotronHForCausalLM', 'NemotronHPuzzleForCausalLM', 'Olmo3ForCausalLM', 'OlmoHybridForCausalLM', 'OlmoeForCausalLM', 'OPTForCausalLM', 'OrionForCausalLM', 'OuroForCausalLM', 'PanguEmbeddedForCausalLM', 'Pangu…
-  {
-    "textPayload": "  Value error, Model architectures ['\\\\\"MaxTextForCausalLM\\\\\"'] are not supported for now. Supported architectures: dict_keys(['AfmoeForCausalLM', 'ApertusForCausalLM', 'ArceeForCausalLM', 'ArcticForCausalLM', 'AXK1ForCausalLM', 'BailingMoeForCausalLM', 'BailingMoeV2ForCausalLM', 'BailingMoeV2_5ForCausalLM', 'BloomForCausalLM', 'ChatGLMModel', 'ChatGLMForConditionalGeneration', 'CohereForCausalLM', 'Cohere2ForCausalLM', 'Cohere2MoeForCausalLM', 'CwmForCausalLM', 'DbrxForCausalLM', 'DeciLMForCausalLM', 'DeepseekForCausalLM', 'DeepseekV2ForCausalLM', 'DeepseekV3ForCausalLM', 'DeepseekV32ForCausalLM', 'DeepseekV4ForCausalLM', 'Ernie4_5ForCausalLM', 'Ernie4_5_MoeForCausalLM', 'ExaoneForCausalLM', 'Exaone4ForCausalLM', 'ExaoneMoEForCausalLM', 'Fairseq2LlamaForCausalLM', 'FalconForCausalLM', 'FalconMambaForCausalLM', 'FalconH1ForCausalLM', 'FlexOlmoForCausalLM', 'GemmaForCausalLM', 'Gemma2ForCausalLM', 'Gemma3ForCausalLM', 'Rnj1ForCausalLM', 'Gemma3nForCausalLM', 'Gemma4ForCausalLM', 'Qwen3NextForCausalLM', 'GlmForCausalLM', 'Glm4ForCausalLM', 'Glm4MoeForCausalLM', 'Glm4MoeLiteForCausalLM', 'GlmMoeDsaForCausalLM', 'GptOssForCausalLM', 'GPT2LMHeadModel', 'GPTJForCausalLM', 'GPTNeoXForCausalLM', 'GraniteForCausalLM', 'GraniteMoeForCausalLM', 'GraniteMoeHybridForCausalLM', 'GraniteMoeSharedForCausalLM', 'GritLM', 'HrmTextForCausalLM', 'HunYuanMoEV1ForCausalLM', 'HunYuanDenseV1ForCausalLM', 'HYV3ForCausalLM', 'HCXVisionForCausalLM', 'HCXVisionV2ForCausalLM', 'HyperCLOVAXForCausalLM', 'InternLM2ForCausalLM', 'InternLM3ForCausalLM', 'IQuestCoderForCausalLM', 'IQuestLoopCoderForCausalLM', 'Jais2ForCausalLM', 'JambaForCausalLM', 'KimiLinearForCausalLM', 'Lfm2ForCausalLM', 'Lfm2MoeForCausalLM', 'LagunaForCausalLM', 'LlamaForCausalLM', 'Llama4ForCausalLM', 'LLaMAForCausalLM', 'LongcatFlashForCausalLM', 'LongcatFlashNgramForCausalLM', 'MambaForCausalLM', 'Mamba2ForCausalLM', 'MellumForCausalLM', 'MiniCPMForCausalLM', 'MiniCPM3ForCausalLM', 'MiniMaxM2ForCausalLM', 'MiniMaxM3SparseForCausalLM', 'InklingForCausalLM', 'InklingForConditionalGeneration', 'Ministral3ForCausalLM', 'MistralForCausalLM', 'MistralLarge3ForCausalLM', 'MixtralForCausalLM', 'MptForCausalLM', 'MPTForCausalLM', 'MiMoForCausalLM', 'MiMoV2FlashForCausalLM', 'MiMoV2ForCausalLM', 'NemotronForCausalLM', 'NemotronHForCausalLM', 'NemotronHPuzzleForCausalLM', 'Olmo3ForCausalLM', 'OlmoHybridForCausalLM', 'OlmoeForCausalLM', 'OPTForCausalLM', 'OrionForCausalLM', 'OuroForCausalLM', 'PanguEmbeddedForCausalLM', 'PanguProMoEV2ForCausalLM', 'PanguUltraMoEForCausalLM', 'Param2MoEForCausalLM', 'PhiForCausalLM', 'Phi3ForCausalLM', 'PhiMoEForCausalLM', 'Plamo2ForCausalLM', 'Plamo3ForCausalLM', 'Qwen2ForCausalLM', 'Qwen2MoeForCausalLM', 'Qwen3ForCausalLM', 'Qwen3MoeForCausalLM', 'RWForCausalLM', 'SarvamMoEForCausalLM', 'SarvamMLAForCausalLM', 'SeedOssForCausalLM', 'Step1ForCausalLM', 'Step3TextForCausalLM', 'Step3p5ForCausalLM', 'StableLMEpochForCausalLM', 'StableLmForCausalLM', 'SolarForCausalLM', 'TeleChat2ForCausalLM', 'TeleChat3ForCausalLM', 'TeleFLMForCausalLM', 'Zamba2ForCausalLM', 'BertModel', 'BertForMaskedLM', 'BertSpladeSparseEmbeddingModel', 'BgeM3EmbeddingModel', 'Gemma2Model', 'Gemma3TextModel', 'GteModel', 'GteNewModel', 'JinaEmbeddingsV5Model', 'LlamaBidirectionalModel', 'LlamaModel', 'MistralModel', 'ModernBertModel', 'NomicBertModel', 'Qwen2Model', 'RobertaForMaskedLM', 'RobertaModel', 'VoyageQwen3BidirectionalEmbedModel', 'XLMRobertaModel', 'CLIPModel', 'ColPaliForRetrieval', 'LlamaNemotronVLModel', 'LlavaNextForConditionalGeneration', 'Phi3VForCausalLM', 'Qwen2VLForConditionalGeneration', 'SiglipModel', 'PrithviGeoSpatialMAE', 'Terratorch', 'HF_ColBERT', 'ColBERTModernBertModel', 'ColBERTJinaRobertaModel', 'ColBERTLfm2Model', 'JinaForRanking', 'ColModernVBertForRetrieval', 'ColQwen3', 'OpsColQwen3Model', 'ColQwen3_5', 'Qwen3VLNemotronEmbedModel', 'InternLM2ForRewardModel', 'Qwen2ForRewardModel', 'Qwen2ForProcessRewardModel', 'BertForTokenClassification', 'ModernBertForTokenClassification', 'OpenAIPrivacyFilterForTokenClassification', 'Qwen3ASRForcedAlignerForTokenClassification', 'RobertaForTokenClassification', 'XLMRobertaForTokenClassification', 'BertForSequenceClassification', 'GPT2ForSequenceClassification', 'GteNewForSequenceClassification', 'JambaForSequenceClassification', 'LlamaBidirectionalForSequenceClassification', 'ModernBertForSequenceClassification', 'RobertaForSequenceClassification', 'XLMRobertaForSequenceClassification', 'JinaVLForRanking', 'LlamaNemotronVLForSequenceClassification', 'AriaForConditionalGeneration', 'AudioFlamingo3ForConditionalGeneration', 'BagelForConditionalGeneration', 'BeeForConditionalGeneration', 'Blip2ForConditionalGeneration', 'ChameleonForConditionalGeneration', 'Cheers', 'CheersForConditionalGeneration', 'Cohere2VisionForConditionalGeneration', 'Cosmos3ForConditionalGeneration', 'Cosmos3EdgeForConditionalGeneration', 'DeepseekVLV2ForCausalLM', 'DeepseekOCRForCausalLM', 'DeepseekOCR2ForCausalLM', 'UnlimitedOCRForCausalLM', 'DotsOCRForCausalLM', 'Eagle2_5_VLForConditionalGeneration', 'Ernie4_5_VLMoeForConditionalGeneration', 'Exaone4_5_ForConditionalGeneration', 'FireRedASR2ForConditionalGeneration', 'FunASRForConditionalGeneration', 'FireRedLIDForConditionalGeneration', 'FunAudioChatForConditionalGeneration', 'Gemma3ForConditionalGeneration', 'Gemma3nForConditionalGeneration', 'DiffusionGemmaForBlockDiffusion', 'Gemma4ForConditionalGeneration', 'Gemma4UnifiedForConditionalGeneration', 'GlmAsrForConditionalGeneration', 'GLM4VForCausalLM', 'Glm4vForConditionalGeneration', 'Glm4vMoeForConditionalGeneration', 'GlmOcrForConditionalGeneration', 'GraniteSpeechForConditionalGeneration', 'GraniteSpeechPlusForConditionalGeneration', 'Granite4VisionForConditionalGeneration', 'H2OVLChatModel', 'HunYuanVLForConditionalGeneration', 'InternVLChatModel', 'InternS1ForConditionalGeneration', 'InternVLForConditionalGeneration', 'InternS1ProForConditionalGeneration', 'InternS2PreviewForConditionalGeneration', 'Idefics3ForConditionalGeneration', 'IsaacForConditionalGeneration', 'KananaVForConditionalGeneration', 'KeyeForConditionalGeneration', 'KeyeVL1_5ForConditionalGeneration', 'KimiVLForConditionalGeneration', 'KimiK25ForConditionalGeneration', 'MoonshotKimiaForCausalLM', 'MossTranscribeDiarizeForConditionalGeneration', 'LightOnOCRForConditionalGeneration', 'Lfm2VlForConditionalGeneration', 'Llama4ForConditionalGeneration', 'Llama_Nemotron_Nano_VL', 'LlavaForConditionalGeneration', 'LlavaNextVideoForConditionalGeneration', 'LlavaOnevisionForConditionalGeneration', 'LlavaOnevision2ForConditionalGeneration', 'MiDashengLMModel', 'MiMoV2OmniForCausalLM', 'MiniMaxM3SparseForConditionalGeneration', 'MiniCPMO', 'MiniCPMV', 'MiniCPMV4_6ForConditionalGeneration', 'Mistral3ForConditionalGeneration', 'MolmoForCausalLM', 'Molmo2ForConditionalGeneration', 'Moondream3ForCausalLM', 'MossAudioModel', 'HfMoondream', 'NemotronH_Nano_VL_V2', 'NemotronH_Nano_Omni_Reasoning_V3', 'NemotronH_Super_Omni_Reasoning_V3', 'NVLM_D', 'OpenCUAForConditionalGeneration', 'OpenPanguVLForConditionalGeneration', 'OpenVLAForActionPrediction', 'Ovis', 'Ovis2_5', 'Ovis2_6ForCausalLM', 'Ovis2_6_MoeForCausalLM', 'PaddleOCRVLForConditionalGeneration', 'PaliGemmaForConditionalGeneration', 'Phi4ForCausalLMV', 'Phi4MMForCausalLM', 'PixtralForConditionalGeneration', 'QianfanOCRForConditionalGeneration', 'Qwen2_5_VLForConditionalGeneration', 'Qwen2AudioForConditionalGeneration', 'Qwen2_5OmniModel', 'Qwen2_5OmniForConditionalGeneration', 'Qwen3OmniMoeForConditionalGeneration', 'Qwen3ASRForConditionalGeneration', 'Qwen3ASRRealtimeGeneration', 'Qwen3VLForConditionalGeneration', 'Qwen3VLMoeForConditionalGeneration', 'Qwen3_5ForConditionalGeneration', 'Qwen3_5MoeForConditionalGeneration', 'RForConditionalGeneration', 'SkyworkR1VChatModel', 'SmolVLMForConditionalGeneration', 'StepVLForConditionalGeneration', 'Step3VLForConditionalGeneration', 'Step3p7ForConditionalGeneration', 'UltravoxModel', 'VoxtralForConditionalGeneration', 'VoxtralRealtimeGeneration', 'CohereAsrForConditionalGeneration', 'NemotronParseForConditionalGeneration', 'WhisperForConditionalGeneration', 'ExtractHiddenStatesModel', 'MiMoMTPModel', 'MiMoV2MTPModel', 'MiMoV2OmniMTPModel', 'EagleCohereForCausalLM', 'EagleLlamaForCausalLM', 'EagleLlama4ForCausalLM', 'EagleMiniCPMForCausalLM', 'DFlashDraftModel', 'DSparkDraftModel', 'Qwen3DSparkModel', 'DFlashLagunaForCausalLM', 'Gemma4DSparkModel', 'PEagleDraftModel', 'PeagleLlamaForCausalLM', 'Eagle3LlamaForCausalLM', 'Eagle3MiniMaxM2ForCausalLM', 'LlamaForCausalLMEagle3', 'Eagle3Qwen2_5vlForCausalLM', 'Eagle3Qwen3vlForCausalLM', 'Eagle3Qwen3ForCausalLM', 'PeagleQwen3ForCausalLM', 'EagleMistralForCausalLM', 'EagleMistralLarge3ForCausalLM', 'Eagle3DeepseekV2ForCausalLM', 'Eagle3DeepseekV3ForCausalLM', 'EagleDeepSeekMTPModel', 'DeepSeekMTPModel', 'DeepSeekV4MTPModel', 'MiniMaxM3MTP', 'BailingMoeV25MTPModel', 'InklingMTPModel', 'Gemma4MTPModel', 'ErnieMTPModel', 'ExaoneMoeMTP', 'Exaone4_5_MTP', 'NemotronHMTPModel', 'LongCatFlashMTPModel', 'Glm4MoeMTPModel', 'Glm4MoeLiteMTPModel', 'GlmOcrMTPModel', 'MedusaModel', 'OpenPanguMTPModel', 'Qwen3NextMTP', 'Step3p5MTP', 'Qwen3_5MTP', 'Qwen3_5MoeMTP', 'HYV3MTPModel', 'GPTBigCodeForCausalLM', 'OlmoForCausalLM', 'Olmo2ForCausalLM', 'SmolLM3ForCausalLM', 'Starcoder2ForCausalLM', 'Emu3ForConditionalGeneration', 'TransformersForCausalLM', 'TransformersMoEForCausalLM', 'TransformersMultiModalForCausalLM', 'TransformersMultiModalMoEForCausalLM', 'TransformersEmbeddingModel', 'TransformersMoEEmbeddingModel', 'TransformersMultiModalEmbeddingModel', 'TransformersForSequenceClassification', 'TransformersMoEForSequenceClassification', 'TransformersMultiModalForSequenceClassification', 'MaxTextForCausalLM']) [type=value_error, input_value=ArgsKwargs((), {'model': ...nderer_num_workers': 1}), input_type=ArgsKwargs]",
-    "insertId": "1fzwzbhw3aiomh80",
-    "resource": {
-      "type": "k8s_container",
-      "labels": {
-        "container_name": "jax-tpu",
-        "pod_name": "ym-qw35-14-pathways-head-0-0-xp56v",
-        "namespace_name": "default",
-        "location": "europe-west4",
-        "cluster_name": "mlperf-v5p",
-        "project_id": "cloud-tpu-multipod-dev"
-      }
-    },
-    "timestamp": "2026-07-30T21:46:31.587391346Z",
-    "severity": "ERROR",
-    "labels": {
-      "k8s-pod/jobset_sigs_k8s_io/global-replicas": "2",
-      "k8s-pod/jobset_sigs_k8s_io/job-global-index": "0",
-      "k8s-pod/controller-uid": "ba47429d-22a1-4588-ae6f-1a19c86cd777",
-      "k8s-pod/jobset_sigs_k8s_io/priority": "1000",
-      "k8s-pod/batch_kubernetes_io/job-completion-index": "0",
-      "k8s-pod/topology_kubernetes_io/region": "europe-west4",
-      "logging.gke.io/top_level_controller_type": "Job",
-      "k8s-pod/job-name": "ym-qw35-14-pathways-head-0",
-      "k8s-pod/jobset_sigs_k8s_io/restart-attempt": "0",
-      "k8s-pod/kueue_x-k8s_io/podset": "pathways-head",
-      "k8s-pod/jobset_sigs_k8s_io/jobset-name": "ym-qw35-14",
-      "k8s-pod/jobset_sigs_k8s_io/replicatedjob-replicas": "1",
-      "k8s-pod/jobset_sigs_k8s_io/job-index": "0",
-      "compute.googleapis.com/resource_name": "gke-mlperf-v5p-cpu-np-b188bf3f-ceqh",
-      "k8s-pod/jobset_sigs_k8s_io/job-key": "c93e9030286d68d148ef5ef54a1801805045bd30",
-      "k8s-pod/batch_kubernetes_io/job-name": "ym-qw35-14-pathways-head-0",
-      "k8s-pod/batch_kubernetes_io/controller-uid": "ba47429d-22a1-4588-ae6f-1a19c86cd777",
-      "logging.gke.io/top_level_controller_name": "ym-qw35-14-pathways-head-0",
-      "k8s-pod/topology_kubernetes_io/zone": "europe-west4-b",
-      "k8s-pod/jobset_sigs_k8s_io/coordinator": "ym-qw35-14-pathways-head-0-0.ym-qw35-14",
-      "k8s-pod/jobset_sigs_k8s_io/replicatedjob-name": "pathways-head"
-    },
-    "logName": "projects/cloud-tpu-multipod-dev/logs/stderr",
-    "receiveTimestamp": "2026-07-30T21:46:34.388641735Z"
-  }
+INFO 2026-07-30T23:04:05.159150911Z [resource.labels.containerName: jax-tpu] MaxTextVllmSampler.update_params: starting converter.convert()...
+INFO 2026-07-30T23:04:05.159210431Z [resource.labels.containerName: jax-tpu] {"pid":"139722955327296"}
+ERROR 2026-07-30T23:04:05.159218431Z [resource.labels.containerName: jax-tpu] [92mStarting Qwen 3.5 Conversion (Hybrid MoE)...[0m
+INFO 2026-07-30T23:05:45.472786264Z [resource.labels.containerName: jax-tpu] MaxTextVllmSampler.update_params: converter.convert() done, 573 weights to assign
+INFO 2026-07-30T23:05:45.472830433Z [resource.labels.containerName: jax-tpu] Weight sync: using pathwaysutils experimental_reshard
+ERROR 2026-07-30T23:05:45.475144273Z [resource.labels.containerName: jax-tpu] [rank0]: Traceback (most recent call last):
+ERROR 2026-07-30T23:05:45.475162533Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 198, in _run_module_as_main
+ERROR 2026-07-30T23:05:45.475170593Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 88, in _run_code
+ERROR 2026-07-30T23:05:45.475178163Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 796, in <module>
+ERROR 2026-07-30T23:05:45.475184663Z [resource.labels.containerName: jax-tpu] [rank0]: app.run(main)
+ERROR 2026-07-30T23:05:45.475211813Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run
+ERROR 2026-07-30T23:05:45.475230283Z [resource.labels.containerName: jax-tpu] [rank0]: _run_main(main, args)
+ERROR 2026-07-30T23:05:45.475234063Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
+ERROR 2026-07-30T23:05:45.475237703Z [resource.labels.containerName: jax-tpu] [rank0]: sys.exit(main(argv))
+ERROR 2026-07-30T23:05:45.475241133Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^
+ERROR 2026-07-30T23:05:45.475244623Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 792, in main
+ERROR 2026-07-30T23:05:45.475248013Z [resource.labels.containerName: jax-tpu] [rank0]: rl_train(argv, kwargs)
+ERROR 2026-07-30T23:05:45.475251463Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 645, in rl_train
+ERROR 2026-07-30T23:05:45.475255013Z [resource.labels.containerName: jax-tpu] [rank0]: _rl_train_impl(argv, kwargs)
+ERROR 2026-07-30T23:05:45.475259363Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 711, in _rl_train_impl
+ERROR 2026-07-30T23:05:45.475263193Z [resource.labels.containerName: jax-tpu] [rank0]: rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
+ERROR 2026-07-30T23:05:45.475266953Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T23:05:45.475269473Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 530, in create_rl_components
+ERROR 2026-07-30T23:05:45.475271903Z [resource.labels.containerName: jax-tpu] [rank0]: rl_cluster = rl_cluster_lib.RLCluster(
+ERROR 2026-07-30T23:05:45.475274423Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T23:05:45.475277413Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 271, in __init__
+ERROR 2026-07-30T23:05:45.475281623Z [resource.labels.containerName: jax-tpu] [rank0]: self._init_cluster()
+ERROR 2026-07-30T23:05:45.475285613Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 486, in _init_cluster
+ERROR 2026-07-30T23:05:45.475289933Z [resource.labels.containerName: jax-tpu] [rank0]: self._rollout = self.cluster_config.rollout_engine(
+ERROR 2026-07-30T23:05:45.475294083Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T23:05:45.475298083Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 320, in __init__
+ERROR 2026-07-30T23:05:45.475301903Z [resource.labels.containerName: jax-tpu] [rank0]: self._sampler.load_checkpoint(state)
+ERROR 2026-07-30T23:05:45.475306283Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py", line 310, in load_checkpoint
+ERROR 2026-07-30T23:05:45.475310023Z [resource.labels.containerName: jax-tpu] [rank0]: self.update_params(updated_weights=path_or_weights, filter_types=None)
+ERROR 2026-07-30T23:05:45.475313833Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 211, in update_params
+ERROR 2026-07-30T23:05:45.475317113Z [resource.labels.containerName: jax-tpu] [rank0]: weight_shape_matches = weight_array.shape == model_runner_state[key].shape
+ERROR 2026-07-30T23:05:45.475320553Z [resource.labels.containerName: jax-tpu] [rank0]: ~~~~~~~~~~~~~~~~~~^^^^^
+ERROR 2026-07-30T23:05:45.475323923Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/flax/nnx/statelib.py", line 258, in __getitem__
+ERROR 2026-07-30T23:05:45.475327393Z [resource.labels.containerName: jax-tpu] [rank0]: value = self._mapping[key]
+ERROR 2026-07-30T23:05:45.475330613Z [resource.labels.containerName: jax-tpu] [rank0]: ~~~~~~~~~~~~~^^^^^
+ERROR 2026-07-30T23:05:45.475334053Z [resource.labels.containerName: jax-tpu] [rank0]: KeyError: 'vllm_model.language_model.model.embed_tokens.weight'
