@@ -1,117 +1,30 @@
-ERROR 2026-07-29T18:58:41.868186314Z [resource.labels.containerName: jax-tpu] Traceback (most recent call last): File "<frozen runpy>", line 198, in _run_module_as_main File "<frozen runpy>", line 88, in _run_code File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 798, in <module> app.run(main) File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run _run_main(main, args) File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main sys.exit(main(argv))
-  {
-    "textPayload": "Traceback (most recent call last):\n  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/deps/src/maxtext/trainers/post_train/rl/train_rl.py\", line 798, in <module>\n    app.run(main)\n  File \"/usr/local/lib/python3.12/site-packages/absl/app.py\", line 367, in run\n    _run_main(main, args)\n  File \"/usr/local/lib/python3.12/site-packages/absl/app.py\", line 312, in _run_main\n    sys.exit(main(argv))",
-    "insertId": "odqo9bwqe87wfv2z",
-    "resource": {
-      "type": "k8s_container",
-      "labels": {
-        "location": "europe-west4",
-        "project_id": "cloud-tpu-multipod-dev",
-        "namespace_name": "default",
-        "pod_name": "ym-qw35-6-pathways-head-0-0-zkhlg",
-        "cluster_name": "mlperf-v5p",
-        "container_name": "jax-tpu"
-      }
-    },
-    "timestamp": "2026-07-29T18:58:41.868186314Z",
-    "severity": "ERROR",
-    "labels": {
-      "k8s-pod/jobset_sigs_k8s_io/replicatedjob-name": "pathways-head",
-      "k8s-pod/jobset_sigs_k8s_io/restart-attempt": "0",
-      "k8s-pod/jobset_sigs_k8s_io/jobset-name": "ym-qw35-6",
-      "k8s-pod/topology_kubernetes_io/zone": "europe-west4-b",
-      "k8s-pod/kueue_x-k8s_io/podset": "pathways-head",
-      "k8s-pod/jobset_sigs_k8s_io/replicatedjob-replicas": "1",
-      "k8s-pod/jobset_sigs_k8s_io/job-global-index": "0",
-      "compute.googleapis.com/resource_name": "gke-mlperf-v5p-cpu-np-b188bf3f-8oeb",
-      "k8s-pod/jobset_sigs_k8s_io/job-index": "0",
-      "k8s-pod/topology_kubernetes_io/region": "europe-west4",
-      "k8s-pod/jobset_sigs_k8s_io/global-replicas": "2",
-      "k8s-pod/batch_kubernetes_io/controller-uid": "7792e600-9b0a-4c37-b887-1ee98950c650",
-      "k8s-pod/controller-uid": "7792e600-9b0a-4c37-b887-1ee98950c650",
-      "k8s-pod/jobset_sigs_k8s_io/priority": "1000",
-      "k8s-pod/batch_kubernetes_io/job-name": "ym-qw35-6-pathways-head-0",
-      "k8s-pod/jobset_sigs_k8s_io/job-key": "4104e0493c9ba93b259f401fa2186e93678d2232",
-      "k8s-pod/jobset_sigs_k8s_io/coordinator": "ym-qw35-6-pathways-head-0-0.ym-qw35-6",
-      "k8s-pod/batch_kubernetes_io/job-completion-index": "0",
-      "logging.gke.io/top_level_controller_name": "ym-qw35-6-pathways-head-0",
-      "logging.gke.io/top_level_controller_type": "Job",
-      "k8s-pod/job-name": "ym-qw35-6-pathways-head-0"
-    },
-    "logName": "projects/cloud-tpu-multipod-dev/logs/stderr",
-    "receiveTimestamp": "2026-07-29T18:58:42.601788526Z",
-    "errorGroups": [
-      {
-        "id": "CJGSwuHl_N32Cg"
-      }
-    ]
-  }
-ERROR 2026-07-29T18:58:41.868762194Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^
-ERROR 2026-07-29T18:58:41.868766244Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 794, in main
-ERROR 2026-07-29T18:58:41.869003184Z [resource.labels.containerName: jax-tpu] rl_train(argv, kwargs)
-ERROR 2026-07-29T18:58:41.869013554Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 629, in rl_train
-ERROR 2026-07-29T18:58:41.869159654Z [resource.labels.containerName: jax-tpu] _rl_train_impl(argv, kwargs)
-ERROR 2026-07-29T18:58:41.869170394Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 712, in _rl_train_impl
-ERROR 2026-07-29T18:58:41.869347143Z [resource.labels.containerName: jax-tpu] rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
-ERROR 2026-07-29T18:58:41.869372914Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-29T18:58:41.869378003Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 513, in create_rl_components
-ERROR 2026-07-29T18:58:41.869544114Z [resource.labels.containerName: jax-tpu] rl_cluster = rl_cluster_lib.RLCluster(
-ERROR 2026-07-29T18:58:41.869554523Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-29T18:58:41.869560283Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 271, in __init__
-ERROR 2026-07-29T18:58:41.869638534Z [resource.labels.containerName: jax-tpu] self._init_cluster()
-ERROR 2026-07-29T18:58:41.869653423Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 486, in _init_cluster
-ERROR 2026-07-29T18:58:41.869800014Z [resource.labels.containerName: jax-tpu] self._rollout = self.cluster_config.rollout_engine(
-ERROR 2026-07-29T18:58:41.869813463Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-29T18:58:41.869818383Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 201, in __init__
-ERROR 2026-07-29T18:58:41.869881763Z [resource.labels.containerName: jax-tpu] "swap_space": rollout_config.rollout_vllm_swap_space_size_gb,
-ERROR 2026-07-29T18:58:41.869895314Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-29T18:58:41.869987243Z [resource.labels.containerName: jax-tpu] AttributeError: 'RolloutConfig' object has no attribute 'rollout_vllm_swap_space_size_gb'
-ERROR 2026-07-29T18:58:44.982175779Z [resource.labels.containerName: jax-tpu] Exception ignored in: <function GCSRecordWriter.__del__ at 0x7a2586d4cb80>
-ERROR 2026-07-29T18:58:44.982227279Z [resource.labels.containerName: jax-tpu] Traceback (most recent call last): File "/usr/local/lib/python3.12/site-packages/tensorboardX/record_writer.py", line 134, in __del__ File "/usr/local/lib/python3.12/site-packages/tensorboardX/record_writer.py", line 158, in close File "/usr/local/lib/python3.12/site-packages/tensorboardX/record_writer.py", line 149, in flush File "/usr/local/lib/python3.12/copy.py", line 87, in copy ImportError: sys.meta_path is None, Python is likely shutting down
-  {
-    "textPayload": "Traceback (most recent call last):\n  File \"/usr/local/lib/python3.12/site-packages/tensorboardX/record_writer.py\", line 134, in __del__\n  File \"/usr/local/lib/python3.12/site-packages/tensorboardX/record_writer.py\", line 158, in close\n  File \"/usr/local/lib/python3.12/site-packages/tensorboardX/record_writer.py\", line 149, in flush\n  File \"/usr/local/lib/python3.12/copy.py\", line 87, in copy\nImportError: sys.meta_path is None, Python is likely shutting down",
-    "insertId": "amkfhicb0u5mgetv",
-    "resource": {
-      "type": "k8s_container",
-      "labels": {
-        "container_name": "jax-tpu",
-        "location": "europe-west4",
-        "namespace_name": "default",
-        "project_id": "cloud-tpu-multipod-dev",
-        "cluster_name": "mlperf-v5p",
-        "pod_name": "ym-qw35-6-pathways-head-0-0-zkhlg"
-      }
-    },
-    "timestamp": "2026-07-29T18:58:44.982227279Z",
-    "severity": "ERROR",
-    "labels": {
-      "logging.gke.io/top_level_controller_type": "Job",
-      "k8s-pod/job-name": "ym-qw35-6-pathways-head-0",
-      "k8s-pod/jobset_sigs_k8s_io/job-index": "0",
-      "k8s-pod/topology_kubernetes_io/region": "europe-west4",
-      "k8s-pod/topology_kubernetes_io/zone": "europe-west4-b",
-      "k8s-pod/batch_kubernetes_io/job-completion-index": "0",
-      "compute.googleapis.com/resource_name": "gke-mlperf-v5p-cpu-np-b188bf3f-8oeb",
-      "k8s-pod/controller-uid": "7792e600-9b0a-4c37-b887-1ee98950c650",
-      "k8s-pod/jobset_sigs_k8s_io/priority": "1000",
-      "logging.gke.io/top_level_controller_name": "ym-qw35-6-pathways-head-0",
-      "k8s-pod/jobset_sigs_k8s_io/global-replicas": "2",
-      "k8s-pod/jobset_sigs_k8s_io/coordinator": "ym-qw35-6-pathways-head-0-0.ym-qw35-6",
-      "k8s-pod/kueue_x-k8s_io/podset": "pathways-head",
-      "k8s-pod/jobset_sigs_k8s_io/replicatedjob-name": "pathways-head",
-      "k8s-pod/jobset_sigs_k8s_io/replicatedjob-replicas": "1",
-      "k8s-pod/jobset_sigs_k8s_io/job-global-index": "0",
-      "k8s-pod/batch_kubernetes_io/controller-uid": "7792e600-9b0a-4c37-b887-1ee98950c650",
-      "k8s-pod/batch_kubernetes_io/job-name": "ym-qw35-6-pathways-head-0",
-      "k8s-pod/jobset_sigs_k8s_io/jobset-name": "ym-qw35-6",
-      "k8s-pod/jobset_sigs_k8s_io/restart-attempt": "0",
-      "k8s-pod/jobset_sigs_k8s_io/job-key": "4104e0493c9ba93b259f401fa2186e93678d2232"
-    },
-    "logName": "projects/cloud-tpu-multipod-dev/logs/stderr",
-    "receiveTimestamp": "2026-07-29T18:58:47.674135982Z",
-    "errorGroups": [
-      {
-        "id": "CO2R2Jq71bjQ-gE"
-      }
-    ]
-  }
+ERROR 2026-07-30T05:48:48.650894637Z [resource.labels.containerName: jax-tpu] Traceback (most recent call last): File "<frozen runpy>", line 198, in _run_module_as_main File "<frozen runpy>", line 88, in _run_code File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 798, in <module> app.run(main) File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run _run_main(main, args) File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main sys.exit(main(argv))
+ERROR 2026-07-30T05:48:48.651636327Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^
+ERROR 2026-07-30T05:48:48.651640477Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 794, in main
+ERROR 2026-07-30T05:48:48.651970347Z [resource.labels.containerName: jax-tpu] rl_train(argv, kwargs)
+ERROR 2026-07-30T05:48:48.651984127Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 629, in rl_train
+ERROR 2026-07-30T05:48:48.652215747Z [resource.labels.containerName: jax-tpu] _rl_train_impl(argv, kwargs)
+ERROR 2026-07-30T05:48:48.652226487Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 712, in _rl_train_impl
+ERROR 2026-07-30T05:48:48.652527067Z [resource.labels.containerName: jax-tpu] rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
+ERROR 2026-07-30T05:48:48.652538727Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T05:48:48.652542637Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 513, in create_rl_components
+ERROR 2026-07-30T05:48:48.652782697Z [resource.labels.containerName: jax-tpu] rl_cluster = rl_cluster_lib.RLCluster(
+ERROR 2026-07-30T05:48:48.652798587Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T05:48:48.652804667Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 271, in __init__
+ERROR 2026-07-30T05:48:48.652911257Z [resource.labels.containerName: jax-tpu] self._init_cluster()
+ERROR 2026-07-30T05:48:48.652917847Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 486, in _init_cluster
+ERROR 2026-07-30T05:48:48.653120537Z [resource.labels.containerName: jax-tpu] self._rollout = self.cluster_config.rollout_engine(
+ERROR 2026-07-30T05:48:48.653131817Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T05:48:48.653135667Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 185, in __init__
+ERROR 2026-07-30T05:48:48.653257937Z [resource.labels.containerName: jax-tpu] self._sampler = MaxTextVllmSampler(
+ERROR 2026-07-30T05:48:48.653267347Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T05:48:48.653271437Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 66, in __init__
+ERROR 2026-07-30T05:48:48.653355327Z [resource.labels.containerName: jax-tpu] super().__init__(tokenizer=tokenizer, config=config)
+ERROR 2026-07-30T05:48:48.653370897Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py", line 163, in __init__
+ERROR 2026-07-30T05:48:48.653540887Z [resource.labels.containerName: jax-tpu] self.llm = LLM(**self.args)
+ERROR 2026-07-30T05:48:48.653549367Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T05:48:48.653553237Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/vllm/entrypoints/llm.py", line 294, in __init__
+ERROR 2026-07-30T05:48:48.653677787Z [resource.labels.containerName: jax-tpu] engine_args = EngineArgs(
+ERROR 2026-07-30T05:48:48.653685787Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^
+ERROR 2026-07-30T05:48:48.653690867Z [resource.labels.containerName: jax-tpu] TypeError: EngineArgs.__init__() got an unexpected keyword argument 'swap_space'
+ERROR 2026-07-30T05:48:51.416702247Z [resource.labels.containerName: jax-tpu] Exception ignored in: <function GCSRecordWriter.__del__ at 0x7b0bda28cf40>
