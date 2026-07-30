@@ -1189,6 +1189,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -1538,7 +1539,7 @@ class NNXDecoder(nnx.Module):
     if attention_metadata is not None:
       layer_kwargs["attention_metadata"] = attention_metadata
 
-    if cfg.engram_layers and decoder_input_tokens is not None:
+    if (cfg.engram_layers or cfg.decoder_block == DecoderBlockType.DEEPSEEK4) and decoder_input_tokens is not None:
       layer_kwargs["decoder_input_tokens"] = decoder_input_tokens
 
     if getattr(cfg, "using_pipeline_parallelism", False):

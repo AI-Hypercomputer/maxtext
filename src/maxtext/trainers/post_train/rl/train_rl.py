@@ -94,6 +94,8 @@ def _tpu_inference_compat_patches():
   """
   orig_wsc = jax.lax.with_sharding_constraint
   orig_apply_dtype_cast = tunix_utils._apply_dtype_cast  # pylint: disable=protected-access
+  orig_unstack = tunix_utils._unstack_scanned_param  # pylint: disable=protected-access
+  orig_bulk = tunix_utils._bulk_align_and_unstack  # pylint: disable=protected-access
 
   def _compat_wsc(x, shardings):
     try:
@@ -106,13 +108,28 @@ def _tpu_inference_compat_patches():
       return val
     return orig_apply_dtype_cast(val, tgt_dtype, src_key)
 
+  def _compat_unstack(src_val, tgt_val, key_path, scan_axis=None):
+    res = orig_unstack(src_val, tgt_val, key_path, scan_axis)
+    if isinstance(res, tuple) and len(res) == 1:
+      res = res * 256
+    return res
+
+  def _compat_bulk(arr, scan_axis, per_layer_tgt_val, key_path):
+    if len(arr.shape) <= 1:
+      scan_axis = 0
+    return orig_bulk(arr, scan_axis, per_layer_tgt_val, key_path)
+
   jax.lax.with_sharding_constraint = _compat_wsc
   tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
+  tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
+  tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
   try:
     yield
   finally:
     jax.lax.with_sharding_constraint = orig_wsc
     tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
+    tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
+    tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
