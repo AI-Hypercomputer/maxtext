@@ -1111,6 +1111,7 @@ sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
+ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax
 sa_use_base2_exp: true # defaults to true in Tokamax
 # local_sa_* variants apply to local (sliding window) attention layers;

@@ -745,6 +745,13 @@ class SplashAttention(BaseModel):
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
+  ring_scan_unroll: NonNegativeInt = Field(
+      1,
+      description=(
+          "Unroll factor for the Tokamax ring attention scan. 0 fully unrolls; values at or above the ring size are "
+          "equivalent to full unrolling. Program size and compile time grow with the factor."
+      ),
+  )
   sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
   sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
@@ -3520,6 +3527,11 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention does not support QK-Clip statistics yet.")
       if self.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
+    if context_parallel_strategy != "ring" and self.ring_scan_unroll != 1:
+      raise ValueError(
+          f"ring_scan_unroll={self.ring_scan_unroll} was specified, but is only supported when "
+          "context_parallel_strategy='ring'."
+      )
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.
