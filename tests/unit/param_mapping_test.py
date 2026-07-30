@@ -105,7 +105,14 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock()
     maxtext_config.inhomogeneous_layer_cycle_interval = 2
     mapping = param_mapping.QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
-    self.assertIn("params-decoder-layers-layer_0-input_layernorm-scale", mapping)
+    self.assertIn("params-decoder-scanned_blocks-local_layers-input_layernorm-scale", mapping)
+    self.assertIn("params-decoder-scanned_blocks-global_layer-input_layernorm-scale", mapping)
+    num_blocks = config["num_hidden_layers"] // maxtext_config.inhomogeneous_layer_cycle_interval
+    local_val = mapping["params-decoder-scanned_blocks-local_layers-input_layernorm-scale"]
+    global_val = mapping["params-decoder-scanned_blocks-global_layer-input_layernorm-scale"]
+    self.assertEqual(len(local_val), num_blocks)
+    self.assertEqual(len(local_val[0]), 1)
+    self.assertEqual(len(global_val), num_blocks)
 
   def test_deepseek_mapping(self):
     config = {
