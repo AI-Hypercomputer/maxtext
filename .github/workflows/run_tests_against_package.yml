@@ -124,6 +124,15 @@ jobs:
           echo "Installing ${maxtext_wheel} for ${MAXTEXT_PACKAGE_EXTRA}..."
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
+            if command -v apt-get &> /dev/null; then
+              echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
+              if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
+                echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
+                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || true
+              else
+                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || true
+              fi
+            fi
             install_tpu_post_train_extra_deps
           else
             install_tpu_pre_train_extra_deps

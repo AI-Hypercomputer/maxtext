@@ -4,6 +4,7 @@ astor
 blake3>=1.0
 cachetools
 cbor2
+fastapi>=0.139.0
 gepa
 gguf
 google-tunix
