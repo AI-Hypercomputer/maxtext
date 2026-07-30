@@ -74,3 +74,12 @@ repos:
     hooks:
       - id: yamllint
         types: [yaml]
+
+  - repo: local
+    hooks:
+      - id: decoupled-requirements
+        name: decoupled requirements are derived from the current GPU requirements
+        entry: python3 src/dependencies/scripts/generate_decoupled_requirements.py --check
+        language: system
+        files: ^src/dependencies/requirements/
+        pass_filenames: false

@@ -23,7 +23,7 @@ When enabled:
 - Skips external integration tests with markers:
   - `external_serving` (`jetstream`, `serving`, `decode_server`)
   - `external_training` (`goodput`)
-- `decoupled` – Applied by `tests/conftest.py` to tests that are runnable in decoupled mode (i.e. not skipped for TPU or external markers).
+- `decoupled` – Applied by `tests/conftest.py` to every collected test except those carrying the external dependency markers above.
 - Production / serving entrypoints (`decode.py`, `maxengine_server.py`, `maxengine_config.py`, tokenizer access in `maxengine.py`) **fail fast with a clear RuntimeError** when decoupled. This prevents accidentally running partial serving logic locally when decoupled mode is ON.
 - Import-time safety is preserved by lightweight stubs returned from `decouple.py` (so modules import cleanly); only active use of missing functionality raises.
 - Conditionally replaces dataset paths in certain tests to point at minimal local datasets.
@@ -48,6 +48,40 @@ Optional environment variables:
 
 - `LOCAL_GCLOUD_PROJECT` - placeholder project string (default: `local-maxtext-project`).
 - `LOCAL_BASE_OUTPUT` - override default local output directory used in tests.
+
+## Installing a decoupled environment
+
+`DECOUPLE_GCLOUD=TRUE` only changes what `gcloud_stub` hands back; it does not hide installed packages, so a module-scope `from google.cloud import storage` still succeeds in an environment that has the Google Cloud SDK. To actually run offline, install `src/dependencies/requirements/generated_requirements/decoupled-requirements.txt`, the GPU pre-training dependency set without the Google Cloud clients and accelerator wheels (see [Update MaxText dependencies](../development/update_dependencies.md)):
+
+```bash
+uv venv --seed .venv_decoupled
+source .venv_decoupled/bin/activate
+uv pip install --resolution=lowest \
+  -r src/dependencies/requirements/generated_requirements/decoupled-requirements.txt
+# MaxText itself requires the Google Cloud packages, so install it without its dependencies.
+uv pip install --no-deps maxtext-*-py3-none-any.whl
+```
+
+CI builds this environment on every pull request and runs the tests marked `decoupled_target` in it (the `cpu-unit` job, first worker group), so a newly added unguarded Google Cloud import fails there:
+
+```bash
+DECOUPLE_GCLOUD=TRUE pytest -v -m decoupled_target --ignore=tests/post_training
+```
+
+Add `decoupled_target` to a test to include it in that gate. The marker only takes effect for tests that the default collection actually reaches, so files listed under `--ignore` in `pytest.ini` cannot be part of it.
+
+### Running decoupled on an accelerator
+
+Decoupling is about the Google Cloud dependencies, not about the hardware, so the file above carries no accelerator wheels and there is no separate decoupled file per accelerator. To run the decoupled suite on an NVIDIA GPU, add the entries that were left out of it, the plugin, the CUDA libraries it loads and Transformer Engine, at the versions the GPU requirements pin:
+
+```bash
+python3 src/dependencies/scripts/generate_decoupled_requirements.py --print-accelerator-requirements |
+  uv pip install --no-deps --resolution=lowest -r /dev/stdin
+```
+
+`--no-deps` is safe because these entries plus the decoupled requirements are the whole GPU lock, and it is also what keeps the resolver from pulling the Google Cloud packages back in.
+
+Other backends follow the same shape: install the vendor's plugin and pjrt wheels on top of the decoupled requirements, for example from a ROCm wheel index. If you want the versions of a different hardware lock rather than the GPU ones, derive the decoupled file from that lock instead, `--source generated_requirements/tpu-requirements.txt`, whose accelerator entries are then `libtpu`.
 
 ## Centralized Decoupling API (`gcloud_stub.py`)
 

@@ -240,6 +240,57 @@ jobs:
           INPUTS_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
           INPUTS_MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
           INPUTS_IS_UPDATE_HLO: ${{ inputs.is_update_hlo }}
+      # DECOUPLE_GCLOUD=TRUE only exercises the offline code paths when the Google Cloud packages
+      # are actually missing, so this runs in its own venv built from the decoupled requirements
+      # rather than the venv the other tests use. The suite is small and unsharded, so it runs in
+      # the first worker group only.
+      - name: Run Targeted Decoupled Tests
+        if: ${{ !inputs.maxtext_installed && inputs.flavor == 'cpu-unit' && inputs.worker_group == 1 }}
+        shell: bash
+        run: |
+          python3 -m uv venv --seed .venv_decoupled
+          source .venv_decoupled/bin/activate
+          uv pip install --resolution=lowest \
+            -r src/dependencies/requirements/generated_requirements/decoupled-requirements.txt
+          # --no-deps: the maxtext wheel requires the Google Cloud packages this environment must not have.
+          uv pip install --no-deps "$(ls maxtext-*-py3-none-any.whl)"
+          python3 - <<'PY'
+          import importlib.util
+          import sys
+
+          def importable(module):
+            try:
+              return importlib.util.find_spec(module) is not None
+            except ModuleNotFoundError:
+              return False
+
+          # google.cloud itself resolves through googleapis-common-protos, so check the clients.
+          modules = (
+              "cloud_accelerator_diagnostics",
+              "gcsfs",
+              "google.api_core",
+              "google.auth",
+              "google.cloud.monitoring_v3",
+              "google.cloud.storage",
+              "google_cloud_mldiagnostics",
+              "jetstream",
+              "ml_goodput_measurement",
+          )
+          coupled = [module for module in modules if importable(module)]
+          if coupled:
+            sys.exit(f"::error::{coupled} importable in the decoupled environment; decoupled mode is not being tested.")
+          PY
+          export DECOUPLE_GCLOUD=TRUE
+          export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
+          export MAXTEXT_REPO_ROOT=$(pwd)
+          export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
+          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
+          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
+          python3 -m pytest -v \
+            -m "decoupled_target" \
+            --durations=0 \
+            --ignore=tests/post_training \
+            --junitxml=test-results-decoupled-targeted.xml
       - name: Upload Reference HLO
         if: ${{ inputs.is_update_hlo }}
         uses: actions/upload-artifact@v4
