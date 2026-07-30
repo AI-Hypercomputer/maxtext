@@ -67,9 +67,7 @@ batch_size: 8
 num_batches: 934
 num_epoch: 1
 train_fraction: 1.0
-# Keep MaxText's generic step count and LR schedule horizon aligned with the
-# RL trainer's 934 * 1 = 934 optimizer updates.
-steps: 934
+# Keep the LR schedule horizon aligned with the derived 934 optimizer updates.
 learning_rate_schedule_steps: 934
 
 # Keep activation memory predictable on the 4-device trainer mesh.
@@ -122,7 +120,7 @@ dataset_name: "openai/gsm8k"
 eval_dataset_name: "openai/gsm8k"
 train_split: "train"
 eval_split: "test"
-hf_name: "main"
+hf_subset: "main"
 data_template_path: "maxtext/examples/chat_templates/gsm8k_rl.json"
 
 # ====== Reward ======
@@ -138,5 +136,4 @@ penalty_incorrect_answer: 0.0
 math_verify_timeout: 120
 math_verify_num_procs: null
 
-debug:
-  rl: false
+debug: false
