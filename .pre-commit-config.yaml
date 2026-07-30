@@ -45,7 +45,7 @@ repos:
     rev: 24.10.1
     hooks:
       - id: pyink
-        exclude: src/maxtext/input_pipeline/protos/
+        exclude: src/maxtext/input_pipeline/protos/|src/maxtext/kernels/megablox/pallas_mosaic_tpu_v2_gmm_kernel\.py
         args:
           - '--pyink-indentation=2'
           - '--line-length=122'
