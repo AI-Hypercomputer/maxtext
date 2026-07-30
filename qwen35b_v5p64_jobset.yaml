@@ -1,10 +1,10 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: ym-qw35-11
+  name: ym-qw35-12
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: ym-qw35-11
+    xpk.google.com/workload: ym-qw35-12
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -99,7 +99,7 @@ spec:
                 restartPolicy: Always
             containers:
               - name: jax-tpu
-                image: gcr.io/tpu-prod-env-multipod/yixuanm-dev-v7:latest
+                image: gcr.io/tpu-prod-env-multipod/yixuanm-dev-v8:latest
                 imagePullPolicy: Always
                 env:
                 - name: PATHWAYS_HEAD
@@ -164,7 +164,7 @@ spec:
                   
                   python3 -m maxtext.trainers.post_train.rl.train_rl \
                   src/maxtext/configs/post_train/rl_gsm8k_qwen35_35b_v5p64.yml \
-                  run_name=ym-qw35-11 \
+                  run_name=ym-qw35-12 \
                   base_output_directory=gs://yixuanm-maxtext-logs/ConvergenceTesting \
                   load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items \
                   vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
@@ -203,7 +203,7 @@ spec:
         template:
           metadata:
             labels:
-              xpk.google.com/workload: ym-qw35-11
+              xpk.google.com/workload: ym-qw35-12
             annotations:
               cloud.google.com/skip-tpu-webhook-check: "true"
           spec:
