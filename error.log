@@ -1,30 +1,42 @@
-ERROR 2026-07-30T05:48:48.650894637Z [resource.labels.containerName: jax-tpu] Traceback (most recent call last): File "<frozen runpy>", line 198, in _run_module_as_main File "<frozen runpy>", line 88, in _run_code File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 798, in <module> app.run(main) File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run _run_main(main, args) File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main sys.exit(main(argv))
-ERROR 2026-07-30T05:48:48.651636327Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^
-ERROR 2026-07-30T05:48:48.651640477Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 794, in main
-ERROR 2026-07-30T05:48:48.651970347Z [resource.labels.containerName: jax-tpu] rl_train(argv, kwargs)
-ERROR 2026-07-30T05:48:48.651984127Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 629, in rl_train
-ERROR 2026-07-30T05:48:48.652215747Z [resource.labels.containerName: jax-tpu] _rl_train_impl(argv, kwargs)
-ERROR 2026-07-30T05:48:48.652226487Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 712, in _rl_train_impl
-ERROR 2026-07-30T05:48:48.652527067Z [resource.labels.containerName: jax-tpu] rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
-ERROR 2026-07-30T05:48:48.652538727Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T05:48:48.652542637Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 513, in create_rl_components
-ERROR 2026-07-30T05:48:48.652782697Z [resource.labels.containerName: jax-tpu] rl_cluster = rl_cluster_lib.RLCluster(
-ERROR 2026-07-30T05:48:48.652798587Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T05:48:48.652804667Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 271, in __init__
-ERROR 2026-07-30T05:48:48.652911257Z [resource.labels.containerName: jax-tpu] self._init_cluster()
-ERROR 2026-07-30T05:48:48.652917847Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 486, in _init_cluster
-ERROR 2026-07-30T05:48:48.653120537Z [resource.labels.containerName: jax-tpu] self._rollout = self.cluster_config.rollout_engine(
-ERROR 2026-07-30T05:48:48.653131817Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T05:48:48.653135667Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 185, in __init__
-ERROR 2026-07-30T05:48:48.653257937Z [resource.labels.containerName: jax-tpu] self._sampler = MaxTextVllmSampler(
-ERROR 2026-07-30T05:48:48.653267347Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T05:48:48.653271437Z [resource.labels.containerName: jax-tpu] File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 66, in __init__
-ERROR 2026-07-30T05:48:48.653355327Z [resource.labels.containerName: jax-tpu] super().__init__(tokenizer=tokenizer, config=config)
-ERROR 2026-07-30T05:48:48.653370897Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py", line 163, in __init__
-ERROR 2026-07-30T05:48:48.653540887Z [resource.labels.containerName: jax-tpu] self.llm = LLM(**self.args)
-ERROR 2026-07-30T05:48:48.653549367Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T05:48:48.653553237Z [resource.labels.containerName: jax-tpu] File "/usr/local/lib/python3.12/site-packages/vllm/entrypoints/llm.py", line 294, in __init__
-ERROR 2026-07-30T05:48:48.653677787Z [resource.labels.containerName: jax-tpu] engine_args = EngineArgs(
-ERROR 2026-07-30T05:48:48.653685787Z [resource.labels.containerName: jax-tpu] ^^^^^^^^^^^
-ERROR 2026-07-30T05:48:48.653690867Z [resource.labels.containerName: jax-tpu] TypeError: EngineArgs.__init__() got an unexpected keyword argument 'swap_space'
-ERROR 2026-07-30T05:48:51.416702247Z [resource.labels.containerName: jax-tpu] Exception ignored in: <function GCSRecordWriter.__del__ at 0x7b0bda28cf40>
+ERROR 2026-07-30T08:24:23.955067872Z [resource.labels.containerName: jax-tpu] [rank0]: Traceback (most recent call last):
+ERROR 2026-07-30T08:24:23.955119232Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 198, in _run_module_as_main
+ERROR 2026-07-30T08:24:23.955126532Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 88, in _run_code
+ERROR 2026-07-30T08:24:23.955130562Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 798, in <module>
+ERROR 2026-07-30T08:24:23.955136552Z [resource.labels.containerName: jax-tpu] [rank0]: app.run(main)
+ERROR 2026-07-30T08:24:23.955140512Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run
+ERROR 2026-07-30T08:24:23.955144342Z [resource.labels.containerName: jax-tpu] [rank0]: _run_main(main, args)
+ERROR 2026-07-30T08:24:23.955148752Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
+ERROR 2026-07-30T08:24:23.955153742Z [resource.labels.containerName: jax-tpu] [rank0]: sys.exit(main(argv))
+ERROR 2026-07-30T08:24:23.955167922Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^
+ERROR 2026-07-30T08:24:23.955171622Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 794, in main
+ERROR 2026-07-30T08:24:23.955175132Z [resource.labels.containerName: jax-tpu] [rank0]: rl_train(argv, kwargs)
+ERROR 2026-07-30T08:24:23.955178732Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 629, in rl_train
+ERROR 2026-07-30T08:24:23.955182092Z [resource.labels.containerName: jax-tpu] [rank0]: _rl_train_impl(argv, kwargs)
+ERROR 2026-07-30T08:24:23.955187822Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 712, in _rl_train_impl
+ERROR 2026-07-30T08:24:23.955192822Z [resource.labels.containerName: jax-tpu] [rank0]: rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
+ERROR 2026-07-30T08:24:23.955196142Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T08:24:23.955199652Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 513, in create_rl_components
+ERROR 2026-07-30T08:24:23.955203142Z [resource.labels.containerName: jax-tpu] [rank0]: rl_cluster = rl_cluster_lib.RLCluster(
+ERROR 2026-07-30T08:24:23.955206792Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T08:24:23.955223902Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 271, in __init__
+ERROR 2026-07-30T08:24:23.955230762Z [resource.labels.containerName: jax-tpu] [rank0]: self._init_cluster()
+ERROR 2026-07-30T08:24:23.955236642Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 486, in _init_cluster
+ERROR 2026-07-30T08:24:23.955242002Z [resource.labels.containerName: jax-tpu] [rank0]: self._rollout = self.cluster_config.rollout_engine(
+ERROR 2026-07-30T08:24:23.955247022Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T08:24:23.955279752Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 211, in __init__
+ERROR 2026-07-30T08:24:23.955283702Z [resource.labels.containerName: jax-tpu] [rank0]: self._sampler.load_checkpoint(state)
+ERROR 2026-07-30T08:24:23.955289342Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py", line 310, in load_checkpoint
+ERROR 2026-07-30T08:24:23.955293052Z [resource.labels.containerName: jax-tpu] [rank0]: self.update_params(updated_weights=path_or_weights, filter_types=None)
+ERROR 2026-07-30T08:24:23.955296392Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 111, in update_params
+ERROR 2026-07-30T08:24:23.955299852Z [resource.labels.containerName: jax-tpu] [rank0]: weight_shape_matches
+ERROR 2026-07-30T08:24:23.955308762Z [resource.labels.containerName: jax-tpu] [rank0]: AssertionError: Shape mismatch for vllm_model.language_model.model.layers.0.linear_attn.in_proj_qkvz.weight: converter produced (12288, 2048), expected (2048, 12288)
+ERROR 2026-07-30T08:24:25.435029047Z [resource.labels.containerName: jax-tpu] [rank0]: Traceback (most recent call last):
+ERROR 2026-07-30T08:24:25.435738267Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/weakref.py", line 666, in _exitfunc
+ERROR 2026-07-30T08:24:25.435751267Z [resource.labels.containerName: jax-tpu] [rank0]: f()
+ERROR 2026-07-30T08:24:25.435756417Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/weakref.py", line 590, in __call__
+ERROR 2026-07-30T08:24:25.435760777Z [resource.labels.containerName: jax-tpu] [rank0]: return info.func(*info.args, **(info.kwargs or {}))
+ERROR 2026-07-30T08:24:25.435764197Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-30T08:24:25.435768427Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 441, in _cleanup_instance_caches
+ERROR 2026-07-30T08:24:25.435771907Z [resource.labels.containerName: jax-tpu] [rank0]: for module in model.modules():
+ERROR 2026-07-30T08:24:25.435775477Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^
+ERROR 2026-07-30T08:24:25.435779207Z [resource.labels.containerName: jax-tpu] [rank0]: AttributeError: 'VllmModelWrapper' object has no attribute 'modules'
