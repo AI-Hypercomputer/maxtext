@@ -105,6 +105,7 @@ def validate_attention_kernel(s: str) -> None:
       "flash",
       "cudnn_flash_te",
       "cudnn_flash_jax",
+      "cutlass_flash",
       "vllm_rpa",
       "vllm_batched_rpa",
   )

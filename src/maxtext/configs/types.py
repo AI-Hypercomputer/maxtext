@@ -4198,8 +4198,20 @@ class MaxTextConfig(
           "STRIPED reorder strategy requires Transformer Engine and is only supported on GPUs. "
           f"Got hardware={self.hardware!r}."
       )
-    if self.hardware == "gpu" and self.packing and self.attention == "cudnn_flash_te" and self.max_segments_per_seq <= 0:
-      raise ValueError("max_segments_per_seq must be set when using TransformerEngine attention and packing")
+    # Mirrors AttentionOp._needs_packed_masking: synthetic data carries no real
+    # segments, so the packed path is never taken and the bound is not needed.
+    if (
+        self.hardware == "gpu"
+        and self.packing
+        and self.dataset_type != DatasetType.SYNTHETIC
+        and self.attention in ("cudnn_flash_te", "cudnn_flash_jax", "cutlass_flash")
+        and self.max_segments_per_seq <= 0
+    ):
+      raise ValueError(
+          f"max_segments_per_seq must be set to the maximum number of packed segments per "
+          f"sequence when using attention={self.attention!r} with packing; these kernels need "
+          f"that bound at trace time to lay out per-segment metadata."
+      )
     dcn_product = (
         self.dcn_data_parallelism
         * self.dcn_pipeline_parallelism
