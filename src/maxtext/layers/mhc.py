@@ -117,8 +117,16 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         raise ValueError(
             "enable_mhc_pallas_kernel currently requires ici_tensor_parallelism=1 and dcn_tensor_parallelism=1."
         )
-      if self.config.mhc_pallas_block_size % 8:
-        raise ValueError("mhc_pallas_block_size must be a multiple of 8.")
+      token_block_sizes = {
+          "mhc_pallas_block_size": self.config.mhc_pallas_block_size,
+          "mhc_pallas_bwd_block_size": self.config.mhc_pallas_bwd_block_size,
+          "mhc_pallas_post_bwd_block_size": self.config.mhc_pallas_post_bwd_block_size,
+      }
+      for name, block_size in token_block_sizes.items():
+        if block_size % 8:
+          raise ValueError(f"{name} must be a multiple of 8.")
+      if self.config.mhc_pallas_post_bwd_feature_block_size % 128:
+        raise ValueError("mhc_pallas_post_bwd_feature_block_size must be a multiple of 128.")
 
     # Norm layer
     self.mhc_norm = RMSNorm(
@@ -264,22 +272,22 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     b, s, k, d = x.shape
 
     if self.config.enable_mhc_pallas_kernel:
-      dtype = self.dtype
       layer_input, mhc_context = mhc_kernel.pre(
           x,
-          jnp.asarray(self.mhc_norm.scale[...], dtype) + self.mhc_norm.scale_offset,
-          jnp.asarray(self.pre_alpha[...], dtype),
-          jnp.asarray(self.pre_beta[...], dtype),
-          jnp.asarray(self.pre_alpha_scale[...], dtype),
-          jnp.asarray(self.post_alpha[...], dtype),
-          jnp.asarray(self.post_beta[...], dtype),
-          jnp.asarray(self.post_alpha_scale[...], dtype),
-          jnp.asarray(self.res_alpha[...], dtype),
-          jnp.asarray(self.res_beta[...], dtype),
-          jnp.asarray(self.res_alpha_scale[...], dtype),
-          self.permutation_matrices.astype(dtype),
+          self.mhc_norm.scale[...] + self.mhc_norm.scale_offset,
+          self.pre_alpha[...],
+          self.pre_beta[...],
+          self.pre_alpha_scale[...],
+          self.post_alpha[...],
+          self.post_beta[...],
+          self.post_alpha_scale[...],
+          self.res_alpha[...],
+          self.res_beta[...],
+          self.res_alpha_scale[...],
+          self.permutation_matrices.astype(x.dtype),
           rms_epsilon=self.config.normalization_layer_epsilon,
           block_size=self.config.mhc_pallas_block_size,
+          bwd_block_size=self.config.mhc_pallas_bwd_block_size,
           interpret=self.mesh.devices.flat[0].platform != "tpu",
       )
     else:
@@ -327,6 +335,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
           layer_out,
           mhc_context,
           block_size=self.config.mhc_pallas_block_size,
+          bwd_block_size=self.config.mhc_pallas_post_bwd_block_size,
+          bwd_feature_block_size=self.config.mhc_pallas_post_bwd_feature_block_size,
           interpret=self.mesh.devices.flat[0].platform != "tpu",
       )
     else:

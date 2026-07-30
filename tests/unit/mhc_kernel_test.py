@@ -40,11 +40,13 @@ _NAMES = (
     "branch_weight",
 )
 _BLOCK_SIZE = 8
+_BWD_BLOCK_SIZE = 16
+_BWD_FEATURE_BLOCK_SIZE = 128
 
 
 def _make_inputs():
   """Builds deterministic production-dtype inputs for the kernel tests."""
-  batch, sequence, streams, embedding = 1, 16, 4, 128
+  batch, sequence, streams, embedding = 1, 16, 4, 256
   flattened_size = streams * embedding
   permutation_count = math.factorial(streams)
   keys = jax.random.split(jax.random.key(0), 14)
@@ -52,18 +54,21 @@ def _make_inputs():
   def random_bf16(index, shape, scale=1.0):
     return (jax.random.normal(keys[index], shape, jnp.float32) * scale).astype(jnp.bfloat16)
 
+  def random_f32(index, shape, scale=1.0):
+    return jax.random.normal(keys[index], shape, jnp.float32) * scale
+
   fan_in = 1.0 / math.sqrt(flattened_size)
   x = random_bf16(0, (batch, sequence, streams, embedding))
-  norm_scale = (1.0 + random_bf16(1, (flattened_size,), 0.1)).astype(jnp.bfloat16)
-  pre_alpha = random_bf16(2, (flattened_size, streams), fan_in)
-  pre_bias = random_bf16(3, (streams,), 0.1)
-  pre_scale = (1.0 + random_bf16(4, (1,), 0.1)).astype(jnp.bfloat16)
-  post_alpha = random_bf16(5, (flattened_size, streams), fan_in)
-  post_bias = random_bf16(6, (streams,), 0.1)
-  post_scale = (1.0 + random_bf16(7, (1,), 0.1)).astype(jnp.bfloat16)
-  res_alpha = random_bf16(8, (flattened_size, permutation_count), fan_in)
-  res_bias = random_bf16(9, (permutation_count,), 0.1)
-  res_scale = (1.0 + random_bf16(10, (1,), 0.1)).astype(jnp.bfloat16)
+  norm_scale = 1.0 + random_f32(1, (flattened_size,), 0.1)
+  pre_alpha = random_f32(2, (flattened_size, streams), fan_in)
+  pre_bias = random_f32(3, (streams,), 0.1)
+  pre_scale = 1.0 + random_f32(4, (1,), 0.1)
+  post_alpha = random_f32(5, (flattened_size, streams), fan_in)
+  post_bias = random_f32(6, (streams,), 0.1)
+  post_scale = 1.0 + random_f32(7, (1,), 0.1)
+  res_alpha = random_f32(8, (flattened_size, permutation_count), fan_in)
+  res_bias = random_f32(9, (permutation_count,), 0.1)
+  res_scale = 1.0 + random_f32(10, (1,), 0.1)
   branch_weight = random_bf16(11, (embedding, embedding), 1.0 / math.sqrt(embedding))
   cotangent = random_bf16(12, (batch, sequence, streams, embedding))
   permutations = jnp.eye(streams, dtype=jnp.bfloat16)[jnp.array(list(itertools.permutations(range(streams))))]
@@ -115,10 +120,18 @@ def _kernel_pipeline(permutations, *args):
       permutations,
       rms_epsilon=1e-6,
       block_size=_BLOCK_SIZE,
+      bwd_block_size=_BWD_BLOCK_SIZE,
       interpret=True,
   )
   layer_output = jnp.dot(layer_input, branch_weight, preferred_element_type=jnp.float32)
-  return mhc.post(layer_output, context, block_size=_BLOCK_SIZE, interpret=True)
+  return mhc.post(
+      layer_output,
+      context,
+      block_size=_BLOCK_SIZE,
+      bwd_block_size=_BWD_BLOCK_SIZE,
+      bwd_feature_block_size=_BWD_FEATURE_BLOCK_SIZE,
+      interpret=True,
+  )
 
 
 def _reference_pipeline(permutations, *args):
@@ -231,4 +244,29 @@ def test_pre_rejects_unsupported_shapes(shape, match):
         permutations,
         rms_epsilon=1e-6,
         interpret=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    (
+        ({"bwd_block_size": 10, "bwd_feature_block_size": 128}, "positive multiple of 8"),
+        ({"bwd_block_size": 16, "bwd_feature_block_size": 192}, "positive multiple of 128"),
+        ({"bwd_block_size": 16, "bwd_feature_block_size": 384}, "embedding dimension"),
+    ),
+)
+def test_post_rejects_unsupported_backward_blocks(kwargs, match):
+  x = jnp.zeros((1, 16, 4, 256), jnp.bfloat16)
+  context = (
+      x,
+      jnp.zeros((1, 16, 4), jnp.float32),
+      jnp.zeros((1, 16, 4, 4), jnp.float32),
+  )
+  with pytest.raises(ValueError, match=match):
+    mhc.post(
+        jnp.zeros((1, 16, 256), jnp.bfloat16),
+        context,
+        block_size=8,
+        interpret=True,
+        **kwargs,
     )

@@ -20,9 +20,13 @@ from jax.experimental import pallas as pl
 
 
 DEFAULT_BLOCK_SIZE = 64
+DEFAULT_BWD_BLOCK_SIZE = 32
+DEFAULT_POST_BWD_BLOCK_SIZE = 256
+DEFAULT_POST_BWD_FEATURE_BLOCK_SIZE = 1024
 DEFAULT_VMEM_LIMIT_BYTES = 64 * 1024 * 1024
 PARALLEL_DIMENSION_SEMANTICS = ("parallel",)
 SEQUENTIAL_DIMENSION_SEMANTICS = ("arbitrary",)
+SEQUENTIAL_2D_DIMENSION_SEMANTICS = ("arbitrary", "arbitrary")
 MHCContext = tuple[jax.Array, jax.Array, jax.Array]
 
 
@@ -97,8 +101,24 @@ def post_apply(x, layer_output, h_post, residual):
   return (residual_mix + post_mix).astype(jnp.bfloat16)
 
 
-def validate_inputs(x, block_size, permutations_shape=None):
-  """Validates the shape and dtype constraints of the tuned kernel."""
+def validate_token_block_size(tokens, block_size, *, name):
+  """Validates a token-axis Pallas block size."""
+  if block_size < 8 or block_size % 8:
+    raise ValueError(f"{name} must be a positive multiple of 8; got {block_size}.")
+  if tokens % block_size:
+    raise ValueError(f"The per-device token count ({tokens}) must be divisible by {name} ({block_size}).")
+
+
+def validate_feature_block_size(embedding, block_size):
+  """Validates the feature tile used by the post-application backward."""
+  if block_size < 128 or block_size % 128:
+    raise ValueError(f"bwd_feature_block_size must be a positive multiple of 128; got {block_size}.")
+  if embedding % block_size:
+    raise ValueError(f"The embedding dimension ({embedding}) must be divisible by bwd_feature_block_size ({block_size}).")
+
+
+def validate_inputs(x, block_size, permutations_shape=None, *, block_size_name="block_size"):
+  """Validates the shape, dtype, and forward token block constraints."""
   if x.dtype != jnp.bfloat16:
     raise ValueError(f"The mHC Pallas kernel requires bfloat16 activations; got {x.dtype}.")
   if x.ndim != 4:
@@ -111,8 +131,4 @@ def validate_inputs(x, block_size, permutations_shape=None):
     )
   if embedding % 128:
     raise ValueError(f"The embedding dimension must be divisible by 128; got {embedding}.")
-  tokens = batch * sequence
-  if block_size < 8 or block_size % 8:
-    raise ValueError(f"block_size must be a positive multiple of 8; got {block_size}.")
-  if tokens % block_size:
-    raise ValueError(f"The per-device token count ({tokens}) must be divisible by block_size ({block_size}).")
+  validate_token_block_size(batch * sequence, block_size, name=block_size_name)

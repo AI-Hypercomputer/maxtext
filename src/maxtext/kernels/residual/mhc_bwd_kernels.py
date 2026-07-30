@@ -22,9 +22,21 @@ from jax.experimental.pallas import tpu as pltpu
 from maxtext.kernels.residual import mhc_common
 
 
-def _post_apply_bwd(x, layer_output, h_post, residual, d_output, *, block_size, vmem_limit_bytes, interpret):
-  """Builds the Pallas call for the post-branch backward pass."""
+def _post_apply_bwd(
+    x,
+    layer_output,
+    h_post,
+    residual,
+    d_output,
+    *,
+    block_size,
+    feature_block_size,
+    vmem_limit_bytes,
+    interpret,
+):
+  """Builds the feature-tiled Pallas call for the post-branch backward pass."""
   tokens, streams, embedding = x.shape
+  feature_blocks = embedding // feature_block_size
 
   def kernel(
       x_ref,
@@ -37,18 +49,43 @@ def _post_apply_bwd(x, layer_output, h_post, residual, d_output, *, block_size, 
       d_h_post_ref,
       d_residual_ref,
   ):
-    _, vjp = jax.vjp(
-        mhc_common.post_apply,
-        x_ref[...],
-        layer_output_ref[...],
-        h_post_ref[...],
-        residual_ref[...],
+    feature_block = pl.program_id(1)
+    d_output_f32 = d_output_ref[...].astype(jnp.float32)
+
+    # These gradients are independent across feature tiles.
+    d_x = jnp.einsum(
+        "tkj,tjd->tkd",
+        residual_ref[...].astype(jnp.bfloat16),
+        d_output_f32,
+        preferred_element_type=jnp.float32,
     )
-    d_x, d_layer_output, d_h_post, d_residual = vjp(d_output_ref[...])
-    d_x_ref[...] = d_x
+    d_layer_output = jnp.sum(h_post_ref[...][:, :, None] * d_output_f32, axis=1)
+    d_x_ref[...] = d_x.astype(d_x_ref.dtype)
     d_layer_output_ref[...] = d_layer_output
-    d_h_post_ref[...] = d_h_post
-    d_residual_ref[...] = d_residual
+
+    # The coefficient gradients reduce over features. Consecutive programs revisit the same
+    # small output windows, so only one feature tile is live at a time.
+    d_h_post = jnp.sum(layer_output_ref[...][:, None, :] * d_output_f32, axis=-1)
+    d_residual = jnp.einsum(
+        "tjd,tkd->tjk",
+        d_output_f32,
+        x_ref[...],
+        preferred_element_type=jnp.float32,
+    ).transpose(0, 2, 1)
+
+    @pl.when(feature_block == 0)
+    def initialize_reductions():
+      d_h_post_ref[...] = jnp.zeros_like(d_h_post_ref)
+      d_residual_ref[...] = jnp.zeros_like(d_residual_ref)
+
+    d_h_post_ref[...] += d_h_post
+    d_residual_ref[...] += d_residual
+
+    # post_apply casts residual to bf16. Its VJP therefore rounds d_residual once after the
+    # complete feature reduction; rounding each partial separately would change the result.
+    @pl.when(feature_block == feature_blocks - 1)
+    def round_d_residual():
+      d_residual_ref[...] = d_residual_ref[...].astype(jnp.bfloat16).astype(d_residual_ref.dtype)
 
   return pl.pallas_call(
       kernel,
@@ -58,19 +95,19 @@ def _post_apply_bwd(x, layer_output, h_post, residual, d_output, *, block_size, 
           jax.ShapeDtypeStruct((tokens, streams), h_post.dtype),
           jax.ShapeDtypeStruct((tokens, streams, streams), residual.dtype),
       ),
-      grid=(tokens // block_size,),
+      grid=(tokens // block_size, feature_blocks),
       in_specs=(
-          pl.BlockSpec((block_size, streams, embedding), lambda i: (i, 0, 0)),
-          pl.BlockSpec((block_size, embedding), lambda i: (i, 0)),
-          pl.BlockSpec((block_size, streams), lambda i: (i, 0)),
-          pl.BlockSpec((block_size, streams, streams), lambda i: (i, 0, 0)),
-          pl.BlockSpec((block_size, streams, embedding), lambda i: (i, 0, 0)),
+          pl.BlockSpec((block_size, streams, feature_block_size), lambda token, feature: (token, 0, feature)),
+          pl.BlockSpec((block_size, feature_block_size), lambda token, feature: (token, feature)),
+          pl.BlockSpec((block_size, streams), lambda token, feature: (token, 0)),
+          pl.BlockSpec((block_size, streams, streams), lambda token, feature: (token, 0, 0)),
+          pl.BlockSpec((block_size, streams, feature_block_size), lambda token, feature: (token, 0, feature)),
       ),
       out_specs=(
-          pl.BlockSpec((block_size, streams, embedding), lambda i: (i, 0, 0)),
-          pl.BlockSpec((block_size, embedding), lambda i: (i, 0)),
-          pl.BlockSpec((block_size, streams), lambda i: (i, 0)),
-          pl.BlockSpec((block_size, streams, streams), lambda i: (i, 0, 0)),
+          pl.BlockSpec((block_size, streams, feature_block_size), lambda token, feature: (token, 0, feature)),
+          pl.BlockSpec((block_size, feature_block_size), lambda token, feature: (token, feature)),
+          pl.BlockSpec((block_size, streams), lambda token, feature: (token, 0)),
+          pl.BlockSpec((block_size, streams, streams), lambda token, feature: (token, 0, 0)),
       ),
       cost_estimate=pl.CostEstimate(
           flops=int(2 * (2 * tokens * streams * streams * embedding + tokens * streams * embedding)),
@@ -79,7 +116,7 @@ def _post_apply_bwd(x, layer_output, h_post, residual, d_output, *, block_size, 
       ),
       compiler_params=pltpu.CompilerParams(
           vmem_limit_bytes=vmem_limit_bytes,
-          dimension_semantics=mhc_common.PARALLEL_DIMENSION_SEMANTICS,
+          dimension_semantics=mhc_common.SEQUENTIAL_2D_DIMENSION_SEMANTICS,
       ),
       interpret=interpret,
   )(x, layer_output, h_post, residual, d_output)
@@ -317,7 +354,8 @@ def _coeff_bwd(
 
 
 def _mhc_pallas_vjp_bwd_impl(
-    block_size,
+    _block_size,
+    bwd_block_size,
     vmem_limit_bytes,
     interpret,
     rms_epsilon,
@@ -357,7 +395,7 @@ def _mhc_pallas_vjp_bwd_impl(
       h_pre,
       d_layer_input,
       d_x_acc,
-      block_size=block_size,
+      block_size=bwd_block_size,
       vmem_limit_bytes=vmem_limit_bytes,
       interpret=interpret,
   )
@@ -384,7 +422,7 @@ def _mhc_pallas_vjp_bwd_impl(
       d_h_post,
       d_residual,
       d_x_acc,
-      block_size=block_size,
+      block_size=bwd_block_size,
       vmem_limit_bytes=vmem_limit_bytes,
       interpret=interpret,
       rms_epsilon=rms_epsilon,
@@ -409,7 +447,15 @@ def _mhc_pallas_vjp_bwd_impl(
   )
 
 
-def post_op_bwd(block_size, vmem_limit_bytes, interpret, saved, d_output):
+def post_op_bwd(
+    _block_size,
+    bwd_block_size,
+    bwd_feature_block_size,
+    vmem_limit_bytes,
+    interpret,
+    saved,
+    d_output,
+):
   """Custom-VJP backward rule for the post-branch operation."""
   x, layer_output, h_post, residual = saved
   batch, sequence, streams, embedding = x.shape
@@ -419,7 +465,8 @@ def post_op_bwd(block_size, vmem_limit_bytes, interpret, saved, d_output):
       h_post.reshape(batch * sequence, streams),
       residual.reshape(batch * sequence, streams, streams),
       d_output.reshape(batch * sequence, streams, embedding),
-      block_size=block_size,
+      block_size=bwd_block_size,
+      feature_block_size=bwd_feature_block_size,
       vmem_limit_bytes=vmem_limit_bytes,
       interpret=interpret,
   )

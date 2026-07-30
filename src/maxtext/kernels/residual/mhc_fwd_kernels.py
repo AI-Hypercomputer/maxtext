@@ -40,6 +40,9 @@ from maxtext.kernels.residual import mhc_common
 
 
 DEFAULT_BLOCK_SIZE = mhc_common.DEFAULT_BLOCK_SIZE
+DEFAULT_BWD_BLOCK_SIZE = mhc_common.DEFAULT_BWD_BLOCK_SIZE
+DEFAULT_POST_BWD_BLOCK_SIZE = mhc_common.DEFAULT_POST_BWD_BLOCK_SIZE
+DEFAULT_POST_BWD_FEATURE_BLOCK_SIZE = mhc_common.DEFAULT_POST_BWD_FEATURE_BLOCK_SIZE
 DEFAULT_VMEM_LIMIT_BYTES = mhc_common.DEFAULT_VMEM_LIMIT_BYTES
 
 
@@ -288,9 +291,10 @@ def _pre_forward(
   return output, residuals
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(0, 1, 2, 3, 4))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0, 1, 2, 3, 4, 5))
 def _pre_op(
     block_size,
+    _bwd_block_size,
     vmem_limit_bytes,
     interpret,
     rms_epsilon,
@@ -333,6 +337,7 @@ def _pre_op(
 
 def _pre_op_fwd(
     block_size,
+    _bwd_block_size,
     vmem_limit_bytes,
     interpret,
     rms_epsilon,
@@ -375,8 +380,18 @@ def _pre_op_fwd(
 _pre_op.defvjp(_pre_op_fwd, _mhc_pallas_vjp_bwd_impl)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(0, 1, 2))
-def _post_op(block_size, vmem_limit_bytes, interpret, x, layer_output, h_post, residual):
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0, 1, 2, 3, 4))
+def _post_op(
+    block_size,
+    _bwd_block_size,
+    _bwd_feature_block_size,
+    vmem_limit_bytes,
+    interpret,
+    x,
+    layer_output,
+    h_post,
+    residual,
+):
   """Differentiable post-branch mHC operation."""
   batch, sequence, streams, embedding = x.shape
   output = _post_apply_fwd(
@@ -391,7 +406,17 @@ def _post_op(block_size, vmem_limit_bytes, interpret, x, layer_output, h_post, r
   return output.reshape(batch, sequence, streams, embedding)
 
 
-def _post_op_fwd(block_size, vmem_limit_bytes, interpret, x, layer_output, h_post, residual):
+def _post_op_fwd(
+    block_size,
+    _bwd_block_size,
+    _bwd_feature_block_size,
+    vmem_limit_bytes,
+    interpret,
+    x,
+    layer_output,
+    h_post,
+    residual,
+):
   """Custom-VJP forward rule for the post-branch operation."""
   batch, sequence, streams, embedding = x.shape
   output = _post_apply_fwd(
@@ -426,6 +451,7 @@ def pre(
     rms_epsilon: float,
     pre_mapping_epsilon: float = 1e-6,
     block_size: int = DEFAULT_BLOCK_SIZE,
+    bwd_block_size: int = DEFAULT_BWD_BLOCK_SIZE,
     vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
     interpret: bool = False,
 ) -> tuple[jax.Array, mhc_common.MHCContext]:
@@ -446,7 +472,8 @@ def pre(
     permutations: Permutation matrices with shape [streams!, streams, streams].
     rms_epsilon: Epsilon used by RMSNorm.
     pre_mapping_epsilon: Epsilon added to the pre-gate output.
-    block_size: Token-axis Pallas block size.
+    block_size: Token-axis Pallas block size for the forward kernels.
+    bwd_block_size: Token-axis block size for the coefficient and pre-application backward kernels.
     vmem_limit_bytes: Scoped VMEM limit passed to the Mosaic compiler.
     interpret: Whether to run the Pallas calls in interpret mode.
 
@@ -456,8 +483,10 @@ def pre(
     branch on the branch input.
   """
   mhc_common.validate_inputs(x, block_size, permutations.shape)
+  mhc_common.validate_token_block_size(x.shape[0] * x.shape[1], bwd_block_size, name="bwd_block_size")
   return _pre_op(
       block_size,
+      bwd_block_size,
       vmem_limit_bytes,
       interpret,
       rms_epsilon,
@@ -482,6 +511,8 @@ def post(
     context: mhc_common.MHCContext,
     *,
     block_size: int = DEFAULT_BLOCK_SIZE,
+    bwd_block_size: int = DEFAULT_POST_BWD_BLOCK_SIZE,
+    bwd_feature_block_size: int = DEFAULT_POST_BWD_FEATURE_BLOCK_SIZE,
     vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
     interpret: bool = False,
 ) -> jax.Array:
@@ -490,8 +521,9 @@ def post(
   Args:
     layer_output: Wrapped branch output with shape [batch, sequence, embedding].
     context: Opaque context returned by :func:`pre`.
-    block_size: Token-axis Pallas block size. Must match the value passed to
-      :func:`pre`.
+    block_size: Token-axis Pallas block size for the forward kernel.
+    bwd_block_size: Token-axis block size for the post-application backward kernel.
+    bwd_feature_block_size: Feature-axis block size for the post-application backward kernel.
     vmem_limit_bytes: Scoped VMEM limit passed to the Mosaic compiler.
     interpret: Whether to run the Pallas call in interpret mode.
 
@@ -500,8 +532,12 @@ def post(
   """
   x, h_post, residual = context
   mhc_common.validate_inputs(x, block_size)
+  mhc_common.validate_token_block_size(x.shape[0] * x.shape[1], bwd_block_size, name="bwd_block_size")
+  mhc_common.validate_feature_block_size(x.shape[-1], bwd_feature_block_size)
   return _post_op(
       block_size,
+      bwd_block_size,
+      bwd_feature_block_size,
       vmem_limit_bytes,
       interpret,
       x,

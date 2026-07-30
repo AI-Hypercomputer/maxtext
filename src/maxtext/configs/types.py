@@ -1671,12 +1671,25 @@ class ManifoldConstrainedHyperConnections(BaseModel):
       description=(
           "Use the optimized Pallas TPU kernel for mHC-lite connectivity. "
           "Requires enable_mhc_lite=True, mhc_expansion_rate=4, bfloat16 activations, "
-          "tensor parallelism of 1, and a per-device token count divisible by mhc_pallas_block_size."
+          "tensor parallelism of 1, and per-device dimensions divisible by the configured "
+          "mHC Pallas block sizes."
       ),
   )
   mhc_pallas_block_size: PositiveInt = Field(
       64,
-      description="Token-axis (T = batch * sequence) block size for the mHC Pallas kernel. Must be a multiple of 8.",
+      description="Forward token-axis (T = batch * sequence) block size for the mHC Pallas kernels.",
+  )
+  mhc_pallas_bwd_block_size: PositiveInt = Field(
+      32,
+      description="Token-axis block size for the coefficient and pre-application backward kernels.",
+  )
+  mhc_pallas_post_bwd_block_size: PositiveInt = Field(
+      256,
+      description="Token-axis block size for the post-application backward kernel.",
+  )
+  mhc_pallas_post_bwd_feature_block_size: PositiveInt = Field(
+      1024,
+      description="Feature-axis block size for the post-application backward kernel.",
   )
 
 
