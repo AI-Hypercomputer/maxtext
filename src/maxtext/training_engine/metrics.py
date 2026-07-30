@@ -31,7 +31,9 @@ import numpy as np
 _METRICS_TO_LOG = [
     "learning_rate",
     "loss",
+    "total_weights",
     "gradient_norm",
+    "step_skipped",
     "step_time",
     "tflops",
 ]

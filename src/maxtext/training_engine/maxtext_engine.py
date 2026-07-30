@@ -157,13 +157,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     model = getattr(self._state, "model", None) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
-      raise TypeError("MaxRL requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
+      raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
 
     # Wait for previous computations to finish before dispatching the next one to TPU.
     self._throttler.wait_for_next()
 
     # TODO(mazumdera): This function call should be pre-compiled.
-    loss, _, micro_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+    loss, aux, micro_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
         loss_callable,
         self._config,
         model,
@@ -179,6 +179,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if isinstance(loss, abstract_engine.WeightedMetric):
       self.record_metrics("loss", loss)
+
+    # Record auxiliary metrics.
+    if isinstance(aux, dict):
+      for key, value in aux.items():
+        self.record_metrics(key, value)
 
     self._cached_losses.append(loss)
     if self._accumulated_grads is None:
@@ -219,8 +224,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if hasattr(self._state, "apply_gradients"):
         if getattr(self._config, "skip_step_on_spikes", False):
           grad_norm = max_utils.l2norm_pytree(grads)
+          self.record_metrics("gradient_norm", grad_norm)
           mean_loss = jnp.mean(jnp.array(self._cached_losses)) if self._cached_losses else jnp.array(0.0)
           self._state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
+          opt_obj = getattr(self._state, "optimizer", self._optimizer)
+          if opt_obj is not None:
+            opt_state = nnx.to_pure_dict(nnx.state(opt_obj)).get("opt_state", {})
+            is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
+            if is_skipped is not None:
+              self.record_metrics("step_skipped", is_skipped.astype(jnp.float32))
         else:
           self._state.apply_gradients(grads)
 
