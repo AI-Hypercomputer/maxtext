@@ -229,10 +229,15 @@ install_post_training_deps() {
     echo "Setting up MaxText post-training workflow for $DEVICE device"
 
     # Install build tools needed to compile vllm from source.
-    # With --no-install-recommends, apt-get only installs the dependencies
-    # that are absolutely required for the package to run, without any of the
-    # additional packages that are recommended but not strictly necessary.
-    apt-get update -y && apt-get install -y --no-install-recommends build-essential
+    if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
+        echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list.d/bookworm.list
+        apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build
+        export CC=gcc-12
+        export CXX=g++-12
+    else
+        apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build || \
+        apt-get install -y --no-install-recommends build-essential cmake ninja-build
+    fi
 
     dep_name='src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt'
     echo "Installing requirements from $dep_name"

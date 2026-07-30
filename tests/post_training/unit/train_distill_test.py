@@ -985,18 +985,27 @@ class TrainDistillTest(unittest.TestCase):
     trainer1.is_managed_externally = True
 
     # Mock input mapping
-    trainer1 = trainer1.with_gen_model_input_fn(
-        lambda batch: {
-            "input_tokens": batch.input_tokens,
-            "positions": batch.positions,
-            "attention_mask": batch.input_mask,
-            "decoder_segment_ids": batch.decoder_segment_ids,
-            "targets": batch.targets,
-            "targets_position": batch.targets_position,
-            "targets_segmentation": batch.targets_segmentation,
-            "cache": None,
-        }
-    )
+    def mock_gen_model_input_fn(batch):
+      if isinstance(batch, dict):
+        return batch
+
+      def _get(obj, attr, default=None):
+        if isinstance(obj, dict):
+          return obj.get(attr, default)
+        return getattr(obj, attr, default)
+
+      return {
+          "input_tokens": _get(batch, "input_tokens"),
+          "positions": _get(batch, "positions"),
+          "attention_mask": _get(batch, "input_mask"),
+          "decoder_segment_ids": _get(batch, "decoder_segment_ids"),
+          "targets": _get(batch, "targets"),
+          "targets_position": _get(batch, "targets_position"),
+          "targets_segmentation": _get(batch, "targets_segmentation"),
+          "cache": None,
+      }
+
+    trainer1 = trainer1.with_gen_model_input_fn(mock_gen_model_input_fn)
 
     # 3. Restore pipeline (creates the MaxTextCheckpointManager)
     # pylint: disable=unexpected-keyword-arg
