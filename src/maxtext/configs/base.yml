@@ -584,6 +584,7 @@ logical_axis_rules: [
                       ['engram_dim', ['tensor']],
                       ['dense_layers', []],
                       ['moe_layers', []],
+                      ['local_layers', []],
                       ['mhc', []],
                       # ==========================================
                       # Inference(Prefill, Decode, Cache)
