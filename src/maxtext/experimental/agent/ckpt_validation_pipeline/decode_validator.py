@@ -75,6 +75,7 @@ def validate_checkpoint(report_gcs_dir, maxtext_args):
       "run_name": run_name,
       "model": internal_model_name,
       "success": result.returncode == 0,  # if returncode is 0, command worked
+      "stdout": result.stdout,  # store standard output (contains generated text like "Input ... -> ...")
       "stderr": (result.stderr if result.returncode != 0 else "Success"),  # store error message if there's a failure
       "checkpoint_used": checkpoint_path,
   }
