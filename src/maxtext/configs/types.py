@@ -851,6 +851,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
   )
+  ragged_sort_use_single_sparsecore: bool = Field(
+      False,
+      description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -1117,11 +1121,29 @@ class HardwareAndMesh(BaseModel):
       description="Customized mesh and logical rules for evaluation.",
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
-  enable_nnx: bool = Field(True, description="Whether to use NNX for model definition.")
+  enable_nnx: bool = Field(
+      True,
+      description=(
+          "Whether to use NNX for model definition. Setting this to False selects the Linen path, "
+          "which will be deprecated in the near future."
+      ),
+  )
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
-  pure_nnx_decoder: bool = Field(True, description="Whether to enable pure NNX decoder.")
-  pure_nnx: bool = Field(True, description="Whether to enable pure NNX mode.")
+  pure_nnx_decoder: bool = Field(
+      True,
+      description=(
+          "Whether to enable pure NNX decoder. Setting this to False selects the Linen decoder, "
+          "which will be deprecated in the near future."
+      ),
+  )
+  pure_nnx: bool = Field(
+      True,
+      description=(
+          "Whether to enable pure NNX mode. Setting this to False selects the Linen path, "
+          "which will be deprecated in the near future."
+      ),
+  )
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
@@ -1630,7 +1652,8 @@ class TrainingLoop(BaseModel):
   log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush Tensorboard.")
   eval_start_step: int = Field(
       0,
-      description="Start evaluation after training step is >= eval_start_step.",
+      ge=0,
+      description="Start evaluation when training step is >= eval_start_step.",
   )
   eval_interval: int = Field(
       -1,
@@ -2065,6 +2088,10 @@ class ElasticTraining(BaseModel):
   """
 
   elastic_enabled: bool = Field(False, description="Whether to enable elastic training.")
+  elastic_backup_kind: str = Field(
+      "snapshot",
+      description=("The kind of backup to use for elastic training: 'snapshot' or 'checkpoint'."),
+  )
   elastic_timeout_seconds: int = Field(
       300,
       description=(
@@ -2921,6 +2948,24 @@ class MaxTextConfig(
             "so quantization (and weight sparsity) would silently have no effect. Set pure_nnx_decoder=True."
         )
 
+    # TODO: Remove this block once the Linen code path and the enable_nnx, pure_nnx and pure_nnx_decoder flags are deleted.
+    linen_flags = [
+        name
+        for name, value in (
+            ("enable_nnx", self.enable_nnx),
+            ("pure_nnx", self.pure_nnx),
+            ("pure_nnx_decoder", self.pure_nnx_decoder),
+        )
+        if not value
+    ]
+    if linen_flags:
+      logger.warning("=" * 80)
+      logger.warning("MAXTEXT DEPRECATION NOTICE: you are running on the Linen code path.")
+      logger.warning("Selected by: %s", ", ".join(f"{name}=False" for name in linen_flags))
+      logger.warning("Linen will be deprecated in the near future and removed after that.")
+      logger.warning("Plan to migrate to NNX: leave enable_nnx, pure_nnx and pure_nnx_decoder at their default of True.")
+      logger.warning("=" * 80)
+
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
       raise ValueError(f"distill_alpha_end must be in [0, 1], got {self.distill_alpha_end}")
@@ -3258,6 +3303,10 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
+      raise ValueError(
+          "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."
+      )
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
           "Colocated python data input is only supported with Pathways (single"
@@ -3481,8 +3530,6 @@ class MaxTextConfig(
         raise ValueError("TPU ring context parallelism requires use_jax_splash=False.")
       if self.attention_type != "global":
         raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
-      if self.packing:
-        raise ValueError("TPU Tokamax ring attention does not support packing yet.")
       if self.context_parallel_load_balance:
         if context_parallel_size % 2 != 0:
           raise ValueError("TPU Tokamax ring load balancing requires an even context_parallel_size.")
@@ -3505,9 +3552,8 @@ class MaxTextConfig(
       if self.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
-    # The AUTO + packing case, which training resolves to STRIPED, is not
-    # validated here because test code paths may load the same config but use a
-    # different reorder path. Training's runtime path enforces this.
+    # AUTO is resolved in training because test code paths may load the same
+    # config but use a different reorder path.
     if (
         context_parallel_size > 1
         and "gpu" not in self.hardware
@@ -3610,6 +3656,7 @@ class MaxTextConfig(
 
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,

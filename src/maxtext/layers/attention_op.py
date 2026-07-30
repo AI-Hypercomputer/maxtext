@@ -534,8 +534,6 @@ class AttentionOp(nnx.Module):
           raise ValueError("TPU Tokamax ring attention requires use_tokamax_splash=True.")
         if self.config.use_jax_splash:
           raise ValueError("TPU Tokamax ring attention requires use_jax_splash=False.")
-        if self.config.packing:
-          raise ValueError("TPU Tokamax ring attention does not support packing yet.")
         if self.attention_type != AttentionType.GLOBAL:
           raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
 
@@ -1073,6 +1071,7 @@ class AttentionOp(nnx.Module):
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
+        or (self.attention_kernel == "autoselected" and target_hardware == "cpu")
         or (self.attention_kernel == "paged")
         or (self.attention_kernel in ("vllm_rpa", "vllm_batched_rpa"))
     ):
@@ -1505,7 +1504,7 @@ class AttentionOp(nnx.Module):
         )
         return splash_kernel
 
-      head_physical_axes = logical_to_mesh_axes((HEAD,), self.mesh)[0]
+      head_physical_axes = self._logical_to_mesh_axes((HEAD,))[0]
       head_physical_axes = (head_physical_axes,) if isinstance(head_physical_axes, str) else (head_physical_axes or ())
       shard_head_size = math.prod(self.mesh.shape.get(ax, 1) for ax in head_physical_axes)
       splash_kernel = wrap_jax_splash_kernel(multi_head_mask, shard_head_size)

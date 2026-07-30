@@ -32,7 +32,8 @@ from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
-from maxtext.training_engine import metrics
+from maxtext.training_engine import inflight_throttler
+from maxtext.training_engine import metrics as metrics_module
 from maxtext.utils import gradient_accumulation
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -87,7 +88,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         checkpoint_dir=getattr(self._config, "checkpoint_directory", ""),
         config=self._config,
     )
-    self._metrics_logger = metrics.MetricsLogger(self._config)
+    self._metrics_recorder = metrics_module.MetricsRecorder()
+    self._throttler = inflight_throttler.InflightThrottler(config=self._config)
 
   @property
   def model(self) -> Any:
@@ -156,6 +158,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     model = getattr(self._state, "model", None) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxRL requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
+
+    # Wait for previous computations to finish before dispatching the next one to TPU.
+    self._throttler.wait_for_next()
+
     # TODO(mazumdera): This function call should be pre-compiled.
     loss, _, micro_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
         loss_callable,
@@ -166,6 +172,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         batch,
         None,
     )
+
+    # Don't add metrics to the throttler queue because metrics are logged after
+    # the update step.
+    self._throttler.add_computation(computation=loss, metrics=None)
 
     if isinstance(loss, abstract_engine.WeightedMetric):
       self.record_metrics("loss", loss)
@@ -184,12 +194,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if self._accumulated_grads is None:
       return
+
+    if self._learning_rate_schedule is not None:
+      try:
+        lr = self._learning_rate_schedule(self.train_step)
+        self.record_metrics("learning_rate", lr)
+      except Exception:  # pylint: disable=broad-except
+        pass
+
+    # Wait for previous computations to finish before dispatching the update step to TPU.
+    self._throttler.wait_for_next()
+
     # TODO(mazumdera): The logic below should be pre-compiled.
     if self._state is not None:
       # TODO(mazumdera): Figure out how exactly we should normalize the losses
       # (if at all). Given that inputs are varying in size, it not correct to
       # simply divide by the number of micro-steps.
-      grads = jax.tree.map(lambda g: g / max(self._micro_step_count, 1), self._accumulated_grads)
+      grads = jax.tree.map(
+          lambda g: g / max(self._micro_step_count, 1),
+          self._accumulated_grads,
+      )
       if getattr(self._config, "gradient_clipping_threshold", 0.0) > 0:
         grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       if hasattr(self._state, "apply_gradients"):
@@ -199,15 +223,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           self._state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
         else:
           self._state.apply_gradients(grads)
+
+    # Add the state to the throttler queue so jax.block_until_ready() waits
+    # for the optimizer update to complete before logging the metrics.
+    self._throttler.add_computation(
+        self._state if self._state is not None else self._model,
+        self._metrics_recorder.get_step_metrics(self.train_step),
+    )
+
     self._cached_losses.clear()
     self._accumulated_grads = None
     self._micro_step_count = 0
-    if hasattr(self, "_learning_rate_schedule") and self._learning_rate_schedule is not None:
-      try:
-        lr = self._learning_rate_schedule(self.train_step)
-        self.record_metrics("lr", lr)
-      except Exception:  # pylint: disable=broad-except
-        pass
     self._train_step += 1
 
   def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
@@ -225,8 +251,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metadata: Checkpoint metadata payload from Orchestrator.
       **kwargs: Additional checkpoint saving options.
     """
+    # Drain all inflight computations and log pending metrics before checkpointing.
+    self._throttler.wait_for_all()
+
     step = kwargs.get("step", self.train_step)
-    # TODO(mazumdera): Also save self._accumulated_grads and _micro_step_count.
+    # TODO: b/540072773 - Also save self._accumulated_grads and _micro_step_count.
     ckpt_saved = self._checkpoint_manager.save_checkpoint(
         step=step,
         model=self.model,
@@ -269,7 +298,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metric: The metric to record.
       aggregation_fn: The aggregation function to apply to the metric.
     """
-    self._metrics_logger.buffer_metrics(
+    self._metrics_recorder.buffer_metrics(
         train_step=self.train_step,
         name=name,
         metric=metric,
@@ -285,7 +314,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       On-device MetricsBuffer containing WeightedMetric and scalar arrays.
     """
-    return self._metrics_logger.get_metrics(clear_cache=clear_cache)
+    return self._metrics_recorder.get_metrics(clear_cache=clear_cache)
 
   def prepare_weight_sync(self, **kwargs: Any) -> Any:
     """Stages weights for transfer and returns access coordinates.
@@ -300,4 +329,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def close(self) -> None:
     """Closes the trainer and its associated resources."""
+    self._throttler.cleanup()
+    self._metrics_recorder.cleanup()
     self._checkpoint_manager.close()

@@ -211,6 +211,7 @@ class DeepSeekGenericLayer(nnx.Module):
       decoder_segment_ids,
       decoder_positions,
       deterministic,
+      model_mode,
       previous_chunk=None,
       slot: None | int = None,
   ):
@@ -221,7 +222,7 @@ class DeepSeekGenericLayer(nnx.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
-        model_mode=self.model_mode,
+        model_mode=model_mode,
         out_sharding=self.out_sharding,
         previous_chunk=previous_chunk,
         slot=slot,
@@ -270,6 +271,7 @@ class DeepSeekGenericLayer(nnx.Module):
       decoder_segment_ids,
       decoder_positions,
       deterministic,
+      model_mode,
       previous_chunk=None,
       slot: None | int = None,
   ):
@@ -283,7 +285,7 @@ class DeepSeekGenericLayer(nnx.Module):
           decoder_segment_ids=decoder_segment_ids,
           inputs_positions=decoder_positions,
           deterministic=deterministic,
-          model_mode=self.model_mode,
+          model_mode=model_mode,
           out_sharding=self.out_sharding,
           previous_chunk=previous_chunk,
           slot=slot,
@@ -295,6 +297,7 @@ class DeepSeekGenericLayer(nnx.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
+          model_mode,
           previous_chunk,
           slot,
       )
@@ -368,6 +371,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
+        model_mode,
         previous_chunk,
         slot,
     )
@@ -581,6 +585,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
+        model_mode,
         previous_chunk,
         slot,
     )

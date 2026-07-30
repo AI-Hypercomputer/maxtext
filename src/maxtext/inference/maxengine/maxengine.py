@@ -145,11 +145,16 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       # nnx.merge. `rest` (RNG state etc.) is materialized in load_params.
       graphdef, _, _, _ = nnx.split(abstract_model, nnx.Param, nnx.Cache, ...)
       self.graphdef = graphdef
+      # Layers may bake their construction-time model_mode into static attributes,
+      # so a call must be merged with the graphdef built for that same mode.
+      graphdef_ar, _, _, _ = nnx.split(abstract_model_ar, nnx.Param, nnx.Cache, ...)
+      self.graphdef_ar = graphdef_ar
       self._create_model_fn = _create_model
       self._nnx_rest_state = None
     else:
       self.model = models.transformer_as_linen(config, mesh=self._mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
       self.graphdef = None
+      self.graphdef_ar = None
       self._create_model_fn = None
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
 
@@ -164,6 +169,8 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     self.decode_state_layouts = None
     self.param_layouts = None
     self.rng = None
+    self._compiled_initialize_fn = None
+    self._compiled_init_cache_fn = None
 
   def print_stats(self, label: str):
     max_utils.print_mem_stats(label)
@@ -218,10 +225,14 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     """NNX equivalent of `model.apply(..., mutable=["cache"])`. Returns (logits, new_cache_dict)."""
     cache_state = self._nnx_cache_state_template(mode=model_mode)
     nnx.replace_by_pure_dict(cache_state, cache_dict)
+    # Merge with the graphdef built for this mode. Layers that captured their
+    # model_mode at construction (e.g. the DeepSeek layers) would otherwise run
+    # the prefill attention path during autoregressive decode.
+    graphdef = self.graphdef_ar if model_mode == MODEL_MODE_AUTOREGRESSIVE else self.graphdef
     # copy=True avoids reusing Variable objects across traces (TraceContextError),
     # mirroring the workaround in train.py's diff_wrapper.
     model = nnx.merge(
-        self.graphdef, params, cache_state, self._nnx_rest_state, copy=True
+        graphdef, params, cache_state, self._nnx_rest_state, copy=True
     )  # pyrefly: ignore[no-matching-overload]
     logits = model(
         decoder_input_tokens,
@@ -1974,11 +1985,15 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         mesh_annotations,
     )
 
-    @functools.partial(jax.jit, out_shardings=shardings)
-    def initialize():
-      return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
+    if self._compiled_initialize_fn is None:
 
-    init_state = initialize()
+      @functools.partial(jax.jit, out_shardings=shardings)
+      def initialize():
+        return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
+
+      self._compiled_initialize_fn = initialize
+
+    init_state = self._compiled_initialize_fn()
     cache = init_state["cache"]
 
     def is_lp(k):
@@ -2002,11 +2017,15 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     # AR-mode cache so the batch dim matches generate's input shape.
     cache_dict_abs = self._nnx_init_cache_dict(mode=MODEL_MODE_AUTOREGRESSIVE)
 
-    @functools.partial(jax.jit, out_shardings=(self.kv_cache_shardings,))
-    def _init_cache():
-      return (jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict_abs),)
+    if self._compiled_init_cache_fn is None:
 
-    (cache,) = _init_cache()
+      @functools.partial(jax.jit, out_shardings=(self.kv_cache_shardings,))
+      def _init_cache():
+        return (jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict_abs),)
+
+      self._compiled_init_cache_fn = _init_cache
+
+    (cache,) = self._compiled_init_cache_fn()
 
     # Per-leaf logical axes for bulk_insert's "cache_batch" lookup. Use model_ar
     # so segment_id leaves carry CACHE_BATCH (under PREFILL they'd carry

@@ -2824,112 +2824,76 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
     num_experts = tcfg.get("num_experts")
     num_experts = num_experts if num_experts is not None else 1
 
-    # Main scanned blocks
-    for layer_in_block in range(attention_pattern_length):
-      hf_indices = list(range(layer_in_block, num_scanned, attention_pattern_length))
-      prefix = f"params-decoder-scanned_blocks-layers_{layer_in_block}"
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-self_attention-query-kernel": [
-                  f"{text_base}.layers.{i}.self_attn.q_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-self_attention-key-kernel": [
-                  f"{text_base}.layers.{i}.self_attn.k_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-self_attention-value-kernel": (
-                  None
-                  if share_kv_projections and layer_in_block == 5
-                  else [f"{text_base}.layers.{i}.self_attn.v_proj.weight" for i in hf_indices]
-              ),
-              f"{prefix}-self_attention-out-kernel": [
-                  f"{text_base}.layers.{i}.self_attn.o_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-self_attention-query_norm-scale": [
-                  f"{text_base}.layers.{i}.self_attn.q_norm.weight" for i in hf_indices
-              ],
-              f"{prefix}-self_attention-key_norm-scale": [
-                  f"{text_base}.layers.{i}.self_attn.k_norm.weight" for i in hf_indices
-              ],
-          }
-      )
-      if maxtext_config.v_norm_with_scale:
-        mapping.update(  # pyrefly: ignore[no-matching-overload]
-            {
-                f"{prefix}-self_attention-value_norm-scale": [
-                    f"{text_base}.layers.{i}.self_attn.v_norm.weight" for i in hf_indices
-                ]
-            }
-        )
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-pre_self_attention_norm-scale": [
-                  f"{text_base}.layers.{i}.input_layernorm.weight" for i in hf_indices
-              ],
-              f"{prefix}-post_self_attention_norm-scale": [
-                  f"{text_base}.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
-              ],
-              f"{prefix}-pre_ffw_norm-scale": [
-                  f"{text_base}.layers.{i}.pre_feedforward_layernorm.weight" for i in hf_indices
-              ],
-              f"{prefix}-post_ffw_norm-scale": [
-                  f"{text_base}.layers.{i}.post_feedforward_layernorm.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-pre_feedforward_layernorm_2-scale": [
-                  f"{text_base}.layers.{i}.pre_feedforward_layernorm_2.weight" if num_experts > 1 else None
-                  for i in hf_indices
-              ],
-              f"{prefix}-mlp-post_feedforward_layernorm_1-scale": [
-                  f"{text_base}.layers.{i}.post_feedforward_layernorm_1.weight" if num_experts > 1 else None
-                  for i in hf_indices
-              ],
-              f"{prefix}-mlp-post_feedforward_layernorm_2-scale": [
-                  f"{text_base}.layers.{i}.post_feedforward_layernorm_2.weight" if num_experts > 1 else None
-                  for i in hf_indices
-              ],
-              f"{prefix}-mlp-pre_forward_scale_2": [
-                  f"{text_base}.layers.{i}.router.scale" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-wi_0-kernel": [
-                  f"{text_base}.layers.{i}.mlp.gate_proj.weight" if num_experts == 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-wi_1-kernel": [
-                  f"{text_base}.layers.{i}.mlp.up_proj.weight" if num_experts == 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-wo-kernel": [
-                  f"{text_base}.layers.{i}.mlp.down_proj.weight" if num_experts == 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-moe_block-MoeBlock_0-gate-kernel": [
-                  f"{text_base}.layers.{i}.router.proj.weight" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": [
-                  f"{text_base}.layers.{i}.experts.gate_up_proj" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": [
-                  f"{text_base}.layers.{i}.experts.gate_up_proj" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wo": [
-                  f"{text_base}.layers.{i}.experts.down_proj" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": [
-                  f"{text_base}.layers.{i}.router.per_expert_scale" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-moe_block-shared_experts-wi_0-kernel": [
-                  f"{text_base}.layers.{i}.mlp.gate_proj.weight" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-moe_block-shared_experts-wi_1-kernel": [
-                  f"{text_base}.layers.{i}.mlp.up_proj.weight" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-moe_block-shared_experts-wo-kernel": [
-                  f"{text_base}.layers.{i}.mlp.down_proj.weight" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-layer_scalar": [f"{text_base}.layers.{i}.layer_scalar" for i in hf_indices],
-          }
-      )
-      mapping = {
-          k: v
-          for k, v in mapping.items()
-          if (isinstance(v, list) and len(v) > 0 and v[0] is not None) or (not isinstance(v, list) and v is not None)
-      }
+    # Main scanned blocks. The block runs 5 local (sliding-window) layers as an
+    # inner scan, then a single global layer, so the scanned params are:
+    #   scanned_blocks-local_layers-*  -> nested [block][local]  (doubly scanned)
+    #   scanned_blocks-global_layer-*  -> flat [block]           (block scan only; the
+    #     length-1 _scan_global_layer scan is a runtime memory boundary, not a param stack)
+    num_blocks = num_scanned // attention_pattern_length
+
+    def hf_layer(idx, suffix):
+      return f"{text_base}.layers.{idx}.{suffix}"
+
+    # (maxtext subkey, hf suffix, gate) with gate in {"always", "dense", "moe"}.
+    # The attention value projection and value_norm are handled separately below.
+    param_specs = [
+        ("self_attention-query-kernel", "self_attn.q_proj.weight", "always"),
+        ("self_attention-key-kernel", "self_attn.k_proj.weight", "always"),
+        ("self_attention-out-kernel", "self_attn.o_proj.weight", "always"),
+        ("self_attention-query_norm-scale", "self_attn.q_norm.weight", "always"),
+        ("self_attention-key_norm-scale", "self_attn.k_norm.weight", "always"),
+        ("pre_self_attention_norm-scale", "input_layernorm.weight", "always"),
+        ("post_self_attention_norm-scale", "post_attention_layernorm.weight", "always"),
+        ("pre_ffw_norm-scale", "pre_feedforward_layernorm.weight", "always"),
+        ("post_ffw_norm-scale", "post_feedforward_layernorm.weight", "always"),
+        ("mlp-pre_feedforward_layernorm_2-scale", "pre_feedforward_layernorm_2.weight", "moe"),
+        ("mlp-post_feedforward_layernorm_1-scale", "post_feedforward_layernorm_1.weight", "moe"),
+        ("mlp-post_feedforward_layernorm_2-scale", "post_feedforward_layernorm_2.weight", "moe"),
+        ("mlp-pre_forward_scale_2", "router.scale", "moe"),
+        ("mlp-wi_0-kernel", "mlp.gate_proj.weight", "dense"),
+        ("mlp-wi_1-kernel", "mlp.up_proj.weight", "dense"),
+        ("mlp-wo-kernel", "mlp.down_proj.weight", "dense"),
+        ("mlp-moe_block-MoeBlock_0-gate-kernel", "router.proj.weight", "moe"),
+        ("mlp-moe_block-MoeBlock_0-wi_0", "experts.gate_up_proj", "moe"),
+        ("mlp-moe_block-MoeBlock_0-wi_1", "experts.gate_up_proj", "moe"),
+        ("mlp-moe_block-MoeBlock_0-wo", "experts.down_proj", "moe"),
+        ("mlp-moe_block-MoeBlock_0-per_expert_scale", "router.per_expert_scale", "moe"),
+        ("mlp-moe_block-shared_experts-wi_0-kernel", "mlp.gate_proj.weight", "moe"),
+        ("mlp-moe_block-shared_experts-wi_1-kernel", "mlp.up_proj.weight", "moe"),
+        ("mlp-moe_block-shared_experts-wo-kernel", "mlp.down_proj.weight", "moe"),
+        ("layer_scalar", "layer_scalar", "always"),
+    ]
+    if maxtext_config.v_norm_with_scale:
+      param_specs.append(("self_attention-value_norm-scale", "self_attn.v_norm.weight", "always"))
+
+    def _spec_active(gate):
+      return gate == "always" or (gate == "dense" and num_experts == 1) or (gate == "moe" and num_experts > 1)
+
+    # Local layers (block positions 0..4): nested [block][local] -> inner scan.
+    local_prefix = "params-decoder-scanned_blocks-local_layers"
+    local_positions = list(range(attention_pattern_length - 1))
+    for subkey, suffix, gate in param_specs:
+      if _spec_active(gate):
+        mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[no-matching-overload]
+            [hf_layer(b * attention_pattern_length + l, suffix) for l in local_positions] for b in range(num_blocks)
+        ]
+    mapping[f"{local_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[no-matching-overload]
+        [hf_layer(b * attention_pattern_length + l, "self_attn.v_proj.weight") for l in local_positions]
+        for b in range(num_blocks)
+    ]
+
+    # Global layer (block position 5): single layer scanned over blocks only.
+    global_prefix = "params-decoder-scanned_blocks-global_layer"
+    global_position = attention_pattern_length - 1
+    for subkey, suffix, gate in param_specs:
+      if _spec_active(gate):
+        mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[no-matching-overload]
+            hf_layer(b * attention_pattern_length + global_position, suffix) for b in range(num_blocks)
+        ]
+    if not share_kv_projections:
+      mapping[f"{global_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[no-matching-overload]
+          hf_layer(b * attention_pattern_length + global_position, "self_attn.v_proj.weight") for b in range(num_blocks)
+      ]
 
     # Remainder layers
     if num_remaining > 0:
@@ -3444,10 +3408,10 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
     attention_pattern_length = 6
     num_remaining = nlayers % attention_pattern_length
 
-    # Scanned sub-layer prefixes
-    for layer_in_block in range(attention_pattern_length):
-      is_global = layer_in_block % 6 == 5
-      prefix = f"params-decoder-scanned_blocks-layers_{layer_in_block}"
+    # Scanned block prefixes. The hooks are per-layer-slice, so they are identical
+    # regardless of scan nesting; only the prefix (and is_global for the shared-kv
+    # skip) differ between the local layers and the single global layer.
+    def _attach_block_hooks(prefix, is_global):
       for key in kernel_keys:
         if share_kv_projections and is_global and key == "self_attention-value-kernel":
           continue
@@ -3456,8 +3420,6 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
         hooks[f"{prefix}-{key}"] = reshape_kernel
       for key in norm_keys:
         hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
-
-      # Add these specialized 3D tensor hooks inside the loop
       if saving_to_hf and num_experts > 1:
         wi0_key = f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"
         wi1_key = f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"
@@ -3466,6 +3428,9 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
         hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
         hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
       hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
+
+    _attach_block_hooks("params-decoder-scanned_blocks-local_layers", is_global=False)
+    _attach_block_hooks("params-decoder-scanned_blocks-global_layer", is_global=True)
 
     # Remainder sub-layer prefixes
     if num_remaining > 0:

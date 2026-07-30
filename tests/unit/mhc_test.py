@@ -243,8 +243,10 @@ class TestMHC(parameterized.TestCase):
       random_x = jax.random.normal(jax.random.PRNGKey(42), (b, s, k * d))
       norm_x = module.mhc_norm(random_x)
 
-      # Output from mHC-lite mapping
-      res_mapping_out = module.res_mapping(norm_x)
+      # Output from mHC-lite mapping (using post_matmul API)
+      res_alpha = jnp.asarray(module.res_alpha[...], module.dtype)
+      h_res = jnp.einsum("bsm,mn -> bsn", norm_x, res_alpha, precision=module.matmul_precision)
+      res_mapping_out = module.res_mapping(h_res)
 
       row_sums = jnp.sum(res_mapping_out, axis=-1)
       col_sums = jnp.sum(res_mapping_out, axis=-2)
@@ -252,6 +254,38 @@ class TestMHC(parameterized.TestCase):
       # Check if sums are close to 1.0
       np.testing.assert_allclose(row_sums, jnp.ones_like(row_sums), atol=1e-2)
       np.testing.assert_allclose(col_sums, jnp.ones_like(col_sums), atol=1e-2)
+
+  def test_weight_concatenation_equivalence(self):
+    """Verify that fused projection matches sequential projections."""
+    self._setup_mhc(4)
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
+
+      b, s, k, d = self.x.shape
+      x_flat = jnp.reshape(self.x, (b, s, k * d))
+      norm_x = module.mhc_norm(x_flat)
+
+      # Sequential Projections (Old way)
+      pre_alpha = jnp.asarray(module.pre_alpha[...], module.dtype)
+      post_alpha = jnp.asarray(module.post_alpha[...], module.dtype)
+      res_alpha = jnp.asarray(module.res_alpha[...], module.dtype)
+
+      h_pre_seq = jnp.einsum("bsm,mk -> bsk", norm_x, pre_alpha, precision=module.matmul_precision)
+      h_post_seq = jnp.einsum("bsm,mk -> bsk", norm_x, post_alpha, precision=module.matmul_precision)
+      h_res_seq = jnp.einsum("bsm,mn -> bsn", norm_x, res_alpha, precision=module.matmul_precision)
+
+      # Fused Projection (New way)
+      alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
+      h_concat = jnp.einsum("bsm,mn -> bsn", norm_x, alpha_concat, precision=module.matmul_precision)
+
+      h_pre_fused = h_concat[..., : module.k]
+      h_post_fused = h_concat[..., module.k : 2 * module.k]
+      h_res_fused = h_concat[..., 2 * module.k :]
+
+      # Verify equivalence
+      np.testing.assert_allclose(h_pre_seq, h_pre_fused, rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(h_post_seq, h_post_fused, rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(h_res_seq, h_res_fused, rtol=1e-5, atol=1e-5)
 
   def test_feature_flag_gates_lite(self):
     """Verify that setting enable_mhc_lite=False falls back to Sinkhorn."""
