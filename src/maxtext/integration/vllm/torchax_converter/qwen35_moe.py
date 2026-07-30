@@ -49,13 +49,13 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
     return self.vllm_state
 
   def _convert_global(self, params):
-    self.vllm_state["vllm_model.language_model.model.embed_tokens.weight"] = jnp.array(
+    self.vllm_state["vllm_model.model.embed_tokens.weight"] = jnp.array(
         params["base"]["token_embedder"]["embedding"]
     )
-    self.vllm_state["vllm_model.language_model.model.norm.weight"] = jnp.array(
+    self.vllm_state["vllm_model.model.norm.weight"] = jnp.array(
         params["base"]["decoder"]["decoder_norm"]["scale"]
     )
-    self.vllm_state["vllm_model.language_model.lm_head.weight"] = jnp.transpose(
+    self.vllm_state["vllm_model.lm_head.weight"] = jnp.transpose(
         params["base"]["decoder"]["logits_dense"]["kernel"], (1, 0)
     )
 
@@ -89,7 +89,7 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
 
         for rep in range(self.num_reps):
           i = rep * self.num_slots + slot
-          prefix = f"vllm_model.language_model.model.layers.{i}"
+          prefix = f"vllm_model.model.layers.{i}"
 
           self.vllm_state[f"{prefix}.input_layernorm.weight"] = pre_ln[rep]
           self.vllm_state[f"{prefix}.post_attention_layernorm.weight"] = post_ln[rep]
@@ -129,7 +129,7 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
 
         for rep in range(self.num_reps):
           i = rep * self.num_slots + slot
-          prefix = f"vllm_model.language_model.model.layers.{i}"
+          prefix = f"vllm_model.model.layers.{i}"
 
           self.vllm_state[f"{prefix}.input_layernorm.weight"] = pre_ln[rep]
           self.vllm_state[f"{prefix}.post_attention_layernorm.weight"] = post_ln[rep]
@@ -251,7 +251,7 @@ class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
 
       for rep in range(self.num_reps):
         i = rep * self.num_slots + slot
-        p = f"vllm_model.language_model.model.layers.{i}"
+        p = f"vllm_model.model.layers.{i}"
 
         self.vllm_state[f"{p}.mlp.gate.weight"] = jnp.transpose(router_weights[rep], (1, 0))
         self.vllm_state[f"{p}.mlp.experts.w13_weight"] = w13_layers[rep]
