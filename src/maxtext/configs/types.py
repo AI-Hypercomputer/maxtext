@@ -3340,10 +3340,15 @@ class MaxTextConfig(
       if self.eval_interval > 0 and not self.hf_eval_split:
         raise ValueError("Please specify hf_eval_split or set eval_interval to <=0.")
     elif self.dataset_type == DatasetType.GRAIN:
-      if not self.grain_train_files and not self.grain_train_mixture_config_path:
-        raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
-      if self.eval_interval > 0 and not self.grain_eval_files:
-        raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
+      use_hf_parquet = self.hf_path and self.grain_file_type == "parquet"
+
+      if not self.grain_train_files and not self.grain_train_mixture_config_path and not use_hf_parquet:
+        raise ValueError(
+            "When dataset_type=grain, set grain_train_files, "
+            "grain_train_mixture_config_path, or use hf_path with grain_file_type=parquet."
+        )
+      if self.eval_interval > 0 and not self.grain_eval_files and not use_hf_parquet:
+        raise ValueError("Please specify grain_eval_files (or hf_path with parquet) or set eval_interval to <=0.")
     elif self.dataset_type == DatasetType.TFDS:
       logger.warning(
           "tfds pipeline is deprecated. Use dataset_type=grain, grain_file_type=tfrecord, and provide grain_train_files."

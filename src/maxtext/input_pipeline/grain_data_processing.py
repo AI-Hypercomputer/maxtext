@@ -16,6 +16,7 @@
 
 import math
 import glob
+import re
 from pathlib import Path
 import functools
 import ml_collections
@@ -36,14 +37,54 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
 
-def find_data_files(data_file_pattern):
+def construct_hf_dataset_path(hf_path: str, hf_train_files: str | None = None, split: str = "train") -> str:
+  """
+  Constructs a robust Hugging Face fsspec (hf://) path for dataset loading.
+  """
+  hf_path = hf_path.strip().strip("/")
+
+  scheme_prefix = "hf://"
+  if hf_path.startswith("hf://"):
+    hf_path = hf_path[len("hf://") :]
+
+  if not hf_path.startswith("datasets/"):
+    hf_path = f"datasets/{hf_path}"
+
+  match = re.match(r"^([^@]+)(@.+)?$", hf_path)
+  repo_path = match.group(1) if match else hf_path
+  revision_suffix = match.group(2) if match and match.group(2) else ""
+
+  if hf_train_files:
+    file_pattern = hf_train_files.lstrip("/")
+  else:
+    if split:
+      file_pattern = f"**/*{split}*.parquet"
+    else:
+      file_pattern = "**/*.parquet"
+
+  full_path = f"{scheme_prefix}{repo_path}{revision_suffix}/{file_pattern}"
+  return full_path
+
+
+def find_data_files(data_file_pattern, hf_access_token=None):
   """Find data files matching the pattern."""
   if data_file_pattern.startswith("gs://"):
     data_files = gcs_utils.gcs_glob_pattern(data_file_pattern)
+  elif data_file_pattern.startswith("hf://"):
+    from huggingface_hub import HfFileSystem  # pylint: disable=import-outside-toplevel
+
+    fs = HfFileSystem(token=hf_access_token)
+    stripped_pattern = data_file_pattern[len("hf://") :]
+    data_files = [f"hf://{f}" for f in fs.glob(stripped_pattern)]
   else:
     # Local files
     data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
   if not data_files:
+    if data_file_pattern.startswith("hf://") and "/**/*.parquet" in data_file_pattern:
+      raise FileNotFoundError(
+          f"No parquet files found for HuggingFace dataset pattern: {data_file_pattern}. "
+          "Please make sure the dataset contains parquet files."
+      )
     raise FileNotFoundError(f"No files found matching pattern: {data_file_pattern}")
   max_logging.log(f"Found {len(data_files)} files for train/eval with grain")
   return data_files
@@ -96,12 +137,13 @@ def get_datasets(
     grain_data_source_max_workers,
     mixture_config_path=None,
     elastic=False,
+    hf_access_token=None,
 ):
   """Load dataset from array_record files for using with grain"""
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
-      files = find_data_files(pattern)
+      files = find_data_files(pattern, hf_access_token=hf_access_token)
       source = grain.ArrayRecordDataSource(files)
       return grain.MapDataset.source(source)
 
@@ -181,7 +223,7 @@ def get_datasets(
       )
       return dataset
   elif data_file_type in ("tfrecord", "parquet"):
-    data_files = find_data_files(data_file_pattern)
+    data_files = find_data_files(data_file_pattern, hf_access_token=hf_access_token)
     file_slice, files_per_host, row_shard = input_pipeline_utils.compute_file_sharding(
         len(data_files), dataloading_host_index, dataloading_host_count
     )
@@ -205,7 +247,9 @@ def get_datasets(
     if data_file_type == "tfrecord":
       dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)  # pyrefly: ignore[missing-attribute]
     else:
-      dataset = dataset.map(grain.experimental.ParquetIterDataset)  # pyrefly: ignore[missing-attribute]
+      dataset = dataset.map(
+          functools.partial(input_pipeline_utils.make_parquet_iter_dataset, hf_access_token=hf_access_token)
+      )  # pyrefly: ignore[missing-attribute]
     cycle_length = min(files_per_host, grain_num_threads)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
     if row_shard is not None:
@@ -432,9 +476,13 @@ def make_grain_train_iterator(
 
   pipeline_fn = _get_pipeline_fn(config)
 
+  grain_train_files = config.grain_train_files
+  if not grain_train_files and not config.grain_train_mixture_config_path and config.hf_path:
+    grain_train_files = construct_hf_dataset_path(config.hf_path, split="train")
+
   get_ds_fn = functools.partial(
       get_datasets,
-      config.grain_train_files,
+      grain_train_files,
       config.grain_file_type,
       shuffle=config.enable_data_shuffling,
       shuffle_seed=config.data_shuffle_seed,
@@ -446,6 +494,7 @@ def make_grain_train_iterator(
       grain_data_source_max_workers=config.grain_data_source_max_workers,
       mixture_config_path=config.grain_train_mixture_config_path,
       elastic=config.grain_use_elastic_iterator,
+      hf_access_token=getattr(config, "hf_access_token", None),
   )
 
   preprocessing_fn = functools.partial(
@@ -533,9 +582,14 @@ def make_grain_eval_iterator(
 
   pipeline_fn = _get_pipeline_fn(config)
 
+  grain_eval_files = config.grain_eval_files
+  if not grain_eval_files and getattr(config, "hf_path", None):
+    split = getattr(config, "hf_eval_split", None) or "validation"
+    grain_eval_files = construct_hf_dataset_path(config.hf_path, split=split)
+
   get_ds_fn = functools.partial(
       get_datasets,
-      config.grain_eval_files,
+      grain_eval_files,
       config.grain_file_type,
       shuffle=False,  # No shuffle for eval
       shuffle_seed=config.data_shuffle_seed,
@@ -545,6 +599,7 @@ def make_grain_eval_iterator(
       grain_num_threads=config.grain_num_threads_eval,
       grain_prefetch_buffer_size=config.grain_prefetch_buffer_size_eval,
       grain_data_source_max_workers=config.grain_data_source_max_workers,
+      hf_access_token=getattr(config, "hf_access_token", None),
   )
 
   preprocessing_fn = functools.partial(
