@@ -67,9 +67,20 @@ class SyncerState(struct.PyTreeNode):
 
 
 def get_first_step(model, state):
-  if isinstance(model, nn.Module):
+  """Extracts step integer safely across Linen (state.step) and NNX/Optax (state.optimizer.step).
+
+  Prevents AttributeError when step is a standard jax.Array lacking .get_value().
+  """
+  if hasattr(state, "step"):
     return int(state.step)
-  return int(state.optimizer.step.get_value())
+  if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+    step_obj = state.optimizer.step
+    if hasattr(step_obj, "value"):
+      return int(step_obj.value)
+    if hasattr(step_obj, "get_value"):
+      return int(step_obj.get_value())
+    return int(step_obj)
+  return 0
 
 
 def make_learner_config(config, learner_idx, num_learners):
@@ -189,10 +200,11 @@ def _run_learner_loop(
     flat_params_shardings, _ = jax.tree_util.tree_flatten_with_path(params_shardings)
     flat_params_shardings = {jax.tree_util.keystr(p): leaf for p, leaf in flat_params_shardings}
 
+    raw_state = state
     if isinstance(model, nn.Module):
       jit_model = model
     else:
-      jit_model, state = nnx.split(state)
+      jit_model, state = nnx.split(raw_state)
 
     p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
         learner_config,
@@ -206,21 +218,26 @@ def _run_learner_loop(
         params_shardings,
     )
 
-    start_step = get_first_step(model, state)
+    start_step = get_first_step(model, raw_state)
 
     # Synchronized Initialization / Resume
     try:
       if start_step == 0:
         if learner_idx == 0:
-          params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
+          params = nnx.filter_state(state, nnx.Param) if learner_config.pure_nnx else raw_state.params
+          print(f"Learner {learner_idx}: sending init params", flush=True)
           max_logging.log(f"Learner {learner_idx}: sending init params")
           transport.send_to_syncer(step=0, fragment_id=-1, data=params)
+          print(f"Learner {learner_idx}: waiting for init params", flush=True)
           max_logging.log(f"Learner {learner_idx}: waiting for init params")
           initial_params = transport.recv_from_syncer(step=0, fragment_id=-1)
+          print(f"Learner {learner_idx}: received init params", flush=True)
           max_logging.log(f"Learner {learner_idx}: received init params")
         else:
+          print(f"Learner {learner_idx}: waiting for init params", flush=True)
           max_logging.log(f"Learner {learner_idx}: waiting for init params")
           initial_params = transport.recv_from_syncer(step=0, fragment_id=-1)
+          print(f"Learner {learner_idx}: received init params", flush=True)
           max_logging.log(f"Learner {learner_idx}: received init params")
 
         tpu_param_sharding = jax.tree_util.tree_map(
@@ -228,14 +245,9 @@ def _run_learner_loop(
         )
         initial_params_tpu = jax.device_put(initial_params, tpu_param_sharding)
         if learner_config.pure_nnx:
-          non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
-          new_model = nnx.merge_state(non_param_model, initial_params_tpu)
-          new_state = type(state)({})
-          new_state["model"] = new_model
-          new_state["optimizer"] = state["optimizer"]
-          state = new_state
+          state = nnx.merge_state(nnx.filter_state(state, nnx.Not(nnx.Param)), initial_params_tpu)
         else:
-          state = state.replace(params=initial_params_tpu)
+          raw_state = raw_state.replace(params=initial_params_tpu)
       else:
         global_params = transport.recv_from_syncer(step=start_step, fragment_id=-1)
         tpu_param_sharding = jax.tree_util.tree_map(
@@ -243,20 +255,15 @@ def _run_learner_loop(
         )
         global_params_tpu = jax.device_put(global_params, tpu_param_sharding)
         if learner_config.pure_nnx:
-          non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
-          new_model = nnx.merge_state(non_param_model, global_params_tpu)
-          new_state = type(state)({})
-          new_state["model"] = new_model
-          new_state["optimizer"] = state["optimizer"]
-          state = new_state
+          state = nnx.merge_state(nnx.filter_state(state, nnx.Not(nnx.Param)), global_params_tpu)
         else:
-          state = state.replace(params=global_params_tpu)
+          raw_state = raw_state.replace(params=global_params_tpu)
     except Exception as e:
       max_logging.error(f"Learner {learner_idx} crashed in init: {e}")
       max_logging.error(traceback.format_exc())
       raise e
 
-    params_template = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
+    params_template = nnx.filter_state(state, nnx.Param) if learner_config.pure_nnx else raw_state.params
     manipulator = FragmentedTreeManipulator.create(params_template, learner_config)
     num_fragments = manipulator.num_fragments
 
@@ -584,39 +591,29 @@ def _run_syncer_loop(
     max_logging.log(f"Syncer: received all fragments for step {step}")
 
     stacked_inner_frag = stack_across_meshes_pytree(learner_frags, global_cpu_mesh, "diloco")
-    # Normalize stacked fragment: concatenate_by_mesh_axis output layout is non-deterministic.
-    stacked_inner_frag = _normalize_to_null_layout(stacked_inner_frag)
     max_logging.log(f"Syncer: Step {step} stacking done")
 
     with jax.set_mesh(global_cpu_mesh):
-      # use_null_layout_jit=True avoids the eager jnp.take Pathways rejects for scanned
-      # fragments; normalize afterwards since concatenate/jit outputs can still vary.
-      outer_params_frag = _normalize_to_null_layout(
-          manipulator.get_flat_fragment(syncer_state.params, frag_idx, use_null_layout_jit=False)
-      )
-      trace_frag = _normalize_to_null_layout(
-          manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, use_null_layout_jit=False)
-      )
+      outer_params_frag = manipulator.get_flat_fragment(syncer_state.params, frag_idx, use_null_layout_jit=False)
+      trace_frag = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, use_null_layout_jit=False)
       opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
 
       compute_grad, apply_outer_step = step_fns_by_frag[frag_idx]
 
-      pseudo_grad_frag = _normalize_to_null_layout(compute_grad(outer_params_frag, stacked_inner_frag))
+      pseudo_grad_frag = compute_grad(outer_params_frag, stacked_inner_frag)
 
       new_outer_params_frag, new_opt_state_frag = apply_outer_step(pseudo_grad_frag, opt_state_frag, outer_params_frag)
-      # Normalize jit outputs before scatter so v.at[].set(frag) always sees null-layout frag.
-      new_outer_params_frag = _normalize_to_null_layout(new_outer_params_frag)
-      new_opt_state_trace = _normalize_to_null_layout(new_opt_state_frag[0].trace)
+      new_opt_state_trace = new_opt_state_frag[0].trace
 
       new_params = manipulator.apply_flat_fragment(
           syncer_state.params, frag_idx, new_outer_params_frag, use_null_layout_jit=False
       )
-      new_params = _normalize_to_null_layout(jax.device_put(new_params, params_full_sharding))
+      new_params = jax.device_put(new_params, params_full_sharding)
 
       new_trace = manipulator.apply_flat_fragment(
           syncer_state.opt_state[0].trace, frag_idx, new_opt_state_trace, use_null_layout_jit=False
       )
-      new_trace = _normalize_to_null_layout(jax.device_put(new_trace, params_full_sharding))
+      new_trace = jax.device_put(new_trace, params_full_sharding)
 
       new_opt_state = (optax.TraceState(trace=new_trace), syncer_state.opt_state[1])
 
