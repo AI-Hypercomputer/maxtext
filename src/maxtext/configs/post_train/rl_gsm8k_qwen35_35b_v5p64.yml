@@ -1,0 +1,132 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+base_config: "rl.yml"
+
+# ====== Model ======
+model_name: qwen3.5-35b-a3b
+tokenizer_path: Qwen/Qwen3.5-35B-A3B
+tokenizer_type: huggingface
+
+# ====== Hardware ======
+# v5p-64 = v5p-8 (4 chips) * 8 nodes
+# Inference: 4 nodes
+# Training: 4 nodes
+trainer_devices_fraction: 0.5
+sampler_devices_fraction: 0.5
+chips_per_vm: 4
+use_pathways: true
+
+# Rollout: TP = 4 (across 4 chips).
+use_standalone_converter: true
+rollout_data_parallelism: -1
+rollout_tensor_parallelism: 4
+rollout_expert_parallelism: 1
+
+# One checkpoint restore plus an in-memory clone avoids reading/converting the
+# same model twice during startup.
+load_checkpoint_only_once: true
+
+# ====== GRPO ======
+rl:
+  num_generations: 4
+  num_iterations: 1
+  grpo_beta: 0.08
+  grpo_epsilon: 0.2
+  loss_algo: "grpo"
+  loss_agg_mode: "sequence-mean-token-mean"
+  use_agentic_rollout: false
+
+# ====== Training Schedule ======
+# GSM8K train yields 934 full batches at batch_size=8 (7,472 examples, with
+# drop_remainder=True). One epoch keeps this recipe short enough for benchmark
+# comparisons while still covering the full training split once.
+batch_size: 8
+num_batches: 934
+num_epoch: 1
+train_fraction: 1.0
+# Keep MaxText's generic step count and LR schedule horizon aligned with the
+# RL trainer's 934 * 1 = 934 optimizer updates.
+steps: 934
+learning_rate_schedule_steps: 934
+
+train_micro_batch_size: 1
+rollout_micro_batch_size: 8
+
+learning_rate: 3e-6
+warmup_steps_fraction: 0.1
+adam_b1: 0.9
+adam_b2: 0.99
+adam_weight_decay: 0.1
+gradient_clipping_threshold: 0.1
+
+log_period: 20
+eval_interval: 100
+
+# ====== Evaluation ======
+# 20 * 32 = 640 held-out GSM8K prompts per eval pass. Increase this once the
+# run is stable if you need lower-variance reporting.
+num_test_batches: 20
+eval_batch_size: 32
+eval_sampling_strategy: "greedy"
+num_eval_passes: 1
+eval_mode: "pass_at_1"
+
+# ====== Rollout / Generation ======
+max_prefill_predict_length: 256
+max_target_length: 1024
+kv_cache_buffer: 256
+
+decode_sampling_temperature: 0.9
+decode_sampling_top_k: 50
+decode_sampling_nucleus_p: 1.0
+
+hbm_utilization_vllm: 0.60
+swap_space_vllm_gb: 2
+max_num_seqs: 32
+# src/maxtext/integration/vllm/torchax_converter/validate_converter.py:325
+max_num_batched_tokens: 16384
+# src/maxtext/integration/vllm/maxtext_vllm_rollout.py:201
+async_scheduling: false
+enable_dp_attention: false
+
+# ====== Checkpointing ======
+enable_checkpointing: true
+async_checkpointing: false
+checkpoint_period: 250
+max_num_checkpoints_to_keep: 4
+
+# ====== Dataset ======
+dataset_name: "openai/gsm8k"
+eval_dataset_name: "openai/gsm8k"
+train_split: "train"
+eval_split: "test"
+hf_name: "main"
+data_template_path: "maxtext/examples/chat_templates/gsm8k_rl.json"
+
+# ====== Reward ======
+reward_exact_answer: 1.0
+reward_white_space_format_match: 1.0
+reward_exact_format_match: 0.1
+reward_partial_format_match: 0.0
+reward_ratio_guess_to_answer_high: 0.0
+reward_ratio_guess_to_answer_low: 0.0
+penalty_incorrect_format: 0.0
+penalty_incorrect_answer: 0.0
+
+math_verify_timeout: 120
+math_verify_num_procs: null
+
+debug:
+  rl: false
