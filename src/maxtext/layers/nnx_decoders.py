@@ -437,6 +437,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
+    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -547,6 +548,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
+    elif self.is_qwen3_next:
+      self._init_scanned_qwen3_next(decoder_block_classes, rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -709,6 +712,43 @@ class NNXDecoder(nnx.Module):
           **layer_kwargs,
       )
     self.layers_remainder = RemattedGemma4Block(
+        config=self.config,
+        mesh=mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        **rem_layer_kwargs,
+        rngs=rngs,
+    )
+
+  def _init_scanned_qwen3_next(self, decoder_block_classes, rngs, mesh):
+    """Initializes scanned Qwen3-Next layers."""
+    config = self.config
+    cycle_interval = config.inhomogeneous_layer_cycle_interval
+    scan_length = config.num_decoder_layers // cycle_interval
+    num_remaining_layers = config.num_decoder_layers % cycle_interval
+    policy = self.get_remat_policy()
+    layer_kwargs = {
+        "num_of_layers": cycle_interval,
+        "remat_policy_fn": policy,
+        "apply_internal_remat": True,
+    }
+    rem_layer_kwargs = {
+        "num_of_layers": num_remaining_layers,
+        "remat_policy_fn": policy,
+        "apply_internal_remat": True,
+    }
+
+    RemattedQwen3NextBlock = qwen3.Qwen3NextScannableBlock
+
+    if scan_length > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          RemattedQwen3NextBlock,
+          length=scan_length,
+          metadata_axis_name="layers",
+          rngs=rngs,
+          **layer_kwargs,
+      )
+    self.layers_remainder = RemattedQwen3NextBlock(
         config=self.config,
         mesh=mesh,
         quant=self.quant,
@@ -1858,6 +1898,13 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
+        elif self.is_qwen3_next:
+          y = self._apply_qwen3_next_scanned_blocks(
+              y,
+              layer_args,
+              layer_kwargs,
+              kv_caches=kv_caches,
+          )
         else:
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
           if kv_caches is not None:
@@ -2215,6 +2262,71 @@ class NNXDecoder(nnx.Module):
 
       if kv_caches is not None and updated_remainder_kv is not None:
         start_idx = scan_length * attention_pattern_length
+        for offset, updated_item in enumerate(updated_remainder_kv):
+          kv_caches[start_idx + offset] = updated_item
+
+    return y
+
+  def _apply_qwen3_next_scanned_blocks(
+      self,
+      y,
+      layer_args,
+      layer_kwargs,
+      kv_caches=None,
+  ):
+    """Applies Qwen3-Next scanned decoder blocks, handling main scan and remainders."""
+
+    cfg = self.config
+    cycle_interval = cfg.inhomogeneous_layer_cycle_interval
+    scan_length = cfg.num_decoder_layers // cycle_interval
+
+    block_unroll = max(1, scan_length)
+    if scan_length > 0:
+      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, cycle_interval, stack=False)
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          *layer_args,
+          length=scan_length,
+          kv_caches_stacked=grouped_kv_caches,
+          skip_block_remat=True,
+          unroll=block_unroll,
+          **layer_kwargs,
+      )
+      maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, cycle_interval, stacked=False)
+
+    num_remaining_layers = cfg.num_decoder_layers % cycle_interval
+    if num_remaining_layers > 0:
+      policy = self.get_remat_policy()
+      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+
+      remainder_kv = None
+      if kv_caches is not None:
+        start_idx = scan_length * cycle_interval
+        remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+
+      def pure_qwen3_fn(graphdef, state_in, y_in, kv_in):
+        merged_layer = nnx.merge(graphdef, state_in)
+        call_kwargs = dict(layer_kwargs)
+        if kv_in is not None:
+          call_kwargs["kv_cache"] = kv_in
+        out_res = merged_layer(y_in, *layer_args, **call_kwargs)
+        if isinstance(out_res, tuple):
+          out_y = out_res[0]
+          out_kv = out_res[1] if len(out_res) > 1 else None
+        else:
+          out_y = out_res
+          out_kv = None
+        return out_y, out_kv, nnx.state(merged_layer)
+
+      checkpointed_qwen3_fn = jax.checkpoint(pure_qwen3_fn, policy=policy, prevent_cse=prevent_cse)
+
+      graphdef, state = nnx.split(self.layers_remainder)
+      y, updated_remainder_kv, new_state = checkpointed_qwen3_fn(graphdef, state, y, remainder_kv)
+      nnx.update(self.layers_remainder, new_state)
+
+      if kv_caches is not None and updated_remainder_kv is not None:
+        start_idx = scan_length * cycle_interval
         for offset, updated_item in enumerate(updated_remainder_kv):
           kv_caches[start_idx + offset] = updated_item
 
