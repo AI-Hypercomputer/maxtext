@@ -1345,6 +1345,8 @@ class Qwen3NextScannableBlock(nnx.Module):
       value for the scan's `y` collection.
     """
     x = carry
+    x = nn.with_logical_constraint(x, ("activation_batch", "activation_norm_length", "activation_embed"))
+    x = checkpoint_name(x, "decoder_layer_input")
 
     # Loop over the number of sub-layers that make up one repeating pattern.
     for i in range(self.num_of_layers):
@@ -1362,6 +1364,8 @@ class Qwen3NextScannableBlock(nnx.Module):
           kv_cache=kv_cache,
           attention_metadata=attention_metadata,
       )
+      x = nn.with_logical_constraint(x, ("activation_batch", "activation_norm_length", "activation_embed"))
+      x = checkpoint_name(x, "decoder_layer_input")
 
     # The output of the block is the carry for the next scan iteration.
     return x, None
