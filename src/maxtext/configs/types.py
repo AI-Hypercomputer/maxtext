@@ -3327,8 +3327,6 @@ class MaxTextConfig(
     if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
       raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
     if self.mla_qk_head_chunk_size > 0:
-      if self.attention != "dot_product":
-        raise ValueError("`mla_qk_head_chunk_size` is only supported with `dot_product` attention.")
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(
             f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
