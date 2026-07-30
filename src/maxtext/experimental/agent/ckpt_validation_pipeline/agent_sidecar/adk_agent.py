@@ -127,7 +127,8 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
         "3. Apply fixes using patch_file and ensure they pass run_linters.\n"
         "4. Create a PR using create_pull_request.\n"
         "5. Test the branch using trigger_airflow_dag.\n"
-        "6. Write a final report using write_remediation_report and conclude the task."
+        "6. Write a final report using write_remediation_report and conclude the task.\n"
+        "7. Autonomous Hardware Scaling: If a failure report shows an Out-Of-Memory (OOM) error or HBM allocation failure (ResourceExhaustedError), the model checkpoint (e.g. DeepSeek-671B) is too large for the current TPU cluster slice. Do not edit model math or sharding. Instead, autonomously scale up infrastructure by calling trigger_airflow_dag with a larger reserved TPU cluster: --cluster_name v5p-128-bodaborg-europe-west4-b --project_name cloud-tpu-multipod-dev --zone europe-west4-b."
     )
     
     # Using gemini-1.5-pro for complex coding, though flash-lite could be used for initial triage
