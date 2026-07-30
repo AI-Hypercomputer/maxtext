@@ -132,6 +132,10 @@ spec:
                   value: "1"
                 - name: NEW_MODEL_DESIGN
                   value: "1"
+                - name: JAX_RANDOM_WEIGHTS
+                  value: "1"
+                - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                  value: "0"
                 - name: TPU_LOG_DIR
                   value: "/root/tpu_logs"
                 - name: XLA_PYTHON_CLIENT_PREALLOCATE
@@ -165,6 +169,9 @@ spec:
                   python3 -m maxtext.trainers.post_train.rl.train_rl \
                   src/maxtext/configs/post_train/rl_gsm8k_qwen35_35b_v5p64.yml \
                   run_name=ym-qw35-15 \
+                  enable_tunix_perf_metrics=True \
+                  scan_layers=True \
+                  allow_split_physical_axes=True \
                   base_output_directory=gs://yixuanm-maxtext-logs/ConvergenceTesting \
                   load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items \
                   vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
