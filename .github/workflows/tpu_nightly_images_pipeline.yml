@@ -28,6 +28,15 @@ on:
         required: false
         type: string
         default: ""
+      mode:
+        description: 'Docker test execution mode: build-all (rebuild image and test), test-only (run tests against existing image without rebuild), or fast-rebuild (rebuild code only)'
+        required: false
+        default: 'build-all'
+        type: choice
+        options:
+          - build-all
+          - test-only
+          - fast-rebuild
 
 permissions:
   contents: read
@@ -44,6 +53,7 @@ jobs:
   build_and_push_docker_images:
     name: Build ${{ matrix.name }} Docker Image
     needs: build_maxtext_package
+    if: inputs.mode != 'test-only'
     strategy:
       fail-fast: false
       matrix:
@@ -70,12 +80,14 @@ jobs:
       maxtext_sha: ${{ needs.build_maxtext_package.outputs.maxtext_sha }}
       include_test_assets: true
       run_tests: false
+      fast_rebuild: ${{ inputs.mode == 'fast-rebuild' }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   run_ci_tests:
     name: Run ${{ matrix.name }} CI Tests
     needs: build_and_push_docker_images
+    if: always() && (inputs.mode == 'test-only' || needs.build_and_push_docker_images.result == 'success')
     strategy:
       fail-fast: false
       matrix:
@@ -92,7 +104,7 @@ jobs:
     uses: ./.github/workflows/run_ci_tests.yml
     with:
       image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
-      image_tag: ${{ github.run_id }}
+      image_tag: ${{ inputs.mode == 'test-only' && 'latest' || github.run_id }}
       device: tpu
       workflow: ${{ matrix.workflow }}
 

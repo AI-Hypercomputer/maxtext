@@ -28,6 +28,15 @@ on:
         required: false
         type: string
         default: ""
+      mode:
+        description: 'Docker test execution mode: build-all (rebuild image and test), test-only (run tests against existing image without rebuild), or fast-rebuild (rebuild code only)'
+        required: false
+        default: 'build-all'
+        type: choice
+        options:
+          - build-all
+          - test-only
+          - fast-rebuild
 
 permissions:
   contents: read
@@ -44,6 +53,7 @@ jobs:
   build_and_push_docker_images:
     name: Build ${{ matrix.name }} Docker Image
     needs: build_maxtext_package
+    if: inputs.mode != 'test-only'
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +75,7 @@ jobs:
       dockerfile: maxtext_gpu_dependencies.Dockerfile
       maxtext_sha: ${{ needs.build_maxtext_package.outputs.maxtext_sha }}
       include_test_assets: true
+      fast_rebuild: ${{ inputs.mode == 'fast-rebuild' }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
