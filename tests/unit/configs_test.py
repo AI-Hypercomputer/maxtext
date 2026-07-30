@@ -139,6 +139,7 @@ def test_qwen35_model_config_validates_for_rl():
   config = pydantic_types.RLConfig(model_name="qwen3.5-35b-a3b", **model_config)
 
   assert config.gdn_conv_kernel_dim == 4
+  assert config.use_qk_norm is False
   assert config.vision_encoder_block == pydantic_types.VisionEncoderBlockType.QWEN3_5
 
 
