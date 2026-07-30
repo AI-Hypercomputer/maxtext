@@ -167,7 +167,7 @@ spec:
                   run_name=ym-qw35-14 \
                   base_output_directory=gs://yixuanm-maxtext-logs/ConvergenceTesting \
                   load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items \
-                  vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
+                  vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
                   vllm_additional_config='{maxtext_config: {model_name: qwen3.5-35b-a3b, model_call_mode: inference, allow_split_physical_axes: true, log_config: false, weight_dtype: bfloat16}}' & PID=$!;
                   
                   while kill -0 $PID 2>/dev/null;
