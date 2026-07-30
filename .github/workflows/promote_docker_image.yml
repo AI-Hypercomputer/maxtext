@@ -68,7 +68,7 @@ jobs:
   tag_docker_image:
     name: Promote ${{ matrix.image_name }} Docker Image
     needs: handle_result
-    if: needs.handle_result.result == 'success' && (github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type)
+    if: needs.handle_result.result == 'success'
     runs-on: linux-x86-n2-16-buildkit
     container: google/cloud-sdk:524.0.0
     strategy:
@@ -81,8 +81,10 @@ jobs:
             image_name: maxtext_post_training_nightly
     steps:
       - name: Configure Docker
+        if: ${{ github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type }}
         run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
       - name: Add tags to Docker image
+        if: ${{ github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type }}
         shell: bash
         env:
           GITHUB_RUN_ID: ${{ github.event.client_payload.github_run_id }}
