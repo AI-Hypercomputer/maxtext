@@ -72,6 +72,8 @@ jobs:
     steps:
       - id: set-params
         name: Set Worker Parameters
+        env:
+          FLAVOR: ${{ inputs.flavor }}
         run: |
           # CPU worker constants
           CPU_UNIT_TOTAL_WORKERS=4
@@ -84,8 +86,6 @@ jobs:
           # Default fallback constants
           DEFAULT_TOTAL_WORKERS=1
           DEFAULT_WORKER_GROUPS='[1]'
-
-          FLAVOR="${{ inputs.flavor }}"
 
           if [[ "$FLAVOR" == "cpu-unit" || "$FLAVOR" == "cpu-post-training-unit" ]]; then
             echo "worker_groups=${CPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"

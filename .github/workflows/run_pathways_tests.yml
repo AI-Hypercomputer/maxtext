@@ -70,7 +70,7 @@ jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }}
+      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
@@ -81,13 +81,15 @@ jobs:
       options: ${{ inputs.container_resource_option }}
     steps:
       - name: Checkout MaxText
+        env:
+          MAXTEXT_SHA: ${{ inputs.maxtext_sha }}
         run: |
           git config --global --add safe.directory /__w/maxtext/maxtext
           git clone https://github.com/google/maxtext.git .
-          git fetch origin ${{ inputs.maxtext_sha }}
+          git fetch origin "$MAXTEXT_SHA"
           git checkout FETCH_HEAD
       - name: Download the maxtext wheel
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
       - name: Install the maxtext wheel
@@ -103,20 +105,27 @@ jobs:
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
+        env:
+          TOTAL_WORKERS: ${{ inputs.total_workers }}
+          WORKER_GROUP: ${{ inputs.worker_group }}
+          IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
+          PYTEST_MARKER: ${{ inputs.pytest_marker }}
+          PYTEST_ADDOPTS: ${{ inputs.pytest_addopts }}
+          PYTHONPATH: "${{ github.workspace }}/src"
         run: |
-          if [ "${{ inputs.total_workers }}" -gt 1 ]; then
+          if [ "${TOTAL_WORKERS}" -gt 1 ]; then
             .venv/bin/python3 -m pip install --quiet pytest-split
-            SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}"
+            SPLIT_ARGS="--splits ${TOTAL_WORKERS} --group ${WORKER_GROUP}"
           else
             SPLIT_ARGS=""
           fi
-          if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
-            FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
+          if [ "${IS_SCHEDULED_RUN}" = "true" ]; then
+            FINAL_PYTEST_MARKER="${PYTEST_MARKER}"
           else
-            if [ -z "${{ inputs.pytest_marker }}" ]; then
+            if [ -z "${PYTEST_MARKER}" ]; then
               FINAL_PYTEST_MARKER="not scheduled_only or newly_added"
             else
-              FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and (not scheduled_only or newly_added)"
+              FINAL_PYTEST_MARKER="${PYTEST_MARKER} and (not scheduled_only or newly_added)"
             fi
           fi
           export MAXTEXT_REPO_ROOT=$(pwd)
@@ -124,12 +133,10 @@ jobs:
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
           # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
-          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0 ${SPLIT_ARGS}
-        env:
-          PYTHONPATH: "${{ github.workspace }}/src"
+          .venv/bin/python3 -m pytest ${PYTEST_ADDOPTS} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0 ${SPLIT_ARGS}
     services:
       resource_manager:
-        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest # zizmor: ignore[unpinned-images]
         ports:
           - "29001:29001"
           - "29002:29002"
@@ -139,7 +146,7 @@ jobs:
           TPU_SKIP_MDS_QUERY: true
 
       worker:
-        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest # zizmor: ignore[unpinned-images]
         ports:
           - "29005:29005"
           - "29006:29006"
@@ -150,7 +157,7 @@ jobs:
           --tpu=4
 
       proxy:
-        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest # zizmor: ignore[unpinned-images]
         ports:
           - "29000:29000"
         env:

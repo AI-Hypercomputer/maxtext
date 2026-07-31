@@ -29,13 +29,15 @@ jobs:
     name: Track Test Performance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Mark git repositories as safe
         run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
 
       - name: Download all test results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: test-results
           pattern: test-results-*-${{ github.run_id }}
@@ -72,12 +74,12 @@ jobs:
           git worktree remove gh-pages
 
       - name: Track Test Durations (Macro-level Dashboard)
-        uses: benchmark-action/github-action-benchmark@v1
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1
         with:
           name: MaxText Test Execution Times
           tool: 'customSmallerIsBetter'
           output-file-path: benchmark-results.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           alert-threshold: '115%'
           comment-on-alert: true
           fail-on-alert: ${{ github.ref != 'refs/heads/main' && github.head_ref != 'ci/test-duration-tracking' }}

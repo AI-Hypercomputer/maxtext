@@ -47,15 +47,18 @@ jobs:
       maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
     steps:
       - name: Checkout MaxText
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.maxtext_sha || github.sha }}
+          persist-credentials: false
       - name: Get metadata
         id: vars
         shell: bash
+        env:
+          MAXTEXT_SHA_INPUT: ${{ inputs.maxtext_sha || github.sha }}
         run: |
           # MaxText SHA used to build the package
-          MAXTEXT_SHA="${{ inputs.maxtext_sha || github.sha }}"
+          MAXTEXT_SHA="$MAXTEXT_SHA_INPUT"
           echo "maxtext_sha=${MAXTEXT_SHA}" >> $GITHUB_OUTPUT
       - name: Install build tools
         run: |

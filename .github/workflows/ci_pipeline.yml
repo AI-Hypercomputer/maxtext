@@ -25,6 +25,11 @@ on:
         description: 'The specific MaxText commit SHA.'
         required: true
         type: string
+    secrets:
+      HF_TOKEN:
+        required: false
+      GEMINI_API_KEY:
+        required: false
     outputs:
       tests_result:
         description: 'The result of all_tests_passed and all_notebooks_passed jobs.'
@@ -54,10 +59,11 @@ jobs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           ref: ${{ inputs.maxtext_sha || github.sha }}
+          persist-credentials: false
       - name: Check for Code Changes
         id: check
         run: |
@@ -386,7 +392,7 @@ jobs:
         if: ${{ contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
 
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
@@ -401,7 +407,8 @@ jobs:
       actions: 'read'
     with:
       failed_run_id: '${{ github.run_id }}'
-    secrets: inherit
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   track_performance:
     name: Track Test Performance
@@ -412,5 +419,4 @@ jobs:
       contents: write
       id-token: write
       pull-requests: write
-    secrets: inherit
 
