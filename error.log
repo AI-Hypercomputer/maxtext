@@ -1,41 +1,38 @@
-INFO 2026-07-30T23:04:05.159150911Z [resource.labels.containerName: jax-tpu] MaxTextVllmSampler.update_params: starting converter.convert()...
-INFO 2026-07-30T23:04:05.159210431Z [resource.labels.containerName: jax-tpu] {"pid":"139722955327296"}
-ERROR 2026-07-30T23:04:05.159218431Z [resource.labels.containerName: jax-tpu] [92mStarting Qwen 3.5 Conversion (Hybrid MoE)...[0m
-INFO 2026-07-30T23:05:45.472786264Z [resource.labels.containerName: jax-tpu] MaxTextVllmSampler.update_params: converter.convert() done, 573 weights to assign
-INFO 2026-07-30T23:05:45.472830433Z [resource.labels.containerName: jax-tpu] Weight sync: using pathwaysutils experimental_reshard
-ERROR 2026-07-30T23:05:45.475144273Z [resource.labels.containerName: jax-tpu] [rank0]: Traceback (most recent call last):
-ERROR 2026-07-30T23:05:45.475162533Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 198, in _run_module_as_main
-ERROR 2026-07-30T23:05:45.475170593Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 88, in _run_code
-ERROR 2026-07-30T23:05:45.475178163Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 796, in <module>
-ERROR 2026-07-30T23:05:45.475184663Z [resource.labels.containerName: jax-tpu] [rank0]: app.run(main)
-ERROR 2026-07-30T23:05:45.475211813Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run
-ERROR 2026-07-30T23:05:45.475230283Z [resource.labels.containerName: jax-tpu] [rank0]: _run_main(main, args)
-ERROR 2026-07-30T23:05:45.475234063Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
-ERROR 2026-07-30T23:05:45.475237703Z [resource.labels.containerName: jax-tpu] [rank0]: sys.exit(main(argv))
-ERROR 2026-07-30T23:05:45.475241133Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^
-ERROR 2026-07-30T23:05:45.475244623Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 792, in main
-ERROR 2026-07-30T23:05:45.475248013Z [resource.labels.containerName: jax-tpu] [rank0]: rl_train(argv, kwargs)
-ERROR 2026-07-30T23:05:45.475251463Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 645, in rl_train
-ERROR 2026-07-30T23:05:45.475255013Z [resource.labels.containerName: jax-tpu] [rank0]: _rl_train_impl(argv, kwargs)
-ERROR 2026-07-30T23:05:45.475259363Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 711, in _rl_train_impl
-ERROR 2026-07-30T23:05:45.475263193Z [resource.labels.containerName: jax-tpu] [rank0]: rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
-ERROR 2026-07-30T23:05:45.475266953Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T23:05:45.475269473Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 530, in create_rl_components
-ERROR 2026-07-30T23:05:45.475271903Z [resource.labels.containerName: jax-tpu] [rank0]: rl_cluster = rl_cluster_lib.RLCluster(
-ERROR 2026-07-30T23:05:45.475274423Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T23:05:45.475277413Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 271, in __init__
-ERROR 2026-07-30T23:05:45.475281623Z [resource.labels.containerName: jax-tpu] [rank0]: self._init_cluster()
-ERROR 2026-07-30T23:05:45.475285613Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 486, in _init_cluster
-ERROR 2026-07-30T23:05:45.475289933Z [resource.labels.containerName: jax-tpu] [rank0]: self._rollout = self.cluster_config.rollout_engine(
-ERROR 2026-07-30T23:05:45.475294083Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-30T23:05:45.475298083Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 320, in __init__
-ERROR 2026-07-30T23:05:45.475301903Z [resource.labels.containerName: jax-tpu] [rank0]: self._sampler.load_checkpoint(state)
-ERROR 2026-07-30T23:05:45.475306283Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py", line 310, in load_checkpoint
-ERROR 2026-07-30T23:05:45.475310023Z [resource.labels.containerName: jax-tpu] [rank0]: self.update_params(updated_weights=path_or_weights, filter_types=None)
-ERROR 2026-07-30T23:05:45.475313833Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 211, in update_params
-ERROR 2026-07-30T23:05:45.475317113Z [resource.labels.containerName: jax-tpu] [rank0]: weight_shape_matches = weight_array.shape == model_runner_state[key].shape
-ERROR 2026-07-30T23:05:45.475320553Z [resource.labels.containerName: jax-tpu] [rank0]: ~~~~~~~~~~~~~~~~~~^^^^^
-ERROR 2026-07-30T23:05:45.475323923Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/flax/nnx/statelib.py", line 258, in __getitem__
-ERROR 2026-07-30T23:05:45.475327393Z [resource.labels.containerName: jax-tpu] [rank0]: value = self._mapping[key]
-ERROR 2026-07-30T23:05:45.475330613Z [resource.labels.containerName: jax-tpu] [rank0]: ~~~~~~~~~~~~~^^^^^
-ERROR 2026-07-30T23:05:45.475334053Z [resource.labels.containerName: jax-tpu] [rank0]: KeyError: 'vllm_model.language_model.model.embed_tokens.weight'
+INFO 2026-07-31T09:39:36.559270235Z [resource.labels.containerName: jax-tpu] Model runner state keys: ['model']
+ERROR 2026-07-31T09:39:36.561880275Z [resource.labels.containerName: jax-tpu] [rank0]: Traceback (most recent call last):
+ERROR 2026-07-31T09:39:36.561911895Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 198, in _run_module_as_main
+ERROR 2026-07-31T09:39:36.561917624Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 88, in _run_code
+ERROR 2026-07-31T09:39:36.561922464Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 796, in <module>
+ERROR 2026-07-31T09:39:36.561927275Z [resource.labels.containerName: jax-tpu] [rank0]: app.run(main)
+ERROR 2026-07-31T09:39:36.561930644Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run
+ERROR 2026-07-31T09:39:36.561934224Z [resource.labels.containerName: jax-tpu] [rank0]: _run_main(main, args)
+ERROR 2026-07-31T09:39:36.561938055Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
+ERROR 2026-07-31T09:39:36.561960695Z [resource.labels.containerName: jax-tpu] [rank0]: sys.exit(main(argv))
+ERROR 2026-07-31T09:39:36.561964044Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^
+ERROR 2026-07-31T09:39:36.561966515Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 792, in main
+ERROR 2026-07-31T09:39:36.561968895Z [resource.labels.containerName: jax-tpu] [rank0]: rl_train(argv, kwargs)
+ERROR 2026-07-31T09:39:36.561971335Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 645, in rl_train
+ERROR 2026-07-31T09:39:36.561973664Z [resource.labels.containerName: jax-tpu] [rank0]: _rl_train_impl(argv, kwargs)
+ERROR 2026-07-31T09:39:36.561977055Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 711, in _rl_train_impl
+ERROR 2026-07-31T09:39:36.561979664Z [resource.labels.containerName: jax-tpu] [rank0]: rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
+ERROR 2026-07-31T09:39:36.561982064Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-31T09:39:36.561985355Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 530, in create_rl_components
+ERROR 2026-07-31T09:39:36.561987724Z [resource.labels.containerName: jax-tpu] [rank0]: rl_cluster = rl_cluster_lib.RLCluster(
+ERROR 2026-07-31T09:39:36.561990104Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-31T09:39:36.561993124Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 271, in __init__
+ERROR 2026-07-31T09:39:36.561996744Z [resource.labels.containerName: jax-tpu] [rank0]: self._init_cluster()
+ERROR 2026-07-31T09:39:36.561999744Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py", line 486, in _init_cluster
+ERROR 2026-07-31T09:39:36.562002084Z [resource.labels.containerName: jax-tpu] [rank0]: self._rollout = self.cluster_config.rollout_engine(
+ERROR 2026-07-31T09:39:36.562004404Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-07-31T09:39:36.562006735Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 321, in __init__
+ERROR 2026-07-31T09:39:36.562009084Z [resource.labels.containerName: jax-tpu] [rank0]: self._sampler.load_checkpoint(state)
+ERROR 2026-07-31T09:39:36.562012235Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py", line 310, in load_checkpoint
+ERROR 2026-07-31T09:39:36.562014615Z [resource.labels.containerName: jax-tpu] [rank0]: self.update_params(updated_weights=path_or_weights, filter_types=None)
+ERROR 2026-07-31T09:39:36.562016964Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/integration/vllm/maxtext_vllm_rollout.py", line 212, in update_params
+ERROR 2026-07-31T09:39:36.562019504Z [resource.labels.containerName: jax-tpu] [rank0]: weight_shape_matches = weight_array.shape == model_runner_state[key].shape
+ERROR 2026-07-31T09:39:36.562021875Z [resource.labels.containerName: jax-tpu] [rank0]: ~~~~~~~~~~~~~~~~~~^^^^^
+ERROR 2026-07-31T09:39:36.562024215Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/flax/nnx/statelib.py", line 258, in __getitem__
+ERROR 2026-07-31T09:39:36.562026555Z [resource.labels.containerName: jax-tpu] [rank0]: value = self._mapping[key]
+ERROR 2026-07-31T09:39:36.562029044Z [resource.labels.containerName: jax-tpu] [rank0]: ~~~~~~~~~~~~~^^^^^
+ERROR 2026-07-31T09:39:36.562031395Z [resource.labels.containerName: jax-tpu] [rank0]: KeyError: 'vllm_model.model.embed_tokens.weight'
+
