@@ -988,38 +988,10 @@ class MoEKernels(BaseModel):
       description="Whether to use the Tokamax library for GMM kernel implementation.",
   )
 
-  use_gmm_v2: tuple[bool, bool, bool] = Field(
-      (False, False, False),
-      description=(
-          "Whether to use GMM v2 for MoE forward/backward passes. "
-          "Can be specified as a single boolean (shorthand for all True or all False) "
-          "or a list/tuple of 3 booleans representing (fwd, dlhs, drhs)."
-      ),
+  use_gmm_v2: bool = Field(
+      False,
+      description="Whether to use Tokamax GMM v2 for MoE kernel.",
   )
-
-  @field_validator("use_gmm_v2", mode="before")
-  @classmethod
-  def validate_use_gmm_v2(cls, v: Any) -> tuple[bool, bool, bool]:
-    """Validate and preprocess use_gmm_v2 configuration input."""
-    # expand single boolean to tuple
-    if isinstance(v, bool):
-      processed_v = (v, v, v)
-    # validation for list/tuple of 3 booleans
-    elif isinstance(v, (list, tuple)) and len(v) == 3 and all(isinstance(x, bool) for x in v):
-      processed_v = tuple(v)
-    else:
-      raise ValueError("use_gmm_v2 must be a boolean or a list/tuple of 3 booleans.")
-
-    valid_combos = {(False, False, False), (True, True, True), (True, False, True)}
-    if processed_v not in valid_combos:
-      raise ValueError(
-          "Invalid GMM v2 configuration combination. Allowed combinations are:\n"
-          "  - [False, False, False] (v1 for FWD, DLHS, DRHS)\n"
-          "  - [True, True, True] (v2 for FWD, DLHS, DRHS)\n"
-          "  - [True, False, True] (v2 for FWD, v1 for DLHS, v2 for DRHS)\n"
-          f"But got: {list(processed_v)} (representing [FWD, DLHS, DRHS])"
-      )
-    return processed_v
 
 
 class DeepSeekMoE(BaseModel):
@@ -2762,8 +2734,7 @@ class MaxTextConfig(
     Validates that num_moe_emb_chunks is used with supported settings.
     """
     if self.num_moe_emb_chunks > 0:
-      # If any value in use_gmm_v2 is False (e.g., [True, False, True]), raise an error.
-      if not all(self.use_gmm_v2) or not self.use_ring_of_experts:
+      if not self.use_gmm_v2 or not self.use_ring_of_experts:
         raise ValueError(
             f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
@@ -3699,7 +3670,7 @@ class MaxTextConfig(
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
 
     # Validation for GMM v2
-    if any(self.use_gmm_v2):
+    if self.use_gmm_v2:
       if not self.use_tokamax_gmm:
         raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
       if self.use_batch_split_schedule:

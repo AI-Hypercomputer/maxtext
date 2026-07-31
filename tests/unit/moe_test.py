@@ -1437,22 +1437,12 @@ class RoutedMoeTest(parameterized.TestCase):
               "use_gmm_v2": False,
           },
           {
-              "testcase_name": "tokamax v2+v1+v2 bf16",
-              "quantization": "",
-              "use_gmm_v2": (True, False, True),
-          },
-          {
-              "testcase_name": "tokamax v2+v1+v2 fp8",
-              "quantization": "fp8_full",
-              "use_gmm_v2": (True, False, True),
-          },
-          {
-              "testcase_name": "tokamax v2+v2+v2 bf16",
+              "testcase_name": "tokamax v2 bf16",
               "quantization": "",
               "use_gmm_v2": True,
           },
           {
-              "testcase_name": "tokamax v2+v2+v2 fp8",
+              "testcase_name": "tokamax v2 fp8",
               "quantization": "fp8_full",
               "use_gmm_v2": True,
           },
@@ -1463,7 +1453,7 @@ class RoutedMoeTest(parameterized.TestCase):
   def test_gmm_grad_equivalence(
       self,
       quantization: str,
-      use_gmm_v2: bool | tuple[bool, bool, bool],
+      use_gmm_v2: bool,
       ici_expert_parallelism: int,
       **kwargs,
   ):

@@ -83,11 +83,7 @@ Dropping:
 
 `use_tokamax_gmm`: If enabled, use Tokamax library's Ragged Dot for matmul. Recommended for dropless configurations.
 
-`use_gmm_v2` (experimental): Requires `use_tokamax_gmm` to be true. If enabled, uses the new Tokamax GMM v2 backend for matrix multiplication. Accepts either a single boolean or a list/tuple of 3 booleans to independently control the forward pass (Fwd), activation gradient (DLHS), and weight gradient (DRHS). Accepted configurations:
-
-- Uses Tokamax v1 for all passes: `use_gmm_v2=false` or `[false,false,false]`.
-- Uses Tokamax v2 for all passes: `use_gmm_v2=true` or `[true,true,true]`.
-- Uses a mixed backend: `use_gmm_v2=[true,false,true]` (v2 for Fwd, v1 for DLHS, v2 for DRHS).
+`use_gmm_v2`: If enabled, use the Tokamax GMM v2 kernel for grouped matrix multiplication. Requires `use_tokamax_gmm` to be True.
 
 `megablox`: If enabled, use Megablox for sparse matrix operations. Effective only when `use_tokamax_gmm` is False.
 

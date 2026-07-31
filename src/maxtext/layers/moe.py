@@ -1496,7 +1496,7 @@ class RoutedMoE(nnx.Module):
       # We support various implementations for gmm - tokamax gmm (v1, v2), older forked megablox, or jax.lax.ragged_dot
       # Determine whether we can use: tokamax gmm v1 (quantized)
       is_tokamax_v1_unquantized = (
-          self.config.use_tokamax_gmm and not self.config.quantization and not any(self.config.use_gmm_v2)
+          self.config.use_tokamax_gmm and not self.config.quantization and not self.config.use_gmm_v2
       )
       # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
       use_custom_vjp_gmm = self.config.use_tokamax_gmm or self.config.megablox

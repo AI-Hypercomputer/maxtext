@@ -270,8 +270,7 @@ merge_gating_gmm: false
 
 # Use tokamax library for gmm kernel implementation
 use_tokamax_gmm: false
-# Whether to use GMM v2 for MoE forward/backward passes. Requires use_tokamax_gmm=true.
-# Can be boolean (e.g., `use_gmm_v2=true`) or list (e.g., `use_gmm_v2=[true,false,true]`) for fwd, dlhs, drhs
+# Whether to use Tokamax GMM v2 for MoE kernel. Requires use_tokamax_gmm=true.
 use_gmm_v2: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.

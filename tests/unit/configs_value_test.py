@@ -308,39 +308,6 @@ class ConfigTest(absltest.TestCase):
           ]
       )
 
-  def test_gmm_v2_validation(self):
-    """Tests that use_gmm_v2 accepts bools and valid tuples, but rejects invalid ones."""
-    # valid bool
-    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "use_gmm_v2=true", "use_tokamax_gmm=true"]
-    config = pyconfig.initialize(argv)
-    self.assertEqual(config.use_gmm_v2, (True, True, True))
-
-    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "use_gmm_v2=false"]
-    config = pyconfig.initialize(argv)
-    self.assertEqual(config.use_gmm_v2, (False, False, False))
-
-    # valid list
-    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "use_gmm_v2=[true, false, true]", "use_tokamax_gmm=true"]
-    config = pyconfig.initialize(argv)
-    self.assertEqual(config.use_gmm_v2, (True, False, True))
-
-    # invalid combinations
-    invalid_args = [
-        ["use_gmm_v2=[false, true, false]"],
-        ["use_gmm_v2=[true, true, false]"],
-        ["use_gmm_v2=[false, false, true]"],
-        ["use_gmm_v2=invalid"],
-        ["use_gmm_v2=[true, false]"],  # wrong size
-        # v2 requires `use_tokamax_gmm=true`
-        ["use_gmm_v2=true", "use_tokamax_gmm=false"],  # missing dependency
-        ["use_gmm_v2=[true, false, true]", "use_tokamax_gmm=false"],  # missing dependency
-    ]
-    for bad_arg in invalid_args:
-      with self.subTest(bad_arg=bad_arg):
-        argv = ["", _BASE_CONFIG_PATH, "run_name=test", "use_tokamax_gmm=true"] + bad_arg
-        with self.assertRaises(pydantic.ValidationError):
-          pyconfig.initialize(argv)
-
   def test_safetensors_dynamic_disallows_single_controller(self):
     """Tests that source_checkpoint_layout=safetensors_dynamic disallows enable_single_controller=True."""
     argv = [
