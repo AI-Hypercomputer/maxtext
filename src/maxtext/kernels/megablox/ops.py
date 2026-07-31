@@ -336,7 +336,7 @@ def _fwd_run_tokamax_v2(
     partial_sum: jnp.ndarray | None,
     transpose_rhs: bool,
 ) -> jnp.ndarray:
-  """Executes the Tokamax GMM V2 backend for forward pass."""
+  """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
   # if transpose_rhs=False, rhs is [g, k, n], remain unchanged
   # if transpose_rhs=True, rhs [g, n, k], explicit transpose to [g, k, n]
   rhs_operand = rhs if not transpose_rhs else rhs.swapaxes(1, 2)
@@ -439,8 +439,8 @@ def _gmm_bwd(
   #  - drhs_dout: the incoming gradient used to calculate drhs.
 
   # 1. Scale Application & QArray Unwrapping
-  dlhs_dout, drhs_dout, lhs, rhs = _bwd_scale_and_unwrap_inputs(
-      grad, lhs, rhs, group_sizes, use_gmm_v2_dlhs, transpose_rhs
+  dlhs_dout, drhs_dout, lhs, rhs = _bwd_prepare_inputs(
+      grad, lhs, rhs, group_sizes, use_gmm_v2_dlhs, transpose_rhs, quantization_rule
   )
 
   # 2. Backward Pass Quantization
@@ -495,15 +495,16 @@ def _gmm_bwd(
   return dlhs, drhs, None, None, d_existing_out, dpartial_sum
 
 
-def _bwd_scale_and_unwrap_inputs(
+def _bwd_prepare_inputs(
     grad: jnp.ndarray,
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
     use_gmm_v2_dlhs: bool,
     transpose_rhs: bool,
+    quantization_rule: qwix.QtRule | None,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray, jnp.ndarray, jnp.ndarray]:
-  """Applies forward scales to outgoing gradients and unwraps QArrays."""
+  """Prepares backward operands."""
 
   # dlhs_dout and drhs_dout can be different when quantization is enabled.
   dlhs_dout = grad
@@ -525,6 +526,16 @@ def _bwd_scale_and_unwrap_inputs(
       # this scale inside the kernel.
       dlhs_dout = _dlhs_scale_grad_by_rhs_scale(dlhs_dout, rhs, group_sizes, transpose_rhs)
       rhs = rhs.qvalue
+
+  # GMM2 FWD performs lhs quantization inside kernel, lhs is stored as unquantized dtype
+  # in the residual tuple. In BWD, we explicitly quantize lhs.
+  if quantization_rule and quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
+    lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
+        lhs,
+        quantization_rule.act_qtype,
+        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+        calibration_method=quantization_rule.act_calibration_method,
+    )
 
   # Assume channelwise scale on lhs m, lhs_transpose[k, m] @ drhs_out[m, n] = drhs[g, k, n]
   # Apply lhs.scale to drhs_dout, as axis m will disappear in drhs.
@@ -692,7 +703,7 @@ def _dlhs_run_tokamax_v2(
     tiling: tuple,
     transpose_rhs: bool,
 ) -> jnp.ndarray:
-  """Executes Tokamax GMM V2 backend for DLHS."""
+  """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
   # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs
   # support. Fusing this transpose into the kernel would also allow us to fuse
   # the rhs_scale application.
@@ -836,13 +847,9 @@ def _drhs_run_tokamax_v2(
     rhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
 ) -> jnp.ndarray:
-  """Executes Tokamax TGMM V2 backend for DRHS."""
+  """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
   drhs_lhs = lhs
-
-  # TGMM kernel requires matching sublane sizes (dtypes) for hardware packing.
-  if drhs_lhs.dtype != drhs_rhs.dtype:
-    drhs_lhs = drhs_lhs.astype(drhs_rhs.dtype)
 
   rhs_scale = None
   if isinstance(drhs_dout, qpl.QArray):
