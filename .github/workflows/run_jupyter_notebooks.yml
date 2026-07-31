@@ -49,19 +49,20 @@ jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }}
+      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         VLLM_TARGET_DEVICE: "tpu"
         UV_TORCH_BACKEND: "cpu"
     steps:
       - name: Checkout MaxText
         if: ${{ !inputs.maxtext_installed }}
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.maxtext_sha }}
+          persist-credentials: false
       - name: Download the MaxText wheel
         if: ${{ !inputs.maxtext_installed }}
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
       - name: Install MaxText and Dependencies
@@ -139,7 +140,7 @@ jobs:
           done
       - name: Upload Outputs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: notebook-outputs-${{ inputs.device_name }}
           path: ./*_output.ipynb

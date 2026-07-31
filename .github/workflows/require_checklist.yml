@@ -21,7 +21,9 @@ on:
 jobs:
   check_pr_body:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
     steps:
-      - uses: mheap/require-checklist-action@v2
+      - uses: mheap/require-checklist-action@9c8100a52aa9726d4648e61aa92415f6c843c990 # v2.6.1
         with:
           requireChecklist: true # If this is true and there are no checklists detected, the action will fail
