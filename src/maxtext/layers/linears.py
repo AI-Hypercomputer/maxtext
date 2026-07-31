@@ -292,7 +292,8 @@ class DenseGeneral(nnx.Module):
       kernel = jnp.asarray(kernel, self.dtype)
 
     if slice_bounds is not None:
-      assert self.quant is None, "sliced contraction is only supported when quant is None"
+      if self.quant is not None:
+        raise ValueError("sliced contraction is only supported when quant is None")
       begin, end = slice_bounds
       kernel = kernel[..., begin:end]
 

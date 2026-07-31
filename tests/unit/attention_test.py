@@ -2106,28 +2106,37 @@ class MLATest(attention_test_util.MLATestBase):
     # Sync weights
     nnx.update(mla_sliced, nnx.state(mla_normal))
 
-    # Test TRAIN mode
+    # Test TRAIN mode with gradient comparison
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_normal, cfg_normal.dtype)
 
-    out_normal_train, _ = mla_normal(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    def loss_fn(model, x):
+      out, _ = model(
+          x,
+          x,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(out.astype(jnp.float32) ** 2), out
 
-    out_sliced_train, _ = mla_sliced(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    (loss_normal, out_normal_train), (grad_model_normal, grad_x_normal) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1), has_aux=True
+    )(mla_normal, lnx)
+
+    (loss_sliced, out_sliced_train), (grad_model_sliced, grad_x_sliced) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1), has_aux=True
+    )(mla_sliced, lnx)
 
     self.assertTrue(jnp.allclose(out_normal_train, out_sliced_train, rtol=1e-05, atol=1e-05, equal_nan=False))
+    self.assertTrue(jnp.allclose(grad_x_normal, grad_x_sliced, rtol=1e-05, atol=1e-05, equal_nan=False))
+
+    grad_model_close = jax.tree_util.tree_map(
+        lambda x, y: jnp.allclose(x, y, rtol=1e-05, atol=1e-05, equal_nan=False),
+        grad_model_normal,
+        grad_model_sliced,
+    )
+    self.assertTrue(jax.tree_util.tree_all(grad_model_close))
 
     # Test PREFILL mode followed by AUTOREGRESSIVE mode to test caching
     prefill_length = cfg_normal.max_prefill_predict_length

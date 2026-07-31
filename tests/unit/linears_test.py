@@ -153,7 +153,7 @@ class DenseGeneralTest(unittest.TestCase):
 
     inputs = jax.random.normal(jax.random.PRNGKey(0), (batch_size, in_features))
 
-    with self.assertRaises(AssertionError):
+    with self.assertRaisesRegex(ValueError, "sliced contraction is only supported when quant is None"):
       layer(inputs, slice_bounds=(0, 3))
 
   def _run_dense_test(self, axis, in_feat_shape, expected_shape):
