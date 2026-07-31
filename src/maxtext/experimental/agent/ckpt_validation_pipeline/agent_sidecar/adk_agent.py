@@ -103,7 +103,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
     client = genai.Client(
         vertexai=True, 
         project="tpu-prod-env-multipod", 
-        location="us-central1"
+        location=os.environ.get("VERTEX_LOCATION", "global")
     )
     
     # List of all our defined tools
