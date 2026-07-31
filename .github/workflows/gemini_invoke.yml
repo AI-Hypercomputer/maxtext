@@ -48,7 +48,7 @@ jobs:
         id: 'mint_identity_token'
         if: |-
           ${{ vars.APP_ID }}
-        uses: 'actions/create-github-app-token@v2'
+        uses: 'actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b' # v2
         with:
           app-id: '${{ vars.APP_ID }}'
           private-key: '${{ secrets.APP_PRIVATE_KEY }}'
@@ -59,7 +59,7 @@ jobs:
       - name: 'Run Gemini CLI'
       # Trigger Gemini with context
         id: 'run_gemini'
-        uses: 'google-github-actions/run-gemini-cli@main'
+        uses: 'google-github-actions/run-gemini-cli@8a300991f26b2958bf7da6e100f99af84a2faf24' # main
         env:
           GEMINI_CLI_TRUST_WORKSPACE: 'true'
           TITLE: '${{ github.event.pull_request.title || github.event.issue.title }}'

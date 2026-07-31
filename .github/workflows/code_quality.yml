@@ -29,13 +29,14 @@ jobs:
     name: "Static code-quality checkers"
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         fetch-depth: 0
         ref: ${{ inputs.maxtext_sha || github.sha }}
+        persist-credentials: false
 
     - name: Install uv and set the Python version
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c  # v7.0.0
       with:
         python-version: '3.12'
         enable-cache: true
@@ -47,7 +48,7 @@ jobs:
       run: . "$GITHUB_WORKSPACE"/venv/bin/activate && uv pip install pre-commit
 
     - name: Cache pre-commit environments
-      uses: actions/cache@v4
+      uses: actions/cache@d4323d4df104b026a6aa633fdb11d7715d97e39a  # v4.2.2
       with:
          path: ~/.cache/pre-commit
          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}

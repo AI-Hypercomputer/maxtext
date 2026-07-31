@@ -117,7 +117,7 @@ jobs:
           name: maxtext-wheel
           path: dist/
       - name: Publish MaxText wheel to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@f76006edbe0ee05634503374d8b9d338f09d84bf  # v1.12.4
         with:
           packages-dir: dist/
 

@@ -27,7 +27,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/stale@v9
+      - uses: actions/stale@28ca1036281a5e5922ead5184a1bbf96e5fc984e  # v9.0.0
         with:
           # Disable the action for issues to run on PRs only
           days-before-issue-stale: -1

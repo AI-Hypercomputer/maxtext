@@ -29,13 +29,15 @@ jobs:
     name: Track Test Performance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Mark git repositories as safe
         run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
 
       - name: Download all test results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5.0.0
         with:
           path: test-results
           pattern: test-results-*-${{ github.run_id }}
@@ -72,7 +74,7 @@ jobs:
           git worktree remove gh-pages
 
       - name: Track Test Durations (Macro-level Dashboard)
-        uses: benchmark-action/github-action-benchmark@v1
+        uses: benchmark-action/github-action-benchmark@43d60b540e118ae3254924d57c2c9d2f2d93e8e1  # v1.14.0
         with:
           name: MaxText Test Execution Times
           tool: 'customSmallerIsBetter'

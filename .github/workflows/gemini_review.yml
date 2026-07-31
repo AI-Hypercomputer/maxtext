@@ -47,7 +47,7 @@ jobs:
         id: 'mint_identity_token'
         if: |-
           ${{ vars.APP_ID }}
-        uses: 'actions/create-github-app-token@v2'
+        uses: 'actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b' # v2
         with:
           app-id: '${{ vars.APP_ID }}'
           private-key: '${{ secrets.APP_PRIVATE_KEY }}'
@@ -57,7 +57,7 @@ jobs:
 
       - name: 'Checkout repository'
         # downloads the code to be analyzed
-        uses: 'actions/checkout@v6'
+        uses: 'actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3' # v6.0.0
         with:
           persist-credentials: 'false'
 
@@ -77,7 +77,7 @@ jobs:
 
       - name: 'Run Gemini pull request review'
         # reviews code with detailed set of instructions for the Gemini
-        uses: 'google-github-actions/run-gemini-cli@v0'
+        uses: 'google-github-actions/run-gemini-cli@8a300991f26b2958bf7da6e100f99af84a2faf24' # v0
         id: 'gemini_pr_review'
         env:
           GEMINI_CLI_TRUST_WORKSPACE: 'true'
