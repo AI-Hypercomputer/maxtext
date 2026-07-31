@@ -329,13 +329,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return self._metrics_recorder.get_metrics(clear_cache=clear_cache)
 
   def prepare_weight_sync(self, **kwargs: Any) -> Any:
-    """Stages weights for transfer and returns access coordinates.
-
+    """Returns weight synchronization metadata.
+  
+    Weight synchronization is not implemented yet. This placeholder returns an
+    empty dictionary until a transfer backend is integrated.
+  
     Args:
-      **kwargs: Weight staging parameters.
-
+      **kwargs: Reserved for future weight-staging configuration.
+  
     Returns:
-      Synchronization endpoints or coordinates for rollout actors.
+      An empty dictionary.
     """
     return {}
 
