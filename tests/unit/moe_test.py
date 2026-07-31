@@ -1425,12 +1425,12 @@ class RoutedMoeTest(parameterized.TestCase):
     self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
 
   @parameterized.named_parameters(
-      dict(
-          testcase_name=f"{base_name}_ep{ici_expert_parallelism}",
-          quantization=quantization,
-          use_gmm_v2=use_gmm_v2,
-          ici_expert_parallelism=ici_expert_parallelism,
-      )
+      {
+          "testcase_name": f"{base_name}_ep{ici_expert_parallelism}",
+          "quantization": quantization,
+          "use_gmm_v2": use_gmm_v2,
+          "ici_expert_parallelism": ici_expert_parallelism,
+      }
       for base_name, quantization, use_gmm_v2 in [
           ("tokamax_v1_bf16", "", False),
           ("tokamax_v1_fp8", "fp8_full", False),
