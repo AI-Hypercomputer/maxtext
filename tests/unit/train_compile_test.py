@@ -1229,3 +1229,32 @@ class TrainCompile(parameterized.TestCase):
             "pure_nnx_decoder=true",
         )
     )
+
+  @parameterized.named_parameters(
+      {"testcase_name": "scanned", "scan_layers": "true"},
+  )
+  @pytest.mark.cpu_only
+  def test_envy(self, scan_layers):
+    # test deepseek4 compile (Linen-only: DeepSeek NNX decoder rewrite is a follow-up PR).
+    compiled_trainstep_file = f"/tmp/test_envy_{scan_layers}.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=envy-switch-base",
+            "per_device_batch_size=1",
+            "max_target_length=8192",
+            f"scan_layers={scan_layers}",
+            "attention=dot_product",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "enable_nnx=True",
+            "pure_nnx=True",
+            "pure_nnx_decoder=True",
+            "override_model_config=True",
+        )
+    )
