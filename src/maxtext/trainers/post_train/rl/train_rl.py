@@ -17,7 +17,7 @@ RL Trainer
 
 This module provides a unified `rl_train` function that consolidates the common
 RL training logic. It handles model loading, reward function setup, dataset
-processing, and training orchestration. By default, we run Group Relative Policy Optimization (GRPO) on 
+processing, and training orchestration. By default, we run Group Relative Policy Optimization (GRPO) on
 GSM8K math reasoning benchmark. The script is also flexible enough to run Group Sequence Policy Optimization (GSPO).
 
 Usage Examples:
@@ -722,8 +722,9 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
 
   # Run evaluation before training
   if trainer_config.num_test_batches > 0:
-    # Update vllm with model parameters from checkpoint
-    rl_cluster.rollout.update_params(nnx.state(actor_model))
+    # `rl_cluster.rollout.update_params()` is intentionally omitted prior to step 0
+    # because `RLCluster` initialization (`create_rl_components`) already syncs the actor model weights
+    # during setup. Skipping this redundant parameter transfer eliminates unnecessary weight resharding.
 
     (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
         trainer_config,
