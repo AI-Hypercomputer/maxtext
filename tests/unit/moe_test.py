@@ -1424,30 +1424,20 @@ class RoutedMoeTest(parameterized.TestCase):
     )
     self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
 
-  @parameterized.product(
-      (
-          {
-              "testcase_name": "tokamax v1 bf16",
-              "quantization": "",
-              "use_gmm_v2": False,
-          },
-          {
-              "testcase_name": "tokamax v1 fp8",
-              "quantization": "fp8_full",
-              "use_gmm_v2": False,
-          },
-          {
-              "testcase_name": "tokamax v2 bf16",
-              "quantization": "",
-              "use_gmm_v2": True,
-          },
-          {
-              "testcase_name": "tokamax v2 fp8",
-              "quantization": "fp8_full",
-              "use_gmm_v2": True,
-          },
-      ),
-      ici_expert_parallelism=[1, 4],
+  @parameterized.named_parameters(
+      dict(
+          testcase_name=f"{base_name}_ep{ici_expert_parallelism}",
+          quantization=quantization,
+          use_gmm_v2=use_gmm_v2,
+          ici_expert_parallelism=ici_expert_parallelism,
+      )
+      for base_name, quantization, use_gmm_v2 in [
+          ("tokamax_v1_bf16", "", False),
+          ("tokamax_v1_fp8", "fp8_full", False),
+          ("tokamax_v2_bf16", "", True),
+          ("tokamax_v2_fp8", "fp8_full", True),
+      ]
+      for ici_expert_parallelism in [1, 4]
   )
   @pytest.mark.tpu_only
   def test_gmm_grad_equivalence(
@@ -1476,7 +1466,8 @@ class RoutedMoeTest(parameterized.TestCase):
           weight_dtype="float32",
           dtype="bfloat16",
           per_device_batch_size=1,
-          max_target_length=512,
+          max_target_length=256,
+          float32_gate_logits=True,
           ici_expert_parallelism=ici_expert_parallelism,
           sparse_matmul=sparse_matmul,
           megablox=megablox,

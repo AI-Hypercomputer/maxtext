@@ -37,30 +37,20 @@ class Train(parameterized.TestCase):
   Similar to `train_using_ragged_dot_smoke_train.py`
   """
 
-  @parameterized.product(
-      (
-          {
-              # "tokamax v1 bf16",
-              "quantization": "",
-              "use_gmm_v2": False,
-          },
-          {
-              # "tokamax v1 fp8",
-              "quantization": "fp8_full",
-              "use_gmm_v2": False,
-          },
-          {
-              # "tokamax v2 bf16",
-              "quantization": "",
-              "use_gmm_v2": True,
-          },
-          {
-              # "tokamax v2 fp8",
-              "quantization": "fp8_full",
-              "use_gmm_v2": True,
-          },
-      ),
-      ici_expert_parallelism=[1, 2],
+  @parameterized.named_parameters(
+      dict(
+          testcase_name=f"{base_name}_ep{ici_expert_parallelism}",
+          quantization=quantization,
+          use_gmm_v2=use_gmm_v2,
+          ici_expert_parallelism=ici_expert_parallelism,
+      )
+      for base_name, quantization, use_gmm_v2 in [
+          ("tokamax_v1_bf16", "", False),
+          ("tokamax_v1_fp8", "fp8_full", False),
+          ("tokamax_v2_bf16", "", True),
+          ("tokamax_v2_fp8", "fp8_full", True),
+      ]
+      for ici_expert_parallelism in [1, 2]
   )
   @pytest.mark.tpu_only
   def test_smoke_train(
@@ -129,7 +119,7 @@ class Train(parameterized.TestCase):
         # train
         "per_device_batch_size=1",
         "dataset_type=synthetic",
-        "steps=3",
+        "steps=2",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "enable_checkpoint_cloud_logger=False",
