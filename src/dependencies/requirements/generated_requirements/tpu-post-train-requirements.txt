@@ -297,7 +297,7 @@ semantic-version>=2.8.2
 sentencepiece>=0.2.2
 seqio>=0.0.20
 setproctitle>=1.3.7
-setuptools>=78.1.0
+setuptools>=83.0.0
 setuptools-rust>=1.9.0
 setuptools-scm>=8.0.1
 shellingham>=1.5.4
@@ -331,7 +331,7 @@ tokenizers>=0.22.2
 toml>=0.10.2
 tomlkit>=0.15.1
 toolz>=1.1.0
-torch==2.10.0+cpu
+torch==2.13.0
 torchax>=0.0.13
 torchvision==0.25.0+cpu
 tornado>=6.5.7
