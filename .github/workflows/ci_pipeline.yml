@@ -30,6 +30,16 @@ on:
         description: 'The result of all_tests_passed and all_notebooks_passed jobs.'
         value: ${{ (jobs.all_tests_passed.result == 'success' && jobs.all_notebooks_passed.result == 'success') && 'success' || 'failure' }}
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Test execution mode: build-all (default), test-only (skip package build and run tests), or fast-rebuild'
+        required: false
+        default: 'build-all'
+        type: choice
+        options:
+          - build-all
+          - test-only
+          - fast-rebuild
   schedule:
     # Run the job every 4 hours
     - cron:  '0 */4 * * *'
@@ -142,6 +152,7 @@ jobs:
     # Run if either tests or notebooks need to run; on PRs, gate on code quality + docs passing
     if: |
       always() &&
+      inputs.mode != 'test-only' &&
       (needs.analyze_code_changes.outputs.run_tests == 'true' || needs.analyze_code_changes.outputs.run_notebooks == 'true') &&
       (github.event_name != 'pull_request' || (needs.code_quality_check.result == 'success' && needs.docs_build_check.result == 'success'))
     uses: ./.github/workflows/build_package.yml
@@ -156,7 +167,7 @@ jobs:
     if: |
       always() &&
       needs.analyze_code_changes.outputs.run_notebooks == 'true' &&
-      needs.build_and_upload_maxtext_package.result == 'success'
+      (inputs.mode == 'test-only' || needs.build_and_upload_maxtext_package.result == 'success')
     uses: ./.github/workflows/run_jupyter_notebooks.yml
     strategy:
         fail-fast: false
@@ -165,7 +176,7 @@ jobs:
       device_name: v6e-8
       base_image: maxtext-unit-test-tpu:py312
       cloud_runner: linux-x86-ct6e-180-8tpu
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha || inputs.maxtext_sha || github.sha }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
@@ -175,12 +186,12 @@ jobs:
     if: |
       always() &&
       needs.analyze_code_changes.outputs.run_tests == 'true' &&
-      needs.build_and_upload_maxtext_package.result == 'success'
+      (inputs.mode == 'test-only' || needs.build_and_upload_maxtext_package.result == 'success')
     runs-on: ubuntu-latest
     outputs:
       total_workers: ${{ steps.set-params.outputs.total_workers }}
       worker_groups: ${{ steps.set-params.outputs.worker_groups }}
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha || inputs.maxtext_sha || github.sha }}
     steps:
       - id: set-params
         name: Formalize Test Suite Parameters
