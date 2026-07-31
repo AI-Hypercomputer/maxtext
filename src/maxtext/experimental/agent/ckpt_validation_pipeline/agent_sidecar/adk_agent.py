@@ -148,6 +148,9 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
             system_instruction=system_instruction,
             tools=adk_tools,
             temperature=0.2,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                maximum_remote_calls=25
+            ),
         )
     )
     
