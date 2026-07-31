@@ -18,7 +18,9 @@ import unittest
 from unittest import mock
 import numpy as np
 
+from maxtext.checkpoint_conversion.to_maxtext import _build_multi_axis_stacked_tensor
 from maxtext.checkpoint_conversion.utils import param_mapping
+from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
 
 
 class ParamMappingTest(unittest.TestCase):
@@ -184,7 +186,59 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config.use_multimodal = False
     maxtext_config.v_norm_with_scale = False
     mapping = param_mapping.GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
-    self.assertIn("params-decoder-scanned_blocks-layers_0-self_attention-query-kernel", mapping)
+    # The block scans its 5 local layers (nested [block][local]) then a single global layer.
+    self.assertIn("params-decoder-scanned_blocks-local_layers-self_attention-query-kernel", mapping)
+    self.assertIn("params-decoder-scanned_blocks-global_layer-self_attention-query-kernel", mapping)
+    # local_layers value is nested [block][local]; global_layer is flat over blocks.
+    num_blocks = config["num_hidden_layers"] // 6
+    local_val = mapping["params-decoder-scanned_blocks-local_layers-self_attention-query-kernel"]
+    global_val = mapping["params-decoder-scanned_blocks-global_layer-self_attention-query-kernel"]
+    self.assertEqual(len(local_val), num_blocks)
+    self.assertEqual(len(local_val[0]), 5)
+    self.assertEqual(len(global_val), num_blocks)
+
+  def test_gemma4_local_layers_stack_unstack_roundtrip(self):
+    """Stacking HF weights into the nested [block][local] MaxText layout (to_maxtext) and
+    un-stacking them back (to_huggingface) must be identity, with the two scan axes placed at
+    (param_scan_axis, param_scan_axis + 1) -- not the leading axes used for MoE expert stacking."""
+    num_blocks, num_local = 2, 5
+    slice_shape = (4, 3)  # per-(block, local) HF weight shape
+    cfg = mock.Mock()
+    cfg.param_scan_axis = 1
+    cfg.scan_layers = True
+    cfg.weight_dtype = "float32"
+    cfg.rope_type = ""
+    cfg.model_name = "gemma4-31b"
+
+    mt_key = "params-decoder-scanned_blocks-local_layers-self_attention-query-kernel"
+
+    def value_of(b, l):
+      return np.full(slice_shape, b * 100 + l, dtype=np.float32)
+
+    hf_names = [[f"b{b}_l{l}" for l in range(num_local)] for b in range(num_blocks)]
+
+    def getter(name):
+      block_idx, local_idx = name.split("_")
+      return value_of(int(block_idx[1:]), int(local_idx[1:]))
+
+    # target: per-slice shape (4, 3) with (blocks, local) inserted at axes (1, 2)
+    target_shape = (slice_shape[0], num_blocks, num_local, slice_shape[1])
+
+    # Forward (to_maxtext): stack. Blocks must land at axis 1, local at axis 2.
+    stacked = _build_multi_axis_stacked_tensor(hf_names, getter, None, target_shape, cfg, mt_key)
+    self.assertEqual(stacked.shape, target_shape)
+    for b in range(num_blocks):
+      for l in range(num_local):
+        np.testing.assert_array_equal(stacked[:, b, l, :], value_of(b, l))
+
+    # Backward (to_huggingface): un-stack and check it round-trips to the originals.
+    param_map = {mt_key: hf_names}
+    hf_shape_map = {f"b{b}_l{l}": slice_shape for b in range(num_blocks) for l in range(num_local)}
+    out = dict(process_maxtext_param(mt_key, stacked, param_map, {}, hf_shape_map, cfg))
+    self.assertEqual(len(out), num_blocks * num_local)
+    for b in range(num_blocks):
+      for l in range(num_local):
+        np.testing.assert_array_equal(out[f"b{b}_l{l}"], value_of(b, l))
 
   # Specific tests with assertions
   def test_reshape_kernel_hook(self):

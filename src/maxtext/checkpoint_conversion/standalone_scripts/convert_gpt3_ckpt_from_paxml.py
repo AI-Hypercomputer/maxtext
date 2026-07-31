@@ -41,6 +41,7 @@ import os
 import sys
 
 from flax import nnx
+from flax import serialization
 import jax
 from jax import random
 from jax.sharding import Mesh
@@ -118,6 +119,12 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   )
 
   state, _, _, _, _ = maxtext_utils.setup_training_state(None, cfg, mesh, checkpoint_manager, init_state_fn)
+  if cfg.pure_nnx:
+    state = train_state_nnx.to_checkpoint_dict(state)
+    state.pop("nnx_aux", None)
+  else:
+    state = serialization.to_state_dict(state)
+
   max_logging.log("start")
   max_utils.print_mem_stats("After params initialized")
 
@@ -201,24 +208,10 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
       "['decoder']['decoder_norm']['bias']": (".params.lm.final_ln.bias", None),
   }
 
-  if cfg.pure_nnx:
-    # NNX state-tree paths after `nnx.split(TrainStateNNX)`. The state is a
-    # nested `nnx.State` (dict-like Mapping) with `nnx.Variable` leaves, so
-    # `jax.tree_util.keystr` produces dict-style entries (`['key']`) plus
-    # `.value` for the Variable leaf, plus `[idx]` for the optax tuple:
-    #   model params   -> ['model']<rest>.value
-    #   adam mu / nu   -> ['optimizer']['opt_state'][0]['mu' | 'nu']<rest>.value
-    #   step           -> ['optimizer']['step'].value
-    #   opt count      -> ['optimizer']['opt_state'][0]['count'].value
-    state_map = {
-        "['optimizer']['step'].value": ("step", None),
-        "['optimizer']['opt_state'][0]['count'].value": ("opt_states_0.no_prefix_0.count", None),
-    }
-  else:
-    state_map = {
-        ".step": ("step", None),
-        ".opt_state.count": ("opt_states_0.no_prefix_0.count", None),
-    }
+  state_map = {
+      "['step']": ("step", None),
+      "['opt_state']['count']": ("opt_states_0.no_prefix_0.count", None),
+  }
 
   def get_layer_prefix(keystr_pax):
     # different path format between decoder_layer variable
@@ -231,26 +224,18 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   for keystr_maxtext, (keystr_pax, transform_fn) in keystr_map.items():
     prefix_pax_opt_state = get_layer_prefix(keystr_pax)
-    if cfg.pure_nnx:
-      state_map[f"['model']{keystr_maxtext}.value"] = (f"mdl_vars{keystr_pax}", transform_fn)
-      state_map[f"['optimizer']['opt_state'][0]['mu']{keystr_maxtext}.value"] = (
-          f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
-          transform_fn,
-      )
-      state_map[f"['optimizer']['opt_state'][0]['nu']{keystr_maxtext}.value"] = (
-          f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
-          transform_fn,
-      )
-    else:
-      state_map[f".params['params']{keystr_maxtext}"] = (f"mdl_vars{keystr_pax}", transform_fn)
-      state_map[f".opt_state.mu['params']{keystr_maxtext}"] = (
-          f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
-          transform_fn,
-      )
-      state_map[f".opt_state.nu['params']{keystr_maxtext}"] = (
-          f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
-          transform_fn,
-      )
+    state_map[f"['params']['params']{keystr_maxtext}"] = (
+        f"mdl_vars{keystr_pax}",
+        transform_fn,
+    )
+    state_map[f"['opt_state']['mu']['params']{keystr_maxtext}"] = (
+        f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
+        transform_fn,
+    )
+    state_map[f"['opt_state']['nu']['params']{keystr_maxtext}"] = (
+        f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
+        transform_fn,
+    )
 
   def verify_fn(key_path, _):
     keystr = jax.tree_util.keystr(key_path)
@@ -302,9 +287,9 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   max_logging.log("converted state finished")
   max_utils.print_mem_stats("converted state finished")
 
-  step_value = int(converted_state.optimizer.step.value) if cfg.pure_nnx else converted_state.step
-  if checkpointing.save_checkpoint(checkpoint_manager, step_value, converted_state):
-    max_logging.log(f"saved a checkpoint at step {step_value}")
+  step_value = int(converted_state["step"]) if isinstance(converted_state, dict) else int(converted_state.step)
+  if checkpointing.save_checkpoint(checkpoint_manager, step_value, converted_state, config=cfg):
+    max_logging.log(f"Saved a checkpoint at step {step_value}.")
   # Upon preemption, exit when and only when all ongoing saves are complete.
   if checkpointing.reached_preemption(checkpoint_manager, step_value):
     checkpointing.wait_until_finished(checkpoint_manager)
@@ -322,7 +307,12 @@ if __name__ == "__main__":
       default="gs://mlperf-llm-public2/gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000",
       required=True,
   )
-  parser.add_argument("--maxtext-model-name", choices=["gpt3-175b", "gpt3-52k"], type=str, required=True)
+  parser.add_argument(
+      "--maxtext-model-name",
+      choices=["gpt3-175b", "gpt3-52k"],
+      type=str,
+      required=True,
+  )
   parser.add_argument("--base-output-directory", type=str, required=True)
   parser.add_argument("--run-name", type=str, required=True)
 
@@ -330,4 +320,9 @@ if __name__ == "__main__":
   if not args.paxml_ckpt_path.startswith("gs://"):
     raise ValueError("--paxml-ckpt-path should be a gcs path starting with gs://")
 
-  convert(args.paxml_ckpt_path, args.maxtext_model_name, args.base_output_directory, args.run_name)
+  convert(
+      args.paxml_ckpt_path,
+      args.maxtext_model_name,
+      args.base_output_directory,
+      args.run_name,
+  )

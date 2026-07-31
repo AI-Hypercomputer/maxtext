@@ -93,6 +93,7 @@ logical_axis_rules: [
                       ['embed', []],
                       ['norm', []],
                       ['layers', []],
+                      ['local_layers', []],
                       ['dense_layers', []],
                       ['moe_layers', []],
                       # ==========================================

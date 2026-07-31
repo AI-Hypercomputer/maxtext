@@ -317,7 +317,10 @@ def get_maxtext_model_info(config):
   quant = quantizations.configure_quantization(config)
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
-  # Get abstract model structure (name, shape) without materializing the weights to save memory
+  # Get abstract model structure (name, shape) without materializing the weights to save memory.
+  # Extract the 'params' collection from the abstract model state. This focuses checkpoint
+  # conversion on trainable model parameters; variables outside the 'params' collection
+  # (such as non-trainable state or optimizer buffers) are not included.
   abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
@@ -346,41 +349,62 @@ def _build_multi_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
+    mt_key: str = "",
 ) -> np.ndarray:
-  """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers).
+  """Builds a MaxText tensor by stacking HF weights along two axes.
 
-  This function handles the complex case for scanned MoE layers, producing a tensor
-  with the shape (num_experts, num_layers, ...).
+  Two cases share this helper:
+    * MoE expert stacking: outer=experts, inner=layers, placed at the LEADING two
+      axes -> shape (num_experts, num_layers, ...).
+    * Gemma4 nested block scan (``scanned_blocks-local_layers``): the block's local
+      layers are an inner scan nested inside the outer block scan, so the two
+      stacked axes live at ``(param_scan_axis, param_scan_axis + 1)`` rather than
+      the leading axes, e.g. (emb, blocks, local, ...).
 
   Args:
       hf_source_keys: A nested (2D) list of Hugging Face parameter names.
-                      Outer list iterates experts, inner list iterates layers.
+                      The outer list is the outer stack axis, the inner list the
+                      inner stack axis.
       tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
       hook_fns: The hook function(s) to apply to each individual weight.
       target_shape: The final shape of the target MaxText tensor.
       config: The MaxText pyconfig object.
+      mt_key: The MaxText parameter key, used to detect the gemma4 nested-scan case.
 
   Returns:
       The final, assembled NumPy array for the MaxText parameter.
   """
-  all_expert_tensors = []
-  # The hook function needs the shape of an individual slice, not the full stacked tensor.
-  # For multi-axis stacking (experts, layers, ...), the slice shape is target_shape[2:]
-  mt_slice_shape = target_shape[2:]
+  # Gemma4's local layers are an inner scan nested inside the block scan, so the
+  # two stacked axes go at (param_scan_axis, param_scan_axis + 1); everything else
+  # (MoE experts/layers) stacks at the leading axes.
+  if isinstance(mt_key, str) and "scanned_blocks-local_layers" in mt_key:
+    outer_axis, inner_axis = config.param_scan_axis, config.param_scan_axis + 1
+  else:
+    outer_axis, inner_axis = 0, 1
 
-  # Outer loop iterates through experts
-  for layer_keys_for_expert in hf_source_keys:
-    layer_tensors_for_expert = []
-    # Inner loop iterates through layers for the current expert
-    for hf_key_single in layer_keys_for_expert:
+  # The hook function needs the shape of an individual slice: target_shape with
+  # the two stacked axes removed.
+  stacked_axes = {outer_axis, inner_axis}
+  mt_slice_shape = tuple(d for i, d in enumerate(target_shape) if i not in stacked_axes)
+
+  all_outer_tensors = []
+  # Outer loop iterates the outer stack axis (experts, or blocks for gemma4 local)
+  for inner_keys in hf_source_keys:
+    inner_tensors = []
+    # Inner loop iterates the inner stack axis (layers, or local layers for gemma4)
+    for hf_key_single in inner_keys:
       if isinstance(hf_key_single, (list, tuple)):
         hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
       else:
         hf_tensor_numpy = tensor_getter_fn(hf_key_single)
-      processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
-      layer_tensors_for_expert.append(processed_hf_tensor)
-    all_expert_tensors.append(np.stack(layer_tensors_for_expert, axis=0))
-  return np.stack(all_expert_tensors, axis=0)
+      inner_tensors.append(apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns))
+    all_outer_tensors.append(np.stack(inner_tensors, axis=0))
+  stacked = np.stack(all_outer_tensors, axis=0)  # (outer, inner, *slice)
+
+  # Move the (outer, inner) axes from leading positions to their targets.
+  if (outer_axis, inner_axis) != (0, 1):
+    stacked = np.moveaxis(stacked, (0, 1), (outer_axis, inner_axis))
+  return stacked
 
 
 def _build_single_axis_stacked_tensor(
@@ -432,7 +456,7 @@ def _build_single_axis_stacked_tensor(
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
-def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config):
+def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config, mt_key=""):
   """Determine the loading function for HF keys.
 
   This function natively supports `composite_hf_key` mapping (where multiple HF keys
@@ -483,6 +507,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hook_fn,
         mt_target_shape_or_shapes,
         config,
+        mt_key,
     )
   return load_fn
 
@@ -492,9 +517,12 @@ def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict)
 
   The index is the parameter's order in `maxtext_abstract_dict.keys()`.
   This function handles two forms of MaxText keys:
-  - `atomic_mt_key`: A single string representing one MaxText parameter that map to HF parameter(s).
+  - `atomic_mt_key`: A single string representing one MaxText parameter that maps to HF parameter(s).
+    Example: "params-decoder-layers_0-self_attention-query-kernel" -> returns a single index and shape tuple.
   - `composite_mt_key`: A tuple of strings representing multiple MaxText parameters derived from
     a single/bundled HF parameter source (e.g., HF gate_up_proj splitting into MT wi_0 and wi_1).
+    Example: ("params-decoder-layers_0-mlp-wi_0-kernel", "params-decoder-layers_0-mlp-wi_1-kernel") ->
+    returns lists of indices and shapes for each composite component.
   """
   is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
   # atomic_mt_key
@@ -1013,9 +1041,9 @@ def main(
       if not lazy_load_tensors:
         max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
-      hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
-      if hf_source_keys_or_key is None:
+      if mt_param_key_or_keys not in param_map_mt_to_hf:
         raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
+      hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
       hook_fn = hook_fn_map_mt.get(mt_param_key_or_keys)
 
       # Step 1: Resolves MaxText key(s) to target indices and shapes
@@ -1032,6 +1060,7 @@ def main(
           hook_fn,
           mt_target_shape_or_shapes,
           config,
+          mt_param_key_or_keys,
       )
 
       # Step 3: Load hf keys and convert to maxtext keys

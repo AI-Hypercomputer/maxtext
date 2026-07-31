@@ -577,6 +577,7 @@ class RoutedMoeTest(unittest.TestCase):
         use_gmm_v2=True,
         num_moe_emb_chunks=4,
         use_ring_of_experts=True,
+        ici_expert_parallelism=4,
         use_random_routing=True,
         mlp_bias=True,
         per_device_batch_size=1,
@@ -596,6 +597,7 @@ class RoutedMoeTest(unittest.TestCase):
         use_tokamax_gmm=True,
         use_gmm_v2=True,
         num_moe_emb_chunks=0,
+        ici_expert_parallelism=4,
         use_ring_of_experts=True,
         use_random_routing=True,
         mlp_bias=True,
@@ -661,6 +663,7 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=True,
         use_tokamax_gmm=True,
         use_gmm_v2=True,
+        ici_expert_parallelism=4,
         num_moe_emb_chunks=4,
         use_ring_of_experts=True,
         mlp_bias=True,
@@ -680,9 +683,10 @@ class RoutedMoeTest(unittest.TestCase):
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
-    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
-    actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    assert_moe_close(actual_output, expected_output, cfg.dtype)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
+      actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+      assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
@@ -756,6 +760,7 @@ class RoutedMoeTest(unittest.TestCase):
       ragged_buffer_factor: float = -1.0,
       ragged_gather_fallback: bool = False,
       ragged_gather_reduce_fallback: bool = False,
+      ragged_sort_use_single_sparsecore: bool = False,
   ):
     """Loss and gradient correctness for the use_ragged_sort flag.
 
@@ -789,6 +794,7 @@ class RoutedMoeTest(unittest.TestCase):
           ragged_buffer_factor=effective_buffer_factor,
           ragged_gather_fallback=ragged_gather_fallback,
           ragged_gather_reduce_fallback=ragged_gather_reduce_fallback,
+          ragged_sort_use_single_sparsecore=ragged_sort_use_single_sparsecore,
       )
 
     def _build_model(cfg, mesh):
@@ -899,6 +905,14 @@ class RoutedMoeTest(unittest.TestCase):
     self._run_ragged_sort_loss_and_grad(
         use_ring_of_experts=False, ragged_gather_fallback=True, ragged_gather_reduce_fallback=True
     )
+
+  @pytest.mark.tpu_only
+  def test_ragged_sort_single_sparsecore_ring_of_experts(self):
+    self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True, ragged_sort_use_single_sparsecore=True)
+
+  @pytest.mark.tpu_only
+  def test_ragged_sort_single_sparsecore_no_ring_of_experts(self):
+    self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False, ragged_sort_use_single_sparsecore=True)
 
   @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):

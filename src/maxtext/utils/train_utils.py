@@ -281,11 +281,15 @@ def setup_train_loop(config, recorder, devices=None):
     with jax.set_mesh(mesh):
       if context_parallel_size > 1 and config.context_parallel_load_balance:
 
-        # Determine load balancing reorder strategy based on whether packing is enabled
+        # Determine load balancing reorder strategy.
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
           reorder_strategy = (
               ReorderStrategy.STRIPED
-              if config.packing and context_parallel_strategy == "ring"
+              if (
+                  config.packing
+                  and context_parallel_strategy == "ring"
+                  and config.hardware in ("gpu", "gpu_multiprocess")
+              )
               else ReorderStrategy.DUAL_CHUNK_SWAP
           )
         else:

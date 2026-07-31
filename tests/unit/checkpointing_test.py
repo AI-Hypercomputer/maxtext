@@ -149,7 +149,7 @@ class LoadDynamicTest(parameterized.TestCase):
   """Tests for cache downloads and dynamic loading of safetensors."""
 
   @mock.patch("huggingface_hub.HfFileSystem")
-  @mock.patch("google.cloud.storage.Client")
+  @mock.patch.object(load_dynamic.storage, "Client")
   def test_build_gcs_cache_worker_cache_hit(self, mock_storage_client, mock_hf_fs):
     mock_client_instance = mock_storage_client.return_value
     mock_bucket = mock_client_instance.bucket.return_value
@@ -161,7 +161,7 @@ class LoadDynamicTest(parameterized.TestCase):
     mock_blob.upload_from_file.assert_not_called()
 
   @mock.patch("huggingface_hub.HfFileSystem")
-  @mock.patch("google.cloud.storage.Client")
+  @mock.patch.object(load_dynamic.storage, "Client")
   def test_build_gcs_cache_worker_cache_miss_success(self, mock_storage_client, mock_hf_fs):
     mock_fs_instance = mock_hf_fs.return_value
     mock_remote_file = mock.MagicMock()
@@ -177,7 +177,7 @@ class LoadDynamicTest(parameterized.TestCase):
     mock_blob.upload_from_file.assert_called_once_with(mock_remote_file, client=mock_client_instance)
 
   @mock.patch("huggingface_hub.HfFileSystem")
-  @mock.patch("google.cloud.storage.Client")
+  @mock.patch.object(load_dynamic.storage, "Client")
   def test_build_gcs_cache_worker_retry_and_fail(self, mock_storage_client, mock_hf_fs):
     mock_fs_instance = mock_hf_fs.return_value
     mock_fs_instance.open.side_effect = Exception("Download failed")

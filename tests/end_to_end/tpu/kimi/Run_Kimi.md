@@ -29,9 +29,9 @@ Kimi is a family of high-performance, open-weights sparse MoE models by Moonshot
 hf download moonshotai/Kimi-K2-Instruct --local-dir $LOCAL_FP8_PATH
 ```
 
-2. Convert the weights from FP8 to BF16 using script [deepseek_fp8_to_bf16.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/deepseek_fp8_to_bf16.py) on CPU
+2. Convert the weights from FP8 to BF16 using script [deepseek_dequantize.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/deepseek_dequantize.py) on CPU
 ```sh
-python3 -m maxtext.checkpoint_conversion.standalone_scripts.deepseek_fp8_to_bf16 --input-fp8-hf-path=$LOCAL_FP8_PATH --output-bf16-hf-path=$LOCAL_BF16_PATH
+python3 -m maxtext.checkpoint_conversion.standalone_scripts.deepseek_dequantize --input-path=$LOCAL_FP8_PATH --output-path=$LOCAL_BF16_PATH
 ```
 Alternatively, we can use the official DeepSeek script [fp8_cast_bf16.py](https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/fp8_cast_bf16.py) to convert on GPU.
 

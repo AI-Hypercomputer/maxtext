@@ -656,6 +656,20 @@ class AttentionTest(parameterized.TestCase):
 
     return lnx, decoder_segment_ids, decoder_positions
 
+  def get_packed_data(self, dtype):
+    """get packed data"""
+    lnx, _, _ = self.get_data(dtype)
+    # Uneven segment lengths so boundaries don't line up with splash blocks, reorder chunks, or the CP shard split.
+    segment_lengths = (80, 240, 112, 80)
+    segment_ids = jnp.concatenate(
+        [jnp.full((length,), segment, dtype=jnp.int32) for segment, length in enumerate(segment_lengths, start=1)]
+    )
+    positions = jnp.concatenate([jnp.arange(length, dtype=jnp.int32) for length in segment_lengths])
+    decoder_segment_ids = jnp.broadcast_to(segment_ids, (self.global_batch_size, self.max_target_length))
+    decoder_positions = jnp.broadcast_to(positions, (self.global_batch_size, self.max_target_length))
+
+    return lnx, decoder_segment_ids, decoder_positions
+
   def get_structured_data(self, dtype):
     """get structured data"""
     lnx = jax.random.normal(
@@ -1143,11 +1157,13 @@ class AttentionTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
-      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
+      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False, "packing": False},
+      {"testcase_name": "load_balance", "context_parallel_load_balance": True, "packing": False},
+      {"testcase_name": "packed", "context_parallel_load_balance": False, "packing": True},
+      {"testcase_name": "packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ring_context_parallel(self, context_parallel_load_balance):
+  def test_tpu_flash_attention_ring_context_parallel(self, context_parallel_load_balance, packing):
     """Test equivalence between dot_product and flash attention + ring context parallelism"""
 
     cfg_cp = pyconfig.initialize(
@@ -1159,12 +1175,15 @@ class AttentionTest(parameterized.TestCase):
         ici_context_parallelism=2,
         use_tokamax_splash=True,
         use_jax_splash=False,
-        packing=False,
+        packing=packing,
         dtype="float32",
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    if packing:
+      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+    else:
+      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
     attention_as_mha_generic = Attention(
         config=self.cfg,
         num_query_heads=cfg_cp.num_query_heads,
@@ -1224,15 +1243,17 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
         msg="Logits from generic dot product and flash attention + ring context parallelism are not close. "
-        f"context_parallel_load_balance={context_parallel_load_balance}.",
+        f"context_parallel_load_balance={context_parallel_load_balance}, packing={packing}.",
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
-      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
+      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False, "packing": False},
+      {"testcase_name": "load_balance", "context_parallel_load_balance": True, "packing": False},
+      {"testcase_name": "packed", "context_parallel_load_balance": False, "packing": True},
+      {"testcase_name": "packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ring_context_parallel_grad(self, context_parallel_load_balance):
+  def test_tpu_flash_attention_ring_context_parallel_grad(self, context_parallel_load_balance, packing):
     """Test gradient equivalence between dot_product and flash attention + ring context parallelism"""
 
     cfg_cp = pyconfig.initialize(
@@ -1244,12 +1265,15 @@ class AttentionTest(parameterized.TestCase):
         ici_context_parallelism=2,
         use_tokamax_splash=True,
         use_jax_splash=False,
-        packing=False,
+        packing=packing,
         dtype="float32",
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    if packing:
+      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+    else:
+      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
     attention_as_mha_generic = Attention(
         config=self.cfg,
         num_query_heads=cfg_cp.num_query_heads,
@@ -1325,7 +1349,7 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
         msg="Input gradients from generic dot product and flash attention + ring context parallelism are not close. "
-        f"context_parallel_load_balance={context_parallel_load_balance}.",
+        f"context_parallel_load_balance={context_parallel_load_balance}, packing={packing}.",
     )
 
   @pytest.mark.tpu_only

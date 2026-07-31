@@ -191,16 +191,13 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         out_sharding=(None,),
     )
 
-  def res_mapping(self, x: Array):
-    """Helper function for residual mapping."""
+  def res_mapping(self, h_res: Array):
+    """Helper function for residual mapping after matmul."""
     # In MaxText, we match weight precision to activations before Matmul
-    res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
     res_beta = jnp.asarray(self.res_beta[...], self.dtype)
     res_alpha_scale = jnp.asarray(self.res_alpha_scale[...], self.dtype)
 
     if self.config.enable_mhc_lite:
-      # Apply projection: (b, s, k*d) @ (k*d, k!) -> (b, s, k!)
-      h_res = jnp.einsum("bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision)
       intermediate = res_alpha_scale * h_res + res_beta[None, None, :]
       # Use float32 for numerical stability during softmax
       weights = jax.nn.softmax(intermediate.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -214,22 +211,17 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       )
       return output
     else:
-      # Apply projection: (b, s, k*d) @ (k*d, k*k) -> (b, s, k*k)
-      h_res = jnp.einsum("bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision)
       b, s, _ = h_res.shape
       h_res = jnp.reshape(h_res, (b, s, self.k, self.k))
       intermediate = res_alpha_scale * h_res + res_beta[None, None, :, :]
       output = sinkhorn(intermediate, self.sinkhorn_iterations)
       return output
 
-  def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: float, eps: float = 0.0):
-    """Helper function for both pre and post mappings."""
+  def mapping(self, h: Array, alpha_scale: Array, beta: Array, scale: float, eps: float = 0.0):
+    """Helper function for both pre and post mappings after matmul."""
     # In MaxText, we match weight precision to activations before Matmul
-    alpha = jnp.asarray(alpha, self.dtype)
     beta = jnp.asarray(beta, self.dtype)
     alpha_scale = jnp.asarray(alpha_scale, self.dtype)
-    # Apply projection: (b, s, k*d) @ (k*d, k) -> (b, s, k)
-    h = jnp.einsum("bsm,mk -> bsk", x, alpha, precision=self.matmul_precision)
     intermediate = alpha_scale * h + beta[None, None, :]
     output = scale * jax.nn.sigmoid(intermediate) + eps
     return output
@@ -260,11 +252,24 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # 1. Flatten the tensor, and RMS normalization
     norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
 
+    # Fused Projections
+    pre_alpha = jnp.asarray(self.pre_alpha[...], self.dtype)
+    post_alpha = jnp.asarray(self.post_alpha[...], self.dtype)
+    res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
+
+    alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
+
+    # MatMul on normalized input
+    h_concat = jnp.einsum("bsm,mn -> bsn", norm_x, alpha_concat, precision=self.matmul_precision)
+
+    h_pre = h_concat[..., : self.k]
+    h_post = h_concat[..., self.k : 2 * self.k]
+    h_res = h_concat[..., 2 * self.k :]
+
     # 2. Pre mapping
     pre_mapping = self.mapping(
-        norm_x,
+        h_pre,
         self.pre_alpha_scale[...],
-        self.pre_alpha[...],
         self.pre_beta[...],
         1.0,
         eps=1e-6,
@@ -289,9 +294,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
 
     # 5. Post mapping
     post_mapping = self.mapping(
-        norm_x,
+        h_post,
         self.post_alpha_scale[...],
-        self.post_alpha[...],
         self.post_beta[...],
         2.0,
     )
@@ -303,7 +307,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     )
 
     # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
-    res_mapping = self.res_mapping(norm_x)
+    res_mapping = self.res_mapping(h_res)
     res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
     return res_out + post_out, metadata
 
