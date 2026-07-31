@@ -29,7 +29,7 @@ chips_per_vm: 4
 use_pathways: true
 
 # Rollout: TP = 4 (across 4 chips).
-use_standalone_converter: true
+use_standalone_converter: false
 rollout_data_parallelism: -1
 rollout_tensor_parallelism: 4
 rollout_expert_parallelism: 1

@@ -171,6 +171,7 @@ spec:
                   run_name=ym-qw35-21 \
                   enable_tunix_perf_metrics=True \
                   scan_layers=True \
+                  use_standalone_converter=False \
                   allow_split_physical_axes=True \
                   base_output_directory=gs://yixuanm-maxtext-logs/ConvergenceTesting \
                   load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items \
