@@ -190,6 +190,40 @@ def remove_size_one_mesh_axis(spec, mesh):
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 
+def mesh_axes_for_dim(axis_names):
+  """Returns the mesh axes attached to one tensor dimension."""
+  if axis_names is None:
+    return ()
+  if isinstance(axis_names, str):
+    return (axis_names,)
+  return tuple(axis for axis in axis_names if axis is not None)
+
+
+def mesh_axes_size(mesh, axes, *, label):
+  """Returns the product of mesh sizes for a set of axes."""
+  size = 1
+  for axis in axes:
+    if axis not in mesh.shape:
+      raise ValueError(f"{label} requires mesh axis {axis!r} to exist.")
+    size *= mesh.shape[axis]
+  return size
+
+
+def with_axis_on_dim(axis_names, axis, dim):
+  """Returns sharding axis names with one dimension replaced."""
+  if axis_names is None:
+    return None
+  if dim >= len(axis_names):
+    raise ValueError(f"Dimension {dim} is out of range for sharding axis names {axis_names}.")
+  axes = list(axis_names)
+  axes[dim] = axis
+  if isinstance(axis_names, P):
+    return P(*axes, unreduced=axis_names.unreduced, reduced=axis_names.reduced)
+  if isinstance(axis_names, tuple):
+    return tuple(axes)
+  return axes
+
+
 def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -> P:
   """Removes physical mesh axes from spec where array dimension is not divisible by the mesh axis size."""
   if spec is None or mesh is None or not shape:
