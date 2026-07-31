@@ -846,6 +846,116 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
           compute_dtype=cfg.dtype,
       )
+    elif getattr(cfg, "use_gdn_kernel", False) and getattr(cfg, "use_hybrid_gdn", False):
+      from maxtext.models.hybrid_gdn import hybrid_fused_conv1d_gdn
+
+      if self.mesh is not None:
+        logical_rules = get_logical_axis_rules()
+        batch_pspec3 = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
+        batch_pspec4 = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=self.mesh, rules=logical_rules)
+        none_pspec3 = logical_to_mesh_axes((None, None, None), mesh=self.mesh, rules=logical_rules)
+        none_pspec1 = logical_to_mesh_axes((None,), mesh=self.mesh, rules=logical_rules)
+
+        recurrent_state_arg = (
+            recurrent_state
+            if recurrent_state is not None
+            else jnp.zeros((batch, self.num_v_heads, self.head_k_dim, self.head_v_dim), dtype=cfg.dtype)
+        )
+        conv_state_arg = (
+            conv_state
+            if conv_state is not None
+            else jnp.zeros((batch, self.config.gdn_conv_kernel_dim - 1, qkv.shape[-1]), dtype=cfg.dtype)
+        )
+        conv_bias_arg = (
+            self.conv1d.bias.value
+            if hasattr(self.conv1d, "bias") and self.conv1d.bias is not None
+            else jnp.zeros((qkv.shape[-1],), dtype=cfg.dtype)
+        )
+
+        @functools.partial(
+            jax.shard_map,
+            mesh=self.mesh,
+            in_specs=(
+                batch_pspec3,  # qkv
+                batch_pspec3,  # b
+                batch_pspec3,  # a
+                none_pspec3,   # conv_weight
+                none_pspec1,   # conv_bias
+                none_pspec1,   # a_log
+                none_pspec1,   # dt_bias
+                batch_pspec3,  # conv_state
+                batch_pspec4,  # recurrent_state
+            ),
+            out_specs=(
+                batch_pspec4,  # core_attn_out
+                (batch_pspec3, batch_pspec4),  # (next_conv_state, next_recurrent_state)
+            ),
+            check_vma=False,
+        )
+        def shard_mapped_hybrid_gdn(qkv_val, b_val, a_val, cw_val, cb_val, alog_val, dt_val, cs_val, rs_val):
+          return hybrid_fused_conv1d_gdn(
+              qkv=qkv_val,
+              b=b_val,
+              a=a_val,
+              conv_weight=cw_val,
+              conv_bias=cb_val,
+              a_log=alog_val,
+              dt_bias=dt_val,
+              conv_state=cs_val,
+              recurrent_state=rs_val,
+              num_k_heads=self.num_k_heads,
+              num_v_heads=self.num_v_heads,
+              head_k_dim=self.head_k_dim,
+              head_v_dim=self.head_v_dim,
+              conv_kernel_size=self.config.gdn_conv_kernel_dim,
+              chunk_size=self.config.gdn_chunk_size,
+              use_qk_norm_in_gdn=self.config.use_qk_norm_in_gdn,
+              compute_dtype=self.config.dtype,
+          )
+
+        core_attn_out, (next_conv_state, next_recurrent_state) = shard_mapped_hybrid_gdn(
+            qkv,
+            b,
+            a,
+            self.conv1d.kernel.value,
+            conv_bias_arg,
+            self.A_log[...],
+            self.dt_bias[...],
+            conv_state_arg,
+            recurrent_state_arg,
+        )
+      else:
+        core_attn_out, (next_conv_state, next_recurrent_state) = hybrid_fused_conv1d_gdn(
+            qkv=qkv,
+            b=b,
+            a=a,
+            conv_weight=self.conv1d.kernel.value,
+            conv_bias=None,
+            a_log=self.A_log[...],
+            dt_bias=self.dt_bias[...],
+            conv_state=conv_state,
+            recurrent_state=recurrent_state,
+            num_k_heads=self.num_k_heads,
+            num_v_heads=self.num_v_heads,
+            head_k_dim=self.head_k_dim,
+            head_v_dim=self.head_v_dim,
+            conv_kernel_size=self.config.gdn_conv_kernel_dim,
+            chunk_size=self.config.gdn_chunk_size,
+            use_qk_norm_in_gdn=self.config.use_qk_norm_in_gdn,
+            compute_dtype=self.config.dtype,
+        )
+    elif getattr(cfg, "use_gdn_kernel", False):
+      core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
+          query,
+          key,
+          value,
+          g,
+          beta,
+          chunk_size=cfg.gdn_chunk_size,
+          initial_state=recurrent_state,
+          use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+          compute_dtype=cfg.dtype,
+      )
     elif self.mesh is not None:
       logical_rules = get_logical_axis_rules()
       recurrent_state_arg = (
