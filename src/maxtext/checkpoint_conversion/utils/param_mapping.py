@@ -4189,6 +4189,8 @@ PARAM_MAPPING = {
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
+    # mistral-7b is structurally isomorphic to Llama 3.1, sharing the same key names and dimension layouts.
+    "mistral-7b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b-pt": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4243,6 +4245,8 @@ HOOK_FNS = {
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    # mistral-7b is structurally isomorphic to Llama 3.1, allowing reuse of Llama's hook functions.
+    "mistral-7b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b-pt": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,

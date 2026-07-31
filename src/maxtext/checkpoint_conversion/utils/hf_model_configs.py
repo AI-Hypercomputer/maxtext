@@ -1519,6 +1519,31 @@ mixtral_8x7b_dict = {
 mixtral_8x7b_config = transformers.MixtralConfig(**mixtral_8x7b_dict)
 
 
+# from https://huggingface.co/mistralai/Mistral-7B-v0.1/blob/main/config.json
+mistral_7b_dict = {
+    "architectures": ["MistralForCausalLM"],
+    "attention_dropout": 0.0,
+    "bos_token_id": 1,
+    "eos_token_id": 2,
+    "hidden_act": "silu",
+    "hidden_size": 4096,
+    "initializer_range": 0.02,
+    "intermediate_size": 14336,
+    "max_position_embeddings": 32768,
+    "model_type": "mistral",
+    "num_attention_heads": 32,
+    "num_hidden_layers": 32,
+    "num_key_value_heads": 8,
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 10000.0,
+    "sliding_window": 4096,
+    "tie_word_embeddings": False,
+    "torch_dtype": "bfloat16",
+    "vocab_size": 32000,
+}
+mistral_7b_config = transformers.MistralConfig(**mistral_7b_dict)
+
+
 # from https://huggingface.co/mistralai/Mixtral-8x22B-Instruct-v0.1/blob/main/config.json
 mixtral_8x22b_dict = {
     "architectures": ["MixtralForCausalLM"],
@@ -1744,6 +1769,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-next-80b-a3b": qwen3_next_80b_a3b_config,
     "qwen3.5-397b-a17b": qwen3_5_397b_a17b_config,
     "qwen3.5-35b-a3b": qwen3_5_35b_a3b_config,
+    "mistral-7b": mistral_7b_config,
     "mixtral-8x7b": mixtral_8x7b_config,
     "mixtral-8x22b": mixtral_8x22b_config,
     "olmo3-7b": olmo3_7b_config,
