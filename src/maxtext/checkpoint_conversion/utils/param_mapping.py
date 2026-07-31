@@ -3957,7 +3957,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
 
     first_idx = hf_layer_indices[0] if is_list else hf_layer_indices
     if first_idx >= 2:
-      if first_idx % 2 == 0 or first_idx == 2:
+      if first_idx % 2 == 0:
         layer_map.update(
             {
                 f"{mt_layer_path}-self_attention-csa_compressor-kv_proj-kernel": get_hf_key(
@@ -4033,11 +4033,6 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   def transpose(input_tensor, target_shape=None):
     return np.transpose(input_tensor)
 
-  def transpose_stack(input_tensor, target_shape=None):
-    # input_tensor is a list of tensors
-    stacked = np.stack(input_tensor, axis=0)  # [E, out, in]
-    return np.transpose(stacked, (0, 2, 1))  # [E, in, out]
-
   def ones_norm(input_tensor, target_shape=None):
     return np.ones(target_shape, dtype=np.float32)
 
@@ -4048,12 +4043,18 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   def reshape_transpose_wq_b(input_tensor, target_shape=None):
     # HF: [n_heads * q_head_dim, kv_lora_rank]
     # MaxText: [kv_lora_rank, n_heads, q_head_dim]
+    if saving_to_hf:
+      tensor = input_tensor.reshape((input_tensor.shape[0], -1))
+      return np.transpose(tensor)
     tensor = np.transpose(input_tensor)  # [kv_lora_rank, n_heads * q_head_dim]
     return tensor.reshape(target_shape)
 
   def reshape_transpose_wkv(input_tensor, target_shape=None):
     # HF: [n_kv_heads * (q_head_dim + v_head_dim), kv_lora_rank]
     # MaxText: [kv_lora_rank, n_kv_heads, q_head_dim + v_head_dim]
+    if saving_to_hf:
+      tensor = input_tensor.reshape((input_tensor.shape[0], -1))
+      return np.transpose(tensor)
     tensor = np.transpose(input_tensor)
     return tensor.reshape(target_shape)
 
@@ -4061,6 +4062,9 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     # HF: [n_heads * v_head_dim, kv_lora_rank] (e.g. [8192, 4096])
     # MaxText: [n_heads, v_head_dim, kv_lora_rank] (e.g. [8, 4096, 1024])
     # We must reshape first and then permute (transpose) to get correct ordering.
+    if saving_to_hf:
+      tensor = np.transpose(input_tensor, (0, 2, 1))
+      return tensor.reshape(target_shape)
     num_heads = target_shape[0]
     embed_dim = target_shape[1]
     kv_lora_rank = target_shape[2]
@@ -4135,9 +4139,59 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     elif "hc_head-hc_base" in key or "hc_head-hc_scale" in key:
       mapping[key] = identity
     elif isinstance(hf_key, list):
-      mapping[key] = transpose if not saving_to_hf else transpose_stack
+      mapping[key] = transpose
     elif "-kernel" in key or "-embedding" in key or "-sinks" in key:
       mapping[key] = transpose
+
+  if saving_to_hf:
+
+    def mhc_concat_fn(input_tensors, target_shape=None):
+      if len(input_tensors) != 3:
+        raise ValueError(f"mhc_concat_fn expected 3 tensors (pre, post, res), got {len(input_tensors)}")
+      tensors = [np.asarray(t) for t in input_tensors]
+      res = np.transpose(np.concatenate(tensors, axis=1))
+      return res.reshape(target_shape) if target_shape is not None else res
+
+    def mhc_concat_base(input_tensors, target_shape=None):
+      if len(input_tensors) != 3:
+        raise ValueError(f"mhc_concat_base expected 3 tensors (pre, post, res), got {len(input_tensors)}")
+      tensors = [np.asarray(t).ravel() for t in input_tensors]
+      res = np.concatenate(tensors, axis=0)
+      return res.reshape(target_shape) if target_shape is not None else res
+
+    def mhc_concat_scale(input_tensors, target_shape=None):
+      if len(input_tensors) != 3:
+        raise ValueError(f"mhc_concat_scale expected 3 tensors (pre, post, res), got {len(input_tensors)}")
+      tensors = [np.asarray(t).ravel() for t in input_tensors]
+      res = np.concatenate(tensors, axis=0)
+      return res.reshape(target_shape) if target_shape is not None else res
+
+    # Process composite mappings
+    keys_to_delete = []
+    keys_to_add = {}
+    for key in list(mapping.keys()):
+      if "mhc" in key and "pre_alpha" in key and "scale" not in key:
+        post = key.replace("pre_alpha", "post_alpha")
+        res = key.replace("pre_alpha", "res_alpha")
+        keys_to_delete.extend([key, post, res])
+        keys_to_add[(key, post, res)] = mhc_concat_fn
+
+      if "mhc" in key and "pre_beta" in key:
+        post = key.replace("pre_beta", "post_beta")
+        res = key.replace("pre_beta", "res_beta")
+        keys_to_delete.extend([key, post, res])
+        keys_to_add[(key, post, res)] = mhc_concat_base
+
+      if "mhc" in key and "pre_alpha_scale" in key:
+        post = key.replace("pre_alpha_scale", "post_alpha_scale")
+        res = key.replace("pre_alpha_scale", "res_alpha_scale")
+        keys_to_delete.extend([key, post, res])
+        keys_to_add[(key, post, res)] = mhc_concat_scale
+
+    for k in set(keys_to_delete):
+      if k in mapping:
+        del mapping[k]
+    mapping.update(keys_to_add)
 
   return mapping
 

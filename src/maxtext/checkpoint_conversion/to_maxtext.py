@@ -317,7 +317,10 @@ def get_maxtext_model_info(config):
   quant = quantizations.configure_quantization(config)
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
-  # Get abstract model structure (name, shape) without materializing the weights to save memory
+  # Get abstract model structure (name, shape) without materializing the weights to save memory.
+  # Extract the 'params' collection from the abstract model state. This focuses checkpoint
+  # conversion on trainable model parameters; variables outside the 'params' collection
+  # (such as non-trainable state or optimizer buffers) are not included.
   abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
@@ -492,9 +495,12 @@ def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict)
 
   The index is the parameter's order in `maxtext_abstract_dict.keys()`.
   This function handles two forms of MaxText keys:
-  - `atomic_mt_key`: A single string representing one MaxText parameter that map to HF parameter(s).
+  - `atomic_mt_key`: A single string representing one MaxText parameter that maps to HF parameter(s).
+    Example: "params-decoder-layers_0-self_attention-query-kernel" -> returns a single index and shape tuple.
   - `composite_mt_key`: A tuple of strings representing multiple MaxText parameters derived from
     a single/bundled HF parameter source (e.g., HF gate_up_proj splitting into MT wi_0 and wi_1).
+    Example: ("params-decoder-layers_0-mlp-wi_0-kernel", "params-decoder-layers_0-mlp-wi_1-kernel") ->
+    returns lists of indices and shapes for each composite component.
   """
   is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
   # atomic_mt_key
@@ -1013,9 +1019,9 @@ def main(
       if not lazy_load_tensors:
         max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
-      hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
-      if hf_source_keys_or_key is None:
+      if mt_param_key_or_keys not in param_map_mt_to_hf:
         raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
+      hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
       hook_fn = hook_fn_map_mt.get(mt_param_key_or_keys)
 
       # Step 1: Resolves MaxText key(s) to target indices and shapes
