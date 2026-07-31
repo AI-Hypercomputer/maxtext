@@ -224,7 +224,7 @@ def _run_learner_loop(
     try:
       if start_step == 0:
         if learner_idx == 0:
-          params = nnx.filter_state(state, nnx.Param) if learner_config.pure_nnx else raw_state.params
+          params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else raw_state.params
           print(f"Learner {learner_idx}: sending init params", flush=True)
           max_logging.log(f"Learner {learner_idx}: sending init params")
           transport.send_to_syncer(step=0, fragment_id=-1, data=params)
@@ -245,7 +245,12 @@ def _run_learner_loop(
         )
         initial_params_tpu = jax.device_put(initial_params, tpu_param_sharding)
         if learner_config.pure_nnx:
-          state = nnx.merge_state(nnx.filter_state(state, nnx.Not(nnx.Param)), initial_params_tpu)
+          non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
+          new_model = nnx.merge_state(non_param_model, initial_params_tpu)
+          new_state = type(state)({})
+          new_state["model"] = new_model
+          new_state["optimizer"] = state["optimizer"]
+          state = new_state
         else:
           raw_state = raw_state.replace(params=initial_params_tpu)
       else:
@@ -255,7 +260,12 @@ def _run_learner_loop(
         )
         global_params_tpu = jax.device_put(global_params, tpu_param_sharding)
         if learner_config.pure_nnx:
-          state = nnx.merge_state(nnx.filter_state(state, nnx.Not(nnx.Param)), global_params_tpu)
+          non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
+          new_model = nnx.merge_state(non_param_model, global_params_tpu)
+          new_state = type(state)({})
+          new_state["model"] = new_model
+          new_state["optimizer"] = state["optimizer"]
+          state = new_state
         else:
           raw_state = raw_state.replace(params=global_params_tpu)
     except Exception as e:
@@ -263,7 +273,7 @@ def _run_learner_loop(
       max_logging.error(traceback.format_exc())
       raise e
 
-    params_template = nnx.filter_state(state, nnx.Param) if learner_config.pure_nnx else raw_state.params
+    params_template = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else raw_state.params
     manipulator = FragmentedTreeManipulator.create(params_template, learner_config)
     num_fragments = manipulator.num_fragments
 
