@@ -71,6 +71,7 @@ gdn_chunk_size: 64
 # implicit boundedness) and matches real Qwen3-Next's own Gated Delta Net. This is also
 # MaxText's own default (base.yml); kept explicit here for clarity.
 use_qk_norm_in_gdn: true
+use_gdn_kernel: true
 
 # RoPE Settings
 rope_max_timescale: 10000
