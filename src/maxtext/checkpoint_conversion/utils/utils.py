@@ -163,22 +163,17 @@ def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = Non
     A NumPy array containing the data from `weight`, cast to `dtype_str` if provided.
   """
   final_dtype_str = str(weight.dtype) if dtype_str is None else dtype_str
-  # JAX dtypes like 'bfloat16', 'float32' are understood by np.dtype()
-  target_np_dtype = np.dtype(final_dtype_str)
   expected_shape = weight.shape
 
-  # Gather the array across devices if it's sharded.
-  # process_allgather typically returns the array on the host.
+  if str(weight.dtype) != final_dtype_str:
+    # Cast in JAX before process_allgather to reduce interconnect data transfer and host RAM
+    # usage when downcasting dtypes.
+    weight = weight.astype(final_dtype_str)
+
   weight = multihost_utils.process_allgather(weight)
-
-  # Convert JAX array to NumPy array.
-  np_array = np.array(weight)
-
-  # Cast to the target NumPy dtype if it's different.
-  if np_array.dtype != target_np_dtype:
-    np_array = np_array.astype(target_np_dtype)
-
-  return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
+  # Use np.asarray to avoid redundant copies when the gathered buffer can be viewed directly.
+  np_array = np.asarray(weight)
+  return np_array.reshape(expected_shape)
 
 
 def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map, save_dtype):
@@ -254,6 +249,9 @@ def process_maxtext_param(
   if maxtext_param_key not in param_map:
     raise ValueError(f"MaxText param key '{maxtext_param_key}' not found in param_map.")
   hf_target_paths = param_map[maxtext_param_key]
+  if hf_target_paths is None:
+    max_logging.log(f"\tskipping parameter mapped to None: {maxtext_param_key}")
+    return []
   if not hf_target_paths:
     raise ValueError(f"No HF target paths found for MaxText key '{maxtext_param_key}'")
 
