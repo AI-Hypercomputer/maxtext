@@ -81,6 +81,11 @@ def test_train_step_cache_hit():
     env["JAX_ENABLE_COMPILATION_CACHE"] = "true"
     env["JAX_COMPILATION_CACHE_DIR"] = temp_dir
     env["JAX_LOG_COMPILES"] = "1"
+    # JAX only caches a computation whose compilation is slower than this
+    # threshold, which defaults to 1 second. The model here is small enough that
+    # the AOT compilation can finish below it, so the cache is left empty and the
+    # runtime execution has nothing to hit.
+    env["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
 
     print("Running CPU training subprocess:", " ".join(cmd))
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
