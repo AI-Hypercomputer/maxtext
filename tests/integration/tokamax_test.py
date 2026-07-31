@@ -107,7 +107,7 @@ class Train(parameterized.TestCase):
         "wo_tile_drhs_embed_dim=128",
         "wo_tile_drhs_mlp_dim=128",
         # tokamax splash
-        "max_target_length=128",
+        "max_target_length=256",
         "attention=flash",
         "use_tokamax_splash=False",
         # quantization
