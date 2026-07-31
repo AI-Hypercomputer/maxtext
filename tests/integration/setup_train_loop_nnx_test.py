@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration test for setup_train_loop with pure_nnx=True.
+"""Integration test for setup_train_loop on the NNX path.
 
 setup_train_loop wires together create_nnx_abstract_model, the training
 optimizer,
@@ -43,7 +43,6 @@ def _tiny_nnx_pyconfig(**overrides):
       "enable_checkpointing": False,
       "dataset_type": "synthetic",
       "model_name": "default",
-      "pure_nnx": True,
       "per_device_batch_size": 1.0,
       "base_emb_dim": 8,
       "base_num_query_heads": 4,
@@ -68,7 +67,7 @@ def _tiny_nnx_pyconfig(**overrides):
 class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
   """End-to-end check that setup_train_loop returns a usable TrainStateNNX."""
 
-  def test_pure_nnx_setup_returns_train_state_nnx(self):
+  def test_setup_returns_train_state_nnx(self):
     config = _tiny_nnx_pyconfig()
 
     (
@@ -109,7 +108,7 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
     # flag them as unused — they're part of the public return contract.
     del checkpoint_manager, rampup_manager, eval_data_iterator
 
-  def test_pure_nnx_setup_param_only_split_matches_model(self):
+  def test_setup_param_only_split_matches_model(self):
     """nnx.split(state.model, nnx.Param, ...) must yield a non-empty Param tree
 
     whose structure matches state_mesh_shardings.model after the same split.
