@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785510372243,
+  "lastUpdate": 1785516160508,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -4050,6 +4050,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total GPU-UNIT Tests Duration",
             "value": 1139.4109999999903,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 2298,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "63fffd4458f689ab5c5bf05fd45b8bdd59ddfc1b",
+          "message": "Merge pull request #4336 from AI-Hypercomputer:dsv4-conversion-pr\n\nPiperOrigin-RevId: 956903801",
+          "timestamp": "2026-07-31T04:30:48Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/63fffd4458f689ab5c5bf05fd45b8bdd59ddfc1b"
+        },
+        "date": 1785516159765,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total CPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 348.0799999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-POST-TRAINING-UNIT Tests Count",
+            "value": 181,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1568.9279999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total CPU-UNIT Tests Duration",
+            "value": 7989.939999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU-UNIT Tests Count",
+            "value": 274,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 754.9689999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 45,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 1678.622999999989,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 2437,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 102.33700000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 101,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 77.02000000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 101,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 1177.581999999992,
             "unit": "sec"
           },
           {
