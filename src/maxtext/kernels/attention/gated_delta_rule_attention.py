@@ -627,10 +627,9 @@ def pallas_chunk_gated_delta_rule(
   )
   s_matrix = s_matrix.astype(jnp.float32)
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
-  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
-  g_diff = jnp.where(mask, g_diff, -1e30)
-  s_matrix = s_matrix * jnp.exp(g_diff)
-  s_matrix = jnp.where(mask, s_matrix, 0.0)
+  mask_val = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
+  g_diff_masked = g_diff * mask_val + (1.0 - mask_val) * -1e30
+  s_matrix = s_matrix * jnp.exp(g_diff_masked) * mask_val
 
   # --- Pallas Exact Decomposition ---
   identity = jnp.eye(chunk_size, dtype=jnp.float32)
