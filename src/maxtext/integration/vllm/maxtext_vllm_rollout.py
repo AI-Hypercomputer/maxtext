@@ -208,6 +208,7 @@ class MaxTextVllmSampler(VllmSampler):
       weight_array = (
           weight.value if hasattr(weight, "value") else weight
       )  # handle both jnp arrays and ShardedDeviceArrays
+      print(model_runner_state.keys())
       weight_shape_matches = weight_array.shape == model_runner_state[key].shape
       assert (
           weight_shape_matches
