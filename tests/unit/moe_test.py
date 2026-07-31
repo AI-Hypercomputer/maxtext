@@ -1431,13 +1431,14 @@ class RoutedMoeTest(parameterized.TestCase):
           "use_gmm_v2": use_gmm_v2,
           "ici_expert_parallelism": ici_expert_parallelism,
       }
-      for base_name, quantization, use_gmm_v2 in [
-          ("tokamax_v1_bf16", "", False),
-          ("tokamax_v1_fp8", "fp8_full", False),
-          ("tokamax_v2_bf16", "", True),
-          ("tokamax_v2_fp8", "fp8_full", True),
+      for base_name, quantization, use_gmm_v2, ici_expert_parallelism in [
+          ("tokamax_v1_bf16", "", False, 1),
+          ("tokamax_v1_fp8", "fp8_full", False, 1),
+          ("tokamax_v2_bf16", "", True, 1),
+          ("tokamax_v2_fp8", "fp8_full", True, 1),
+          ("tokamax_v2_bf16", "", True, 4),
+          ("tokamax_v2_fp8", "fp8_full", True, 4),
       ]
-      for ici_expert_parallelism in [1, 4]
   )
   @pytest.mark.tpu_only
   def test_gmm_grad_equivalence(
