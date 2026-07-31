@@ -1040,7 +1040,8 @@ class NNXDecoder(nnx.Module):
       new_params, new_rest = scanned_state.split(nnx.Param, ...)
       out_layers = nnx.merge(updated_graphdef[0], new_params, new_rest)
     else:
-      nnx.update(layers, scanned_state)
+      clean_state = nnx.filter_state(scanned_state, nnx.Not((nnx.RngState, nnx.Intermediate)))
+      nnx.update(layers, clean_state)
       out_layers = layers
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
@@ -2040,25 +2041,39 @@ class NNXDecoder(nnx.Module):
         start_idx = scan_length * attention_pattern_length
         remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
 
-      def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
-        merged_layer = nnx.merge(graphdef, state_in)
+      if cfg.use_qwix_quantization or cfg.lora.lora_weight_qtype:
         call_kwargs = dict(layer_kwargs)
-        if kv_in is not None:
-          call_kwargs["kv_cache"] = kv_in
-        out_res = merged_layer(y_in, *layer_args, **call_kwargs)
+        if remainder_kv is not None:
+          call_kwargs["kv_cache"] = remainder_kv
+        out_res = self.layers_remainder(y, *layer_args, **call_kwargs)
         if isinstance(out_res, tuple):
-          out_y = out_res[0]
-          out_kv = out_res[1] if len(out_res) > 1 else None
+          y = out_res[0]
+          updated_remainder_kv = out_res[1] if len(out_res) > 1 else None
         else:
-          out_y = out_res
-          out_kv = None
-        return out_y, out_kv, nnx.state(merged_layer)
+          y = out_res
+          updated_remainder_kv = None
+      else:
 
-      checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
+        def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
+          merged_layer = nnx.merge(graphdef, state_in)
+          call_kwargs = dict(layer_kwargs)
+          if kv_in is not None:
+            call_kwargs["kv_cache"] = kv_in
+          out_res = merged_layer(y_in, *layer_args, **call_kwargs)
+          if isinstance(out_res, tuple):
+            out_y = out_res[0]
+            out_kv = out_res[1] if len(out_res) > 1 else None
+          else:
+            out_y = out_res
+            out_kv = None
+          nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
+          return out_y, out_kv, nnx.state(merged_layer)
 
-      graphdef, state = nnx.split(self.layers_remainder)
-      y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
-      nnx.update(self.layers_remainder, new_state)
+        checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
+
+        graphdef, state = nnx.split(self.layers_remainder)
+        y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
+        nnx.update(self.layers_remainder, new_state)
 
       if kv_caches is not None and updated_remainder_kv is not None:
         start_idx = scan_length * attention_pattern_length

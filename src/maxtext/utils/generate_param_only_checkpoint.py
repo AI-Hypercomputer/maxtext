@@ -213,7 +213,12 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
 
     def init_state_fn():
       nnx_model = _create_model_partial()
-      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      wrt = (
+          getattr(nnx, "LoRAParam", nnx.Param)
+          if getattr(getattr(config, "lora", None), "enable_lora", False)
+          else nnx.Param
+      )
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
       return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
   else:
