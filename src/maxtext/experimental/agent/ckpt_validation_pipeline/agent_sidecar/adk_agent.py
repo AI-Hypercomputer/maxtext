@@ -131,8 +131,8 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
         "7. Autonomous Hardware Scaling: If a failure report shows an Out-Of-Memory (OOM) error or HBM allocation failure (ResourceExhaustedError), the model checkpoint (e.g. DeepSeek-671B) is too large for the current TPU cluster slice. Do not edit model math or sharding. Instead, autonomously scale up infrastructure by calling trigger_airflow_dag with a larger reserved TPU cluster: --cluster_name v5p-128-bodaborg-europe-west4-b --project_name cloud-tpu-multipod-dev --zone europe-west4-b."
     )
     
-    # Using gemini-1.5-pro for complex coding, though flash-lite could be used for initial triage
-    model_id = "gemini-1.5-pro"
+    # Defaulting to Gemini 3 Pro (preview) for advanced reasoning, with environment variable override support
+    model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-3.5-flash-lite")
     
     prompt = (
         f"Pipeline Run ID: {run_id}\n"
