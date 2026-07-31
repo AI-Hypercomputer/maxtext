@@ -1847,19 +1847,7 @@ class NNXDecoder(nnx.Module):
             raise AttributeError(f"Could not locate decoder layer at index {lyr} in {self.__class__.__name__}")
 
           graphdef, state = nnx.split(layer)
-          if kv_caches is not None:
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
-              if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
-                kv_cache = (
-                    kv_caches["key_cache"][lyr],
-                    kv_caches["value_cache"][lyr],
-                )
-              else:
-                kv_cache = None
-            else:
-              kv_cache = kv_caches[lyr]
-          else:
-            kv_cache = None
+          kv_cache = kv_caches[lyr] if kv_caches is not None else None
 
           if cfg.remat_policy != "none":
             y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache)
@@ -1880,12 +1868,7 @@ class NNXDecoder(nnx.Module):
             nnx.update(layer, new_state)
 
           if kv_caches is not None and kv_cache is not None:
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
-              if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
-                kv_caches["key_cache"][lyr] = kv_cache[0]
-                kv_caches["value_cache"][lyr] = kv_cache[1]
-            else:
-              kv_caches[lyr] = kv_cache
+            kv_caches[lyr] = kv_cache
 
           if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
             visual_embeds = deepstack_visual_embeds[lyr]

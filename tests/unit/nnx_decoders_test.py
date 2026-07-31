@@ -489,6 +489,18 @@ class TestNNXDecoderRematPolicy(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class _HybridCacheEchoLayer(nnx.Module):
+  """Stand-in layer that exposes per-layer hybrid cache forwarding."""
+
+  def __init__(self, increment):
+    self.increment = increment
+
+  def __call__(self, inputs, *unused_args, kv_cache=None, **unused_kwargs):
+    if kv_cache is None:
+      return inputs, None
+    return inputs, jax.tree.map(lambda value: value + self.increment, kv_cache)
+
+
 class TestNNXDecoderForwardPass(unittest.TestCase):
   """Integration-style test for NNXDecoder.__call__ in train mode."""
 
@@ -537,6 +549,32 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
     )
     self.assertIsInstance(result, tuple)
     self.assertEqual(len(result), 3)
+
+  def test_qwen35_hybrid_flat_kv_caches_are_forwarded_per_layer(self):
+    """Qwen3.5 forwards both GDN tuples and attention arrays by layer."""
+    self.decoder.config.decoder_block = DecoderBlockType.QWEN3_5
+    self.decoder.config.inhomogeneous_layer_cycle_interval = 2
+    self.decoder.layers_0 = _HybridCacheEchoLayer(1)
+    self.decoder.layers_1 = _HybridCacheEchoLayer(2)
+    kv_caches = [
+        (jnp.array([1.0]), jnp.array([2.0])),
+        jnp.array([3.0]),
+    ]
+    ids, segment_ids, positions = self._make_token_inputs()
+
+    _, _, updated_kv_caches = self.decoder(
+        self.shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        kv_caches=kv_caches,
+    )
+
+    np.testing.assert_array_equal(updated_kv_caches[0][0], jnp.array([2.0]))
+    np.testing.assert_array_equal(updated_kv_caches[0][1], jnp.array([3.0]))
+    np.testing.assert_array_equal(updated_kv_caches[1], jnp.array([5.0]))
 
   def test_logits_shape(self):
     """Logits shape: [batch, seq_len, vocab_size]."""
