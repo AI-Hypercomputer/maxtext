@@ -786,7 +786,14 @@ class Decoder(nn.Module):
         kernel_axes=("norm",),
         parameter_memory_host_offload=cfg.parameter_memory_host_offload,
     )(y, out_sharding=norm_out_sharding)
-    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+    # [NAVI patch C] Skip the output-head Dropout entirely when deterministic. It is a
+    # mathematical no-op (identity) in that case, but instantiating nn.Dropout still
+    # registers/mutates an RngCount on the module. When this head is invoked inside
+    # tunix compute_chunked_logps' jax.lax.scan (chunked-logps memory lever), that
+    # RngCount mutation crosses the scan trace level and raises flax TraceContextError.
+    # Guarding on `deterministic` removes the RNG touch at its source with zero math change.
+    if not deterministic:
+      y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
@@ -849,6 +856,7 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      skip_lm_head: bool = False,  # [NAVI patch C] robust: skip output head INSIDE decoder
   ):
     cfg = self.config
     mesh = self.mesh
@@ -1287,6 +1295,14 @@ class Decoder(nn.Module):
     elif cfg.num_vocab_tiling > 1 and model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow("intermediates", "hidden_states", hidden_state)
+
+    # [NAVI patch C] Robust chunked-logps: when the caller (tunix compute_chunked_logps)
+    # asks to skip the LM head, DO NOT run apply_output_head here. Guarantees the
+    # [B, L, vocab] logits matmul never enters the graph (same mechanism as num_vocab_tiling),
+    # rather than relying on XLA DCE to prune an already-emitted 40GB matmul. The caller
+    # re-projects hidden_state chunk-by-chunk via compute_final_logits under scan+remat.
+    elif skip_lm_head:
+      logits = None
 
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
