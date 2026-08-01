@@ -29,7 +29,7 @@ import qwix
 import qwix.pallas as qpl
 import tokamax
 
-# from maxtext.utils import max_logging
+
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
     dot_dimension_numbers=(([1], [2]), ([], [])),
     lhs_ragged_dimensions=[0],
@@ -169,6 +169,7 @@ def _gmm_fwd(
         jnp.ndarray | qpl.QArray,
         jnp.ndarray,
         jnp.ndarray | None,
+        jnp.ndarray | None,
     ],
 ]:
   """Forward function for GMM VJP.
@@ -219,13 +220,13 @@ def _gmm_fwd(
 
 
 def _fwd_quantize_activation_and_weight(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    lhs: jnp.ndarray | qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
     quantization_rule: qwix.QtRule,
     use_gmm_v2: bool,
     use_manual_quantization: bool,
     transpose_rhs: bool,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
   if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2:
     lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
@@ -265,8 +266,8 @@ def _fwd_gather_weight(rhs: qpl.QArray, weight_gather_axes: List[Tuple[str, int]
 
 
 def _fwd_run_tokamax_v1(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    lhs: jnp.ndarray | qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype,
     transpose_rhs: bool,
@@ -319,8 +320,8 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
 
 
 def _fwd_run_tokamax_v2(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    lhs: jnp.ndarray | qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype,
     tiling: tuple,
