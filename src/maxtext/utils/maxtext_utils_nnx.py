@@ -65,13 +65,18 @@ def nnx_extract_named_sharding(abstract_state: nnx.State) -> nnx.State:
     out_shardings). Contrast with sharding.nnx_construct_named_sharding, which
     retains wrappers for abstract tree zipping compatibility.
   """
-  # Don't use nnx.get_named_sharding() because it constructs new shardings. Instead, we
-  # get the existing sharding from the abstract_state.
-  # The state leaf is of type jax.ShapeDtypeStruct(shape, dtype, sharding)
+  def _get_sharding(x):
+    if isinstance(x, nnx.Variable):
+      val = x.get_value() if hasattr(x, "get_value") else x.value
+      return getattr(val, "sharding", None)
+    if isinstance(x, jax.ShapeDtypeStruct):
+      return x.sharding
+    return getattr(x, "sharding", None)
+
   return jax.tree.map(
-      lambda x: x.sharding,
+      _get_sharding,
       abstract_state,
-      is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+      is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.ShapeDtypeStruct)),
   )
 
 
@@ -170,13 +175,22 @@ def create_nnx_sharded_model(
   # By providing out_shardings, we instruct JAX to produce sharded output directly,
   # avoiding a large intermediate allocation on a single device.
   @partial(jax.jit, out_shardings=named_sharding)
-  def create_sharded_state():
-    model = init_fn()
-    return jax.lax.with_sharding_constraint(nnx.state(model), named_sharding)
+  def create_sharded_zeros():
+    return jax.tree.map(
+        lambda x: jnp.zeros(x.shape, dtype=x.dtype),
+        abstract_state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
 
   # Create the model with sharded parameters.
   with jax.set_mesh(mesh):
-    sharded_state = create_sharded_state()
+    sharded_zeros = create_sharded_zeros()
+    sharded_state = jax.tree.map(
+        lambda var, val: var.replace(value=val),
+        abstract_state,
+        sharded_zeros,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
   return nnx.merge(graphdef, sharded_state)
 
 
