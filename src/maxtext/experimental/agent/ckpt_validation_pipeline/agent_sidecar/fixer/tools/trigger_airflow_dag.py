@@ -29,9 +29,10 @@ AIRFLOW_URL = os.environ.get(
 DAG_ID = "maxtext_validation_master_dag"
 
 
-def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, overrides=None):
-  """Triggers the master Airflow DAG, passing the specified branch and optional parameter overrides in conf."""
-  url = f"{AIRFLOW_URL}/api/v1/dags/{DAG_ID}/dagRuns"
+def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, overrides=None, dag_id=None):
+  """Triggers an Airflow DAG (defaulting to master DAG or specified sub-DAG), passing the specified branch and optional parameter overrides in conf."""
+  target_dag = dag_id or os.environ.get("TARGET_DAG_ID", DAG_ID)
+  url = f"{AIRFLOW_URL}/api/v1/dags/{target_dag}/dagRuns"
 
   conf_dict = {"maxtext_branch": branch_name}
   if cluster_name:
@@ -74,7 +75,7 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
     print(f"Warning: Failed to refresh Google auth credentials: {auth_e}")
 
   try:
-    print(f"Triggering Airflow DAG '{DAG_ID}' on branch '{branch_name}' (conf: {conf_dict})...")
+    print(f"Triggering Airflow DAG '{target_dag}' on branch '{branch_name}' (conf: {conf_dict})...")
     response = requests.post(url, json=payload, headers=headers, timeout=10)
 
     if response.status_code in (200, 201):
@@ -95,7 +96,8 @@ if __name__ == "__main__":
   parser.add_argument("--project_name", type=str, default=None, help="Optional override for GCP project (e.g. cloud-tpu-multipod-dev).")
   parser.add_argument("--zone", type=str, default=None, help="Optional override for GCP zone (e.g. europe-west4-b).")
   parser.add_argument("--overrides", type=str, default=None, help="Optional parameter overrides in conf (JSON string or key=val list).")
+  parser.add_argument("--dag_id", type=str, default=None, help="Specific Airflow DAG ID to re-trigger (e.g. dag_verify_forward_pass, dag_verify_decoding).")
   args = parser.parse_args()
 
-  trigger_dag(args.branch, args.cluster_name, args.project_name, args.zone, args.overrides)
+  trigger_dag(args.branch, args.cluster_name, args.project_name, args.zone, args.overrides, args.dag_id)
 

@@ -65,7 +65,7 @@ def main():
             logger.info("Detected failure for %s. Attempt %s/%s.", run_id, retries + 1, MAX_RETRIES)
             
             # Trigger the ADK workflow instead of shelling out to agentapi CLI
-            run_agent_workflow(run_id, model_name, failure_log)
+            run_agent_workflow(run_id, model_name, failure_log, blob_name)
             
             state[run_id] = retries + 1
             save_state(state)

@@ -82,11 +82,13 @@ def create_pull_request(base_branch: str, fix_branch_name: str, commit_message: 
 
 # --- VERIFIER TOOLS ---
 
-def trigger_airflow_dag(branch_name: str, overrides: str = "") -> str:
-    """Triggers the Airflow pipeline to verify the patched branch, optionally passing parameter overrides in conf (as a JSON string or key=val list)."""
+def trigger_airflow_dag(branch_name: str, overrides: str = "", dag_id: str = "") -> str:
+    """Triggers the Airflow pipeline (specific sub-DAG or master DAG) to verify the patched branch, optionally passing parameter overrides in conf and a specific dag_id."""
     args = ["--branch", branch_name]
     if overrides:
         args.extend(["--overrides", overrides])
+    if dag_id:
+        args.extend(["--dag_id", dag_id])
     return _run_script("trigger_airflow_dag.py", args)
 
 def write_remediation_report(run_id: str, content: str) -> str:
@@ -101,7 +103,7 @@ def write_remediation_report(run_id: str, content: str) -> str:
 
 # --- AGENT EXECUTION LOOP ---
 
-def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
+def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_source: str = ""):
     """Executes the ADK native agent loop using Gemini."""
     logger.info(f"Starting native ADK agent workflow for run_id: {run_id}")
     
@@ -131,7 +133,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
         "1. Diagnose the issue using the failure log and read_local_file/fetch_reference_code/run_shape_analysis.\n"
         "2. Apply code fixes using patch_file and ensure they pass run_linters.\n"
         "3. Call create_pull_request to automatically fork a fix branch from the user's base branch, commit your changes, push, and open a Pull Request proposing the fix.\n"
-        "4. Call trigger_airflow_dag to re-trigger the Airflow DAG on the newly forked fix branch to verify that your patch resolves the failure.\n"
+        "4. Call trigger_airflow_dag to re-trigger ONLY the specific Airflow DAG that failed on the newly forked fix branch. Look at the Report Source filename: if it ends in '_forward_pass.json', pass dag_id='dag_verify_forward_pass'; if '_decoding.json', pass dag_id='dag_verify_decoding'; if '_shape.json', pass dag_id='dag_verify_checkpoint_shape'; if '_forward_compile.json', pass dag_id='dag_verify_forward_compile'. Never re-trigger maxtext_validation_master_dag if only a specific sub-DAG failed.\n"
         "5. Write a final report using write_remediation_report and conclude the task.\n"
         "6. Autonomous Hardware Scaling: If a failure report shows an Out-Of-Memory (OOM) error or HBM allocation failure (ResourceExhaustedError), the model checkpoint (e.g. DeepSeek-671B) is too large for the current TPU cluster slice. Do not edit model math or sharding. Instead, autonomously scale up infrastructure by calling trigger_airflow_dag with a larger reserved TPU cluster: --cluster_name v5p-128-bodaborg-europe-west4-b --project_name cloud-tpu-multipod-dev --zone europe-west4-b."
     )
@@ -142,6 +144,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
     prompt = (
         f"Pipeline Run ID: {run_id}\n"
         f"Target Model: {model_name}\n"
+        f"Report Source: {report_source}\n"
         f"Failure Log:\n{failure_log}\n\n"
         "Begin your diagnosis and execute the necessary tools to resolve this issue."
     )
