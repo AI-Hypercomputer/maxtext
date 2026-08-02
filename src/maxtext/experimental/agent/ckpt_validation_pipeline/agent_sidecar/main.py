@@ -36,9 +36,21 @@ def main():
             logger.info("No failures detected in GCS. Exiting cleanly.")
             return
 
-        run_id = failure.get("run_id") or failure.get("task")  # Fallback to task if run_id missing
-        model_name = failure.get("model_name", "unknown")
-        failure_log = failure.get("log", "") or failure.get("error_message", "")
+        run_id = (
+            failure.get("run_name")
+            or failure.get("run_id")
+            or failure.get("task")
+            or failure.get("stage")
+            or "unknown_run"
+        )
+        model_name = failure.get("model") or failure.get("model_name", "unknown")
+        failure_log = (
+            failure.get("stderr")
+            or failure.get("error_message")
+            or failure.get("log", "")
+        )
+        if not failure_log or failure_log == "Success":
+          failure_log = failure.get("stdout", "No logs provided.")
 
         state = load_state()
         retries = state.get(run_id, 0)

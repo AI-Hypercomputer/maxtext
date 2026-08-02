@@ -2,8 +2,9 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install necessary dependencies (Swapped antigravity for google-genai)
-RUN pip install --no-cache-dir google-cloud-storage google-genai
+# Install git and necessary dependencies
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir google-cloud-storage google-genai requests google-auth
 
 # Copy the agent_sidecar code
 COPY src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar /app/agent_sidecar

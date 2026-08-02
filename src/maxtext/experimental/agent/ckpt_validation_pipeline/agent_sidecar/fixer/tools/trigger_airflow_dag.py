@@ -18,8 +18,14 @@ import argparse
 import requests
 import os
 
+import google.auth
+import google.auth.transport.requests
+
 # Note: In a production environment, the Airflow Webserver URL and auth token would be injected via environment variables.
-AIRFLOW_URL = os.environ.get("AIRFLOW_WEBSERVER_URL", "http://localhost:8080")
+AIRFLOW_URL = os.environ.get(
+    "AIRFLOW_WEBSERVER_URL",
+    "https://4bae0a6de8f94e92aa8ee3a6ffc8b278-dot-us-central1.composer.googleusercontent.com",
+)
 DAG_ID = "maxtext_validation_master_dag"
 
 
@@ -40,9 +46,17 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None):
   headers = {
       "Content-Type": "application/json",
       "Accept": "application/json",
-      # In production, add authentication headers here:
-      # "Authorization": f"Bearer {os.environ.get('AIRFLOW_API_TOKEN')}"
   }
+  try:
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    auth_req = google.auth.transport.requests.Request()
+    credentials.refresh(auth_req)
+    if credentials.token:
+      headers["Authorization"] = f"Bearer {credentials.token}"
+  except Exception as auth_e:
+    print(f"Warning: Failed to refresh Google auth credentials: {auth_e}")
 
   try:
     print(f"Triggering Airflow DAG '{DAG_ID}' on branch '{branch_name}' (conf: {conf_dict})...")
