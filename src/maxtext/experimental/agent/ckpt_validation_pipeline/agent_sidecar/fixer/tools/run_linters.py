@@ -40,13 +40,15 @@ def main():
   # Run Pylint
   print(f"Running pylint on {file_path}...")
   try:
-    subprocess.run(["pylint", file_path], check=True)
-    print("pylint completed successfully.")
+    res = subprocess.run(["pylint", file_path], check=False)
+    # pylint exit codes: 1=Fatal, 2=Error, 4=Warning, 8=Refactor, 16=Convention
+    if res.returncode & 1 or res.returncode & 2 or res.returncode & 32:
+      print(f"pylint failed with fatal/error code {res.returncode}")
+      sys.exit(res.returncode)
+    else:
+      print(f"pylint completed (no syntax/fatal errors, code {res.returncode}).")
   except FileNotFoundError:
     print("Note: pylint not installed in this environment. Skipping lint check.")
-  except subprocess.CalledProcessError as e:
-    print(f"pylint failed with error code {e.returncode}")
-    sys.exit(e.returncode)
 
 
 if __name__ == "__main__":

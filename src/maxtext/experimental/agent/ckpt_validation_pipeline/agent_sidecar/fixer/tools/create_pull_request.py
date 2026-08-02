@@ -21,14 +21,18 @@ import sys
 
 def main():
   parser = argparse.ArgumentParser(description="Create a Pull Request using GitHub CLI.")
-  parser.add_argument("--title", type=str, required=True, help="PR Title")
-  parser.add_argument("--body", type=str, required=True, help="PR Body/Description")
-  parser.add_argument("--base", type=str, required=True, help="Base branch (e.g., main or maxtext_branch)")
+  parser.add_argument("--title", type=str, required=False, default=None, help="PR Title")
+  parser.add_argument("--body", type=str, required=False, default=None, help="PR Body/Description")
+  parser.add_argument("--message", type=str, required=False, default=None, help="Commit/PR Message")
+  parser.add_argument("--base", type=str, required=False, default="main", help="Base branch")
+  parser.add_argument("--fix_branch", type=str, required=False, default=None, help="Forked fix branch name")
 
-  args = parser.parse_args()
+  args, unknown = parser.parse_known_args()
 
+  title = args.title or args.message or "Automated code fix by Overwatch Agent"
+  body = args.body or args.message or title
   import time
-  fork_branch = f"fix/agent-remediation-{int(time.time())}"
+  fork_branch = args.fix_branch or f"fix/agent-remediation-{int(time.time())}"
 
   print(f"1. Forking new branch '{fork_branch}' from base branch '{args.base}'...")
   subprocess.run(["git", "checkout", args.base], check=False)
@@ -36,13 +40,13 @@ def main():
 
   print("2. Staging and committing patched changes...")
   subprocess.run(["git", "add", "."], check=False)
-  subprocess.run(["git", "commit", "-m", args.title], check=False)
+  subprocess.run(["git", "commit", "-m", title], check=False)
 
   print(f"3. Pushing forked branch '{fork_branch}' to origin...")
   push_res = subprocess.run(["git", "push", "-u", "origin", fork_branch], check=False)
 
   print(f"4. Opening Pull Request from '{fork_branch}' into base branch '{args.base}'...")
-  cmd = ["gh", "pr", "create", "--title", args.title, "--body", args.body, "--base", args.base, "--head", fork_branch]
+  cmd = ["gh", "pr", "create", "--title", title, "--body", body, "--base", args.base, "--head", fork_branch]
 
   try:
     subprocess.run(cmd, check=True)
