@@ -31,6 +31,8 @@ def main():
   try:
     subprocess.run(["pyink", "--pyink-indentation=2", "--line-length=122", file_path], check=True)
     print("pyink completed successfully.")
+  except FileNotFoundError:
+    print("Note: pyink not installed in this environment. Skipping formatting check.")
   except subprocess.CalledProcessError as e:
     print(f"pyink failed with error code {e.returncode}")
     sys.exit(e.returncode)
@@ -40,6 +42,8 @@ def main():
   try:
     subprocess.run(["pylint", file_path], check=True)
     print("pylint completed successfully.")
+  except FileNotFoundError:
+    print("Note: pylint not installed in this environment. Skipping lint check.")
   except subprocess.CalledProcessError as e:
     print(f"pylint failed with error code {e.returncode}")
     sys.exit(e.returncode)

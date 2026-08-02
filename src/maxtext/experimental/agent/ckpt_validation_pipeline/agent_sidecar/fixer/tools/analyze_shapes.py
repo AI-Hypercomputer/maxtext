@@ -21,14 +21,20 @@ import sys
 
 def main():
   parser = argparse.ArgumentParser(description="Run inspect_checkpoint locally.")
-  parser.add_argument("--mode", type=str, required=True, choices=["hf", "maxtext", "orbax"])
-  # allow passing rest of args directly to inspect_checkpoint.py
+  parser.add_argument("--mode", type=str, required=False, default="maxtext", choices=["hf", "maxtext", "orbax"])
+  parser.add_argument("--model", type=str, required=False, default=None, help="MaxText model name")
+  parser.add_argument("--run_id", type=str, required=False, default=None, help="Run ID")
   args, unknown = parser.parse_known_args()
 
-  # The absolute path to the core inspect_checkpoint tool
-  script_path = "/Users/fiyinbenstowe/Desktop/project/maxtext/src/maxtext/checkpoint_conversion/inspect_checkpoint.py"
+  import os
+  script_path = "/app/src/maxtext/checkpoint_conversion/inspect_checkpoint.py"
+  if not os.path.exists(script_path):
+    script_path = "src/maxtext/checkpoint_conversion/inspect_checkpoint.py"
 
-  cmd = ["python3", script_path, args.mode] + unknown
+  cmd = ["python3", script_path, args.mode]
+  if args.model:
+    cmd.append(f"model_name={args.model}")
+  cmd.extend(unknown)
 
   try:
     subprocess.run(cmd, check=True)

@@ -12,10 +12,13 @@ logger = logging.getLogger(__name__)
 def _run_script(script_name: str, args: list[str]) -> str:
     script_path = Path(__file__).parent / "fixer" / "tools" / script_name
     cmd = ["python3", str(script_path)] + args
+    logger.info(f"Executing script tool: {script_name} {args}")
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        logger.info(f"Tool {script_name} output:\n{result.stdout}")
         return result.stdout
     except subprocess.CalledProcessError as e:
+        logger.error(f"Error executing {script_name}:\n{e.stderr}\n{e.stdout}")
         return f"Error executing {script_name}:\n{e.stderr}\n{e.stdout}"
 
 # --- ANALYST TOOLS ---
@@ -126,12 +129,10 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
         "You are the Overwatch Autonomous Agent. Your job is to debug and fix failures in the MaxText checkpoint "
         "validation pipeline. Follow these strict steps:\n"
         "1. Diagnose the issue using the failure log and read_local_file/fetch_reference_code/run_shape_analysis.\n"
-        "2. Create a fix branch using manage_github_branch.\n"
-        "3. Apply fixes using patch_file and ensure they pass run_linters.\n"
-        "4. Create a PR using create_pull_request.\n"
-        "5. Test the branch using trigger_airflow_dag. If the failure is a configuration or rematerialization conflict (e.g. remat_policy='full' with debug_tensors=True), pass parameter overrides via the overrides argument in trigger_airflow_dag (e.g., '{\"maxtext_overrides\": {\"remat_policy\": \"none\"}}').\n"
-        "6. Write a final report using write_remediation_report and conclude the task.\n"
-        "7. Autonomous Hardware Scaling: If a failure report shows an Out-Of-Memory (OOM) error or HBM allocation failure (ResourceExhaustedError), the model checkpoint (e.g. DeepSeek-671B) is too large for the current TPU cluster slice. Do not edit model math or sharding. Instead, autonomously scale up infrastructure by calling trigger_airflow_dag with a larger reserved TPU cluster: --cluster_name v5p-128-bodaborg-europe-west4-b --project_name cloud-tpu-multipod-dev --zone europe-west4-b."
+        "2. Apply code fixes using patch_file and ensure they pass run_linters.\n"
+        "3. Call create_pull_request to automatically fork a fix branch from the user's base branch, commit your changes, push, and open a Pull Request proposing the fix.\n"
+        "4. Write a final report using write_remediation_report and conclude the task.\n"
+        "5. Autonomous Hardware Scaling: If a failure report shows an Out-Of-Memory (OOM) error or HBM allocation failure (ResourceExhaustedError), the model checkpoint (e.g. DeepSeek-671B) is too large for the current TPU cluster slice. Do not edit model math or sharding. Instead, autonomously scale up infrastructure by calling trigger_airflow_dag with a larger reserved TPU cluster: --cluster_name v5p-128-bodaborg-europe-west4-b --project_name cloud-tpu-multipod-dev --zone europe-west4-b."
     )
     
     # Defaulting to Gemini 3 Pro (preview) for advanced reasoning, with environment variable override support
