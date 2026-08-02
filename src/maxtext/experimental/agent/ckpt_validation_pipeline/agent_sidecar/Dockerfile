@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y git curl ca-certificates gpg && \
     apt-get update && apt-get install -y gh && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir google-cloud-storage google-genai requests google-auth pyink pylint absl-py safetensors numpy pyyaml jax flax orbax-checkpoint
+RUN pip install --no-cache-dir google-cloud-storage google-genai requests google-auth pyink pylint absl-py safetensors numpy pyyaml jax flax orbax-checkpoint omegaconf
 
 # Copy entire repository so .git and src/maxtext are available inside the container
 COPY . /app

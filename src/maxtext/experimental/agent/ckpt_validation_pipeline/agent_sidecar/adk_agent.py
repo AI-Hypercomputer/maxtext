@@ -131,8 +131,9 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
         "1. Diagnose the issue using the failure log and read_local_file/fetch_reference_code/run_shape_analysis.\n"
         "2. Apply code fixes using patch_file and ensure they pass run_linters.\n"
         "3. Call create_pull_request to automatically fork a fix branch from the user's base branch, commit your changes, push, and open a Pull Request proposing the fix.\n"
-        "4. Write a final report using write_remediation_report and conclude the task.\n"
-        "5. Autonomous Hardware Scaling: If a failure report shows an Out-Of-Memory (OOM) error or HBM allocation failure (ResourceExhaustedError), the model checkpoint (e.g. DeepSeek-671B) is too large for the current TPU cluster slice. Do not edit model math or sharding. Instead, autonomously scale up infrastructure by calling trigger_airflow_dag with a larger reserved TPU cluster: --cluster_name v5p-128-bodaborg-europe-west4-b --project_name cloud-tpu-multipod-dev --zone europe-west4-b."
+        "4. Call trigger_airflow_dag to re-trigger the Airflow DAG on the newly forked fix branch to verify that your patch resolves the failure.\n"
+        "5. Write a final report using write_remediation_report and conclude the task.\n"
+        "6. Autonomous Hardware Scaling: If a failure report shows an Out-Of-Memory (OOM) error or HBM allocation failure (ResourceExhaustedError), the model checkpoint (e.g. DeepSeek-671B) is too large for the current TPU cluster slice. Do not edit model math or sharding. Instead, autonomously scale up infrastructure by calling trigger_airflow_dag with a larger reserved TPU cluster: --cluster_name v5p-128-bodaborg-europe-west4-b --project_name cloud-tpu-multipod-dev --zone europe-west4-b."
     )
     
     # Defaulting to Gemini 3 Pro (preview) for advanced reasoning, with environment variable override support
