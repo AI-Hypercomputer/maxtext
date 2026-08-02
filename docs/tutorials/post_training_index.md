@@ -38,6 +38,8 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
   - [RL on Multi-Host TPUs](./posttraining/rl_on_multi_host.md)
   - [RL with Qwen3-30b-a3b-base](./posttraining/rl_qwen3_30b.md)
   - [RL with GPT-OSS 20B](./posttraining/rl_gptoss_20b.md)
+  - [RL with gemma4-e4b](./posttraining/rl_gemma4_e4b.md)
+  - [RL with gemma4-26b](./posttraining/rl_gemma4_26b.md)
 
 ## Step by step RL
 
@@ -77,6 +79,8 @@ posttraining/rl.md
 posttraining/rl_on_multi_host.md
 posttraining/rl_qwen3_30b.md
 posttraining/rl_gptoss_20b.md
+posttraining/rl_gemma4_e4b.md
+posttraining/rl_gemma4_26b.md
 posttraining/knowledge_distillation.md
 posttraining/lora.md
 posttraining/lora_on_multi_host.md

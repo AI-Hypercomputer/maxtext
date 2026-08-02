@@ -72,7 +72,7 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ### Option 2: Converting from a Hugging Face checkpoint
 
-Refer to [Hugging Face to MaxText](hf-to-maxtext) to convert a Hugging Face checkpoint to MaxText format. After conversion finishes, set `MAXTEXT_CKPT_PATH` to the converted MaxText checkpoint path.
+Refer to [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a Hugging Face checkpoint to MaxText format. After conversion finishes, set `MAXTEXT_CKPT_PATH` to the converted MaxText checkpoint path.
 
 ```bash
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
@@ -96,7 +96,7 @@ Both files are already included under `src/maxtext/examples/chat_templates/`, so
 
 ### Build and Upload MaxText Docker Image
 
-For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext.md).
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../build_maxtext.md).
 
 ### Submit your workload
 
@@ -147,6 +147,6 @@ For a complete list of collected metrics, see the [Tunix Metrics Documentation](
 
 ## Convert Checkpoint to Hugging Face Format
 
-Refer to [MaxText to Hugging Face](maxtext-to-hf) to convert a MaxText checkpoint back to Hugging Face format.
+Refer to [MaxText to Hugging Face](../../guides/checkpointing_solutions/convert_checkpoint.md#maxtext-to-hugging-face) to convert a MaxText checkpoint back to Hugging Face format.
 
 > **Note (Gemma 4 E4B specifics):** Because this recipe fine-tunes the **base** model, pass `--hf_model_path=google/gemma-4-E4B` to `to_huggingface` so the exported checkpoint bundles the base tokenizer. Without it, `to_huggingface` sources the tokenizer from `HF_IDS[gemma4-e4b]` = `google/gemma-4-E4B-it` (the instruction-tuned model). Also keep `scan_layers=False`, since the `gemma4_small` decoder block is not compatible with scanned layers.
