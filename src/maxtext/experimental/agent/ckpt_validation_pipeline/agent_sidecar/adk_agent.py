@@ -79,9 +79,12 @@ def create_pull_request(base_branch: str, fix_branch_name: str, commit_message: 
 
 # --- VERIFIER TOOLS ---
 
-def trigger_airflow_dag(branch_name: str) -> str:
-    """Triggers the Airflow pipeline to verify the patched branch."""
-    return _run_script("trigger_airflow_dag.py", ["--branch", branch_name])
+def trigger_airflow_dag(branch_name: str, overrides: str = "") -> str:
+    """Triggers the Airflow pipeline to verify the patched branch, optionally passing parameter overrides in conf (as a JSON string or key=val list)."""
+    args = ["--branch", branch_name]
+    if overrides:
+        args.extend(["--overrides", overrides])
+    return _run_script("trigger_airflow_dag.py", args)
 
 def write_remediation_report(run_id: str, content: str) -> str:
     """Writes the final victory lap markdown report to the root of the project."""
@@ -126,7 +129,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str):
         "2. Create a fix branch using manage_github_branch.\n"
         "3. Apply fixes using patch_file and ensure they pass run_linters.\n"
         "4. Create a PR using create_pull_request.\n"
-        "5. Test the branch using trigger_airflow_dag.\n"
+        "5. Test the branch using trigger_airflow_dag. If the failure is a configuration or rematerialization conflict (e.g. remat_policy='full' with debug_tensors=True), pass parameter overrides via the overrides argument in trigger_airflow_dag (e.g., '{\"maxtext_overrides\": {\"remat_policy\": \"none\"}}').\n"
         "6. Write a final report using write_remediation_report and conclude the task.\n"
         "7. Autonomous Hardware Scaling: If a failure report shows an Out-Of-Memory (OOM) error or HBM allocation failure (ResourceExhaustedError), the model checkpoint (e.g. DeepSeek-671B) is too large for the current TPU cluster slice. Do not edit model math or sharding. Instead, autonomously scale up infrastructure by calling trigger_airflow_dag with a larger reserved TPU cluster: --cluster_name v5p-128-bodaborg-europe-west4-b --project_name cloud-tpu-multipod-dev --zone europe-west4-b."
     )

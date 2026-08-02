@@ -29,8 +29,8 @@ AIRFLOW_URL = os.environ.get(
 DAG_ID = "maxtext_validation_master_dag"
 
 
-def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None):
-  """Triggers the master Airflow DAG, passing the specified branch and optional cluster scaling overrides."""
+def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, overrides=None):
+  """Triggers the master Airflow DAG, passing the specified branch and optional parameter overrides in conf."""
   url = f"{AIRFLOW_URL}/api/v1/dags/{DAG_ID}/dagRuns"
 
   conf_dict = {"maxtext_branch": branch_name}
@@ -40,6 +40,21 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None):
     conf_dict["xpk_project"] = project_name
   if zone:
     conf_dict["xpk_zone"] = zone
+
+  if overrides:
+    if isinstance(overrides, dict):
+      conf_dict.update(overrides)
+    elif isinstance(overrides, str):
+      try:
+        import json
+        parsed = json.loads(overrides)
+        if isinstance(parsed, dict):
+          conf_dict.update(parsed)
+      except Exception:
+        for kv in overrides.split(","):
+          if "=" in kv:
+            k, v = kv.split("=", 1)
+            conf_dict[k.strip()] = v.strip()
 
   payload = {"conf": conf_dict}
 
@@ -79,7 +94,8 @@ if __name__ == "__main__":
   parser.add_argument("--cluster_name", type=str, default=None, help="Optional override for TPU GKE cluster name (e.g. v5p-128-bodaborg-europe-west4-b).")
   parser.add_argument("--project_name", type=str, default=None, help="Optional override for GCP project (e.g. cloud-tpu-multipod-dev).")
   parser.add_argument("--zone", type=str, default=None, help="Optional override for GCP zone (e.g. europe-west4-b).")
+  parser.add_argument("--overrides", type=str, default=None, help="Optional parameter overrides in conf (JSON string or key=val list).")
   args = parser.parse_args()
 
-  trigger_dag(args.branch, args.cluster_name, args.project_name, args.zone)
+  trigger_dag(args.branch, args.cluster_name, args.project_name, args.zone, args.overrides)
 
