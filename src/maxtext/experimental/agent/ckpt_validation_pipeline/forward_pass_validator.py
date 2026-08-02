@@ -241,6 +241,7 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
   report = {
       "run_name": run_name,
       "model": internal_model_name,
+      "status": "SUCCESS" if returncode == 0 else "FAILED",
       "success": returncode == 0,
       "stderr": (stderr_str if returncode != 0 else "Success"),
       "stdout": (stdout_str if returncode != 0 else "Success"),

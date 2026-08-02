@@ -44,8 +44,11 @@ def check_for_failures():
     for blob in valid_blobs:
       content = blob.download_as_string()
       report_data = json.loads(content)
-      # Check for "failed" (shape check) or "FAILURE" (mock tensor)
-      if report_data and (report_data.get("status") == "failed" or report_data.get("status") == "FAILURE"):
+      # Check for "failed" (shape check), "FAILURE" (mock tensor), or success == False (forward pass / decode)
+      if report_data and (
+          report_data.get("status") in ("failed", "FAILED", "FAILURE")
+          or report_data.get("success") is False
+      ):
         logger.info("Detected failure report: %s", blob.name)
         return report_data, blob.name
 
