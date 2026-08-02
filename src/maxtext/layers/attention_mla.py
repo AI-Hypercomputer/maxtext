@@ -935,8 +935,10 @@ class MLA(Attention):
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
 
-    if self.config.experimental_sa_quant_q_fp8:
+    if self.config.experimental_sa_quant_q_fp8 == "cast":
       query = query.astype(jnp.float8_e4m3fn)
+    elif self.config.experimental_sa_quant_q_fp8 == "tensor":
+      raise NotImplementedError("Tensor scaling for Q is not implemented yet.")
 
     query = self._maybe_shard_with_logical(query, query_logical_name)
     return query, low_rank_q
@@ -961,8 +963,14 @@ class MLA(Attention):
 
     key = jnp.concatenate([key_nope, key_rope], axis=-1)
 
-    if self.config.experimental_sa_quant_k_fp8:
+    if self.config.experimental_sa_quant_k_fp8 == "cast":
       key = key.astype(jnp.float8_e4m3fn)
+    elif self.config.experimental_sa_quant_k_fp8 == "tensor":
+      raise NotImplementedError("Tensor scaling for K is not implemented yet.")
+    if self.config.experimental_sa_quant_v_fp8 == "cast":
+      value = value.astype(jnp.float8_e4m3fn)
+    elif self.config.experimental_sa_quant_v_fp8 == "tensor":
+      raise NotImplementedError("Tensor scaling for V is not implemented yet.")
 
     key = self._maybe_shard_with_logical(key, key_logical_name)
     value = self._maybe_shard_with_logical(value, value_logical_name)
