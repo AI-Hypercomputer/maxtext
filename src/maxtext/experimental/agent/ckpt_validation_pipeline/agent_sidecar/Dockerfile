@@ -15,9 +15,12 @@ RUN pip install --no-cache-dir google-cloud-storage google-genai requests google
 # Copy entire repository so .git and src/maxtext are available inside the container
 COPY . /app
 
-# Set git global identity for commits
+# Set git global identity for commits and initialize local repo
 RUN git config --global user.email "overwatch-agent@google.com" && \
-    git config --global user.name "Overwatch Agent"
+    git config --global user.name "Overwatch Agent" && \
+    git init -q && \
+    git add . && \
+    git commit -q -m "initial container workspace"
 
 ENV PYTHONPATH="/app/src/maxtext/utils:/app/src:/app"
 
