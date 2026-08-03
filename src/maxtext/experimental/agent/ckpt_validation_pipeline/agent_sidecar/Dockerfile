@@ -18,10 +18,11 @@ RUN pip install --no-cache-dir google-cloud-storage google-genai requests google
     pip install --no-cache-dir -r src/dependencies/requirements/generated_requirements/tpu-requirements.txt || true && \
     pip install --no-cache-dir --no-deps -e . || true
 
-# Set git global identity for commits and initialize local repo
+# Set git global identity for commits and initialize local repo with origin
 RUN git config --global user.email "overwatch-agent@google.com" && \
     git config --global user.name "Overwatch Agent" && \
     git init -q && \
+    git remote add origin https://github.com/AI-Hypercomputer/maxtext.git && \
     git add . && \
     git commit -q -m "initial container workspace"
 

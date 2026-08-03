@@ -44,9 +44,10 @@ def main():
 
   import os
   gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-  if gh_token:
-    print("Configuring git remote authentication with GH_TOKEN...")
-    subprocess.run(["git", "remote", "set-url", "origin", f"https://x-access-token:{gh_token}@github.com/AI-Hypercomputer/maxtext.git"], check=False)
+  remote_url = f"https://x-access-token:{gh_token}@github.com/AI-Hypercomputer/maxtext.git" if gh_token else "https://github.com/AI-Hypercomputer/maxtext.git"
+  print(f"Configuring git remote 'origin' ({'with GH_TOKEN' if gh_token else 'anonymous'})...")
+  if subprocess.run(["git", "remote", "set-url", "origin", remote_url], capture_output=True).returncode != 0:
+    subprocess.run(["git", "remote", "add", "origin", remote_url], check=False)
 
   print(f"3. Pushing forked branch '{fork_branch}' to origin...")
   push_res = subprocess.run(["git", "push", "-u", "origin", fork_branch], capture_output=True, text=True, check=False)
