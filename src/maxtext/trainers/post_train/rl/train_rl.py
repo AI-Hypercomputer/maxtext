@@ -142,6 +142,7 @@ from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
+from maxtext.trainers.post_train import checkpointing as post_train_checkpointing
 from maxtext.utils import max_logging, max_utils, model_creation_utils
 
 
@@ -489,7 +490,9 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           rollout_micro_batch_size=rollout_micro_batch_size,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
-          checkpoint_root_directory=checkpoint_dir,
+          # Checkpointing is handled by post_train.checkpointing, which writes MaxText's on-disk
+          # layout instead of Tunix's, so Tunix's own manager stays disabled.
+          checkpoint_root_directory=None,
           checkpointing_options=checkpointing_options,
       ),
       rollout_config=base_rollout.RolloutConfig(
@@ -553,6 +556,8 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
       cluster_config=cluster_config,
       **rl_cluster_kwargs,
   )
+  if checkpoint_dir is not None:
+    post_train_checkpointing.install(rl_cluster.actor_trainer, checkpoint_dir, trainer_config)
 
   def make_reward_fn(fn):
     # pragma: no cover
