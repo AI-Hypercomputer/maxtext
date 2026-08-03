@@ -658,15 +658,20 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # vLLM PAGED STATE PATH: use tpu_inference fused conv + ragged delta-rule.
       # =========================================================================
       try:
-        from tpu_inference.layers.common.gdn_attention import GdnAttentionConfig, run_jax_gdn_attention  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import RaggedGatedDeltaRuleImpl  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        # pylint: disable=import-outside-toplevel
+        # pytype: disable=import-error
+        from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
+        from tpu_inference.layers.common.sharding import ShardingAxisName
+        from tpu_inference.layers.common.utils import (
+            reorder_concatenated_tensor_for_sharding,
+            truncate_sharded_tensor,
+        )
+        from tpu_inference.utils import get_mesh_shape_product
+        from jax.sharding import PartitionSpec as P_spec
       except ImportError as e:
         raise ImportError(
-            "GDN attention kernel require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
+            "Could not import the paged GDN API from the `tpu-inference` revision pinned by MaxText. "
+            "Install the post-training dependencies from `src/dependencies/extra_deps/post_train_github_deps.txt`."
         ) from e
 
       attn_data = ShardingAxisName.ATTN_DATA
@@ -703,8 +708,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       conv_state_paged, recurrent_state_paged = kv_cache
 
-      # Use REF impl (pure JAX) to avoid Mosaic kernel compilation issues.
-      gdn_config = GdnAttentionConfig(ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF)
+      # Match tpu-inference's native vLLM bridge by compiling against the active
+      # request bucket instead of the runner's maximum-size metadata buffers.
+      dp_size = get_mesh_shape_product(self.mesh, attn_data)
+      padded_num_reqs_per_dp = attention_metadata.padded_num_reqs // dp_size
+      state_indices = truncate_sharded_tensor(
+          attention_metadata.mamba_state_indices.astype(jnp.int32), padded_num_reqs_per_dp, dp_size
+      )
+      query_start_loc = truncate_sharded_tensor(
+          attention_metadata.query_start_loc, padded_num_reqs_per_dp + 1, dp_size
+      )
+      seq_lens = truncate_sharded_tensor(attention_metadata.seq_lens, padded_num_reqs_per_dp, dp_size)
 
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
@@ -716,17 +730,16 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           None,  # conv_bias: MaxText conv1d uses use_bias=False.
           jnp.asarray(self.A_log[...], dtype=cfg.dtype),
           jnp.asarray(self.dt_bias[...], dtype=cfg.dtype),
-          attention_metadata.mamba_state_indices.astype(jnp.int32),
-          attention_metadata.query_start_loc,
+          state_indices,
+          query_start_loc,
           attention_metadata.request_distribution,
-          attention_metadata.seq_lens,
+          seq_lens,
           self.num_k_heads,
           self.num_v_heads,
           self.head_k_dim,
           self.head_v_dim,
           cfg.gdn_conv_kernel_dim,
           mesh=self.mesh,
-          config=gdn_config,
       )
 
       # Reshape GDN output and apply gated norm + out projection.
