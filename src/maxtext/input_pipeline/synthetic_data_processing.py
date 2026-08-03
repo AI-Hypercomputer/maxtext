@@ -33,9 +33,7 @@ def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq
 
   Splits each sequence into a random number (2..max_segments_per_seq) of
   varying-length segments, assigning each a sequential integer segment ID
-  starting from 1. Segment boundaries are randomized per row so the same
-  segment IDs can be reused across the batch dimension without cross-row
-  correlation.
+  starting from 1 via a fully vectorized JAX implementation.
 
   Args:
     batch_size: Number of sequences.
@@ -43,25 +41,32 @@ def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq
     max_segments_per_seq: Maximum number of segments per sequence (>= 2).
 
   Returns:
-    Integer array [batch_size, seq_len] where 0 = padding.
+    Integer array [batch_size, seq_len] with sequential segment IDs starting at 1.
   """
-  if max_segments_per_seq < 2:
+  if max_segments_per_seq < 2 or seq_len < 2:
     return jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
+  max_segs = min(max_segments_per_seq, seq_len)
   key = jax.random.PRNGKey(42)
-  segments = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
-  for b in range(batch_size):
-    key, subkey = jax.random.split(key)
-    n_segs = jax.random.randint(subkey, (1,), 2, max_segments_per_seq + 1)[0]
-    # Random split points (sorted) in range [1, seq_len-1)
-    key, subkey = jax.random.split(key)
-    splits = jax.random.randint(subkey, (n_segs - 1,), 1, seq_len)
-    splits = jnp.sort(splits)
-    splits = jnp.concatenate([jnp.array([0], dtype=jnp.int32), splits, jnp.array([seq_len], dtype=jnp.int32)])
-    seg_ids = jnp.arange(1, n_segs + 1)
-    row = jnp.repeat(seg_ids, splits[1:] - splits[:-1], total_repeat_length=seq_len)
-    segments = segments.at[b].set(row)
-  return segments
+  k1, k2 = jax.random.split(key, 2)
+
+  # Sample random number of segments per row in [2, max_segs].
+  n_segs = jax.random.randint(k1, shape=(batch_size, 1), minval=2, maxval=max_segs + 1)
+  num_splits = n_segs - 1
+
+  # Assign random uniform scores to positions 1..seq_len-1 and rank them.
+  scores = jax.random.uniform(k2, shape=(batch_size, seq_len - 1))
+  ranks = jnp.argsort(jnp.argsort(scores, axis=-1), axis=-1)
+
+  # A position is a split boundary if its rank < num_splits for that row.
+  split_mask = ranks < num_splits
+
+  # Position 0 is always the start of segment 1.
+  first_pos = jnp.ones((batch_size, 1), dtype=jnp.bool_)
+  is_boundary = jnp.concatenate([first_pos, split_mask], axis=-1)
+
+  # Cumulative sum across sequence length gives sequential segment IDs: 1, 2, ...
+  return jnp.cumsum(is_boundary, axis=-1, dtype=jnp.int32)
 
 
 class SyntheticDataIterator:

@@ -67,7 +67,11 @@ def _shift_left_one_cp_aware(x: jnp.ndarray, axis_name: str = "context") -> jnp.
     Array shaped like x, left-shifted by 1 across CP boundaries.
   """
   local_rolled = jnp.roll(x, -1, axis=1)
-  local_rolled = local_rolled.at[:, -1:, ...].set(0)
+
+  # Mask for the last position along axis=1 (avoids .at[...].set() scatter).
+  last_mask = jnp.arange(local_rolled.shape[1]) == local_rolled.shape[1] - 1
+  last_mask = last_mask.reshape((1, -1) + (1,) * (local_rolled.ndim - 2))
+  local_rolled = jnp.where(last_mask, 0, local_rolled)
 
   try:
     cp_size = jax.lax.psum(1, axis_name=axis_name)
@@ -82,7 +86,7 @@ def _shift_left_one_cp_aware(x: jnp.ndarray, axis_name: str = "context") -> jnp.
   perm = [(r, (r - 1) % cp_size) for r in range(cp_size)]
   next_first = jax.lax.ppermute(first_token, axis_name=axis_name, perm=perm)
   next_first = jnp.where(cp_rank == cp_size - 1, jnp.zeros_like(next_first), next_first)
-  return local_rolled.at[:, -1:, ...].set(next_first)
+  return jnp.where(last_mask, next_first, local_rolled)
 
 
 def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
@@ -141,9 +145,7 @@ def roll_and_mask_by_segment(x: jnp.ndarray, segment_ids: jnp.ndarray | None, sh
   #   2. current segment == 0 (padding/EOD position)
   is_boundary = (seg_current != seg_next) | (seg_current == 0)
 
-  mask = is_boundary
-  for _ in range(x.ndim - 2):
-    mask = jnp.expand_dims(mask, axis=-1)
+  mask = is_boundary[(...,) + (None,) * (x.ndim - 2)]
 
   return jnp.where(mask, 0, rolled)
 
