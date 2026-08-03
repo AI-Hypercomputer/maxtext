@@ -960,6 +960,10 @@ class TrainDistillTest(unittest.TestCase):
     config.checkpoint_dir = self.test_dir
     config.dataset_type = "synthetic"
     config.lora_enabled = False
+    # The checkpoint manager reads these for the metadata it stamps, and a bare Mock puts a Mock
+    # where a bool belongs.
+    config.scan_layers = True
+    config.lora = None
 
     # pylint: disable=import-outside-toplevel
     from tunix.sft import peft_trainer
