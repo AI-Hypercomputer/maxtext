@@ -149,23 +149,24 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
 
   def _monkeypatched_restore(self, directory, item=None, transforms=None, restore_args=None, **kwargs):
     def _rename_nnx_linen_keys(tree, to_linen: bool):
-      """Recursively map parameter key names between NNX and Linen conventions.
+      """Recursively map parameter key names and layer hierarchy between NNX and Linen conventions.
 
       Linen checkpoints on disk (e.g. Qwen3-8B unscanned) store weights under:
-        - input_layernorm
-        - post_attention_layernorm
-        - attention
+        - decoder/layers/0/input_layernorm
+        - decoder/layers/0/post_attention_layernorm
+        - decoder/layers/0/attention
 
       NNX Qwen3DecoderLayer (inheriting from AttentionWithNorm) expects:
-        - pre_self_attention_layer_norm
-        - post_self_attention_layer_norm
-        - self_attention
+        - decoder/layers_0/pre_self_attention_layer_norm
+        - decoder/layers_0/post_self_attention_layer_norm
+        - decoder/layers_0/self_attention
 
-      By converting `item` and `restore_args` to Linen names before Orbax restore,
-      we allow Orbax to match and load every parameter array from disk.
-      By converting the restored dictionary back to NNX names before returning,
-      we ensure nnx.update(model, checkpoint) overwrites every NNX model attribute
-      with its loaded checkpoint array, preventing deleted array runtime errors.
+      When `to_linen=True` (before Orbax restore):
+        - Converts NNX layer attributes (`layers_0`, `layers_1`) into Linen sequence dictionary `layers: {'0': ..., '1': ...}`
+        - Maps NNX normalization/attention attribute names to Linen checkpoint key names.
+      When `to_linen=False` (after Orbax restore):
+        - Unpacks Linen `layers: {'0': ..., '1': ...}` sequence dictionary back into direct NNX attributes (`layers_0`, `layers_1`).
+        - Maps Linen checkpoint key names back to NNX attribute names so nnx.update(model, checkpoint) populates all weights.
       """
       if to_linen:
         key_map = {
@@ -185,9 +186,26 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
         new_tree = {}
         for k, v in tree.items():
           k_str = str(k)
-          # Replace key if it matches our mapping; otherwise keep original key name (e.g. layers_0)
+          # Replace key if it matches our mapping; otherwise keep original key name
           new_k = key_map.get(k_str, k)
           new_tree[new_k] = _rename_nnx_linen_keys(v, to_linen=to_linen)
+
+        if to_linen:
+          # Convert NNX layers_0, layers_1 -> Linen sequence dict layers: {'0': ..., '1': ...}
+          layer_keys = [k for k in list(new_tree.keys()) if re.match(r"^layers_(\d+)$", str(k))]
+          if layer_keys:
+            layers_dict = {}
+            for lk in layer_keys:
+              idx_str = re.match(r"^layers_(\d+)$", str(lk)).group(1)
+              layers_dict[idx_str] = new_tree.pop(lk)
+            new_tree["layers"] = layers_dict
+        else:
+          # Convert Linen sequence dict layers: {'0': ..., '1': ...} -> NNX layers_0, layers_1
+          if "layers" in new_tree and (isinstance(new_tree["layers"], dict) or hasattr(new_tree["layers"], "items")):
+            layers_dict = new_tree.pop("layers")
+            for idx_key, layer_val in layers_dict.items():
+              new_tree[f"layers_{idx_key}"] = layer_val
+
         try:
           return type(tree)(new_tree)
         except Exception:  # pylint: disable=broad-exception-caught
