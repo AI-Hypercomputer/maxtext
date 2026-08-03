@@ -67,7 +67,9 @@ def main():
             # Immediately mark the report as handled and increment retries to prevent duplicate concurrent triggers
             state[run_id] = retries + 1
             save_state(state)
-            mark_handled(blob_name)
+            if not mark_handled(blob_name):
+                logger.info("Report %s was already claimed or deleted by a concurrent worker. Exiting cleanly.", blob_name)
+                return
             
             # Trigger the ADK workflow instead of shelling out to agentapi CLI
             run_agent_workflow(run_id, model_name, failure_log, blob_name)

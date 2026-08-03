@@ -42,14 +42,24 @@ def main():
   subprocess.run(["git", "add", "."], check=False)
   subprocess.run(["git", "commit", "-m", title], check=False)
 
+  import os
+  gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+  if gh_token:
+    print("Configuring git remote authentication with GH_TOKEN...")
+    subprocess.run(["git", "remote", "set-url", "origin", f"https://x-access-token:{gh_token}@github.com/AI-Hypercomputer/maxtext.git"], check=False)
+
   print(f"3. Pushing forked branch '{fork_branch}' to origin...")
   push_res = subprocess.run(["git", "push", "-u", "origin", fork_branch], check=False)
 
   print(f"4. Opening Pull Request from '{fork_branch}' into base branch '{args.base}'...")
-  cmd = ["gh", "pr", "create", "--title", title, "--body", body, "--base", args.base, "--head", fork_branch]
+  env = os.environ.copy()
+  if gh_token:
+    env["GH_TOKEN"] = gh_token
+    env["GITHUB_TOKEN"] = gh_token
+  cmd = ["gh", "pr", "create", "--title", title, "--body", body, "--base", args.base, "--head", fork_branch, "--repo", "AI-Hypercomputer/maxtext"]
 
   try:
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=env)
     print(f"Successfully opened Pull Request targeting '{args.base}' from head '{fork_branch}'.")
   except Exception as e:
     print(f"Note: gh CLI or remote push could not authenticate in serverless mode ({e}).")

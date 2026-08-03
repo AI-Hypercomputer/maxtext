@@ -69,5 +69,8 @@ def mark_handled(blob_name):
       new_name = "handled_" + blob_name
       bucket.rename_blob(blob, new_name)
       logger.info("Successfully marked %s as handled.", blob_name)
+      return True
+    return False
   except Exception as e:
     logger.error("Failed to mark blob %s as handled: %s", blob_name, e)
+    return False
