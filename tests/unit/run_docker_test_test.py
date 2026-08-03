@@ -57,6 +57,37 @@ class RunDockerTestTest(unittest.TestCase):
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("Invalid mode", result.stderr)
 
+  def test_run_docker_test_fast_rebuild_mode(self):
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+    script_path = os.path.join(repo_root, "src", "dependencies", "scripts", "run_docker_test.sh")
+
+    result = subprocess.run(
+        ["bash", script_path, "--mode=fast-rebuild", "--base-image=non_existent_base_img_999"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    self.assertIn("Mode           : fast-rebuild", result.stdout)
+    self.assertIn("not found locally", result.stderr)
+
+  def test_run_docker_test_test_only_mode(self):
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+    script_path = os.path.join(repo_root, "src", "dependencies", "scripts", "run_docker_test.sh")
+
+    result = subprocess.run(
+        ["bash", script_path, "--mode=test-only", "--image=non_existent_test_img_456"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    self.assertIn("Mode           : test-only", result.stdout)
+    self.assertIn("Skipping image build.", result.stdout)
+    self.assertIn("not found locally", result.stderr)
+
 
 if __name__ == "__main__":
   unittest.main()
