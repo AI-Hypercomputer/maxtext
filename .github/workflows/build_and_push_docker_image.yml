@@ -162,7 +162,7 @@ jobs:
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
           tags: gcr.io/${{ vars.PROJECT_NAME }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
-          no-cache: ${{ inputs.fast_rebuild != true }}
+          cache-to: type=gha,mode=max
           outputs: type=image,compression=zstd,force-compression=true
           build-args: |
             DEVICE=${{ inputs.device }}
