@@ -417,14 +417,18 @@ def validate_converter(argv) -> None:
     # Only unroll for MaxText targets (they have '.layers.', while HF has '.layers.0.')
     if any(".layers." in k and not k.split(".layers.")[1][0].isdigit() for k in maxtext_vllm_state):
         expanded = {}
+        is_inhomogeneous = any(".layer_0." in k for k in maxtext_vllm_state)
+        default_num_blocks = 10 if is_inhomogeneous else getattr(trainer_config, "base_num_decoder_layers", 48)
+
         for k, v in maxtext_vllm_state.items():
             if ".layers." in k and not k.split(".layers.")[1][0].isdigit():
                 val = v if hasattr(v, "shape") else v.value
+                num_blocks = default_num_blocks
                 scan_axis = 0
-                if hasattr(val, "shape") and len(val.shape) > 1 and val.shape[1] in (48, 40, 10, 8, 32) and val.shape[0] not in (48, 40, 10, 8, 32):
-                    scan_axis = 1
-                num_blocks = val.shape[scan_axis] if hasattr(val, "shape") and len(val.shape) > 0 else getattr(trainer_config, "base_num_decoder_layers", 48)
-
+                if hasattr(val, "shape") and len(val.shape) > 1:
+                    if default_num_blocks in val.shape:
+                        scan_axis = val.shape.index(default_num_blocks)
+                
                 slot = None
                 for s in range(10):
                     if f".layer_{s}." in k:
