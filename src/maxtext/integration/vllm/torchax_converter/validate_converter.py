@@ -419,15 +419,28 @@ def validate_converter(argv) -> None:
         expanded = {}
         for k, v in maxtext_vllm_state.items():
             if ".layers." in k and not k.split(".layers.")[1][0].isdigit():
-                num_layers = getattr(trainer_config, "base_num_decoder_layers", 48)
                 val = v if hasattr(v, "shape") else v.value
                 scan_axis = 0
-                if len(val.shape) > 1 and val.shape[1] == num_layers and val.shape[0] != num_layers:
+                if hasattr(val, "shape") and len(val.shape) > 1 and val.shape[1] in (48, 40, 10, 8, 32) and val.shape[0] not in (48, 40, 10, 8, 32):
                     scan_axis = 1
-                
-                for i in range(num_layers):
-                    new_k = k.replace(".layers.", f".layers_{i}.")
-                    expanded[new_k] = val.take(i, axis=scan_axis)
+                num_blocks = val.shape[scan_axis] if hasattr(val, "shape") and len(val.shape) > 0 else getattr(trainer_config, "base_num_decoder_layers", 48)
+
+                slot = None
+                for s in range(10):
+                    if f".layer_{s}." in k:
+                        slot = s
+                        break
+
+                if slot is not None:
+                    cycle_interval = getattr(trainer_config, "inhomogeneous_layer_cycle_interval", 4)
+                    for i in range(num_blocks):
+                        global_idx = i * cycle_interval + slot
+                        new_k = k.replace(f".layers.layer_{slot}.", f".layers_{global_idx}.")
+                        expanded[new_k] = val.take(i, axis=scan_axis)
+                else:
+                    for i in range(num_blocks):
+                        new_k = k.replace(".layers.", f".layers_{i}.")
+                        expanded[new_k] = val.take(i, axis=scan_axis)
             else:
                 expanded[k] = v
         maxtext_vllm_state = expanded
