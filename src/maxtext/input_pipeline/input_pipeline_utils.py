@@ -590,27 +590,32 @@ class ParseFeatures(grain.MapTransform):
     example.ParseFromString(element)
     features = example.features.feature
 
-    missing = [c for c in self.data_columns if c not in features]
-    if missing:
-      raise ValueError(
-          f"Column {missing} not found in dataset. Available columns: {sorted(features.keys())}. "
-          "Please set train_data_columns or eval_data_columns accordingly."
-      )
-
     parsed = {}
     for col in self.data_columns:
-      if col in features:
-        f = features[col]
-
-        # Dynamically check proto field type instead of relying on the tokenize flag
-        if len(f.float_list.value) > 0:
-          parsed[col] = np.array(f.float_list.value, dtype=np.float32)
-        elif len(f.int64_list.value) > 0:
-          parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
-        elif len(f.bytes_list.value) > 0:
-          parsed[col] = np.array(f.bytes_list.value, dtype=object)
+      target_col = col
+      if col not in features:
+        # Fallback alias: support bidirectional mapping between 'text' and 'messages'
+        if col == "text" and "messages" in features:
+          target_col = "messages"
+        elif col == "messages" and "text" in features:
+          target_col = "text"
         else:
-          parsed[col] = np.array([])
+          raise ValueError(
+              f"Column '{col}' not found in dataset. Available columns: {sorted(features.keys())}. "
+              "Please set train_data_columns or eval_data_columns accordingly."
+          )
+
+      f = features[target_col]
+
+      # Dynamically check proto field type instead of relying on the tokenize flag
+      if len(f.float_list.value) > 0:
+        parsed[col] = np.array(f.float_list.value, dtype=np.float32)
+      elif len(f.int64_list.value) > 0:
+        parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
+      elif len(f.bytes_list.value) > 0:
+        parsed[col] = np.array(f.bytes_list.value, dtype=object)
+      else:
+        parsed[col] = np.array([])
 
     # Reshape the flattened arrays back to 2D [seq_len, top_k]
     seq_len = len(parsed.get("inputs", []))

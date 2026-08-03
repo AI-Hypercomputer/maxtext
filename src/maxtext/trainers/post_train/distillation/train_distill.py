@@ -276,7 +276,13 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   # Inherits _shard_optimizer from PeftTrainer.
 
-  def _train_step(self, model, optimizer, inputs, grad_accumulator=None, **kwargs):
+  def _train_step(
+      self,
+      model,
+      optimizer,
+      *args,
+      **kwargs,
+  ):
     """Overrides the main JIT block to natively handle ModelBundle module.
 
     Uses jax.value_and_grad with explicit split/merge to avoid nesting
@@ -285,6 +291,20 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       ValueError: The graph structure of a node added to cached_partial was
       mutated inside the transformation.
     """
+    if len(args) == 1:
+      # Legacy signature: _train_step(model, optimizer, inputs)
+      inputs = args[0]
+    elif len(args) == 3:
+      # Tunix signature: _train_step(model, optimizer, grad_acc, inputs, is_update)
+      _, inputs, _ = args
+    elif "inputs" in kwargs:
+      inputs = kwargs["inputs"]
+    else:
+      raise TypeError(
+          f"_train_step expects either (model, optimizer, inputs) or"
+          f" (model, optimizer, grad_acc, inputs, is_update), got {len(args)} args"
+      )
+
     batch = self.gen_model_input_fn(inputs)
     student = model.student_model
     teacher = model.teacher_model
