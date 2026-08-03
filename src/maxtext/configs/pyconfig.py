@@ -272,8 +272,10 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
       raise ValueError(f"{key!r} not in {', '.join(map(repr, valid_fields))}.")
 
     new_value = value
-    if isinstance(new_value, str) and new_value.lower() == "none" and key != "remat_policy":
-      new_value = None
+    if isinstance(new_value, str) and new_value.lower() == "none":
+      field_info = valid_fields.get(key)
+      if not (field_info and field_info.annotation is str):
+        new_value = None
 
     # Pydantic validates enums from their values, so string is fine.
     # It also handles type coercion for simple types.
