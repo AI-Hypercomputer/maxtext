@@ -1889,6 +1889,7 @@ class RoutedMoE(nnx.Module):
         _weight_gather,
         partial_accum0=None,
         partial_accum1=None,
+        mask=None,
     ):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
@@ -1901,6 +1902,9 @@ class RoutedMoE(nnx.Module):
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
+          if mask is not None:
+            layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
+            layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       else:
@@ -1913,6 +1917,8 @@ class RoutedMoE(nnx.Module):
         )
         if self.config.mlp_bias and w0_bias is not None:
           layer_w0 = layer_w0 + w0_bias
+          if mask is not None:
+            layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
 
         layer_w1 = gmm_fn(
@@ -1924,8 +1930,21 @@ class RoutedMoE(nnx.Module):
         )
         if self.config.mlp_bias and w1_bias is not None:
           layer_w1 = layer_w1 + w1_bias
+          if mask is not None:
+            layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       return layer_w0, layer_w1
+
+    def valid_token_count(x, routing, route_metadata):
+      """Rows of `x` the gmm actually computes; the rest is ragged-buffer padding."""
+      num_ep = self.get_expert_parallelism_size()
+      num_experts_per_shard = self.config.num_experts // num_ep
+      if self.config.use_ring_of_experts and x.shape[0] < routing.sorted_selected_experts.shape[0]:
+        return jnp.sum(routing.local_group_sizes)
+      if self.config.use_ragged_sort and self.config.use_ring_of_experts:
+        experts_start = route_metadata.expert_shard_id * num_experts_per_shard
+        return jnp.sum(jax.lax.dynamic_slice_in_dim(routing.group_sizes, experts_start, num_experts_per_shard))
+      return jnp.sum(routing.group_sizes)
 
     def get_gmm_for_local_experts(x, routing, route_metadata):
       """Return a partial GMM function with preconfigured routing params."""
@@ -2095,6 +2114,11 @@ class RoutedMoE(nnx.Module):
       last_w0 = jax.lax.dynamic_slice_in_dim(w0, (self.config.num_moe_emb_chunks - 1) * chunk_dim, chunk_dim, axis=1)
       last_w1 = jax.lax.dynamic_slice_in_dim(w1, (self.config.num_moe_emb_chunks - 1) * chunk_dim, chunk_dim, axis=1)
       gmm_fn = get_gmm_for_local_experts(last_x_chunk, routing, route_metadata)
+      mask = (
+          jnp.arange(last_x_chunk.shape[0]) < valid_token_count(last_x_chunk, routing, route_metadata)
+          if self.config.mlp_bias
+          else None
+      )
       output0, output1 = gmm_up(
           last_x_chunk,
           last_w0,
@@ -2105,6 +2129,7 @@ class RoutedMoE(nnx.Module):
           weight_gather,
           partial_accum0=ps0,
           partial_accum1=ps1,
+          mask=mask,
       )
       return output0, output1, gmm_fn, routing, route_metadata, wo_bias
 
@@ -2138,12 +2163,13 @@ class RoutedMoE(nnx.Module):
         )
       else:
         x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+        mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
 
         if self.config.mlp_bias:
           w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
         gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
-        output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather)
+        output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
 
       intermediate_layer = self.apply_ffn_activation(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -2161,7 +2187,9 @@ class RoutedMoE(nnx.Module):
             tiled=True,
         )
       if self.config.mlp_bias:
+        mask = jnp.arange(intermediate_output.shape[0]) < valid_token_count(intermediate_output, routing, route_metadata)
         intermediate_output = intermediate_output + wo_bias
+        intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
       intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
 
       if self.config.use_ring_of_experts:
