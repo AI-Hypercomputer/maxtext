@@ -24,7 +24,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Config
+from maxtext.common.common_types import Config, AttentionType
 from maxtext.common.common_types import HyperConnectionType, MODEL_MODE_PREFILL, DecoderBlockType
 from maxtext.layers import attention_mla
 from maxtext.layers import initializers
@@ -149,7 +149,7 @@ class DeepSeekGenericLayer(nnx.Module):
           max_target_length=self.config.max_target_length,
           max_prefill_predict_length=self.config.max_prefill_predict_length,
           attention_kernel=self.config.attention,
-          attention_type=self.config.attention_type,
+          attention_type=AttentionType(self.config.attention_type),
           inputs_q_shape=self.dummy_inputs_shape,
           inputs_kv_shape=self.dummy_inputs_shape,
           mesh=mesh,
