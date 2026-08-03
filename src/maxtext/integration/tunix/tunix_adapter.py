@@ -31,6 +31,43 @@ from maxtext.integration.tunix.utils import VllmWeightMapping
 from maxtext.models.models import Transformer
 
 
+import jax
+
+# Compatibility shims for JAX 0.11.0+ strict sharding assertions
+_orig_wsc = jax.lax.with_sharding_constraint
+_orig_top_k = jax.lax.top_k
+
+
+def _compat_wsc(x, shardings):
+  try:
+    return _orig_wsc(x, shardings)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return jax.sharding.reshard(x, shardings)
+
+
+def _compat_top_k(operand, k, axis=-1):
+  """Compat shim around jax.lax.top_k to reshard sharded reduction operands."""
+  try:
+    return _orig_top_k(operand, k, axis=axis)
+  except Exception:  # pylint: disable=broad-exception-caught
+    sharding = getattr(operand, "sharding", None)
+    if sharding is not None and hasattr(sharding, "spec") and hasattr(sharding, "mesh"):  # pylint: disable=line-too-long
+      spec = list(sharding.spec)
+      idx = axis if axis >= 0 else len(spec) + axis
+      if 0 <= idx < len(spec):
+        spec[idx] = None
+        target_sharding = jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*spec))  # pylint: disable=line-too-long
+        try:
+          operand = _orig_wsc(operand, target_sharding)
+        except Exception:  # pylint: disable=broad-exception-caught
+          operand = jax.sharding.reshard(operand, target_sharding)
+    return _orig_top_k(operand, k, axis=axis)
+
+
+jax.lax.with_sharding_constraint = _compat_wsc
+jax.lax.top_k = _compat_top_k
+
+
 class TunixMaxTextAdapter(nnx.Module):
   """Adapter exposing Tunix Trainer call signature over a Transformer model."""
 
