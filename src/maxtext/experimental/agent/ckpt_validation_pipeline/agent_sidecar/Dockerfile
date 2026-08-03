@@ -10,10 +10,13 @@ RUN apt-get update && apt-get install -y git curl ca-certificates gpg && \
     apt-get update && apt-get install -y gh && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir google-cloud-storage google-genai requests google-auth pyink pylint absl-py safetensors numpy pyyaml jax flax orbax-checkpoint omegaconf
-
-# Copy entire repository so .git and src/maxtext are available inside the container
+# Copy entire repository first so requirement files and source code are available
 COPY . /app
+
+# Automatically install all MaxText TPU requirements and local package
+RUN pip install --no-cache-dir google-cloud-storage google-genai requests google-auth pyink pylint && \
+    pip install --no-cache-dir -r src/dependencies/requirements/generated_requirements/tpu-requirements.txt || true && \
+    pip install --no-cache-dir --no-deps -e . || true
 
 # Set git global identity for commits and initialize local repo
 RUN git config --global user.email "overwatch-agent@google.com" && \
