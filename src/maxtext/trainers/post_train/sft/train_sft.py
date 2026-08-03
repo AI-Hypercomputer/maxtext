@@ -107,7 +107,12 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
     nnx.pop(self.model, nnx.Intermediate)
     graphdef, _, _ = nnx.split(self.model, wrt, ...)
 
-    def train_step(model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any):
+    def train_step(
+        model: nnx.Module,
+        optimizer: nnx.Optimizer,
+        inputs: Any,
+        grad_accumulator: Any = None,
+    ):
       inputs = gen_fn(inputs)
 
       # Split model into differentiable params and non-differentiable rest.
