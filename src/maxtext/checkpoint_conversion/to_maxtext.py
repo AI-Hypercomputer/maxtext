@@ -471,7 +471,20 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
     Case 4: Scanned with expert stacking (nested list of strings)
   """
   load_fn = None
-  if not isinstance(hf_source_keys_or_key, list):
+  if hf_source_keys_or_key is None:
+    def _none_loader():
+      import numpy as np
+
+      shape = mt_target_shape_or_shapes
+      val = (
+          np.ones(shape, dtype=np.float32)
+          if any(kw in mt_key for kw in ("norm", "scale", "sinks"))
+          else np.zeros(shape, dtype=np.float32)
+      )
+      return apply_hook_fns(val, shape, hook_fn)
+
+    return _none_loader
+  elif not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
       if isinstance(key, (list, tuple)):
@@ -984,7 +997,43 @@ def main(
 
       def _eager_getter(key):
         if key not in hf_state_dict_numpy:
-          raise ValueError(f"HuggingFace key {key} not found in state_dict.")
+          alt_key = key
+          if alt_key.startswith("model."):
+            alt_key = alt_key[len("model.") :]
+          replacements = [
+              ("compressor.indexer.q_b_proj.weight", "indexer.wq_b.weight"),
+              ("compressor.indexer.scorer.weights_proj.weight", "indexer.weights_proj.weight"),
+              ("compressor.indexer.", "indexer.compressor."),
+              ("compressor.kv_norm.weight", "compressor.norm.weight"),
+              ("compressor.position_bias", "compressor.ape"),
+              ("indexer.position_bias", "indexer.ape"),
+              ("e_score_correction_bias", "bias"),
+              ("embed_tokens.weight", "embed.weight"),
+              ("input_layernorm.weight", "attn_norm.weight"),
+              ("post_attention_layernorm.weight", "ffn_norm.weight"),
+              (".mlp.shared_experts.gate_proj.weight", ".ffn.shared_experts.w1.weight"),
+              (".mlp.shared_experts.up_proj.weight", ".ffn.shared_experts.w3.weight"),
+              (".mlp.shared_experts.down_proj.weight", ".ffn.shared_experts.w2.weight"),
+              (".q_a_proj.weight", ".wq_a.weight"),
+              (".q_a_norm.weight", ".q_norm.weight"),
+              (".q_b_proj.weight", ".wq_b.weight"),
+              (".kv_proj.weight", ".wkv.weight"),
+              (".gate_proj.weight", ".wgate.weight"),
+              (".sinks", ".attn_sink"),
+              (".o_a_proj.weight", ".wo_a.weight"),
+              (".o_b_proj.weight", ".wo_b.weight"),
+              (".self_attn.", ".attn."),
+              (".attn_hc.", ".hc_attn_"),
+              (".ffn_hc.", ".hc_ffn_"),
+              ("hc_head.hc_", "hc_head_"),
+              (".mlp.", ".ffn."),
+          ]
+          for old, new in replacements:
+            alt_key = alt_key.replace(old, new)
+          if alt_key in hf_state_dict_numpy:
+            key = alt_key
+          else:
+            raise ValueError(f"HuggingFace key {key} not found in state_dict.")
         v = hf_state_dict_numpy[key]
         # target dtype is "float32"
         if save_dtype == DType.FLOAT32:
