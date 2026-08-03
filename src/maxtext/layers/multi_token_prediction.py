@@ -74,7 +74,7 @@ def _shift_left_one_cp_aware(x: jnp.ndarray, axis_name: str = "context") -> jnp.
   local_rolled = jnp.where(last_mask, 0, local_rolled)
 
   try:
-    cp_size = jax.lax.psum(1, axis_name=axis_name)
+    cp_size = jax.lax.axis_size(axis_name)
   except NameError:
     return local_rolled
   if cp_size == 1:
