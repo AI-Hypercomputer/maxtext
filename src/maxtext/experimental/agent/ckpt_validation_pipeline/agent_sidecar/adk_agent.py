@@ -103,70 +103,148 @@ def write_remediation_report(run_id: str, content: str) -> str:
 
 # --- AGENT EXECUTION LOOP ---
 
+def _load_prompt_file(filename: str) -> str:
+    """Loads a prompt template from fixer/prompts/ directory."""
+    prompt_path = Path(__file__).parent / "fixer" / "prompts" / filename
+    try:
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        logger.error(f"Error loading prompt file {filename}: {e}")
+        return ""
+
 def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_source: str = ""):
-    """Executes the ADK native agent loop using Gemini."""
-    logger.info(f"Starting native ADK agent workflow for run_id: {run_id}")
+    """Executes the 4-Phase Meta-Agent Orchestrator loop using Gemini."""
+    logger.info(f"Starting 4-Phase Meta-Agent Orchestrator workflow for run_id: {run_id}")
     
-    # Initialize the GenAI client using Vertex AI (No API key needed, uses Cloud Run Service Account)
-    client = genai.Client(
-        vertexai=True, 
-        project="tpu-prod-env-multipod", 
-        location=os.environ.get("VERTEX_LOCATION", "global")
+    # Check for manager 1B-token API key first
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        logger.info("Initializing GenAI Client using GEMINI_API_KEY (1B token quota)...")
+        client = genai.Client(api_key=api_key)
+    else:
+        logger.info("Initializing GenAI Client using Vertex AI default credentials...")
+        client = genai.Client(
+            vertexai=True,
+            project="tpu-prod-env-multipod",
+            location=os.environ.get("VERTEX_LOCATION", "global")
+        )
+    
+    model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-3.1-pro-preview")
+    maxtext_branch = os.environ.get("MAXTEXT_BRANCH", "main")
+    hf_ref_code_url = "https://huggingface.co/Qwen/Qwen2.5-7B/raw/main/modeling_qwen2.py"
+    hf_config_url = "https://huggingface.co/Qwen/Qwen2.5-7B/raw/main/config.json"
+    
+    # --- PHASE 1: ANALYST SUBAGENT (01_diagnose.txt) ---
+    logger.info("Phase 1: Invoking Analyst subagent to generate structured JSON One-Pager...")
+    analyst_template = _load_prompt_file("01_diagnose.txt")
+    analyst_prompt = analyst_template.format(
+        model_name=model_name,
+        run_id=run_id,
+        maxtext_branch=maxtext_branch,
+        hf_ref_code_url=hf_ref_code_url,
+        hf_config_url=hf_config_url,
+        failure_log=failure_log
     )
     
-    # List of all our defined tools
-    adk_tools = [
-        read_local_file,
-        fetch_reference_code,
-        run_shape_analysis,
-        patch_file,
-        run_linters,
-        manage_github_branch,
-        create_pull_request,
-        trigger_airflow_dag,
-        write_remediation_report
-    ]
-    
-    system_instruction = (
-        "You are the Overwatch Autonomous Agent. Your job is to debug and fix failures in the MaxText checkpoint "
-        "validation pipeline. Follow these strict steps:\n"
-        "1. Diagnose the issue using the failure log and read_local_file/fetch_reference_code/run_shape_analysis.\n"
-        "2. Apply code fixes using patch_file and ensure they pass run_linters.\n"
-        "3. Call create_pull_request to automatically fork a fix branch from the user's base branch, commit your changes, push, and open a Pull Request proposing the fix.\n"
-        "4. Call trigger_airflow_dag to re-trigger ONLY the specific Airflow DAG that failed on the newly forked fix branch. Look at the Report Source filename: if it ends in '_forward_pass.json', pass dag_id='dag_verify_forward_pass'; if '_decoding.json', pass dag_id='dag_verify_decoding'; if '_shape.json', pass dag_id='dag_verify_checkpoint_shape'; if '_forward_compile.json', pass dag_id='dag_verify_forward_compile'. Never re-trigger maxtext_validation_master_dag if only a specific sub-DAG failed.\n"
-        "5. Write a final report using write_remediation_report and conclude the task.\n"
-        "6. Autonomous Hardware Scaling: If a failure report shows an Out-Of-Memory (OOM) error or HBM allocation failure (ResourceExhaustedError), the model checkpoint (e.g. DeepSeek-671B) is too large for the current TPU cluster slice. Do not edit model math or sharding. Instead, autonomously scale up infrastructure by calling trigger_airflow_dag with a larger reserved TPU cluster: --cluster_name v5p-128-bodaborg-europe-west4-b --project_name cloud-tpu-multipod-dev --zone europe-west4-b."
-    )
-    
-    # Defaulting to Gemini 3 Pro (preview) for advanced reasoning, with environment variable override support
-    model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-3.5-flash-lite")
-    
-    prompt = (
-        f"Pipeline Run ID: {run_id}\n"
-        f"Target Model: {model_name}\n"
-        f"Report Source: {report_source}\n"
-        f"Failure Log:\n{failure_log}\n\n"
-        "Begin your diagnosis and execute the necessary tools to resolve this issue."
-    )
-    
-    # Start a chat session that will automatically execute tools and loop back to the model
-    chat = client.chats.create(
+    import json
+    analyst_tools = [read_local_file, fetch_reference_code, run_shape_analysis]
+    analyst_chat = client.chats.create(
         model=model_id,
         config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            tools=adk_tools,
+            tools=analyst_tools,
             temperature=0.2,
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                maximum_remote_calls=25
-            ),
+            response_mime_type="application/json",
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=15)
         )
     )
+    analyst_response = analyst_chat.send_message(analyst_prompt)
     
-    # Send the initial prompt. The SDK will handle the tool call loop automatically in newer versions, 
-    # or you can manually loop it. We rely on the ADK's chat interface.
-    response = chat.send_message(prompt)
-    logger.info("Agent workflow completed.")
-    return response.text
+    # --- PHASE 2: REVIEW PHASE (Meta-Agent Validation) ---
+    logger.info("Phase 2: Reviewing Analyst JSON One-Pager plan...")
+    plan_json = {}
+    try:
+        plan_json = json.loads(analyst_response.text)
+        logger.info(f"Analyst diagnosis: {plan_json.get('diagnosis')}")
+    except Exception as e:
+        logger.error(f"Analyst returned invalid JSON ({e}). Forcing fallback diagnosis...")
+        plan_json = {
+            "diagnosis": "JAX rematerialization array deletion error or config failure.",
+            "error_type": "Logit Divergence",
+            "failing_file": "src/maxtext/layers/normalizations.py",
+            "structured_plan": [
+                "Step 1: Check if failure is Array has been deleted. If so, pass overrides remat_policy=none via trigger_airflow_dag without editing Python files.",
+                "Step 2: Otherwise, apply precise fix to failing file and run linters."
+            ]
+        }
+    
+    # --- PHASE 3: FIXER SUBAGENT (02_patch.txt) ---
+    logger.info("Phase 3: Invoking Fixer subagent to execute structured plan...")
+    fixer_template = _load_prompt_file("02_patch.txt")
+    fixer_system = (
+        f"{fixer_template}\n\n"
+        "META-AGENT STRICT CONSTRAINTS:\n"
+        "- If the error is 'RuntimeError: Array has been deleted', DO NOT edit normalizations.py or any nnx code. Fix via maxtext_overrides (remat_policy=none).\n"
+        f"- Target branch to fork from: '{maxtext_branch}'. Newly created fix branch will be 'fix-val-{model_name}-{run_id}'.\n"
+        f"- Here is the Analyst Structured One-Pager Plan:\n{json.dumps(plan_json, indent=2)}"
+    )
+    
+    fixer_tools = [
+        read_local_file, fetch_reference_code, run_shape_analysis,
+        patch_file, run_linters, manage_github_branch, create_pull_request
+    ]
+    fixer_chat = client.chats.create(
+        model=model_id,
+        config=types.GenerateContentConfig(
+            system_instruction=fixer_system,
+            tools=fixer_tools,
+            temperature=0.2,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=20)
+        )
+    )
+    fixer_prompt = f"Execute the Analyst structured plan for run_id {run_id} and model {model_name}."
+    fixer_response = fixer_chat.send_message(fixer_prompt)
+    logger.info(f"Fixer Phase completed: {fixer_response.text[:200]}...")
+    
+    # --- PHASE 4: VERIFIER SUBAGENT (03_verify.txt) ---
+    logger.info("Phase 4: Invoking Verifier subagent to trigger pipeline and write remediation report...")
+    verifier_template = _load_prompt_file("03_verify.txt")
+    
+    # Determine the correct sub-DAG ID based on report source filename
+    dag_id_to_trigger = ""
+    if report_source.endswith("_forward_pass.json"):
+        dag_id_to_trigger = "dag_verify_forward_pass"
+    elif report_source.endswith("_decoding.json"):
+        dag_id_to_trigger = "dag_verify_decoding"
+    elif report_source.endswith("_shape.json"):
+        dag_id_to_trigger = "dag_verify_checkpoint_shape"
+    elif report_source.endswith("_forward_compile.json"):
+        dag_id_to_trigger = "dag_verify_forward_compile"
+    
+    new_branch = f"fix-val-{model_name}-{run_id}"
+    verifier_system = (
+        f"{verifier_template}\n\n"
+        "EXPLICIT META-AGENT VERIFICATION INSTRUCTIONS:\n"
+        f"1. The newly created fix branch is exactly: '{new_branch}'.\n"
+        f"2. You MUST pass branch_name='{new_branch}' when calling trigger_airflow_dag.\n"
+        f"3. You MUST pass dag_id='{dag_id_to_trigger}' if not empty, so only the failing sub-DAG runs.\n"
+        "4. Upon completion, you MUST call write_remediation_report to create remediation_report_{run_id}.md in the project root."
+    )
+    
+    verifier_tools = [trigger_airflow_dag, write_remediation_report]
+    verifier_chat = client.chats.create(
+        model=model_id,
+        config=types.GenerateContentConfig(
+            system_instruction=verifier_system,
+            tools=verifier_tools,
+            temperature=0.2,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=10)
+        )
+    )
+    verifier_prompt = f"Verify branch '{new_branch}' for run_id '{run_id}' and write the final Remediation Report."
+    verifier_response = verifier_chat.send_message(verifier_prompt)
+    logger.info("4-Phase Meta-Agent Orchestrator workflow completed successfully.")
+    return verifier_response.text
 
 if __name__ == "__main__":
     # Mock trigger for local testing

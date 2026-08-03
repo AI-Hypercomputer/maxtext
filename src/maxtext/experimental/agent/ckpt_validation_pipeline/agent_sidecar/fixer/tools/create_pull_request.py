@@ -35,6 +35,7 @@ def main():
   fork_branch = args.fix_branch or f"fix/agent-remediation-{int(time.time())}"
 
   print(f"1. Forking new branch '{fork_branch}' from base branch '{args.base}'...")
+  subprocess.run(["git", "fetch", "origin", args.base], check=False)
   subprocess.run(["git", "checkout", args.base], check=False)
   subprocess.run(["git", "checkout", "-b", fork_branch], check=False)
 
