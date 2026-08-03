@@ -116,8 +116,6 @@ class WorkloadConfig:
   xpk_storage: None | list[str] = None
   hlo_dump: None | bool = None
   skip_validation: bool = False
-  reuse_image: bool = False
-  fast_rebuild: bool = False
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
@@ -645,15 +643,7 @@ def generate_xpk_workload_cmd(
     workload_create_command = f"python3 {wl_config.xpk_path}/xpk.py workload create-pathways"
     docker_image_flag = f"--docker-image={pw_config.runner_image}"
   else:
-    if getattr(wl_config, 'reuse_image', False):
-      docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
-    elif getattr(wl_config, 'fast_rebuild', False):
-      runner_image = f"{wl_config.base_docker_image}__runner"
-      print(f"Fast rebuild requested: rebuilding runner image '{runner_image}' from '{wl_config.base_docker_image}' without --no-cache.")
-      run_command_with_updates(f"bash src/dependencies/scripts/docker_upload_runner.sh FAST_REBUILD=true LOCAL_IMAGE_NAME={wl_config.base_docker_image}", "Fast Rebuild Runner Image")
-      docker_image_flag = f'--docker-image="{runner_image}"'
-    else:
-      docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
+    docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
   if wl_config.skip_validation:
     workload_create_command += " --skip-validation"
