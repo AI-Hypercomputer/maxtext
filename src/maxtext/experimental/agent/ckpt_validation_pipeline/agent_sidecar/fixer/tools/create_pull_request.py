@@ -49,7 +49,11 @@ def main():
     subprocess.run(["git", "remote", "set-url", "origin", f"https://x-access-token:{gh_token}@github.com/AI-Hypercomputer/maxtext.git"], check=False)
 
   print(f"3. Pushing forked branch '{fork_branch}' to origin...")
-  push_res = subprocess.run(["git", "push", "-u", "origin", fork_branch], check=False)
+  push_res = subprocess.run(["git", "push", "-u", "origin", fork_branch], capture_output=True, text=True, check=False)
+  if push_res.returncode != 0:
+    print(f"git push failed (code {push_res.returncode}):\nSTDOUT: {push_res.stdout}\nSTDERR: {push_res.stderr}")
+  else:
+    print(f"git push succeeded:\n{push_res.stdout}\n{push_res.stderr}")
 
   print(f"4. Opening Pull Request from '{fork_branch}' into base branch '{args.base}'...")
   env = os.environ.copy()
@@ -59,8 +63,12 @@ def main():
   cmd = ["gh", "pr", "create", "--title", title, "--body", body, "--base", args.base, "--head", fork_branch, "--repo", "AI-Hypercomputer/maxtext"]
 
   try:
-    subprocess.run(cmd, check=True, env=env)
-    print(f"Successfully opened Pull Request targeting '{args.base}' from head '{fork_branch}'.")
+    pr_res = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
+    print(f"Successfully opened Pull Request targeting '{args.base}' from head '{fork_branch}'.\nSTDOUT: {pr_res.stdout}\nSTDERR: {pr_res.stderr}")
+  except subprocess.CalledProcessError as e:
+    print(f"Note: gh pr create failed (code {e.returncode}):\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}")
+    print(f"Successfully created forked branch '{fork_branch}' and committed fix locally.")
+    print(f"PR Title: {args.title}\nPR Body: {args.body}")
   except Exception as e:
     print(f"Note: gh CLI or remote push could not authenticate in serverless mode ({e}).")
     print(f"Successfully created forked branch '{fork_branch}' and committed fix locally.")
