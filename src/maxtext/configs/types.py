@@ -358,6 +358,7 @@ class Checkpointing(BaseModel):
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
   )
+  save_checkpoint_on_start: bool = Field(True, description="If True, saves an initial checkpoint upon training start.")
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
   )
@@ -450,7 +451,7 @@ class Quantization(BaseModel):
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
       False,
-      description="Whether to use manual quantization for batch split. Only used if use_batch_split_schedule is True.",
+      description="Whether to use manual quantization for batch split. Only used if `use_batch_split_schedule=True`.",
   )
   weight_quantization_calibration_method: str = Field(
       "absmax",
@@ -626,20 +627,6 @@ class Attention(BaseModel):
   use_post_attn_norm: bool = Field(False, description="Apply LayerNorm after the attention block.")
   use_post_ffw_norm: bool = Field(False, description="Apply LayerNorm after the feed-forward block.")
   use_ragged_attention: bool = Field(False, description="Whether to use ragged attention kernels.")
-  use_tokamax_gmm: bool = Field(
-      False,
-      description="Whether to use the Tokamax library for GMM kernel implementation.",
-  )
-  use_gmm_v2: bool = Field(
-      False,
-      description=(
-          "Whether to use GMM v2 (with bf16 activations and weights) for MoE."
-          " Requires use_tokamax_gmm: true. Currently incompatible with quantization."
-      ),
-  )
-  num_moe_emb_chunks: int = Field(
-      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
-  )
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for Transformer Engine padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
@@ -997,6 +984,21 @@ class MoEKernels(BaseModel):
   wo_tile_drhs_mlp_dim: int = Field(1024, description="bwd pass drhs tiling dimension for MLP in GMM for wo.")
 
   merge_gating_gmm: bool = Field(False, description="whether to merge the two gating gmm kernels into one.")
+
+  num_moe_emb_chunks: int = Field(
+      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
+  )
+
+  # tokamax gmm
+  use_tokamax_gmm: bool = Field(
+      False,
+      description="Whether to use the Tokamax library for GMM kernel implementation.",
+  )
+
+  use_gmm_v2: bool = Field(
+      False,
+      description="Whether to use Tokamax GMM v2 for MoE kernel.",
+  )
 
 
 class DeepSeekMoE(BaseModel):
@@ -3772,10 +3774,15 @@ class MaxTextConfig(
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
-    if self.use_gmm_v2 and (self.quantization or self.use_qwix_quantization):
-      raise ValueError("Quantization with GMM v2 is not supported yet.")
-    if self.use_gmm_v2 and not self.use_tokamax_gmm:
-      raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
+    if self.use_manual_quantization and not self.use_batch_split_schedule:
+      raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
+
+    # Validation for GMM v2
+    if self.use_gmm_v2:
+      if not self.use_tokamax_gmm:
+        raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
+      if self.use_batch_split_schedule:
+        raise ValueError("GMM v2 is not supported with a batch split schedule.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

@@ -996,7 +996,7 @@ class Decoder(nn.Module):
             # scan with initialized parameters.
             if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
               # old version of batch-split that fully uses qwix quantization.
-              if cfg.use_qwix_quantization and not cfg.use_manual_quantization:
+              if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
                 y = deepseek_batchsplit_fp8.scan_batch_split_layers(
                     y,
                     self.variables["params"]["moe_layers"],

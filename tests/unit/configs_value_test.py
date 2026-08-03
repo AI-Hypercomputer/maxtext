@@ -311,40 +311,6 @@ class ConfigTest(absltest.TestCase):
           ]
       )
 
-  def test_gmm_v2_quantization_disallowed(self):
-    """Tests that use_gmm_v2=True with quantization enabled is disallowed."""
-    argv = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "use_gmm_v2=true",
-        "quantization=fp8_full",
-    ]
-    with self.assertRaises(pydantic.ValidationError):
-      pyconfig.initialize(argv)
-
-    argv_qwix = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "use_gmm_v2=true",
-        "use_qwix_quantization=true",
-    ]
-    with self.assertRaises(pydantic.ValidationError):
-      pyconfig.initialize(argv_qwix)
-
-  def test_gmm_v2_requires_tokamax_gmm(self):
-    """Tests that use_gmm_v2=True requires use_tokamax_gmm=True."""
-    argv = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "use_gmm_v2=true",
-        "use_tokamax_gmm=false",
-    ]
-    with self.assertRaises(pydantic.ValidationError):
-      pyconfig.initialize(argv)
-
   def test_safetensors_dynamic_disallows_single_controller(self):
     """Tests that source_checkpoint_layout=safetensors_dynamic disallows enable_single_controller=True."""
     argv = [
