@@ -31,7 +31,6 @@ gcloud run jobs deploy $JOB_NAME \
   --image $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:latest \
   --region $REGION \
   --service-account=ml-auto-solutions@$PROJECT_ID.iam.gserviceaccount.com \
-  --set-env-vars=PYTHONUNBUFFERED=1 \
-  --clear-secrets
+  --update-env-vars=PYTHONUNBUFFERED=1
 
 echo "Deployment Complete! The Overwatch Agent is now deployed as a Serverless Job and is triggered exclusively by Airflow on failure."
