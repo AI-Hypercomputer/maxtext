@@ -520,6 +520,20 @@ def validate_converter(argv) -> None:
                   weight_array = weight_array.T
               elif len(weight_array.shape) == 3 and weight_array.shape[0] == target_shape[0] and weight_array.shape[1] == target_shape[2] and weight_array.shape[2] == target_shape[1]:
                   weight_array = jnp.transpose(weight_array, (0, 2, 1))
+              elif len(weight_array.shape) == 3 and len(target_shape) == 3:
+                  if weight_array.shape[0] == target_shape[0] and weight_array.shape[2] == target_shape[2] and target_shape[1] % weight_array.shape[1] == 0:
+                      weight_array = jnp.repeat(weight_array, target_shape[1] // weight_array.shape[1], axis=1)
+                  elif weight_array.shape[0] == target_shape[0] and weight_array.shape[1] == target_shape[1] and target_shape[2] > weight_array.shape[2]:
+                      half_old = weight_array.shape[2] // 2
+                      pad_amount = (target_shape[2] // 2) - half_old
+                      w0 = jnp.pad(weight_array[:, :, :half_old], ((0, 0), (0, 0), (0, pad_amount)))
+                      w1 = jnp.pad(weight_array[:, :, half_old:], ((0, 0), (0, 0), (0, pad_amount)))
+                      weight_array = jnp.concatenate([w0, w1], axis=2)
+                  elif weight_array.shape[0] == target_shape[0] and weight_array.shape[2] == target_shape[2] and target_shape[1] > weight_array.shape[1]:
+                      pad_amount = target_shape[1] - weight_array.shape[1]
+                      weight_array = jnp.pad(weight_array, ((0, 0), (0, pad_amount), (0, 0)))
+                  else:
+                      logging.warning(f"Shape mismatch for {search_key}: expected {target_shape}, got {weight_array.shape}")
               else:
                   logging.warning(f"Shape mismatch for {search_key}: expected {target_shape}, got {weight_array.shape}")
                   
