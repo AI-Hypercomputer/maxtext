@@ -35,6 +35,9 @@ from maxtext.layers.quantizations import Fp8Quantization
 from maxtext.utils import max_logging, maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
+import absl.logging
+
+absl.logging.set_verbosity(absl.logging.INFO)
 
 
 def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
@@ -1428,28 +1431,43 @@ class RoutedMoeTest(parameterized.TestCase):
       {
           "testcase_name": f"{base_name}_ep{ici_expert_parallelism}",
           "quantization": quantization,
+          "use_tokamax_gmm": use_tokamax_gmm,
           "use_gmm_v2": use_gmm_v2,
+          "wa_static": wa_static,
           "ici_expert_parallelism": ici_expert_parallelism,
       }
-      for base_name, quantization, use_gmm_v2, ici_expert_parallelism in [
-          ("tokamax_v1_bf16", "", False, 1),
-          ("tokamax_v1_fp8", "fp8_full", False, 1),
-          ("tokamax_v2_bf16", "", True, 1),
-          ("tokamax_v2_fp8", "fp8_full", True, 1),
-          ("tokamax_v2_bf16", "", True, 4),
-          ("tokamax_v2_fp8", "fp8_full", True, 4),
+      for base_name, quantization, use_tokamax_gmm, use_gmm_v2, wa_static, ici_expert_parallelism in [
+          ("megablox_bf16", "", False, False, False, 1),
+          ("megablox_fp8_dynamic", "fp8_full", False, False, False, 1),
+          ("megablox_fp8_static", "fp8_full", False, False, True, 1),
+          ("tokamax_v1_bf16", "", True, False, False, 1),
+          ("tokamax_v1_fp8_dynamic", "fp8_full", True, False, False, 1),
+          ("tokamax_v1_fp8_static", "fp8_full", True, False, True, 1),
+          ("tokamax_v2_bf16", "", True, True, False, 1),
+          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 1),
+          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1),
+          ("tokamax_v2_bf16", "", True, True, False, 4),
+          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 4),
+          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 4),
       ]
   )
   @pytest.mark.tpu_only
   def test_gmm_grad_equivalence(
       self,
       quantization: str,
+      use_tokamax_gmm: bool,
       use_gmm_v2: bool,
+      wa_static: bool,
       ici_expert_parallelism: int,
       **kwargs,
   ):
-    megablox = False
-    use_tokamax_gmm = True
+    megablox = True
+    if wa_static:
+      weight_quantization_calibration_method = "fixed,-224,224"
+      act_quantization_calibration_method = "fixed,-224,224"
+    else:
+      weight_quantization_calibration_method = "absmax"
+      act_quantization_calibration_method = "absmax"
 
     def _build_cfg(
         sparse_matmul,
@@ -1466,7 +1484,7 @@ class RoutedMoeTest(parameterized.TestCase):
           model_name="mixtral-8x7b",
           weight_dtype="float32",
           dtype="bfloat16",
-          per_device_batch_size=1,
+          per_device_batch_size=2,
           max_target_length=256,
           float32_gate_logits=True,
           ici_expert_parallelism=ici_expert_parallelism,
@@ -1476,8 +1494,8 @@ class RoutedMoeTest(parameterized.TestCase):
           use_gmm_v2=use_gmm_v2,
           quantization=quantization,
           use_qwix_quantization=True,
-          weight_quantization_calibration_method="fixed,-224,224",
-          act_quantization_calibration_method="fixed,-224,224",
+          weight_quantization_calibration_method=weight_quantization_calibration_method,
+          act_quantization_calibration_method=act_quantization_calibration_method,
           bwd_quantization_calibration_method="absmax",
           wi_tile_fwd_batch_seq=128,
           wi_tile_dlhs_batch_seq=128,
