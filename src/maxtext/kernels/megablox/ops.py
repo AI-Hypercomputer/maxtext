@@ -195,7 +195,7 @@ def _gmm_fwd(
   ):
     rhs = _fwd_gather_weight(rhs, weight_gather_axes)
 
-  # 3. Backend Execution Routing
+  # Backend Execution Routing
   if use_tokamax_backend and not use_gmm_v2:
     out = _fwd_run_tokamax_v1(lhs, rhs, group_sizes, preferred_element_type, transpose_rhs, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
