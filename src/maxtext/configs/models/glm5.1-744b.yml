@@ -55,7 +55,7 @@ max_position_embeddings: 202752
 rope_interleave: true
 
 # Indexer for Dynamic Sparse Attention (DSA)
-use_indexer: true
+use_indexer: false
 indexer_n_heads: 32
 indexer_head_dim: 128
 indexer_topk: 2048

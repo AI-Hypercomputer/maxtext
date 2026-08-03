@@ -422,6 +422,7 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
         "your token visible in 'ps' and shell history. Please set the 'HF_TOKEN' environment variable instead."
     )
   kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
+  raw_overrides_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
   overrides_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
 
   temp_cfg1 = omegaconf.OmegaConf.merge(base_yml_config, overrides_cfg)
@@ -458,7 +459,7 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)
       # if override_model_config=True, only apply model configs for keys not present in overrides.
       if temp_cfg.get("override_model_config"):
-        model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in overrides_cfg}
+        model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in raw_overrides_cfg}
       else:
         model_cfg = model_loaded_cfg
         # Validate that no keys are overridden by both model config and CLI/kwargs

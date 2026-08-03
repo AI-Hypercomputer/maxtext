@@ -14,9 +14,6 @@
 
 """Checkpoint conversion utility functions."""
 
-import torch  # pylint: disable=unused-import
-import transformers  # pylint: disable=unused-import
-from transformers import AutoModelForCausalLM  # pylint: disable=unused-import
 import contextlib
 import gc
 import io

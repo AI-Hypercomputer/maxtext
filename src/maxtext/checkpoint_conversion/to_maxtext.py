@@ -49,9 +49,6 @@ Example Usage:
     scan_layers=True
 """
 
-import torch  # pylint: disable=unused-import
-import transformers  # pylint: disable=unused-import
-from transformers import AutoModelForCausalLM  # pylint: disable=unused-import
 import argparse
 from functools import partial
 import json
