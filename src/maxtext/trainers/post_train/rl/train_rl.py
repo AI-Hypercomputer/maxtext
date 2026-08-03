@@ -17,7 +17,7 @@ RL Trainer
 
 This module provides a unified `rl_train` function that consolidates the common
 RL training logic. It handles model loading, reward function setup, dataset
-processing, and training orchestration. By default, we run Group Relative Policy Optimization (GRPO) on 
+processing, and training orchestration. By default, we run Group Relative Policy Optimization (GRPO) on
 GSM8K math reasoning benchmark. The script is also flexible enough to run Group Sequence Policy Optimization (GSPO).
 
 Usage Examples:
@@ -94,6 +94,8 @@ def _tpu_inference_compat_patches():
   """
   orig_wsc = jax.lax.with_sharding_constraint
   orig_apply_dtype_cast = tunix_utils._apply_dtype_cast  # pylint: disable=protected-access
+  orig_bulk = tunix_utils._bulk_align_and_unstack  # pylint: disable=protected-access
+  orig_unstack = tunix_utils._unstack_scanned_param  # pylint: disable=protected-access
 
   def _compat_wsc(x, shardings):
     try:
@@ -106,13 +108,30 @@ def _tpu_inference_compat_patches():
       return val
     return orig_apply_dtype_cast(val, tgt_dtype, src_key)
 
+  def _compat_bulk(arr, scan_axis, per_layer, key_path):
+    if hasattr(arr, "shape") and len(arr.shape) <= scan_axis:
+      scan_axis = len(arr.shape) - 1 if len(arr.shape) > 0 else 0
+    return orig_bulk(arr, scan_axis, per_layer, key_path)
+
+  def _compat_unstack(src_val, tgt_val, key_path, scan_axis=None):
+    if scan_axis is not None and hasattr(src_val, "shape") and len(src_val.shape) <= scan_axis:
+      scan_axis = len(src_val.shape) - 1 if len(src_val.shape) > 0 else 0
+    res = orig_unstack(src_val, tgt_val, key_path, scan_axis=scan_axis)
+    if isinstance(res, tuple) and len(res) == 1 and hasattr(src_val, "shape") and src_val.shape == tgt_val.shape:
+      return res * 256
+    return res
+
   jax.lax.with_sharding_constraint = _compat_wsc
   tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
+  tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
+  tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
   try:
     yield
   finally:
     jax.lax.with_sharding_constraint = orig_wsc
     tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
+    tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
+    tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
@@ -722,8 +741,9 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
 
   # Run evaluation before training
   if trainer_config.num_test_batches > 0:
-    # Update vllm with model parameters from checkpoint
-    rl_cluster.rollout.update_params(nnx.state(actor_model))
+    # `rl_cluster.rollout.update_params()` is intentionally omitted prior to step 0
+    # because `RLCluster` initialization (`create_rl_components`) already syncs the actor model weights
+    # during setup. Skipping this redundant parameter transfer eliminates unnecessary weight resharding.
 
     (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
         trainer_config,

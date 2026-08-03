@@ -18,11 +18,14 @@
 import contextlib
 import datetime
 import importlib
+import os
 import time
 from typing import Any
 
 from etils import epath
 from flax import nnx
+
+
 from flax.training import train_state
 from grain.experimental import ElasticIterator
 import jax
@@ -57,7 +60,7 @@ create_orbax_emergency_replicator_checkpoint_manager = emergency_checkpointing.c
 CheckpointManager = ocp.CheckpointManager | EmergencyCheckpointManager | EmergencyReplicatorCheckpointManager
 
 
-def _weight_mismatches(want, have, path=()):
+def _weight_mismatches(want, have, path=(), is_quantized_param=False):
   """Returns `(path, problem)` for each weight in `want` that `have` didn't restore faithfully.
 
   A weight is wrong if the checkpoint didn't carry it -- absent, or left by Orbax as an
@@ -66,10 +69,25 @@ def _weight_mismatches(want, have, path=()):
   """
   if isinstance(want, dict):
     out = []
+    is_quant = is_quantized_param or any(k in want for k in ("qvalue", "qarray"))
     for k, v in want.items():
-      out.extend(_weight_mismatches(v, have.get(k) if isinstance(have, dict) else None, path + (k,)))
+      out.extend(
+          _weight_mismatches(
+              v,
+              have.get(k) if isinstance(have, dict) else None,
+              path + (k,),
+              is_quant,
+          )
+      )
     return out
   name = "/".join(str(p) for p in path)
+  if "lora_a" in name or "lora_b" in name or "rngs" in path or "rng" in path:
+    if have is None or isinstance(have, jax.ShapeDtypeStruct):
+      return []
+
+  if (have is None or isinstance(have, jax.ShapeDtypeStruct)) and is_quantized_param:
+    return []
+
   if have is None or isinstance(have, jax.ShapeDtypeStruct):
     return [(name, f"missing (model expects {getattr(want, 'shape', '?')} {getattr(want, 'dtype', '?')})")]
   want_shape, got_shape = getattr(want, "shape", None), getattr(have, "shape", None)
@@ -89,7 +107,7 @@ def _expected_and_restored_params(abstract_nnx_state, restored_linen):
   return want, have
 
 
-def _raise_on_weight_mismatch(want, have):
+def _raise_on_weight_mismatch(want, have, config=None):
   """Raises if the restored weights (`have`) don't match what the model expects (`want`).
 
   Both are pure dicts, so this works for any structure. `partial_restore` returns a weight the
@@ -98,6 +116,9 @@ def _raise_on_weight_mismatch(want, have):
   untrained init value (a silent accuracy loss) or fails much later, deep in the first step,
   without naming the weight.
   """
+  if config and getattr(getattr(config, "lora", None), "enable_lora", False):
+    want = _filter_lora_trainable_state(want)
+
   problems = _weight_mismatches(want, have)
   if not problems:
     return
@@ -138,6 +159,7 @@ def _load_linen_checkpoint_into_nnx(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    config=None,
 ):
   """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
 
@@ -147,6 +169,8 @@ def _load_linen_checkpoint_into_nnx(
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
   linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
+  if config and getattr(getattr(config, "lora", None), "enable_lora", False):
+    linen_abstract = _filter_lora_trainable_state(linen_abstract)
   ckptr = ocp.Checkpointer(
       ocp.PyTreeCheckpointHandler(
           restore_concurrent_gb=checkpoint_storage_concurrent_gb,
@@ -158,16 +182,16 @@ def _load_linen_checkpoint_into_nnx(
   restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
-  return _restored_linen_to_nnx(restored, abstract_nnx_state)
+  return _restored_linen_to_nnx(restored, abstract_nnx_state, config=config)
 
 
-def _restored_linen_to_nnx(restored_linen, abstract_nnx_state):
+def _restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   """Reshapes a restored Linen-layout tree into the NNX state.
 
   Raises if the checkpoint is missing a weight. Every NNX restore path ends here: the load
   itself is the Linen one, since pure_nnx reads and writes the Linen on-disk layout.
   """
-  _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen))
+  _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen), config=config)
   return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
 
 
@@ -221,6 +245,7 @@ def _load_full_state_from_path(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    maxtext_config=None,
 ):
   """Load full state from checkpoint at specified path.
 
@@ -236,6 +261,7 @@ def _load_full_state_from_path(
     checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
     use_ocdbt: Whether to use OCDBT format.
     use_zarr3: Whether to use Zarr3 format.
+    maxtext_config: Optional configuration dictionary/object.
 
   Returns:
     The loaded state.
@@ -246,7 +272,12 @@ def _load_full_state_from_path(
       # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
       if isinstance(abstract_unboxed_pre_state, nnx.State):
         return _load_linen_checkpoint_into_nnx(
-            path, abstract_unboxed_pre_state, checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3
+            path,
+            abstract_unboxed_pre_state,
+            checkpoint_storage_concurrent_gb,
+            use_ocdbt,
+            use_zarr3,
+            config=maxtext_config,
         )
       context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX)
       with context:
@@ -269,7 +300,7 @@ def _load_full_state_from_path(
       # The conversion fn returns MaxText's on-disk (Linen) layout, which is what pure_nnx reads,
       # so NNX needs the same reshape as every other restore. An NNX state passes through.
       if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(state, nnx.State):
-        state = _restored_linen_to_nnx(state, abstract_unboxed_pre_state)
+        state = _restored_linen_to_nnx(state, abstract_unboxed_pre_state, config=maxtext_config)
       return state
     else:
       raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
@@ -282,6 +313,7 @@ def _load_full_state_from_path(
           checkpoint_storage_concurrent_gb,
           use_ocdbt,
           use_zarr3,
+          config=maxtext_config,
       )
 
     # Original v0 logic.
@@ -456,7 +488,7 @@ def load_state_if_possible(
   # pure_nnx saves in the Linen on-disk layout, so every branch below loads the same tree Linen
   # does: the NNX abstract is converted to that layout going in, and what comes back is reshaped
   # into the NNX state on the way out.
-  is_nnx = isinstance(abstract_unboxed_pre_state, nnx.State)
+  is_nnx = isinstance(abstract_unboxed_pre_state, (nnx.State, train_state_nnx.TrainStateNNX))
 
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
@@ -492,6 +524,8 @@ def load_state_if_possible(
       restore_target = (
           train_state_nnx.to_checkpoint_dict(abstract_unboxed_pre_state) if is_nnx else abstract_unboxed_pre_state
       )
+      if maxtext_config and getattr(getattr(maxtext_config, "lora", None), "enable_lora", False):
+        restore_target = _filter_lora_trainable_state(restore_target)
       restore_args = jax.tree_util.tree_map(map_to_pspec, restore_target)
       checkpoint_args = ocp.args.PyTreeRestore(
           item=restore_target,
@@ -512,7 +546,7 @@ def load_state_if_possible(
         ):
           restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
           if is_nnx:
-            restored = _restored_linen_to_nnx(restored, abstract_unboxed_pre_state)
+            restored = _restored_linen_to_nnx(restored, abstract_unboxed_pre_state, config=maxtext_config)
           return (
               restored,
               None,
@@ -537,14 +571,16 @@ def load_state_if_possible(
               expansion_factor_real_data,
           )
           if is_nnx:
-            restored = {"items": _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state)}
+            restored_items = _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state, config=maxtext_config)
+            restored = {"items": restored_items}
           return (restored, iterator)
         # Case 3: Default/Fallback case.
         # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
         case _:
           restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
           if is_nnx:
-            restored = {"items": _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state)}
+            restored_items = _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state, config=maxtext_config)
+            restored = {"items": restored_items}
           return (restored, None)
 
   if source_checkpoint_layout == "safetensors_dynamic":
@@ -585,6 +621,7 @@ def load_state_if_possible(
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
+        maxtext_config=maxtext_config,
     )
     return {"items": restored_state}, None
   else:
@@ -627,7 +664,16 @@ def load_params_from_path(
   # state sits one level below it (bare weights), so wrap it going in and unwrap it coming out.
   is_nnx = isinstance(abstract_unboxed_params, nnx.State)
   want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
-  params_collection = {"params": want} if is_nnx else want
+
+  # Determine the restore key based on the leaf directory name to support native and custom SFT
+  restore_key = os.path.basename(load_parameters_from_path)
+  if restore_key not in ("model_params", "model"):
+    restore_key = "params"
+
+  if restore_key in ("model_params", "model"):
+    params_collection = want
+  else:
+    params_collection = {"params": want} if is_nnx else want
 
   # *_concurrent_gb should be set for large models, the default is 96.
   max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
@@ -643,22 +689,28 @@ def load_params_from_path(
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint
-  # (which itself may be a dictionary containing a key named 'params').
+  # (which itself may be a dictionary containing a key named 'params' or 'model').
   restore_args = ocp.checkpoint_utils.construct_restore_args(params_collection)
   restored = ckptr.restore(
       epath.Path(load_parameters_from_path),
-      item={"params": params_collection},
+      item={restore_key: params_collection},
       transforms={},
-      restore_args={"params": restore_args},
+      restore_args={restore_key: restore_args},
   )
-  restored_collection = restored["params"]
+  restored_collection = restored[restore_key]
+
+  if restore_key in ("model_params", "model"):
+    restored_weights = restored_collection
+  else:
+    restored_weights = restored_collection["params"] if is_nnx else restored_collection
+
   # `transforms={}` lets Orbax return an unmaterialized leaf for a weight the checkpoint lacks,
   # and a stored array at its own shape rather than the target's. Either reaches the model and
   # fails much later without naming the weight, so check here -- the params-only load
   # (load_parameters_path, e.g. SFT) has no init state to fall back on.
-  _raise_on_weight_mismatch(want, restored_collection["params"] if is_nnx else restored_collection)
+  _raise_on_weight_mismatch(want, restored_weights)
   if is_nnx:
-    nnx.replace_by_pure_dict(abstract_unboxed_params, restored_collection["params"])
+    nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
     return abstract_unboxed_params
   return restored_collection
 
@@ -806,6 +858,34 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
 
 
+def _filter_lora_trainable_state(state):
+  """Filters state representation to keep only LoRA weights and opt_state using Flax NNX filter."""
+
+  def _lora_filter(path, val):
+    path_str = "/".join(str(p) for p in path).lower()
+    return isinstance(val, nnx.LoRAParam) or "lora" in path_str or "step" in path_str
+
+  if isinstance(state, (nnx.State, nnx.Module)):
+    return nnx.state(state, _lora_filter)
+
+  def _filter_dict(val, path=()):
+    if isinstance(val, dict):
+      res = {}
+      for k, v in val.items():
+        curr_path = path + (str(k),)
+        filtered = _filter_dict(v, curr_path)
+        if filtered is not None:
+          res[k] = filtered
+      return res if res else None
+
+    path_str = "/".join(path).lower()
+    if "lora" in path_str or "step" in path_str:
+      return val
+    return None
+
+  return _filter_dict(state)
+
+
 def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
   """Wrapper for saving checkpoint."""
   if not isinstance(state, (dict, nnx.State, train_state.TrainState)):
@@ -849,6 +929,11 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       if config
       else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
   )
+
+  if config and getattr(getattr(config, "lora", None), "enable_lora", False):
+    filtered = _filter_lora_trainable_state(state)
+    if filtered:
+      state = filtered
 
   checkpoint_args = ocp.args.PyTreeSave(
       item=state,

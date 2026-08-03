@@ -105,7 +105,8 @@ jobs:
       mode: ${{ inputs.image_suffix != '' && format('{0}_{1}', 'nightly', inputs.image_suffix) || 'nightly' }}
       run_id: ${{ github.run_id }}
       maxtext_sha: ${{ github.sha }}
-    secrets: inherit
+    secrets:
+      AIRFLOW_CALLBACK_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
 
   # TODO: This is a workaround, to be removed when promote_docker_image.yml workflow is stable
   tag_docker_image:
@@ -128,9 +129,11 @@ jobs:
         shell: bash
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          IMAGE_NAME_EXPR: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
         run: |
-          image_name=${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
-          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${image_name}"
+          image_name="$IMAGE_NAME_EXPR"
+          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${image_name}"
 
           # Add the traceability tag to confirm it passed validation suite
           gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \

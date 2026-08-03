@@ -149,6 +149,7 @@ class SplashConfig:
   dq_reduction_steps: int | None = None
   # An experimental scheduler that sometimes produces better softmax overlap.
   use_experimental_scheduler: bool = False
+  ring_scan_unroll: int = 1
 
   def __post_init__(self):
     if self.block_kv_compute is None:
@@ -1350,6 +1351,8 @@ def _splash_attention_bwd_dkv(
     config: SplashConfig,
     dkv_mask_sparsity: float,
     return_fp32_grads: bool = False,
+    dq_carry_in: jax.Array | None = None,
+    return_unreduced_dq: bool = False,
 ):
   num_q_heads, q_seq_len, head_dim_qk = q.shape
   kv_seq_len, head_dim_v = v.shape[-2:]
@@ -1525,7 +1528,7 @@ def _splash_attention_bwd_dkv(
     dq_alias_spec = dq_spec
     dq_dtype = jnp.float32 if return_fp32_grads else q.dtype
     dq_shape = jax.ShapeDtypeStruct((3, *q.shape), dq_dtype)
-    dq = jnp.zeros_like(dq_shape)
+    dq = dq_carry_in if dq_carry_in is not None else jnp.zeros_like(dq_shape)
   else:
     dq_index_map = unravel(lambda h, i, j: (j, h, i, 0))
     dq_spec = pl.BlockSpec((None, None, bq, head_dim_qk), dq_index_map)
@@ -1726,6 +1729,8 @@ def _splash_attention_bwd_dkv(
         interpret=config.interpret,
         metadata=metadata,
     )(*args, dq, dk, dv)
+  if return_unreduced_dq and dq_reduction_steps == 3:
+    return dq_unreduced, dk.astype(jnp.float32), dv.astype(jnp.float32)
   dq = dq_unreduced.sum(axis=0)
   if return_fp32_grads:
     return dq.astype(jnp.float32), dk.astype(jnp.float32), dv.astype(jnp.float32)
@@ -1746,6 +1751,8 @@ def _splash_attention_bwd(
     res: base.SplashResidualsType,
     grads: jax.Array | tuple[jax.Array, dict[str, jax.Array]],
     return_fp32_grads: bool = False,
+    dq_carry_in: jax.Array | None = None,
+    return_unreduced_dq: bool = False,
 ) -> tuple[
     MaskInfo | None,  # fwd_mask_info
     MaskInfo | None,  # dvk_mask_info
@@ -1793,6 +1800,8 @@ def _splash_attention_bwd(
       config=config,
       dkv_mask_sparsity=dkv_mask_sparsity,
       return_fp32_grads=return_fp32_grads,
+      dq_carry_in=dq_carry_in,
+      return_unreduced_dq=return_unreduced_dq,
   )
   dsinks = None
   if sinks is not None:

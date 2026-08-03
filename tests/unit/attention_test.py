@@ -1247,18 +1247,61 @@ class AttentionTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "packed", "context_parallel_load_balance": False, "packing": True},
-      {"testcase_name": "packed_load_balance", "context_parallel_load_balance": True, "packing": True},
+      {
+          "testcase_name": "no_load_balance",
+          "context_parallel_load_balance": False,
+          "max_target_length": 512,
+          "dq_reduction_steps": 0,
+          "ring_scan_unroll": 1,
+          "packing": False,
+      },
+      {
+          "testcase_name": "load_balance",
+          "context_parallel_load_balance": True,
+          "max_target_length": 512,
+          "dq_reduction_steps": 0,
+          "ring_scan_unroll": 1,
+          "packing": False,
+      },
+      {
+          "testcase_name": "load_balance_dq_reduction_unroll",
+          "context_parallel_load_balance": True,
+          "max_target_length": 1024,
+          "dq_reduction_steps": 3,
+          "ring_scan_unroll": 2,
+          "packing": False,
+      },
+      {
+          "testcase_name": "packed",
+          "context_parallel_load_balance": False,
+          "max_target_length": 512,
+          "dq_reduction_steps": 0,
+          "ring_scan_unroll": 1,
+          "packing": True,
+      },
+      {
+          "testcase_name": "packed_load_balance",
+          "context_parallel_load_balance": True,
+          "max_target_length": 512,
+          "dq_reduction_steps": 0,
+          "ring_scan_unroll": 1,
+          "packing": True,
+      },
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ring_context_parallel_grad(self, context_parallel_load_balance, packing):
+  def test_tpu_flash_attention_ring_context_parallel_grad(
+      self,
+      context_parallel_load_balance,
+      max_target_length,
+      dq_reduction_steps,
+      ring_scan_unroll,
+      packing,
+  ):
     """Test gradient equivalence between dot_product and flash attention + ring context parallelism"""
 
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
-        **self.config_arguments,
+        **{**self.config_arguments, "max_target_length": max_target_length},
         attention="flash",
         context_parallel_strategy="ring",
         context_parallel_load_balance=context_parallel_load_balance,
@@ -1267,6 +1310,8 @@ class AttentionTest(parameterized.TestCase):
         use_jax_splash=False,
         packing=packing,
         dtype="float32",
+        dq_reduction_steps=dq_reduction_steps,
+        ring_scan_unroll=ring_scan_unroll,
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
@@ -1349,7 +1394,8 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
         msg="Input gradients from generic dot product and flash attention + ring context parallelism are not close. "
-        f"context_parallel_load_balance={context_parallel_load_balance}, packing={packing}.",
+        f"context_parallel_load_balance={context_parallel_load_balance}, "
+        f"dq_reduction_steps={dq_reduction_steps}, ring_scan_unroll={ring_scan_unroll}, packing={packing}.",
     )
 
   @pytest.mark.tpu_only

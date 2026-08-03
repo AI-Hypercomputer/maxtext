@@ -107,6 +107,7 @@ class ConfigTest(absltest.TestCase):
         "context_parallel_strategy=ring",
         "context_parallel_load_balance=False",
         "ici_context_parallelism=2",
+        "ring_scan_unroll=2",
         "hardware=tpu",
         "packing=False",
         "dataset_type=synthetic",
@@ -118,6 +119,7 @@ class ConfigTest(absltest.TestCase):
 
     self.assertEqual(config.context_parallel_strategy, "ring")
     self.assertEqual(config.ici_context_parallelism, 2)
+    self.assertEqual(config.ring_scan_unroll, 2)
     self.assertEqual(config.attention, "flash")
     self.assertTrue(config.use_tokamax_splash)
 
@@ -206,6 +208,7 @@ class ConfigTest(absltest.TestCase):
         (["ici_context_parallelism=1"], ["ici_context_parallelism=2"], "context_parallel_size > 1"),
         (["context_sharding=expert", "ici_expert_parallelism=2"], [], "context_sharding"),
         (["dq_reduction_steps=2"], [], "dq_reduction_steps"),
+        (["ring_scan_unroll=-1"], [], "ring_scan_unroll"),
         (["max_target_length=2050"], [], "context_parallel_size squared"),
         (["attention=dot_product"], ["attention=flash"], "attention=flash"),
         (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),

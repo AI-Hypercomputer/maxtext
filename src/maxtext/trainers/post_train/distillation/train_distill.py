@@ -276,7 +276,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   # Inherits _shard_optimizer from PeftTrainer.
 
-  def _train_step(self, model, optimizer, inputs):
+  def _train_step(self, model, optimizer, inputs, grad_accumulator=None, **kwargs):
     """Overrides the main JIT block to natively handle ModelBundle module.
 
     Uses jax.value_and_grad with explicit split/merge to avoid nesting
@@ -411,6 +411,9 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     Returns:
       A new MaxTextTrainingInput containing the Teacher's outputs (logits).
     """
+    if hasattr(input_data, "microbatches"):
+      input_data.microbatches = [self._prepare_inputs(mb) for mb in input_data.microbatches]
+      return input_data
 
     # 3. Return extended object so fields are available for Student training step
     # pylint: disable=unexpected-keyword-arg
