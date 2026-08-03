@@ -1644,7 +1644,7 @@ class NNXDecoder(nnx.Module):
     mhc_reduce = None
     if hasattr(cfg, "mhc_expansion_rate"):
       mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
-      if cfg.mhc_expansion_rate > 1:
+      if cfg.mhc_expansion_rate > 1 and cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4):
         # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
         y = mhc_expand(y)
 
