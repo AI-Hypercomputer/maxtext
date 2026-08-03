@@ -336,6 +336,10 @@ def validate_converter(argv) -> None:
       maxtext_vllm_state = converter.convert(model_state)
   del model_state, model, mesh, converter
   gc.collect()
+  try:
+    jax.clear_caches()
+  except Exception:
+    pass
 
   print("=" * 80)
   print(f"Loading vLLM model (load_format={vllm_load_format})...")
