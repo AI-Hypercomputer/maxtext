@@ -757,6 +757,11 @@ class TestMakePackedSegmentIds(unittest.TestCase):
     r2 = self._make_ids(batch_size=2, seq_len=32, max_segs=4)
     self.assertTrue(jnp.array_equal(r1, r2))
 
+  def test_seq_len_lt_2_returns_all_ones(self):
+    """seq_len < 2 is too short for packing → all-ones."""
+    result = self._make_ids(batch_size=3, seq_len=1, max_segs=5)
+    self.assertTrue(jnp.array_equal(result, jnp.ones((3, 1), dtype=jnp.int32)))
+
 
 class TestShiftLeftOneCpAware(unittest.TestCase):
   """CP-aware unit tests for _shift_left_one_cp_aware."""
