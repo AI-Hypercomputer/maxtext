@@ -184,7 +184,8 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
     fixer_system = (
         f"{fixer_template}\n\n"
         "META-AGENT STRICT CONSTRAINTS:\n"
-        "- If the error is 'RuntimeError: Array has been deleted', DO NOT edit normalizations.py or any nnx code. Fix via maxtext_overrides (remat_policy=none).\n"
+        "- For forward pass or eval verification tasks, if the error is 'RuntimeError: Array has been deleted', DO NOT edit normalizations.py or any nnx code. Fix via maxtext_overrides (remat_policy=none).\n"
+        "- For training verification tasks, if 'RuntimeError: Array has been deleted' occurs, report it as an upstream MaxText NNX framework issue.\n"
         f"- Target branch to fork from: '{maxtext_branch}'. Newly created fix branch will be 'fix-val-{model_name}-{run_id}'.\n"
         f"- Here is the Analyst Structured One-Pager Plan:\n{json.dumps(plan_json, indent=2)}"
     )
