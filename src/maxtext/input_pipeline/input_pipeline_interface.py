@@ -13,20 +13,20 @@
 # limitations under the License.
 
 """Input pipeline"""
+
 import functools
 
 import jax
 from jax.sharding import PartitionSpec as P
-
 from maxtext.configs import pyconfig
-from maxtext.input_pipeline.grain_data_processing import make_grain_train_iterator
 from maxtext.input_pipeline.grain_data_processing import make_grain_eval_iterator
-from maxtext.input_pipeline.hf_data_processing import make_hf_train_iterator
+from maxtext.input_pipeline.grain_data_processing import make_grain_train_iterator
 from maxtext.input_pipeline.hf_data_processing import make_hf_eval_iterator
-from maxtext.input_pipeline.olmo_grain_data_processing import make_olmo_grain_train_iterator
+from maxtext.input_pipeline.hf_data_processing import make_hf_train_iterator
 from maxtext.input_pipeline.olmo_grain_data_processing import make_olmo_grain_eval_iterator
-from maxtext.input_pipeline.synthetic_data_processing import SyntheticDataIterator
+from maxtext.input_pipeline.olmo_grain_data_processing import make_olmo_grain_train_iterator
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
+from maxtext.input_pipeline.synthetic_data_processing import SyntheticDataIterator
 from maxtext.utils import max_logging
 from maxtext.utils.sharding import remove_size_one_mesh_axis
 
@@ -47,8 +47,8 @@ def get_process_loading_real_data(
 
 
 def create_process_specific_iterator(config: pyconfig.HyperParameters, mesh, process_indices, input_iterator):
-  """
-  If the current process's index is among the `process_indices`, a real
+  """If the current process's index is among the `process_indices`, a real
+
   data iterator is created. Otherwise, a placeholder iterator is returned.
   """
   if jax.process_index() in process_indices:
@@ -100,8 +100,11 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
       mesh,
   )
   output_train_iterator = create_process_specific_iterator(config, mesh, process_indices_train, train_iterator)
-  if config.expansion_factor_real_data > 1:  # assert number of hosts loading real data
-    assert len(process_indices_train) == jax.process_count() // config.expansion_factor_real_data
+  active_process_count = len(set(d.process_index for d in mesh.devices.flat))
+  exp_factor = config.expansion_factor_real_data
+  expected_processes = active_process_count // exp_factor
+  if exp_factor > 1:  # assert number of hosts loading real data
+    assert len(process_indices_train) == expected_processes
 
   # Generate output eval iterator
   output_eval_iterator = None
@@ -114,7 +117,8 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
         mesh,
     )
 
-    if config.expansion_factor_real_data > 1:
-      assert len(process_indices_eval) == jax.process_count() // config.expansion_factor_real_data
+    if exp_factor > 1:
+      assert len(process_indices_eval) == expected_processes
+
     output_eval_iterator = create_process_specific_iterator(config, mesh, process_indices_eval, eval_iterator)
   return output_train_iterator, output_eval_iterator
