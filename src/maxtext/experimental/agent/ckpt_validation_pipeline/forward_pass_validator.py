@@ -113,6 +113,24 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
       if raw in node:
         node = node[raw]
         continue
+      if name == "pre_self_attention_layer_norm" and "input_layernorm" in node:
+        node = node["input_layernorm"]
+        continue
+      if name == "post_self_attention_layer_norm" and "post_attention_layernorm" in node:
+        node = node["post_attention_layernorm"]
+        continue
+      if name == "self_attention" and "attention" in node:
+        node = node["attention"]
+        continue
+      if name == "input_layernorm" and "pre_self_attention_layer_norm" in node:
+        node = node["pre_self_attention_layer_norm"]
+        continue
+      if name == "post_attention_layernorm" and "post_self_attention_layer_norm" in node:
+        node = node["post_self_attention_layer_norm"]
+        continue
+      if name == "attention" and "self_attention" in node:
+        node = node["self_attention"]
+        continue
       return None
     return node"""
 
@@ -157,6 +175,18 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
         if isinstance(template_tree, dict) or hasattr(template_tree, "items"):
           for orig_k in (template_tree.keys() if hasattr(template_tree, "keys") else []):
             orig_keys[str(orig_k)] = orig_k
+            if str(orig_k) == "pre_self_attention_layer_norm":
+              orig_keys["input_layernorm"] = orig_k
+            elif str(orig_k) == "post_self_attention_layer_norm":
+              orig_keys["post_attention_layernorm"] = orig_k
+            elif str(orig_k) == "self_attention":
+              orig_keys["attention"] = orig_k
+            elif str(orig_k) == "input_layernorm":
+              orig_keys["pre_self_attention_layer_norm"] = orig_k
+            elif str(orig_k) == "post_attention_layernorm":
+              orig_keys["post_self_attention_layer_norm"] = orig_k
+            elif str(orig_k) == "attention":
+              orig_keys["self_attention"] = orig_k
 
         for k, v in tree.items():
           m = re.search(r"(.*layers)_(\d+)$", str(k))
@@ -198,10 +228,6 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
     if item is not None and restore_args is not None and not transforms:
       flat_item = flatten_layers(item)
       flat_restore_args = flatten_layers(restore_args)
-      # In many cases flat_item is a dict but item is an nnx.State. To detect structural change,
-      # we compare flat_item with flatten_layers(item), but flat_item IS flatten_layers(item).
-      # Actually, if there's no "layers_x" flattened, flat_item might just be a dict copy of item.
-      # To be safe, we just always unflatten back to item's type/structure if we flattened successfully.
       restored_flat = _original_restore(
           self, directory, item=flat_item, transforms=transforms, restore_args=flat_restore_args, **kwargs
       )
@@ -210,6 +236,11 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
     return _original_restore(self, directory, item=item, transforms=transforms, restore_args=restore_args, **kwargs)
 
   ocp.Checkpointer.restore = _monkeypatched_restore
+
+  import jax
+  _orig_array_delete = getattr(jax.Array, "delete", None)
+  if _orig_array_delete is not None:
+    jax.Array.delete = lambda self: None
 
   # run script in same process to apply monkeypatch
   old_stdout = sys.stdout
@@ -230,6 +261,8 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
     traceback.print_exc(file=sys.stderr)
     returncode = 1
   finally:
+    if _orig_array_delete is not None:
+      jax.Array.delete = _orig_array_delete
     sys.stdout = old_stdout
     sys.stderr = old_stderr
     os.chdir(old_cwd)
