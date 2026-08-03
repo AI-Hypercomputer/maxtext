@@ -145,6 +145,29 @@ class ConfigTest(absltest.TestCase):
 
     self.assertTrue(config.context_parallel_load_balance)
 
+  def test_tpu_tokamax_ring_config_validation_accepts_mla(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.attention_type, "mla")
+
   def test_tpu_tokamax_ring_config_validation_accepts_packing(self):
     argv = [
         "",
@@ -213,7 +236,12 @@ class ConfigTest(absltest.TestCase):
         (["attention=dot_product"], ["attention=flash"], "attention=flash"),
         (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
         (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),
-        (["attention_type=full"], [], "global causal"),
+        (["attention_type=full"], [], "attention_type"),
+        (["attention_type=local_sliding", "sliding_window_size=128"], [], "attention_type"),
+        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "attention_type"),
+        (["attention_type=compressed"], [], "attention_type"),
+        (["attention_type=mla", "packing=True"], ["packing=False"], "packing"),
+        (["attention_type=mla", "use_batch_split_schedule=True"], [], "batch-split"),
         (
             [
                 "context_parallel_load_balance=True",

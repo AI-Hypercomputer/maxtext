@@ -3610,8 +3610,13 @@ class MaxTextConfig(
         raise ValueError("TPU ring context parallelism requires use_tokamax_splash=True.")
       if self.use_jax_splash:
         raise ValueError("TPU ring context parallelism requires use_jax_splash=False.")
-      if self.attention_type != "global":
-        raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
+      if self.attention_type not in ("global", "mla"):
+        raise ValueError("TPU Tokamax ring attention supports only attention_type='global' or 'mla'.")
+      if self.attention_type == "mla":
+        if self.packing:
+          raise ValueError("TPU Tokamax ring attention with MLA does not support packing yet.")
+        if self.use_batch_split_schedule:
+          raise ValueError("TPU Tokamax ring attention with MLA does not support the DeepSeek batch-split schedule.")
       if self.context_parallel_load_balance:
         if context_parallel_size % 2 != 0:
           raise ValueError("TPU Tokamax ring load balancing requires an even context_parallel_size.")

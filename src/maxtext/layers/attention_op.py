@@ -534,8 +534,13 @@ class AttentionOp(nnx.Module):
           raise ValueError("TPU Tokamax ring attention requires use_tokamax_splash=True.")
         if self.config.use_jax_splash:
           raise ValueError("TPU Tokamax ring attention requires use_jax_splash=False.")
-        if self.attention_type != AttentionType.GLOBAL:
-          raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
+        if self.attention_type not in (AttentionType.GLOBAL, AttentionType.MLA):
+          raise ValueError("TPU Tokamax ring attention supports only attention_type='global' or 'mla'.")
+        if self.attention_type == AttentionType.MLA:
+          if self.config.packing:
+            raise ValueError("TPU Tokamax ring attention with MLA does not support packing yet.")
+          if self.config.use_batch_split_schedule:
+            raise ValueError("TPU Tokamax ring attention with MLA does not support the DeepSeek batch-split schedule.")
 
         context_axis = self.config.context_sharding
         axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
