@@ -68,7 +68,7 @@ jobs:
   tag_docker_image:
     name: Promote ${{ matrix.image_name }} Docker Image
     needs: handle_result
-    if: needs.handle_result.result == 'success'
+    if: needs.handle_result.result == 'success' && (github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type)
     runs-on: linux-x86-n2-16-buildkit
     container: google/cloud-sdk:524.0.0
     strategy:
