@@ -50,44 +50,36 @@ class ExtractAnswerTest(unittest.TestCase):
 
   # ---- boxed extraction ----
 
-  @pytest.mark.cpu_only
   def test_boxed_inside_answer_tags(self):
     got = utils_rl.extract_answer("<reasoning>2+2</reasoning><answer>\\boxed{4}</answer>", self.config)
     self.assertEqual(got, "4")
 
-  @pytest.mark.cpu_only
   def test_boxed_without_answer_tags(self):
     got = utils_rl.extract_answer("the result is \\boxed{42}", self.config)
     self.assertEqual(got, "42")
 
-  @pytest.mark.cpu_only
   def test_boxed_nested_latex(self):
     """Brace-balanced scan keeps the full nested LaTeX content."""
     got = utils_rl.extract_answer("<answer>\\boxed{\\frac{1}{2}}</answer>", self.config)
     self.assertEqual(got, "\\frac{1}{2}")
 
-  @pytest.mark.cpu_only
   def test_multiple_boxed_returns_last(self):
     got = utils_rl.extract_answer("first \\boxed{1} then \\boxed{99}", self.config)
     self.assertEqual(got, "99")
 
-  @pytest.mark.cpu_only
   def test_boxed_strips_whitespace(self):
     got = utils_rl.extract_answer("<answer>\\boxed{ 7 }</answer>", self.config)
     self.assertEqual(got, "7")
 
-  @pytest.mark.cpu_only
   def test_boxed_negative(self):
     got = utils_rl.extract_answer("answer: \\boxed{-3}", self.config)
     self.assertEqual(got, "-3")
 
-  @pytest.mark.cpu_only
   def test_answer_tag_scopes_over_reasoning_boxed(self):
     """A boxed value in <reasoning> must not win over the one in <answer>."""
     resp = "<reasoning>maybe \\boxed{1}</reasoning><answer>\\boxed{8}</answer>"
     self.assertEqual(utils_rl.extract_answer(resp, self.config), "8")
 
-  @pytest.mark.cpu_only
   def test_scoping_follows_configured_solution_tokens(self):
     """Scoping uses solution_start/end_token, not a hardcoded <answer> tag."""
     config = SimpleNamespace(
@@ -101,20 +93,17 @@ class ExtractAnswerTest(unittest.TestCase):
 
   # ---- legacy fallback (no boxed) ----
 
-  @pytest.mark.cpu_only
   def test_legacy_plain_answer_in_tags(self):
     """A plain-text answer inside <answer> tags (no boxed) still extracts."""
     got = utils_rl.extract_answer("<reasoning>work</reasoning><answer>42</answer>", self.config)
     self.assertEqual(got, "42")
 
-  @pytest.mark.cpu_only
   def test_legacy_last_answer_wins(self):
     got = utils_rl.extract_answer("<answer>1</answer> ... <answer>5</answer>", self.config)
     self.assertEqual(got, "5")
 
   # ---- no answer ----
 
-  @pytest.mark.cpu_only
   def test_no_answer_returns_fallback_constant(self):
     got = utils_rl.extract_answer("I have no idea", self.config)
     self.assertEqual(got, utils_rl.FALLBACK_ANSWER)

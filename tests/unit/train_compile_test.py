@@ -46,7 +46,6 @@ except Exception:  # pylint: disable=broad-exception-caught
 class TrainCompile(parameterized.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
 
-  @pytest.mark.cpu_only
   def test_save_compiled_v4(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v4.pickle")
@@ -63,7 +62,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_save_compiled_v5e(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5e.pickle")
@@ -82,7 +80,6 @@ class TrainCompile(parameterized.TestCase):
 
   # TODO (b/366200617) : This tests fails in AOT, but config works fine on real hardware
   @pytest.mark.skip(reason="Issue w/ kernels_test. Error: The TPU is already in use by process...")
-  @pytest.mark.cpu_only
   def test_minimal_offloaded_v5e(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5e_offload.pickle")
@@ -105,7 +102,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_save_flash(self):
     compiled_trainstep_file = "/tmp/test_save_flash"
     train_compile_main(
@@ -121,7 +117,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_save_compiled_v5p_two_slices(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5p_two_slices.pickle")
@@ -138,7 +133,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_save_compiled_v6e(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v6e.pickle")
@@ -155,7 +149,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_save_compiled_tpu7x(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_tpu7x.pickle")
@@ -173,7 +166,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_save_compiled_tpu7x_two_slices(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_tpu7x_two_slices.pickle")
@@ -193,7 +185,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_remat_save_dot_except_mlpwi(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlpwi.pickle")
@@ -216,7 +207,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_remat_save_dot_except_mlp(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlp.pickle")
@@ -239,7 +229,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_remat_save_qkv_proj(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_qkv_proj.pickle")
@@ -262,7 +251,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_remat_full(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_full.pickle")
@@ -285,7 +273,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_custom_64x4_mesh(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_custom_64x4_mesh.pickle")
@@ -327,7 +314,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_custom_32x8_mesh(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_custom_32x8_mesh.pickle")
@@ -352,7 +338,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_dropping_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_bf16.pickle")
@@ -375,7 +360,6 @@ class TrainCompile(parameterized.TestCase):
     )
 
   @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
-  @pytest.mark.cpu_only
   def test_moe_dropping_int8(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_int8.pickle")
@@ -399,7 +383,6 @@ class TrainCompile(parameterized.TestCase):
     )
 
   # TODO(b/388572320): Add int8 quantization test once this bug is fixed.
-  @pytest.mark.cpu_only
   def test_moe_megablox_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_megablox_bf16.pickle")
@@ -421,7 +404,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_megablox_ring_ep_random(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_megablox_ring_ep_random.pickle")
@@ -446,7 +428,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_ragged_dot_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_ragged_dot_bf16.pickle")
@@ -468,7 +449,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_dense_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_bf16.pickle")
@@ -491,7 +471,6 @@ class TrainCompile(parameterized.TestCase):
     )
 
   @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
-  @pytest.mark.cpu_only
   def test_moe_dense_int8(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_int8.pickle")
@@ -514,7 +493,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_pp_bf16(self):
     cfg = pyconfig.initialize([None, get_test_config_path()])
     if getattr(cfg, "pure_nnx_decoder", False):
@@ -542,7 +520,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_deepseek_scanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_scanned_bf16.pickle")
@@ -566,7 +543,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_emb_chunking(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_emb_chunking.pickle")
@@ -595,7 +571,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_emb_chunking_with_mlp_bias(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_emb_chunking_bias.pickle")
@@ -625,7 +600,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_deepseek_unscanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
@@ -649,7 +623,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_deepseek_with_device_limit(self):
     compiled_trainstep_file = "/tmp/test_moe_deepseek_with_device_limit.pickle"
     train_compile_main(
@@ -673,7 +646,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_deepseek_pipeline_subset(self):
     cfg = pyconfig.initialize([None, get_test_config_path()])
     if getattr(cfg, "pure_nnx_decoder", False):
@@ -700,7 +672,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_pipeline_subset(self):
     cfg = pyconfig.initialize([None, get_test_config_path()])
     if getattr(cfg, "pure_nnx_decoder", False):
@@ -724,7 +695,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_llama4_17b_16e(self):
     compiled_trainstep_file = "/tmp/test_moe_llama4_17b_16e.pickle"
     train_compile_main(
@@ -745,7 +715,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_gpt_oss_20b_sparse_matmul(self):
     compiled_trainstep_file = "/tmp/test_moe_gpt_oss_20b_sparse_matmul.pickle"
     train_compile_main(
@@ -767,7 +736,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_moe_gpt_oss_20b_dense_matmul(self):
     compiled_trainstep_file = "/tmp/test_moe_gpt_oss_20b_dense_matmul.pickle"
     train_compile_main(
@@ -789,7 +757,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_gpt3_6b(self):
     compiled_trainstep_file = "/tmp/test_gpt3_6b"
     train_compile_main(
@@ -804,7 +771,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_qwen3_qk_norm(self):
     """AOT test for non-llama qk norm models"""
     compiled_trainstep_file = "/tmp/test_qwen3_qk_norm"
@@ -820,7 +786,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_qwen3_next(self):
     """AOT test for qwen3-next and GatedDeltaNet implementation"""
     compiled_trainstep_file = "/tmp/test_qwen3_next"
@@ -837,7 +802,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_deepseek32(self):
     # test deepseek3.2 with sparse attention
     compiled_trainstep_file = "/tmp/test_deepseek32.pickle"
@@ -891,7 +855,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_indexer_dense_warmup(self):
     # test deepseek3.2 with sparse attention
     compiled_trainstep_file = "/tmp/test_indexer_dense_warmup.pickle"
@@ -918,7 +881,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_indexer_sparse_training(self):
     # test deepseek3.2 with sparse attention
     compiled_trainstep_file = "/tmp/test_indexer_sparse_training.pickle"
@@ -944,7 +906,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_olmo3_7b(self):
     """AOT test for Olmo3 7B implementation"""
     compiled_trainstep_file = "/tmp/test_olmo3_7b"
@@ -962,7 +923,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_mhc_integration(self):
     """AOT test for Manifold-constrained Hyper Connection implementation"""
     compiled_trainstep_file = "/tmp/test_mhc_integration"
@@ -986,7 +946,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_engram_integration(self):
     """AOT test for Engram implementation"""
     compiled_trainstep_file = "/tmp/test_engram_integration"
@@ -1009,7 +968,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_circular_pipeline_ag_per_repeat_ep_ds(self):
     cfg = pyconfig.initialize([None, get_test_config_path()])
     if getattr(cfg, "pure_nnx_decoder", False):
@@ -1043,7 +1001,6 @@ class TrainCompile(parameterized.TestCase):
       {"testcase_name": "dot_product", "attention": "dot_product"},
       {"testcase_name": "tokamax_splash", "attention": "flash"},
   )
-  @pytest.mark.cpu_only
   def test_qk_clip(self, attention):
     """AOT test for AdamW optimizer with QK clip for DeepSeek3 Tiny model"""
     compiled_trainstep_file = "/tmp/test_qk_clip.pickle"
@@ -1076,7 +1033,6 @@ class TrainCompile(parameterized.TestCase):
       {"testcase_name": "consistent_rms_scaling", "muon_consistent_rms": 0.2},
       {"testcase_name": "width_scaling", "muon_consistent_rms": None},
   )
-  @pytest.mark.cpu_only
   def test_muon(self, muon_consistent_rms):
     """AOT test for Muon optimizer for DeepSeek3 Tiny model"""
     compiled_trainstep_file = "/tmp/test_muon.pickle"
@@ -1107,7 +1063,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_vocab_tiling_bf16(self):
     """test vocab_tiling when weight_dtype=bfloat16"""
     compiled_trainstep_file = "/tmp/test_vocab_tiling_bf16.pickle"
@@ -1126,7 +1081,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_qwen3_5(self):
     """AOT test for qwen3-5"""
     compiled_trainstep_file = "/tmp/test_qwen3_5"
@@ -1147,7 +1101,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_serialization_and_deserialization_formats(self):
     """Tests that our custom binary save/load functions work securely and legacy fallback triggers warning."""
 
@@ -1185,7 +1138,6 @@ class TrainCompile(parameterized.TestCase):
       assert loaded_legacy.startswith(b"\x80")
       assert loaded_legacy != serialized
 
-  @pytest.mark.cpu_only
   def test_zero1_optimizer_sharding(self):
     """AOT test for Zero-1 optimizer sharding (shard_optimizer_over_data)"""
     temp_dir = gettempdir()
@@ -1206,7 +1158,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_vocab_tiling_bf16_nnx(self):
     """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp).
 

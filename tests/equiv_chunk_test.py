@@ -28,11 +28,14 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 import jax.sharding
+import pytest
 from maxtext.configs import pyconfig
 from maxtext.layers import initializers
 from maxtext.layers import moe
 from maxtext.utils import maxtext_utils
 from tests.utils import test_helpers
+
+pytestmark = [pytest.mark.tpu_only]
 
 
 def build_cfg(n_chunks):

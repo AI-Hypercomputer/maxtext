@@ -1150,7 +1150,6 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
     self.assertEqual(len(in_shardings), 3)
 
 
-@pytest.mark.cpu_only
 class TestGetShapedBatch(unittest.TestCase):
   """Tests for get_shaped_batch."""
 
@@ -1761,7 +1760,6 @@ class TestKVCacheScanHelpers(unittest.TestCase):
       maxtext_utils.update_kv_caches_after_scan(kv_caches_tuple, returned_kv_cache, scan_length=1, block_len=2)
 
 
-@pytest.mark.cpu_only
 class TestGetSaveAndOffloadNames(unittest.TestCase):
   """Tests for maxtext_utils.get_save_and_offload_names (pure config logic, no device needed)."""
 
