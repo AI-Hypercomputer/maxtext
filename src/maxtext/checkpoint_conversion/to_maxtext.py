@@ -166,6 +166,57 @@ class LazyHFLoader:
       index_data = json.load(f)
     self.shard_map = index_data["weight_map"]
 
+  def resolve_key(self, key: str) -> str:
+    """Resolves a requested key to its actual name in the HF checkpoint index."""
+    if key in self.shard_map:
+      return key
+    if key.startswith("model."):
+      stripped_key = key[6:]
+      if stripped_key in self.shard_map:
+        return stripped_key
+
+    # DeepSeek V4 / Qwen fallback replacements
+    replacements = [
+        ("compressor.indexer.q_b_proj.weight", "indexer.wq_b.weight"),
+        ("compressor.indexer.scorer.weights_proj.weight", "indexer.weights_proj.weight"),
+        ("compressor.indexer.", "indexer.compressor."),
+        ("compressor.kv_norm.weight", "compressor.norm.weight"),
+        ("compressor.position_bias", "compressor.ape"),
+        ("indexer.position_bias", "indexer.ape"),
+        ("e_score_correction_bias", "bias"),
+        ("embed_tokens.weight", "embed.weight"),
+        ("input_layernorm.weight", "attn_norm.weight"),
+        ("post_attention_layernorm.weight", "ffn_norm.weight"),
+        (".mlp.shared_experts.gate_proj.weight", ".ffn.shared_experts.w1.weight"),
+        (".mlp.shared_experts.up_proj.weight", ".ffn.shared_experts.w3.weight"),
+        (".mlp.shared_experts.down_proj.weight", ".ffn.shared_experts.w2.weight"),
+        (".q_a_proj.weight", ".wq_a.weight"),
+        (".q_a_norm.weight", ".q_norm.weight"),
+        (".q_b_proj.weight", ".wq_b.weight"),
+        (".kv_proj.weight", ".wkv.weight"),
+        (".gate_proj.weight", ".wgate.weight"),
+        (".sinks", ".attn_sink"),
+        (".o_a_proj.weight", ".wo_a.weight"),
+        (".o_b_proj.weight", ".wo_b.weight"),
+        (".self_attn.", ".attn."),
+        (".attn_hc.", ".hc_attn_"),
+        (".ffn_hc.", ".hc_ffn_"),
+        ("hc_head.hc_", "hc_head_"),
+        ("hc_head.", "hc_head_"),
+        (".self_attention.", ".attn."),
+        ("model.norm.weight", "norm.weight"),
+        ("lm_head.weight", "head.weight"),
+    ]
+    candidate = key
+    if candidate.startswith("model."):
+      candidate = candidate[6:]
+    for old, new in replacements:
+      candidate = candidate.replace(old, new)
+    if candidate in self.shard_map:
+      return candidate
+
+    return key
+
   def get_tensor(self, key: str) -> np.ndarray:
     """
     Retrieves a specific tensor by name, lazily loading its shard if necessary.
@@ -177,6 +228,7 @@ class LazyHFLoader:
     For safetensors, this is extremely efficient as it memory-maps the file
     and reads only the required tensor's data from disk.
     """
+    key = self.resolve_key(key)
     # Handle single-file models (shard map key might be None or we just know the filename)
     shard_name = self.shard_map.get(key)
     if shard_name is None and None in self.shard_map:
@@ -318,10 +370,10 @@ def get_maxtext_model_info(config):
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   # Get abstract model structure (name, shape) without materializing the weights to save memory.
-  # Extract the 'params' collection from the abstract model state. This focuses checkpoint
-  # conversion on trainable model parameters; variables outside the 'params' collection
-  # (such as non-trainable state or optimizer buffers) are not included.
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  abstract_model_state = maxtext_utils.get_abstract_param(maxtext_model_flax, config)
+  abstract_params_tree = abstract_model_state["params"]
+  if "Tid2EidVar" in abstract_model_state:
+    abstract_params_tree["Tid2EidVar"] = abstract_model_state["Tid2EidVar"]
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
       abstract_params_tree,
@@ -333,7 +385,11 @@ def get_maxtext_model_info(config):
   # preprocess state
   maxtext_abstract_dict = {}
   for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
-    mt_param_key = "params-" + "-".join(param_key_parts_from_path(path_tuple))
+    key_str = "-".join(param_key_parts_from_path(path_tuple))
+    if key_str.startswith("Tid2EidVar-"):
+      mt_param_key = key_str
+    else:
+      mt_param_key = "params-" + key_str
     if isinstance(abstract_leaf_value, nn.LogicallyPartitioned):
       mt_target_shape = abstract_leaf_value.value.shape
     else:
