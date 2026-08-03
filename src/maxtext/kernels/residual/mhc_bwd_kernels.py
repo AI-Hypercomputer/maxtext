@@ -61,7 +61,9 @@ def _post_apply_bwd(
     )
     d_layer_output = jnp.sum(h_post_ref[...][:, :, None] * d_output_f32, axis=1)
     d_x_ref[...] = d_x.astype(d_x_ref.dtype)
-    d_layer_output_ref[...] = d_layer_output
+    # d_layer_output is accumulated in float32 but the cotangent must carry the
+    # branch output's dtype, which is config.dtype (bfloat16) in a MaxText model.
+    d_layer_output_ref[...] = d_layer_output.astype(d_layer_output_ref.dtype)
 
     # The coefficient gradients reduce over features. Consecutive programs revisit the same
     # small output windows, so only one feature tile is live at a time.
@@ -271,25 +273,30 @@ def _coeff_bwd(
       d_res_scale_ref[...] = jnp.zeros_like(d_res_scale_ref)
       d_res_bias_ref[...] = jnp.zeros_like(d_res_bias_ref)
 
-    d_phi_ref[...] += d_phi
-    d_pre_scale_ref[...] += d_pre_scale
-    d_pre_bias_ref[...] += d_pre_bias
-    d_post_scale_ref[...] += d_post_scale
-    d_post_bias_ref[...] += d_post_bias
-    d_res_scale_ref[...] += d_res_scale
-    d_res_bias_ref[...] += d_res_bias
+    # These accumulators are float32 regardless of the parameter dtype: the grid
+    # visits tokens // block_size programs, so a low-precision accumulator would
+    # round the running total once per program. XLA reduces the same quantity in
+    # one pass, so a bfloat16 accumulator here diverges from the reference by far
+    # more than a single rounding (up to 9% relative at T=8192, block_size=8).
+    d_phi_ref[...] += d_phi.astype(jnp.float32)
+    d_pre_scale_ref[...] += d_pre_scale.astype(jnp.float32)
+    d_pre_bias_ref[...] += d_pre_bias.astype(jnp.float32)
+    d_post_scale_ref[...] += d_post_scale.astype(jnp.float32)
+    d_post_bias_ref[...] += d_post_bias.astype(jnp.float32)
+    d_res_scale_ref[...] += d_res_scale.astype(jnp.float32)
+    d_res_bias_ref[...] += d_res_bias.astype(jnp.float32)
 
   return pl.pallas_call(
       kernel,
       out_shape=(
           jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
-          jax.ShapeDtypeStruct((flattened_size, 2 * streams + permutation_count), phi.dtype),
-          jax.ShapeDtypeStruct((1,), pre_scale.dtype),
-          jax.ShapeDtypeStruct((streams,), pre_bias.dtype),
-          jax.ShapeDtypeStruct((1,), post_scale.dtype),
-          jax.ShapeDtypeStruct((streams,), post_bias.dtype),
-          jax.ShapeDtypeStruct((1,), res_scale.dtype),
-          jax.ShapeDtypeStruct((permutation_count,), res_bias.dtype),
+          jax.ShapeDtypeStruct((flattened_size, 2 * streams + permutation_count), jnp.float32),
+          jax.ShapeDtypeStruct((1,), jnp.float32),
+          jax.ShapeDtypeStruct((streams,), jnp.float32),
+          jax.ShapeDtypeStruct((1,), jnp.float32),
+          jax.ShapeDtypeStruct((streams,), jnp.float32),
+          jax.ShapeDtypeStruct((1,), jnp.float32),
+          jax.ShapeDtypeStruct((permutation_count,), jnp.float32),
       ),
       grid=(tokens // block_size,),
       in_specs=(
@@ -431,18 +438,21 @@ def _mhc_pallas_vjp_bwd_impl(
   _, phi_vjp = jax.vjp(mhc_common.fold_norm_scale, norm_scale, pre_alpha, post_alpha, res_alpha)
   d_norm_scale, d_pre_alpha, d_post_alpha, d_res_alpha = phi_vjp(d_phi)
   d_x = d_x.reshape(batch, sequence, streams, embedding)
+  # The custom-VJP contract requires each cotangent to carry its primal's dtype.
+  # _coeff_bwd accumulates in float32, so round back here: once, after the full
+  # token reduction, rather than once per grid program.
   return (
       d_x,
       d_norm_scale,
       d_pre_alpha,
-      d_pre_bias,
-      d_pre_scale,
+      d_pre_bias.astype(pre_bias.dtype),
+      d_pre_scale.astype(pre_scale.dtype),
       d_post_alpha,
-      d_post_bias,
-      d_post_scale,
+      d_post_bias.astype(post_bias.dtype),
+      d_post_scale.astype(post_scale.dtype),
       d_res_alpha,
-      d_res_bias,
-      d_res_scale,
+      d_res_bias.astype(res_bias.dtype),
+      d_res_scale.astype(res_scale.dtype),
       jnp.zeros_like(permutations),
   )
 

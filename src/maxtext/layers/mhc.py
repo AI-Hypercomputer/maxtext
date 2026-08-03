@@ -16,18 +16,25 @@
 
 import itertools
 import math
-from typing import Callable
+from collections.abc import Callable
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, Config
-from maxtext.common.common_types import HyperConnectionType
+from jax.sharding import PartitionSpec as P
+
+from maxtext.common.common_types import Array, Config, HyperConnectionType
 from maxtext.kernels.residual import mhc_fwd_kernels as mhc_kernel
-from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import (
+    default_bias_init,
+    default_scalar_init,
+    nd_dense_init,
+    variable_to_logically_partitioned,
+)
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.utils.sharding import logical_to_mesh_axes
 
 
 def get_permutation_matrices(k: int) -> Array:
@@ -239,6 +246,115 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       output = sinkhorn(intermediate, self.sinkhorn_iterations)
       return output
 
+  def _logical_to_mesh_axes(self, logical_names):
+    """Resolves logical axes, including pipeline-local rule contexts."""
+    rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
+    return logical_to_mesh_axes(logical_names, self.mesh, rules=rules)
+
+  def _pallas_sharding_specs(self):
+    """Returns the per-device specs used around the single-device kernels."""
+    token_axes = ("activation_batch", "activation_norm_length")
+    x_spec = self._logical_to_mesh_axes((*token_axes, None, None))
+    layer_spec = self._logical_to_mesh_axes((*token_axes, None))
+    coefficient_spec = self._logical_to_mesh_axes((*token_axes, None))
+    residual_spec = self._logical_to_mesh_axes((*token_axes, None, None))
+    context_spec = (x_spec, coefficient_spec, residual_spec)
+    return x_spec, layer_spec, context_spec
+
+  def _pallas_pre(
+      self,
+      x,
+      norm_scale,
+      pre_alpha,
+      pre_beta,
+      pre_alpha_scale,
+      post_alpha,
+      post_beta,
+      post_alpha_scale,
+      res_alpha,
+      res_beta,
+      res_alpha_scale,
+      permutation_matrices,
+  ):
+    """Runs mHC pre on each device's local batch/sequence shard."""
+    x_spec, layer_spec, context_spec = self._pallas_sharding_specs()
+
+    def local_pre(
+        local_x,
+        local_norm_scale,
+        local_pre_alpha,
+        local_pre_beta,
+        local_pre_alpha_scale,
+        local_post_alpha,
+        local_post_beta,
+        local_post_alpha_scale,
+        local_res_alpha,
+        local_res_beta,
+        local_res_alpha_scale,
+        local_permutation_matrices,
+    ):
+      return mhc_kernel.pre(
+          local_x,
+          local_norm_scale,
+          local_pre_alpha,
+          local_pre_beta,
+          local_pre_alpha_scale,
+          local_post_alpha,
+          local_post_beta,
+          local_post_alpha_scale,
+          local_res_alpha,
+          local_res_beta,
+          local_res_alpha_scale,
+          local_permutation_matrices,
+          rms_epsilon=self.config.normalization_layer_epsilon,
+          block_size=self.config.mhc_pallas_block_size,
+          bwd_block_size=self.config.mhc_pallas_bwd_block_size,
+          interpret=self.mesh.devices.flat[0].platform != "tpu",
+      )
+
+    return jax.shard_map(
+        local_pre,
+        mesh=self.mesh,
+        in_specs=(x_spec,) + (P(),) * 11,
+        out_specs=(layer_spec, context_spec),
+        check_vma=False,
+    )(
+        x,
+        norm_scale,
+        pre_alpha,
+        pre_beta,
+        pre_alpha_scale,
+        post_alpha,
+        post_beta,
+        post_alpha_scale,
+        res_alpha,
+        res_beta,
+        res_alpha_scale,
+        permutation_matrices,
+    )
+
+  def _pallas_post(self, layer_output, context):
+    """Runs mHC post on local shards and preserves the input token layout."""
+    x_spec, layer_spec, context_spec = self._pallas_sharding_specs()
+
+    def local_post(local_layer_output, local_context):
+      return mhc_kernel.post(
+          local_layer_output,
+          local_context,
+          block_size=self.config.mhc_pallas_block_size,
+          bwd_block_size=self.config.mhc_pallas_post_bwd_block_size,
+          bwd_feature_block_size=self.config.mhc_pallas_post_bwd_feature_block_size,
+          interpret=self.mesh.devices.flat[0].platform != "tpu",
+      )
+
+    return jax.shard_map(
+        local_post,
+        mesh=self.mesh,
+        in_specs=(layer_spec, context_spec),
+        out_specs=x_spec,
+        check_vma=False,
+    )(layer_output, context)
+
   def mapping(self, h: Array, alpha_scale: Array, beta: Array, scale: float, eps: float = 0.0):
     """Helper function for both pre and post mappings after matmul."""
     # In MaxText, we match weight precision to activations before Matmul
@@ -272,7 +388,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     b, s, k, d = x.shape
 
     if self.config.enable_mhc_pallas_kernel:
-      layer_input, mhc_context = mhc_kernel.pre(
+      layer_input, mhc_context = self._pallas_pre(
           x,
           self.mhc_norm.scale[...] + self.mhc_norm.scale_offset,
           self.pre_alpha[...],
@@ -285,10 +401,6 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
           self.res_beta[...],
           self.res_alpha_scale[...],
           self.permutation_matrices.astype(x.dtype),
-          rms_epsilon=self.config.normalization_layer_epsilon,
-          block_size=self.config.mhc_pallas_block_size,
-          bwd_block_size=self.config.mhc_pallas_bwd_block_size,
-          interpret=self.mesh.devices.flat[0].platform != "tpu",
       )
     else:
       # 1. Flatten the tensor, and RMS normalization
@@ -331,14 +443,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       raise ValueError(f"Unsupported type: {mhc_type}")
 
     if self.config.enable_mhc_pallas_kernel:
-      output = mhc_kernel.post(
-          layer_out,
-          mhc_context,
-          block_size=self.config.mhc_pallas_block_size,
-          bwd_block_size=self.config.mhc_pallas_post_bwd_block_size,
-          bwd_feature_block_size=self.config.mhc_pallas_post_bwd_feature_block_size,
-          interpret=self.mesh.devices.flat[0].platform != "tpu",
-      )
+      output = self._pallas_post(layer_out, mhc_context)
     else:
       # 5. Post mapping
       post_mapping = self.mapping(
