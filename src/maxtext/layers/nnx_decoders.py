@@ -1665,7 +1665,7 @@ class NNXDecoder(nnx.Module):
     )
 
     mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
-    if cfg.mhc_expansion_rate > 1:
+    if cfg.mhc_expansion_rate > 1 and cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4):
       # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
       y = mhc_expand(y)
 
@@ -1973,7 +1973,7 @@ class NNXDecoder(nnx.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    if cfg.mhc_expansion_rate > 1:
+    if getattr(cfg, "mhc_expansion_rate", 1) > 1 and cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4):
       # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
       hidden_state = mhc_reduce(y)
     else:
