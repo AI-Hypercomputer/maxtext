@@ -1599,6 +1599,8 @@ class Qwen3NextDecoderLayer(nnx.Module):
       inputs = inputs[0]
 
     if self.is_mhc_enabled:
+      mhc_expand, mhc_reduce = mhc.get_functions(self.config.mhc_expansion_rate)
+      inputs = mhc_expand(inputs)
       new_kv_cache = None
 
       def attention_branch(inputs):
@@ -1643,6 +1645,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           mhc_type=HyperConnectionType.MLP_DENSE,
       )
 
+      layer_output = mhc_reduce(layer_output)
       layer_output = nn.with_logical_constraint(
           layer_output,
           self.activation_axis_names,
