@@ -219,20 +219,33 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
       return tree
 
     # When restoring an NNX model from a Linen checkpoint without explicit transforms,
-    # translate key names to Linen conventions for Orbax lookup, then translate the
-    # restored weights back to NNX conventions.
+    # detect whether the checkpoint actually uses Linen conventions before translating keys.
+    # If the checkpoint is already in NNX format (e.g. qwen3-8b unscanned), pass item unchanged.
     if item is not None and restore_args is not None and not transforms:
-      linen_item = _rename_nnx_linen_keys(item, to_linen=True)
-      linen_restore_args = _rename_nnx_linen_keys(restore_args, to_linen=True)
-      restored_linen = _original_restore(
-          self,
-          directory,
-          item=linen_item,
-          transforms=transforms,
-          restore_args=linen_restore_args,
-          **kwargs,
-      )
-      return _rename_nnx_linen_keys(restored_linen, to_linen=False)
+      is_linen_ckpt = False
+      try:
+        meta = self.metadata(directory)
+        item_meta = meta.item_metadata if hasattr(meta, "item_metadata") and meta.item_metadata is not None else meta
+        if item_meta is not None:
+          flat_meta = ocp.tree.to_flat_dict(item_meta)
+          meta_keys_str = " ".join(".".join(map(str, k)) for k in flat_meta.keys())
+          if "input_layernorm" in meta_keys_str or ".layers.0." in meta_keys_str or ".layers.1." in meta_keys_str:
+            is_linen_ckpt = True
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        absl.logging.info("Could not inspect checkpoint metadata for Linen conventions: %s", e)
+
+      if is_linen_ckpt:
+        linen_item = _rename_nnx_linen_keys(item, to_linen=True)
+        linen_restore_args = _rename_nnx_linen_keys(restore_args, to_linen=True)
+        restored_linen = _original_restore(
+            self,
+            directory,
+            item=linen_item,
+            transforms=transforms,
+            restore_args=linen_restore_args,
+            **kwargs,
+        )
+        return _rename_nnx_linen_keys(restored_linen, to_linen=False)
 
     return _original_restore(
         self,
