@@ -528,11 +528,13 @@ def validate_converter(argv) -> None:
                   if weight_array.shape[0] == target_shape[0] and weight_array.shape[2] == target_shape[2] and target_shape[1] % weight_array.shape[1] == 0:
                       weight_array = jnp.repeat(weight_array, target_shape[1] // weight_array.shape[1], axis=1)
                   elif weight_array.shape[0] == target_shape[0] and weight_array.shape[1] == target_shape[1] and target_shape[2] > weight_array.shape[2]:
-                      half_old = weight_array.shape[2] // 2
-                      pad_amount = (target_shape[2] // 2) - half_old
-                      w0 = jnp.pad(weight_array[:, :, :half_old], ((0, 0), (0, 0), (0, pad_amount)))
-                      w1 = jnp.pad(weight_array[:, :, half_old:], ((0, 0), (0, 0), (0, pad_amount)))
-                      weight_array = jnp.concatenate([w0, w1], axis=2)
+                      tp = 4
+                      chunk_size = weight_array.shape[2] // (tp * 2)
+                      arr = weight_array.reshape(weight_array.shape[0], weight_array.shape[1], tp, 2, chunk_size)
+                      target_chunk_size = target_shape[2] // (tp * 2)
+                      pad_amount = target_chunk_size - chunk_size
+                      arr_pad = jnp.pad(arr, ((0, 0), (0, 0), (0, 0), (0, 0), (0, pad_amount)))
+                      weight_array = arr_pad.reshape(target_shape)
                   elif weight_array.shape[0] == target_shape[0] and weight_array.shape[2] == target_shape[2] and target_shape[1] > weight_array.shape[1]:
                       pad_amount = target_shape[1] - weight_array.shape[1]
                       weight_array = jnp.pad(weight_array, ((0, 0), (0, pad_amount), (0, 0)))
