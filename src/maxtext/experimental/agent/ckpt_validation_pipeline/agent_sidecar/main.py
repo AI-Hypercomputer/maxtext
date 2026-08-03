@@ -64,12 +64,13 @@ def main():
         elif retries < MAX_RETRIES:
             logger.info("Detected failure for %s. Attempt %s/%s.", run_id, retries + 1, MAX_RETRIES)
             
-            # Trigger the ADK workflow instead of shelling out to agentapi CLI
-            run_agent_workflow(run_id, model_name, failure_log, blob_name)
-            
+            # Immediately mark the report as handled and increment retries to prevent duplicate concurrent triggers
             state[run_id] = retries + 1
             save_state(state)
             mark_handled(blob_name)
+            
+            # Trigger the ADK workflow instead of shelling out to agentapi CLI
+            run_agent_workflow(run_id, model_name, failure_log, blob_name)
 
     except Exception as e:
         logger.error("Error during job execution: %s", e)
