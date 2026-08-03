@@ -353,6 +353,42 @@ class MultiTokenPredictionBlock(nnx.Module):
       deterministic,
   ) -> dict:
     cfg = self.config
+    cp_size = getattr(cfg, "context_parallel_size", 1)
+
+    # Under packing, target_mask carries segment IDs (1, 2, ...) rather
+    # than a 0/1 loss mask. Normalize to 0/1 so downstream
+    # ``mtp_xent * target_mask`` scales loss correctly.
+    # When mtp_num_layers=0 and quantize_model traces the MTP block,
+    # decoder_target_tokens / decoder_target_mask may be None (the
+    # quantization path skips dummy targets when MTP is disabled).
+    if target_mask is None:
+      target_mask = jnp.ones_like(input_ids, dtype=jnp.int32)
+    else:
+      target_mask = jnp.asarray(target_mask)
+      target_mask = (target_mask != 0).astype(jnp.int32)
+
+    # Same guard: target_ids may be None during mtp_num_layers=0 quantization.
+    if target_ids is None:
+      target_ids = jnp.ones_like(input_ids, dtype=jnp.int32)
+
+    # CP load_balance shuffles token order via DUAL_CHUNK_SWAP, which breaks
+    # the ppermute-based neighbor fetch in _shift_left_one_cp_aware.
+    if cp_size > 1 and getattr(cfg, "context_parallel_load_balance", False):
+      raise ValueError(
+          "MTP does not support context_parallel_load_balance. "
+          "DUAL_CHUNK_SWAP reorder breaks the ppermute-based neighbor "
+          "fetch in _shift_left_one_cp_aware."
+      )
+
+    # Segment tracking alignment: with mtp_num_layers > 1, rolled_segment_ids
+    # drifts one position behind target_ids each iteration, breaking boundary
+    # detection for layers k >= 2. Reject until multi-layer tracking is fixed.
+    if cp_size > 1 and cfg.packing and cfg.mtp_num_layers > 1:
+      raise ValueError(
+          "MTP with CP and packing only supports mtp_num_layers=1. "
+          "Multi-layer segment tracking alignment is not yet implemented."
+      )
+
     mtp_hidden_state = main_hidden_state
 
     # Rolling variables move prediction window one token to the right per iteration.

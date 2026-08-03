@@ -690,6 +690,27 @@ class TestRollAndMaskBySegment(unittest.TestCase):
     with self.assertRaises(AssertionError):
       multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg, shift=-2)
 
+  def test_segment_ids_greater_than_one(self):
+    """Segment IDs 2, 3, ... should NOT be used as loss weights.
+
+    Under packing, targets_segmentation carries document IDs (1, 2, ...).
+    roll_and_mask_by_segment uses these for boundary detection only; the
+    output values still carry the original segment ID.  The caller
+    (MultiTokenPredictionBlock.__call__) must normalize to 0/1 before the
+    rolling loop.
+    """
+    x = self._make_data([99, 99, 99, 99, 99, 99, 99, 99])
+    seg = self._make_data([1, 1, 3, 3, 3, 7, 7, 0])
+    result = multi_token_prediction.roll_and_mask_by_segment(x, segment_ids=seg)
+    # Boundary positions (1→3, 4→7) and tail are zeroed.
+    # Non-boundary positions carry original segment ID: 3, 3, 7.
+    self.assertEqual(result[0, 0].item(), 99)
+    self.assertEqual(result[0, 1].item(), 0, "cross-segment boundary should be 0")
+    self.assertEqual(result[0, 2].item(), 99)
+    self.assertNotEqual(result[0, 2].item(), 1, "segment ID 3 must NOT be used as mask weight")
+    self.assertEqual(result[0, 4].item(), 0, "cross-segment boundary should be 0")
+    self.assertEqual(result[0, 7].item(), 0, "tail should be 0")
+
 
 class TestMakePackedSegmentIds(unittest.TestCase):
   """Unit tests for _make_packed_segment_ids in synthetic_data_processing."""
