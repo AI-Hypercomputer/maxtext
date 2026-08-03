@@ -877,7 +877,7 @@ class Decoder(nn.Module):
     )
 
     mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
-    if cfg.mhc_expansion_rate > 1:
+    if cfg.mhc_expansion_rate > 1 and cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4):
       # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
       y = mhc_expand(y)
 
@@ -1287,7 +1287,7 @@ class Decoder(nn.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    if cfg.mhc_expansion_rate > 1:
+    if cfg.mhc_expansion_rate > 1 and cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4):
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
         hidden_state = mhc.DeepSeek4HyperHeadToLinen(
             config=cfg,
@@ -1531,9 +1531,7 @@ class Decoder(nn.Module):
           deterministic,
           model_mode,
           previous_chunk,
-          None,  # page_state
           slot,
-          None,  # bidirectional_mask
           kv_cache,
           attention_metadata,
       )
