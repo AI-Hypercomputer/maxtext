@@ -1182,6 +1182,20 @@ def load_hf_dict_from_safetensors(model_id_or_path, token, revision, framework="
     )
   # load safetensors
   ckpt_paths = sorted(pathlib.Path(local_path).glob("[!.]*.safetensors"))
+  max_logging.log(f"Preloading {len(ckpt_paths)} .safetensors shards sequentially into Linux OS Page Cache...")
+  start_time = time.time()
+  total_bytes = 0
+  for path in ckpt_paths:
+    size = os.path.getsize(path)
+    total_bytes += size
+    with open(path, "rb") as f:
+      while f.read(16 * 1024 * 1024):
+        pass
+  elapsed = time.time() - start_time
+  max_logging.log(
+      f"Preloaded {total_bytes / (1024**3):.2f} GB across {len(ckpt_paths)} shards in {elapsed:.2f}s "
+      f"({(total_bytes / (1024**2)) / max(elapsed, 1e-6):.2f} MB/s)."
+  )
   max_logging.log(f"Loading {len(ckpt_paths)} checkpoints in parallel...")
 
   def _load_single_shard(ckpt_path):
@@ -1264,15 +1278,20 @@ def shard_jax_weights(jax_weights, device_count, mem_info):
   del jax_weights
   gc.collect()
 
-  jax_weights_new = []
-  jax_weights_flat.reverse()
   num_weights = len(jax_weights_flat)
-  for _ in tqdm(range(num_weights)):
-    jax_weight = jax_weights_flat.pop()
-    jax_weights_new.append(checkpoint_device_put(jax_weight))
-    del jax_weight
-    gc.collect()
-    logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  num_workers = min(num_weights, os.cpu_count() or 16, 32)
+  max_logging.log(f"Parallelizing checkpoint sharding across {num_workers} threads without per-item gc.collect()...")
+  with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    jax_weights_new = list(
+        tqdm(
+            executor.map(checkpoint_device_put, jax_weights_flat),
+            total=num_weights,
+            desc="Checkpoint sharding (parallel)",
+            unit="param",
+        )
+    )
+  del jax_weights_flat
+  gc.collect()
 
   jax_weights = tree.unflatten(jax_weights_struct, jax_weights_new)
   max_logging.log(f"Elapse for checkpoint sharding: {(time.time() - start) / 60:.2f} min")
@@ -1287,6 +1306,7 @@ def save_weights_to_checkpoint(
     use_ocdbt: bool,
     use_zarr3: bool,
     config=None,
+    loader_cleanup_fn=None,
 ):
   """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
 
@@ -1303,6 +1323,7 @@ def save_weights_to_checkpoint(
           (OCDBT) format for improved metadata handling.
       use_zarr3: If True, uses the Zarr3 storage format for the underlying array data.
       config: Optional config to save along with checkpoint metadata.
+      loader_cleanup_fn: Optional callable to release HuggingFace loader handles from RAM before Orbax save.
   """
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -1314,6 +1335,13 @@ def save_weights_to_checkpoint(
   else:
     # If number of simulated devices is 1, SKIP sharding and SKIP jax conversion.
     max_logging.log("Single device: Skip sharding")
+
+  if loader_cleanup_fn is not None:
+    max_logging.log("Cleaning up HuggingFace loader handles and running GC before Orbax checkpoint save...")
+    loader_cleanup_fn()
+  else:
+    gc.collect()
+  print_ram_usage("After GC cleanup before Orbax save")
 
   # Save checkpoint
   start = time.time()

@@ -54,6 +54,7 @@ Example Usage:
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import gc
 import json
 import os
 import sys
@@ -122,9 +123,11 @@ class LazyHFLoader:
     self.current_shard_content = {}
     # Cache for resolved local shard paths
     self._local_shard_paths = {}
+    self._open_shards = {}
     # Use a lock to serialize heavy RAM operations, but NOT downloads
     self._ram_lock = threading.Lock()
     self._initialize_index()
+    self._preload_local_shards_into_page_cache()
 
   def __getstate__(self):
     """Allows pickling/copying by excluding the non-pickleable lock."""
@@ -136,6 +139,31 @@ class LazyHFLoader:
     """Restores state after pickling/copying and recreates a new lock."""
     self.__dict__.update(state)
     self._ram_lock = threading.Lock()
+    if not hasattr(self, "_open_shards"):
+      self._open_shards = {}
+
+  def _preload_local_shards_into_page_cache(self):
+    """Sequentially reads all unique local safetensors shards into OS page cache and keeps handles open."""
+    if not self.is_local or not self.shard_map:
+      return
+    unique_shards = sorted(set(self.shard_map.values()))
+    max_logging.log(f"Preloading {len(unique_shards)} local .safetensors shards sequentially into Linux OS Page Cache...")
+    start_time = time.time()
+    total_bytes = 0
+    for shard_name in unique_shards:
+      path = os.path.join(self.model_id, shard_name)
+      if os.path.exists(path):
+        size = os.path.getsize(path)
+        total_bytes += size
+        with open(path, "rb") as f:
+          while f.read(16 * 1024 * 1024):
+            pass
+        self._open_shards[shard_name] = safe_open(path, framework="np", device="cpu")
+    elapsed = time.time() - start_time
+    max_logging.log(
+        f"Preloaded {total_bytes / (1024**3):.2f} GB across {len(unique_shards)} shards in {elapsed:.2f}s "
+        f"({(total_bytes / (1024**2)) / max(elapsed, 1e-6):.2f} MB/s)."
+    )
 
   def _initialize_index(self):
     """Fetches and parses the Hugging Face model index file to build a shard map."""
@@ -257,11 +285,22 @@ class LazyHFLoader:
         )
       self._local_shard_paths[shard_name] = local_path
 
-    # STEP 2: Lock ONLY the reading into RAM.
-    # This prevents multiple threads from simultaneously allocating large chunks of RAM.
+    if shard_name in self._open_shards:
+      return self._open_shards[shard_name].get_tensor(key)
+
+    # STEP 2: Lock ONLY the reading into RAM for fallback non-preloaded shards.
     with self._ram_lock:
-      with safe_open(local_path, framework="np", device="cpu") as f:
-        return f.get_tensor(key)
+      if shard_name not in self._open_shards:
+        self._open_shards[shard_name] = safe_open(local_path, framework="np", device="cpu")
+      return self._open_shards[shard_name].get_tensor(key)
+
+  def cleanup(self):
+    """Closes and releases all safe_open handles and memory buffers from RAM."""
+    max_logging.log("Releasing LazyHFLoader safe_open handles and shard map from memory...")
+    self._open_shards.clear()
+    self._local_shard_paths.clear()
+    self.shard_map.clear()
+    gc.collect()
 
 
 class LazyTensor:
@@ -1302,6 +1341,7 @@ def main(
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
       config=config,
+      loader_cleanup_fn=hf_loader.cleanup if (lazy_load_tensors and hf_loader is not None) else None,
   )
 
   print_ram_usage("Program Ends")
