@@ -1043,7 +1043,7 @@ def get_rope_index(
 
   Returns:
     A tuple of:
-      - position_ids: 3D position IDs. Shape: (3, batch, seq_len).
+      - position_ids: 3D position IDs. Shape: (batch, seq_len, 3)
       - mrope_position_deltas: Position offset for each sequence. Shape: (batch, 1).
 
   Raises:
@@ -1062,10 +1062,10 @@ def get_rope_index(
     position_ids = np.where(attention_mask == 0, 1.0, position_ids)
 
     # Expand to 3D (same value in all dimensions for text-only)
-    position_ids = np.broadcast_to(position_ids[np.newaxis, :, :], (3, batch_size, seq_len))
+    position_ids = np.stack([position_ids, position_ids, position_ids], axis=-1)
 
     # Calculate deltas for each sequence
-    max_position_ids = np.max(position_ids, axis=(0, 2), keepdims=True).transpose(1, 0, 2)  # (batch, 1, 1)
+    max_position_ids = np.max(position_ids, axis=(1, 2), keepdims=True)  # (batch, 1, 1)
     mrope_position_deltas = max_position_ids.squeeze(-1) + 1 - np.sum(attention_mask, axis=-1, keepdims=True)
 
     return position_ids, mrope_position_deltas
@@ -1075,6 +1075,7 @@ def get_rope_index(
     attention_mask = np.ones_like(input_ids)
 
   attention_mask_bool = attention_mask == 1
+  # Internally still build (3, batch, seq) then transpose to (batch, seq, 3).
   position_ids = np.zeros((3, batch_size, seq_len), dtype=jnp.float32)
   mrope_position_deltas = []
 
@@ -1281,6 +1282,7 @@ def get_rope_index(
     mrope_position_deltas.append(llm_positions.max().item() + 1 - len(valid_input_ids))
 
   mrope_position_deltas = np.array(mrope_position_deltas).reshape(batch_size, 1)
+  position_ids = np.transpose(position_ids, (1, 2, 0))  # (3, batch, seq) -> (batch, seq, 3)
 
   return position_ids, mrope_position_deltas
 
