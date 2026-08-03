@@ -225,9 +225,28 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
         )
       return tree
 
+    def rename_keys_for_linen(tree):
+      if isinstance(tree, dict) or hasattr(tree, "items"):
+        new_tree = {}
+        for k, v in tree.items():
+          k_str = str(k)
+          if k_str == "pre_self_attention_layer_norm":
+            new_k = "input_layernorm"
+          elif k_str == "post_self_attention_layer_norm":
+            new_k = "post_attention_layernorm"
+          elif k_str == "self_attention":
+            new_k = "attention"
+          else:
+            new_k = k
+          new_tree[new_k] = rename_keys_for_linen(v)
+        return new_tree
+      if isinstance(tree, (list, tuple)):
+        return type(tree)(rename_keys_for_linen(x) for x in tree)
+      return tree
+
     if item is not None and restore_args is not None and not transforms:
-      flat_item = flatten_layers(item)
-      flat_restore_args = flatten_layers(restore_args)
+      flat_item = rename_keys_for_linen(flatten_layers(item))
+      flat_restore_args = rename_keys_for_linen(flatten_layers(restore_args))
       restored_flat = _original_restore(
           self, directory, item=flat_item, transforms=transforms, restore_args=flat_restore_args, **kwargs
       )
