@@ -2553,6 +2553,82 @@ class DerivedValues(BaseModel):
 # ----------------------------------------------------------------------------
 # Helper Functions
 # ----------------------------------------------------------------------------
+
+
+def _normalize_axes(axes: Any) -> tuple[str, ...]:
+  """Normalize a logical-rule mapping value to a tuple of axis name strings.
+
+  Args:
+    axes: The right-hand side of a logical axis rule entry.  Can be a single
+      string, a list/tuple of strings, or an empty list.
+
+  Returns:
+    A (possibly empty) tuple of physical axis name strings.
+  """
+  if axes is None:
+    return ()
+  if isinstance(axes, str):
+    return (axes,)
+  if isinstance(axes, (list, tuple)):
+    return tuple(a for a in axes if isinstance(a, str))
+  return ()
+
+
+def infer_cp_axes(logical_axis_rules: list) -> tuple[str, ...]:
+  """Infer which physical mesh axis/axes serve as Context Parallelism (CP).
+
+  Scans *logical_axis_rules* for the ``activation_length`` logical axis and
+  returns the physical axis/axes it is mapped to.
+
+  Args:
+    logical_axis_rules: The list of ``[logical_name, physical_axes]`` pairs
+      (the ``logical_axis_rules`` config field).
+
+  Returns:
+    A tuple of physical axis name strings that act as CP.  Empty if the
+    ``activation_length`` logical axis is not found in the rules.
+  """
+  for rule in logical_axis_rules:
+    if rule and len(rule) >= 2 and rule[0] == "activation_length":
+      return _normalize_axes(rule[1])
+  return ()
+
+
+def infer_ep_axes(logical_axis_rules: list) -> tuple[str, ...]:
+  """Infer which physical mesh axis/axes serve as Expert Parallelism (EP).
+
+  Scans *logical_axis_rules* for the ``exp`` logical axis and returns the
+  physical axis/axes it is mapped to.
+
+  Args:
+    logical_axis_rules: The list of ``[logical_name, physical_axes]`` pairs
+      (the ``logical_axis_rules`` config field).
+
+  Returns:
+    A tuple of physical axis name strings that act as EP.  Empty if the
+    ``exp`` logical axis is not found in the rules.
+  """
+  for rule in logical_axis_rules:
+    if rule and len(rule) >= 2 and rule[0] == "exp":
+      return _normalize_axes(rule[1])
+  return ()
+
+
+def ep_enabled(config):
+  """Determine if Expert Parallelism (EP) is enabled based on the config."""
+  # Infer EP rank from logical_axis_rules and disable incompatible flags when EP rank > 1.
+  ep_axes = infer_ep_axes(config.logical_axis_rules)
+  ep_rank = 1
+  for axis_name in ep_axes:
+    ici_val = getattr(config, f"ici_{axis_name}_parallelism", 1)
+    dcn_val = getattr(config, f"dcn_{axis_name}_parallelism", 1)
+    if ici_val == -1 or dcn_val == -1:
+      ep_rank = -1
+      break
+    ep_rank *= ici_val * max(dcn_val, 1)
+  return ep_rank != 1
+
+
 def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   """Choose appropriate scales for individual dimensions based on global scale."""
   if scale == 0:
@@ -2773,9 +2849,31 @@ class MaxTextConfig(
       mesh_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule.value)
 
       # Use setattr to dynamically apply attributes, keeping code compact
-      for field in ("mesh_axes", "logical_axis_rules", "data_sharding", "context_sharding"):
+      for field in ("mesh_axes", "logical_axis_rules", "data_sharding"):
         if field in mesh_config:
           setattr(self, field, mesh_config[field])
+
+      # Infer context_sharding from logical_axis_rules when using custom mesh rules.
+      # Falls back to the default ("context") when no activation_length rule is found.
+      cp_axes = infer_cp_axes(self.logical_axis_rules)
+      if cp_axes:
+        self.context_sharding = cp_axes[0]
+
+    # Skip EP check if logical rule is overridden by user. Otherwise, ensure that EP rank is 1 when EP is disabled.
+    if not self.override_logical_axis_rules:
+      ep_is_enabled = ep_enabled(self)
+      if not ep_is_enabled:
+        _ep_disabled_flags = {
+            "use_random_routing": False,
+            "use_ragged_sort": False,
+            "ragged_buffer_factor": -1.0,
+            "use_ring_of_experts": False,
+            "num_moe_emb_chunks": 0,
+        }
+        for flag_name, disabled_value in _ep_disabled_flags.items():
+          current = getattr(self, flag_name)
+          if current != disabled_value:
+            raise ValueError(f"When EP rank is 1, {flag_name} must be {disabled_value} (was {current}).")
 
     # Handle eval custom mesh and rule
     if self.custom_mesh_and_rule_for_eval is CustomRule.DEFAULT:
