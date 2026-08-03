@@ -1,99 +1,112 @@
-ERROR 2026-07-31T10:35:22.707132879Z [resource.labels.containerName: jax-tpu] 0it [00:00, ?it/s]I0731 10:35:22.706975 138830248970048 vllm_sampler.py:543] Received additional kwargs that are not explicitly defined in the method signature: {'stop': None, 'detokenize': False, 'include_stop_str_in_output': False}. These will be forwarded to the underlying sampler, but please ensure that they are valid.
-ERROR 2026-07-31T10:35:22.719580399Z [resource.labels.containerName: jax-tpu]
-ERROR 2026-07-31T10:35:22.820682217Z [resource.labels.containerName: jax-tpu] Rendering prompts: 0%| | 0/32 [00:00<?, ?it/s][A
-ERROR 2026-07-31T10:35:22.820880697Z [resource.labels.containerName: jax-tpu] Rendering prompts: 100%|██████████| 32/32 [00:00<00:00, 317.32it/s][A Rendering prompts: 100%|██████████| 32/32 [00:00<00:00, 316.51it/s]
-ERROR 2026-07-31T10:35:22.821621037Z [resource.labels.containerName: jax-tpu]
-ERROR 2026-07-31T10:36:53.035488101Z [resource.labels.containerName: jax-tpu] Processed prompts: 0%| | 0/32 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s][A 0it [01:30, ?it/s]
-ERROR 2026-07-31T10:36:53.042796451Z [resource.labels.containerName: jax-tpu] [rank0]: Traceback (most recent call last):
-ERROR 2026-07-31T10:36:53.042824401Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 198, in _run_module_as_main
-ERROR 2026-07-31T10:36:53.042829981Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 88, in _run_code
-ERROR 2026-07-31T10:36:53.042834081Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 796, in <module>
-ERROR 2026-07-31T10:36:53.042838391Z [resource.labels.containerName: jax-tpu] [rank0]: app.run(main)
-ERROR 2026-07-31T10:36:53.042842181Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run
-ERROR 2026-07-31T10:36:53.042846421Z [resource.labels.containerName: jax-tpu] [rank0]: _run_main(main, args)
-ERROR 2026-07-31T10:36:53.042849981Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
-ERROR 2026-07-31T10:36:53.042853521Z [resource.labels.containerName: jax-tpu] [rank0]: sys.exit(main(argv))
-ERROR 2026-07-31T10:36:53.042857141Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.042860811Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 792, in main
-ERROR 2026-07-31T10:36:53.042864551Z [resource.labels.containerName: jax-tpu] [rank0]: rl_train(argv, kwargs)
-ERROR 2026-07-31T10:36:53.042869801Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 645, in rl_train
-ERROR 2026-07-31T10:36:53.042873641Z [resource.labels.containerName: jax-tpu] [rank0]: _rl_train_impl(argv, kwargs)
-ERROR 2026-07-31T10:36:53.042880961Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 728, in _rl_train_impl
-ERROR 2026-07-31T10:36:53.042885691Z [resource.labels.containerName: jax-tpu] [rank0]: (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
-ERROR 2026-07-31T10:36:53.042889861Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^
-ERROR 2026-07-31T10:36:53.042940311Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/evaluate_rl.py", line 268, in evaluate
-ERROR 2026-07-31T10:36:53.042944231Z [resource.labels.containerName: jax-tpu] [rank0]: multiple_call_responses = generate_responses(
-ERROR 2026-07-31T10:36:53.042946631Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.042949271Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/evaluate_rl.py", line 73, in generate_responses
-ERROR 2026-07-31T10:36:53.042951621Z [resource.labels.containerName: jax-tpu] [rank0]: responses = rl_cluster.rollout.generate(
-ERROR 2026-07-31T10:36:53.042954041Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.042956871Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rollout/vllm_rollout.py", line 101, in generate
-ERROR 2026-07-31T10:36:53.042959221Z [resource.labels.containerName: jax-tpu] [rank0]: self.output = self._sampler(
-ERROR 2026-07-31T10:36:53.042961551Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.042969461Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py", line 569, in __call__
-ERROR 2026-07-31T10:36:53.042971851Z [resource.labels.containerName: jax-tpu] [rank0]: outputs = self.llm.generate(
-ERROR 2026-07-31T10:36:53.042974231Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.042976631Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/entrypoints/llm.py", line 465, in generate
-ERROR 2026-07-31T10:36:53.042978971Z [resource.labels.containerName: jax-tpu] [rank0]: return self._run_completion(
-ERROR 2026-07-31T10:36:53.042981291Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.042983701Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/entrypoints/offline_utils.py", line 349, in _run_completion
-ERROR 2026-07-31T10:36:53.042986151Z [resource.labels.containerName: jax-tpu] [rank0]: return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
-ERROR 2026-07-31T10:36:53.042988591Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.042990991Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/entrypoints/offline_utils.py", line 595, in _run_engine
-ERROR 2026-07-31T10:36:53.042993331Z [resource.labels.containerName: jax-tpu] [rank0]: step_outputs = self.llm_engine.step()
-ERROR 2026-07-31T10:36:53.042995721Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.042998151Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 304, in step
-ERROR 2026-07-31T10:36:53.043000661Z [resource.labels.containerName: jax-tpu] [rank0]: outputs = self.engine_core.get_output()
-ERROR 2026-07-31T10:36:53.043002971Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043005381Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 290, in get_output
-ERROR 2026-07-31T10:36:53.043007781Z [resource.labels.containerName: jax-tpu] [rank0]: outputs, model_executed = self.engine_core.step_fn()
-ERROR 2026-07-31T10:36:53.043010151Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043012461Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 588, in step
-ERROR 2026-07-31T10:36:53.043014761Z [resource.labels.containerName: jax-tpu] [rank0]: future = self.model_executor.execute_model(scheduler_output, non_block=True)
-ERROR 2026-07-31T10:36:53.043017251Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043019581Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 120, in execute_model
-ERROR 2026-07-31T10:36:53.043022101Z [resource.labels.containerName: jax-tpu] [rank0]: output.result()
-ERROR 2026-07-31T10:36:53.043024441Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 449, in result
-ERROR 2026-07-31T10:36:53.043026801Z [resource.labels.containerName: jax-tpu] [rank0]: return self.__get_result()
-ERROR 2026-07-31T10:36:53.043030301Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043033931Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
-ERROR 2026-07-31T10:36:53.043044231Z [resource.labels.containerName: jax-tpu] [rank0]: raise self._exception
-ERROR 2026-07-31T10:36:53.043048111Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 98, in collective_rpc
-ERROR 2026-07-31T10:36:53.043052081Z [resource.labels.containerName: jax-tpu] [rank0]: result = run_method(self.driver_worker, method, args, kwargs)
-ERROR 2026-07-31T10:36:53.043076471Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043081401Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/serial_utils.py", line 510, in run_method
-ERROR 2026-07-31T10:36:53.043086031Z [resource.labels.containerName: jax-tpu] [rank0]: return func(*args, **kwargs)
-ERROR 2026-07-31T10:36:53.043090431Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043103781Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/worker/worker_base.py", line 351, in execute_model
-ERROR 2026-07-31T10:36:53.043107441Z [resource.labels.containerName: jax-tpu] [rank0]: return self.worker.execute_model(scheduler_output)
-ERROR 2026-07-31T10:36:53.043109791Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043112121Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/worker/tpu_worker.py", line 586, in execute_model
-ERROR 2026-07-31T10:36:53.043114511Z [resource.labels.containerName: jax-tpu] [rank0]: output = self.model_runner.execute_model(scheduler_output,
-ERROR 2026-07-31T10:36:53.043116871Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043119211Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/utils.py", line 404, in wrapper
-ERROR 2026-07-31T10:36:53.043121691Z [resource.labels.containerName: jax-tpu] [rank0]: result = func(*args, **kwargs)
-ERROR 2026-07-31T10:36:53.043124011Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043126361Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 1324, in execute_model
-ERROR 2026-07-31T10:36:53.043128681Z [resource.labels.containerName: jax-tpu] [rank0]: output = self._execute_model(scheduler_output,
-ERROR 2026-07-31T10:36:53.043130971Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043133331Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 1625, in _execute_model
-ERROR 2026-07-31T10:36:53.043135761Z [resource.labels.containerName: jax-tpu] [rank0]: expert_indices) = self.model_fn(
-ERROR 2026-07-31T10:36:53.043138051Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043141381Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/models/common/model_loader.py", line 471, in wrapped_model_fn
-ERROR 2026-07-31T10:36:53.043143731Z [resource.labels.containerName: jax-tpu] [rank0]: return jitted_model_fn(*args, **kwargs)
-ERROR 2026-07-31T10:36:53.043146081Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043148481Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/models/common/model_loader.py", line 391, in run_model
-ERROR 2026-07-31T10:36:53.043150791Z [resource.labels.containerName: jax-tpu] [rank0]: return model(*args)
-ERROR 2026-07-31T10:36:53.043153121Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043155551Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/maxtext_vllm_adapter/adapter.py", line 266, in __call__
-ERROR 2026-07-31T10:36:53.043157921Z [resource.labels.containerName: jax-tpu] [rank0]: hidden, kv_caches = self.model(
-ERROR 2026-07-31T10:36:53.043160201Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043162571Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/models/models.py", line 552, in __call__
-ERROR 2026-07-31T10:36:53.043165021Z [resource.labels.containerName: jax-tpu] [rank0]: logits, hidden_state, kv_caches = self.decoder(
-ERROR 2026-07-31T10:36:53.043167331Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043169731Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/layers/nnx_decoders.py", line 1854, in __call__
-ERROR 2026-07-31T10:36:53.043172151Z [resource.labels.containerName: jax-tpu] [rank0]: kv_caches["key_cache"][lyr],
-ERROR 2026-07-31T10:36:53.043174601Z [resource.labels.containerName: jax-tpu] [rank0]: ~~~~~~~~~^^^^^^^^^^^^^
-ERROR 2026-07-31T10:36:53.043181841Z [resource.labels.containerName: jax-tpu] [rank0]: TypeError: list indices must be integers or slices, not str
-ERROR 2026-07-31T10:36:53.043184201Z [resource.labels.containerName: jax-tpu] [rank0]: --------------------
-ERROR 2026-07-31T10:36:53.043187381Z [resource.labels.containerName: jax-tpu] [rank0]: For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+ERROR 2026-08-03T18:49:56.385503426Z [resource.labels.containerName: jax-tpu] Rendering prompts: 0%| | 0/32 [00:00<?, ?it/s][A Rendering prompts: 100%|██████████| 32/32 [00:00<00:00, 793.09it/s]
+ERROR 2026-08-03T18:49:56.385787672Z [resource.labels.containerName: jax-tpu]
+ERROR 2026-08-03T18:51:06.648660039Z [resource.labels.containerName: jax-tpu] Processed prompts: 0%| | 0/32 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s][A 0it [01:10, ?it/s]
+ERROR 2026-08-03T18:51:06.652885516Z [resource.labels.containerName: jax-tpu] [rank0]: Traceback (most recent call last):
+ERROR 2026-08-03T18:51:06.652894750Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/models/qwen3.py", line 661, in __call__
+ERROR 2026-08-03T18:51:06.652897133Z [resource.labels.containerName: jax-tpu] [rank0]: from tpu_inference.layers.common.gdn_attention import GdnAttentionConfig, run_jax_gdn_attention # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+ERROR 2026-08-03T18:51:06.652898816Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652900749Z [resource.labels.containerName: jax-tpu] [rank0]: ImportError: cannot import name 'GdnAttentionConfig' from 'tpu_inference.layers.common.gdn_attention' (/usr/local/lib/python3.12/site-packages/tpu_inference/layers/common/gdn_attention.py)
+ERROR 2026-08-03T18:51:06.652902952Z [resource.labels.containerName: jax-tpu] [rank0]: The above exception was the direct cause of the following exception:
+ERROR 2026-08-03T18:51:06.652903923Z [resource.labels.containerName: jax-tpu]
+ERROR 2026-08-03T18:51:06.652904995Z [resource.labels.containerName: jax-tpu] [rank0]: Traceback (most recent call last):
+ERROR 2026-08-03T18:51:06.652906077Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 198, in _run_module_as_main
+ERROR 2026-08-03T18:51:06.652907409Z [resource.labels.containerName: jax-tpu] [rank0]: File "<frozen runpy>", line 88, in _run_code
+ERROR 2026-08-03T18:51:06.652908851Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 796, in <module>
+ERROR 2026-08-03T18:51:06.652910263Z [resource.labels.containerName: jax-tpu] [rank0]: app.run(main)
+ERROR 2026-08-03T18:51:06.652911325Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 367, in run
+ERROR 2026-08-03T18:51:06.652923252Z [resource.labels.containerName: jax-tpu] [rank0]: _run_main(main, args)
+ERROR 2026-08-03T18:51:06.652924394Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
+ERROR 2026-08-03T18:51:06.652925115Z [resource.labels.containerName: jax-tpu] [rank0]: sys.exit(main(argv))
+ERROR 2026-08-03T18:51:06.652925876Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652926587Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 792, in main
+ERROR 2026-08-03T18:51:06.652927329Z [resource.labels.containerName: jax-tpu] [rank0]: rl_train(argv, kwargs)
+ERROR 2026-08-03T18:51:06.652928060Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 645, in rl_train
+ERROR 2026-08-03T18:51:06.652928811Z [resource.labels.containerName: jax-tpu] [rank0]: _rl_train_impl(argv, kwargs)
+ERROR 2026-08-03T18:51:06.652929542Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/train_rl.py", line 728, in _rl_train_impl
+ERROR 2026-08-03T18:51:06.652930543Z [resource.labels.containerName: jax-tpu] [rank0]: (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
+ERROR 2026-08-03T18:51:06.652931375Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652932056Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/evaluate_rl.py", line 268, in evaluate
+ERROR 2026-08-03T18:51:06.652932817Z [resource.labels.containerName: jax-tpu] [rank0]: multiple_call_responses = generate_responses(
+ERROR 2026-08-03T18:51:06.652933528Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652934309Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/trainers/post_train/rl/evaluate_rl.py", line 73, in generate_responses
+ERROR 2026-08-03T18:51:06.652935Z [resource.labels.containerName: jax-tpu] [rank0]: responses = rl_cluster.rollout.generate(
+ERROR 2026-08-03T18:51:06.652935811Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652936913Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/rl/rollout/vllm_rollout.py", line 101, in generate
+ERROR 2026-08-03T18:51:06.652937744Z [resource.labels.containerName: jax-tpu] [rank0]: self.output = self._sampler(
+ERROR 2026-08-03T18:51:06.652938495Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652939236Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py", line 569, in __call__
+ERROR 2026-08-03T18:51:06.652940088Z [resource.labels.containerName: jax-tpu] [rank0]: outputs = self.llm.generate(
+ERROR 2026-08-03T18:51:06.652940849Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652941560Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/entrypoints/llm.py", line 465, in generate
+ERROR 2026-08-03T18:51:06.652942261Z [resource.labels.containerName: jax-tpu] [rank0]: return self._run_completion(
+ERROR 2026-08-03T18:51:06.652942982Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652943683Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/entrypoints/offline_utils.py", line 349, in _run_completion
+ERROR 2026-08-03T18:51:06.652944454Z [resource.labels.containerName: jax-tpu] [rank0]: return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
+ERROR 2026-08-03T18:51:06.652945245Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652945936Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/entrypoints/offline_utils.py", line 595, in _run_engine
+ERROR 2026-08-03T18:51:06.652946688Z [resource.labels.containerName: jax-tpu] [rank0]: step_outputs = self.llm_engine.step()
+ERROR 2026-08-03T18:51:06.652947459Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652948160Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 304, in step
+ERROR 2026-08-03T18:51:06.652948981Z [resource.labels.containerName: jax-tpu] [rank0]: outputs = self.engine_core.get_output()
+ERROR 2026-08-03T18:51:06.652949832Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652950573Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 290, in get_output
+ERROR 2026-08-03T18:51:06.652958746Z [resource.labels.containerName: jax-tpu] [rank0]: outputs, model_executed = self.engine_core.step_fn()
+ERROR 2026-08-03T18:51:06.652959487Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652961910Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 588, in step
+ERROR 2026-08-03T18:51:06.652962702Z [resource.labels.containerName: jax-tpu] [rank0]: future = self.model_executor.execute_model(scheduler_output, non_block=True)
+ERROR 2026-08-03T18:51:06.652963453Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652965275Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 120, in execute_model
+ERROR 2026-08-03T18:51:06.652966067Z [resource.labels.containerName: jax-tpu] [rank0]: output.result()
+ERROR 2026-08-03T18:51:06.652966798Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+ERROR 2026-08-03T18:51:06.652967549Z [resource.labels.containerName: jax-tpu] [rank0]: return self.__get_result()
+ERROR 2026-08-03T18:51:06.652968330Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652969091Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+ERROR 2026-08-03T18:51:06.652969782Z [resource.labels.containerName: jax-tpu] [rank0]: raise self._exception
+ERROR 2026-08-03T18:51:06.652970473Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 98, in collective_rpc
+ERROR 2026-08-03T18:51:06.652971244Z [resource.labels.containerName: jax-tpu] [rank0]: result = run_method(self.driver_worker, method, args, kwargs)
+ERROR 2026-08-03T18:51:06.652971986Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652972677Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/serial_utils.py", line 510, in run_method
+ERROR 2026-08-03T18:51:06.652973628Z [resource.labels.containerName: jax-tpu] [rank0]: return func(*args, **kwargs)
+ERROR 2026-08-03T18:51:06.652974670Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652975441Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/vllm/v1/worker/worker_base.py", line 351, in execute_model
+ERROR 2026-08-03T18:51:06.652976232Z [resource.labels.containerName: jax-tpu] [rank0]: return self.worker.execute_model(scheduler_output)
+ERROR 2026-08-03T18:51:06.652976943Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652978886Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/worker/tpu_worker.py", line 586, in execute_model
+ERROR 2026-08-03T18:51:06.652979667Z [resource.labels.containerName: jax-tpu] [rank0]: output = self.model_runner.execute_model(scheduler_output,
+ERROR 2026-08-03T18:51:06.652980438Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652981199Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/utils.py", line 404, in wrapper
+ERROR 2026-08-03T18:51:06.652981970Z [resource.labels.containerName: jax-tpu] [rank0]: result = func(*args, **kwargs)
+ERROR 2026-08-03T18:51:06.652982762Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652983593Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 1324, in execute_model
+ERROR 2026-08-03T18:51:06.652984344Z [resource.labels.containerName: jax-tpu] [rank0]: output = self._execute_model(scheduler_output,
+ERROR 2026-08-03T18:51:06.652985095Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652985786Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 1625, in _execute_model
+ERROR 2026-08-03T18:51:06.652986527Z [resource.labels.containerName: jax-tpu] [rank0]: expert_indices) = self.model_fn(
+ERROR 2026-08-03T18:51:06.652987248Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652988260Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/models/common/model_loader.py", line 471, in wrapped_model_fn
+ERROR 2026-08-03T18:51:06.652989241Z [resource.labels.containerName: jax-tpu] [rank0]: return jitted_model_fn(*args, **kwargs)
+ERROR 2026-08-03T18:51:06.652989993Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652992096Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/tpu_inference/models/common/model_loader.py", line 391, in run_model
+ERROR 2026-08-03T18:51:06.652992807Z [resource.labels.containerName: jax-tpu] [rank0]: return model(*args)
+ERROR 2026-08-03T18:51:06.652993518Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652994249Z [resource.labels.containerName: jax-tpu] [rank0]: File "/usr/local/lib/python3.12/site-packages/maxtext_vllm_adapter/adapter.py", line 266, in __call__
+ERROR 2026-08-03T18:51:06.652994980Z [resource.labels.containerName: jax-tpu] [rank0]: hidden, kv_caches = self.model(
+ERROR 2026-08-03T18:51:06.652995711Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652996472Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/models/models.py", line 552, in __call__
+ERROR 2026-08-03T18:51:06.652997213Z [resource.labels.containerName: jax-tpu] [rank0]: logits, hidden_state, kv_caches = self.decoder(
+ERROR 2026-08-03T18:51:06.652997964Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.652998736Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/layers/nnx_decoders.py", line 1853, in __call__
+ERROR 2026-08-03T18:51:06.652999457Z [resource.labels.containerName: jax-tpu] [rank0]: y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache)
+ERROR 2026-08-03T18:51:06.653000178Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.653000899Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/layers/nnx_decoders.py", line 1823, in pure_layer_fn
+ERROR 2026-08-03T18:51:06.653001670Z [resource.labels.containerName: jax-tpu] [rank0]: out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
+ERROR 2026-08-03T18:51:06.653002511Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.653003232Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/models/qwen3_5.py", line 210, in __call__
+ERROR 2026-08-03T18:51:06.653003933Z [resource.labels.containerName: jax-tpu] [rank0]: attention_output, new_kv_cache = cast(Qwen3_5GatedDeltaNet, self.attention)(
+ERROR 2026-08-03T18:51:06.653004665Z [resource.labels.containerName: jax-tpu] [rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 2026-08-03T18:51:06.653005376Z [resource.labels.containerName: jax-tpu] [rank0]: File "/deps/src/maxtext/models/qwen3.py", line 668, in __call__
+ERROR 2026-08-03T18:51:06.653006087Z [resource.labels.containerName: jax-tpu] [rank0]: raise ImportError(
+ERROR 2026-08-03T18:51:06.653006838Z [resource.labels.containerName: jax-tpu] [rank0]: ImportError: GDN attention kernel require the vllm-tpu package. Please install it with `pip install vllm-tpu`.
+ERROR 2026-08-03T18:51:06.653007549Z [resource.labels.containerName: jax-tpu] [rank0]: --------------------
+ERROR 2026-08-03T18:51:06.653017223Z [resource.labels.containerName: jax-tpu] [rank0]: For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+ERROR 2026-08-03T18:51:07.877438564Z [resource.labels.containerName: jax-tpu] Processed prompts: 0%| | 0/32 [01:11<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]
