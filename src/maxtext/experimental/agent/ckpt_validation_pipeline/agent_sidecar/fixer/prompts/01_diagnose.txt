@@ -34,7 +34,7 @@
 **Output Format:**
 Respond ONLY with a valid JSON payload matching the following schema:
 ```json
-{
+{{
   "diagnosis": "Brief summary of the root cause.",
   "error_type": "Shape Mismatch | Out-Of-Memory | Logit Divergence",
   "failing_file": "Path to the failing MaxText python file.",
@@ -43,5 +43,5 @@ Respond ONLY with a valid JSON payload matching the following schema:
     "Step 2: Modify class Y to match the PyTorch reference logic...",
     "Step 3: ..."
   ]
-}
+}}
 ```
