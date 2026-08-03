@@ -204,6 +204,63 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
     )
 
 
+class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
+  """Static mask for DeepSeek-V4 Heavily Compressed Attention (HCA).
+
+  Local tokens attend causally (and with sliding window if set).
+  Compressed tokens attend fully without masking.
+  Tile padding tokens between local and compressed tokens are masked out.
+  """
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      local_kv_len: int,
+      compressed_kv_len: int,
+      pad_kv_total: int = 0,
+      sliding_window_size: int | None = None,
+      shard_count: int = 1,
+  ):
+    compress_ratio = max(1, local_kv_len // max(1, compressed_kv_len))
+    is_power_of_2 = (compress_ratio & (compress_ratio - 1)) == 0
+    compress_shift = int(np.log2(compress_ratio)) if is_power_of_2 else None
+    comp_start = local_kv_len + pad_kv_total
+
+    def hca_mask_fn(q_ids, kv_ids):
+      if q_ids.size == 0 or kv_ids.size == 0:
+        return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
+
+      is_local = kv_ids < local_kv_len
+      causal = q_ids >= kv_ids
+      if sliding_window_size is not None:
+        local_valid = causal & ((q_ids - kv_ids) < sliding_window_size)
+      else:
+        local_valid = causal
+
+      c_idx = kv_ids - comp_start
+      if compress_shift is not None:
+        c_thresh = (q_ids + 1) >> compress_shift
+      else:
+        c_thresh = (q_ids + 1) // compress_ratio
+
+      compressed_valid = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < compressed_kv_len)
+      return (is_local & local_valid) | compressed_valid
+
+    super().__init__(
+        shape=shape,
+        mask_function=hca_mask_fn,
+        shard_count=shard_count,
+    )
+
+  def __eq__(self, other: object):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+    return self.shape == other.shape and np.array_equal(self.q_sequence, other.q_sequence)
+
+  def __hash__(self):
+    return hash((type(self), self.shape, self.q_sequence.tobytes() if self.q_sequence is not None else None))
+
+
 def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
   """Generates an explicit boolean mask for chunked causal attention.
 
@@ -1046,6 +1103,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
+      pad_kv_total: int = 0,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1129,6 +1187,7 @@ class AttentionOp(nnx.Module):
             use_ragged_attention=use_ragged_attention,
             record_max_logits=record_max_logits,
             decoder_segment_ids_kv=decoder_segment_ids_kv,
+            pad_kv_total=pad_kv_total,
         )
         if max_logits is not None:
           self.max_logits = nnx.Intermediate(max_logits)
@@ -1297,6 +1356,7 @@ class AttentionOp(nnx.Module):
       use_ragged_attention: bool = False,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Array | None = None,
+      pad_kv_total: int = 0,
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
@@ -1422,7 +1482,7 @@ class AttentionOp(nnx.Module):
       sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
       block_q = sa_config.block_q
       block_kv = sa_config.block_kv
-      if self.attention_type == AttentionType.COMPRESSED and (
+      if self.attention_type == AttentionType.COMPRESSED and indexer_mask is not None and (
           (query.shape[2] % block_q != 0) or (key.shape[2] % block_kv != 0)
       ):
         padded_q_len = ((query.shape[2] + block_q - 1) // block_q) * block_q
@@ -1434,6 +1494,16 @@ class AttentionOp(nnx.Module):
       mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
+      elif self.attention_type == AttentionType.COMPRESSED and indexer_mask is None:
+        local_kv_len = query.shape[2]
+        compressed_kv_len = key.shape[2] - query.shape[2] - pad_kv_total
+        mask = HCAStaticMask(
+            shape=mask_shape,
+            local_kv_len=local_kv_len,
+            compressed_kv_len=compressed_kv_len,
+            pad_kv_total=pad_kv_total,
+            sliding_window_size=self.sliding_window_size if self.sliding_window_size else None,
+        )
       else:
         mask = mask_module.CausalMask(shape=mask_shape)
 
@@ -1480,6 +1550,8 @@ class AttentionOp(nnx.Module):
       single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
+      if self.attention_type == AttentionType.COMPRESSED and indexer_mask is None:
+        sa_config = dataclasses.replace(sa_config, dq_reduction_steps=3)
 
       # Create the splash attention kernel object separately, jit it for performance
       @partial(
@@ -1666,22 +1738,27 @@ class AttentionOp(nnx.Module):
             return attention_output, None
         else:
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
+          B, H, q_len, D = query.shape
+          _, KV_H, kv_len, _ = key.shape
+
+          q_folded = jnp.reshape(query, (B * H, q_len, D))
+          k_folded = jnp.reshape(key, (B * KV_H, kv_len, D))
+          v_folded = jnp.reshape(value, (B * KV_H, kv_len, D))
+          if sinks is None:
+            s_folded = None
+          elif sinks.ndim == 1:
+            s_folded = jnp.tile(sinks, (B,))
+          else:
+            s_folded = jnp.reshape(sinks, (B * H,))
 
           if record_max_logits:
-
-            def kernel_fn(q, k, v, d, s):
-              # Pass save_residuals=True to force stats generation
-              out, stats = kernel(q, k, v, d, sinks=s, save_residuals=True)
-              return out, stats["max_logits"]
-
-            attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(
-                query, key, value, decoder_segment_ids_tuple, sinks
-            )
+            out_folded, stats = kernel(q_folded, k_folded, v_folded, None, sinks=s_folded, save_residuals=True)
+            attention_output = jnp.reshape(out_folded, (B, H, q_len, D))
+            max_logits = jnp.reshape(stats["max_logits"], (B, H, q_len))
             return attention_output, max_logits
           else:
-            attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
-                query, key, value, decoder_segment_ids_tuple, sinks
-            )
+            out_folded = kernel(q_folded, k_folded, v_folded, None, sinks=s_folded)
+            attention_output = jnp.reshape(out_folded, (B, H, q_len, D))
             return attention_output, None
 
       elif self.config.use_jax_splash:
@@ -2288,6 +2365,7 @@ class AttentionOp(nnx.Module):
       slot: Optional[int] = None,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
+      pad_kv_total: int = 0,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -2323,6 +2401,7 @@ class AttentionOp(nnx.Module):
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
+        pad_kv_total=pad_kv_total,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
