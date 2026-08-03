@@ -1822,16 +1822,16 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     interleaved [THTHWHTHW...], preserving frequency continuity.
 
     Args:
-      freqs: Shape (3, batch, seq_len, head_dim // 2)
-        Dimension 0: temporal frequencies
-        Dimension 1: height frequencies
-        Dimension 2: width frequencies
+      freqs: Shape (batch, seq_len, 3, head_dim // 2)
+        Dimension -2 index 0: temporal frequencies
+        Dimension -2 index 1: height frequencies
+        Dimension -2 index 2: width frequencies
 
     Returns:
       freqs_t: Shape (batch, seq_len, head_dim // 2) with interleaved pattern
     """
-    # Start with temporal frequencies (dimension 0)
-    freqs_t = freqs[0]  # (batch, seq_len, head_dim // 2)
+    # Start with temporal frequencies
+    freqs_t = freqs[..., 0, :]  # (batch, seq_len, head_dim // 2)
 
     # Create interleaved pattern
     # For each spatial dimension (H, W), place frequencies at positions:
@@ -1842,7 +1842,7 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
       # Use slice syntax to match PyTorch behavior
       idx = slice(offset, section_size, 3)
       # Replace those positions with the corresponding spatial frequencies
-      freqs_t = freqs_t.at[..., idx].set(freqs[dim_idx, ..., idx])
+      freqs_t = freqs_t.at[..., idx].set(freqs[..., dim_idx, idx])
 
     return freqs_t
 
@@ -1857,8 +1857,8 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
       inputs: Input tensor of shape [batch, sequence, heads, head_dim].
       position: Position IDs with shape:
         - [batch, sequence] for text-only (2D)
-        - [3, batch, sequence] for multimodal with vision (3D)
-          where dim 0 = temporal, dim 1 = height, dim 2 = width
+        - [batch, sequence, 3] for multimodal with vision (3D)
+          where the last dim is (temporal, height, width)
 
     Returns:
       Tensor of shape [batch, sequence, heads, head_dim] with RoPE applied.
@@ -1872,15 +1872,15 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
 
     # Handle both 2D (text-only) and 3D (multimodal) position IDs
     if position.ndim == 2:
-      # Text-only: expand (batch, seq) -> (3, batch, seq) with same positions
-      position = jnp.broadcast_to(position[jnp.newaxis, ...], (3,) + position.shape)
-    elif position.ndim != 3 or position.shape[0] != 3:
-      raise ValueError(f"Position IDs must be 2D (batch, seq) or 3D (3, batch, seq), got shape {position.shape}")
+      # Text-only: expand (batch, seq) -> (batch, seq, 3) with same positions
+      position = jnp.broadcast_to(position[..., jnp.newaxis], position.shape + (3,))
+    elif position.ndim != 3 or position.shape[-1] != 3:
+      raise ValueError(f"Position IDs must be 2D (batch, seq) or 3D (batch, seq, 3), got shape {position.shape}")
 
-    # Compute frequencies: (3, batch, seq, 1) @ (head_dim // 2, 1) -> (3, batch, seq, head_dim // 2)
+    # Compute frequencies: (batch, seq, 3, 1) * (1, 1, 1, head_dim//2) -> (batch, seq, 3, head_dim//2)
     inv_freq_expanded = (1.0 / self.timescale)[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (1, 1, 1, head_dim//2)
-    position_expanded = position[..., jnp.newaxis]  # (3, batch, seq, 1)
-    freqs = position_expanded * inv_freq_expanded  # (3, batch, seq, head_dim//2)
+    position_expanded = position[..., jnp.newaxis]  # (batch, seq, 3, 1)
+    freqs = position_expanded * inv_freq_expanded  # (batch, seq, 3, head_dim//2)
 
     # Apply interleaved MRoPE pattern for 3D positions
     freqs = self._apply_interleaved_mrope(freqs)  # (batch, seq, head_dim//2)
