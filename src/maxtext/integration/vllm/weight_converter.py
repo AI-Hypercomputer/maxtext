@@ -49,76 +49,103 @@ class AttentionOut(Operation):
 class AttentionQKV(Operation):
     def __call__(self, tensors, **kwargs):
         tp = kwargs.get('tp', 1)
+
         @jax.jit
-        def _f_single(q_in, k_in, v_in, idx):
-            # q_in shape: [d_model, num_layers, num_heads, head_dim] (num_layers is axis 1)
-            # transpose (1, 0, 2, 3) makes it [num_layers, d_model, num_heads, head_dim]
-            q, k, v = jnp.transpose(q_in, (1, 0, 2, 3))[idx], jnp.transpose(k_in, (1, 0, 2, 3))[idx], jnp.transpose(v_in, (1, 0, 2, 3))[idx]
-            d_model, num_q_heads, head_dim = q.shape[0], q.shape[1], q.shape[2]
-            num_kv_heads = k.shape[1]
-            qkv_by_tp = jnp.concatenate([
-                q.reshape(1, d_model, tp, num_q_heads // tp, head_dim),
-                k.reshape(1, d_model, tp, num_kv_heads // tp, head_dim),
-                v.reshape(1, d_model, tp, num_kv_heads // tp, head_dim)
-            ], axis=3)
-            return jnp.transpose(qkv_by_tp.reshape(1, d_model, -1), (0, 2, 1))[0] # Return the sliced layer!
-        return [_f_single(tensors[0], tensors[1], tensors[2], i) for i in range(tensors[0].shape[1])]
+        def _f(q_in, k_in, v_in):
+            q = jnp.transpose(q_in, (1, 0, 2, 3))
+            k = jnp.transpose(k_in, (1, 0, 2, 3))
+            v = jnp.transpose(v_in, (1, 0, 2, 3))
+
+            num_layers, d_model, num_q_heads, head_dim = q.shape
+            num_kv_heads = k.shape[2]
+            actual_tp = min(tp, num_kv_heads)
+
+            kv_per_tp = num_kv_heads // actual_tp
+            q_per_tp = num_q_heads // actual_tp
+
+            q_by_tp = q.reshape(num_layers, d_model, actual_tp, q_per_tp, head_dim)
+            k_by_tp = k.reshape(num_layers, d_model, actual_tp, kv_per_tp, head_dim)
+            v_by_tp = v.reshape(num_layers, d_model, actual_tp, kv_per_tp, head_dim)
+
+            qkv_by_tp = jnp.concatenate([q_by_tp, k_by_tp, v_by_tp], axis=3)
+            qkv_flat = qkv_by_tp.reshape(num_layers, d_model, -1)
+            qkv_proj = jnp.transpose(qkv_flat, (0, 2, 1))
+            return qkv_proj
+
+        res = _f(tensors[0], tensors[1], tensors[2])
+        return list(jnp.unstack(res, axis=0))
 
 class MoEExpertDown(Operation):
     def __call__(self, tensors, **kwargs):
         @jax.jit
-        def _f_single(t_in, idx):
-            # t_in is shape [num_layers, num_experts, d_inner, d_model]
-            # t_slice is [num_experts, d_inner, d_model]
-            t_slice = t_in[idx]
-            return t_slice
-            
-        return [_f_single(tensors[0], i) for i in range(tensors[0].shape[0])]
+        def _f(t_in):
+            # t_in is shape [num_experts, num_layers, d_inner, d_model]
+            # transpose (1, 0, 2, 3) makes it [num_layers, num_experts, d_inner, d_model]
+            return jnp.transpose(t_in, (1, 0, 2, 3))
+
+        t_transposed = _f(tensors[0])
+        return list(jnp.unstack(t_transposed, axis=0))
 
 class MoEFuseGateUp(Operation):
     def __call__(self, tensors, **kwargs):
         tp = kwargs.get('tp', 1)
-        
+
         @jax.jit
-        def _fuse_single_idx(wi_0_in, wi_1_in, idx):
-            w0, w1 = wi_0_in[idx], wi_1_in[idx]
-            w0, w1 = jnp.transpose(w0, (0, 2, 1)), jnp.transpose(w1, (0, 2, 1))
-            num_experts, d_inner, d_model = w0.shape
-            chunk_size = d_inner // tp
-            padded_chunk_size = ((chunk_size + 127) // 128) * 128
-            pad_amount = padded_chunk_size - chunk_size
-            gate_chunks, up_chunks = w0.reshape(num_experts, tp, chunk_size, d_model), w1.reshape(num_experts, tp, chunk_size, d_model)
-            if pad_amount > 0:
-                gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-                up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-            fused = jnp.stack([gate_chunks, up_chunks], axis=2).reshape(num_experts, 2 * padded_chunk_size * tp, d_model)
-            return fused
-            
-        return [_fuse_single_idx(tensors[0], tensors[1], i) for i in range(tensors[0].shape[0])]
+        def _fuse_all(wi_0, wi_1):
+            wi_0 = jnp.transpose(wi_0, (1, 0, 2, 3))
+            wi_1 = jnp.transpose(wi_1, (1, 0, 2, 3))
+
+            def _fuse_single(w0, w1):
+                w0 = jnp.transpose(w0, (0, 2, 1))
+                w1 = jnp.transpose(w1, (0, 2, 1))
+                num_experts, d_inner, d_model = w0.shape
+                chunk_size = d_inner // tp
+                padded_chunk_size = ((chunk_size + 127) // 128) * 128
+                pad_amount = padded_chunk_size - chunk_size
+                gate_chunks = w0.reshape(num_experts, tp, chunk_size, d_model)
+                up_chunks = w1.reshape(num_experts, tp, chunk_size, d_model)
+                if pad_amount > 0:
+                    gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+                    up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+                combined = jnp.stack([gate_chunks, up_chunks], axis=2)
+                res = combined.reshape(num_experts, 2 * padded_chunk_size * tp, d_model)
+                return jnp.transpose(res, (0, 2, 1))
+
+            return jax.vmap(_fuse_single)(wi_0, wi_1)
+
+        fused = _fuse_all(tensors[0], tensors[1])
+        return list(jnp.unstack(fused, axis=0))
 
 class MoEFuseGateUpPrefused(Operation):
     def __call__(self, tensors, **kwargs):
         tp = kwargs.get('tp', 1)
-        
+
         @jax.jit
-        def _fuse_single_idx(wi_in, idx):
-            w = wi_in[idx]
-            w = jnp.transpose(w, (0, 2, 1))
-            num_experts, double_d_inner, d_model = w.shape
-            d_inner = double_d_inner // 2
-            w0 = w[:, :d_inner, :]
-            w1 = w[:, d_inner:, :]
-            chunk_size = d_inner // tp
-            padded_chunk_size = ((chunk_size + 127) // 128) * 128
-            pad_amount = padded_chunk_size - chunk_size
-            gate_chunks, up_chunks = w0.reshape(num_experts, tp, chunk_size, d_model), w1.reshape(num_experts, tp, chunk_size, d_model)
-            if pad_amount > 0:
-                gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-                up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-            fused = jnp.stack([gate_chunks, up_chunks], axis=2).reshape(num_experts, 2 * padded_chunk_size * tp, d_model)
-            return fused
-            
-        return [_fuse_single_idx(tensors[0], i) for i in range(tensors[0].shape[0])]
+        def _fuse_all(wi):
+            wi = jnp.transpose(wi, (1, 0, 2, 3))
+
+            def _fuse_single(w):
+                w = jnp.transpose(w, (0, 2, 1))
+                num_experts, double_d_inner, d_model = w.shape
+                d_inner = double_d_inner // 2
+                w0 = w[:, :d_inner, :]
+                w1 = w[:, d_inner:, :]
+                chunk_size = d_inner // tp
+                padded_chunk_size = ((chunk_size + 127) // 128) * 128
+                pad_amount = padded_chunk_size - chunk_size
+                gate_chunks = w0.reshape(num_experts, tp, chunk_size, d_model)
+                up_chunks = w1.reshape(num_experts, tp, chunk_size, d_model)
+                if pad_amount > 0:
+                    gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+                    up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+                combined = jnp.stack([gate_chunks, up_chunks], axis=2)
+                res = combined.reshape(num_experts, 2 * padded_chunk_size * tp, d_model)
+                return jnp.transpose(res, (0, 2, 1))
+
+            return jax.vmap(_fuse_single)(wi)
+
+        fused = _fuse_all(tensors[0])
+        return list(jnp.unstack(fused, axis=0))
 
 # ==========================================
 # 2. Rule
@@ -148,10 +175,10 @@ class WeightConverter(abc.ABC):
             if hasattr(x, 'items'): return {k: _to_pure(v) for k, v in x.items()}
             if hasattr(x, 'value'): return x.value
             return x
-            
+
         pure_src = _to_pure(src_pytree)
         flat_src = traverse_util.flatten_dict(pure_src, sep='.')
-        
+
         # Free source references to prevent HBM peaks when evaluating rules
         del pure_src
         if hasattr(src_pytree, 'clear'):
@@ -161,7 +188,7 @@ class WeightConverter(abc.ABC):
             self.rules = build_mt_rules(flat_src)
         else:
             self.rules = build_hf_rules(flat_src, target_state, self.rules)
-            
+
         result = {}
         for rule in self.rules:
             tensors = []
@@ -172,10 +199,10 @@ class WeightConverter(abc.ABC):
                     # Ignore unfound keys for robustness across subtle model variant differences,
                     # like we do gracefully in the regex matching case
                     pass
-            
+
             if not tensors:
                 continue
-                
+
             out = tensors
             for op in rule.operations:
                 out = op(out, tp=self.tp)
@@ -189,11 +216,11 @@ class WeightConverter(abc.ABC):
                 result[rule.target_pattern] = out[0]
             else:
                 result[rule.target_pattern] = out
-                
+
             del out
             del tensors
             gc.collect()
-                
+
         return result
 # ==========================================
 # 4. Registries and Builders
@@ -224,14 +251,14 @@ class MTMoEFuseGateUp(Operation):
     def __call__(self, tensors, **kwargs):
         tp = kwargs.get('tp', 1)
         wi_0, wi_1 = tensors[0], tensors[1]
-        
+
         @jax.jit
         def _f(w0, w1):
             axis = w0.ndim - 1
             chunk_size = w0.shape[axis] // tp
             target_chunk_size = ((chunk_size + 127) // 128) * 128
             target_half_dim = target_chunk_size * tp
-            
+
             def _pad_and_chunk(arr):
                 new_shape = list(arr.shape)
                 new_shape[axis] = tp
@@ -243,46 +270,46 @@ class MTMoEFuseGateUp(Operation):
                     pad_widths[axis + 1] = (0, pad_amount)
                     arr_reshaped = jnp.pad(arr_reshaped, pad_widths)
                 return arr_reshaped
-                
+
             p_wi_0 = _pad_and_chunk(w0)
             p_wi_1 = _pad_and_chunk(w1)
             combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
-            
+
             tgt_shape = list(w0.shape)
             tgt_shape[axis] = target_half_dim * 2
             return combined.reshape(tgt_shape)
-            
+
         return _f(wi_0, wi_1)
 
 class MTMoEDownPad(Operation):
     def __call__(self, tensors, **kwargs):
         wo = tensors[0]
         tp = kwargs.get('tp', 1)
-        
+
         @jax.jit
         def _f(w):
             axis = w.ndim - 2
             chunk_size = w.shape[axis] // tp
             target_chunk_size = ((chunk_size + 127) // 128) * 128
             target_dim = target_chunk_size * tp
-            
+
             pad_amount = target_dim - w.shape[axis]
             if pad_amount > 0:
                 new_shape = list(w.shape)
                 new_shape[axis] = tp
                 new_shape.insert(axis + 1, chunk_size)
                 arr_reshaped = w.reshape(new_shape)
-                
+
                 per_shard_extra = target_chunk_size - chunk_size
                 pad_widths = [(0, 0)] * arr_reshaped.ndim
                 pad_widths[axis + 1] = (0, per_shard_extra)
                 arr_reshaped = jnp.pad(arr_reshaped, pad_widths)
-                
+
                 tgt_shape = list(w.shape)
                 tgt_shape[axis] = target_dim
                 w = arr_reshaped.reshape(tgt_shape)
             return w
-            
+
         return _f(wo)
 
 class Identity(Operation):
@@ -294,9 +321,9 @@ def build_mt_rules(flat_src: Dict[str, Any]) -> list:
     processed = set()
     for key in flat_src.keys():
         if key in processed: continue
-        
+
         target_key = key.replace("base.", "model.", 1) if key.startswith("base.") else key
-        
+
         if key.endswith(".wi_0"):
             wi_1_key = key.replace(".wi_0", ".wi_1")
             wi_key = target_key.replace(".wi_0", ".wi")
@@ -311,9 +338,9 @@ def build_mt_rules(flat_src: Dict[str, Any]) -> list:
             rules.append(Rule([key], target_key, [MTMoEDownPad()]))
         else:
             rules.append(Rule([key], target_key, [Identity()]))
-            
+
         processed.add(key)
-        
+
     return rules
 
 def build_hf_rules(flat_src: Dict[str, Any], target_state: Any, rules: List[Rule]) -> list:

@@ -250,7 +250,6 @@ class MaxTextVllmSampler(VllmSampler):
 
     return None
 
->>>>>>> origin/main
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
   """VllmRollout that uses VllmSampler with WeightConverter for weight sync.

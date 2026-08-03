@@ -254,6 +254,12 @@ class ConverterValidationConfig(types.RLConfig):
   wandb_entity: str = ""
   wandb_run_name: str = ""
   save_config_to_gcs: bool = False
+  hbm_utilization_vllm: float = 0.6
+  use_standalone_converter: bool = False
+  debug_converter: bool = False
+  vllm_load_format: str = "dummy"
+  gcs_debug_path: str = ""
+  use_chat_template: bool = False
 
 def validate_converter(argv) -> None:
   """Run end-to-end validation for MaxText to vLLM weight conversion.
@@ -434,9 +440,19 @@ def validate_converter(argv) -> None:
       
       # Strip 'vllm_model.' prefix if the golden state doesn't use it (e.g., HF Qwen)
       search_key = key
+      if search_key not in golden_llm_state and ".experts." in search_key and ".experts.routed_experts." not in search_key:
+          alt_key = search_key.replace(".experts.", ".experts.routed_experts.", 1)
+          if alt_key in golden_llm_state:
+              search_key = alt_key
+
       if search_key.startswith("vllm_model.") and search_key not in golden_llm_state and getattr(golden_llm_state, '__class__', type).__name__ != 'State':
           search_key = search_key[len("vllm_model."):]
           
+      if search_key not in golden_llm_state and ".experts." in search_key and ".experts.routed_experts." not in search_key:
+          alt_key = search_key.replace(".experts.", ".experts.routed_experts.", 1)
+          if alt_key in golden_llm_state:
+              search_key = alt_key
+
       if search_key in golden_llm_state:
           target_obj = golden_llm_state[search_key]
           
@@ -506,6 +522,7 @@ def validate_converter(argv) -> None:
         for sk in skipped_keys[:15]:
             logging.warning(f"SKIPPED WEIGHT: {sk}")
             print(f"SKIPPED WEIGHT: {sk}")
+        print("ALL KEYS IN GOLDEN_LLM_STATE CONTAINING MLP:", [k for k in (golden_llm_state.keys() if hasattr(golden_llm_state, 'keys') else []) if 'mlp' in str(k)])
 
     model_runner = llm.llm_engine.model_executor.driver_worker.model_runner
     if hasattr(model_runner, "model"):
@@ -514,7 +531,10 @@ def validate_converter(argv) -> None:
       except Exception as e:
         logging.warning(f"Could not nnx.update model_runner.model: {e}")
     if hasattr(model_runner, "state"):
-      model_runner.state_leaves = tuple(jax.tree_util.tree_leaves(model_runner.state))
+      if isinstance(model_runner.state, nnx.State):
+        model_runner.state_leaves = tuple(jax.tree_util.tree_leaves(model_runner.state))
+      else:
+        model_runner.state_leaves = model_runner.state
       logging.info("Updated model_runner.state_leaves after weight assignment.")
 
   # --- Generation test ------------------------------------------------------
