@@ -119,7 +119,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "0"
 
 from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
+from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout, requires_maxtext_scanned_weight_unroll
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
@@ -444,7 +444,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
 
   rl_rollout_engine = (
       functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
-      if trainer_config.use_standalone_converter
+      if trainer_config.use_standalone_converter or requires_maxtext_scanned_weight_unroll(trainer_config)
       else "vllm"
   )
 

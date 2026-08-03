@@ -14,11 +14,16 @@
 
 """Unit tests for RL result parsing and reward scoring (CPU-only)."""
 
+import os
 import unittest
 import pytest
 from types import SimpleNamespace
+import transformers
+import yaml
 
+from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
 from maxtext.trainers.post_train.rl import utils_rl
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR
 
 pytestmark = [pytest.mark.post_training]
 
@@ -363,6 +368,29 @@ class TestFormatMaxTextMessages(unittest.TestCase):
     """Test formatting when template_config is None (the fix)."""
     messages = ["What is 2+2?"]
     self.assertRaises(ValueError, lambda: utils_rl.format_maxtext_messages(messages, None, self.config))
+
+  @pytest.mark.cpu_only
+  def test_qwen35_recipe_applies_only_qwen_chat_markers(self):
+    """The Qwen recipe must not nest Gemma turns inside Qwen's chat template."""
+    recipe_path = os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "rl_gsm8k_qwen35_35b_v5p64.yml")
+    with open(recipe_path, "r", encoding="utf-8") as recipe_file:
+      recipe = yaml.safe_load(recipe_file)
+    template_config = load_data_template_from_file(recipe["data_template_path"])
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "qwen3-tokenizer"),
+        local_files_only=True,
+    )
+
+    messages = utils_rl.format_maxtext_messages(["What is 2+2?"], template_config, self.config)
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+    self.assertEqual(prompt.count("<|im_start|>user"), 1)
+    self.assertEqual(prompt.count("<|im_start|>assistant"), 1)
+    self.assertNotIn("<start_of_turn>", prompt)
+    self.assertNotIn("<end_of_turn>", prompt)
+    self.assertIn("What is 2+2?", prompt)
+    for tag in ("<reasoning>", "</reasoning>", "<answer>", "</answer>"):
+      self.assertIn(tag, prompt)
 
 
 if __name__ == "__main__":

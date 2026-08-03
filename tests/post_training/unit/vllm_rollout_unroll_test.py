@@ -12,13 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the Gemma scanned weights unrolling workaround."""
+"""Unit tests for MaxText scanned-weight unrolling workarounds."""
 
+from types import SimpleNamespace
 import unittest
 import numpy as np
 import pytest
 
-from maxtext.integration.vllm.maxtext_vllm_rollout import unroll_gemma_scanned_weights
+from maxtext.integration.vllm.maxtext_vllm_rollout import (
+    requires_maxtext_scanned_weight_unroll,
+    unroll_gemma_scanned_weights,
+    unroll_qwen_scanned_weights,
+    uses_maxtext_vllm_adapter,
+    validate_direct_sync_layer_coverage,
+)
 
 
 class MockWeights:
@@ -157,3 +164,118 @@ class GemmaScannedWeightsUnrollTest(unittest.TestCase):
     self.assertIsInstance(list(decoder_dict["layers"].keys())[0], int)
     np.testing.assert_array_equal(decoder_dict["layers"][0]["attn"]["wq"], np.array([[0], [0]]))
     np.testing.assert_array_equal(decoder_dict["layers"][6]["attn"]["wq"], np.array([[6], [6]]))
+
+
+class QwenScannedWeightsUnrollTest(unittest.TestCase):
+  """Verify heterogeneous Qwen blocks map to unscanned decoder attributes."""
+
+  @pytest.mark.cpu_only
+  def test_interleaves_slots_and_repetitions(self):
+    slot_0 = np.zeros((2, 2, 1), dtype=np.float32)
+    slot_0[:, 0, :] = 0
+    slot_0[:, 1, :] = 2
+    slot_1 = np.zeros((2, 2, 1), dtype=np.float32)
+    slot_1[:, 0, :] = 1
+    slot_1[:, 1, :] = 3
+    weights = MockWeights(
+        {
+            "base": {
+                "decoder": {
+                    "layers": {
+                        "layer_0": {"probe": slot_0},
+                        "layer_1": {"probe": slot_1, "rngs": {"key": np.ones(2, dtype=np.uint32)}},
+                    },
+                    "decoder_norm": {"scale": np.ones(2)},
+                }
+            }
+        }
+    )
+
+    unrolled = unroll_qwen_scanned_weights(weights)
+
+    decoder = unrolled["base"]["decoder"]
+    for layer_idx in range(4):
+      self.assertIn(f"layers_{layer_idx}", decoder)
+      np.testing.assert_array_equal(
+          decoder[f"layers_{layer_idx}"]["probe"],
+          np.full((2, 1), layer_idx, dtype=np.float32),
+      )
+    np.testing.assert_array_equal(decoder["decoder_norm"]["scale"], np.ones(2))
+    self.assertNotIn("probe", decoder["layers"]["layer_1"])
+    np.testing.assert_array_equal(decoder["layers"]["layer_1"]["rngs"]["key"], np.ones(2, dtype=np.uint32))
+    target = {
+        "model": {
+            "decoder": {
+                f"layers_{layer_idx}": {"probe": np.zeros((2, 1), dtype=np.float32)} for layer_idx in range(4)
+            }
+        }
+    }
+    self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), 4)
+
+  @pytest.mark.cpu_only
+  def test_rejects_inconsistent_scan_lengths(self):
+    weights = MockWeights(
+        {
+            "decoder": {
+                "layers": {
+                    "layer_0": {"probe": np.ones((2, 2, 1))},
+                    "layer_1": {"probe": np.ones((2, 3, 1))},
+                }
+            }
+        }
+    )
+
+    with self.assertRaisesRegex(ValueError, "disagree on scan length"):
+      unroll_qwen_scanned_weights(weights)
+
+  @pytest.mark.cpu_only
+  def test_supports_nondefault_axis_and_sparse_slots(self):
+    slot_1 = np.stack(
+        [np.full((2, 1), 1, dtype=np.float32), np.full((2, 1), 3, dtype=np.float32)],
+        axis=0,
+    )
+    weights = MockWeights({"decoder": {"layers": {"layer_1": {"probe": slot_1}}}})
+
+    unrolled = unroll_qwen_scanned_weights(weights, scan_axis=0, pattern_length=2)
+
+    self.assertNotIn("layers_0", unrolled["decoder"])
+    np.testing.assert_array_equal(unrolled["decoder"]["layers_1"]["probe"], np.full((2, 1), 1))
+    np.testing.assert_array_equal(unrolled["decoder"]["layers_3"]["probe"], np.full((2, 1), 3))
+
+  @pytest.mark.cpu_only
+  def test_rejects_missing_target_layer_parameters(self):
+    source = {"base": {"decoder": {"layers_0": {"probe": np.ones((2, 1))}}}}
+    target = {
+        "model": {
+            "decoder": {
+                "layers_0": {"probe": np.zeros((2, 1))},
+                "layers_1": {"probe": np.zeros((2, 1))},
+            }
+        }
+    }
+
+    with self.assertRaisesRegex(ValueError, "leave rollout transformer parameters at random initialization"):
+      validate_direct_sync_layer_coverage(source, target)
+
+
+class MaxTextAdapterSelectionTest(unittest.TestCase):
+  """Verify only scanned MaxText-adapter rollouts take the custom sync path."""
+
+  @pytest.mark.cpu_only
+  def test_detects_dict_and_string_overrides(self):
+    dict_config = SimpleNamespace(vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]}, scan_layers=True)
+    string_config = SimpleNamespace(vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}', scan_layers=True)
+
+    self.assertTrue(uses_maxtext_vllm_adapter(dict_config))
+    self.assertTrue(uses_maxtext_vllm_adapter(string_config))
+    self.assertTrue(requires_maxtext_scanned_weight_unroll(dict_config))
+
+  @pytest.mark.cpu_only
+  def test_bypasses_native_or_unscanned_rollouts(self):
+    native_config = SimpleNamespace(
+        vllm_hf_overrides={"architectures": ["Qwen3_5MoeForConditionalGeneration"]}, scan_layers=True
+    )
+    unscanned_config = SimpleNamespace(vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]}, scan_layers=False)
+
+    self.assertFalse(requires_maxtext_scanned_weight_unroll(native_config))
+    self.assertFalse(requires_maxtext_scanned_weight_unroll(unscanned_config))

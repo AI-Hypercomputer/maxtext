@@ -111,7 +111,7 @@ eval_dataset_name: "openai/gsm8k"
 train_split: "train"
 eval_split: "test"
 hf_subset: "main"
-data_template_path: "maxtext/examples/chat_templates/gsm8k_rl.json"
+data_template_path: "maxtext/examples/chat_templates/openmathinstruct2_rl.json"
 
 # ====== Reward ======
 reward_exact_answer: 1.0
