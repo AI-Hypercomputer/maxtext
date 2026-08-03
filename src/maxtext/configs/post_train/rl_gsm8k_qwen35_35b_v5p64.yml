@@ -126,4 +126,4 @@ penalty_incorrect_answer: 0.0
 math_verify_timeout: 120
 math_verify_num_procs: null
 
-debug: false
+debug: true
