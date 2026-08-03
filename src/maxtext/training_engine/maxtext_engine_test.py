@@ -141,7 +141,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         ),
     )
 
-  def test_save_checkpoint_with_model_and_optimizer(self):
+  def test_save_checkpoint_called_after_update(self):
     mock_config = self.setup_config(enable_checkpointing=True)
 
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
@@ -150,11 +150,22 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_orbax_mgr.save.return_value = True
     t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
 
-    t.train_step = 10
-    metadata_to_save = {"worker_id": "worker_0", "run_id": "run_123"}
-    t.save_checkpoint(metadata=metadata_to_save)
+    dummy_metadata = mock.MagicMock()
+    t.save_checkpoint(metadata=dummy_metadata)
 
+    # Verify orbax save was called
     mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    self.assertNotIn("micro_step_count", call_kwargs["custom_metadata"])
+    self.assertEqual(call_kwargs["custom_metadata"]["additional_metadata"], dummy_metadata)
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    self.assertIn("model_params", args_dict)
+    self.assertIn("accumulated_metrics", args_dict)
+    self.assertNotIn("accumulated_grads", args_dict)
 
   def test_save_checkpoint_skips_if_already_saved(self):
     mock_config = self.setup_config(enable_checkpointing=True)
@@ -187,6 +198,34 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_orbax_mgr.save.assert_called_once()
     self.assertTrue(t._throttler._inflight_queue.empty())
 
+  def test_save_checkpoint_called_after_fwd_bwd_before_update(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    mock_orbax_mgr = mock.MagicMock()
+    mock_orbax_mgr.latest_step.return_value = None
+    mock_orbax_mgr.save.return_value = True
+    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+
+    t._micro_step_count = 1
+    t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+
+    dummy_metadata = mock.MagicMock()
+    t.save_checkpoint(metadata=dummy_metadata)
+
+    # Verify orbax save was called
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    self.assertEqual(call_kwargs["custom_metadata"]["micro_step_count"], 1)
+    self.assertEqual(call_kwargs["custom_metadata"]["additional_metadata"], dummy_metadata)
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    self.assertIn("model_params", args_dict)
+    self.assertIn("accumulated_metrics", args_dict)
+    self.assertIn("accumulated_grads", args_dict)
+
   def test_restore_checkpoint_no_checkpoint_returns_defaults(self):
     mock_config = self.setup_config(enable_checkpointing=True)
 
@@ -196,24 +235,73 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
 
     restored_metadata = t.restore_checkpoint()
-    self.assertEqual(restored_metadata, {})
+    self.assertIsNone(restored_metadata)
 
   def test_restore_checkpoint_restores_ckpt_metadata(self):
     mock_config = self.setup_config(enable_checkpointing=True)
-
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
     mock_orbax_mgr = mock.MagicMock()
     mock_orbax_mgr.latest_step.return_value = 10
 
+    # Mock metadata with item_metadata and custom_metadata attributes
     dummy_metadata = mock.MagicMock()
-    mock_orbax_mgr.metadata.return_value = dummy_metadata
-    mock_orbax_mgr.restore.return_value = {"model_params": {"weights": jnp.array([1.0, 2.0])}}
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    mock_metadata.custom_metadata = {"additional_metadata": dummy_metadata}
+    mock_orbax_mgr.metadata.return_value = mock_metadata
+
+    # Return dummy model and optimizer state from orbax restore
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    dummy_opt_state = nnx.state(dummy_opt, nnx.optimizer.OptState)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": dummy_opt_state,
+    }
     t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
 
     restored_metadata = t.restore_checkpoint(step=10)
     self.assertEqual(t.train_step, 10)
     self.assertEqual(restored_metadata, dummy_metadata)
     mock_orbax_mgr.restore.assert_called_once()
+
+  def test_restore_intra_step_checkpoint(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    mock_orbax_mgr = mock.MagicMock()
+    mock_orbax_mgr.latest_step.return_value = 5
+
+    # Mock metadata with item_metadata and custom_metadata attributes
+    dummy_metadata = mock.MagicMock()
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    mock_metadata.custom_metadata = {"micro_step_count": 2, "additional_metadata": dummy_metadata}
+    mock_orbax_mgr.metadata.return_value = mock_metadata
+
+    metrics_buf = abstract_engine.MetricsBuffer(id=5, mode="train")
+    metrics_buf.weighted_metrics["loss"] = abstract_engine.WeightedMetric(
+        unreduced_sum=jnp.array([4.0, 6.0]),
+        denominator=jnp.array([2.0, 2.0]),
+    )
+    dummy_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    dummy_opt_state = nnx.state(dummy_opt, nnx.optimizer.OptState)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": dummy_opt_state,
+        "accumulated_metrics": [metrics_buf],
+        "accumulated_grads": dummy_grads,
+    }
+    t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
+
+    _ = t.restore_checkpoint(step=5)
+    self.assertEqual(t._micro_step_count, 2)
+    self.assertEqual(t._accumulated_grads, dummy_grads)
+    self.assertEqual(len(t._cached_losses), 2)
+    self.assertTrue(isinstance(t._cached_losses[0], abstract_engine.WeightedMetric))
+    self.assertAlmostEqual(float(t._cached_losses[0].unreduced_sum), 4.0)
+    self.assertAlmostEqual(float(t._cached_losses[1].unreduced_sum), 6.0)
 
   def test_record_and_get_metrics(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
