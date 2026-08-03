@@ -99,43 +99,6 @@ def _train_a_step(model, optimizer):
   return jnp.asarray(target.linear.kernel[...])
 
 
-class PostTrainCheckpointInjectHyperparamsTest(unittest.TestCase):
-  """RL and distillation wrap the optimizer in inject_hyperparams; the layout must not notice."""
-
-  def test_opt_state_matches_an_unwrapped_optimizer(self):
-    """mu and nu belong under the Linen `params` collection either way.
-
-    The conversion finds them by name at the top of the optimizer state. Behind the
-    inject_hyperparams shell they are not there, so stripping it afterwards leaves them
-    unwrapped and pre-training cannot line the optimizer up.
-    """
-
-    def mu_keys(directory, optimizer):
-      model = _Model(nnx.Rngs(0))
-      manager = post_train_checkpointing.MaxTextLayoutCheckpointManager(
-          root_directory=directory, options=ocp.CheckpointManagerOptions(save_interval_steps=1)
-      )
-      self.assertTrue(manager.save(1, model, optimizer, force=True))
-      manager.close()
-      keys = _on_disk_keys(directory)
-      return sorted({k.split("/")[3] for k in keys if k.startswith("opt_state/0/mu/")})
-
-    with tempfile.TemporaryDirectory() as plain_dir:  # pylint: disable=consider-using-with
-      plain_model = _Model(nnx.Rngs(0))
-      plain = mu_keys(plain_dir, nnx.Optimizer(plain_model, optax.adamw(1e-3), wrt=nnx.Param))
-
-    with tempfile.TemporaryDirectory() as injected_dir:  # pylint: disable=consider-using-with
-      injected_model = _Model(nnx.Rngs(0))
-      # A schedule, as RL and distillation use. A plain float produces a different shell --
-      # optax only adds hyperparams_states for callables -- and would not reproduce this.
-      schedule = optax.constant_schedule(1e-3)
-      tx = optax.inject_hyperparams(optax.adamw)(learning_rate=schedule)
-      injected = mu_keys(injected_dir, nnx.Optimizer(injected_model, tx, wrt=nnx.Param))
-
-    self.assertEqual(plain, ["params"], "an unwrapped optimizer should already be under params")
-    self.assertEqual(injected, plain, "inject_hyperparams changed where mu landed on disk")
-
-
 class PostTrainCheckpointLayoutTest(unittest.TestCase):
   """The on-disk layout has to be MaxText's, so pre-training can read what post-training wrote."""
 
@@ -462,30 +425,6 @@ class PostTrainCheckpointSubclassHookTest(unittest.TestCase):
     self.assertEqual([k for k in keys if "student_model" in k.split("/")], [])
 
 
-class PostTrainCheckpointBaseManagerTest(unittest.TestCase):
-  """The base class builds a manager over Tunix's item names before we replace it."""
-
-  def test_closes_the_base_class_manager_it_replaces(self):
-    with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
-      mock_base_cm = mock.MagicMock()
-
-      def fake_base_init(self, root_directory=None, options=None):
-        del root_directory, options
-        self._checkpoint_manager = mock_base_cm
-
-      with mock.patch.object(tunix_checkpoint_manager.CheckpointManager, "__init__", fake_base_init):
-        manager = post_train_checkpointing.MaxTextLayoutCheckpointManager(
-            root_directory=d,
-            options=ocp.CheckpointManagerOptions(save_interval_steps=1),
-        )
-      mock_base_cm.close.assert_called_once()
-      # pylint: disable=protected-access
-      self.assertIsNotNone(manager._checkpoint_manager)
-      self.assertIsNot(manager._checkpoint_manager, mock_base_cm)
-      # pylint: enable=protected-access
-      manager.close()
-
-
 class InstallTest(unittest.TestCase):
   """`install` swaps in the MaxText-layout manager and restores what it finds."""
 
@@ -568,7 +507,7 @@ class UnwrapModelTest(unittest.TestCase):
 
   def test_ignores_a_base_attribute_that_is_not_a_module(self):
     model = _Model(nnx.Rngs(0))
-    setattr(model, "base", "not a module")
+    model.base = "not a module"
     self.assertIs(post_train_checkpointing.unwrap_model(model), model)
 
 

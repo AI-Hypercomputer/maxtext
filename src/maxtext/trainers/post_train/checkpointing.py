@@ -20,11 +20,10 @@ run without Tunix installed.
 """
 
 import os
-from typing import Any, Sequence
+from typing import Any
 
 from flax import nnx
 import jax
-import jax.numpy as jnp
 import orbax.checkpoint as ocp
 from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 
@@ -56,9 +55,7 @@ def unwrap_model(model: nnx.Module) -> nnx.Module:
     The wrapped model, or `model` itself if it is not wrapped.
   """
   base = getattr(model, _ADAPTER_CHILD, None)
-  if isinstance(base, nnx.Module):
-    return unwrap_model(base)
-  return model
+  return base if isinstance(base, nnx.Module) else model
 
 
 def _drop_adapter_level(tree):
@@ -101,46 +98,6 @@ def _add_adapter_level(tree, guide):
   return tree
 
 
-def _drop_inject_hyperparams(opt_state):
-  """Strips the `optax.inject_hyperparams` state wrapper if present.
-
-  RL and distillation trainers wrap their optimizer in `inject_hyperparams`. To produce
-  a checkpoint fully compatible with pre-training, we strip the outer shell and only save
-  the inner state.
-
-  Args:
-    opt_state: The optimizer state dict to inspect.
-
-  Returns:
-    The inner state if `inject_hyperparams` was found, otherwise `opt_state`.
-  """
-  if isinstance(opt_state, dict) and {"count", "hyperparams", "hyperparams_states", "inner_state"}.issubset(
-      opt_state.keys()
-  ):
-    return opt_state["inner_state"]
-  return opt_state
-
-
-def _add_inject_hyperparams(restored_opt_state, guide, step):
-  """Restores the `optax.inject_hyperparams` wrapper state.
-
-  Args:
-    restored_opt_state: The bare inner state loaded from disk.
-    guide: The currently initialized optimizer state dict, used as a structural guide.
-    step: The global step to restore into the wrapper's count.
-
-  Returns:
-    The reconstructed full state dict.
-  """
-  if isinstance(guide, dict) and {"count", "hyperparams", "hyperparams_states", "inner_state"}.issubset(guide.keys()):
-
-    new_state = dict(guide)
-    new_state["inner_state"] = restored_opt_state
-    new_state["count"] = jnp.array(step, dtype=guide["count"].dtype)
-    return new_state
-  return restored_opt_state
-
-
 class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
   """Tunix checkpoint manager that reads and writes MaxText's on-disk layout.
 
@@ -164,31 +121,15 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     """
     self._config = config
     super().__init__(root_directory=root_directory, options=options)
-    # The base class built a manager over Tunix's item names. Close it before replacing it with
-    # one that knows MaxText's layout, or its open handles and threads outlive it.
     # pylint: disable=access-member-before-definition
-    if getattr(self, "_checkpoint_manager", None) is not None:
-      self._checkpoint_manager.close()
-    # pylint: enable=access-member-before-definition
-
-    if root_directory is not None:
+    if self._checkpoint_manager is not None:
+      directory = self._checkpoint_manager.directory
+      options = options or getattr(self._checkpoint_manager, "options", None)
       # Pathways only supports the persistence APIs, so drop ocdbt/zarr3 there as Tunix does.
       pathways = "proxy" in os.getenv("JAX_PLATFORMS", "")
 
-      # Orbax otherwise materialises the whole tree on the host at once (its default concurrency
-      # is ~89GiB), which OOMKills the container the trainer runs in. MaxText already has a knob
-      # for this, checkpoint_storage_concurrent_gb, but it was never plumbed into this path.
-      concurrent_gb = getattr(config, "checkpoint_storage_concurrent_gb", None) if config is not None else None
-
       def pytree_handler():
-        kwargs = {"use_ocdbt": not pathways, "use_zarr3": not pathways}
-        if concurrent_gb:
-          # Only the device-to-host budget: that is the one that decides how much of the tree is
-          # resident in host memory at once. Capping save_concurrent_gb/restore_concurrent_gb as
-          # well breaks reads of any single array larger than the cap, e.g. llama3.1-8b's
-          # mlp.wi_0.kernel at 3.75GiB ("Requested more bytes than we reserved space for").
-          kwargs["save_device_host_concurrent_gb"] = concurrent_gb
-        return ocp.PyTreeCheckpointHandler(**kwargs)
+        return ocp.PyTreeCheckpointHandler(use_ocdbt=not pathways, use_zarr3=not pathways)
 
       handlers = {
           _ITEM_NAME: pytree_handler(),
@@ -198,39 +139,19 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
           "custom_metadata": ocp.JsonCheckpointHandler(),
           **(extra_item_handlers or {}),
       }
+      self._checkpoint_manager.close()
       self._checkpoint_manager = ocp.CheckpointManager(
-          root_directory,
+          directory,
+          item_names=tuple(handlers),
           item_handlers=handlers,
           options=options,
       )
-    else:
-      self._checkpoint_manager = None
+    # pylint: enable=access-member-before-definition
 
   def wait_until_finished(self):
     """Blocks until outstanding async checkpoint writes are complete."""
-    if getattr(self, "_checkpoint_manager", None) is not None:
+    if self._checkpoint_manager is not None:
       self._checkpoint_manager.wait_until_finished()
-
-  def close(self):
-    """Closes the checkpoint manager."""
-    if getattr(self, "_checkpoint_manager", None) is not None:
-      self._checkpoint_manager.close()
-
-  def latest_step(self) -> int | None:
-    """Returns the latest step saved, reloading from storage if not cached."""
-    if getattr(self, "_checkpoint_manager", None) is None:
-      return None
-    step = self._checkpoint_manager.latest_step()
-    if step is None:
-      steps = self.all_steps(read=True)
-      return steps[-1] if steps else None
-    return step
-
-  def all_steps(self, read: bool = False) -> Sequence[int]:
-    """Returns all steps tracked by the manager."""
-    if getattr(self, "_checkpoint_manager", None) is None:
-      return []
-    return self._checkpoint_manager.all_steps(read=read)
 
   def model_to_checkpoint(self, model: nnx.Module) -> nnx.Module:
     """Returns the module whose weights belong in the checkpoint.
@@ -267,7 +188,7 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     del step
     return {}
 
-  def save(  # pylint: disable=too-many-positional-arguments
+  def save(
       self,
       step: int,
       model: nnx.Module,
@@ -298,17 +219,8 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     if save_only_lora_params:
       state = nnx.split_state(state, nnx.LoRAParam, ...)[0]
     items = train_state_nnx.to_checkpoint_dict(state)
-    if "opt_state" in items:
-      inner = _drop_inject_hyperparams(items["opt_state"])
-      if inner is not items["opt_state"]:
-        # to_checkpoint_dict ran against the inject_hyperparams shell. It puts mu and nu into
-        # the Linen `params` collection by finding those keys at the top of the optimizer
-        # state, and behind the shell they are not there, so it left them bare. Convert what
-        # was behind it, or pre-training finds the accumulators one level short.
-        inner = train_state_nnx.opt_state_to_linen(inner)
-      items["opt_state"] = inner
-      if self.model_to_checkpoint(model) is not model:
-        items["opt_state"] = _drop_adapter_level(items["opt_state"])
+    if self.model_to_checkpoint(model) is not model and "opt_state" in items:
+      items["opt_state"] = _drop_adapter_level(items["opt_state"])
     jax.block_until_ready(items)
 
     save_args = {
@@ -319,23 +231,12 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     metadata = checkpointing.checkpoint_custom_metadata(self._config)
     metadata.update(custom_metadata or {})
 
-    if not force and step in self.all_steps():
-      max_logging.log(f"Step {step} already exists in MaxText layout. Skipping save.")
-      return False
-
-    try:
-      saved = self._checkpoint_manager.save(
-          step,
-          args=ocp.args.Composite(**save_args),
-          custom_metadata=metadata,
-          force=force,
-      )
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      if "StepAlreadyExistsError" in type(e).__name__:
-        max_logging.log(f"Step {step} already exists. Skipping save.")
-        saved = False
-      else:
-        raise e
+    saved = self._checkpoint_manager.save(
+        step,
+        args=ocp.args.Composite(**save_args),
+        custom_metadata=metadata,
+        force=force,
+    )
     if saved:
       max_logging.log(f"Saved post-training checkpoint at step {step} in MaxText's on-disk layout")
     return saved
@@ -390,11 +291,8 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     )
 
     restored_items = dict(restored[_ITEM_NAME])
-    if "opt_state" in restored_items and opt_state_guide is not None:
-      restored_items["opt_state"] = _add_inject_hyperparams(restored_items["opt_state"], opt_state_guide, step)
-      if is_wrapped:
-        restored_items["opt_state"] = _add_adapter_level(restored_items["opt_state"], opt_state_guide)
-
+    if is_wrapped and opt_state_guide is not None and "opt_state" in restored_items:
+      restored_items["opt_state"] = _add_adapter_level(restored_items["opt_state"], opt_state_guide)
     new_state = checkpointing.linen_items_to_nnx(restored_items, state)
     nnx.update(self.model_to_checkpoint(model), new_state["model"])
     if optimizer is not None and "optimizer" in new_state:
@@ -415,21 +313,6 @@ def install(trainer, checkpoint_dir: str, config=None) -> None:
     checkpoint_dir: Directory to read and write checkpoints in.
     config: The run's config, read for the metadata the checkpoint stores.
   """
-  # enable_checkpointing is a documented MaxText flag, and until now this path ignored it: the
-  # manager was installed regardless, so Tunix saved at the end of training no matter what the
-  # config said. That save is not free -- an 8B SFT writes 44.9 GiB and the transfer to host
-  # OOMKills the container -- so being able to turn it off is the difference between a smoke test
-  # that reports whether the trainer runs and one that cannot get past its first save.
-  # post_train_skip_checkpointing exists because neither existing flag can say this:
-  # enable_checkpointing is validated as required whenever load_parameters_path is set, and
-  # checkpoint_period=0 makes the shared checkpointing path raise ZeroDivisionError on
-  # `step % config.checkpoint_period`.
-  if config is not None and (
-      not getattr(config, "enable_checkpointing", True) or getattr(config, "post_train_skip_checkpointing", False)
-  ):
-    max_logging.log("Checkpoint saving disabled: skipping post-train checkpoint manager install.")
-    return
-
   if trainer.checkpoint_manager is not None:
     trainer.checkpoint_manager.close()
 
