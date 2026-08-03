@@ -20,8 +20,11 @@ import grain
 import pytest
 from types import SimpleNamespace
 import jax
+import jax.numpy as jnp
+import optax
 
 from maxtext.trainers.post_train.rl import train_rl
+from maxtext.trainers.post_train.rl import utils_rl
 
 pytestmark = [pytest.mark.post_training]
 from maxtext.configs import types
@@ -660,6 +663,44 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     # Verify apply_chat_template now runs successfully and renders correct content
     rendered = tokenizer.apply_chat_template([{"role": "user", "content": "Hello!"}])
     self.assertEqual(rendered, "Hello!")
+
+
+class RLOptimizerClippingTest(unittest.TestCase):
+  """RL clips gradients without giving the optimizer state an extra chain level."""
+
+  def _config(self, threshold):
+    return SimpleNamespace(
+        learning_rate=1e-3,
+        learning_rate_schedule_steps=-1,
+        steps=-1,
+        train_steps=10,
+        # No warmup, so the learning rate at step 0 is non-zero and updates are comparable.
+        warmup_steps_fraction=0.0,
+        adam_b1=0.9,
+        adam_b2=0.95,
+        adam_weight_decay=0.1,
+        gradient_clipping_threshold=threshold,
+    )
+
+  def _opt_state_structure(self, threshold):
+    params = {"w": jnp.array([3.0, 4.0])}
+    return jax.tree_util.tree_structure(utils_rl.get_optimizer(self._config(threshold)).init(params))
+
+  @pytest.mark.cpu_only
+  def test_clipping_does_not_change_the_optimizer_state_shape(self):
+    self.assertEqual(self._opt_state_structure(1.0), self._opt_state_structure(0.0))
+
+  @pytest.mark.cpu_only
+  def test_gradients_are_clipped(self):
+    params = {"w": jnp.array([3.0, 4.0])}  # global norm 5.0
+    grads = {"w": jnp.array([3.0, 4.0])}
+
+    clipped = utils_rl.get_optimizer(self._config(0.1))
+    unclipped = utils_rl.get_optimizer(self._config(0.0))
+    clipped_updates, _ = clipped.update(grads, clipped.init(params), params)
+    unclipped_updates, _ = unclipped.update(grads, unclipped.init(params), params)
+
+    self.assertLess(float(optax.tree.norm(clipped_updates)), float(optax.tree.norm(unclipped_updates)))
 
 
 if __name__ == "__main__":
