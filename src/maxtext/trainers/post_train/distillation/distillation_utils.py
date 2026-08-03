@@ -22,7 +22,6 @@ import abc
 from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence
 
 import flax
-from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -32,7 +31,7 @@ from orbax import checkpoint
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.common import grain_utility
-from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
+from maxtext.trainers.post_train import checkpointing as post_train_checkpointing
 from tunix.sft import peft_trainer
 
 
@@ -647,7 +646,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
 # -----------------------------------------------------------------------------
 
 
-class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
+class MaxTextCheckpointManager(post_train_checkpointing.MaxTextLayoutCheckpointManager):
   """Custom CheckpointManager that uses MaxText's native handlers.
 
   Model and optimizer are delegated to Tunix's v1 ``Checkpointer`` unchanged.
@@ -662,136 +661,64 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
       student_config: Any,
       options: checkpoint.CheckpointManagerOptions | None = None,
   ):
-    super().__init__(root_directory=root_directory, options=options)
+    super().__init__(
+        root_directory=root_directory,
+        options=options,
+        # MaxText's Grain handler, so the input pipeline's position rides along with the state.
+        extra_item_handlers={"iter": grain_utility.GrainCheckpointHandler()},
+    )
     self.student_config = student_config
     self._iterator = raw_iterator
 
-    # Re-initialize internal Orbax manager with MaxText's Grain handler
-    # pylint: disable=access-member-before-definition
-    # pytype: disable=attribute-error
-    if self._checkpoint_manager is not None:
-      root_directory = self._checkpoint_manager.directory
+  def model_to_checkpoint(self, model):
+    """Only the student is trained, so only the student is checkpointed."""
+    return getattr(model, "student_model", model)
 
-      if options is None:
-        options = getattr(self._checkpoint_manager, "options", None)
+  def _train_state(self, model, optimizer):
+    # learn-to-init runs discard the optimizer state, so leave it out of the checkpoint.
+    if self.student_config.learn_to_init_mode:
+      optimizer = None
+    return super()._train_state(model, optimizer)
 
-      item_handlers = {
-          "model_params": checkpoint.PyTreeCheckpointHandler(),
-          "optimizer_state": checkpoint.PyTreeCheckpointHandler(),
-          "custom_metadata": checkpoint.JsonCheckpointHandler(),
-          # Use MaxText's handler for the iterator
-          "iter": grain_utility.GrainCheckpointHandler(),
-      }
+  def _extra_save_args(self, step):
+    """Saves the input pipeline's position alongside the state, when there is one to save."""
+    del step
+    if self._iterator is None:
+      return {}
 
-      self._checkpoint_manager.close()
-      self._checkpoint_manager = checkpoint.CheckpointManager(
-          root_directory,
-          item_handlers=item_handlers,
-          options=options,
-      )
-    # pytype: enable=attribute-error
-    # pylint: enable=access-member-before-definition
+    # Follow MaxText's logic to handle multi-process saving.
+    # Logic extracted from src/maxtext/common/checkpointing.py:save_checkpoint
+    data_iterator = self._iterator
+    if not isinstance(data_iterator, list):
+      data_iterator = [data_iterator]
 
-  def save(
-      self,
-      step,
-      model,
-      optimizer=None,
-      save_only_lora_params=False,
-      force=False,
-      custom_metadata=None,
-  ):
-    """Saves the checkpoint including the input pipeline state (if available)."""
-    if self._checkpoint_manager is None:
-      return False
-    if not force and not self._checkpoint_manager.should_save(step):
-      return False
+    grain_iters_to_save = []
+    process_count_total = jax.process_count() * len(data_iterator)
+    for i, data_iter in enumerate(data_iterator):
+      process_index = jax.process_index() + i * jax.process_count()
+      # MaxText iterators (MultiHostDataLoadIterator) wrap the actual Grain iterator in .local_iterator
+      local_iter = data_iter.local_iterator if hasattr(data_iter, "local_iterator") else data_iter
+      grain_iters_to_save.append((local_iter, process_index, process_count_total))
 
-    # Standard Tunix Logic for Model/Optimizer.
-    # Accept either a ModelBundle (common path) or a plain nnx module.
-    target_model = getattr(model, "student_model", model)
-    if save_only_lora_params:
-      params = nnx.state(target_model, nnx.LoRAParam)
-    else:
-      params = nnx.state(target_model)
-
-    # Define standard SaveArgs once to reuse
-    default_save_args = checkpoint.SaveArgs()
-    cp_save_args = {
-        "model_params": checkpoint.args.PyTreeSave(
-            item=params, save_args=jax.tree.map(lambda _: default_save_args, params)
-        ),
-    }
-    # Exclude optimizer state if the flag is set OR if learn_to_init_mode is active.
-    exclude_opt = self.student_config.learn_to_init_mode
-
-    if optimizer is not None and not exclude_opt:
-      optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
-      cp_save_args["optimizer_state"] = checkpoint.args.PyTreeSave(
-          item=optimizer_state, save_args=jax.tree.map(lambda _: default_save_args, optimizer_state)
-      )
-
-    if self._iterator is not None:
-      # Follow MaxText's logic to handle multi-process saving
-      # Logic extracted from src/maxtext/common/checkpointing.py:save_checkpoint
-      data_iterator = self._iterator
-      if not isinstance(data_iterator, list):
-        data_iterator = [data_iterator]
-
-      grain_iters_to_save = []
-      process_count_total = jax.process_count() * len(data_iterator)
-
-      for i, data_iter in enumerate(data_iterator):
-        process_index = jax.process_index() + i * jax.process_count()
-        # MaxText iterators (MultiHostDataLoadIterator) wrap the actual Grain iterator in .local_iterator
-        local_iter = data_iter.local_iterator if hasattr(data_iter, "local_iterator") else data_iter
-        grain_iters_to_save.append((local_iter, process_index, process_count_total))
-
-      # Use GrainCheckpointSave wrapper
-      cp_save_args["iter"] = grain_utility.GrainCheckpointSave(item=grain_iters_to_save)
-
-    return self._checkpoint_manager.save(
-        step,
-        args=checkpoint.args.Composite(**cp_save_args),
-        custom_metadata=custom_metadata or {},
-        force=force,
-    )
+    return {"iter": grain_utility.GrainCheckpointSave(item=grain_iters_to_save)}
 
   def maybe_restore(
       self,
       model: Any,
       optimizer: Any = None,
+      step: int | None = None,
       restore_only_lora_params: bool = False,
   ) -> tuple[int, dict[str, Any]]:
-    """Restores model + optimizer by delegating to upstream Tunix.
-
-    Unwraps `ModelBundle` if present (we only restore `student_model`).
-
-    Returns:
-      (restored step, custom_metadata dict). Step is 0 if no checkpoint exists.
-    """
-    if self._checkpoint_manager is None:
-      return 0, {}
-
-    target_model = getattr(model, "student_model", model)
-
-    step, _ = super().maybe_restore(
-        model=target_model,
-        optimizer=optimizer,
+    """Restores the student model and its optimizer from MaxText's on-disk layout."""
+    step, custom_metadata = super().maybe_restore(
+        model,
+        optimizer,
+        step=step,
         restore_only_lora_params=restore_only_lora_params,
     )
-    if step == 0:
-      return 0, {}
-
-    max_logging.log(f"Restored from checkpoint step {step}.")
-
-    metadata = self._checkpoint_manager.metadata(step)
-    if metadata and hasattr(metadata, "custom_metadata") and metadata.custom_metadata is not None:
-      custom_metadata = metadata.custom_metadata
-    else:
-      custom_metadata = {}
-
-    return step, dict(custom_metadata)
+    if step:
+      max_logging.log(f"Restored from checkpoint step {step}.")
+    return step, dict(custom_metadata or {})
 
   def restore_iterator(self):
     """Restores the iterator using MaxText's logic."""
@@ -817,8 +744,3 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
     except Exception as e:  # pylint: disable=broad-exception-caught
       max_logging.log(f"Warning: Could not restore input pipeline: {e}")
       return None
-
-  def wait_until_finished(self):
-    """Blocks until all outstanding checkpoint operations are complete."""
-    if self._checkpoint_manager is not None:
-      self._checkpoint_manager.wait_until_finished()

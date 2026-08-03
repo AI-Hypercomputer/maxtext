@@ -113,10 +113,7 @@ def get_distillation_optimizer(config, max_train_steps):
 
     # Apply Gradient Clipping
     if config.gradient_clipping_threshold > 0:
-      opt = optax.chain(
-          optax.clip_by_global_norm(max_norm=config.gradient_clipping_threshold),
-          opt,
-      )
+      opt = optimizers.add_gradient_clipping(opt, config.gradient_clipping_threshold)
     return opt
 
   # 3. Create Injectable Optimizer

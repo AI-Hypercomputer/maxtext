@@ -86,5 +86,35 @@ class TrainSFTTest(unittest.TestCase):
     )
 
 
+class TrainSFTTunixConfigTest(unittest.TestCase):
+  """The Tunix config decides who checkpoints and whether the optimizer gets wrapped."""
+
+  def _mt_config(self, grad_accum=1):
+    return SimpleNamespace(
+        checkpoint_period=5,
+        async_checkpointing=False,
+        tensorboard_dir="/tmp/tb",
+        profiler="",
+        eval_interval=1,
+        steps=10,
+        checkpoint_dir="/tmp/ckpt",
+        data_sharding=["data"],
+        gradient_accumulation_steps=grad_accum,
+    )
+
+  @pytest.mark.cpu_only
+  def test_tunix_checkpointing_is_disabled(self):
+    """post_train.checkpointing owns checkpointing, so Tunix's own manager must stay off."""
+    self.assertIsNone(train_sft.get_tunix_config(self._mt_config()).checkpoint_root_directory)
+
+  @pytest.mark.cpu_only
+  def test_single_step_accumulation_is_not_passed_through(self):
+    self.assertIsNone(train_sft.get_tunix_config(self._mt_config(grad_accum=1)).gradient_accumulation_steps)
+
+  @pytest.mark.cpu_only
+  def test_real_accumulation_is_passed_through(self):
+    self.assertEqual(train_sft.get_tunix_config(self._mt_config(grad_accum=4)).gradient_accumulation_steps, 4)
+
+
 if __name__ == "__main__":
   unittest.main()

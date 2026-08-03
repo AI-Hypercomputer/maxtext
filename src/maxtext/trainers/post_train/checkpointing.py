@@ -1,0 +1,323 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Checkpointing for the Tunix post-training trainers, in MaxText's on-disk layout.
+
+Lives here rather than in `maxtext.common.checkpointing` because the manager subclasses
+Tunix's, and `maxtext.common.checkpointing` is imported by pre-training and inference, which
+run without Tunix installed.
+"""
+
+import os
+from typing import Any
+
+from flax import nnx
+import jax
+import orbax.checkpoint as ocp
+from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
+
+from maxtext.common import checkpointing
+from maxtext.common import train_state_nnx
+from maxtext.utils import max_logging
+
+# The item MaxText stores a checkpoint under, matching create_orbax_checkpoint_manager.
+_ITEM_NAME = "items"
+
+# What Tunix stored a checkpoint under, kept registered so old checkpoints still restore.
+_TUNIX_ITEM_NAMES = ("model_params", "optimizer_state")
+
+# The Tunix adapter's only child module. DPO and RL train through the adapter, so its state
+# carries this extra level and a MaxText checkpoint must not.
+_ADAPTER_CHILD = "base"
+
+
+def unwrap_model(model: nnx.Module) -> nnx.Module:
+  """Returns the MaxText model, unwrapping the Tunix adapter if there is one.
+
+  Matches on the child module rather than on `TunixMaxTextAdapter` itself, so any equivalent
+  wrapper unwraps the same way.
+
+  Args:
+    model: The model a Tunix trainer holds.
+
+  Returns:
+    The wrapped model, or `model` itself if it is not wrapped.
+  """
+  base = getattr(model, _ADAPTER_CHILD, None)
+  return base if isinstance(base, nnx.Module) else model
+
+
+def _drop_adapter_level(tree):
+  """Removes the adapter level wherever it wraps a weight-shaped subtree.
+
+  The optimizer is built over the adapter, so its accumulators (mu, nu, acc_grads) are keyed by
+  the adapter's graph and carry the level even though the weights they shadow do not.
+
+  Args:
+    tree: A pure dict, typically the optimizer state.
+
+  Returns:
+    The same tree with every `{"base": subtree}` replaced by `subtree`.
+  """
+  if isinstance(tree, dict):
+    if set(tree) == {_ADAPTER_CHILD}:
+      return _drop_adapter_level(tree[_ADAPTER_CHILD])
+    return {k: _drop_adapter_level(v) for k, v in tree.items()}
+  if isinstance(tree, list):
+    return [_drop_adapter_level(v) for v in tree]
+  return tree
+
+
+def _add_adapter_level(tree, guide):
+  """Inverse of `_drop_adapter_level`.
+
+  Args:
+    tree: A pure dict with the adapter level removed.
+    guide: The same tree before removal, giving the positions to restore.
+
+  Returns:
+    `tree` with the adapter level put back wherever `guide` carries it.
+  """
+  if isinstance(guide, dict) and set(guide) == {_ADAPTER_CHILD}:
+    return {_ADAPTER_CHILD: _add_adapter_level(tree, guide[_ADAPTER_CHILD])}
+  if isinstance(guide, dict) and isinstance(tree, dict):
+    return {k: (_add_adapter_level(v, guide[k]) if k in guide else v) for k, v in tree.items()}
+  if isinstance(guide, list) and isinstance(tree, list) and len(guide) == len(tree):
+    return [_add_adapter_level(t, g) for t, g in zip(tree, guide)]
+  return tree
+
+
+class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
+  """Tunix checkpoint manager that reads and writes MaxText's on-disk layout.
+
+  Tunix stores `nnx.state(model)` verbatim under a `model_params` item. MaxText stores the Linen
+  layout under `items`: weights in `params/params`, the optimizer in `opt_state` and `step`, and
+  NNX-only state such as rngs in `nnx_aux`. Converting on the way out keeps post-training
+  checkpoints loadable by pre-training and everything else that reads MaxText checkpoints.
+
+  Checkpoints written before this existed are still in the Tunix layout, so `maybe_restore`
+  falls back to the base class for those.
+  """
+
+  def __init__(self, root_directory=None, options=None, extra_item_handlers=None):
+    """Initializes the manager.
+
+    Args:
+      root_directory: Directory to write checkpoints to. None disables checkpointing.
+      options: Orbax `CheckpointManagerOptions`.
+      extra_item_handlers: Handlers for items a subclass saves besides the state.
+    """
+    super().__init__(root_directory=root_directory, options=options)
+    # pylint: disable=access-member-before-definition
+    if self._checkpoint_manager is not None:
+      directory = self._checkpoint_manager.directory
+      options = options or getattr(self._checkpoint_manager, "options", None)
+      # Pathways only supports the persistence APIs, so drop ocdbt/zarr3 there as Tunix does.
+      pathways = "proxy" in os.getenv("JAX_PLATFORMS", "")
+
+      def pytree_handler():
+        return ocp.PyTreeCheckpointHandler(use_ocdbt=not pathways, use_zarr3=not pathways)
+
+      handlers = {
+          _ITEM_NAME: pytree_handler(),
+          # Tunix's item names stay registered so `maybe_restore` can fall back to checkpoints
+          # written before the layout change.
+          **{name: pytree_handler() for name in _TUNIX_ITEM_NAMES},
+          "custom_metadata": ocp.JsonCheckpointHandler(),
+          **(extra_item_handlers or {}),
+      }
+      self._checkpoint_manager.close()
+      self._checkpoint_manager = ocp.CheckpointManager(
+          directory,
+          item_names=tuple(handlers),
+          item_handlers=handlers,
+          options=options,
+      )
+    # pylint: enable=access-member-before-definition
+
+  def wait_until_finished(self):
+    """Blocks until outstanding async checkpoint writes are complete."""
+    if self._checkpoint_manager is not None:
+      self._checkpoint_manager.wait_until_finished()
+
+  def model_to_checkpoint(self, model: nnx.Module) -> nnx.Module:
+    """Returns the module whose weights belong in the checkpoint.
+
+    Args:
+      model: The model the trainer holds.
+
+    Returns:
+      The module to checkpoint. Subclasses override this when it is not the trainer's model.
+    """
+    return unwrap_model(model)
+
+  def _train_state(self, model, optimizer):
+    """Returns the `{model, optimizer}` state to checkpoint.
+
+    Args:
+      model: The model the trainer holds.
+      optimizer: The trainer's optimizer, or None to checkpoint weights only.
+
+    Returns:
+      An `nnx.State` shaped like the one pre-training checkpoints.
+    """
+    return nnx.state(train_state_nnx.TrainStateNNX(self.model_to_checkpoint(model), optimizer))
+
+  def _extra_save_args(self, step):
+    """Returns save args for items a subclass stores besides the state.
+
+    Args:
+      step: The step being saved.
+
+    Returns:
+      A dict of item name to Orbax save args. Empty by default.
+    """
+    del step
+    return {}
+
+  def save(
+      self,
+      step: int,
+      model: nnx.Module,
+      optimizer: nnx.Optimizer | None = None,
+      save_only_lora_params: bool = False,
+      force: bool = False,
+      custom_metadata: dict[str, Any] | None = None,
+  ) -> bool:
+    """Saves the model and optimizer in MaxText's on-disk layout.
+
+    Args:
+      step: The step to save at.
+      model: The model the trainer holds.
+      optimizer: The trainer's optimizer, or None to save weights only.
+      save_only_lora_params: Whether to save only the LoRA params.
+      force: Whether to save regardless of the save decision policy.
+      custom_metadata: Metadata to store with the checkpoint.
+
+    Returns:
+      Whether a checkpoint was written.
+    """
+    if self._checkpoint_manager is None:
+      return False
+    if not force and not self._checkpoint_manager.should_save(step):
+      return False
+
+    state = self._train_state(model, optimizer)
+    if save_only_lora_params:
+      state = nnx.split_state(state, nnx.LoRAParam, ...)[0]
+    items = train_state_nnx.to_checkpoint_dict(state)
+    if self.model_to_checkpoint(model) is not model and "opt_state" in items:
+      items["opt_state"] = _drop_adapter_level(items["opt_state"])
+    jax.block_until_ready(items)
+
+    save_args = {
+        _ITEM_NAME: ocp.args.PyTreeSave(item=items, save_args=jax.tree.map(lambda _: ocp.SaveArgs(), items)),
+        **self._extra_save_args(step),
+    }
+    saved = self._checkpoint_manager.save(
+        step,
+        args=ocp.args.Composite(**save_args),
+        custom_metadata=custom_metadata or {},
+        force=force,
+    )
+    if saved:
+      max_logging.log(f"Saved post-training checkpoint at step {step} in MaxText's on-disk layout")
+    return saved
+
+  def maybe_restore(
+      self,
+      model: nnx.Module,
+      optimizer: nnx.Optimizer | None = None,
+      step: int | None = None,
+      restore_only_lora_params: bool = False,
+  ) -> tuple[int, dict[str, Any]]:
+    """Restores the model and optimizer in place from the latest checkpoint.
+
+    Args:
+      model: The model to restore into.
+      optimizer: The optimizer to restore into, or None to skip it.
+      step: The step to restore from. Defaults to the latest.
+      restore_only_lora_params: Whether to restore only the LoRA params.
+
+    Returns:
+      A tuple of the restored step (0 if there is no checkpoint) and its custom metadata.
+    """
+    if self._checkpoint_manager is None:
+      return 0, {}
+    if step is None:
+      step = self._checkpoint_manager.latest_step()
+      if step is None:
+        return 0, {}
+
+    metadata = self._checkpoint_manager.metadata(step)
+    if _ITEM_NAME not in metadata.item_metadata:
+      max_logging.log(f"Step {step} predates MaxText-layout post-training checkpoints; restoring the Tunix layout")
+      return super().maybe_restore(model, optimizer, step=step, restore_only_lora_params=restore_only_lora_params)
+
+    state = self._train_state(model, optimizer)
+    target = train_state_nnx.to_checkpoint_dict(state)
+    opt_state_guide = target.get("opt_state")
+    is_wrapped = self.model_to_checkpoint(model) is not model
+    if is_wrapped and opt_state_guide is not None:
+      target["opt_state"] = _drop_adapter_level(opt_state_guide)
+
+    restored = self._checkpoint_manager.restore(
+        step,
+        args=ocp.args.Composite(
+            **{
+                _ITEM_NAME: ocp.args.PyTreeRestore(
+                    item=target,
+                    restore_args=ocp.checkpoint_utils.construct_restore_args(target),
+                )
+            }
+        ),
+    )
+
+    restored_items = dict(restored[_ITEM_NAME])
+    if is_wrapped and opt_state_guide is not None and "opt_state" in restored_items:
+      restored_items["opt_state"] = _add_adapter_level(restored_items["opt_state"], opt_state_guide)
+    new_state = checkpointing.linen_items_to_nnx(restored_items, state)
+    nnx.update(self.model_to_checkpoint(model), new_state["model"])
+    if optimizer is not None and "optimizer" in new_state:
+      nnx.update(optimizer, new_state["optimizer"])
+
+    max_logging.log(f"Restored post-training checkpoint from step {step}")
+    return step, (metadata.custom_metadata if metadata else {}) or {}
+
+
+def install(trainer, checkpoint_dir: str) -> None:
+  """Replaces a Tunix trainer's checkpoint manager with the MaxText-layout one and restores.
+
+  `PeftTrainer.__init__` builds its own manager and restores from it, so callers pass a
+  `checkpoint_root_directory` of None and call this straight afterwards instead.
+
+  Args:
+    trainer: A Tunix `PeftTrainer` or subclass.
+    checkpoint_dir: Directory to read and write checkpoints in.
+  """
+  if trainer.checkpoint_manager is not None:
+    trainer.checkpoint_manager.close()
+
+  trainer.checkpoint_manager = MaxTextLayoutCheckpointManager(
+      root_directory=checkpoint_dir,
+      options=trainer.config.checkpointing_options,
+  )
+  # pylint: disable=protected-access
+  trainer._train_steps, trainer._restored_custom_metadata = trainer.checkpoint_manager.maybe_restore(
+      trainer.model,
+      trainer.optimizer,
+      restore_only_lora_params=getattr(trainer, "_lora_enabled", False),
+  )
+  trainer._iter_steps = trainer._train_steps * trainer.config.get_with_default("gradient_accumulation_steps", 1)
+  # pylint: enable=protected-access

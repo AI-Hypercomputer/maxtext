@@ -839,5 +839,85 @@ class TestMuonLogic(unittest.TestCase):
       self.assertEqual(kwargs["ns_coeffs"], (3.4445, -4.7750, 2.0315))
 
 
+class AddGradientClippingTest(parameterized.TestCase):
+  """Clipping must stay identical to the chained form while leaving the state tree alone."""
+
+  THRESHOLD = 1.0
+
+  def _params(self):
+    return {"w": jnp.array([3.0, 4.0]), "b": jnp.array([12.0])}
+
+  def _grads(self, scale):
+    # Global norm of [3, 4, 12] is 13, so scale=1.0 is well over the threshold.
+    return jax.tree.map(lambda x: x * scale, self._params())
+
+  @parameterized.named_parameters(("over_threshold", 1.0), ("under_threshold", 0.01))
+  def test_updates_match_the_chained_form(self, scale):
+    params, grads = self._params(), self._grads(scale)
+
+    chained = optax.chain(optax.clip_by_global_norm(self.THRESHOLD), optax.adamw(1e-2))
+    chained_updates, _ = chained.update(grads, chained.init(params), params)
+
+    inline = optimizers.add_gradient_clipping(optax.adamw(1e-2), self.THRESHOLD)
+    inline_updates, _ = inline.update(grads, inline.init(params), params)
+
+    jax.tree.map(lambda a, b: self.assertTrue(jnp.allclose(a, b), f"{a} != {b}"), chained_updates, inline_updates)
+
+  def test_gradients_over_the_threshold_are_clipped(self):
+    """Guards against the wrapper quietly becoming a passthrough."""
+    params, grads = self._params(), self._grads(1.0)
+
+    inline = optimizers.add_gradient_clipping(optax.sgd(1.0), self.THRESHOLD)
+    inline_updates, _ = inline.update(grads, inline.init(params), params)
+    unclipped = optax.sgd(1.0)
+    unclipped_updates, _ = unclipped.update(grads, unclipped.init(params), params)
+
+    inline_norm = optax.tree.norm(inline_updates)
+    self.assertAlmostEqual(float(inline_norm), self.THRESHOLD, places=5)
+    self.assertGreater(float(optax.tree.norm(unclipped_updates)), float(inline_norm))
+
+  def test_state_tree_matches_the_unclipped_optimizer(self):
+    """A checkpointed opt_state must not gain a level from clipping.
+
+    Pre-training clips in its train step, so its optimizer state is the bare tx state. A
+    post-training checkpoint one chain level deeper cannot be resumed by it.
+    """
+    params = self._params()
+    inner = optax.adamw(1e-2)
+
+    bare = jax.tree_util.tree_structure(inner.init(params))
+    inline = jax.tree_util.tree_structure(optimizers.add_gradient_clipping(inner, self.THRESHOLD).init(params))
+    chained = jax.tree_util.tree_structure(optax.chain(optax.clip_by_global_norm(self.THRESHOLD), inner).init(params))
+
+    self.assertEqual(bare, inline)
+    self.assertNotEqual(bare, chained)
+
+  def test_extra_args_reach_the_inner_optimizer(self):
+    """`get_optimizer` can return a transform taking extra args, as skip_step_on_spikes does."""
+    params, grads = self._params(), self._grads(1.0)
+    seen = {}
+
+    def update_fn(updates, state, params=None, **extra_args):
+      del params
+      seen.update(extra_args)
+      return updates, state
+
+    inner = optax.GradientTransformationExtraArgs(lambda p: optax.EmptyState(), update_fn)
+    wrapped = optimizers.add_gradient_clipping(inner, self.THRESHOLD)
+    wrapped.update(grads, wrapped.init(params), params, loss=jnp.array(1.0))
+
+    self.assertEqual(list(seen), ["loss"])
+
+  def test_clipping_composes_with_skip_step_on_spikes(self):
+    """get_optimizer can return a spike-skipping transform, which takes loss/grad_norm."""
+    params, grads = self._params(), self._grads(1.0)
+
+    inner = optimizers.skip_step_on_spikes(optax.adamw(1e-2), interval=4, scaling_factor=2.0)
+    wrapped = optimizers.add_gradient_clipping(inner, self.THRESHOLD)
+    updates, _ = wrapped.update(grads, wrapped.init(params), params, loss=jnp.array(1.0), grad_norm=jnp.array(1.0))
+
+    self.assertEqual(jax.tree_util.tree_structure(updates), jax.tree_util.tree_structure(params))
+
+
 if __name__ == "__main__":
   unittest.main()

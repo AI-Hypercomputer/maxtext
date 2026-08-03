@@ -30,6 +30,7 @@ from math_verify import parse
 
 from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_template_parser
 
+from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.rl.math_verify_pool import math_verify_pool, verify_math_worker
 from maxtext.utils import max_logging
 
@@ -614,18 +615,15 @@ def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
   # Grad clipping to prevent large gradients. We find this
   # important to keep KL divergence in check.
   def make_optimizer(learning_rate):
-    transforms = []
-    if tmvp_config.gradient_clipping_threshold > 0:
-      transforms.append(optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold))
-    transforms.append(
-        optax.adamw(
-            learning_rate=learning_rate,
-            b1=tmvp_config.adam_b1,
-            b2=tmvp_config.adam_b2,
-            weight_decay=tmvp_config.adam_weight_decay,
-        )
+    opt = optax.adamw(
+        learning_rate=learning_rate,
+        b1=tmvp_config.adam_b1,
+        b2=tmvp_config.adam_b2,
+        weight_decay=tmvp_config.adam_weight_decay,
     )
-    return optax.chain(*transforms)
+    if tmvp_config.gradient_clipping_threshold > 0:
+      opt = optimizers.add_gradient_clipping(opt, tmvp_config.gradient_clipping_threshold)
+    return opt
 
   # Wrap the entire optimizer (including gradient clipping) with
   # inject_hyperparams so opt_state.hyperparams['learning_rate'] is at the
