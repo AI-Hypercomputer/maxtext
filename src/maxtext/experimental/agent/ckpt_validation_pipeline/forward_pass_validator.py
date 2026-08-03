@@ -148,111 +148,82 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
   _original_restore = ocp.Checkpointer.restore
 
   def _monkeypatched_restore(self, directory, item=None, transforms=None, restore_args=None, **kwargs):
-    # pylint: disable=too-many-nested-blocks
-    def flatten_layers(tree):
-      if isinstance(tree, dict) or hasattr(tree, "items"):
-        new_tree = {}
-        for k, v in tree.items():
-          if str(k).endswith("layers") and (isinstance(v, dict) or hasattr(v, "items")):
-            for sub_k, sub_v in v.items():
-              if str(sub_k).isdigit():
-                new_tree[f"{k}_{sub_k}"] = flatten_layers(sub_v)
-              else:
-                if k not in new_tree:
-                  new_tree[k] = {}
-                new_tree[k][sub_k] = flatten_layers(sub_v)
-          else:
-            new_tree[k] = flatten_layers(v)
-        return new_tree
-      if isinstance(tree, (list, tuple)):
-        return type(tree)(flatten_layers(x) for x in tree)
-      return tree
+    def _rename_nnx_linen_keys(tree, to_linen: bool):
+      """Recursively map parameter key names between NNX and Linen conventions.
 
-    def unflatten_layers(tree, template_tree):
-      if isinstance(tree, dict) or hasattr(tree, "items"):
-        new_tree = {}
-        orig_keys = {}
-        if isinstance(template_tree, dict) or hasattr(template_tree, "items"):
-          for orig_k in (template_tree.keys() if hasattr(template_tree, "keys") else []):
-            orig_keys[str(orig_k)] = orig_k
-            if str(orig_k) == "pre_self_attention_layer_norm":
-              orig_keys["input_layernorm"] = orig_k
-            elif str(orig_k) == "post_self_attention_layer_norm":
-              orig_keys["post_attention_layernorm"] = orig_k
-            elif str(orig_k) == "self_attention":
-              orig_keys["attention"] = orig_k
-            elif str(orig_k) == "input_layernorm":
-              orig_keys["pre_self_attention_layer_norm"] = orig_k
-            elif str(orig_k) == "post_attention_layernorm":
-              orig_keys["post_self_attention_layer_norm"] = orig_k
-            elif str(orig_k) == "attention":
-              orig_keys["self_attention"] = orig_k
+      Linen checkpoints on disk (e.g. Qwen3-8B unscanned) store weights under:
+        - input_layernorm
+        - post_attention_layernorm
+        - attention
 
-        for k, v in tree.items():
-          m = re.search(r"(.*layers)_(\d+)$", str(k))
-          if m:
-            layer_name, idx_str = m.groups()
-            orig_layer_name = orig_keys.get(layer_name, layer_name)
-            if orig_layer_name not in new_tree:
-              new_tree[orig_layer_name] = {}
-            orig_layer = None
-            if (isinstance(template_tree, dict) or hasattr(template_tree, "items")) and orig_layer_name in template_tree:
-              orig_layer = template_tree[orig_layer_name]
-            orig_idx = int(idx_str) if (orig_layer is not None and int(idx_str) in orig_layer) else idx_str
-            new_tree[orig_layer_name][orig_idx] = unflatten_layers(
-                v, orig_layer[orig_idx] if (orig_layer is not None and orig_idx in orig_layer) else None
-            )
-          else:
-            orig_k = orig_keys.get(str(k), k)
-            orig_v_template = (
-                template_tree[orig_k]
-                if ((isinstance(template_tree, dict) or hasattr(template_tree, "items")) and orig_k in template_tree)
-                else None
-            )
-            new_tree[orig_k] = unflatten_layers(v, orig_v_template)
+      NNX Qwen3DecoderLayer (inheriting from AttentionWithNorm) expects:
+        - pre_self_attention_layer_norm
+        - post_self_attention_layer_norm
+        - self_attention
 
-        if template_tree is not None:
-          try:
-            return type(template_tree)(new_tree)
-          except Exception:  # pylint: disable=broad-exception-caught
-            return new_tree
-        return new_tree
+      By converting `item` and `restore_args` to Linen names before Orbax restore,
+      we allow Orbax to match and load every parameter array from disk.
+      By converting the restored dictionary back to NNX names before returning,
+      we ensure nnx.update(model, checkpoint) overwrites every NNX model attribute
+      with its loaded checkpoint array, preventing deleted array runtime errors.
+      """
+      if to_linen:
+        key_map = {
+            "pre_self_attention_layer_norm": "input_layernorm",
+            "post_self_attention_layer_norm": "post_attention_layernorm",
+            "self_attention": "attention",
+        }
+      else:
+        key_map = {
+            "input_layernorm": "pre_self_attention_layer_norm",
+            "post_attention_layernorm": "post_self_attention_layer_norm",
+            "attention": "self_attention",
+        }
 
-      if isinstance(tree, (list, tuple)):
-        return type(tree)(
-            unflatten_layers(x, template_tree[i] if template_tree and i < len(template_tree) else None)
-            for i, x in enumerate(tree)
-        )
-      return tree
-
-    def rename_keys_for_linen(tree):
+      # Recursively traverse dictionaries or dictionary-like mappings (including nnx.State)
       if isinstance(tree, dict) or hasattr(tree, "items"):
         new_tree = {}
         for k, v in tree.items():
           k_str = str(k)
-          if k_str == "pre_self_attention_layer_norm":
-            new_k = "input_layernorm"
-          elif k_str == "post_self_attention_layer_norm":
-            new_k = "post_attention_layernorm"
-          elif k_str == "self_attention":
-            new_k = "attention"
-          else:
-            new_k = k
-          new_tree[new_k] = rename_keys_for_linen(v)
-        return new_tree
+          # Replace key if it matches our mapping; otherwise keep original key name (e.g. layers_0)
+          new_k = key_map.get(k_str, k)
+          new_tree[new_k] = _rename_nnx_linen_keys(v, to_linen=to_linen)
+        try:
+          return type(tree)(new_tree)
+        except Exception:  # pylint: disable=broad-exception-caught
+          return new_tree
+
+      # Recursively traverse lists or tuples (e.g. sequences of layers or restore args)
       if isinstance(tree, (list, tuple)):
-        return type(tree)(rename_keys_for_linen(x) for x in tree)
+        return type(tree)(_rename_nnx_linen_keys(x, to_linen=to_linen) for x in tree)
+
+      # Return leaf arrays / primitives unmodified
       return tree
 
+    # When restoring an NNX model from a Linen checkpoint without explicit transforms,
+    # translate key names to Linen conventions for Orbax lookup, then translate the
+    # restored weights back to NNX conventions.
     if item is not None and restore_args is not None and not transforms:
-      flat_item = rename_keys_for_linen(flatten_layers(item))
-      flat_restore_args = rename_keys_for_linen(flatten_layers(restore_args))
-      restored_flat = _original_restore(
-          self, directory, item=flat_item, transforms=transforms, restore_args=flat_restore_args, **kwargs
+      linen_item = _rename_nnx_linen_keys(item, to_linen=True)
+      linen_restore_args = _rename_nnx_linen_keys(restore_args, to_linen=True)
+      restored_linen = _original_restore(
+          self,
+          directory,
+          item=linen_item,
+          transforms=transforms,
+          restore_args=linen_restore_args,
+          **kwargs,
       )
-      return unflatten_layers(restored_flat, item)
+      return _rename_nnx_linen_keys(restored_linen, to_linen=False)
 
-    return _original_restore(self, directory, item=item, transforms=transforms, restore_args=restore_args, **kwargs)
+    return _original_restore(
+        self,
+        directory,
+        item=item,
+        transforms=transforms,
+        restore_args=restore_args,
+        **kwargs,
+    )
 
   ocp.Checkpointer.restore = _monkeypatched_restore
 
