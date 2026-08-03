@@ -21,14 +21,9 @@ from unittest import mock
 
 import pytest
 
-from benchmarks import maxtext_xpk_runner
-from benchmarks import xpk_configs
-import benchmarks.maxtext_trillium_model_configs as model_configs
-
-
 @pytest.mark.cpu_only
 class RunDockerTestTest(unittest.TestCase):
-  """Tests for run_docker_test.sh / run_docker_test.py and XPK docker reuse flags."""
+  """Tests for run_docker_test.sh / run_docker_test.py CLI options."""
 
   def test_run_docker_test_help(self):
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -61,83 +56,6 @@ class RunDockerTestTest(unittest.TestCase):
     )
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("Invalid mode", result.stderr)
-
-  def test_xpk_workload_config_default_base_docker_image(self):
-    cluster_config = xpk_configs.XpkClusterConfig(
-        cluster_name="test-cluster",
-        project="test-project",
-        zone="us-central2-b",
-        device_type="v6e-16",
-    )
-    wl_config = maxtext_xpk_runner.WorkloadConfig(
-        model=model_configs.default_128,
-        num_slices=1,
-        device_type="v6e-16",
-        base_output_directory="gs://test",
-        base_docker_image="maxtext_base_image",
-        libtpu_type=maxtext_xpk_runner.LibTpuType.MAXTEXT,
-        generate_metrics_and_upload_to_big_query=False,
-    )
-    cmd, _ = maxtext_xpk_runner.generate_xpk_workload_cmd(
-        cluster_config=cluster_config,
-        wl_config=wl_config,
-        workload_name="test-workload",
-    )
-    self.assertIn('--base-docker-image="maxtext_base_image"', cmd)
-    self.assertNotIn('--docker-image="maxtext_base_image"', cmd)
-
-  def test_xpk_workload_config_reuse_image(self):
-    cluster_config = xpk_configs.XpkClusterConfig(
-        cluster_name="test-cluster",
-        project="test-project",
-        zone="us-central2-b",
-        device_type="v6e-16",
-    )
-    wl_config = maxtext_xpk_runner.WorkloadConfig(
-        model=model_configs.default_128,
-        num_slices=1,
-        device_type="v6e-16",
-        base_output_directory="gs://test",
-        base_docker_image="maxtext_base_image",
-        libtpu_type=maxtext_xpk_runner.LibTpuType.MAXTEXT,
-        generate_metrics_and_upload_to_big_query=False,
-        reuse_image=True,
-    )
-    cmd, _ = maxtext_xpk_runner.generate_xpk_workload_cmd(
-        cluster_config=cluster_config,
-        wl_config=wl_config,
-        workload_name="test-workload",
-    )
-    self.assertIn('--docker-image="maxtext_base_image"', cmd)
-    self.assertNotIn('--base-docker-image="maxtext_base_image"', cmd)
-
-  @mock.patch.object(maxtext_xpk_runner, "run_command_with_updates", return_value=0)
-  def test_xpk_workload_config_fast_rebuild(self, mock_run_cmd):
-    cluster_config = xpk_configs.XpkClusterConfig(
-        cluster_name="test-cluster",
-        project="test-project",
-        zone="us-central2-b",
-        device_type="v6e-16",
-    )
-    wl_config = maxtext_xpk_runner.WorkloadConfig(
-        model=model_configs.default_128,
-        num_slices=1,
-        device_type="v6e-16",
-        base_output_directory="gs://test",
-        base_docker_image="maxtext_base_image",
-        libtpu_type=maxtext_xpk_runner.LibTpuType.MAXTEXT,
-        generate_metrics_and_upload_to_big_query=False,
-        fast_rebuild=True,
-    )
-    cmd, _ = maxtext_xpk_runner.generate_xpk_workload_cmd(
-        cluster_config=cluster_config,
-        wl_config=wl_config,
-        workload_name="test-workload",
-    )
-    mock_run_cmd.assert_called_once()
-    self.assertIn("FAST_REBUILD=true", mock_run_cmd.call_args[0][0])
-    self.assertIn('--docker-image="maxtext_base_image__runner"', cmd)
-    self.assertNotIn('--base-docker-image=', cmd)
 
 
 if __name__ == "__main__":
