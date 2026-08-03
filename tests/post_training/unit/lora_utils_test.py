@@ -96,7 +96,7 @@ class LoraUtilsTest(unittest.TestCase):
     self.assertEqual(
         path,
         "decoder/((scanned_blocks|layers_remainder)/)?layers.*/.*"
-        "(self_attention/(query|key|value|out)|mlp/.*(wi_0|wi_1|wo|shared_experts/(wi_0|wi_1|wo)))",
+        "(self_attention/(query|key|value|out)|mlp/.*(wi_0|wi_1|wo))",
     )
 
     mock_config.model_name = "unknown_model"
@@ -292,6 +292,7 @@ class LoraUtilsTest(unittest.TestCase):
             "lora_restore_path": "some/path",
             "lora_rank": 4,
             "lora_alpha": 8.0,
+            "lora_module_path": ".*mlp/wi_.*",
         },
         scan_layers=False,
     )
@@ -300,8 +301,8 @@ class LoraUtilsTest(unittest.TestCase):
 
     restored_state = nnx.state(model, nnx.LoRAParam)
 
-    with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=restored_state) as mock_restore:
-      with mock.patch("flax.nnx.update") as mock_update:
+    with mock.patch("maxtext.utils.lora_utils.sync_lora_metadata"):
+      with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=restored_state) as mock_restore:
         lora_utils.restore_lora_from_path(model, cfg)
         mock_restore.assert_called_once()
         args, kwargs = mock_restore.call_args
@@ -311,7 +312,6 @@ class LoraUtilsTest(unittest.TestCase):
           self.assertTrue(kwargs["partial_restore"])
         elif "args" in kwargs and hasattr(kwargs["args"], "partial_restore"):
           self.assertTrue(kwargs["args"].partial_restore)
-        mock_update.assert_called_once()
 
   def test_sync_lora_metadata_default_syncs(self):
     """Test that default lora rank/alpha are successfully synced from checkpoint metadata."""
@@ -420,8 +420,9 @@ class LoraUtilsTest(unittest.TestCase):
 
       # Use save_checkpoint wrapper with a simple state
       dummy_state = {"weight": jnp.array([1.0, 2.0])}
-      checkpointing.save_checkpoint(manager, step=0, state=dummy_state, config=cfg_save)
-      manager.wait_until_finished()
+      dummy_iterator = checkpointing.PlaceHolderDataIterator(cfg_save, None)
+      checkpointing.save_checkpoint(manager, step=0, state=dummy_state, config=cfg_save, data_iterator=dummy_iterator)
+      checkpointing.wait_until_finished(manager)
 
       # Now verify that the saved checkpoint contains metadata on disk
       checkpoint_dir = epath.Path(tmpdir) / "0"

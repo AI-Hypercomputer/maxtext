@@ -19,8 +19,57 @@ It first ensures 'uv' is installed and then uses it to install the packages list
 """
 
 import os
+import shutil
 import subprocess
 import sys
+
+
+def ensure_cpp20_compiler():
+  """Ensures GCC/G++ >= 11 (or C++20 compatible compiler) is available for building vLLM.
+
+  If no suitable C++20 compiler is found in PATH, prints installation instructions
+  and raises a RuntimeError.
+  """
+  if sys.platform != "linux":
+    return
+
+  # 1. Check default 'gcc'
+  if shutil.which("gcc"):
+    try:
+      res = subprocess.run(["gcc", "-dumpversion"], capture_output=True, text=True, check=False)
+      major_ver = int(res.stdout.strip().split(".")[0])
+      if major_ver >= 11:
+        return
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+  # 2. Check for gcc-12 / g++-12 or gcc-11 / g++-11 in PATH
+  if shutil.which("gcc-12") and shutil.which("g++-12"):
+    os.environ["CC"] = "gcc-12"
+    os.environ["CXX"] = "g++-12"
+    print("Configured C++20 compiler: CC=gcc-12 CXX=g++-12")
+    return
+  if shutil.which("gcc-11") and shutil.which("g++-11"):
+    os.environ["CC"] = "gcc-11"
+    os.environ["CXX"] = "g++-11"
+    print("Configured C++20 compiler: CC=gcc-11 CXX=g++-11")
+    return
+
+  # 3. No C++20 compiler found: raise error with copy-paste installation instructions
+  msg = (
+      "\n========================================================================\n"
+      "ERROR: A C++20 compatible compiler (GCC/G++ >= 11) is required to build\n"
+      "vLLM for post-training inference, but none was found in PATH.\n\n"
+      "Please install GCC 11+ or GCC 12 using your system package manager:\n\n"
+      "  - Debian/Ubuntu:\n"
+      "      sudo apt-get update && sudo apt-get install -y gcc-12 g++-12 build-essential cmake ninja-build\n"
+      "      export CC=gcc-12 CXX=g++-12\n\n"
+      "  - RHEL/Fedora/CentOS:\n"
+      "      sudo dnf install -y gcc-c++ cmake ninja-build\n\n"
+      "After installing, re-run this script.\n"
+      "========================================================================\n"
+  )
+  raise RuntimeError(msg)
 
 
 def main():
@@ -30,6 +79,7 @@ def main():
   """
   os.environ["VLLM_TARGET_DEVICE"] = "tpu"
   os.environ["UV_TORCH_BACKEND"] = "cpu"
+  ensure_cpp20_compiler()
 
   current_dir = os.path.dirname(os.path.abspath(__file__))
   repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
@@ -47,11 +97,11 @@ def main():
     sys.exit(1)
 
   github_deps_command = [
-      sys.executable,  # Use the current Python executable's pip to ensure the correct environment
-      "-m",
       "uv",
       "pip",
       "install",
+      "--python",
+      sys.executable,
       "-r",
       str(github_deps_path),
       "--no-deps",
@@ -59,11 +109,11 @@ def main():
   ]
 
   local_vllm_install_command = [
-      sys.executable,  # Use the current Python executable's pip to ensure the correct environment
-      "-m",
       "uv",
       "pip",
       "install",
+      "--python",
+      sys.executable,
       f"{repo_root}/maxtext/integration/vllm",  # MaxText on vllm installations
       "--no-deps",
   ]

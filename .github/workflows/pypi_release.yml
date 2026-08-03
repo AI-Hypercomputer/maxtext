@@ -38,7 +38,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write  # required for PyPI Trusted Publishing (OIDC)
 
 jobs:
   handle_result:
@@ -48,11 +47,12 @@ jobs:
     if: github.event_name == 'repository_dispatch'
     steps:
       - name: Report DAG result
+        env:
+          STATE: ${{ github.event.client_payload.state }}
+          DAG_ID: ${{ github.event.client_payload.dag_id }}
+          DAG_RUN_ID: ${{ github.event.client_payload.dag_run_id }}
+          SHA: ${{ github.event.client_payload.sha }}
         run: |
-          STATE="${{ github.event.client_payload.state }}"
-          DAG_ID="${{ github.event.client_payload.dag_id }}"
-          DAG_RUN_ID="${{ github.event.client_payload.dag_run_id }}"
-          SHA="${{ github.event.client_payload.sha }}"
 
           echo "================================"
           echo "DAG ID:      ${DAG_ID}"
@@ -111,13 +111,16 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     if: needs.build_maxtext_package.result == 'success' && (github.event_name == 'repository_dispatch' || inputs.publish)
+    permissions:
+      id-token: write # required for PyPI Trusted Publishing (OIDC)
+      contents: read
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
           path: dist/
       - name: Publish MaxText wheel to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist/
 
@@ -158,10 +161,15 @@ jobs:
         run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
       - name: Add tags to Docker image
         shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          IMAGE_NAME: ${{ matrix.image_name }}
+          RUN_ID_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.client_payload.github_run_id }}
+          PYPI_VERSION: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
         run: |
-          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${{ matrix.image_name }}"
-          GITHUB_RUN_ID="${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.client_payload.github_run_id }}"
+          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${IMAGE_NAME}"
+          GITHUB_RUN_ID="${RUN_ID_INPUT}"
           gcloud container images add-tag \
             "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
-            "${SOURCE_IMAGE}:${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}" \
+            "${SOURCE_IMAGE}:${PYPI_VERSION}" \
             --quiet

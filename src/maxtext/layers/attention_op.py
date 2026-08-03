@@ -67,8 +67,6 @@ from maxtext.kernels.attention import jax_flash_attention
 from maxtext.kernels.attention import tokamax_ring_attention
 from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha
-from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -77,6 +75,8 @@ from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec,
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
 from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
@@ -534,8 +534,6 @@ class AttentionOp(nnx.Module):
           raise ValueError("TPU Tokamax ring attention requires use_tokamax_splash=True.")
         if self.config.use_jax_splash:
           raise ValueError("TPU Tokamax ring attention requires use_jax_splash=False.")
-        if self.config.packing:
-          raise ValueError("TPU Tokamax ring attention does not support packing yet.")
         if self.attention_type != AttentionType.GLOBAL:
           raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
 
@@ -1073,6 +1071,7 @@ class AttentionOp(nnx.Module):
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
+        or (self.attention_kernel == "autoselected" and target_hardware == "cpu")
         or (self.attention_kernel == "paged")
         or (self.attention_kernel in ("vllm_rpa", "vllm_batched_rpa"))
     ):
@@ -1505,7 +1504,7 @@ class AttentionOp(nnx.Module):
         )
         return splash_kernel
 
-      head_physical_axes = logical_to_mesh_axes((HEAD,), self.mesh)[0]
+      head_physical_axes = self._logical_to_mesh_axes((HEAD,))[0]
       head_physical_axes = (head_physical_axes,) if isinstance(head_physical_axes, str) else (head_physical_axes or ())
       shard_head_size = math.prod(self.mesh.shape.get(ax, 1) for ax in head_physical_axes)
       splash_kernel = wrap_jax_splash_kernel(multi_head_mask, shard_head_size)

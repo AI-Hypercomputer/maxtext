@@ -15,9 +15,12 @@
 """Tests for NNX scan utilities."""
 
 import unittest
+from unittest import mock
 
 from flax import nnx
 import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from maxtext.layers import nnx_scan
@@ -59,6 +62,65 @@ class TestCreateScannedLayers(unittest.TestCase):
         rngs=nnx.Rngs(0),
     )
     self.assertIsNone(layers)
+
+
+@pytest.mark.cpu_only
+class TestApplyScannedLayers(unittest.TestCase):
+  """Tests for nnx_scan.apply_scanned_layers."""
+
+  def test_nonzero_param_scan_axis_round_trip(self):
+    """The scan dimension is stored at param_scan_axis and restored for application."""
+    length = 3
+    layers = nnx_scan.create_scanned_layers(
+        _LinearLayer,
+        length=length,
+        param_scan_axis=1,
+        metadata_axis_name="layers",
+        rngs=nnx.Rngs(0),
+    )
+
+    self.assertEqual(layers.kernel.value.shape, (2, length, 2))
+
+    inputs = jnp.array([1.0, -1.0])
+    kernels = jnp.moveaxis(layers.kernel.value, 1, 0)
+    expected = inputs
+    for kernel in kernels:
+      expected = expected @ kernel
+
+    actual = nnx_scan.apply_scanned_layers(
+        layers,
+        inputs,
+        length=length,
+        param_scan_axis=1,
+        apply_fn=lambda layer, carry: layer(carry),
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+    self.assertEqual(layers.kernel.value.shape, (2, length, 2))
+
+  def test_full_remat_checkpoints_scan_body_with_none_policy(self):
+    """A None policy means full remat and must not disable jax.checkpoint."""
+    layers = nnx_scan.create_scanned_layers(
+        _LinearLayer,
+        length=2,
+        param_scan_axis=1,
+        metadata_axis_name="layers",
+        rngs=nnx.Rngs(0),
+    )
+
+    with mock.patch.object(nnx_scan.jax, "checkpoint", wraps=jax.checkpoint) as checkpoint:
+      nnx_scan.apply_scanned_layers(
+          layers,
+          jnp.array([1.0, -1.0]),
+          length=2,
+          param_scan_axis=1,
+          apply_fn=lambda layer, carry: layer(carry),
+          remat=True,
+          remat_policy=None,
+      )
+
+    checkpoint.assert_called_once()
+    self.assertIsNone(checkpoint.call_args.kwargs["policy"])
 
 
 if __name__ == "__main__":

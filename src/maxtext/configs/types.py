@@ -748,6 +748,13 @@ class SplashAttention(BaseModel):
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
+  ring_scan_unroll: NonNegativeInt = Field(
+      1,
+      description=(
+          "Unroll factor for the Tokamax ring attention scan. 0 fully unrolls; values at or above the ring size are "
+          "equivalent to full unrolling. Program size and compile time grow with the factor."
+      ),
+  )
   sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
   sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
@@ -866,6 +873,10 @@ class MoEGeneral(BaseModel):
   use_ragged_sort: bool = Field(
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
+  )
+  ragged_sort_use_single_sparsecore: bool = Field(
+      False,
+      description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
   )
   use_gather_mosaic_kernel: bool = Field(
       False,
@@ -1090,11 +1101,29 @@ class HardwareAndMesh(BaseModel):
       description="Customized mesh and logical rules for evaluation.",
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
-  enable_nnx: bool = Field(True, description="Whether to use NNX for model definition.")
+  enable_nnx: bool = Field(
+      True,
+      description=(
+          "Whether to use NNX for model definition. Setting this to False selects the Linen path, "
+          "which will be deprecated in the near future."
+      ),
+  )
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
-  pure_nnx_decoder: bool = Field(True, description="Whether to enable pure NNX decoder.")
-  pure_nnx: bool = Field(True, description="Whether to enable pure NNX mode.")
+  pure_nnx_decoder: bool = Field(
+      True,
+      description=(
+          "Whether to enable pure NNX decoder. Setting this to False selects the Linen decoder, "
+          "which will be deprecated in the near future."
+      ),
+  )
+  pure_nnx: bool = Field(
+      True,
+      description=(
+          "Whether to enable pure NNX mode. Setting this to False selects the Linen path, "
+          "which will be deprecated in the near future."
+      ),
+  )
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
@@ -1126,6 +1155,10 @@ class LayoutAndSharding(BaseModel):
       "with auto sharding, megablox kernel, and EP / FSDP parallelisms.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
+  dense_fsdp_use_two_stage_all_gather: bool = Field(
+      False,
+      description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",
@@ -1599,7 +1632,8 @@ class TrainingLoop(BaseModel):
   log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush Tensorboard.")
   eval_start_step: int = Field(
       0,
-      description="Start evaluation after training step is >= eval_start_step.",
+      ge=0,
+      description="Start evaluation when training step is >= eval_start_step.",
   )
   eval_interval: int = Field(
       -1,
@@ -2034,6 +2068,10 @@ class ElasticTraining(BaseModel):
   """
 
   elastic_enabled: bool = Field(False, description="Whether to enable elastic training.")
+  elastic_backup_kind: str = Field(
+      "snapshot",
+      description=("The kind of backup to use for elastic training: 'snapshot' or 'checkpoint'."),
+  )
   elastic_timeout_seconds: int = Field(
       300,
       description=(
@@ -2518,6 +2556,82 @@ class DerivedValues(BaseModel):
 # ----------------------------------------------------------------------------
 # Helper Functions
 # ----------------------------------------------------------------------------
+
+
+def _normalize_axes(axes: Any) -> tuple[str, ...]:
+  """Normalize a logical-rule mapping value to a tuple of axis name strings.
+
+  Args:
+    axes: The right-hand side of a logical axis rule entry.  Can be a single
+      string, a list/tuple of strings, or an empty list.
+
+  Returns:
+    A (possibly empty) tuple of physical axis name strings.
+  """
+  if axes is None:
+    return ()
+  if isinstance(axes, str):
+    return (axes,)
+  if isinstance(axes, (list, tuple)):
+    return tuple(a for a in axes if isinstance(a, str))
+  return ()
+
+
+def infer_cp_axes(logical_axis_rules: list) -> tuple[str, ...]:
+  """Infer which physical mesh axis/axes serve as Context Parallelism (CP).
+
+  Scans *logical_axis_rules* for the ``activation_length`` logical axis and
+  returns the physical axis/axes it is mapped to.
+
+  Args:
+    logical_axis_rules: The list of ``[logical_name, physical_axes]`` pairs
+      (the ``logical_axis_rules`` config field).
+
+  Returns:
+    A tuple of physical axis name strings that act as CP.  Empty if the
+    ``activation_length`` logical axis is not found in the rules.
+  """
+  for rule in logical_axis_rules:
+    if rule and len(rule) >= 2 and rule[0] == "activation_length":
+      return _normalize_axes(rule[1])
+  return ()
+
+
+def infer_ep_axes(logical_axis_rules: list) -> tuple[str, ...]:
+  """Infer which physical mesh axis/axes serve as Expert Parallelism (EP).
+
+  Scans *logical_axis_rules* for the ``exp`` logical axis and returns the
+  physical axis/axes it is mapped to.
+
+  Args:
+    logical_axis_rules: The list of ``[logical_name, physical_axes]`` pairs
+      (the ``logical_axis_rules`` config field).
+
+  Returns:
+    A tuple of physical axis name strings that act as EP.  Empty if the
+    ``exp`` logical axis is not found in the rules.
+  """
+  for rule in logical_axis_rules:
+    if rule and len(rule) >= 2 and rule[0] == "exp":
+      return _normalize_axes(rule[1])
+  return ()
+
+
+def ep_enabled(config):
+  """Determine if Expert Parallelism (EP) is enabled based on the config."""
+  # Infer EP rank from logical_axis_rules and disable incompatible flags when EP rank > 1.
+  ep_axes = infer_ep_axes(config.logical_axis_rules)
+  ep_rank = 1
+  for axis_name in ep_axes:
+    ici_val = getattr(config, f"ici_{axis_name}_parallelism", 1)
+    dcn_val = getattr(config, f"dcn_{axis_name}_parallelism", 1)
+    if ici_val == -1 or dcn_val == -1:
+      ep_rank = -1
+      break
+    ep_rank *= ici_val * max(dcn_val, 1)
+  return ep_rank != 1
+
+
 def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   """Choose appropriate scales for individual dimensions based on global scale."""
   if scale == 0:
@@ -2738,9 +2852,31 @@ class MaxTextConfig(
       mesh_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule.value)
 
       # Use setattr to dynamically apply attributes, keeping code compact
-      for field in ("mesh_axes", "logical_axis_rules", "data_sharding", "context_sharding"):
+      for field in ("mesh_axes", "logical_axis_rules", "data_sharding"):
         if field in mesh_config:
           setattr(self, field, mesh_config[field])
+
+      # Infer context_sharding from logical_axis_rules when using custom mesh rules.
+      # Falls back to the default ("context") when no activation_length rule is found.
+      cp_axes = infer_cp_axes(self.logical_axis_rules)
+      if cp_axes:
+        self.context_sharding = cp_axes[0]
+
+    # Skip EP check if logical rule is overridden by user. Otherwise, ensure that EP rank is 1 when EP is disabled.
+    if not self.override_logical_axis_rules:
+      ep_is_enabled = ep_enabled(self)
+      if not ep_is_enabled:
+        _ep_disabled_flags = {
+            "use_random_routing": False,
+            "use_ragged_sort": False,
+            "ragged_buffer_factor": -1.0,
+            "use_ring_of_experts": False,
+            "num_moe_emb_chunks": 0,
+        }
+        for flag_name, disabled_value in _ep_disabled_flags.items():
+          current = getattr(self, flag_name)
+          if current != disabled_value:
+            raise ValueError(f"When EP rank is 1, {flag_name} must be {disabled_value} (was {current}).")
 
     # Handle eval custom mesh and rule
     if self.custom_mesh_and_rule_for_eval is CustomRule.DEFAULT:
@@ -2888,6 +3024,24 @@ class MaxTextConfig(
             "pure_nnx_decoder=True. The bridged Linen decoder (pure_nnx_decoder=False) is invisible to Qwix, "
             "so quantization (and weight sparsity) would silently have no effect. Set pure_nnx_decoder=True."
         )
+
+    # TODO: Remove this block once the Linen code path and the enable_nnx, pure_nnx and pure_nnx_decoder flags are deleted.
+    linen_flags = [
+        name
+        for name, value in (
+            ("enable_nnx", self.enable_nnx),
+            ("pure_nnx", self.pure_nnx),
+            ("pure_nnx_decoder", self.pure_nnx_decoder),
+        )
+        if not value
+    ]
+    if linen_flags:
+      logger.warning("=" * 80)
+      logger.warning("MAXTEXT DEPRECATION NOTICE: you are running on the Linen code path.")
+      logger.warning("Selected by: %s", ", ".join(f"{name}=False" for name in linen_flags))
+      logger.warning("Linen will be deprecated in the near future and removed after that.")
+      logger.warning("Plan to migrate to NNX: leave enable_nnx, pure_nnx and pure_nnx_decoder at their default of True.")
+      logger.warning("=" * 80)
 
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
@@ -3226,6 +3380,10 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
+      raise ValueError(
+          "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."
+      )
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
           "Colocated python data input is only supported with Pathways (single"
@@ -3277,8 +3435,6 @@ class MaxTextConfig(
     if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
       raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
     if self.mla_qk_head_chunk_size > 0:
-      if self.attention != "dot_product":
-        raise ValueError("`mla_qk_head_chunk_size` is only supported with `dot_product` attention.")
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(
             f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
@@ -3449,8 +3605,6 @@ class MaxTextConfig(
         raise ValueError("TPU ring context parallelism requires use_jax_splash=False.")
       if self.attention_type != "global":
         raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
-      if self.packing:
-        raise ValueError("TPU Tokamax ring attention does not support packing yet.")
       if self.context_parallel_load_balance:
         if context_parallel_size % 2 != 0:
           raise ValueError("TPU Tokamax ring load balancing requires an even context_parallel_size.")
@@ -3472,10 +3626,14 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention does not support QK-Clip statistics yet.")
       if self.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
+    if context_parallel_strategy != "ring" and self.ring_scan_unroll != 1:
+      raise ValueError(
+          f"ring_scan_unroll={self.ring_scan_unroll} was specified, but is only supported when "
+          "context_parallel_strategy='ring'."
+      )
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
-    # The AUTO + packing case, which training resolves to STRIPED, is not
-    # validated here because test code paths may load the same config but use a
-    # different reorder path. Training's runtime path enforces this.
+    # AUTO is resolved in training because test code paths may load the same
+    # config but use a different reorder path.
     if (
         context_parallel_size > 1
         and "gpu" not in self.hardware
@@ -3545,6 +3703,8 @@ class MaxTextConfig(
         self.hf_eval_split = "train"
       if self.eval_interval > 0 and not self.hf_eval_split:
         raise ValueError("Please specify hf_eval_split or set eval_interval to <=0.")
+      if self.grain_worker_count > 1:
+        raise ValueError("Only supports <= 1 for now, more workers results in duplicated data")
     elif self.dataset_type == DatasetType.GRAIN:
       if not self.grain_train_files and not self.grain_train_mixture_config_path:
         raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
@@ -3576,6 +3736,7 @@ class MaxTextConfig(
 
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
@@ -3735,8 +3896,10 @@ class MaxTextConfig(
 
 class RLConfig(
     LogitsAndLoss,
+    Engram,
     RematAndOffload,
     Attention,
+    Llama4Attention,
     LayoutAndSharding,
     InferenceLayout,
     InferenceGeneral,

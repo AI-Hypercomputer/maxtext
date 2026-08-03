@@ -34,6 +34,7 @@ def ring_ragged_sort(
     gather_reduce_flops_override=-1,
     gather_bytes_accessed_override=-1,
     gather_reduce_bytes_accessed_override=-1,
+    use_single_sparsecore=False,
 ):
   """Ragged-gather variant for AG-RS Expert Parallelism token routing.
 
@@ -111,6 +112,7 @@ def ring_ragged_sort(
           enforce_fallback=enforce_gather_fallback,
           flops_override=gather_flops_override,
           bytes_accessed_override=gather_bytes_accessed_override,
+          use_single_sparsecore=use_single_sparsecore,
       )
     else:
       local_buffer_size = buffer_size
@@ -134,6 +136,7 @@ def ring_ragged_sort(
           enforce_fallback=enforce_gather_fallback,
           flops_override=gather_flops_override,
           bytes_accessed_override=gather_bytes_accessed_override,
+          use_single_sparsecore=use_single_sparsecore,
       )
 
     out = (x, group_sizes_local, topk_argsort_revert_indices)
@@ -188,6 +191,7 @@ def ring_ragged_sort(
           enforce_fallback=enforce_gather_reduce_fallback,
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
+          use_single_sparsecore=use_single_sparsecore,
       )
     else:
       # Buffering: g_x has size `local_buffer_size` (packed).
@@ -213,6 +217,7 @@ def ring_ragged_sort(
           enforce_fallback=enforce_gather_reduce_fallback,
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
+          use_single_sparsecore=use_single_sparsecore,
       )
     return grad_hidden_states, None
 
@@ -235,6 +240,7 @@ def ring_ragged_unsort(
     gather_reduce_flops_override=-1,
     gather_bytes_accessed_override=-1,
     gather_reduce_bytes_accessed_override=-1,
+    use_single_sparsecore=False,
 ):
   """Dual of :func:`ring_ragged_sort`.
 
@@ -266,14 +272,27 @@ def ring_ragged_unsort(
   """
 
   @jax.custom_vjp
-  def _ring_ragged_unsort(sorted_tokens_local, group_sizes_local, topk_argsort_revert_indices, topk_weights_flat):
+  def _ring_ragged_unsort(
+      sorted_tokens_local,
+      group_sizes_local,
+      topk_argsort_revert_indices,
+      topk_weights_flat,
+  ):
     """Unsort and scatter activations."""
     return _ring_ragged_unsort_fwd(
-        sorted_tokens_local, group_sizes_local, topk_argsort_revert_indices, topk_weights_flat
+        sorted_tokens_local,
+        group_sizes_local,
+        topk_argsort_revert_indices,
+        topk_weights_flat,
     )[0]
 
   @jax.named_scope("ragged-unsort-fwd")
-  def _ring_ragged_unsort_fwd(sorted_tokens_local, group_sizes_local, topk_argsort_revert_indices, topk_weights_flat):
+  def _ring_ragged_unsort_fwd(
+      sorted_tokens_local,
+      group_sizes_local,
+      topk_argsort_revert_indices,
+      topk_weights_flat,
+  ):
     """Executes unsorting sending tokens back."""
     group_offsets = jnp.cumulative_sum(group_sizes_local, include_initial=True)
 
@@ -309,6 +328,7 @@ def ring_ragged_unsort(
           enforce_fallback=enforce_gather_reduce_fallback,
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
+          use_single_sparsecore=use_single_sparsecore,
       )
     else:
       # Shift indices so they map to the packed local buffer [0, local_num_tokens).
@@ -327,6 +347,7 @@ def ring_ragged_unsort(
           enforce_fallback=enforce_gather_reduce_fallback,
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
+          use_single_sparsecore=use_single_sparsecore,
       )
 
     res = (
@@ -385,6 +406,7 @@ def ring_ragged_unsort(
           enforce_fallback=enforce_gather_fallback,
           flops_override=gather_flops_override,
           bytes_accessed_override=gather_bytes_accessed_override,
+          use_single_sparsecore=use_single_sparsecore,
       )
       # Mask out gradients that correspond to elements outside the valid shard
       # output range.
@@ -408,6 +430,7 @@ def ring_ragged_unsort(
           enforce_fallback=enforce_gather_fallback,
           flops_override=gather_flops_override,
           bytes_accessed_override=gather_bytes_accessed_override,
+          use_single_sparsecore=use_single_sparsecore,
       )
       # Mask out gradients for elements beyond the valid limit of the local buffer.
       limit = jnp.minimum(shard_output_end - shard_output_start, buffer_size)
@@ -420,10 +443,22 @@ def ring_ragged_unsort(
   # Build the flat weights array from the routing weights.
   topk_weights_flat = topk_weights.astype(jnp.float32)
 
-  return _ring_ragged_unsort(sorted_tokens_local, group_sizes_local, topk_argsort_revert_indices, topk_weights_flat)
+  return _ring_ragged_unsort(
+      sorted_tokens_local,
+      group_sizes_local,
+      topk_argsort_revert_indices,
+      topk_weights_flat,
+  )
 
 
-def a2a_ragged_sort(inputs, sort_indices, valid_end, enforce_gather_fallback=False, enforce_gather_reduce_fallback=False):
+def a2a_ragged_sort(
+    inputs,
+    sort_indices,
+    valid_end,
+    enforce_gather_fallback=False,
+    enforce_gather_reduce_fallback=False,
+    use_single_sparsecore=False,
+):
   """Ragged-gather variant for ``local_permute``.
 
   Unlike :func:`ring_ragged_sort`, the rows valid for this shard live in
@@ -463,7 +498,13 @@ def a2a_ragged_sort(inputs, sort_indices, valid_end, enforce_gather_fallback=Fal
   def _a2a_ragged_sort_fwd(inputs, sort_indices, valid_end):
     start = jnp.int32(0)
     end = valid_end.astype(jnp.int32) if hasattr(valid_end, "astype") else jnp.int32(valid_end)
-    out = ragged_gather(inputs, sort_indices, start[None], end[None])
+    out = ragged_gather(
+        inputs,
+        sort_indices,
+        start[None],
+        end[None],
+        use_single_sparsecore=use_single_sparsecore,
+    )
     n = sort_indices.shape[0]
     valid_mask = jnp.arange(n) < end
     out = jnp.where(valid_mask[:, None], out, 0.0)
@@ -487,6 +528,7 @@ def a2a_ragged_sort(inputs, sort_indices, valid_end, enforce_gather_fallback=Fal
         valid_rows_mask=valid_rows_mask[idx_inv],
         reduce_group_size=1,
         enforce_fallback=enforce_gather_reduce_fallback,
+        use_single_sparsecore=use_single_sparsecore,
     )
     # custom_vjp must return one gradient per primal arg; valid_end is integer
     # and non-differentiable, so we return None for it.
@@ -497,7 +539,12 @@ def a2a_ragged_sort(inputs, sort_indices, valid_end, enforce_gather_fallback=Fal
 
 
 def a2a_ragged_unsort(
-    sorted_tokens, revert_indices, valid_end, enforce_gather_fallback=False, enforce_gather_reduce_fallback=False
+    sorted_tokens,
+    revert_indices,
+    valid_end,
+    enforce_gather_fallback=False,
+    enforce_gather_reduce_fallback=False,
+    use_single_sparsecore=False,
 ):
   """Dual of :func:`a2a_ragged_sort`.
 
@@ -540,6 +587,7 @@ def a2a_ragged_unsort(
         valid_rows_mask=valid_rows_mask,
         reduce_group_size=1,
         enforce_fallback=enforce_gather_reduce_fallback,
+        use_single_sparsecore=use_single_sparsecore,
     )
     res = (revert_indices, end, sorted_tokens.shape, start)
     return out, res
@@ -551,7 +599,13 @@ def a2a_ragged_unsort(
     # Because revert_indices is a permutation, build the inverse and use
     # ragged_gather to pull the per-row gradients to the right positions.
     idx_inv = jnp.argsort(revert_indices)
-    grad_sorted = ragged_gather(g_out, idx_inv, start[None], end[None])
+    grad_sorted = ragged_gather(
+        g_out,
+        idx_inv,
+        start[None],
+        end[None],
+        use_single_sparsecore=use_single_sparsecore,
+    )
     num_rows = sorted_tokens_shape[0]
     pos = jnp.arange(num_rows)
     valid = pos < end

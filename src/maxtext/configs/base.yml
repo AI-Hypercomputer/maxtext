@@ -584,6 +584,7 @@ logical_axis_rules: [
                       ['engram_dim', ['tensor']],
                       ['dense_layers', []],
                       ['moe_layers', []],
+                      ['local_layers', []],
                       ['mhc', []],
                       # ==========================================
                       # Inference(Prefill, Decode, Cache)
@@ -656,6 +657,9 @@ check_vma: False
 
 # Enable ZeRO-1 optimizer sharding over data axis
 shard_optimizer_over_data: false
+
+# when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
+dense_fsdp_use_two_stage_all_gather: false
 
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
@@ -938,7 +942,7 @@ mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inher
 # Muon optimizer parameters
 # https://github.com/google-deepmind/optax/blob/main/optax/contrib/_muon.py
 # "mu_dtype", "adam_eps" are shared by AdamW
-# "nesterov", "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" use default
+# "nesterov", "weight_decay_mask", "adaptive" use default
 muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
@@ -985,7 +989,7 @@ decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
 decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
-eval_start_step: 0 # start eval after train step is >= eval_start_step
+eval_start_step: 0 # start eval when train step is >= eval_start_step
 eval_interval: -1  # the specific number of train step between eval_step
 eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
@@ -1108,6 +1112,7 @@ sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
+ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax
 sa_use_base2_exp: true # defaults to true in Tokamax
 # local_sa_* variants apply to local (sliding window) attention layers;
@@ -1337,6 +1342,7 @@ distill_beta_schedule: "constant"
 ##### Elastic training parameters
 # Elastic training is Pathways-specific and does not work on McJAX.
 elastic_enabled: false
+elastic_backup_kind: "snapshot"
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1

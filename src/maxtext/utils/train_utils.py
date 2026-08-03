@@ -32,6 +32,7 @@ from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
+from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -243,7 +244,12 @@ def setup_train_loop(config, recorder, devices=None):
       # For NNX, the train state is wrapped in the TrainStateNNX module.
       def create_train_state_fn():
         model = _create_model_partial()
-        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+        wrt = (
+            getattr(nnx, "LoRAParam", nnx.Param)
+            if getattr(getattr(config, "lora", None), "enable_lora", False)
+            else nnx.Param
+        )
+        optimizer = nnx.Optimizer(model, tx, wrt=wrt)
         return train_state_nnx.TrainStateNNX(model, optimizer)
 
       init_state_fn = create_train_state_fn
@@ -251,7 +257,7 @@ def setup_train_loop(config, recorder, devices=None):
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
     if checkpoint_manager is not None:
-      checkpoint_step = checkpoint_manager.latest_step()
+      checkpoint_step = checkpointing.latest_step(checkpoint_manager)
       if checkpoint_step is not None:
         validate_completed_steps(checkpoint_step + 1, config.steps)
 
@@ -281,11 +287,15 @@ def setup_train_loop(config, recorder, devices=None):
     with jax.set_mesh(mesh):
       if context_parallel_size > 1 and config.context_parallel_load_balance:
 
-        # Determine load balancing reorder strategy based on whether packing is enabled
+        # Determine load balancing reorder strategy.
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
           reorder_strategy = (
               ReorderStrategy.STRIPED
-              if config.packing and context_parallel_strategy == "ring"
+              if (
+                  config.packing
+                  and context_parallel_strategy == "ring"
+                  and config.hardware in ("gpu", "gpu_multiprocess")
+              )
               else ReorderStrategy.DUAL_CHUNK_SWAP
           )
         else:
@@ -305,6 +315,15 @@ def setup_train_loop(config, recorder, devices=None):
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
     if config.pure_nnx:
+      if getattr(getattr(config, "lora", None), "enable_lora", False) and getattr(config.lora, "lora_restore_path", None):
+        # Restore standalone LoRA adapter weights onto the base model state after initialization.
+        target_model_state = (
+            state["model"]
+            if (isinstance(state, (nnx.State, dict)) and "model" in state)
+            else getattr(state, "model", state)
+        )
+        lora_utils.restore_lora_from_path(target_model_state, config)
+        _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
       with nn_partitioning.axis_rules(config.logical_axis_rules):
         # We only need the graphdef here; it's merged with state below. Avoid
         # nnx.get_abstract_model: it eagerly builds a NamedSharding for every variable

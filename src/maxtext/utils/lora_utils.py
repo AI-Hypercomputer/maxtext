@@ -208,7 +208,12 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
       def create_train_state_fn():
         nnx_model = _create_model_partial()
-        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        wrt = (
+            getattr(nnx, "LoRAParam", nnx.Param)
+            if getattr(getattr(config, "lora", None), "enable_lora", False)
+            else nnx.Param
+        )
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
         return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
       init_state_fn = create_train_state_fn
@@ -724,6 +729,20 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
     else:
       matched_val = curr
 
+    target_sharding = getattr(variable, "sharding", None)
+    if target_sharding is None:
+      try:
+        mesh = maxtext_utils.get_mesh_from_config(mt_config)
+        if mesh:
+          target_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    if target_sharding is not None:
+      try:
+        matched_val = jax.device_put(matched_val, target_sharding)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
     variable.value = matched_val
 
   jax.tree_util.tree_map_with_path(
@@ -732,7 +751,7 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  nnx.update(model, abstract_lora_params)
+  nnx.pop(model, nnx.Intermediate)
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
   return model
 
