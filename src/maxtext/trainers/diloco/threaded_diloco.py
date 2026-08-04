@@ -50,7 +50,12 @@ def mix_frags(i_frag, o_frag, alpha):
 
 
 def _slice_global_mesh_to_submesh(
-    tree: Any, submesh: jax.sharding.Mesh, learner_idx: int, num_devices_per_mesh: int, target_shardings: Any
+    tree: Any,
+    submesh: jax.sharding.Mesh,
+    learner_idx: int,
+    num_devices_per_mesh: int,
+    target_shardings: Any,
+    num_learners: int = 2,
 ) -> Any:
   """Slices shards of a global_mesh array to construct a submesh array without cross-device communication."""
   def _slice_leaf(leaf, sharding_spec):
@@ -61,12 +66,13 @@ def _slice_global_mesh_to_submesh(
         if isinstance(sharding_spec, jax.sharding.NamedSharding)
         else jax.sharding.NamedSharding(submesh, jax.sharding.PartitionSpec())
     )
+    target_shape = leaf.shape[1:] if leaf.ndim > 0 and leaf.shape[0] == num_learners else leaf.shape
     if not hasattr(leaf, "addressable_shards") or not leaf.addressable_shards:
       return jax.device_put(leaf, target_sharding)
     start_idx = learner_idx * num_devices_per_mesh
     end_idx = start_idx + num_devices_per_mesh
     local_shards = [shard.data for shard in leaf.addressable_shards[start_idx:end_idx]]
-    return jax.make_array_from_single_device_arrays(leaf.shape, target_sharding, local_shards)
+    return jax.make_array_from_single_device_arrays(target_shape, target_sharding, local_shards)
 
   return jax.tree_util.tree_map(_slice_leaf, tree, target_shardings)
 
@@ -421,7 +427,9 @@ def make_step_fns(global_mesh, flat_params_shardings, frag_keys, trace_keys, out
   """Creates eager functions for computing gradients and applying outer steps."""
 
   def compute_grad(o_frag, stacked_i_frag):
-    averaged_i_frag = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), stacked_i_frag)
+    averaged_i_frag = jax.tree_util.tree_map(
+        lambda x: jnp.broadcast_to(jnp.mean(x, axis=0, keepdims=True), x.shape), stacked_i_frag
+    )
     return jax.tree_util.tree_map(lambda x, y: x - y, o_frag, averaged_i_frag)
 
   def apply_outer_step(g_frag, o_state_frag, p_frag):
@@ -522,7 +530,7 @@ def _run_syncer_loop(
           params_shardings,
       )
       local_params = _slice_global_mesh_to_submesh(
-          syncer_state.params, submesh, i, devices_per_mesh, local_sharding
+          syncer_state.params, submesh, i, devices_per_mesh, local_sharding, num_learners
       )
       max_logging.log(f"Syncer: sending params to Learner {i} at step {start_step}")
       transport.send_to_learner(learner_idx=i, step=start_step, fragment_id=-1, data=local_params)
@@ -552,27 +560,8 @@ def _run_syncer_loop(
   step_fns_by_frag = {}
   with jax.set_mesh(global_mesh):
     for f_idx in range(num_fragments):
-      if f_idx == 0:
-        frag_dict = manipulator.get_flat_fragment(syncer_state.params, f_idx)
-        trace_dict = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, f_idx)
-      else:
-        indices = manipulator.fragment_to_layer_indices[f_idx]
-        num_layer_indices = len(indices)
-        frag_dict = {}
-        trace_dict = {}
-        for keystr, v in [
-            (jax.tree_util.keystr(k), v) for k, v in jax.tree_util.tree_flatten_with_path(syncer_state.params)[0]
-        ]:
-          if manipulator.keypath_to_is_scanned.get(keystr, False):
-            frag_shape = (num_layer_indices,) + v.shape[1:]
-            frag_dict[keystr] = jax.ShapeDtypeStruct(frag_shape, v.dtype)
-        for keystr, v in [
-            (jax.tree_util.keystr(k), v)
-            for k, v in jax.tree_util.tree_flatten_with_path(syncer_state.opt_state[0].trace)[0]
-        ]:
-          if manipulator.keypath_to_is_scanned.get(keystr, False):
-            frag_shape = (num_layer_indices,) + v.shape[1:]
-            trace_dict[keystr] = jax.ShapeDtypeStruct(frag_shape, v.dtype)
+      frag_dict = manipulator.get_flat_fragment(syncer_state.params, f_idx, has_replica_dim=True)
+      trace_dict = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, f_idx, has_replica_dim=True)
       step_fns_by_frag[f_idx] = make_step_fns(
           global_mesh, flat_params_shardings, frag_dict, trace_dict, outer_optimizer
       )
@@ -594,8 +583,8 @@ def _run_syncer_loop(
     max_logging.log(f"Syncer: Step {step} stacking done")
 
     with jax.set_mesh(global_mesh):
-      outer_params_frag = manipulator.get_flat_fragment(syncer_state.params, frag_idx, use_null_layout_jit=False)
-      trace_frag = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, use_null_layout_jit=False)
+      outer_params_frag = manipulator.get_flat_fragment(syncer_state.params, frag_idx, has_replica_dim=True, use_null_layout_jit=False)
+      trace_frag = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, has_replica_dim=True, use_null_layout_jit=False)
       opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
 
       compute_grad, apply_outer_step = step_fns_by_frag[frag_idx]
@@ -606,12 +595,12 @@ def _run_syncer_loop(
       new_opt_state_trace = new_opt_state_frag[0].trace
 
       new_params = manipulator.apply_flat_fragment(
-          syncer_state.params, frag_idx, new_outer_params_frag, use_null_layout_jit=False
+          syncer_state.params, frag_idx, new_outer_params_frag, has_replica_dim=True, use_null_layout_jit=False
       )
       new_params = jax.device_put(new_params, params_full_sharding)
 
       new_trace = manipulator.apply_flat_fragment(
-          syncer_state.opt_state[0].trace, frag_idx, new_opt_state_trace, use_null_layout_jit=False
+          syncer_state.opt_state[0].trace, frag_idx, new_opt_state_trace, has_replica_dim=True, use_null_layout_jit=False
       )
       new_trace = jax.device_put(new_trace, params_full_sharding)
 
@@ -626,7 +615,7 @@ def _run_syncer_loop(
           k: jax.sharding.NamedSharding(submesh, flat_params_shardings[k].spec) for k in new_outer_params_frag
       }
       local_frag = _slice_global_mesh_to_submesh(
-          new_outer_params_frag, submesh, i, devices_per_mesh, frag_local_sharding
+          new_outer_params_frag, submesh, i, devices_per_mesh, frag_local_sharding, num_learners
       )
       transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=local_frag)
 
