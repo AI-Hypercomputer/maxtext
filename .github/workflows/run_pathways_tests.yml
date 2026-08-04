@@ -105,6 +105,7 @@ jobs:
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
+        shell: bash
         env:
           TOTAL_WORKERS: ${{ inputs.total_workers }}
           WORKER_GROUP: ${{ inputs.worker_group }}
@@ -113,6 +114,17 @@ jobs:
           PYTEST_ADDOPTS: ${{ inputs.pytest_addopts }}
           PYTHONPATH: "${{ github.workspace }}/src"
         run: |
+          # Cleanly release TPU device locks upon SIGTERM / PR cancellation
+          cleanup_tpu_locks() {
+            echo "Received cancellation signal; cleaning up /dev/accel* locks and /tmp/libtpu_lockfile..."
+            kill -9 "${PYTEST_PID:-}" 2>/dev/null || true
+            rm -f /tmp/libtpu_lockfile
+            fuser -k -9 /dev/accel* 2>/dev/null || true
+            sleep 0.5
+            exit 143
+          }
+          trap cleanup_tpu_locks TERM INT
+
           if [ "${TOTAL_WORKERS}" -gt 1 ]; then
             .venv/bin/python3 -m pip install --quiet pytest-split
             SPLIT_ARGS="--splits ${TOTAL_WORKERS} --group ${WORKER_GROUP}"
@@ -133,7 +145,9 @@ jobs:
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
           # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
-          .venv/bin/python3 -m pytest ${PYTEST_ADDOPTS} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0 ${SPLIT_ARGS}
+          .venv/bin/python3 -m pytest ${PYTEST_ADDOPTS} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0 ${SPLIT_ARGS} &
+          PYTEST_PID=$!
+          wait $PYTEST_PID
     services:
       resource_manager:
         image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest # zizmor: ignore[unpinned-images]

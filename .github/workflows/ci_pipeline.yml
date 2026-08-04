@@ -285,7 +285,7 @@ jobs:
       pytest_addopts: '--ignore=tests/post_training'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
+      container_resource_option: "--init --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
       total_workers: ${{ needs.gate_test_run.outputs.total_workers || '2' }}
@@ -308,7 +308,7 @@ jobs:
       pytest_addopts: '--ignore=tests/post_training --ignore=tests/integration/hlo_diff_test.py'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
+      container_resource_option: "--init --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
