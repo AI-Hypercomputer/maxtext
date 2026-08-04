@@ -115,8 +115,8 @@ jobs:
             }
 
             for (const checkRun of checkRuns.check_runs) {
-              // Ignore the current running workflow
-              if (checkRun.name.endsWith(context.job)) continue
+              // Ignore the current running workflow and test duration tracking
+              if (checkRun.name.endsWith(context.job) || checkRun.name.includes('Track Test Duration')) continue
 
               if (checkRun.status !== 'completed' || !['success', 'skipped'].includes(checkRun.conclusion)) {
                 core.info(`Waiting for check: ${checkRun.name} (Status: ${checkRun.status}, Conclusion: ${checkRun.conclusion})`);
