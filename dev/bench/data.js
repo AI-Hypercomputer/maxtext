@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785838410819,
+  "lastUpdate": 1785849508484,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -4488,6 +4488,88 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total GPU-UNIT Tests Duration",
             "value": 1884.74599999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 2309,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "29a0ad60b5347f67d3fb8e616233a0c672818b98",
+          "message": "fix(nnx): scope PartitionSpec default strictly to LoRA parameters in sharding analysis\n\nThis CL is a follow-up fix for PR #4501 (`src/maxtext/utils/sharding.py`):\n- Scopes `PartitionSpec P()` defaulting strictly to LoRA parameters (`isinstance(p_leaf, nnx.LoRAParam)` or `'lora'` in parameter name), allowing NNX LoRA models to execute safely without missing-spec errors.\n- Standard NNX parameters (`nnx.Param`) and standard Linen parameters remain `None` so unit tests (`test_mixed_sharding_fails`) throw an `AssertionError` on unannotated arrays as expected (`tolerance=0.5` untouched).\n- Keeps element counts (`p_leaf.size`) for unsharded parameter totals to preserve mixed-precision sharding validation.\n\n# Tests\n- Verified `tests/unit/maxtext_utils_test.py::TestAssertParamsSufficientlySharded` (7/7 passed with tolerance=0.5 untouched).\n- Verified `tests/integration/lora_e2e_nnx_test.py` (sharding validation passed across all 10 tests).\n\n# Checklist\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests and provided workload details above.\n- [x] I have made or will make corresponding changes to the doc if needed.\n\nPiperOrigin-RevId: 958869746",
+          "timestamp": "2026-08-04T08:29:04Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/29a0ad60b5347f67d3fb8e616233a0c672818b98"
+        },
+        "date": 1785849507938,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1703.8739999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 89,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 1153.6959999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 52,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 1686.9289999999894,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 2449,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 102.28200000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 101,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 76.476,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 101,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 1899.4099999999873,
             "unit": "sec"
           },
           {
