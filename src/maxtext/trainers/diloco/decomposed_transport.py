@@ -77,57 +77,6 @@ class ThreadedTransportManager:
       buffer[(rec_step, rec_frag)] = data
 
 
-def _put_on_local_cpu_mesh(tree: Any, local_cpu_mesh: jax.sharding.Mesh) -> Any:
-  """Safely transfers a PyTree of TPU arrays to local colocated CPU mesh.
-
-  Transfers per single-device shard via host numpy buffer to avoid triggering
-  multislice JIT resharding kernels in Pathways.
-  """
-  cpu_devices = list(local_cpu_mesh.devices.flat)
-
-  def _put_leaf(leaf):
-    if not isinstance(leaf, jax.Array):
-      return leaf
-    spec = leaf.sharding.spec if isinstance(leaf.sharding, jax.sharding.NamedSharding) else jax.sharding.PartitionSpec()
-    target_sharding = jax.sharding.NamedSharding(local_cpu_mesh, spec)
-    if not hasattr(leaf, "addressable_shards") or not leaf.addressable_shards:
-      return jax.device_put(np.asarray(leaf), target_sharding)
-    cpu_shards = [
-        jax.device_put(np.asarray(shard.data), cpu_devices[i])
-        for i, shard in enumerate(leaf.addressable_shards)
-    ]
-    return jax.make_array_from_single_device_arrays(leaf.shape, target_sharding, cpu_shards)
-
-  return jax.tree_util.tree_map(_put_leaf, tree)
-
-
-def _put_on_tpu_mesh(tree: Any, tpu_submesh: jax.sharding.Mesh, target_shardings: Any) -> Any:
-  """Safely transfers a PyTree of CPU arrays to local TPU submesh.
-
-  Transfers per single-device shard via host numpy buffer to avoid triggering
-  multislice JIT resharding kernels in Pathways.
-  """
-  tpu_devices = list(tpu_submesh.devices.flat)
-
-  def _put_leaf(leaf, sharding_spec):
-    if not isinstance(leaf, jax.Array):
-      return leaf
-    target_sharding = (
-        sharding_spec
-        if isinstance(sharding_spec, jax.sharding.NamedSharding)
-        else jax.sharding.NamedSharding(tpu_submesh, jax.sharding.PartitionSpec())
-    )
-    if not hasattr(leaf, "addressable_shards") or not leaf.addressable_shards:
-      return jax.device_put(np.asarray(leaf), target_sharding)
-    tpu_shards = [
-        jax.device_put(np.asarray(shard.data), tpu_devices[i])
-        for i, shard in enumerate(leaf.addressable_shards)
-    ]
-    return jax.make_array_from_single_device_arrays(leaf.shape, target_sharding, tpu_shards)
-
-  return jax.tree_util.tree_map(_put_leaf, tree, target_shardings)
-
-
 class LearnerTransport:
   """Wrapper for learner threads to communicate with the syncer."""
 
@@ -135,26 +84,16 @@ class LearnerTransport:
       self,
       manager: ThreadedTransportManager,
       learner_idx: int,
-      local_cpu_mesh: jax.sharding.Mesh,
   ):
     self.manager = manager
     self.learner_idx = learner_idx
-    self.local_cpu_mesh = local_cpu_mesh
     self._executor = ThreadPoolExecutor(max_workers=1)
 
   def send_to_syncer_async(self, step: int, fragment_id: int, data: Any):
-    """Asynchronously offloads TPU data to local CPU mesh and sends to syncer."""
-    # 1. Initiate copy to local CPU mesh
-    frag_cpu = _put_on_local_cpu_mesh(data, self.local_cpu_mesh)
-
-    # 2. Block and send in the background executor thread
+    """Asynchronously sends fragment data to syncer."""
     def _send():
       try:
-        max_logging.log(f"Learner {self.learner_idx}: async send starting for step {step} frag {fragment_id}")
-        jax.block_until_ready(frag_cpu)
-        max_logging.log(f"Learner {self.learner_idx}: async send block_until_ready done")
-        self.manager.send_to_syncer(self.learner_idx, step, fragment_id, frag_cpu)
-        max_logging.log(f"Learner {self.learner_idx}: async send sent to syncer")
+        self.manager.send_to_syncer(self.learner_idx, step, fragment_id, data)
       except Exception as e:
         max_logging.error(f"Learner {self.learner_idx}: async send failed: {e}")
         max_logging.error(traceback.format_exc())
@@ -163,10 +102,8 @@ class LearnerTransport:
     self._executor.submit(_send)
 
   def send_to_syncer(self, step: int, fragment_id: int, data: Any):
-    """Synchronously offloads TPU data to local CPU mesh and sends to syncer."""
-    frag_cpu = _put_on_local_cpu_mesh(data, self.local_cpu_mesh)
-    jax.block_until_ready(frag_cpu)
-    self.manager.send_to_syncer(self.learner_idx, step, fragment_id, frag_cpu)
+    """Synchronously sends fragment data to syncer."""
+    self.manager.send_to_syncer(self.learner_idx, step, fragment_id, data)
 
   def recv_from_syncer(self, step: int, fragment_id: int) -> Any:
     return self.manager.recv_from_syncer(self.learner_idx, step, fragment_id)
@@ -178,6 +115,15 @@ class LearnerTransport:
 
 class SyncerTransport:
   """Wrapper for the syncer thread to communicate with learners."""
+
+  def __init__(self, manager: ThreadedTransportManager):
+    self.manager = manager
+
+  def send_to_learner(self, learner_idx: int, step: int, fragment_id: int, data: Any):
+    self.manager.send_to_learner(learner_idx, step, fragment_id, data)
+
+  def recv_from_learner(self, learner_idx: int, step: int, fragment_id: int) -> Any:
+    return self.manager.recv_from_learner(learner_idx, step, fragment_id)
 
   def __init__(self, manager: ThreadedTransportManager):
     self.manager = manager
