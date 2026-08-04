@@ -2098,7 +2098,7 @@ class MLATest(attention_test_util.MLATestBase):
 
     # Enable sliced projections for one config
     config_arguments_sliced = config_arguments.copy()
-    config_arguments_sliced["use_sliced_mla_projections"] = True
+    config_arguments_sliced["use_sliced_mla_proj"] = True
 
     cfg_normal, mla_normal = self.init_mla(config_arguments, rope_type="default")
     _, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")

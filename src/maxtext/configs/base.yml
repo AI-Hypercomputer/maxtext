@@ -445,7 +445,7 @@ kv_lora_rank: 512
 qk_nope_head_dim: 128
 qk_rope_head_dim: 64
 v_head_dim: 128
-use_sliced_mla_projections: false # Whether to slice projection kernel weights before contraction in MLA instead of running full projection + jnp.split.
+use_sliced_mla_proj: false # Whether to slice projection kernel weights before contraction in MLA instead of running full projection + jnp.split.
 
 # Compressed Attention parameters
 o_lora_rank: 0 # Output LoRA rank for Compressed Attention.

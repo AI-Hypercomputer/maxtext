@@ -156,6 +156,30 @@ class DenseGeneralTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "sliced contraction is only supported when quant is None"):
       layer(inputs, slice_bounds=(0, 3))
 
+  def test_slice_bounds_invalid(self):
+    batch_size = 2
+    in_features = 4
+    n_heads = 2
+    head_dim = 8
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=(n_heads, head_dim),
+        use_bias=True,
+        rngs=self.rngs,
+    )
+
+    inputs = jax.random.normal(jax.random.PRNGKey(0), (batch_size, in_features))
+
+    with self.assertRaisesRegex(ValueError, "slice_bounds .* must be valid and within"):
+      layer(inputs, slice_bounds=(3, 2))
+
+    with self.assertRaisesRegex(ValueError, "slice_bounds .* must be valid and within"):
+      layer(inputs, slice_bounds=(-1, 4))
+
+    with self.assertRaisesRegex(ValueError, "slice_bounds .* must be valid and within"):
+      layer(inputs, slice_bounds=(0, 100))
+
   def _run_dense_test(self, axis, in_feat_shape, expected_shape):
     batch_size = 2
     seq_len = 3

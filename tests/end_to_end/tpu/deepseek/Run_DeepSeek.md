@@ -375,7 +375,7 @@ python3 -m tests.utils.forward_pass_logit_checker \
 
 To optimize Multi-Head Latent Attention (MLA) performance, you can enable sliced projections.
 
-*   **Flag**: `use_sliced_mla_projections` (default: `False`)
+*   **Flag**: `use_sliced_mla_proj` (default: `False`)
 *   **Description**: When set to `True`, it slices the projection kernel weights before contraction in MLA, instead of running the full projection followed by `jnp.split`. This can improve performance.
 *   **Constraint**: Sliced contraction is only supported when quantization is disabled (`quant=None`).
 

@@ -926,7 +926,7 @@ class MLA(Attention):
       low_rank_q = checkpoint_name(low_rank_q, "query_wa_proj")
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
       low_rank_q = checkpoint_name(low_rank_q, "mla_q")
-      if self.config.use_sliced_mla_projections and self.wq_b.quant is None:
+      if self.config.use_sliced_mla_proj and self.wq_b.quant is None:
         q_nope = self.wq_b(
             low_rank_q,
             out_sharding=query_sharding,
@@ -966,7 +966,7 @@ class MLA(Attention):
       value_logical_name = self.value_axis_names
 
     wkva_out_sharding = create_sharding(self.mesh, key_logical_name)
-    if self.config.use_sliced_mla_projections and self.wkv_b.quant is None:
+    if self.config.use_sliced_mla_proj and self.wkv_b.quant is None:
       key_nope = self.wkv_b(
           low_rank_main,
           out_sharding=wkva_out_sharding,
