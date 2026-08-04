@@ -16,3 +16,6 @@
 Checkpoint Validation Agent Package.
 Used to verify and report the status of converted model checkpoints.
 """
+
+from maxtext.experimental.agent.ckpt_validation_pipeline import layer_metrics
+
