@@ -67,13 +67,10 @@ def sinkhorn(t, iters=20):
   t = jax.nn.softmax(t, axis=-1) + eps
   t = t / (jnp.sum(t, axis=-2, keepdims=True) + eps)
 
-  def body_fun(i, val):
-    val = val / (jnp.sum(val, axis=-1, keepdims=True) + eps)
-    val = val / (jnp.sum(val, axis=-2, keepdims=True) + eps)
-    return val
+  for _ in range(iters - 1):
+    t = t / (jnp.sum(t, axis=-1, keepdims=True) + eps)
+    t = t / (jnp.sum(t, axis=-2, keepdims=True) + eps)
 
-  # Use lax.fori_loop for an efficient, JIT-friendly loop
-  t = jax.lax.fori_loop(0, iters - 1, body_fun, t)
   return t.astype(initial_dtype)
 
 
@@ -249,8 +246,9 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # x shape: [batch, seq, expansion_rate, emb]
     b, s, k, d = x.shape
 
-    # 1. Flatten the tensor, and RMS normalization
-    norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
+    with jax.named_scope("mhc_norm"):
+      # 1. Flatten the tensor, and RMS normalization
+      norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
 
     # Fused Projections
     pre_alpha = jnp.asarray(self.pre_alpha[...], self.dtype)
@@ -274,7 +272,10 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         1.0,
         eps=1e-6,
     )
-    layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
+    # Moving away from einsum seems to allow XLA to perform better fusions
+    # https://github.com/AI-Hypercomputer/maxtext/pull/4664#discussion_r3677899970
+    # bskd, bsk -> bsd
+    layer_input = jnp.sum(x * jnp.expand_dims(pre_mapping, axis=3), axis=2)
 
     # 3. Pre-norm
     layer_input = norm_fn(layer_input)
@@ -299,16 +300,16 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         self.post_beta[...],
         2.0,
     )
-    post_out = jnp.einsum(
-        "bsd,bsk -> bskd",
-        layer_out,
-        post_mapping,
-        precision=self.matmul_precision,
-    )
+    # Moving away from einsum seems to allow XLA to perform better fusions
+    # bsd,bsk -> bskd
+    post_out = jnp.expand_dims(layer_out, axis=2) * jnp.expand_dims(post_mapping, axis=3)
 
     # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
     res_mapping = self.res_mapping(h_res)
-    res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
+
+    # Moving away from einsum seems to allow XLA to perform better fusions
+    # bskd,bskm -> bsmd
+    res_out = jnp.sum(jnp.expand_dims(x, axis=3) * jnp.expand_dims(res_mapping, axis=4), axis=2)
     return res_out + post_out, metadata
 
 
