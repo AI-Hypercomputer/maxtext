@@ -3932,7 +3932,6 @@ class RLConfig(
     MlaAttention,
     CompressedAttention,
     AttentionIndexer,
-    Llama4Attention,
     SplashAttention,
     Qwen3Next,
     MTP,
