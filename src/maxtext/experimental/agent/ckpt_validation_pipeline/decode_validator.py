@@ -69,6 +69,9 @@ def validate_checkpoint(report_gcs_dir, maxtext_args):
   repo_root = os.path.abspath(os.path.join(maxtext_module_dir, "../../"))
   # run subprocess (from the top level repo directory)
   result = subprocess.run(command, text=True, capture_output=True, check=False, cwd=repo_root)
+  if result.stdout:
+    logger.info("=== Subprocess Stdout ===")
+    logger.info(result.stdout)
 
   # generate report
   report = {
