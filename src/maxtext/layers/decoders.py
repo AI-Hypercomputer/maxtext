@@ -1177,6 +1177,8 @@ class Decoder(nn.Module):
               if bidirectional_mask_value is not None and visual_embeds is not None:
                 y = deepstack_process(y, bidirectional_mask_value, visual_embeds)
 
+            self.sow("intermediates", "layer_outputs", y)
+
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
