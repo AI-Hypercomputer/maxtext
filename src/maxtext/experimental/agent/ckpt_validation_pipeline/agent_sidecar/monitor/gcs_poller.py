@@ -34,20 +34,19 @@ def check_for_failures():
     client = storage.Client()
     bucket = client.bucket(GCS_BUCKET_NAME)
     blobs = list(bucket.list_blobs())
-    
+
     # Filter for unhandled json reports
     valid_blobs = [b for b in blobs if b.name.endswith(".json") and "handled" not in b.name]
-    
+
     # Sort by creation time descending (newest first)
     valid_blobs.sort(key=lambda b: b.time_created, reverse=True)
-    
+
     for blob in valid_blobs:
       content = blob.download_as_string()
       report_data = json.loads(content)
       # Check for "failed" (shape check), "FAILURE" (mock tensor), or success == False (forward pass / decode)
       if report_data and (
-          report_data.get("status") in ("failed", "FAILED", "FAILURE")
-          or report_data.get("success") is False
+          report_data.get("status") in ("failed", "FAILED", "FAILURE") or report_data.get("success") is False
       ):
         logger.info("Detected failure report: %s", blob.name)
         return report_data, blob.name

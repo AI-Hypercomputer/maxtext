@@ -14,15 +14,13 @@
 
 """Layer-by-layer activation similarity and diagnostic utilities for validation agent."""
 
-import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
+import numpy as np
 
 
 def compute_layer_statistics(tensor_or_array: Any) -> Dict[str, float]:
   """Computes summary statistics (mean, std, min, max) for a layer activation array/tensor."""
   try:
-    import numpy as np
-
     arr = np.asarray(tensor_or_array, dtype=np.float64)
     if arr.size == 0:
       return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "has_nan_inf": False}
@@ -34,15 +32,13 @@ def compute_layer_statistics(tensor_or_array: Any) -> Dict[str, float]:
         "max": float(np.max(arr)) if not has_nan_inf else float("nan"),
         "has_nan_inf": has_nan_inf,
     }
-  except Exception:
+  except Exception:  # pylint: disable=broad-exception-caught
     return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "has_nan_inf": True}
 
 
 def compute_cosine_similarity(arr1: Any, arr2: Any) -> float:
   """Computes cosine similarity between two layer activation arrays."""
   try:
-    import numpy as np
-
     a = np.asarray(arr1, dtype=np.float64).flatten()
     b = np.asarray(arr2, dtype=np.float64).flatten()
     min_len = min(a.size, b.size)
@@ -55,7 +51,7 @@ def compute_cosine_similarity(arr1: Any, arr2: Any) -> float:
     if norm_a == 0 or norm_b == 0:
       return 0.0
     return float(np.dot(a, b) / (norm_a * norm_b))
-  except Exception:
+  except Exception:  # pylint: disable=broad-exception-caught
     return 0.0
 
 

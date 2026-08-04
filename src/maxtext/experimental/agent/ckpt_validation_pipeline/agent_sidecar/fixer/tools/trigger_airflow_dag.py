@@ -48,6 +48,7 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
     elif isinstance(overrides, str):
       try:
         import json
+
         parsed = json.loads(overrides)
         if isinstance(parsed, dict):
           conf_dict.update(parsed)
@@ -64,9 +65,7 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
       "Accept": "application/json",
   }
   try:
-    credentials, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
+    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     auth_req = google.auth.transport.requests.Request()
     credentials.refresh(auth_req)
     if credentials.token:
@@ -92,12 +91,25 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Trigger the MaxText Validation Airflow DAG on a specific branch.")
   parser.add_argument("--branch", type=str, required=True, help="The git branch name containing the bug fix to test.")
-  parser.add_argument("--cluster_name", type=str, default=None, help="Optional override for TPU GKE cluster name (e.g. v5p-128-bodaborg-europe-west4-b).")
-  parser.add_argument("--project_name", type=str, default=None, help="Optional override for GCP project (e.g. cloud-tpu-multipod-dev).")
+  parser.add_argument(
+      "--cluster_name",
+      type=str,
+      default=None,
+      help="Optional override for TPU GKE cluster name (e.g. v5p-128-bodaborg-europe-west4-b).",
+  )
+  parser.add_argument(
+      "--project_name", type=str, default=None, help="Optional override for GCP project (e.g. cloud-tpu-multipod-dev)."
+  )
   parser.add_argument("--zone", type=str, default=None, help="Optional override for GCP zone (e.g. europe-west4-b).")
-  parser.add_argument("--overrides", type=str, default=None, help="Optional parameter overrides in conf (JSON string or key=val list).")
-  parser.add_argument("--dag_id", type=str, default=None, help="Specific Airflow DAG ID to re-trigger (e.g. dag_verify_forward_pass, dag_verify_decoding).")
+  parser.add_argument(
+      "--overrides", type=str, default=None, help="Optional parameter overrides in conf (JSON string or key=val list)."
+  )
+  parser.add_argument(
+      "--dag_id",
+      type=str,
+      default=None,
+      help="Specific Airflow DAG ID to re-trigger (e.g. dag_verify_forward_pass, dag_verify_decoding).",
+  )
   args = parser.parse_args()
 
   trigger_dag(args.branch, args.cluster_name, args.project_name, args.zone, args.overrides, args.dag_id)
-

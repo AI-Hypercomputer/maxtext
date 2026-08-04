@@ -162,11 +162,14 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
         - decoder/layers_0/self_attention
 
       When `to_linen=True` (before Orbax restore):
-        - Converts NNX layer attributes (`layers_0`, `layers_1`) into Linen sequence dictionary `layers: {'0': ..., '1': ...}`
+        - Converts NNX layer attributes (`layers_0`, `layers_1`) into Linen sequence
+          dictionary `layers: {'0': ..., '1': ...}`
         - Maps NNX normalization/attention attribute names to Linen checkpoint key names.
       When `to_linen=False` (after Orbax restore):
-        - Unpacks Linen `layers: {'0': ..., '1': ...}` sequence dictionary back into direct NNX attributes (`layers_0`, `layers_1`).
-        - Maps Linen checkpoint key names back to NNX attribute names so nnx.update(model, checkpoint) populates all weights.
+        - Unpacks Linen `layers: {'0': ..., '1': ...}` sequence dictionary back into direct
+          NNX attributes (`layers_0`, `layers_1`).
+        - Maps Linen checkpoint key names back to NNX attribute names so
+          nnx.update(model, checkpoint) populates all weights.
       """
       if to_linen:
         key_map = {
@@ -258,18 +261,22 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
 
   ocp.Checkpointer.restore = _monkeypatched_restore
 
-  import jax
+  import jax  # pylint: disable=import-outside-toplevel
+
   _orig_array_delete = getattr(jax.Array, "delete", None)
   if _orig_array_delete is not None:
     jax.Array.delete = lambda self: None
 
-  import transformers
+  import transformers  # pylint: disable=import-outside-toplevel
+
   _orig_from_pretrained = transformers.AutoTokenizer.from_pretrained
-  def _monkeypatched_from_pretrained(*args, **kwargs):
-    tokenizer = _orig_from_pretrained(*args, **kwargs)
+
+  def _monkeypatched_from_pretrained(*p_args, **p_kwargs):
+    tokenizer = _orig_from_pretrained(*p_args, **p_kwargs)
     if getattr(tokenizer, "pad_token", None) is None and getattr(tokenizer, "eos_token", None) is not None:
       tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
+
   transformers.AutoTokenizer.from_pretrained = _monkeypatched_from_pretrained
 
   # run script in same process to apply monkeypatch
