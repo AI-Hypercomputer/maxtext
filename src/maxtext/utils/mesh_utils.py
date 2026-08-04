@@ -164,7 +164,7 @@ def _expand_tree_on_mesh(
           donate_argnums=0 if donate else None,
       )
       .trace(in_structs)
-      .lower(lowering_platforms=("cpu",))
+      .lower()
   )
   compiled = lowered.compile(device_assignment=tuple(mesh.devices.flat))
   return compiled(tree)
