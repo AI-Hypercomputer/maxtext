@@ -95,22 +95,20 @@ def get_first_step(model, state):
   Prevents AttributeError and multislice host transfer errors.
   """
   try:
-    if hasattr(state, "step"):
-      val = state.step
-    elif hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+    if isinstance(model, nn.Module):
+      val = getattr(state, "step", 0)
+      if isinstance(val, (int, np.integer)):
+        return int(val)
+      return 0
+    if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
       val = state.optimizer.step
       if hasattr(val, "get_value"):
         val = val.get_value()
       elif hasattr(val, "value"):
         val = val.value
-    else:
-      return 0
-
-    if isinstance(val, (int, np.integer)):
-      return int(val)
-    if hasattr(val, "addressable_shards") and val.addressable_shards:
-      return int(np.asarray(val.addressable_shards[0].data))
-    return int(val)
+      if isinstance(val, (int, np.integer)):
+        return int(val)
+    return 0
   except Exception as e:
     max_logging.log(f"get_first_step encountered exception reading step, defaulting to 0: {e}")
     return 0
@@ -317,10 +315,6 @@ def _run_learner_loop(
               if learner_config.shard_optimizer_over_data and isinstance(model, nn.Module):
                 state = sharding.maybe_shard_with_name(state, state_mesh_shardings, learner_config.shard_mode)
               state, metrics = p_train_step(state, example_batch, *step_rng_args)
-              # Force block to catch async errors immediately
-              for leaf in jax.tree_util.tree_flatten((state, metrics))[0]:
-                if hasattr(leaf, "block_until_ready"):
-                  leaf.block_until_ready()
 
           max_logging.log(f"Learner {learner_idx}: Step {step} finished")
           step_time_delta = datetime.datetime.now() - last_step_completion
