@@ -227,7 +227,7 @@ def stack_across_meshes_pytree(
           mesh,
           axis_index_to_expand=0,
           out_specs=specs_with_expanded_axis,
-          donate=True,
+          donate=False,
       )
       for tree, mesh in zip(pytrees, meshes, strict=True)
   ]
