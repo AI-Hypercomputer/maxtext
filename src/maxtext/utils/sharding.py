@@ -437,14 +437,14 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
   for path, p_leaf in all_params_leaves:  # Iterate over each parameter leaf
     param_name_str = jax.tree_util.keystr(path)  # Convert the tree path to a readable string
 
-    # Unwrap nnx.Variable / nnx.LoRAParam objects to access the underlying jax.Array
-    if hasattr(p_leaf, "value") and not isinstance(p_leaf, jax.Array):
+    # Default unannotated LoRA parameters to PartitionSpec P() while leaving standard parameters as None for strict assertions.
+    is_lora_param = isinstance(p_leaf, getattr(nnx, "LoRAParam", ()))
+    is_lora = is_lora_param or "lora" in param_name_str.lower()
+    if isinstance(p_leaf, nnx.Variable):
       p_leaf = p_leaf.value
 
-    # Extract sharding spec, defaulting to PartitionSpec P() if sharding is unset or single-device
-    sharding = getattr(p_leaf, "sharding", None)
-    spec = getattr(sharding, "spec", None)
-    if spec is None:
+    spec = getattr(getattr(p_leaf, "sharding", None), "spec", None)
+    if spec is None and is_lora:
       spec = P()
     assert isinstance(spec, P), f"Expected '.sharding.spec' for parameter '{param_name_str}' to be a PartitionSpec."
 
