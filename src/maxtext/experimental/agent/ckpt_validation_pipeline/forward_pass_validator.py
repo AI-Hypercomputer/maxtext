@@ -263,6 +263,15 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
   if _orig_array_delete is not None:
     jax.Array.delete = lambda self: None
 
+  import transformers
+  _orig_from_pretrained = transformers.AutoTokenizer.from_pretrained
+  def _monkeypatched_from_pretrained(*args, **kwargs):
+    tokenizer = _orig_from_pretrained(*args, **kwargs)
+    if getattr(tokenizer, "pad_token", None) is None and getattr(tokenizer, "eos_token", None) is not None:
+      tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+  transformers.AutoTokenizer.from_pretrained = _monkeypatched_from_pretrained
+
   # run script in same process to apply monkeypatch
   old_stdout = sys.stdout
   old_stderr = sys.stderr
@@ -284,6 +293,7 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
   finally:
     if _orig_array_delete is not None:
       jax.Array.delete = _orig_array_delete
+    transformers.AutoTokenizer.from_pretrained = _orig_from_pretrained
     sys.stdout = old_stdout
     sys.stderr = old_stderr
     os.chdir(old_cwd)
