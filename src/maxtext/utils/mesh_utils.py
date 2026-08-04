@@ -14,8 +14,11 @@
 
 """Mesh utilities for DiLoCo stack operations across submeshes."""
 
-from typing import Any
+from typing import Any, Sequence
 import jax
+import jax.numpy as jnp
+from jax import sharding
+from jax.experimental.layout import Format, Layout
 import numpy as np
 
 from pathwaysutils.experimental.concatenate_by_mesh_axis import concatenate_by_mesh_axis
@@ -47,48 +50,209 @@ def partition_mesh_by_diloco_axis(
   return submeshes
 
 
-def _expand_array_dims_with_mesh(
-    x: jax.Array,
+def _insert_axis_into_spec(
+    spec: sharding.PartitionSpec,
+    axis_index: int,
+    axis_name: str | None,
+) -> sharding.PartitionSpec:
+  spec_list = list(spec)
+  while len(spec_list) < axis_index:
+    spec_list.append(None)
+  spec_list.insert(axis_index, axis_name)
+  return sharding.PartitionSpec(*spec_list)
+
+
+def _replace_axis_in_spec(
+    spec: sharding.PartitionSpec,
+    axis_index: int,
     axis_name: str,
-) -> jax.Array:
-  """Expands array dimensions by introducing a new dim-1 at index 0 and expanding its mesh."""
-  sharding = x.sharding
-  assert isinstance(sharding, jax.sharding.NamedSharding)
-  submesh = sharding.mesh
+) -> sharding.PartitionSpec:
+  spec_list = list(spec)
+  spec_list[axis_index] = axis_name
+  return sharding.PartitionSpec(*spec_list)
 
-  expanded_devices = np.expand_dims(np.array(submesh.devices), axis=0)
-  expanded_mesh = jax.sharding.Mesh(expanded_devices, axis_names=(axis_name,) + submesh.axis_names)
-  expanded_sharding = jax.sharding.NamedSharding(
-      expanded_mesh, jax.sharding.PartitionSpec(axis_name, *sharding.spec), memory_kind=sharding.memory_kind
+
+def _get_spec(leaf: jax.Array) -> sharding.PartitionSpec:
+  if not isinstance(leaf.sharding, sharding.NamedSharding):
+    raise ValueError(f"Expected NamedSharding, got {leaf.sharding=!r}")
+  return leaf.sharding.spec
+
+
+def _get_mesh_from_tree(tree: Any) -> sharding.Mesh:
+  for leaf in jax.tree.leaves(tree):
+    if isinstance(leaf, jax.Array):
+      if isinstance(leaf.sharding, sharding.NamedSharding):
+        if isinstance(leaf.sharding.mesh, sharding.Mesh):
+          return leaf.sharding.mesh
+        raise ValueError(f"Expected Mesh, got {leaf.sharding.mesh=!r}")
+      raise ValueError(f"Expected NamedSharding, got {leaf.sharding=!r}")
+  raise ValueError("PyTree has no jax.Array leaves.")
+
+
+def _expand_mesh_by_axis(
+    mesh: sharding.Mesh,
+    axis_index: int,
+    axis_name: str,
+    axis_type: sharding.AxisType = sharding.AxisType.Auto,
+) -> sharding.Mesh:
+  axis_names = (
+      *mesh.axis_names[:axis_index],
+      axis_name,
+      *mesh.axis_names[axis_index:],
   )
+  axis_types = (
+      *mesh.axis_types[:axis_index],
+      axis_type,
+      *mesh.axis_types[axis_index:],
+  )
+  devices = np.expand_dims(mesh.devices, axis=axis_index)
+  return sharding.Mesh(devices, axis_names=axis_names, axis_types=axis_types)
 
-  # Pathways caches all jit-compiled ops (expand_dims, device_put_reshard) keyed by
-  # shape/dtype/sharding WITHOUT layout. Different learner slices or jnp.take outputs
-  # can produce arrays with different layouts (null vs tiled) for the same logical tensor,
-  # causing the cached jit to reject the second layout variant.
-  # Shard-level construction avoids every layout-sensitive jit entirely: np.expand_dims
-  # is a pure-numpy op and make_array_from_single_device_arrays is a metadata operation.
-  local_arrays = [
-      jax.device_put(
-          np.expand_dims(np.asarray(shard.data), axis=0),
-          jax.sharding.SingleDeviceSharding(shard.device),
+
+def _expand_tree_on_mesh(
+    tree: Any,
+    mesh: sharding.Mesh,
+    axis_index_to_expand: int,
+    out_specs: Any,
+    donate: bool = True,
+) -> Any:
+  """Lowers and compiles expand_dims on a physical submesh using pure NamedSharding."""
+  def _expand_distributed_axis(t):
+    return jax.tree.map(
+        lambda x: jnp.expand_dims(x, axis=axis_index_to_expand)
+        if isinstance(x, jax.Array)
+        else x,
+        t,
+    )
+
+  def _leaf_struct(leaf):
+    if isinstance(leaf, jax.Array):
+      return jax.ShapeDtypeStruct(
+          leaf.shape, leaf.dtype
       )
-      for shard in x.addressable_shards
-  ]
-  return jax.make_array_from_single_device_arrays(
-      shape=(1,) + x.shape,
-      sharding=expanded_sharding,
-      arrays=local_arrays,
+    return leaf
+
+  in_structs = jax.tree.map(_leaf_struct, tree)
+
+  def _leaf_in_sharding(leaf):
+    if isinstance(leaf, jax.Array):
+      return sharding.NamedSharding(
+          mesh=mesh,
+          spec=_get_spec(leaf),
+          memory_kind=leaf.sharding.memory_kind if hasattr(leaf.sharding, "memory_kind") else None,
+      )
+    return leaf
+
+  in_shardings = jax.tree.map(_leaf_in_sharding, tree)
+
+  def _leaf_out_sharding(spec, leaf):
+    if isinstance(leaf, jax.Array):
+      return sharding.NamedSharding(
+          mesh=mesh,
+          spec=spec,
+          memory_kind=leaf.sharding.memory_kind if hasattr(leaf.sharding, "memory_kind") else None,
+      )
+    return leaf
+
+  out_shardings = jax.tree.map(_leaf_out_sharding, out_specs, tree)
+
+  lowered = (
+      jax.jit(
+          _expand_distributed_axis,
+          in_shardings=(in_shardings,),
+          out_shardings=out_shardings,
+          donate_argnums=0 if donate else None,
+      )
+      .trace(in_structs)
+      .lower(lowering_platforms=("cpu",))
+  )
+  compiled = lowered.compile(device_assignment=tuple(mesh.devices.flat))
+  return compiled(tree)
+
+
+def _put_tree_on_expanded_mesh(
+    tree: Any,
+    expanded_mesh: sharding.Mesh,
+    axis_index: int,
+    axis_name: str,
+) -> Any:
+  def _target_sharding(arr):
+    if not isinstance(arr, jax.Array):
+      return None
+    if not isinstance(arr.sharding, sharding.NamedSharding):
+      raise ValueError(f"Expected NamedSharding, got {arr.sharding=!r}")
+    target_spec = _replace_axis_in_spec(
+        arr.sharding.spec,
+        axis_index=axis_index,
+        axis_name=axis_name,
+    )
+    return sharding.NamedSharding(
+        mesh=expanded_mesh,
+        spec=target_spec,
+        memory_kind=arr.sharding.memory_kind if hasattr(arr.sharding, "memory_kind") else None,
+    )
+
+  target_shardings = jax.tree.map(_target_sharding, tree)
+  return jax.device_put(tree, target_shardings)
+
+
+def stack_across_meshes_pytree(
+    pytrees: Sequence[Any],
+    global_mesh: jax.sharding.Mesh,
+    axis_name: str,
+) -> Any:
+  """Stacks a list of PyTrees across submeshes into a single global PyTree."""
+  if not pytrees:
+    return pytrees
+
+  meshes = [_get_mesh_from_tree(tree) for tree in pytrees]
+
+  def _leaf_expanded_spec(leaf):
+    if isinstance(leaf, jax.Array):
+      return _insert_axis_into_spec(
+          _get_spec(leaf),
+          axis_index=0,
+          axis_name=None,
+      )
+    return leaf
+
+  specs_with_expanded_axis = jax.tree.map(
+      _leaf_expanded_spec,
+      pytrees[0],
   )
 
+  expanded_trees_on_learner = [
+      _expand_tree_on_mesh(
+          tree,
+          mesh,
+          axis_index_to_expand=0,
+          out_specs=specs_with_expanded_axis,
+          donate=True,
+      )
+      for tree, mesh in zip(pytrees, meshes, strict=True)
+  ]
 
-def stack_across_meshes_pytree(trees: list[Any], global_mesh: jax.sharding.Mesh, axis_name: str) -> Any:
-  """Stacks a list of PyTrees across submeshes into a single global PyTree."""
-  # 1. Expand dimensions of all arrays in all PyTrees manually
-  expanded_trees = []
-  for tree in trees:
-    exp_tree = jax.tree_util.tree_map(lambda x: _expand_array_dims_with_mesh(x, axis_name), tree)
-    expanded_trees.append(exp_tree)
+  expanded_meshes = [
+      _expand_mesh_by_axis(
+          mesh,
+          axis_index=0,
+          axis_name=axis_name,
+          axis_type=sharding.AxisType.Auto,
+      )
+      for mesh in meshes
+  ]
 
-  # 2. Concatenate along the mesh axis using pathwaysutils
-  return concatenate_by_mesh_axis(expanded_trees, mesh_axis=axis_name)
+  expanded_trees_on_expanded_mesh = [
+      _put_tree_on_expanded_mesh(
+          tree,
+          expanded_mesh=mesh,
+          axis_index=0,
+          axis_name=axis_name,
+      )
+      for tree, mesh in zip(
+          expanded_trees_on_learner, expanded_meshes, strict=True
+      )
+  ]
+
+  return concatenate_by_mesh_axis(expanded_trees_on_expanded_mesh, axis_name)
+
