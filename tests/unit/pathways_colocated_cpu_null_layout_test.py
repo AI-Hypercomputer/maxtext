@@ -82,5 +82,41 @@ class ColocatedCpuNullLayoutTest(unittest.TestCase):
     self.assertEqual(res.sharding, cpu_sharding)
 
 
+  def test_colocated_cpu_no_null_layout_jit_fails(self):
+    """Verifies that placing a tiled TPU array onto colocated CPU hosts
+    WITHOUT null-layout normalization causes layout mismatch failure.
+
+    Note: This proves that WITHOUT calling `_normalize_to_null_layout`,
+    the jax operations will fail because the tensor retains its TPU tiling
+    on the CPU when consumed by a CPU JIT function.
+    """
+    # 1. Create a tiled tensor on TPU (produced by JIT/XLA)
+    tpu_arr = jax.jit(
+        lambda: jnp.ones((self.NUM_LAYERS, self.HIDDEN), dtype=jnp.float32),
+        out_shardings=self.sharding,
+    )()
+    jax.block_until_ready(tpu_arr)
+
+    # 2. Transfer to colocated CPU mesh WITHOUT null-layout normalization
+    cpu_mesh = colocated_python.colocated_cpu_devices(self.mesh)
+    cpu_sharding = jax.sharding.NamedSharding(cpu_mesh, jax.sharding.PartitionSpec())
+    
+    # We do NOT call _normalize_to_null_layout here.
+    cpu_arr = jax.device_put(tpu_arr, cpu_sharding)
+
+    # 3. Define JIT function strictly expecting null layout (tiling=None)
+    null_layout = Layout(major_to_minor=tuple(range(cpu_arr.ndim)), tiling=None)
+    null_format = Format(layout=null_layout, sharding=cpu_sharding)
+
+    @jax.jit(in_shardings=(null_format,), out_shardings=cpu_sharding)
+    def cpu_fn(x):
+      return x * 2.0
+
+    # 4. Assert execution fails because cpu_arr still retains TPU tiling
+    with self.assertRaises(Exception):
+      res = cpu_fn(cpu_arr)
+      jax.block_until_ready(res)
+
+
 if __name__ == "__main__":
   unittest.main()
