@@ -12,13 +12,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Download a HuggingFace dataset via streaming and save as Bagz files.
+"""Download a HuggingFace dataset via streaming and save as Bagz files.
 Only supports text dataset for now.
 
 Supports writing to local path, including GCS bucket mounted via GCSFUSE. 
 Produces filenames: {name}-XXXXX-of-YYYYY.bagz
 User can control file-size-mb and workers for parallelism. 
+
+Examples:
+    1. Basic conversion of a HuggingFace dataset to local directory:
+       python3 tools/data_generation/download_hf_dataset_as_bagz.py \
+           --dataset=Salesforce/wikitext \
+           --config='{"name": "wikitext-103-raw-v1"}' \
+           --split=train \
+           --output=/tmp/wikitext_bagz \
+           --file-size-mb=100.0 \
+           --workers=4
+
+    2. Writing to a write-optimized GCSFUSE mounted bucket with custom prefix:
+       python3 tools/data_generation/download_hf_dataset_as_bagz.py \
+           --dataset=allenai/c4 \
+           --config='{"name": "en"}' \
+           --split=train \
+           --output=/gcs_mount/my_bucket/c4_bagz \
+           --name-prefix=c4_en_train \
+           --file-size-mb=1000.0 \
+           --workers=16
+
+    3. Converting a gated/private HuggingFace dataset using an auth token:
+       python3 tools/data_generation/download_hf_dataset_as_bagz.py \
+           --dataset=meta-llama/Llama-2-7b \
+           --split=train \
+           --output=/tmp/llama_data \
+           --token=$HF_TOKEN
 
 GCS output recommendation:
     Mount the bucket with write-optimized GCSFUSE flags and pass the mount path as --output.
