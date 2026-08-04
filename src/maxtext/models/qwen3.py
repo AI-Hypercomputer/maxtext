@@ -1031,6 +1031,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # STEP D: Final Output Stage
     # =========================================================================
 
+    core_attn_out = checkpoint_name(core_attn_out, "context")
     # The normalization and gating is applied per-head on the value dimension.
 
     # Apply the norm and gate. Output shape: (B, S, H_v, D_v)
