@@ -1,10 +1,5 @@
 # MTP + CP + Packing
 
-## Summary
-
-Fixes 4 correctness issues when combining Multi-Token Prediction (MTP),
-Context Parallelism (AG-CP), and Packing.
-
 ## Design Highlights
 
 ### 1. CP-Aware Left Shift (`_shift_left_one_cp_aware`)
