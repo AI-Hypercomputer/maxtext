@@ -56,17 +56,21 @@ def _slice_global_mesh_to_submesh(
     num_devices_per_mesh: int,
     target_shardings: Any,
     num_learners: int = 2,
+    target_shapes: Any = None,
 ) -> Any:
   """Slices shards of a global_mesh array to construct a submesh array without cross-device communication."""
-  def _slice_leaf(leaf, sharding_spec):
+  def _slice_leaf(leaf, sharding_spec, shape=None):
     if not isinstance(leaf, jax.Array):
       return leaf
     target_sharding = (
         sharding_spec
         if isinstance(sharding_spec, jax.sharding.NamedSharding)
-        else jax.sharding.NamedSharding(submesh, jax.sharding.PartitionSpec())
+        else jax.sharding.NamedSharding(submesh, getattr(sharding_spec, "spec", jax.sharding.PartitionSpec()))
     )
-    target_shape = leaf.shape[1:] if leaf.ndim > 0 and leaf.shape[0] == num_learners else leaf.shape
+    if shape is not None:
+      target_shape = shape
+    else:
+      target_shape = leaf.shape[1:] if leaf.ndim > 0 and leaf.shape[0] == num_learners else leaf.shape
     if not hasattr(leaf, "addressable_shards") or not leaf.addressable_shards:
       return jax.device_put(leaf, target_sharding)
     start_idx = learner_idx * num_devices_per_mesh
@@ -74,6 +78,8 @@ def _slice_global_mesh_to_submesh(
     local_shards = [shard.data for shard in leaf.addressable_shards[start_idx:end_idx]]
     return jax.make_array_from_single_device_arrays(target_shape, target_sharding, local_shards)
 
+  if target_shapes is not None:
+    return jax.tree_util.tree_map(_slice_leaf, tree, target_shardings, target_shapes)
   return jax.tree_util.tree_map(_slice_leaf, tree, target_shardings)
 
 
@@ -529,8 +535,9 @@ def _run_syncer_loop(
           lambda s, submesh=submesh: jax.sharding.NamedSharding(submesh, s.spec),
           params_shardings,
       )
+      target_shapes = jax.tree_util.tree_map(lambda x: x.shape, abstract_params)
       local_params = _slice_global_mesh_to_submesh(
-          syncer_state.params, submesh, i, devices_per_mesh, local_sharding, num_learners
+          syncer_state.params, submesh, i, devices_per_mesh, local_sharding, num_learners, target_shapes
       )
       max_logging.log(f"Syncer: sending params to Learner {i} at step {start_step}")
       transport.send_to_learner(learner_idx=i, step=start_step, fragment_id=-1, data=local_params)
@@ -609,11 +616,18 @@ def _run_syncer_loop(
 
     # Send updated fragment directly to each learner's submesh.
     for i, submesh in enumerate(submeshes):
-      frag_local_sharding = {
-          k: jax.sharding.NamedSharding(submesh, flat_params_shardings[k].spec) for k in new_outer_params_frag
+      target_shardings = {
+          k: jax.sharding.NamedSharding(submesh, learner_frags[i][k].sharding.spec) for k in new_outer_params_frag
       }
+      target_shapes = {k: learner_frags[i][k].shape for k in new_outer_params_frag}
       local_frag = _slice_global_mesh_to_submesh(
-          new_outer_params_frag, submesh, i, devices_per_mesh, frag_local_sharding, num_learners
+          new_outer_params_frag,
+          submesh,
+          i,
+          devices_per_mesh,
+          target_shardings,
+          num_learners=num_learners,
+          target_shapes=target_shapes,
       )
       transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=local_frag)
 
