@@ -73,25 +73,24 @@ def get_first_step(model, state):
   """
   try:
     if hasattr(state, "step"):
-      return int(state.step)
-    if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
-      step_obj = state.optimizer.step
-      if hasattr(step_obj, "get_value"):
-        return int(step_obj.get_value())
-      if hasattr(step_obj, "value"):
-        val = step_obj.value
-        if hasattr(val, "get_value"):
-          return int(val.get_value())
-        if hasattr(val, "addressable_shards") and val.addressable_shards:
-          return int(val.addressable_shards[0].data)
-        return int(val)
-      if hasattr(step_obj, "addressable_shards") and step_obj.addressable_shards:
-        return int(step_obj.addressable_shards[0].data)
-      return int(step_obj)
+      val = state.step
+    elif hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+      val = state.optimizer.step
+      if hasattr(val, "get_value"):
+        val = val.get_value()
+      elif hasattr(val, "value"):
+        val = val.value
+    else:
+      return 0
+
+    if isinstance(val, (int, np.integer)):
+      return int(val)
+    if hasattr(val, "addressable_shards") and val.addressable_shards:
+      return int(np.asarray(val.addressable_shards[0].data))
+    return int(val)
   except Exception as e:
-    max_logging.warn(f"get_first_step encountered exception reading step, defaulting to 0: {e}")
+    max_logging.log(f"get_first_step encountered exception reading step, defaulting to 0: {e}")
     return 0
-  return 0
 
 
 def make_learner_config(config, learner_idx, num_learners):
