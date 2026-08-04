@@ -144,6 +144,19 @@ class TestMatchFormatApproximatelyScores(unittest.TestCase):
     self.assertEqual(scores[0], 2.0)
     self.assertEqual(scores[1], -2.0)
 
+  @pytest.mark.cpu_only
+  def test_prefilled_reasoning_start_scores_native_completion(self):
+    self.config.reasoning_start_token = "<think>"
+    self.config.reasoning_end_token = "</think>"
+    self.config.reasoning_start_token_in_prompt = True
+    completion = "40 + 2 = 42</think>\n\n<answer>42</answer>"
+
+    self.assertEqual(self._score([completion])[0], 2.0)
+    self.assertEqual(
+        utils_rl.match_format_exactly(None, [completion], self.config)[0],
+        self.config.reward_exact_format_match,
+    )
+
 
 class TestCheckNumbers(unittest.TestCase):
   """Tests for utils_rl.check_numbers.
@@ -370,8 +383,8 @@ class TestFormatMaxTextMessages(unittest.TestCase):
     self.assertRaises(ValueError, lambda: utils_rl.format_maxtext_messages(messages, None, self.config))
 
   @pytest.mark.cpu_only
-  def test_qwen35_recipe_applies_only_qwen_chat_markers(self):
-    """The Qwen recipe must not nest Gemma turns inside Qwen's chat template."""
+  def test_qwen35_recipe_requests_answer_without_nested_reasoning_tags(self):
+    """The recipe instruction must not request a second reasoning wrapper."""
     recipe_path = os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "rl_gsm8k_qwen35_35b_v5p64.yml")
     with open(recipe_path, "r", encoding="utf-8") as recipe_file:
       recipe = yaml.safe_load(recipe_file)
@@ -381,7 +394,15 @@ class TestFormatMaxTextMessages(unittest.TestCase):
         local_files_only=True,
     )
 
-    messages = utils_rl.format_maxtext_messages(["What is 2+2?"], template_config, self.config)
+    recipe_config = SimpleNamespace(
+        reasoning_start_token=recipe["reasoning_start_token"],
+        reasoning_end_token=recipe["reasoning_end_token"],
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+    )
+    messages = utils_rl.format_maxtext_messages(["What is 2+2?"], template_config, recipe_config)
+    # The vendored fixture is Qwen3, not Qwen3.5, so this test validates the
+    # instruction contract rather than Qwen3.5's native prefilled <think>.
     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     self.assertEqual(prompt.count("<|im_start|>user"), 1)
@@ -389,8 +410,25 @@ class TestFormatMaxTextMessages(unittest.TestCase):
     self.assertNotIn("<start_of_turn>", prompt)
     self.assertNotIn("<end_of_turn>", prompt)
     self.assertIn("What is 2+2?", prompt)
-    for tag in ("<reasoning>", "</reasoning>", "<answer>", "</answer>"):
+    self.assertNotIn("<reasoning>", prompt)
+    self.assertNotIn("</reasoning>", prompt)
+    for tag in ("<answer>", "</answer>"):
       self.assertIn(tag, prompt)
+
+    self.assertFalse(recipe["enable_prefix_caching"])
+    self.assertEqual(recipe["reasoning_start_token"], "<think>")
+    self.assertEqual(recipe["reasoning_end_token"], "</think>")
+    self.assertTrue(recipe["reasoning_start_token_in_prompt"])
+    self.assertEqual(recipe["eval_sampling_strategy"], "standard")
+    self.assertEqual(
+        recipe["generation_configs"]["standard"],
+        {
+            "eval_temperature": 1.0,
+            "eval_top_k": 20,
+            "eval_top_p": 0.95,
+        },
+    )
+    self.assertEqual(recipe["stop_strings"], ["</answer>"])
 
 
 if __name__ == "__main__":

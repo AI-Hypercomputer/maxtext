@@ -77,7 +77,14 @@ eval_interval: 100
 # run is stable if you need lower-variance reporting.
 num_test_batches: 20
 eval_batch_size: 32
-eval_sampling_strategy: "greedy"
+# Qwen3.5 is a thinking model; top-k=1 greedy decoding can fall into endless
+# token loops. Match the model's published sampling defaults instead.
+eval_sampling_strategy: "standard"
+generation_configs:
+  standard:
+    eval_temperature: 1.0
+    eval_top_k: 20
+    eval_top_p: 0.95
 num_eval_passes: 1
 eval_mode: "pass_at_1"
 
@@ -86,9 +93,9 @@ max_prefill_predict_length: 256
 max_target_length: 1024
 kv_cache_buffer: 256
 
-decode_sampling_temperature: 0.9
-decode_sampling_top_k: 50
-decode_sampling_nucleus_p: 1.0
+decode_sampling_temperature: 1.0
+decode_sampling_top_k: 20
+decode_sampling_nucleus_p: 0.95
 
 hbm_utilization_vllm: 0.60
 swap_space_vllm_gb: 2
@@ -98,6 +105,10 @@ max_num_batched_tokens: 16384
 # src/maxtext/integration/vllm/maxtext_vllm_rollout.py:201
 async_scheduling: false
 enable_dp_attention: false
+# The custom MaxText Qwen3.5 adapter does not yet save/restore GDN recurrent
+# state in vLLM's block-addressed prefix cache. Enabling APC would reuse the
+# attention prefix with an unrelated recurrent state and corrupt generation.
+enable_prefix_caching: false
 
 # ====== Checkpointing ======
 enable_checkpointing: true
@@ -111,7 +122,16 @@ eval_dataset_name: "openai/gsm8k"
 train_split: "train"
 eval_split: "test"
 hf_subset: "main"
-data_template_path: "maxtext/examples/chat_templates/openmathinstruct2_rl.json"
+data_template_path: "maxtext/examples/chat_templates/qwen35_math_rl.json"
+reasoning_start_token: "<think>"
+reasoning_end_token: "</think>"
+reasoning_start_token_in_prompt: true
+
+# Qwen3.5's chat template opens its native <think> block in the prompt. The
+# model closes it itself, then emits the task-specific answer block requested
+# above. Stop as soon as that answer is complete so a later repetition cannot
+# invalidate an otherwise valid sample.
+stop_strings: ["</answer>"]
 
 # ====== Reward ======
 reward_exact_answer: 1.0

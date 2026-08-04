@@ -117,6 +117,7 @@ def _tpu_inference_compat_patches():
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
 
+from maxtext.common.common_types import DecoderBlockType
 from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout, requires_maxtext_scanned_weight_unroll
@@ -124,6 +125,31 @@ from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
 from maxtext.utils import max_logging, max_utils, model_creation_utils
+
+
+_RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset(
+    (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+)
+
+
+def rollout_prefix_caching_enabled(trainer_config: Any) -> bool:
+  """Returns whether vLLM prefix caching is safe for this rollout model.
+
+  The MaxText vLLM adapter stores Qwen3-Next/Qwen3.5 GDN state in a
+  per-request slot, outside vLLM's block-addressed prefix cache. Reusing only
+  the attention KV blocks would therefore skip the cached prefix tokens while
+  starting the recurrent layers from a fresh (potentially stale) state slot.
+  Keep prefix caching disabled for these hybrid recurrent models until the
+  adapter implements recurrent-state prefix save/restore.
+  """
+  enabled = bool(getattr(trainer_config, "enable_prefix_caching", False))
+  if enabled and getattr(trainer_config, "decoder_block", None) in _RECURRENT_ROLLOUT_DECODER_BLOCKS:
+    max_logging.log(
+        "Disabling vLLM prefix caching for the hybrid recurrent rollout model: "
+        "GDN state is not part of the MaxText adapter's prefix cache."
+    )
+    return False
+  return enabled
 
 
 def get_dataset(
@@ -495,7 +521,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           rollout_vllm_kwargs={
               "hf_overrides": trainer_config.vllm_hf_overrides,
               "enable_expert_parallel": sampler_config.enable_expert_parallel,
-              "enable_prefix_caching": True,  # Enable prefix caching to speed up generation for long prompts
+              "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
               # Ensures vLLM model initializes with correct dtype (not float32 default)
               "dtype": trainer_config.weight_dtype.value,
           },
