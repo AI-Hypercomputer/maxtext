@@ -924,6 +924,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
   )
+  enable_moe_token_activation_dedup: bool = Field(
+      False,
+      description="Enable token activation deduplication in MoE ragged all-to-all communication.",
+  )
   norm_topk_prob: bool = Field(
       False,
       description="Enable top-k probability normalization for router weights (Qwen3-specific).",
