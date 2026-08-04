@@ -1070,3 +1070,43 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     element[f"{self.data_column}_mrope_deltas"] = mrope_position_deltas
 
     return element
+
+
+import bagz
+
+class BagzDataSource:
+  """A fully picklable and fork-safe RandomAccessDataSource for Bagz files."""
+  def __init__(self, paths: list[str] | str):
+    if isinstance(paths, (list, tuple)):
+      self._path = ",".join(sorted(paths))
+    else:
+      self._path = paths
+    self._len = None
+    self._reader = None
+
+  @property
+  def reader(self):
+    if self._reader is None:
+      self._reader = bagz.Reader(self._path)
+    return self._reader
+
+  def __len__(self) -> int:
+    if self._len is None:
+      self._len = len(bagz.Reader(self._path))
+    return self._len
+
+  def __getitem__(self, record_key: int):
+    return self.reader[record_key]
+
+  def __repr__(self) -> str:
+    return f"BagzDataSource(path={self._path!r})"
+
+  def __getstate__(self):
+    state = self.__dict__.copy()
+    state["_reader"] = None
+    return state
+
+  def __setstate__(self, state):
+    self.__dict__.update(state)
+    self._reader = None
+

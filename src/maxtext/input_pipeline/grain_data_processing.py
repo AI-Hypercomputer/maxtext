@@ -26,6 +26,7 @@ import jax
 
 import grain.python as grain
 from grain.experimental import ElasticIterator
+import bagz
 
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils
@@ -180,6 +181,76 @@ def get_datasets(
           elastic=elastic,
       )
       return dataset
+  elif data_file_type == "bagz":
+    def create_dataset_from_pattern(pattern):
+      files = find_data_files(pattern)
+      source = input_pipeline_utils.BagzDataSource(files)
+      return grain.MapDataset.source(source)
+
+    if mixture_config_path:
+      with open(mixture_config_path, "r", encoding="utf-8") as f:
+        mixture_config = json.load(f)
+      paths = [config["path"] for config in mixture_config.values()]
+      weights = [float(config["weight"]) for config in mixture_config.values()]
+
+      executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
+      dataset_list = list(executor.map(create_dataset_from_pattern, paths))
+      executor.shutdown(wait=True)
+
+      datasets_dict = dict(zip(mixture_config.keys(), dataset_list))
+      for name, ds in datasets_dict.items():
+        datasets_dict[name] = _apply_mapdataset_transforms(
+            ds,
+            shuffle,
+            shuffle_seed,
+            num_epoch,
+            dataloading_host_index,
+            dataloading_host_count,
+            grain_num_threads,
+            grain_prefetch_buffer_size,
+        )
+
+      total_weight = sum(weights)
+      weights_dict = {name: weight / total_weight for name, weight in zip(mixture_config.keys(), weights)}
+      dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
+      return dataset
+    elif ";" in data_file_pattern:
+      data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
+      assert len(data_file_patterns) == len(weights)
+      weights = [float(w) for w in weights]
+      weights = [round(w / sum(weights), 4) for w in weights]
+
+      executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
+      dataset_list = list(executor.map(create_dataset_from_pattern, data_file_patterns))
+      executor.shutdown(wait=True)
+
+      for d, _ in enumerate(dataset_list):
+        dataset_list[d] = _apply_mapdataset_transforms(
+            dataset_list[d],
+            shuffle,
+            shuffle_seed,
+            num_epoch,
+            dataloading_host_index,
+            dataloading_host_count,
+            grain_num_threads,
+            grain_prefetch_buffer_size,
+        )
+      dataset = grain.IterDataset.mix(dataset_list, weights)
+      return dataset
+    else:
+      dataset = create_dataset_from_pattern(data_file_pattern)
+      dataset = _apply_mapdataset_transforms(
+          dataset,
+          shuffle,
+          shuffle_seed,
+          num_epoch,
+          dataloading_host_index,
+          dataloading_host_count,
+          grain_num_threads,
+          grain_prefetch_buffer_size,
+          elastic=elastic,
+      )
+      return dataset
   elif data_file_type in ("tfrecord", "parquet"):
     data_files = find_data_files(data_file_pattern)
     file_slice, files_per_host, row_shard = input_pipeline_utils.compute_file_sharding(
@@ -215,7 +286,7 @@ def get_datasets(
     return dataset
   else:
     raise ValueError(
-        f"grain pipeline supports (arrayrecord, tfrecord, parquet) as grain_file_type, but got {data_file_type}"
+        f"grain pipeline supports (arrayrecord, tfrecord, parquet, bagz) as grain_file_type, but got {data_file_type}"
     )
 
 
