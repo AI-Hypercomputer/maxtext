@@ -37,3 +37,29 @@ def save_state(state):
   Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
   with open(STATE_FILE, "w", encoding="utf-8") as f:
     json.dump(state, f, indent=2)
+
+
+def get_run_state(run_id: str) -> dict:
+  """Returns a structured dictionary state for a given run_id."""
+  state = load_state()
+  entry = state.get(run_id, {"retries": 0, "attempts": []})
+  if isinstance(entry, int):
+    entry = {"retries": entry, "attempts": []}
+  return entry
+
+
+def record_attempt(run_id: str, branch: str = "", diagnosis: str = "", hypothesis: str = "") -> dict:
+  """Records an attempt with rich context so terminal alerts include full analysis and history."""
+  state = load_state()
+  entry = get_run_state(run_id)
+  entry["retries"] += 1
+  if branch or diagnosis or hypothesis:
+    entry["attempts"].append({
+        "attempt": entry["retries"],
+        "branch": branch,
+        "diagnosis": diagnosis,
+        "hypothesis": hypothesis,
+    })
+  state[run_id] = entry
+  save_state(state)
+  return entry

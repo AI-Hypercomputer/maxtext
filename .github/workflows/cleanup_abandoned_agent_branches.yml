@@ -1,0 +1,31 @@
+name: Cleanup Abandoned Agent Branches
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Inactivity threshold in days'
+        required: false
+        default: '14'
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run branch cleanup script
+        run: |
+          python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/monitor/branch_cleanup.py \
+            --days "${{ github.event.inputs.days || '14' }}"

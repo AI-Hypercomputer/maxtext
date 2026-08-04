@@ -27,14 +27,39 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+def _check_and_send_victory_laps(state):
+  """Checks if any previously failing runs have succeeded and dispatches Victory Lap emails."""
+  from monitor.alerter import dispatch_victory_lap_alert
+  for run_id, entry in list(state.items()):
+    if isinstance(entry, dict) and entry.get("retries", 0) > 0 and not entry.get("victory_lap_sent", False):
+      logger.info("Run ID %s succeeded after %s retries! Sending Victory Lap email...", run_id, entry["retries"])
+      last_attempt = entry.get("attempts", [{}])[-1] if entry.get("attempts") else {}
+      pr_url = last_attempt.get("pr_url", "")
+      dispatch_victory_lap_alert(run_id=run_id, model_name=entry.get("model", "unknown"), pr_url=pr_url)
+      entry["victory_lap_sent"] = True
+  save_state(state)
+
+
 def main():
   """Entrypoint for the Cloud Run Job. Executes once and terminates."""
   logger.info("Overwatch Cloud Run Job started. Checking for pipeline failures...")
 
   try:
+    # Check if Airflow passed failure context directly via environment overrides
+    airflow_error = os.environ.get("AIRFLOW_ERROR_MESSAGE", "").strip()
+    if airflow_error:
+      logger.info("Detected direct failure context from Airflow on_failure_callback!")
+      run_id = os.environ.get("RUN_NAME", "airflow_run")
+      model_name = os.environ.get("MAXTEXT_MODEL_NAME", "unknown_model")
+      run_agent_workflow(run_id, model_name, airflow_error, "airflow_callback")
+      return
+
     failure, blob_name = check_for_failures()
     if not failure:
-      logger.info("No failures detected in GCS. Exiting cleanly.")
+      logger.info("No failures detected in GCS. Checking if any retry runs completed successfully...")
+      state = load_state()
+      _check_and_send_victory_laps(state)
+      logger.info("Exiting cleanly.")
       return
 
     run_id = (
