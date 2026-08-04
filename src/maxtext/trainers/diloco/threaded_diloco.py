@@ -75,7 +75,12 @@ def _slice_global_mesh_to_submesh(
       return jax.device_put(leaf, target_sharding)
     start_idx = learner_idx * num_devices_per_mesh
     end_idx = start_idx + num_devices_per_mesh
-    local_shards = [shard.data for shard in leaf.addressable_shards[start_idx:end_idx]]
+    local_shards = []
+    for shard in leaf.addressable_shards[start_idx:end_idx]:
+      s = shard.data
+      while s.ndim > len(target_shape) and s.shape[0] == 1:
+        s = s.squeeze(0)
+      local_shards.append(s)
     return jax.make_array_from_single_device_arrays(target_shape, target_sharding, local_shards)
 
   if target_shapes is not None:
