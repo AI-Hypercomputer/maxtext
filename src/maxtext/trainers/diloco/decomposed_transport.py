@@ -21,8 +21,8 @@ import traceback
 import jax
 import jax.numpy as jnp
 from jax.experimental import colocated_python
+import numpy as np
 from maxtext.utils import max_logging
-
 
 
 class ThreadedTransportManager:
@@ -80,8 +80,8 @@ class ThreadedTransportManager:
 def _put_on_local_cpu_mesh(tree: Any, local_cpu_mesh: jax.sharding.Mesh) -> Any:
   """Safely transfers a PyTree of TPU arrays to local colocated CPU mesh.
 
-  Transfers per single-device shard using make_array_from_single_device_arrays
-  to avoid triggering multislice JIT resharding kernels in Pathways.
+  Transfers per single-device shard via host numpy buffer to avoid triggering
+  multislice JIT resharding kernels in Pathways.
   """
   cpu_devices = list(local_cpu_mesh.devices.flat)
 
@@ -91,14 +91,41 @@ def _put_on_local_cpu_mesh(tree: Any, local_cpu_mesh: jax.sharding.Mesh) -> Any:
     spec = leaf.sharding.spec if isinstance(leaf.sharding, jax.sharding.NamedSharding) else jax.sharding.PartitionSpec()
     target_sharding = jax.sharding.NamedSharding(local_cpu_mesh, spec)
     if not hasattr(leaf, "addressable_shards") or not leaf.addressable_shards:
-      return jax.device_put(leaf, target_sharding)
+      return jax.device_put(np.asarray(leaf), target_sharding)
     cpu_shards = [
-        jax.device_put(shard.data, cpu_devices[i])
+        jax.device_put(np.asarray(shard.data), cpu_devices[i])
         for i, shard in enumerate(leaf.addressable_shards)
     ]
     return jax.make_array_from_single_device_arrays(leaf.shape, target_sharding, cpu_shards)
 
   return jax.tree_util.tree_map(_put_leaf, tree)
+
+
+def _put_on_tpu_mesh(tree: Any, tpu_submesh: jax.sharding.Mesh, target_shardings: Any) -> Any:
+  """Safely transfers a PyTree of CPU arrays to local TPU submesh.
+
+  Transfers per single-device shard via host numpy buffer to avoid triggering
+  multislice JIT resharding kernels in Pathways.
+  """
+  tpu_devices = list(tpu_submesh.devices.flat)
+
+  def _put_leaf(leaf, sharding_spec):
+    if not isinstance(leaf, jax.Array):
+      return leaf
+    target_sharding = (
+        sharding_spec
+        if isinstance(sharding_spec, jax.sharding.NamedSharding)
+        else jax.sharding.NamedSharding(tpu_submesh, jax.sharding.PartitionSpec())
+    )
+    if not hasattr(leaf, "addressable_shards") or not leaf.addressable_shards:
+      return jax.device_put(np.asarray(leaf), target_sharding)
+    tpu_shards = [
+        jax.device_put(np.asarray(shard.data), tpu_devices[i])
+        for i, shard in enumerate(leaf.addressable_shards)
+    ]
+    return jax.make_array_from_single_device_arrays(leaf.shape, target_sharding, tpu_shards)
+
+  return jax.tree_util.tree_map(_put_leaf, tree, target_shardings)
 
 
 class LearnerTransport:

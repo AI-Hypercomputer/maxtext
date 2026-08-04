@@ -33,7 +33,7 @@ import optax
 
 from maxtext.common import checkpointing, profiler, metric_logger
 from maxtext.common.goodput import maybe_record_goodput, GoodputEvent
-from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager, LearnerTransport, SyncerTransport
+from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager, LearnerTransport, SyncerTransport, _put_on_tpu_mesh
 from maxtext.trainers.diloco.fragmenter import FragmentedTreeManipulator
 from maxtext.utils import exceptions
 from maxtext.utils import max_logging
@@ -47,6 +47,55 @@ from maxtext.utils.mesh_utils import partition_mesh_by_diloco_axis, stack_across
 @jax.jit
 def mix_frags(i_frag, o_frag, alpha):
   return jax.tree_util.tree_map(lambda x, y: alpha * x + (1 - alpha) * y, i_frag, o_frag)
+
+
+def _replicate_initial_params_to_global_cpu_mesh(
+    tree: Any, global_cpu_mesh: jax.sharding.Mesh, num_learners: int, target_shardings: Any
+) -> Any:
+  """Replicates Learner 0's initial CPU param shards across all diloco slices on global_cpu_mesh."""
+  cpu_devices = list(global_cpu_mesh.devices.flat)
+
+  def _put_leaf(leaf, sharding_spec):
+    if not isinstance(leaf, jax.Array):
+      return leaf
+    target_sharding = (
+        sharding_spec
+        if isinstance(sharding_spec, jax.sharding.NamedSharding)
+        else jax.sharding.NamedSharding(global_cpu_mesh, jax.sharding.PartitionSpec())
+    )
+    if not hasattr(leaf, "addressable_shards") or not leaf.addressable_shards:
+      return jax.device_put(np.asarray(leaf), target_sharding)
+    l0_shards = [np.asarray(s.data) for s in leaf.addressable_shards]
+    all_shards = l0_shards * num_learners
+    global_leaf_shards = [
+        jax.device_put(all_shards[i], cpu_devices[i])
+        for i in range(len(cpu_devices))
+    ]
+    return jax.make_array_from_single_device_arrays(leaf.shape, target_sharding, global_leaf_shards)
+
+  return jax.tree_util.tree_map(_put_leaf, tree, target_shardings)
+
+
+def _slice_global_cpu_mesh_to_submesh(
+    tree: Any, submesh: jax.sharding.Mesh, learner_idx: int, num_devices_per_mesh: int, target_shardings: Any
+) -> Any:
+  """Slices shards of a global_cpu_mesh array to construct a submesh array without cross-device communication."""
+  def _slice_leaf(leaf, sharding_spec):
+    if not isinstance(leaf, jax.Array):
+      return leaf
+    target_sharding = (
+        sharding_spec
+        if isinstance(sharding_spec, jax.sharding.NamedSharding)
+        else jax.sharding.NamedSharding(submesh, jax.sharding.PartitionSpec())
+    )
+    if not hasattr(leaf, "addressable_shards") or not leaf.addressable_shards:
+      return jax.device_put(np.asarray(leaf), target_sharding)
+    start_idx = learner_idx * num_devices_per_mesh
+    end_idx = start_idx + num_devices_per_mesh
+    local_shards = [shard.data for shard in leaf.addressable_shards[start_idx:end_idx]]
+    return jax.make_array_from_single_device_arrays(leaf.shape, target_sharding, local_shards)
+
+  return jax.tree_util.tree_map(_slice_leaf, tree, target_shardings)
 
 
 def _normalize_to_null_layout(tree):
@@ -254,7 +303,7 @@ def _run_learner_loop(
         tpu_param_sharding = jax.tree_util.tree_map(
             lambda s: jax.sharding.NamedSharding(submesh, s.spec), params_shardings
         )
-        initial_params_tpu = jax.device_put(initial_params, tpu_param_sharding)
+        initial_params_tpu = _put_on_tpu_mesh(initial_params, submesh, tpu_param_sharding)
         if learner_config.pure_nnx:
           non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
           new_model = nnx.merge_state(non_param_model, initial_params_tpu)
@@ -269,7 +318,7 @@ def _run_learner_loop(
         tpu_param_sharding = jax.tree_util.tree_map(
             lambda s: jax.sharding.NamedSharding(submesh, s.spec), params_shardings
         )
-        global_params_tpu = jax.device_put(global_params, tpu_param_sharding)
+        global_params_tpu = _put_on_tpu_mesh(global_params, submesh, tpu_param_sharding)
         if learner_config.pure_nnx:
           non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
           new_model = nnx.merge_state(non_param_model, global_params_tpu)
@@ -348,7 +397,7 @@ def _run_learner_loop(
             tpu_frag_sharding = {
                 k: jax.sharding.NamedSharding(submesh, flat_params_shardings[k].spec) for k in received_frag.keys()
             }
-            received_frag_tpu = jax.device_put(received_frag, tpu_frag_sharding)
+            received_frag_tpu = _put_on_tpu_mesh(received_frag, submesh, tpu_frag_sharding)
 
             params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
             inner_frag = manipulator.get_flat_fragment(params, frag_idx)
@@ -513,7 +562,9 @@ def _run_syncer_loop(
     initial_params_l0 = transport.recv_from_learner(learner_idx=0, step=0, fragment_id=-1)
     max_logging.log("Syncer: received init params from Learner 0")
     with jax.set_mesh(global_cpu_mesh):
-      global_params = jax.device_put(initial_params_l0, params_shardings)
+      global_params = _replicate_initial_params_to_global_cpu_mesh(
+          initial_params_l0, global_cpu_mesh, config.num_diloco_replicas, params_shardings
+      )
       # Normalize to null layout: learner transport delivers tiled params, and different
       # tensors may have mixed layouts. Consistent null layout prevents jit__take /
       # jit__scatter from seeing layout mismatches across params with the same signature.
@@ -538,12 +589,15 @@ def _run_syncer_loop(
   # Params on global_cpu_mesh have no diloco axis in their spec, so they are replicated
   # across all diloco slices. Rebinding to each cpu_submesh is a metadata-only operation
   # that avoids the jit-level layout checking that caused Pathways layout mismatches.
+  devices_per_mesh = len(cpu_submeshes[0].devices.flat)
   for i, submesh in enumerate(cpu_submeshes):
     local_sharding = jax.tree_util.tree_map(
         lambda s, submesh=submesh: jax.sharding.NamedSharding(submesh, s.spec),
         params_shardings,
     )
-    local_params = jax.device_put(syncer_state.params, local_sharding)
+    local_params = _slice_global_cpu_mesh_to_submesh(
+        syncer_state.params, submesh, i, devices_per_mesh, local_sharding
+    )
     max_logging.log(f"Syncer: sending params to Learner {i} at step {start_step}")
     transport.send_to_learner(learner_idx=i, step=start_step, fragment_id=-1, data=local_params)
     max_logging.log(f"Syncer: sent params to Learner {i} at step {start_step}")
@@ -644,14 +698,15 @@ def _run_syncer_loop(
       syncer_state = syncer_state.replace(params=new_params, opt_state=new_opt_state, step=step)
     max_logging.log(f"Syncer: Step {step} outer step applied")
 
-    # Send updated fragment directly to each learner's submesh via device_put.
-    # new_outer_params_frag has no diloco axis in its sharding (replicated across slices),
-    # so rebinding to each cpu_submesh is a metadata-only operation with no layout checking.
+    # Send updated fragment directly to each learner's submesh.
+    devices_per_mesh = len(cpu_submeshes[0].devices.flat)
     for i, submesh in enumerate(cpu_submeshes):
       frag_local_sharding = {
           k: jax.sharding.NamedSharding(submesh, flat_params_shardings[k].spec) for k in new_outer_params_frag
       }
-      local_frag = jax.device_put(new_outer_params_frag, frag_local_sharding)
+      local_frag = _slice_global_cpu_mesh_to_submesh(
+          new_outer_params_frag, submesh, i, devices_per_mesh, frag_local_sharding
+      )
       transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=local_frag)
 
     # SyncerState is a plain PyTreeNode, not a NNX TrainState — force the Linen save path.
