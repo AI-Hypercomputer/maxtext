@@ -16,6 +16,7 @@
 
 import unittest
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,6 +74,27 @@ class SFTHooksTest(unittest.TestCase):
     batch = {"targets_segmentation": np.array([[1, 1, 0], [1, 0, 0]])}
     total_weights = training_hooks.get_total_weights(batch)
     self.assertEqual(total_weights, 3)
+
+  def test_sft_training_hooks_prefers_explicit_loss_mask(self):
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)
+    training_hooks = sft_hooks.SFTTrainingHooks(self.config, self.mesh, learning_rate_schedule, goodput_recorder=None)
+    batch = {
+        "targets_segmentation": np.ones((2, 4), dtype=np.int32),
+        "targets_loss_mask": np.array([[1, 0, 0, 0], [0, 1, 1, 0]], dtype=np.int32),
+    }
+
+    total_weights = training_hooks.get_total_weights(batch)
+
+    self.assertEqual(total_weights, 3)
+
+  def test_preaveraged_eval_loss_is_config_driven(self):
+    training_hooks = object.__new__(sft_hooks.SFTTrainingHooks)
+
+    training_hooks.config = SimpleNamespace(training_objective="block_diffusion", loss_is_preaveraged=False)
+    self.assertFalse(training_hooks.eval_loss_is_preaveraged())
+
+    training_hooks.config = SimpleNamespace(training_objective="causal_lm", loss_is_preaveraged=True)
+    self.assertTrue(training_hooks.eval_loss_is_preaveraged())
 
 
 if __name__ == "__main__":
