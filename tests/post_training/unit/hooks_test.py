@@ -45,6 +45,13 @@ class DummyTrainingHooks(BaseTrainingHooks):
     return np.sum(batch["targets_segmentation"] != 0)
 
 
+class PreaveragedDummyTrainingHooks(DummyTrainingHooks):
+  """Models a Tunix objective that passes a weighted eval mean."""
+
+  def eval_loss_is_preaveraged(self) -> bool:
+    return True
+
+
 class BaseHooksTest(unittest.TestCase):
 
   def setUp(self):
@@ -117,6 +124,27 @@ class BaseHooksTest(unittest.TestCase):
     self.assertAlmostEqual(metrics["eval/avg_loss"], 5.0)
     self.assertAlmostEqual(metrics["eval/avg_perplexity"], np.exp(5.0), places=2)
     self.assertEqual(metrics["eval/total_weights"], jax.device_count() * self.config.max_target_length * total_eval_steps)
+
+  def test_preaveraged_eval_loss_is_not_divided_again(self):
+    training_hooks = PreaveragedDummyTrainingHooks(
+        self.config,
+        self.mesh,
+        self.learning_rate_schedule,
+        goodput_recorder=None,
+    )
+    training_hooks.metric_logger = MetricLogger(self.config, self.learning_rate_schedule)
+    training_hooks.metric_logger.metadata = defaultdict(float)
+    self.mock_train_ctx.data_hooks.eval_batch = self.expected_batch
+    self.mock_train_ctx.train_steps = 0
+    for _ in range(2):
+      training_hooks.on_eval_step_start(self.mock_train_ctx)
+
+    training_hooks.on_eval_step_end(self.mock_train_ctx, eval_loss=3.0)
+
+    metrics = self._read_logged_metrics(num_expected=1)[0]
+    self.assertAlmostEqual(metrics["eval/total_loss"], 3.0)
+    self.assertAlmostEqual(metrics["eval/avg_loss"], 3.0)
+    self.assertAlmostEqual(metrics["eval/avg_perplexity"], np.exp(3.0), places=2)
 
   def test_on_train_end_asserts_if_on_train_start_not_called(self):
     with self.assertRaises(AssertionError):

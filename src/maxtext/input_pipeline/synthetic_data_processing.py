@@ -111,6 +111,11 @@ class PlaceHolderDataIterator:
         "targets_position": neg_ones,
         "targets_segmentation": neg_ones,
     }
+    if getattr(config, "training_objective", "causal_lm") == "block_diffusion":
+      zeros = np.zeros_like(neg_ones)
+      batch["completion_mask"] = zeros
+      batch["corruption_mask"] = zeros
+      batch["targets_loss_mask"] = zeros
 
     def infinite_iterator():
       while True:
