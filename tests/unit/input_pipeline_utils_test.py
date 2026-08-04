@@ -15,8 +15,84 @@
 """Unit tests for input_pipeline_utils."""
 
 import unittest
+from types import SimpleNamespace
 
-from maxtext.input_pipeline.input_pipeline_utils import compute_file_sharding
+import numpy as np
+
+from maxtext.input_pipeline.input_pipeline_utils import BlockDiffusionCorruption, compute_file_sharding, PadOrTrimToMaxLength
+
+
+class BlockDiffusionPaddingTest(unittest.TestCase):
+  """Checks that tokenizer padding never becomes diffusion supervision."""
+
+  def test_nonzero_token_pad_id_keeps_metadata_padding_zero(self):
+    clean = PadOrTrimToMaxLength(
+        max_length=6,
+        pad_id=7,
+        config=SimpleNamespace(training_objective="block_diffusion"),
+    ).map(
+        {
+            "inputs": np.asarray([11, 12, 13], dtype=np.int32),
+            "targets": np.asarray([11, 12, 13], dtype=np.int32),
+        }
+    )
+    corrupted = BlockDiffusionCorruption(block_size=4, mask_id=99, min_noise=1.0, axis=0).random_map(
+        clean, np.random.default_rng(0)
+    )
+
+    padding = np.arange(6) >= 3
+    np.testing.assert_array_equal(clean["inputs"][padding], 7)
+    np.testing.assert_array_equal(clean["inputs_segmentation"][padding], 0)
+    np.testing.assert_array_equal(clean["targets_segmentation"][padding], 0)
+    np.testing.assert_array_equal(clean["inputs_position"][padding], 0)
+    np.testing.assert_array_equal(clean["targets_position"][padding], 0)
+    np.testing.assert_array_equal(corrupted["corruption_mask"][padding], 0)
+    np.testing.assert_array_equal(corrupted["targets_loss_mask"][padding], 0)
+    np.testing.assert_array_equal(corrupted["inputs"][padding], 7)
+
+  def test_pad_valued_source_token_remains_valid(self):
+    clean = PadOrTrimToMaxLength(
+        max_length=4,
+        pad_id=7,
+        config=SimpleNamespace(training_objective="block_diffusion"),
+    ).map(
+        {
+            "inputs": np.asarray([11, 7], dtype=np.int32),
+            "targets": np.asarray([11, 7], dtype=np.int32),
+        }
+    )
+
+    np.testing.assert_array_equal(clean["inputs"], [11, 7, 7, 7])
+    np.testing.assert_array_equal(clean["inputs_segmentation"], [1, 1, 0, 0])
+    np.testing.assert_array_equal(clean["targets_segmentation"], [1, 1, 0, 0])
+
+  def test_causal_padding_preserves_legacy_metadata_pad_value(self):
+    clean = PadOrTrimToMaxLength(
+        max_length=4,
+        pad_id=7,
+        config=SimpleNamespace(training_objective="causal_lm"),
+    ).map(
+        {
+            "inputs": np.asarray([11, 7], dtype=np.int32),
+            "targets": np.asarray([11, 7], dtype=np.int32),
+        }
+    )
+
+    np.testing.assert_array_equal(clean["inputs_segmentation"], [1, 0, 7, 7])
+    np.testing.assert_array_equal(clean["targets_segmentation"], [1, 0, 7, 7])
+    np.testing.assert_array_equal(clean["inputs_position"], [0, 1, 7, 7])
+    np.testing.assert_array_equal(clean["targets_position"], [0, 1, 7, 7])
+
+  def test_corruption_rejects_mismatched_batch_shapes(self):
+    with self.assertRaisesRegex(ValueError, "must have identical shapes"):
+      BlockDiffusionCorruption(block_size=4, mask_id=99).random_map(
+          {
+              "inputs": np.asarray([11, 12], dtype=np.int32),
+              "targets": np.asarray([11, 12, 13], dtype=np.int32),
+              "targets_segmentation": np.ones(2, dtype=np.int32),
+          },
+          np.random.default_rng(0),
+      )
 
 
 class ComputeFileShardingNormalCaseTest(unittest.TestCase):

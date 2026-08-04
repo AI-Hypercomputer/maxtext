@@ -1151,8 +1151,16 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
 class TestGetShapedBatch(unittest.TestCase):
   """Tests for get_shaped_batch."""
 
-  def _make_cfg(self, *, enable_diloco=False, use_multimodal=False, use_audio=False, model_name="llama3.1-8b"):
-    """Build a minimal config mock for get_shaped_batch tests."""
+  def _make_cfg(
+      self,
+      *,
+      enable_diloco=False,
+      use_multimodal=False,
+      use_audio=False,
+      model_name="llama3.1-8b",
+      training_objective="causal_lm",
+  ):
+    """Builds the config subset consumed by get_shaped_batch."""
     cfg = MagicMock()
     cfg.enable_diloco = enable_diloco
     cfg.global_batch_size_to_load = 4
@@ -1160,6 +1168,7 @@ class TestGetShapedBatch(unittest.TestCase):
     cfg.use_multimodal = use_multimodal
     cfg.use_audio = use_audio
     cfg.model_name = model_name
+    cfg.training_objective = training_objective
     if enable_diloco:
       cfg.num_diloco_replicas = 2
     return cfg
@@ -1181,6 +1190,21 @@ class TestGetShapedBatch(unittest.TestCase):
     batch = maxtext_utils.get_shaped_batch(cfg)
     expected_shape = (cfg.global_batch_size_to_load, cfg.max_target_length)
     self.assertEqual(batch["inputs"].shape, expected_shape)
+
+  def test_block_diffusion_masks_are_in_shaped_batch(self):
+    cfg = self._make_cfg(training_objective="block_diffusion")
+
+    batch = maxtext_utils.get_shaped_batch(cfg)
+
+    self.assertEqual(batch["corruption_mask"].shape, batch["inputs"].shape)
+    self.assertEqual(batch["targets_loss_mask"].shape, batch["inputs"].shape)
+    self.assertEqual(batch["targets_loss_mask"].dtype, jnp.int32)
+
+  def test_causal_shaped_batch_has_no_diffusion_masks(self):
+    batch = maxtext_utils.get_shaped_batch(self._make_cfg())
+
+    self.assertNotIn("corruption_mask", batch)
+    self.assertNotIn("targets_loss_mask", batch)
 
   def test_diloco_shape(self):
     cfg = self._make_cfg(enable_diloco=True)

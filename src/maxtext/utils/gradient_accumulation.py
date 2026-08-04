@@ -162,12 +162,20 @@ def gradient_accumulation_loss_and_grad(
   grad_and_loss, aux = jax.lax.scan(
       accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
   )
+  is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
+  if is_block_diffusion:
+    has_weights = grad_and_loss["total_weights"] > 0
+    denominator = jnp.maximum(grad_and_loss["total_weights"], 1)
+  else:
+    denominator = grad_and_loss["total_weights"]
   loss = (
-      grad_and_loss["loss"] / grad_and_loss["total_weights"]
+      grad_and_loss["loss"] / denominator
       + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
       + grad_and_loss["indexer_loss"] / config.gradient_accumulation_steps
       + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
   )
+  if is_block_diffusion:
+    loss = jnp.where(has_weights, loss, 0.0)
   raw_grads = grad_and_loss["grad"]
   if data_parallel_active:
     # Mark the gradients unreduced over the "data" axis now that we're outside the
@@ -177,11 +185,15 @@ def gradient_accumulation_loss_and_grad(
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
   divisor = (
-      config.gradient_accumulation_steps
-      if getattr(config, "use_tunix_gradient_accumulation", False)
-      else grad_and_loss["total_weights"]
+      config.gradient_accumulation_steps if getattr(config, "use_tunix_gradient_accumulation", False) else denominator
   )
-  raw_grads = jax.tree_util.tree_map(lambda arr: arr / divisor, raw_grads)
+  if is_block_diffusion:
+    raw_grads = jax.tree_util.tree_map(
+        lambda arr: jnp.where(has_weights, arr / divisor, jnp.zeros_like(arr)),
+        raw_grads,
+    )
+  else:
+    raw_grads = jax.tree_util.tree_map(lambda arr: arr / divisor, raw_grads)
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
 
   if is_nnx:
