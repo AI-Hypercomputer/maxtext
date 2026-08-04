@@ -152,6 +152,7 @@ class TokamaxRingAttentionTest(absltest.TestCase):
         use_splash_scheduler=False,
         ring_scan_unroll=2,
         context_parallel_load_balance=False,
+        sa_bwd_dkv_megacore=False,
     )
 
     splash_config = tokamax_ring_attention.build_splash_config(
@@ -181,6 +182,7 @@ class TokamaxRingAttentionTest(absltest.TestCase):
         use_splash_scheduler=False,
         ring_scan_unroll=1,
         context_parallel_load_balance=False,
+        sa_bwd_dkv_megacore=False,
     )
 
     splash_config = tokamax_ring_attention.build_splash_config(

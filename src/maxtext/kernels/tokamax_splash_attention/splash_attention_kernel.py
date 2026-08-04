@@ -150,6 +150,8 @@ class SplashConfig:
   # An experimental scheduler that sometimes produces better softmax overlap.
   use_experimental_scheduler: bool = False
   ring_scan_unroll: int = 1
+  # Use both TensorCores in the dkv backward by splitting the grid over kv-head groups.
+  bwd_dkv_megacore: bool = False
 
   def __post_init__(self):
     if self.block_kv_compute is None:
@@ -1185,6 +1187,7 @@ def _flash_attention_dkv_kernel(
     mask_function: MaskFunctionType | None,
     q_heads_per_kv_head: int,
     config: SplashConfig,
+    megacore_groups: bool = False,
 ):
   del mask_next_ref, active_cols_ref
   HEAD_DIM_MINOR = QKVLayout.HEAD_DIM_MINOR
@@ -1200,16 +1203,24 @@ def _flash_attention_dkv_kernel(
     should_initialize = bounds_start_ref[grid_idx].astype(jnp.bool_)
     should_write = bounds_end_ref[grid_idx].astype(jnp.bool_)
   else:
-    kv_index, q_head, q_index = (
-        pl.program_id(0),
-        pl.program_id(1),
-        pl.program_id(2),
-    )
+    if megacore_groups:
+      kv_index, q_head_index_per_kv_head, q_index = (
+          pl.program_id(1),
+          pl.program_id(2),
+          pl.program_id(3),
+      )
+    else:
+      kv_index, q_head, q_index = (
+          pl.program_id(0),
+          pl.program_id(1),
+          pl.program_id(2),
+      )
     grid_idx = (kv_index * q_steps) + q_index
     should_initialize = q_index == 0
     should_write = True if q_steps <= 2 else q_index == q_steps - 1
     if q_heads_per_kv_head > 1:
-      q_head_index_per_kv_head = lax.rem(q_head, q_heads_per_kv_head)
+      if not megacore_groups:
+        q_head_index_per_kv_head = lax.rem(q_head, q_heads_per_kv_head)
       should_initialize = jnp.logical_and(should_initialize, q_head_index_per_kv_head == 0)
       should_write = jnp.logical_and(should_write, q_head_index_per_kv_head == q_heads_per_kv_head - 1)
 
@@ -1407,6 +1418,12 @@ def _splash_attention_bwd_dkv(
   kv_steps = kv_seq_len // bkv
   q_steps = q_seq_len // bq
   q_heads_per_kv_head = num_q_heads // num_kv_heads
+  if config.bwd_dkv_megacore and (is_mqa or num_kv_heads == 1):
+    raise ValueError(
+        f"bwd_dkv_megacore requires more than one KV head; got is_mqa={is_mqa}, " f"num_kv_heads={num_kv_heads}."
+    )
+  # The kv-head group split needs a static grid.
+  megacore_groups = config.bwd_dkv_megacore and not dynamic_grid
 
   if dynamic_grid:
 
@@ -1424,6 +1441,16 @@ def _splash_attention_bwd_dkv(
     def mask_index_map(h, grid_idx, rows_ref, cols_ref, mask_next_ref=None, *_):
       del h, rows_ref, cols_ref  # Unused.
       next_m = to_i32(mask_next_ref[grid_idx])  # pyrefly: ignore[unsupported-operation]
+      return next_m, 0, 0
+
+  elif megacore_groups:
+    unravel = lambda f: lambda g, j, gi, i, *_: f(g * q_heads_per_kv_head + gi, i, j)
+    grid = (num_kv_heads, kv_steps, q_heads_per_kv_head, q_steps)
+
+    def mask_index_map(g, j, gi, i, rows_ref, cols_ref, mask_next_ref=None, *_):
+      del g, gi, rows_ref, cols_ref  # Unused.
+      grid_idx = j * q_steps + i
+      next_m = to_i32(mask_next_ref[grid_idx])
       return next_m, 0, 0
 
   else:
@@ -1599,6 +1626,7 @@ def _splash_attention_bwd_dkv(
       bkv=bkv,
       mask_function=mask_function,
       q_heads_per_kv_head=q_heads_per_kv_head,
+      megacore_groups=megacore_groups,
   )
 
   kernel_name = get_kernel_name(
@@ -1749,7 +1777,13 @@ def _splash_attention_bwd_dkv(
         # 2) for kv_seq_len, the splash attention prefetch schedule assumes no
         #     megacore
         # 3) for q_seq_len, we are reducing over it to compute dkv
-        compiler_params=pltpu.CompilerParams(dimension_semantics=("arbitrary",) * len(grid)),
+        # With megacore_groups the kv-head group dimension is independent (each
+        # group owns its dk/dv/dq blocks), so it is marked parallel.
+        compiler_params=pltpu.CompilerParams(
+            dimension_semantics=(("parallel",) + ("arbitrary",) * (len(grid) - 1))
+            if megacore_groups
+            else (("arbitrary",) * len(grid))
+        ),
         name=kernel_name,
         cost_estimate=cost_estimate,
         interpret=config.interpret,
@@ -2014,7 +2048,7 @@ def _make_splash_attention(
         mask,
         (bq_dkv, bkv_dkv),
         is_dkv=True,
-        return_dynamic_grid=config.dq_reduction_steps == 3,
+        return_dynamic_grid=config.dq_reduction_steps == 3 and not config.bwd_dkv_megacore,
     )
 
     assert (mask_function_fwd is None) == (mask_function_dkv is None)
