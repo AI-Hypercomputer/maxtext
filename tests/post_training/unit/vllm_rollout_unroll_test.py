@@ -16,8 +16,11 @@
 
 import unittest
 import numpy as np
+import pytest
 
 from maxtext.integration.vllm.maxtext_vllm_rollout import unroll_gemma_scanned_weights
+
+pytestmark = pytest.mark.post_training
 
 
 class MockWeights:
