@@ -28,7 +28,6 @@ from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import deepseek_batchsplit
-from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.globals import EPS
@@ -105,7 +104,7 @@ class MultiTokenPredictionLayer(nnx.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         use_bias=False,
-        kernel_axes=("embed", None) if cfg.use_batch_split_schedule else ("concat_embed", "embed"),
+        kernel_axes=("embed", None),
         rngs=rngs,
     )
     # Use MODEL_MODE_TRAIN for initialization; runtime model_mode is passed dynamically.
@@ -223,6 +222,24 @@ class MultiTokenPredictionLayer(nnx.Module):
     return output[0] if isinstance(output, tuple) else output
 
 
+def _cross_entropy_with_integer_labels(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
+  """Memory-efficient cross entropy loss from integer target labels.
+
+  Avoids materializing a dense 3D [batch, seq_len, vocab_size] one-hot target
+  tensor in HBM, significantly reducing memory consumption during MTP training.
+
+  Args:
+    logits: Unscaled logit tensor of shape [..., vocab_size].
+    labels: Integer target label IDs of shape [...].
+
+  Returns:
+    Cross-entropy loss tensor of shape [...].
+  """
+  log_sum_exp = jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
+  target_logits = jnp.take_along_axis(logits, labels[..., None], axis=-1)
+  return jnp.squeeze(log_sum_exp - target_logits, axis=-1)
+
+
 class MultiTokenPredictionBlock(nnx.Module):
   """Orchestrates the MTP process by running a sequence of MTP layers."""
 
@@ -304,8 +321,26 @@ class MultiTokenPredictionBlock(nnx.Module):
 
       mtp_logits = self.decoder.apply_output_head(shared_embedding, mtp_hidden_state, deterministic, model_mode)
 
-      mtp_xent, _ = max_utils.cross_entropy_with_logits(
-          mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0
+      logits_logical_axes = (
+          "activation_embed_and_logits_batch",
+          "activation_length",
+          "activation_vocab",
+      )
+      mtp_logits = sharding.maybe_shard_with_logical(
+          mtp_logits,
+          logits_logical_axes,
+          self.mesh,
+          cfg.shard_mode,
+          debug_sharding=cfg.debug_sharding,
+      )
+
+      mtp_xent = _cross_entropy_with_integer_labels(mtp_logits, rolled_target_ids)
+      mtp_xent = sharding.maybe_shard_with_logical(
+          mtp_xent,
+          ("activation_embed_and_logits_batch", "activation_length"),
+          self.mesh,
+          cfg.shard_mode,
+          debug_sharding=cfg.debug_sharding,
       )
       mtp_xent_masked = mtp_xent * rolled_target_mask
 
