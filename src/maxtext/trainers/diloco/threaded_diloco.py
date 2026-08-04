@@ -28,6 +28,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental import colocated_python
+import numpy as np
 import optax
 
 from maxtext.common import checkpointing, profiler, metric_logger
