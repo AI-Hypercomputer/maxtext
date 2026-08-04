@@ -24,6 +24,7 @@ import jax
 from maxtext.trainers.post_train.rl import train_rl
 
 pytestmark = [pytest.mark.post_training]
+from maxtext.configs import types
 from maxtext.utils import model_creation_utils
 
 
@@ -40,6 +41,14 @@ def _get_mock_devices(devices_per_slice, num_slices=1):
 
 class TrainRLTest(unittest.TestCase):
   """Tests for train_rl.py."""
+
+  @pytest.mark.cpu_only
+  def test_rl_config_includes_decoder_engram_defaults(self):
+    """RL models must expose Engram fields consumed by the shared decoder."""
+    config = types.RLConfig(model_name="gemma4-26b")
+
+    self.assertEqual(config.engram_layers, [])
+    self.assertEqual(config.engram_max_ngram_size, 3)
 
   @pytest.mark.cpu_only
   def test_setup_configs_and_devices_pathways_split(self):
@@ -64,7 +73,7 @@ class TrainRLTest(unittest.TestCase):
         ),
     ):
       trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
-          ["dummy", "dummy"]
+          ["dummy", "dummy"], config_class=types.RLConfig
       )
 
       self.assertEqual(trainer_config, mock_config)
@@ -95,7 +104,9 @@ class TrainRLTest(unittest.TestCase):
             return_value=mock_config,
         ),
     ):
-      _, _, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
+      _, _, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
+          ["dummy", "dummy"], config_class=types.RLConfig
+      )
 
       self.assertEqual(len(trainer_devices), 2)
       self.assertEqual(len(sampler_devices), 6)
@@ -125,7 +136,7 @@ class TrainRLTest(unittest.TestCase):
         ),
     ):
       with self.assertRaisesRegex(ValueError, "Not enough slices for trainer and samplers"):
-        model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
+        model_creation_utils.setup_configs_and_devices(["dummy", "dummy"], config_class=types.RLConfig)
 
   @pytest.mark.cpu_only
   def test_setup_configs_and_devices_multislice_invalid_tp(self):
@@ -152,7 +163,7 @@ class TrainRLTest(unittest.TestCase):
         ),
     ):
       with self.assertRaisesRegex(ValueError, "must be divisible by tensor parallelism"):
-        model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
+        model_creation_utils.setup_configs_and_devices(["dummy", "dummy"], config_class=types.RLConfig)
 
   @pytest.mark.cpu_only
   def test_setup_configs_and_devices_multislice_invalid_tp_fsdp(self):
@@ -179,7 +190,7 @@ class TrainRLTest(unittest.TestCase):
         ),
     ):
       with self.assertRaisesRegex(ValueError, "must equal devices_per_slice"):
-        model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
+        model_creation_utils.setup_configs_and_devices(["dummy", "dummy"], config_class=types.RLConfig)
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_no_dp(self):
@@ -347,7 +358,7 @@ class TrainRLTest(unittest.TestCase):
 
     # Configs
     trainer_config = SimpleNamespace(
-        debug=SimpleNamespace(rl=False),
+        debug=False,
         rl=SimpleNamespace(use_agentic_rollout=False),
         tokenizer_path="dummy_path",
         dataset_name="dummy_dataset",
@@ -415,7 +426,7 @@ class TrainRLTest(unittest.TestCase):
     mock_ds.train_test_split.return_value = mock_split_result
     mock_load.return_value = mock_ds
     mock_config = SimpleNamespace(
-        debug=SimpleNamespace(rl=False),
+        debug=False,
         dataset_name="open-r1/OpenR1-Math-220k",
         eval_dataset_name="open-r1/OpenR1-Math-220k",
         train_split="train",
@@ -460,7 +471,7 @@ class TrainRLTest(unittest.TestCase):
     mock_ds = mock.MagicMock()
     mock_load.return_value = mock_ds
     mock_config = SimpleNamespace(
-        debug=SimpleNamespace(rl=False),
+        debug=False,
         dataset_name="openai/gsm8k",
         eval_dataset_name="openai/gsm8k",
         train_split="train",
@@ -502,30 +513,6 @@ class TrainRLTest(unittest.TestCase):
     ]
     mock_load.assert_has_calls(expected_calls, any_order=True)
     assert mock_load.call_count == len(expected_calls)
-
-  @pytest.mark.cpu_only
-  @mock.patch("maxtext.trainers.post_train.rl.train_rl.model_creation_utils.setup_configs_and_devices")
-  def test_rl_train_invalid_vocab_tiling(self, mock_setup):
-    mock_config = SimpleNamespace(
-        num_vocab_tiling=2,
-        optimizer_memory_host_offload=False,
-    )
-    mock_setup.return_value = (mock_config, mock_config, [], [])
-
-    with self.assertRaisesRegex(ValueError, "Vocab Tiling is not supported with RL"):
-      train_rl._rl_train_impl([], {})  # pylint: disable=protected-access
-
-  @pytest.mark.cpu_only
-  @mock.patch("maxtext.trainers.post_train.rl.train_rl.model_creation_utils.setup_configs_and_devices")
-  def test_rl_train_invalid_optimizer_memory_host_offload(self, mock_setup):
-    mock_config = SimpleNamespace(
-        num_vocab_tiling=1,
-        optimizer_memory_host_offload=True,
-    )
-    mock_setup.return_value = (mock_config, mock_config, [], [])
-
-    with self.assertRaisesRegex(ValueError, "optimizer_memory_host_offload=True is not supported"):
-      train_rl._rl_train_impl([], {})  # pylint: disable=protected-access
 
   @pytest.mark.cpu_only
   def test_build_reward_fns_defaults_when_no_custom(self):

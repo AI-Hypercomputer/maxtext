@@ -21,6 +21,7 @@ from unittest import mock
 
 from etils import epath
 from flax import nnx
+from flax.training import train_state
 import jax
 import jax.numpy as jnp
 from maxtext.common import checkpointing
@@ -83,13 +84,16 @@ class TestLoadStateIfPossibleNNX(unittest.TestCase):
     saved_linen = train_state_nnx.to_checkpoint_dict(concrete)
     self.assertIn("nnx_aux", saved_linen)
 
-    checkpoint_manager = mock.Mock()
+    checkpoint_manager = mock.Mock(spec=checkpointing.EmergencyCheckpointManager)
     checkpoint_manager.restore.return_value = mock.Mock(state=saved_linen)
-    restored = checkpointing._restore_emergency_linen_checkpoint_into_nnx(  # pylint: disable=protected-access
-        checkpoint_manager,
-        14,
-        _abstract_dropout_state(),
-        lambda leaf: ocp.type_handlers.ArrayRestoreArgs(global_shape=leaf.shape, dtype=leaf.dtype),
+    restored, _ = checkpointing.load_state_if_possible(
+        checkpoint_manager=checkpoint_manager,
+        data_iterator=None,
+        load_parameters_from_path="",
+        load_full_state_from_path="",
+        checkpoint_storage_concurrent_gb=8,
+        abstract_unboxed_pre_state=_abstract_dropout_state(),
+        step=14,
     )
     restored = restored.to_pure_dict()
 
@@ -147,6 +151,74 @@ class TestLoadStateIfPossibleNNX(unittest.TestCase):
     forwarded_params = m.call_args[0][1]
     self.assertIs(forwarded_params, fake_state.params)
 
+  def test_safetensors_dynamic_hands_over_weights_and_returns_nnx_params(self):
+    """The loader gets the bare weights, and its result comes back as NNX params."""
+    abstract = _abstract_nnx_state()
+    weights = {"linear": {"kernel": jnp.ones((2, 1)), "bias": jnp.array([5.0])}}
+
+    with mock.patch.object(
+        checkpointing, "load_safetensors_dynamic_state", return_value=(None, {"params": weights})
+    ) as m:
+      full, params = checkpointing.load_state_if_possible(
+          checkpoint_manager=None,
+          data_iterator=None,
+          load_parameters_from_path="gs://does-not-exist/hf",
+          load_full_state_from_path="",
+          checkpoint_storage_concurrent_gb=8,
+          abstract_unboxed_pre_state=abstract,
+          source_checkpoint_layout="safetensors_dynamic",
+          maxtext_config=mock.Mock(),
+      )
+
+    self.assertIsNone(full)
+    # The loader sees the weights the way the HF mappings name them: no `model` prefix above them.
+    forwarded = m.call_args[0][1]
+    self.assertEqual(set(forwarded.to_pure_dict().keys()), {"linear"})
+    # And the restored weights come back as an nnx.State, the shape a params-only load returns.
+    self.assertIsInstance(params, nnx.State)
+    self.assertTrue(jnp.array_equal(params.to_pure_dict()["linear"]["bias"], weights["linear"]["bias"]))
+
+  def test_safetensors_dynamic_unmapped_weight_raises(self):
+    """A weight no HF mapping covered comes back unmaterialized, which must raise."""
+    unmapped = {
+        "linear": {"kernel": jnp.ones((2, 1)), "bias": jax.ShapeDtypeStruct((1,), jnp.float32)},
+    }
+    with mock.patch.object(checkpointing, "load_safetensors_dynamic_state", return_value=(None, {"params": unmapped})):
+      with self.assertRaises(ValueError) as ctx:
+        checkpointing.load_state_if_possible(
+            checkpoint_manager=None,
+            data_iterator=None,
+            load_parameters_from_path="gs://does-not-exist/hf",
+            load_full_state_from_path="",
+            checkpoint_storage_concurrent_gb=8,
+            abstract_unboxed_pre_state=_abstract_nnx_state(),
+            source_checkpoint_layout="safetensors_dynamic",
+            maxtext_config=mock.Mock(),
+        )
+    self.assertIn("linear/bias", str(ctx.exception))
+
+  def test_safetensors_dynamic_forwards_params_collection_for_linen(self):
+    """Linen hands over its `params` collection, not the whole TrainState, and gets it back as-is."""
+    weights = {"params": {"linear": {"kernel": jnp.ones((2, 1))}}}
+    fake_state = mock.Mock(spec=["params"])
+    fake_state.params = weights
+
+    with mock.patch.object(checkpointing, "load_safetensors_dynamic_state", return_value=(None, weights)) as m:
+      full, params = checkpointing.load_state_if_possible(
+          checkpoint_manager=None,
+          data_iterator=None,
+          load_parameters_from_path="gs://does-not-exist/hf",
+          load_full_state_from_path="",
+          checkpoint_storage_concurrent_gb=8,
+          abstract_unboxed_pre_state=fake_state,
+          source_checkpoint_layout="safetensors_dynamic",
+          maxtext_config=mock.Mock(),
+      )
+
+    self.assertIsNone(full)
+    self.assertIs(m.call_args[0][1], fake_state.params)
+    self.assertIs(params, weights)  # Linen keeps the collection layout it passed in
+
   def test_no_paths_returns_none_none(self):
     """Sanity: with no checkpoint manager and no load paths, the function returns (None, None)."""
     full, params = checkpointing.load_state_if_possible(
@@ -159,6 +231,158 @@ class TestLoadStateIfPossibleNNX(unittest.TestCase):
     )
     self.assertIsNone(full)
     self.assertIsNone(params)
+
+
+class TestManagerRestoreParity(unittest.TestCase):
+  """NNX and Linen go through the same manager restore; only the ends of the call differ.
+
+  Cases come in pairs, one per state type, so a divergence in the shared flow fails one half.
+  """
+
+  def _manager(self, restored):
+    manager = mock.MagicMock(spec=ocp.CheckpointManager)
+    manager.restore.return_value = restored
+    return manager
+
+  def _linen_abstract(self):
+    """A real Linen TrainState -- the manager restore paths tree_map over the whole state."""
+
+    def make():
+      params = {"params": {"linear": {"kernel": jnp.zeros((2, 1))}}}
+      return train_state.TrainState.create(apply_fn=lambda x: x, params=params, tx=optax.identity())
+
+    return jax.eval_shape(make)  # every leaf abstract, `step` included, as get_abstract_state gives it
+
+  def _load(self, manager, abstract, **kwargs):
+    kwargs.setdefault("data_iterator", None)
+    return checkpointing.load_state_if_possible(
+        checkpoint_manager=manager,
+        load_parameters_from_path="",
+        load_full_state_from_path="",
+        checkpoint_storage_concurrent_gb=8,
+        abstract_unboxed_pre_state=abstract,
+        step=7,
+        **kwargs,
+    )
+
+  def test_nnx_restores_the_linen_layout_and_returns_an_nnx_state(self):
+    abstract = _abstract_dropout_state()
+    saved = train_state_nnx.to_checkpoint_dict(_dropout_state(0))
+    manager = self._manager({"items": saved})
+
+    restored, _ = self._load(manager, abstract)
+
+    # Going in: the manager is asked for the Linen on-disk layout, not the NNX one.
+    item = manager.restore.call_args.kwargs["args"]["items"].item
+    self.assertEqual(set(item) & {"params", "step"}, {"params", "step"})
+    self.assertNotIn("model", item)
+    # Coming out: reshaped back under `items`, the same key the Linen path returns.
+    self.assertIsInstance(restored["items"], nnx.State)
+    self.assertIn("model", restored["items"].to_pure_dict())
+
+  def test_linen_restore_target_and_return_are_untouched(self):
+    abstract = self._linen_abstract()
+    sentinel = {"items": {"params": abstract.params}}
+    manager = self._manager(sentinel)
+
+    restored, _ = self._load(manager, abstract)
+
+    self.assertIs(manager.restore.call_args.kwargs["args"]["items"].item, abstract)
+    self.assertIs(restored, sentinel)  # returned exactly as the manager gave it
+
+  def test_grain_case_converts_items_and_passes_the_iterator_through(self):
+    """The grain branch is shared too: NNX only reshapes `items`, leaving the iterator element alone."""
+    abstract = _abstract_nnx_state()
+    saved = {"params": {"params": {"linear": {"kernel": jnp.ones((2, 1)), "bias": jnp.array([5.0])}}}}
+    manager = self._manager(None)
+
+    with mock.patch.object(
+        checkpointing.grain_utility, "restore_grain_iterator", return_value=({"items": saved}, None)
+    ) as m:
+      restored, iterator = self._load(manager, abstract, dataset_type="grain", data_iterator=mock.MagicMock())
+
+    m.assert_called_once()
+    self.assertIsNone(iterator)
+    self.assertIsInstance(restored["items"], nnx.State)
+    self.assertTrue(jnp.array_equal(restored["items"].to_pure_dict()["model"]["linear"]["bias"], jnp.array([5.0])))
+
+  def test_grain_case_is_untouched_for_linen(self):
+    abstract = self._linen_abstract()
+    sentinel = ({"items": {"params": abstract.params}}, None)
+    manager = self._manager(None)
+
+    with mock.patch.object(checkpointing.grain_utility, "restore_grain_iterator", return_value=sentinel):
+      restored, iterator = self._load(manager, abstract, dataset_type="grain", data_iterator=mock.MagicMock())
+
+    self.assertIs(restored, sentinel[0])
+    self.assertIsNone(iterator)
+
+  def test_missing_weight_raises_on_the_standard_path(self):
+    """The missing-weight check guards every NNX restore, not just the weights-only load."""
+    saved = {"params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}}}  # no bias
+    manager = self._manager({"items": saved})
+
+    with self.assertRaises(ValueError) as ctx:
+      self._load(manager, _abstract_nnx_state())
+    self.assertIn("linear/bias", str(ctx.exception))
+
+  def test_missing_weight_raises_on_the_emergency_path(self):
+    saved = {"params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}}}  # no bias
+    manager = mock.Mock(spec=checkpointing.EmergencyCheckpointManager)
+    manager.restore.return_value = mock.Mock(state=saved)
+
+    with self.assertRaises(ValueError) as ctx:
+      self._load(manager, _abstract_nnx_state())
+    self.assertIn("linear/bias", str(ctx.exception))
+
+  def test_no_step_in_manager_falls_through_to_the_load_paths(self):
+    """An empty manager (latest_step() is None) must not restore -- it falls through, for both types."""
+    manager = mock.MagicMock(spec=ocp.CheckpointManager)
+    manager.latest_step.return_value = None
+
+    for abstract in (_abstract_nnx_state(), self._linen_abstract()):
+      restored, params = checkpointing.load_state_if_possible(
+          checkpoint_manager=manager,
+          data_iterator=None,
+          load_parameters_from_path="",
+          load_full_state_from_path="",
+          checkpoint_storage_concurrent_gb=8,
+          abstract_unboxed_pre_state=abstract,
+      )
+      self.assertIsNone(restored)
+      self.assertIsNone(params)
+      manager.restore.assert_not_called()
+
+
+class TestResolveConversionFn(unittest.TestCase):
+  """`checkpoint_conversion_fn` arrives from config as a dotted string and has to be imported."""
+
+  def test_dotted_string_is_imported(self):
+    fn = checkpointing._resolve_conversion_fn("json.loads")  # pylint: disable=protected-access
+    self.assertEqual(fn('{"a": 1}'), {"a": 1})
+
+  def test_callable_passes_through(self):
+    self.assertIs(checkpointing._resolve_conversion_fn(len), len)  # pylint: disable=protected-access
+
+  def test_missing_fn_names_the_config_flag(self):
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._resolve_conversion_fn(None)  # pylint: disable=protected-access
+    self.assertIn("checkpoint_conversion_fn", str(ctx.exception))
+
+  def test_bare_name_without_module_raises(self):
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._resolve_conversion_fn("my_fn")  # pylint: disable=protected-access
+    self.assertIn("dotted path", str(ctx.exception))
+
+  def test_unimportable_module_raises(self):
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._resolve_conversion_fn("no_such_module_xyz.my_fn")  # pylint: disable=protected-access
+    self.assertIn("no_such_module_xyz", str(ctx.exception))
+
+  def test_non_callable_attribute_raises(self):
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._resolve_conversion_fn("json.__doc__")  # pylint: disable=protected-access
+    self.assertIn("not a function", str(ctx.exception))
 
 
 class TestLoadParamsIntoNNX(unittest.TestCase):
@@ -212,6 +436,52 @@ class TestLoadParamsIntoNNX(unittest.TestCase):
     self.assertEqual(set(restored.keys()), {"params"})  # the collection, not the bare weights
     self.assertTrue(jnp.array_equal(restored["params"]["linear"]["kernel"], weights["linear"]["kernel"]))
     self.assertTrue(jnp.array_equal(restored["params"]["linear"]["bias"], weights["linear"]["bias"]))
+
+
+class TestSafetensorsFullStateIntoNNX(unittest.TestCase):
+  """A full-state safetensors load reshapes the conversion fn's output into the NNX state."""
+
+  def _load(self, converted, abstract):
+    """Runs the v1 safetensors branch, stubbing the read so only the conversion is under test."""
+    with (
+        mock.patch.object(checkpointing, "ocp_v1") as v1,
+        mock.patch.object(checkpointing, "sharding_utils") as shardings,
+    ):
+      v1.pytree_metadata.return_value = mock.Mock(metadata={"w": jax.ShapeDtypeStruct((1,), jnp.float32)})
+      shardings.construct_maximal_shardings.return_value = {"w": None}
+      return checkpointing._load_full_state_from_path(  # pylint: disable=protected-access
+          path="gs://does-not-exist/hf",
+          abstract_unboxed_pre_state=abstract,
+          enable_orbax_v1=True,
+          checkpoint_conversion_fn=lambda _: converted,
+          source_checkpoint_layout="safetensors",
+          checkpoint_storage_concurrent_gb=8,
+          use_ocdbt=True,
+          use_zarr3=True,
+      )
+
+  def test_linen_layout_output_is_reshaped_into_nnx(self):
+    converted = {
+        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1)), "bias": jnp.array([5.0])}}},
+        "step": jnp.asarray(0, jnp.int32),
+    }
+    restored = self._load(converted, _abstract_nnx_state())
+
+    self.assertIsInstance(restored, nnx.State)
+    pure = restored.to_pure_dict()
+    self.assertTrue(jnp.array_equal(pure["model"]["linear"]["kernel"], jnp.ones((2, 1))))
+
+  def test_missing_weight_raises(self):
+    """A bad conversion fn hits the same missing-weight check as the other NNX loads."""
+    converted = {"params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}}}  # no bias
+    with self.assertRaises(ValueError) as ctx:
+      self._load(converted, _abstract_nnx_state())
+    self.assertIn("linear/bias", str(ctx.exception))
+
+  def test_linen_state_is_untouched(self):
+    """For Linen the conversion fn's output is returned as-is."""
+    converted = {"params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}}}
+    self.assertIs(self._load(converted, mock.Mock(spec=["params"])), converted)
 
 
 class TestToCheckpointDict(unittest.TestCase):

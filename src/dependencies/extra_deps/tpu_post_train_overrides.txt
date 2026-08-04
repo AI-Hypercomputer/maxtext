@@ -1,8 +1,11 @@
 datasets>=4.8.5
-flax==0.12.4
+fastapi>=0.139.0
+flax==0.12.8
 fsspec==2026.2.0
 gcsfs==2026.2.0
 google-metrax>=0.2.3
-jax==0.10.1
+jax==0.11.0
+jaxlib==0.11.0
+libtpu==0.0.44
 optax==0.2.6
 qwix==0.1.8

@@ -208,7 +208,12 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
       def create_train_state_fn():
         nnx_model = _create_model_partial()
-        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        wrt = (
+            getattr(nnx, "LoRAParam", nnx.Param)
+            if getattr(getattr(config, "lora", None), "enable_lora", False)
+            else nnx.Param
+        )
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
         return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
       init_state_fn = create_train_state_fn
@@ -433,10 +438,10 @@ def _get_lora_module_path(mt_config: pyconfig.HyperParameters) -> str:
 
   raw_path = lora_configs.get(matched_key, "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))")
 
-  # This regex makes the layer index optional, matching both scanned and unscanned layer paths
-  # (e.g. 'layers/0/mlp/...' vs 'layers/mlp/...').
-  optional_layer_index = "(?:[0-9]+/)?"
-  final_path = str(raw_path).replace("layers/", f"layers/{optional_layer_index}")
+  # This regex makes the layer index optional, matching scanned, unscanned named (layers_0),
+  # and unscanned index (layers/0) layer paths.
+  layer_pattern = r"layers(?:_[0-9]+|/[0-9]+)?/"
+  final_path = str(raw_path).replace("layers/", layer_pattern)
 
   max_logging.log(f"Using lora_module_path: {final_path}")
   return final_path
@@ -485,7 +490,8 @@ def is_lora_enabled(model: nnx.Module) -> bool:
 def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperParameters) -> None:
   """Validates that LoRA is active or that target modules were matched."""
 
-  if is_lora_enabled(lora_model):
+  enabled = is_lora_enabled(lora_model)
+  if enabled:
     wrapped_modules = set()
     for path, value in nnx.iter_graph(lora_model):
       if isinstance(value, nnx.LoRAParam):
@@ -579,6 +585,7 @@ def apply_lora_to_model(
     mt_config: pyconfig.HyperParameters,
 ) -> nnx.Module:
   """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
+  # pylint: disable=protected-access
   # Skip Qwix LoRA if MaxText LoRA adapters are loaded
   if mt_config.lora_input_adapters_path:
     max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
@@ -722,6 +729,20 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
     else:
       matched_val = curr
 
+    target_sharding = getattr(variable, "sharding", None)
+    if target_sharding is None:
+      try:
+        mesh = maxtext_utils.get_mesh_from_config(mt_config)
+        if mesh:
+          target_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    if target_sharding is not None:
+      try:
+        matched_val = jax.device_put(matched_val, target_sharding)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
     variable.value = matched_val
 
   jax.tree_util.tree_map_with_path(
@@ -730,7 +751,7 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  nnx.update(model, abstract_lora_params)
+  nnx.pop(model, nnx.Intermediate)
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
   return model
 

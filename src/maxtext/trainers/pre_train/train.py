@@ -25,7 +25,6 @@ import os
 
 from absl import app
 
-
 import optax
 
 import pathwaysutils  # pylint: disable=unused-import
@@ -397,7 +396,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     else:
       owg_type = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
       custom_param_filter = nnx.Any(owg_type)
-      model_graphdef, curr_params, custom_params, rest = nnx.split(state.model, nnx.Param, custom_param_filter, ...)
+      train_param_type = (
+          getattr(nnx, "LoRAParam", nnx.Param)
+          if getattr(getattr(config, "lora", None), "enable_lora", False)
+          else nnx.Param
+      )
+      nnx.pop(state.model, nnx.Intermediate)
+      model_graphdef, curr_params, custom_params, rest = nnx.split(
+          state.model, train_param_type, custom_param_filter, ...
+      )
       if config.parameter_memory_host_offload:
         # Params are kept on host (pinned_host) in in_shardings. Move only Param
         # variables to device before the forward/backward pass so that all dot_general
@@ -412,22 +419,33 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         curr_params = jax.device_put(curr_params, device_param_shardings)
         nnx.update(state.model, curr_params)  # ensure state.model has device params for optimizer update
       if config.shard_optimizer_over_data:
-        curr_params = jax.tree.map(
-            functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+        param_sharding_lookup = {}
+        for p, s in jax.tree_util.tree_leaves_with_path(
+            params_shardings, is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding, jax.sharding.Sharding))
+        ):
+          param_sharding_lookup[p] = s.get_value() if isinstance(s, nnx.Variable) else s
+
+        def _maybe_shard_param(path, var):
+          if path in param_sharding_lookup:
+            return sharding.maybe_shard_with_name(var, param_sharding_lookup[path], shard_mode=config.shard_mode)
+          return var
+
+        curr_params = jax.tree_util.tree_map_with_path(
+            _maybe_shard_param,
             curr_params,
-            params_shardings,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
         nnx.update(state.model, curr_params)
 
       def diff_wrapper(curr_params, custom_params, rest, config, data):
         local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
         loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
-        _, _, _, new_rest = nnx.split(local_model, nnx.Param, custom_param_filter, ...)
-        return loss, (aux, new_rest)
+        non_param_rest = nnx.state(local_model, nnx.Not(nnx.Any(nnx.Param, nnx.Intermediate)))
+        return loss, (aux, non_param_rest)
 
       grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
-      (loss, (aux, new_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
-      nnx.update(state.model, nnx.State.merge(custom_grads, new_rest))
+      (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
+      nnx.update(state.model, nnx.State.merge(custom_grads, non_param_rest))
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -587,7 +605,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "scalar": scalar_metrics,
       "scalars": {},
   }
-  if config.record_internal_nn_metrics:
+  if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
   if isinstance(model, nn.Module):
@@ -667,12 +685,14 @@ def training_loop_iteration(
 
   # Unpack immutable_data
   config = immutable_data["config"]  # for helpers
-  logical_axis_rules = immutable_data["logical_axis_rules"]
+  logical_axis_rules_for_train = immutable_data["logical_axis_rules_for_train"]
+  logical_axis_rules_for_eval = immutable_data["logical_axis_rules_for_eval"]
   shard_optimizer_over_data = immutable_data["shard_optimizer_over_data"]
   shard_mode = immutable_data["shard_mode"]
   eval_interval = immutable_data["eval_interval"]
   eval_steps = immutable_data["eval_steps"]
   start_step = immutable_data["start_step"]
+  eval_start_step = immutable_data["eval_start_step"]
 
   # HLO dump config
   dump_hlo = immutable_data["dump_hlo"]
@@ -696,7 +716,7 @@ def training_loop_iteration(
     else:
       step_rng_args = ()
     with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules):
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_train):
         if shard_optimizer_over_data and isinstance(model, nn.Module):
           state = sharding.maybe_shard_with_name(state, state_mesh_shardings, shard_mode)
         state, metrics = p_train_step(state, example_batch, *step_rng_args)
@@ -716,7 +736,12 @@ def training_loop_iteration(
         all_host_upload=dump_hlo_upload_all,
     )
 
-  if eval_interval > 0 and step > start_step and (step + 1) % eval_interval == 0:
+  if (
+      eval_interval > 0
+      and step >= start_step
+      and step >= eval_start_step
+      and (step - eval_start_step) % eval_interval == 0
+  ):
     assert eval_data_iterator
     # Explicitly reset the eval iterator and counters before starting the eval loop
     eval_data_iterator.reset()
@@ -728,10 +753,12 @@ def training_loop_iteration(
     # pylint: disable=not-callable
     for eval_batch in eval_data_iterator:
       # Shard input eval data
-      eval_batch = jax.device_put(eval_batch, sharding.get_input_data_sharding(config, mesh))
+      eval_batch = jax.device_put(
+          eval_batch, sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+      )
       if 0 < eval_steps <= eval_step_count:
         break
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules):
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules_for_eval):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
       eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
       last_eval_step_completion = datetime.datetime.now()
@@ -861,12 +888,14 @@ def train_loop(config, recorder, state=None):
 
   immutable_data = {
       "config": config,
-      "logical_axis_rules": config.logical_axis_rules,
+      "logical_axis_rules_for_train": config.logical_axis_rules,
+      "logical_axis_rules_for_eval": config.logical_axis_rules_for_eval,
       "shard_optimizer_over_data": config.shard_optimizer_over_data,
       "shard_mode": config.shard_mode,
       "steps": config.steps,
       "eval_interval": config.eval_interval,
       "eval_steps": config.eval_steps,
+      "eval_start_step": config.eval_start_step,
       "save_checkpoint_on_completion": config.save_checkpoint_on_completion,
       "start_step": start_step,
       "dump_hlo": config.dump_hlo,
@@ -895,7 +924,7 @@ def train_loop(config, recorder, state=None):
 
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
-      checkpoint_manager.wait_until_finished()
+      checkpointing.wait_until_finished(checkpoint_manager)
     _job_completed_gracefully = True
   except exceptions.StopTraining as e:
     prof.deactivate()

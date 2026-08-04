@@ -16,7 +16,6 @@
 # components except core dMoE part (between EP all2all).
 mesh_axes: ['data', 'stage', 'fsdp', 'expert']
 data_sharding: [['data', 'stage', 'fsdp', 'expert']]
-context_sharding: 'expert'
 logical_axis_rules: [
                       # ==========================================
                       # Vocabulary Embedding

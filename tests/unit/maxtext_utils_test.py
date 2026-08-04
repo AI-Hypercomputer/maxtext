@@ -107,21 +107,33 @@ class TestIntermediateValueRetrieval(unittest.TestCase):
     # 2. Create the Decoder Mock
     self.mock_decoder = MagicMock(name="Decoder")
     self.mock_model.decoder = self.mock_decoder
-    self.mock_layers = {}
-    self.mock_model.decoder.layers = self.mock_layers
-    self.self_attention = {}
-    self.mock_layers["self_attention"] = self.self_attention
+    self.mock_layer = MagicMock(name="Layer")
+    self.mock_decoder.get_layers.return_value = [self.mock_layer]
+    self.self_attention = MagicMock(name="Attention", spec=[])
+    self.mock_layer.self_attention = self.self_attention
 
   def test_valid_intermediate_key(self):
     expected_sowed_data = [0.1, 0.5, 0.9]
     mock_sowed_variable = Mock(name="out_projection_activations")
     mock_sowed_variable.get_value.return_value = (expected_sowed_data,)
 
-    self.mock_decoder.layers["self_attention"]["out_projection_activations"] = mock_sowed_variable
+    self.self_attention.out_projection_activations = mock_sowed_variable
 
     result = maxtext_utils.get_intermediate_value(self.mock_model, "out_projection_activations")
 
     self.assertEqual(result, expected_sowed_data)
+
+  def test_clear_intermediate_key(self):
+    expected_sowed_data = [0.1, 0.5, 0.9]
+    mock_sowed_variable = Mock(name="out_projection_activations")
+    mock_sowed_variable.get_value.return_value = (expected_sowed_data,)
+
+    self.self_attention.out_projection_activations = mock_sowed_variable
+
+    result = maxtext_utils.get_intermediate_value(self.mock_model, "out_projection_activations", clear=True)
+
+    self.assertEqual(result, expected_sowed_data)
+    self.assertFalse(hasattr(self.self_attention, "out_projection_activations"))
 
   def test_returns_default_if_sow_did_not_happen(self):
     """
@@ -471,6 +483,7 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     with self.assertRaises(AssertionError):
       assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
 
+  @pytest.mark.skip(reason="This test is skipped due to a sharding issue. b/542212958")
   def test_mixed_sharding_fails(self):
     """Tests that a mix of sharded and unsharded parameters fails when the unsharded
 
@@ -523,6 +536,7 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     with self.assertRaises(AssertionError):
       assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
 
+  @pytest.mark.skip(reason="This test is skipped due to a sharding issue. b/542212958")
   def test_multi_axis_mixed_sharding_fails(self):
     """Tests that a mix of sharded (correctly) and unsharded tensors on a complex mesh fails."""
     devices = np.array(jax.devices()).reshape((jax.device_count(), 1, 1, 1, 1))

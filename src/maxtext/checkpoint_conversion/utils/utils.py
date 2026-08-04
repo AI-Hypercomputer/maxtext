@@ -163,22 +163,17 @@ def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = Non
     A NumPy array containing the data from `weight`, cast to `dtype_str` if provided.
   """
   final_dtype_str = str(weight.dtype) if dtype_str is None else dtype_str
-  # JAX dtypes like 'bfloat16', 'float32' are understood by np.dtype()
-  target_np_dtype = np.dtype(final_dtype_str)
   expected_shape = weight.shape
 
-  # Gather the array across devices if it's sharded.
-  # process_allgather typically returns the array on the host.
+  if str(weight.dtype) != final_dtype_str:
+    # Cast in JAX before process_allgather to reduce interconnect data transfer and host RAM
+    # usage when downcasting dtypes.
+    weight = weight.astype(final_dtype_str)
+
   weight = multihost_utils.process_allgather(weight)
-
-  # Convert JAX array to NumPy array.
-  np_array = np.array(weight)
-
-  # Cast to the target NumPy dtype if it's different.
-  if np_array.dtype != target_np_dtype:
-    np_array = np_array.astype(target_np_dtype)
-
-  return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
+  # Use np.asarray to avoid redundant copies when the gathered buffer can be viewed directly.
+  np_array = np.asarray(weight)
+  return np_array.reshape(expected_shape)
 
 
 def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map, save_dtype):
@@ -254,6 +249,9 @@ def process_maxtext_param(
   if maxtext_param_key not in param_map:
     raise ValueError(f"MaxText param key '{maxtext_param_key}' not found in param_map.")
   hf_target_paths = param_map[maxtext_param_key]
+  if hf_target_paths is None:
+    max_logging.log(f"\tskipping parameter mapped to None: {maxtext_param_key}")
+    return []
   if not hf_target_paths:
     raise ValueError(f"No HF target paths found for MaxText key '{maxtext_param_key}'")
 
@@ -313,36 +311,42 @@ def process_maxtext_param(
 
     return output_weights
 
-  # Case 4: Multi-axis stacked (Scanned MoE layer)
-  # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
-  # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
-  max_logging.log("\tscan moe")
-  expert_axis_to_slice = 0
+  # Case 4: Multi-axis stacked. Two sub-cases (the inverse of _build_multi_axis_stacked_tensor):
+  #   - Scanned MoE: the tensor is stacked on (experts, layers) at the LEADING two axes, so we
+  #     slice axis 0 (experts) then axis 0 again (layers, after the expert axis is removed).
+  #   - Gemma4 nested block scan (scanned_blocks-local_layers): the block's local layers are an
+  #     inner scan nested in the block scan, so the two axes are at (param_scan_axis,
+  #     param_scan_axis + 1) -- outer = blocks, inner = local. We slice param_scan_axis (blocks),
+  #     then param_scan_axis again (local shifts down into that slot once blocks is removed).
+  key_str = maxtext_param_key[0] if isinstance(maxtext_param_key, tuple) else maxtext_param_key
+  if isinstance(key_str, str) and "scanned_blocks-local_layers" in key_str:
+    max_logging.log("\tscan gemma4 local")
+    outer_axis_to_slice = maxtext_config.param_scan_axis
+    inner_axis_to_slice = maxtext_config.param_scan_axis
+  else:
+    max_logging.log("\tscan moe")
+    outer_axis_to_slice = 0
+    inner_axis_to_slice = 0
 
-  # Outer loop for experts
-  for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
-    # Slice along the expert axis to get the tensor for the current expert across all layers.
+  # Outer loop (experts for MoE, blocks for gemma4 local)
+  for outer_idx, inner_paths in enumerate(hf_target_paths):
     if isinstance(maxtext_param_weight, list):
-      expert_tensor_slice = [
-          jax.lax.index_in_dim(x, expert_idx, axis=expert_axis_to_slice, keepdims=False) for x in maxtext_param_weight
+      outer_slice = [
+          jax.lax.index_in_dim(x, outer_idx, axis=outer_axis_to_slice, keepdims=False) for x in maxtext_param_weight
       ]
     else:
-      expert_tensor_slice = jax.lax.index_in_dim(
-          maxtext_param_weight, expert_idx, axis=expert_axis_to_slice, keepdims=False
-      )
+      outer_slice = jax.lax.index_in_dim(maxtext_param_weight, outer_idx, axis=outer_axis_to_slice, keepdims=False)
 
-    # Inner loop for layers
-    for layer_idx, hf_path in enumerate(expert_paths_for_layer):
-      # Slice the expert tensor along the layer axis to get the final individual weight.
-      # axis is 0 on the new sliced tensor
-      if isinstance(expert_tensor_slice, list):
-        layer_tensor_slice = [jax.lax.index_in_dim(x, layer_idx, axis=0, keepdims=False) for x in expert_tensor_slice]
+    # Inner loop (layers for MoE, local layers for gemma4)
+    for inner_idx, hf_path in enumerate(inner_paths):
+      if isinstance(outer_slice, list):
+        inner_slice = [jax.lax.index_in_dim(x, inner_idx, axis=inner_axis_to_slice, keepdims=False) for x in outer_slice]
       else:
-        layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
+        inner_slice = jax.lax.index_in_dim(outer_slice, inner_idx, axis=inner_axis_to_slice, keepdims=False)
 
       _process(
           hf_path,
-          layer_tensor_slice,
+          inner_slice,
           output_weights,
           current_hook_fns,
           hf_shape_map,
@@ -867,12 +871,26 @@ def load_orbax_checkpoint(config) -> dict:
   for i, path in enumerate(paths):
     checkpoint_path = epath.Path(path)
     metadata = ckptr.metadata(checkpoint_path)
+    checkpoint_tree = metadata.item_metadata.tree
+    if isinstance(checkpoint_tree, dict):
+      if "params" in checkpoint_tree:
+        checkpoint_tree = {"params": checkpoint_tree["params"]}
+        max_logging.log(f"Filtering checkpoint to only load 'params' from {path}")
+      else:
+        filtered_tree = {k: v for k, v in checkpoint_tree.items() if k not in ("opt_state", "optimizer")}
+        if len(filtered_tree) < len(checkpoint_tree):
+          checkpoint_tree = filtered_tree
+          max_logging.log(f"Filtering checkpoint to exclude optimizer keys from {path}")
+
     restore_args = jax.tree_util.tree_map(
         lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
-        metadata.item_metadata.tree,
+        checkpoint_tree,
         is_leaf=lambda x: hasattr(x, "shape"),
     )
-    restored = ckptr.restore(checkpoint_path, restore_args=restore_args)
+    restored = ckptr.restore(
+        checkpoint_path,
+        args=ocp.args.PyTreeRestore(item=checkpoint_tree, restore_args=restore_args, partial_restore=True),
+    )
 
     if i == 0:
       merged_dict = restored
@@ -1246,7 +1264,7 @@ def save_weights_to_checkpoint(
   if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new, config=config):
     max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
-  checkpoint_manager.wait_until_finished()
+  checkpointing.wait_until_finished(checkpoint_manager)
 
   max_logging.log(f"Elapse for checkpoint save: {(time.time() - start) / 60:.2f} min")
 

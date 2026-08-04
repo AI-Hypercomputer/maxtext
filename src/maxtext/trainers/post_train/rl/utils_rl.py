@@ -171,7 +171,7 @@ def get_match_format_regex(tmvp_config: Any) -> re.Pattern[str]:
       ),
       flags=re.MULTILINE | re.DOTALL,
   )
-  if tmvp_config.debug.rl:
+  if tmvp_config.debug:
     match_format.search(
         f"{tmvp_config.reasoning_start_token}Let me"
         f" think!{tmvp_config.reasoning_end_token}{tmvp_config.solution_start_token}2{tmvp_config.solution_end_token}",
@@ -465,7 +465,7 @@ def check_numbers(
     # 2. Try math_verify for robust mathematical correctness checking
     scores = math_verify_func(math_verify_queue, scores, trainer_config=tmvp_config)
 
-  if tmvp_config.debug.rl:
+  if tmvp_config.debug:
     debug_log_path = epath.Path(tmvp_config.base_output_directory) / tmvp_config.run_name / "debug_rl_logs"
     debug_log_path.mkdir(parents=True, exist_ok=True)
     log_file = debug_log_path / f"check_numbers_{uuid.uuid4().hex}.txt"
@@ -565,7 +565,7 @@ def check_correctness(extracted_response: str, acceptable_answers: list[str], tm
         0.9 <= (float(pred) + EPSILON) / (float(gold) + EPSILON) <= 1.1 for pred in predictions for gold in golds
     )
   except:
-    if tmvp_config.debug.rl:
+    if tmvp_config.debug:
       max_logging.log(
           f"check_correctness failed for extracted response: {extracted_response} and answers: {acceptable_answers}"
       )
@@ -573,7 +573,7 @@ def check_correctness(extracted_response: str, acceptable_answers: list[str], tm
   return False, is_partially_correct
 
 
-def get_optimizer(tmvp_config: Any, max_train_steps: int) -> optax.GradientTransformation:
+def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
   """Function to obtain an optax optimizer, currently we use adamw.
 
   The LR schedule length defaults to the actual RL run length
@@ -595,13 +595,13 @@ def get_optimizer(tmvp_config: Any, max_train_steps: int) -> optax.GradientTrans
     # Deliberate decoupling of the schedule length from the run length.
     schedule_steps = lr_schedule_steps
   else:
-    schedule_steps = max_train_steps
+    schedule_steps = tmvp_config.train_steps
   schedule = optax.schedules.warmup_cosine_decay_schedule(
       init_value=0.0,
       peak_value=tmvp_config.learning_rate,
       # Linearly increase learning rate from 0. to learning_rate in the first
       # warmup_steps_fraction × schedule_steps steps, then cosine-decay to 0
-      # over the remaining schedule_steps. When schedule_steps > max_train_steps
+      # over the remaining schedule_steps. When schedule_steps > tmvp_config.train_steps
       # the run ends partway through the schedule (useful for matching a fixed
       # GPU LR schedule across TPU runs with different num_batches).
       warmup_steps=int(tmvp_config.warmup_steps_fraction * schedule_steps),

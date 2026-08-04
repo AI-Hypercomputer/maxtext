@@ -39,7 +39,7 @@ def _make_config():
       penalty_incorrect_format=-0.5,
       penalty_incorrect_answer=-0.5,
       dataset_name="test",
-      debug=SimpleNamespace(rl=False),
+      debug=False,
   )
 
 
@@ -306,6 +306,7 @@ class TestGetOptimizer(unittest.TestCase):
         adam_b1=0.9,
         adam_b2=0.999,
         adam_weight_decay=0.01,
+        train_steps=100,
     )
 
   @pytest.mark.cpu_only
@@ -314,7 +315,7 @@ class TestGetOptimizer(unittest.TestCase):
     import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
 
     config = self._make_optimizer_config(gradient_clipping_threshold=0.0)
-    opt = utils_rl.get_optimizer(config, max_train_steps=100)
+    opt = utils_rl.get_optimizer(config)
     # Should be usable: init on a simple param tree
     params = {"w": jnp.ones(3)}
     state = opt.init(params)
@@ -326,7 +327,7 @@ class TestGetOptimizer(unittest.TestCase):
     import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
 
     config = self._make_optimizer_config(gradient_clipping_threshold=1.0)
-    opt = utils_rl.get_optimizer(config, max_train_steps=100)
+    opt = utils_rl.get_optimizer(config)
     params = {"w": jnp.ones(3)}
     state = opt.init(params)
     self.assertIn("learning_rate", state.hyperparams)

@@ -33,7 +33,7 @@ from maxtext.common.common_types import AttentionType, DecoderBlockType, Reorder
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
-from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
 from maxtext.utils import accelerator_to_spec_map
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
@@ -84,6 +84,7 @@ class QuantizationType(str, Enum):
   """Supported quantization schemes."""
 
   NONE = ""
+  FP4 = "fp4"
   INT4 = "int4"
   INT8 = "int8"
   INTMP = "intmp"
@@ -315,6 +316,11 @@ class RunInfo(BaseModel):
 class Checkpointing(BaseModel):
   """Core configuration for checkpointing and run restoration."""
 
+  convert_checkpoint_if_possible: bool = Field(
+      False,
+      description="Whether to convert checkpoint on the fly if not provided via\
+        load_parameters_path or base_output_directory",
+  )
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
   hf_lora_adapter_path: PathStr = Field(
@@ -539,7 +545,7 @@ class MTP(BaseModel):
   )
 
 
-class Logits(BaseModel):
+class LogitsAndLoss(BaseModel):
   """Configuration for the final logits computation."""
 
   logits_via_embedding: bool = Field(False, description="If True, tie the embedding and unembedding matrices.")
@@ -554,6 +560,10 @@ class Logits(BaseModel):
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
   )
   z_loss_multiplier: float = Field(0.0, description="The multiplier for the z-loss (e.g., 1e-4). 0.0 to disable.")
+  num_vocab_tiling: int = Field(
+      1,
+      description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
+  )
 
 
 class Attention(BaseModel):
@@ -561,7 +571,7 @@ class Attention(BaseModel):
 
   attention: str = Field(
       "autoselected",
-      description="The attention algorithm to use (dot_product, flash, etc).",
+      description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, etc).",
   )
   attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
       "global", description="The variant of attention to use."
@@ -637,6 +647,14 @@ class Attention(BaseModel):
   force_q_layout: bool = Field(False, description="Force the Q layout")
   use_qk_clip: bool = Field(False, description="Whether to use QK-Clip (MuonClip) for training stability.")
   qk_clip_threshold: float = Field(100.0, description="Threshold for QK-Clip (tau).")
+  mla_qk_head_chunk_size: int = Field(
+      0,
+      ge=0,
+      description=(
+          "Chunk size over heads dimension for QK attention dot product in mla. "
+          "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
+      ),
+  )
 
 
 class MoBa(BaseModel):
@@ -727,6 +745,13 @@ class SplashAttention(BaseModel):
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
+  ring_scan_unroll: NonNegativeInt = Field(
+      1,
+      description=(
+          "Unroll factor for the Tokamax ring attention scan. 0 fully unrolls; values at or above the ring size are "
+          "equivalent to full unrolling. Program size and compile time grow with the factor."
+      ),
+  )
   sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
   sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
@@ -845,6 +870,10 @@ class MoEGeneral(BaseModel):
   use_ragged_sort: bool = Field(
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
+  )
+  ragged_sort_use_single_sparsecore: bool = Field(
+      False,
+      description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
   )
   use_gather_mosaic_kernel: bool = Field(
       False,
@@ -1064,12 +1093,34 @@ class HardwareAndMesh(BaseModel):
       CustomRule.DEFAULT,
       description="Customized mesh and logical rules for granularity.",
   )
+  custom_mesh_and_rule_for_eval: CustomRule = Field(
+      CustomRule.DEFAULT,
+      description="Customized mesh and logical rules for evaluation.",
+  )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
-  enable_nnx: bool = Field(True, description="Whether to use NNX for model definition.")
+  enable_nnx: bool = Field(
+      True,
+      description=(
+          "Whether to use NNX for model definition. Setting this to False selects the Linen path, "
+          "which will be deprecated in the near future."
+      ),
+  )
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
-  pure_nnx_decoder: bool = Field(True, description="Whether to enable pure NNX decoder.")
-  pure_nnx: bool = Field(True, description="Whether to enable pure NNX mode.")
+  pure_nnx_decoder: bool = Field(
+      True,
+      description=(
+          "Whether to enable pure NNX decoder. Setting this to False selects the Linen decoder, "
+          "which will be deprecated in the near future."
+      ),
+  )
+  pure_nnx: bool = Field(
+      True,
+      description=(
+          "Whether to enable pure NNX mode. Setting this to False selects the Linen path, "
+          "which will be deprecated in the near future."
+      ),
+  )
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
@@ -1080,6 +1131,9 @@ class LayoutAndSharding(BaseModel):
   """Configuration for data and model sharding rules."""
 
   logical_axis_rules: Any = Field([], description="Rules for mapping logical axes to physical mesh axes.")
+  logical_axis_rules_for_eval: Any = Field(
+      [], description="Rules for mapping logical axes to physical mesh axes during evaluation."
+  )
   data_sharding: Any = Field([], description="Sharding for input data.")
   context_sharding: str = Field("context", description="Physical axis name for context parallelism.")
   input_data_sharding_logical_axes: list[str] = Field(
@@ -1098,6 +1152,10 @@ class LayoutAndSharding(BaseModel):
       "with auto sharding, megablox kernel, and EP / FSDP parallelisms.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
+  dense_fsdp_use_two_stage_all_gather: bool = Field(
+      False,
+      description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",
@@ -1271,10 +1329,6 @@ class Tokenizer(BaseModel):
   use_truncation: bool = Field(
       True,
       description="If False, use chunking for long sequences instead of truncation.",
-  )
-  num_vocab_tiling: int = Field(
-      1,
-      description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
   )
 
 
@@ -1573,6 +1627,11 @@ class TrainingLoop(BaseModel):
       description="Total number of training steps. -1 defaults to learning_rate_schedule_steps.",
   )
   log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush Tensorboard.")
+  eval_start_step: int = Field(
+      0,
+      ge=0,
+      description="Start evaluation when training step is >= eval_start_step.",
+  )
   eval_interval: int = Field(
       -1,
       description="Run evaluation every N training steps. -1 disables interval-based evaluation.",
@@ -1969,10 +2028,6 @@ class Metrics(BaseModel):
   record_internal_nn_metrics: int = Field(0, description="Record internal neural network metrics.")
   prometheus_port: int = Field(0, description="Port for Prometheus metrics server. 0 disables it.")
   enable_checkpoint_cloud_logger: bool = Field(False, description="Enables structured logging for checkpointing.")
-  enable_tunix_perf_metrics: bool = Field(
-      False,
-      description="Whether to enable Tunix-managed metrics measurement. The metrics will be uploaded to tensorboard.",
-  )
   enable_wandb: bool = Field(False, description="Enable Weights & Biases logging.")
   wandb_project_name: str = Field("maxtext", description="Weights & Biases project name.")
   wandb_run_name: str = Field("", description="Weights & Biases run name. If empty, a default name is generated.")
@@ -2010,6 +2065,10 @@ class ElasticTraining(BaseModel):
   """
 
   elastic_enabled: bool = Field(False, description="Whether to enable elastic training.")
+  elastic_backup_kind: str = Field(
+      "snapshot",
+      description=("The kind of backup to use for elastic training: 'snapshot' or 'checkpoint'."),
+  )
   elastic_timeout_seconds: int = Field(
       300,
       description=(
@@ -2134,6 +2193,16 @@ class VisionProjector(BaseModel):
   projector_output_dim_for_vit: int = Field(4096, description="Output dimension for the vision projector.")
   pixel_shuffle_ratio_for_vit: float = Field(0.5, description="Pixel shuffle ratio for the Vision Transformer.")
   projector_dropout_for_vit: float = Field(0.0, description="Dropout rate for the vision projector.")
+  vision_projector_type: str = Field(
+      "default", description="Type of the vision projector to use. Supported: 'default', 'customized_vision_projector'."
+  )
+  vision_connector_num_layers: int = Field(2, description="Number of layers in custom vision projector.")
+  vision_connector_hidden_size: int = Field(
+      0,
+      description=("Hidden size for custom vision projector intermediate layers. 0 defaults to LLM hidden size."),
+  )
+  vision_connector_activation: str = Field("gelu", description="Activation function for custom vision projector.")
+  vision_connector_use_bias: bool = Field(True, description="Whether to use bias in custom vision projector.")
 
 
 class AudioEncoder(BaseModel):
@@ -2159,17 +2228,15 @@ class AudioEncoder(BaseModel):
   max_sample_len_for_audio: int = Field(10000, description="Maximum sample length for audio input.")
 
 
-class Debug(BaseModel):
-  """Configuration for debugging options."""
-
-  rl: bool = Field(False, description="RL-specific debugging")
+class Multimodal(MultimodalGeneral, VisionTower, VisionProjector, AudioEncoder):
+  """Configurations for multimodal"""
 
 
-class RLHardware(BaseModel):
-  """Hardware settings specific to RL training."""
+class RLCluster(BaseModel):
+  """Cluster configurations specific to RL training."""
 
-  trainer_devices_fraction: float = Field(0.5, description="Fraction of devices to use for the trainer.")
-  sampler_devices_fraction: float = Field(0.5, description="Fraction of devices to use for the sampler.")
+  trainer_devices_fraction: float = Field(0.5, gt=0.0, le=1.0, description="Fraction of devices to use for the trainer.")
+  sampler_devices_fraction: float = Field(0.5, gt=0.0, le=1.0, description="Fraction of devices to use for the sampler.")
   chips_per_vm: int = Field(4, description="Number of accelerator chips per VM.")
   use_pathways: bool = Field(True, description="Whether to use Pathways for multihost orchestration.")
   num_trainer_slices: int = Field(-1, description="Number of slices for the trainer.")
@@ -2199,9 +2266,9 @@ class RLHardware(BaseModel):
 class VLLM(BaseModel):
   """vLLM-specific configuration for rollouts."""
 
-  kv_cache_buffer: int = Field(256, description="Buffer for KV cache.")
-  hbm_utilization_vllm: float = Field(0.72, description="Target HBM utilization for vLLM.")
-  swap_space_vllm_gb: int = Field(2, description="Swap space in GB for vLLM.")
+  kv_cache_buffer: int = Field(256, gt=0, description="Buffer for KV cache.")
+  hbm_utilization_vllm: float = Field(0.72, gt=0.0, le=1.0, description="Target HBM utilization for vLLM.")
+  swap_space_vllm_gb: int = Field(2, ge=0, description="Swap space in GB for vLLM.")
   enable_dp_attention: bool = Field(False, description="Enable the attn_dp mesh axis in vLLM.")
   enable_expert_parallel: bool = Field(False, description="Enable expert parallelism in vLLM.")
   async_scheduling: bool = Field(False, description="Enable asynchronous scheduling in vLLM.")
@@ -2233,7 +2300,7 @@ class RL(BaseModel):
   """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
   num_generations: int = Field(2, description="Number of responses to generate per prompt (G in GRPO paper).")
-  num_iterations: int = Field(1, description="Number of iterations per batch (μ in GRPO paper).")
+  num_iterations: int = Field(1, ge=1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
   loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
@@ -2273,12 +2340,20 @@ class RL(BaseModel):
 class RLDataset(BaseModel):
   """Dataset settings for RL training."""
 
+  dataset_name: str = Field("openai/gsm8k", description="Name of the training dataset.")
+  eval_dataset_name: str = Field("openai/gsm8k", description="Name of the evaluation dataset.")
+  train_split: str = Field("train", description="Dataset split for training.")
+  eval_split: str = Field("test", description="Dataset split for evaluation.")
+  hf_subset: None | str = Field(None, description="Subset name of the Hugging Face dataset.")
+  hf_train_files: None | str = Field(None, description="Files for the HF training split.")
+  hf_eval_files: None | str = Field(None, description="Files for the HF evaluation split.")
+  data_shuffle_seed: int = Field(42, description="Seed for shuffling the dataset.")
   batch_size: int = Field(1, description="Global batch size for the dataset loader in RL.")
-  num_batches: int = Field(4, description="Number of batches for RL training.")
+  num_batches: int = Field(4, ge=1, description="Number of batches for RL training.")
   num_test_batches: int = Field(5, description="Number of batches for RL evaluation.")
   eval_batch_size: int = Field(-1, description="Batch size for RL evaluation.")
   test_batch_start_index: int = Field(0, description="Start index for the test dataset")
-  train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
+  train_fraction: float = Field(1.0, gt=0.0, le=1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
   rollout_micro_batch_size: int = Field(-1, description="Micro batch size for rollout.")
   dataset_processor_path: str = Field(
@@ -2286,20 +2361,6 @@ class RLDataset(BaseModel):
       description=(
           "Optional path to a user-provided Python file with a `process_data` function. "
           "When set, replaces the built-in dataset processor for custom datasets."
-      ),
-  )
-  reward_functions_path: str = Field(
-      "",
-      description=(
-          "Optional path to a user Python file containing custom reward functions. "
-          "Used with `reward_functions` to fully replace the built-in reward stack."
-      ),
-  )
-  reward_functions: str = Field(
-      "",
-      description=(
-          "Comma-separated names of reward functions to import from `reward_functions_path`. "
-          "Each function signature: (prompts, completions, tmvp_config, **kwargs) -> list[float]."
       ),
   )
 
@@ -2327,7 +2388,7 @@ class RLEvaluation(BaseModel):
   )
 
 
-class Reward(BaseModel):
+class RLReward(BaseModel):
   """Configuration for the reward/penalty model in RL."""
 
   reward_exact_answer: float = Field(5.0, description="Reward for an exact answer match.")
@@ -2347,9 +2408,23 @@ class Reward(BaseModel):
       None,
       description=("Max worker processes for the math_verify pool. None ⇒ " "min(batch_size, cpu_count())."),
   )
+  reward_functions_path: str = Field(
+      "",
+      description=(
+          "Optional path to a user Python file containing custom reward functions. "
+          "Used with `reward_functions` to fully replace the built-in reward stack."
+      ),
+  )
+  reward_functions: str = Field(
+      "",
+      description=(
+          "Comma-separated names of reward functions to import from `reward_functions_path`. "
+          "Each function signature: (prompts, completions, tmvp_config, **kwargs) -> list[float]."
+      ),
+  )
 
 
-class SpecialTokens(BaseModel):
+class RLSpecialTokens(BaseModel):
   """Special tokens used for formatting prompts and responses in RL."""
 
   reasoning_start_token: str = Field("<reasoning>", description="Token to mark the beginning of a reasoning section.")
@@ -2458,11 +2533,6 @@ class DerivedValues(BaseModel):
       None,
       description="The full path to the checkpoint directory, derived from `run_name`.",
   )
-  convert_checkpoint_if_possible: bool = Field(
-      False,
-      description="Whether to convert checkpoint on the fly if not provided via\
-        load_parameters_path or base_output_directory",
-  )
   metrics_dir: None | str = Field(
       None,
       description="The full path to the metrics directory, derived from `run_name`.",
@@ -2493,6 +2563,82 @@ class DerivedValues(BaseModel):
 # ----------------------------------------------------------------------------
 # Helper Functions
 # ----------------------------------------------------------------------------
+
+
+def _normalize_axes(axes: Any) -> tuple[str, ...]:
+  """Normalize a logical-rule mapping value to a tuple of axis name strings.
+
+  Args:
+    axes: The right-hand side of a logical axis rule entry.  Can be a single
+      string, a list/tuple of strings, or an empty list.
+
+  Returns:
+    A (possibly empty) tuple of physical axis name strings.
+  """
+  if axes is None:
+    return ()
+  if isinstance(axes, str):
+    return (axes,)
+  if isinstance(axes, (list, tuple)):
+    return tuple(a for a in axes if isinstance(a, str))
+  return ()
+
+
+def infer_cp_axes(logical_axis_rules: list) -> tuple[str, ...]:
+  """Infer which physical mesh axis/axes serve as Context Parallelism (CP).
+
+  Scans *logical_axis_rules* for the ``activation_length`` logical axis and
+  returns the physical axis/axes it is mapped to.
+
+  Args:
+    logical_axis_rules: The list of ``[logical_name, physical_axes]`` pairs
+      (the ``logical_axis_rules`` config field).
+
+  Returns:
+    A tuple of physical axis name strings that act as CP.  Empty if the
+    ``activation_length`` logical axis is not found in the rules.
+  """
+  for rule in logical_axis_rules:
+    if rule and len(rule) >= 2 and rule[0] == "activation_length":
+      return _normalize_axes(rule[1])
+  return ()
+
+
+def infer_ep_axes(logical_axis_rules: list) -> tuple[str, ...]:
+  """Infer which physical mesh axis/axes serve as Expert Parallelism (EP).
+
+  Scans *logical_axis_rules* for the ``exp`` logical axis and returns the
+  physical axis/axes it is mapped to.
+
+  Args:
+    logical_axis_rules: The list of ``[logical_name, physical_axes]`` pairs
+      (the ``logical_axis_rules`` config field).
+
+  Returns:
+    A tuple of physical axis name strings that act as EP.  Empty if the
+    ``exp`` logical axis is not found in the rules.
+  """
+  for rule in logical_axis_rules:
+    if rule and len(rule) >= 2 and rule[0] == "exp":
+      return _normalize_axes(rule[1])
+  return ()
+
+
+def ep_enabled(config):
+  """Determine if Expert Parallelism (EP) is enabled based on the config."""
+  # Infer EP rank from logical_axis_rules and disable incompatible flags when EP rank > 1.
+  ep_axes = infer_ep_axes(config.logical_axis_rules)
+  ep_rank = 1
+  for axis_name in ep_axes:
+    ici_val = getattr(config, f"ici_{axis_name}_parallelism", 1)
+    dcn_val = getattr(config, f"dcn_{axis_name}_parallelism", 1)
+    if ici_val == -1 or dcn_val == -1:
+      ep_rank = -1
+      break
+    ep_rank *= ici_val * max(dcn_val, 1)
+  return ep_rank != 1
+
+
 def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   """Choose appropriate scales for individual dimensions based on global scale."""
   if scale == 0:
@@ -2531,7 +2677,7 @@ class MaxTextConfig(
     ModelArchitecture,
     Engram,
     MTP,
-    Logits,
+    LogitsAndLoss,
     # Attention Mechanisms
     Attention,
     MlaAttention,
@@ -2561,14 +2707,7 @@ class MaxTextConfig(
     Muon,
     FineTuning,
     Distillation,
-    # Reinforcement Learning
-    RLHardware,
     VLLM,
-    RL,
-    RLDataset,
-    RLEvaluation,
-    Reward,
-    SpecialTokens,
     # Positional Embeddings
     PositionalEmbedding,
     Rope,
@@ -2614,14 +2753,9 @@ class MaxTextConfig(
   Every field is explicitly defined to prevent misconfigurations (`extra='forbid'`).
   """
 
-  debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
   dpo: DPO = Field(
       default_factory=DPO,
       description="Configuration for DPO and ORPO alignment algorithms.",
-  )
-  rl: RL = Field(
-      default_factory=RL,
-      description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
   )
   lora: LoRA = Field(
       default_factory=LoRA,
@@ -2697,31 +2831,68 @@ class MaxTextConfig(
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
         )
 
+  @staticmethod
+  def _load_mesh_config_from_yaml(rule_value: str) -> dict:
+    """Helper to load and parse custom mesh YAML configurations."""
+    custom_mesh_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "custom_mesh_and_rule",
+        f"{rule_value}.yml",
+    )
+
+    if not os.path.exists(custom_mesh_path):
+      # ValueError is more semantically correct for validation errors than NotImplementedError
+      raise ValueError(f"Custom mesh config file not found at {custom_mesh_path}")
+
+    # Explicitly setting encoding removes the need for the pylint disable comment
+    with open(custom_mesh_path, "r", encoding="utf-8") as f:
+      return yaml.safe_load(f) or {}
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
     Computes all derived values and runs all cross-field validations after initial parsing.
     This logic is ported from the legacy pyconfig_deprecated.py system and adapted for Pydantic.
     """
+    # Handle primary custom mesh and rule
     if self.custom_mesh_and_rule is not CustomRule.DEFAULT:
-      custom_mesh_path = os.path.join(
-          os.path.dirname(os.path.abspath(__file__)),
-          "custom_mesh_and_rule",
-          f"{self.custom_mesh_and_rule.value}.yml",
-      )
-      if os.path.exists(custom_mesh_path):
-        with open(custom_mesh_path, "r") as f:  # pylint: disable=unspecified-encoding
-          custom_mesh_config = yaml.safe_load(f)
-          if "mesh_axes" in custom_mesh_config:
-            self.mesh_axes = custom_mesh_config["mesh_axes"]
-          if "logical_axis_rules" in custom_mesh_config:
-            self.logical_axis_rules = custom_mesh_config["logical_axis_rules"]
-          if "data_sharding" in custom_mesh_config:
-            self.data_sharding = custom_mesh_config["data_sharding"]
-          if "context_sharding" in custom_mesh_config:
-            self.context_sharding = custom_mesh_config["context_sharding"]
-      else:
-        raise NotImplementedError(f"Custom mesh config file not found at {custom_mesh_path}")
+      mesh_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule.value)
+
+      # Use setattr to dynamically apply attributes, keeping code compact
+      for field in ("mesh_axes", "logical_axis_rules", "data_sharding"):
+        if field in mesh_config:
+          setattr(self, field, mesh_config[field])
+
+      # Infer context_sharding from logical_axis_rules when using custom mesh rules.
+      # Falls back to the default ("context") when no activation_length rule is found.
+      cp_axes = infer_cp_axes(self.logical_axis_rules)
+      if cp_axes:
+        self.context_sharding = cp_axes[0]
+
+    # Skip EP check if logical rule is overridden by user. Otherwise, ensure that EP rank is 1 when EP is disabled.
+    if not self.override_logical_axis_rules:
+      ep_is_enabled = ep_enabled(self)
+      if not ep_is_enabled:
+        _ep_disabled_flags = {
+            "use_random_routing": False,
+            "use_ragged_sort": False,
+            "ragged_buffer_factor": -1.0,
+            "use_ring_of_experts": False,
+            "num_moe_emb_chunks": 0,
+        }
+        for flag_name, disabled_value in _ep_disabled_flags.items():
+          current = getattr(self, flag_name)
+          if current != disabled_value:
+            raise ValueError(f"When EP rank is 1, {flag_name} must be {disabled_value} (was {current}).")
+
+    # Handle eval custom mesh and rule
+    if self.custom_mesh_and_rule_for_eval is CustomRule.DEFAULT:
+      # Fallback to primary rule if eval is DEFAULT
+      self.custom_mesh_and_rule_for_eval = self.custom_mesh_and_rule
+      self.logical_axis_rules_for_eval = self.logical_axis_rules
+    else:
+      eval_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_eval.value)
+      self.logical_axis_rules_for_eval = eval_config.get("logical_axis_rules", self.logical_axis_rules)
 
     # A. SET RUN NAME AND PATHS
     # If run_name is not set, generate one from the JOBSET_NAME environment variable (if available)
@@ -2860,6 +3031,24 @@ class MaxTextConfig(
             "pure_nnx_decoder=True. The bridged Linen decoder (pure_nnx_decoder=False) is invisible to Qwix, "
             "so quantization (and weight sparsity) would silently have no effect. Set pure_nnx_decoder=True."
         )
+
+    # TODO: Remove this block once the Linen code path and the enable_nnx, pure_nnx and pure_nnx_decoder flags are deleted.
+    linen_flags = [
+        name
+        for name, value in (
+            ("enable_nnx", self.enable_nnx),
+            ("pure_nnx", self.pure_nnx),
+            ("pure_nnx_decoder", self.pure_nnx_decoder),
+        )
+        if not value
+    ]
+    if linen_flags:
+      logger.warning("=" * 80)
+      logger.warning("MAXTEXT DEPRECATION NOTICE: you are running on the Linen code path.")
+      logger.warning("Selected by: %s", ", ".join(f"{name}=False" for name in linen_flags))
+      logger.warning("Linen will be deprecated in the near future and removed after that.")
+      logger.warning("Plan to migrate to NNX: leave enable_nnx, pure_nnx and pure_nnx_decoder at their default of True.")
+      logger.warning("=" * 80)
 
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
@@ -3198,6 +3387,10 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
+      raise ValueError(
+          "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."
+      )
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
           "Colocated python data input is only supported with Pathways (single"
@@ -3248,6 +3441,19 @@ class MaxTextConfig(
       raise ValueError("MoBA is only supported with dot_product attention.")
     if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
       raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
+    if self.mla_qk_head_chunk_size > 0:
+      if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
+        raise ValueError(
+            f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
+            f"`num_query_heads` ({self.num_query_heads})."
+        )
+      if self.use_indexer and (
+          self.mla_qk_head_chunk_size > self.indexer_n_heads or self.indexer_n_heads % self.mla_qk_head_chunk_size != 0
+      ):
+        raise ValueError(
+            f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
+            f"`indexer_n_heads` ({self.indexer_n_heads})."
+        )
     if self.use_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
@@ -3406,10 +3612,11 @@ class MaxTextConfig(
         raise ValueError("TPU ring context parallelism requires use_jax_splash=False.")
       if self.attention_type != "global":
         raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
-      if self.packing:
-        raise ValueError("TPU Tokamax ring attention does not support packing yet.")
       if self.context_parallel_load_balance:
-        raise ValueError("TPU Tokamax ring attention does not support context_parallel_load_balance yet.")
+        if context_parallel_size % 2 != 0:
+          raise ValueError("TPU Tokamax ring load balancing requires an even context_parallel_size.")
+        if self.mtp_num_layers > 0:
+          raise ValueError("TPU Tokamax ring attention with context_parallel_load_balance=True does not support MTP.")
       if self.use_ragged_attention:
         raise ValueError("TPU Tokamax ring attention does not support ragged attention.")
       if self.attention_sink:
@@ -3426,10 +3633,14 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention does not support QK-Clip statistics yet.")
       if self.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
+    if context_parallel_strategy != "ring" and self.ring_scan_unroll != 1:
+      raise ValueError(
+          f"ring_scan_unroll={self.ring_scan_unroll} was specified, but is only supported when "
+          "context_parallel_strategy='ring'."
+      )
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
-    # The AUTO + packing case, which training resolves to STRIPED, is not
-    # validated here because test code paths may load the same config but use a
-    # different reorder path. Training's runtime path enforces this.
+    # AUTO is resolved in training because test code paths may load the same
+    # config but use a different reorder path.
     if (
         context_parallel_size > 1
         and "gpu" not in self.hardware
@@ -3499,6 +3710,8 @@ class MaxTextConfig(
         self.hf_eval_split = "train"
       if self.eval_interval > 0 and not self.hf_eval_split:
         raise ValueError("Please specify hf_eval_split or set eval_interval to <=0.")
+      if self.grain_worker_count > 1:
+        raise ValueError("Only supports <= 1 for now, more workers results in duplicated data")
     elif self.dataset_type == DatasetType.GRAIN:
       if not self.grain_train_files and not self.grain_train_mixture_config_path:
         raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
@@ -3524,17 +3737,13 @@ class MaxTextConfig(
 
     if self.eval_interval > 0 >= self.eval_steps and self.generate_padding_batch_eval:
       raise ValueError("`eval_steps` must be > 0 when `generate_padding_batch_eval` is True.")
-    if self.rl.loss_algo == "grpo":
-      self.use_grpo = True
-    else:
-      self.use_grpo = False
-
     if self.use_batch_split_schedule:
       if self.quantization and not self.quantization == "fp8_full":
         raise ValueError("Batch split quantization only supports `quantization=fp8_full`")
 
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
@@ -3689,4 +3898,274 @@ class MaxTextConfig(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
+    return self
+
+
+class RLConfig(
+    LogitsAndLoss,
+    Engram,
+    RematAndOffload,
+    Attention,
+    Llama4Attention,
+    LayoutAndSharding,
+    InferenceLayout,
+    InferenceGeneral,
+    Decoding,
+    IciParallelism,
+    DcnParallelism,
+    HardwareAndMesh,
+    ModelArchitecture,
+    MoBa,
+    # Positional Embeddings
+    PositionalEmbedding,
+    Rope,
+    YarnRope,
+    # Mixture of Experts
+    MoEGeneral,
+    MoEKernels,
+    DeepSeekMoE,
+    # General MaxText Configs
+    RunInfo,
+    Checkpointing,
+    OrbaxStorage,
+    DataTypes,
+    Tokenizer,
+    AdamW,
+    Optimizer,
+    Quantization,
+    # Debugging and Profiling
+    DevelopmentAndDebugging,
+    Profiling,
+    # For compatibility with trainer in post_train/rl
+    RL,
+    RLCluster,
+    RLDataset,
+    RLEvaluation,
+    RLReward,
+    RLSpecialTokens,
+    VLLM,
+):
+  """
+  Configuration for Reinforcement Learning in MaxText.
+  """
+
+  num_epoch: int = Field(1, ge=1, description="Number of epochs to train for.")
+  eval_interval: int = Field(
+      -1,
+      description="Run evaluation every N training steps. -1 disables interval-based evaluation.",
+  )
+  enable_dropout: bool = Field(True, description="Enables dropout in the model.")
+  dropout_rate: float = Field(0.0, ge=0.0, le=1.0, description="The dropout rate.")
+  init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
+  log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush to Tensorboard.")
+  hf_access_token: None | str = Field(None, description="Hugging Face API access token.")
+  enable_tunix_perf_metrics: bool = Field(
+      False,
+      description="Whether to enable Tunix-managed metrics measurement. The metrics will be uploaded to tensorboard.",
+  )
+  max_target_length: int = Field(2048, description="Maximum sequence length for the model.")
+  max_prefill_predict_length: int = Field(64, description="Maximum length for the prefill stage in decoding.")
+
+  debug: bool = Field(False, description="Enable debug mode for RL.")
+
+  cluster: RLCluster = Field(
+      default_factory=RLCluster,
+      description="Configuration for RL cluster.",
+  )
+
+  rl: RL = Field(
+      default_factory=RL,
+      description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
+  )
+
+  dataset: RLDataset = Field(
+      default_factory=RLDataset,
+      description="Configuration for RL datasets.",
+  )
+
+  reward: RLReward = Field(
+      default_factory=RLReward,
+      description="Configuration for RL rewards.",
+  )
+
+  special_tokens: RLSpecialTokens = Field(
+      default_factory=RLSpecialTokens,
+      description="Configuration for RL special tokens.",
+  )
+
+  evaluation: RLEvaluation = Field(
+      default_factory=RLEvaluation,
+      description="Configuration for RL evaluation.",
+  )
+
+  vllm: VLLM = Field(
+      default_factory=VLLM,
+      description="Configuration for rollouts.",
+  )
+
+  @model_validator(mode="before")
+  @classmethod
+  def map_flat_fields_to_nested_models(cls, data: Any) -> Any:
+    """Route flat top-level overrides into their matching nested model fields.
+
+    Runs as a pydantic "before" validator so that flat keys in YAML configs or
+    CLI overrides can populate a field of the same name inside a nested model
+    without callers having to nest the override themselves.
+
+    Args:
+      data: The raw input to the model, as passed to pydantic's constructor.
+        Only dicts are processed; anything else is returned unchanged.
+
+    Returns:
+      `data`, mutated in place so nested model dicts are pre-populated with
+      the matching flat overrides. s
+    """
+    if not isinstance(data, dict):
+      return data
+
+    # Loop over every field declared in RLConfig
+    for field_name, field_info in cls.model_fields.items():
+      annotation = getattr(field_info, "annotation", None)
+
+      # If the field is a nested Pydantic model
+      if hasattr(annotation, "model_fields"):
+        nested_dict = data.setdefault(field_name, {})
+        if not isinstance(nested_dict, dict):
+          nested_dict = {}
+          data[field_name] = nested_dict
+
+        # Check if any parameter of the nested model was passed as a flat key in `data`
+        for inner_key in annotation.model_fields.keys():
+          if inner_key in data:
+            nested_dict[inner_key] = data[inner_key]
+
+    return data
+
+  @model_validator(mode="after")
+  def set_derived_values_and_validate(self) -> "RLConfig":
+    """Validate required RL config fields and fill in values derived from them.
+
+    Runs as a post-init model validator: checks constraints and computes fields
+    that depend on other fields so callers don't have to derive them by hand.
+
+    Returns:
+      This RLConfig instance, with derived fields populated in place.
+
+    Raises:
+      ValueError: If a required field is missing or a cross-field constraint
+        is violated.
+    """
+    # Validate that model_name is set.
+    model_name = getattr(self, "model_name", None)
+    if model_name is None:
+      raise ValueError("model_name is not set. Please pass model_name in your command.")
+
+    # Set tokenizer_path based on model_name if not explicitly provided.
+    tokenizer_path = getattr(self, "tokenizer_path", None)
+    if tokenizer_path is None:
+      if model_name in HF_IDS:
+        self.tokenizer_path = HF_IDS[model_name]
+        self.tokenizer_type = TokenizerType.HUGGINGFACE
+      else:
+        raise ValueError(
+            "model_name not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
+          Please pass tokenizer_path in your command."
+        )
+
+    if self.optimizer_memory_host_offload:
+      raise ValueError(
+          "optimizer_memory_host_offload=True is not supported on the post-training "
+          "RL path because the underlying Tunix RLCluster/Trainer does not "
+          "support host offloading of the optimizer state."
+      )
+
+    if self.num_vocab_tiling > 1:
+      raise ValueError(
+          f"Vocab Tiling is not supported with RL. "
+          f"num_vocab_tiling was configured to {self.num_vocab_tiling}, but it must be 1 when running train_rl."
+      )
+
+    # Set checkpoint_dir based on run_name and base_output_directory.
+    if self.run_name and self.base_output_directory:
+      checkpoint_dir = os.path.join(self.base_output_directory, self.run_name, "checkpoints", "")
+    else:
+      checkpoint_dir = os.path.join(os.path.abspath("maxtext_output"), "checkpoints", "")
+    object.__setattr__(self, "checkpoint_dir", checkpoint_dir)
+
+    # Set tensorboard_dir based on run_name and base_output_directory.
+    if self.run_name and self.base_output_directory:
+      tensorboard_dir = os.path.join(self.base_output_directory, self.run_name, "tensorboard", "")
+    else:
+      tensorboard_dir = os.path.join(os.path.abspath("maxtext_output"), "tensorboard", "")
+    object.__setattr__(self, "tensorboard_dir", tensorboard_dir)
+
+    # Slice configuration
+    if not (
+        (self.cluster.num_trainer_slices == -1 and self.cluster.num_samplers_slices == -1)
+        or (self.cluster.num_trainer_slices > 0 and self.cluster.num_samplers_slices > 0)
+    ):
+      raise ValueError("`num_trainer_slices` and `num_samplers_slices` must be both -1 or both positive.")
+    self.num_slices = 1 if self.cluster.num_trainer_slices == -1 else -1
+
+    # Set train_steps based on the number of batches, iterations, train fraction, and epochs.
+    object.__setattr__(
+        self,
+        "train_steps",
+        int(self.dataset.num_batches * self.rl.num_iterations * self.dataset.train_fraction * self.num_epoch),
+    )
+
+    # Set learning_rate_schedule_steps based on train_steps if not explicitly provided.
+    if self.learning_rate_schedule_steps == -1:
+      self.learning_rate_schedule_steps = self.train_steps
+
+    # Rollout parallelism checks
+    for name, val in [
+        ("rollout_tensor_parallelism", self.cluster.rollout_tensor_parallelism),
+        ("rollout_data_parallelism", self.cluster.rollout_data_parallelism),
+        ("rollout_expert_parallelism", self.cluster.rollout_expert_parallelism),
+    ]:
+      if val != -1 and val <= 0:
+        raise ValueError(f"`{name}` must be -1 or > 0, got {val}.")
+
+    # Dynamically inject model dimensions.
+    emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(self.global_parameter_scale)
+    object.__setattr__(self, "emb_dim", int((2**emb_scale) * self.base_emb_dim))
+    object.__setattr__(self, "num_query_heads", int((2**num_head_scale) * self.base_num_query_heads))
+    object.__setattr__(self, "num_kv_heads", int((2**num_head_scale) * self.base_num_kv_heads))
+    object.__setattr__(self, "mlp_dim", int((2**mlp_dim_scale) * self.base_mlp_dim))
+    object.__setattr__(self, "moe_mlp_dim", int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0)))
+    object.__setattr__(self, "num_decoder_layers", int((2**layer_scale) * self.base_num_decoder_layers))
+
+    # Mirror into internal MaxText fields for backward compatibility.
+    train_micro_batch_size = getattr(self.dataset, "train_micro_batch_size", -1)
+    batch_size = getattr(self.dataset, "batch_size", 1)
+    if train_micro_batch_size <= 0:
+      train_micro_batch_size = batch_size
+    object.__setattr__(self, "micro_batch_size_to_train_on", train_micro_batch_size)
+
+    if self.remat_policy == "custom":
+      tensors = [
+          "decoder_layer_input",
+          "context",
+          "mlpwi",
+          "moe_mlpwi_0",
+          "moe_mlpwi_1",
+          "moe_mlpwo",
+          "mlpwi_0",
+          "mlpwi_1",
+          "mlpwo",
+          "query_proj",
+          "key_proj",
+          "value_proj",
+          "query_wa_proj",
+          "kv_wa_proj",
+          "mla_kv",
+          "mla_q",
+          "qkv_proj",
+          "attention_out",
+          "out_proj",
+      ]
+      object.__setattr__(self, "tensors_on_device", [t for t in tensors if getattr(self, t) == "device"])
+      object.__setattr__(self, "tensors_to_offload", [t for t in tensors if getattr(self, t) == "offload"])
+
     return self

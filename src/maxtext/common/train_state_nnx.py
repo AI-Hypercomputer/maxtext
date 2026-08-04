@@ -228,7 +228,7 @@ def split_for_checkpoint(state: nnx.State):
   return linen_state, aux, ephemeral
 
 
-def to_checkpoint_dict(state: nnx.State):
+def to_checkpoint_dict(state: nnx.State | nnx.Module):
   """Reshapes an nnx.State into the on-disk checkpoint layout.
 
   Weights (nnx.Param) map to the Linen `params` collection and the optimizer to
@@ -236,6 +236,8 @@ def to_checkpoint_dict(state: nnx.State):
   must persist -- rngs/dropout, batch stats, and any custom variable -- goes under an `nnx_aux`
   subtree. Works on a concrete state (save) or an abstract state (restore target).
   """
+  if isinstance(state, nnx.Module):
+    state = nnx.state(state)
   linen_state, aux_state, _ = split_for_checkpoint(state)
   pure = linen_state.to_pure_dict()
   linen_dict = to_linen_checkpoint_dict({"model": pure.get("model", {}), "optimizer": pure.get("optimizer", {})})

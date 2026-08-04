@@ -69,7 +69,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     chips_per_vm=8 ici_tensor_parallelism=4\
     max_target_length=512 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd \
     enable_tunix_perf_metrics=True rl.num_generations=16 \
-    debug.rl=False rl.reshard_chunk_size=1 
+    debug=False rl.reshard_chunk_size=1 
 
 # Step 3: Run inference on the checkpoint produced by the RL run
 python3 -m maxtext.inference.vllm_decode \

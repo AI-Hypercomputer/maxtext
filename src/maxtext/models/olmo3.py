@@ -211,7 +211,7 @@ class Olmo3DecoderLayer(nnx.Module):
         ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
-    if cfg.record_internal_nn_metrics:
+    if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
       self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(

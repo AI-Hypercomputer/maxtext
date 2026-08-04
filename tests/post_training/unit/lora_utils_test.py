@@ -88,7 +88,7 @@ class LoraUtilsTest(unittest.TestCase):
     path = lora_utils._get_lora_module_path(mock_config)
     self.assertEqual(
         path,
-        "decoder/layers/(?:[0-9]+/)?.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
+        "decoder/layers(?:_[0-9]+|/[0-9]+)?/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
     )
 
     mock_config.model_name = "gemma4-9b"
@@ -96,7 +96,7 @@ class LoraUtilsTest(unittest.TestCase):
     self.assertEqual(
         path,
         "decoder/((scanned_blocks|layers_remainder)/)?layers.*/.*"
-        "(self_attention/(query|key|value|out)|mlp/.*(wi_0|wi_1|wo|shared_experts/(wi_0|wi_1|wo)))",
+        "(self_attention/(query|key|value|out)|mlp/.*(wi_0|wi_1|wo))",
     )
 
     mock_config.model_name = "unknown_model"
@@ -106,7 +106,7 @@ class LoraUtilsTest(unittest.TestCase):
     # Fallback to default
     self.assertEqual(
         path,
-        "decoder/layers/(?:[0-9]+/)?.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
+        "decoder/layers(?:_[0-9]+|/[0-9]+)?/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
     )
 
     mock_config.lora.lora_module_path = "custom/path"
@@ -244,6 +244,15 @@ class LoraUtilsTest(unittest.TestCase):
     # Verify it IS now LoRA enabled
     self.assertTrue(lora_utils.is_lora_enabled(lora_model))
 
+    # Verify quantization if weight_qtype is set
+    flat_state_paths = [".".join(str(p) for p in path) for path, _ in state.flat_state()]
+    if weight_qtype is not None:
+      self.assertTrue(any("qvalue" in path for path in flat_state_paths), "Expected quantized weights (qvalue) in state")
+    else:
+      self.assertFalse(
+          any("qvalue" in path for path in flat_state_paths), "Did not expect quantized weights (qvalue) in state"
+      )
+
     # Test fit for PeftTrainer
     trainer_cfg = peft_trainer.TrainingConfig(eval_every_n_steps=10)
     optimizer = optax.adam(1e-4)
@@ -283,6 +292,7 @@ class LoraUtilsTest(unittest.TestCase):
             "lora_restore_path": "some/path",
             "lora_rank": 4,
             "lora_alpha": 8.0,
+            "lora_module_path": ".*mlp/wi_.*",
         },
         scan_layers=False,
     )
@@ -291,8 +301,8 @@ class LoraUtilsTest(unittest.TestCase):
 
     restored_state = nnx.state(model, nnx.LoRAParam)
 
-    with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=restored_state) as mock_restore:
-      with mock.patch("flax.nnx.update") as mock_update:
+    with mock.patch("maxtext.utils.lora_utils.sync_lora_metadata"):
+      with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=restored_state) as mock_restore:
         lora_utils.restore_lora_from_path(model, cfg)
         mock_restore.assert_called_once()
         args, kwargs = mock_restore.call_args
@@ -302,7 +312,6 @@ class LoraUtilsTest(unittest.TestCase):
           self.assertTrue(kwargs["partial_restore"])
         elif "args" in kwargs and hasattr(kwargs["args"], "partial_restore"):
           self.assertTrue(kwargs["args"].partial_restore)
-        mock_update.assert_called_once()
 
   def test_sync_lora_metadata_default_syncs(self):
     """Test that default lora rank/alpha are successfully synced from checkpoint metadata."""
@@ -411,8 +420,9 @@ class LoraUtilsTest(unittest.TestCase):
 
       # Use save_checkpoint wrapper with a simple state
       dummy_state = {"weight": jnp.array([1.0, 2.0])}
-      checkpointing.save_checkpoint(manager, step=0, state=dummy_state, config=cfg_save)
-      manager.wait_until_finished()
+      dummy_iterator = checkpointing.PlaceHolderDataIterator(cfg_save, None)
+      checkpointing.save_checkpoint(manager, step=0, state=dummy_state, config=cfg_save, data_iterator=dummy_iterator)
+      checkpointing.wait_until_finished(manager)
 
       # Now verify that the saved checkpoint contains metadata on disk
       checkpoint_dir = epath.Path(tmpdir) / "0"

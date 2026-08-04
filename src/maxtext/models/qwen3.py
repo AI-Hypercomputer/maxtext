@@ -33,7 +33,7 @@ from flax import nnx
 
 from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.common.common_types import KV_BATCH, KV_HEAD
-from maxtext.utils.sharding import logical_to_mesh_axes
+from maxtext.utils.sharding import logical_to_mesh_axes, get_logical_axis_rules
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -612,7 +612,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
     mixed_qkvz = qkvz.reshape(new_shape_qkvz)
     if self.mesh is not None:
-      logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
+      logical_rules = get_logical_axis_rules()
       qkvz_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
       mixed_qkvz = jax.lax.with_sharding_constraint(mixed_qkvz, qkvz_sharding)
@@ -845,7 +845,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           compute_dtype=cfg.dtype,
       )
     elif self.mesh is not None:
-      logical_rules = self.config.logical_axis_rules
+      logical_rules = get_logical_axis_rules()
       recurrent_state_arg = (
           recurrent_state
           if recurrent_state is not None
@@ -2136,22 +2136,17 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
 
     x, _ = self.patch_embed(hidden_states)
     x = x.reshape(batch_size, -1, self.config.hidden_size_for_vit)
-    valid_grid = None
     if attention_mask is not None and video_grid_thw is None:
       raise ValueError("video_grid_thw is required when video_mask is provided.")
-    if attention_mask is not None and batch_size != 1:
-      raise ValueError("Padded Qwen3-Omni vision encoding currently supports batch size one.")
-    if video_grid_thw is not None:
-      grid = video_grid_thw[0] if getattr(video_grid_thw, "ndim", 1) == 2 else video_grid_thw
-      valid_grid = tuple(int(dim) for dim in grid)
-    pos = self.pos_embed_interpolate(num_frames, height, width)
-    if attention_mask is not None and valid_grid is not None:
-      valid_pos = self.pos_embed_interpolate(*valid_grid)
-      valid_indices = jnp.nonzero(attention_mask[0], size=math.prod(valid_grid))[0]
-      pos = jnp.zeros_like(pos).at[valid_indices].set(valid_pos)
-
-    pos = pos[jnp.newaxis, :, :]
+    pos = self.pos_embed_interpolate(
+        num_frames,
+        height,
+        width,
+        video_grid_thw=video_grid_thw,
+        attention_mask=attention_mask,
+    )
     x = x + pos
+    valid_grid = video_grid_thw
 
     h_traj = []
     for i in range(self.depth):

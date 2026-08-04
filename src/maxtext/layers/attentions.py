@@ -16,6 +16,7 @@
 
 import dataclasses
 import functools
+import os
 from typing import Any, Iterable, Optional, Tuple, Union, cast
 
 from jax.ad_checkpoint import checkpoint_name
@@ -67,7 +68,7 @@ from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNo
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
-from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding
+from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -436,7 +437,9 @@ class Attention(nnx.Module):
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
         self.init_kv_caches(inputs_kv_shape=inputs_kv_shape)
-        if self.model_mode != MODEL_MODE_TRAIN and base_kv_cache and config.attention != "vllm_rpa"
+        if self.model_mode != MODEL_MODE_TRAIN
+        and base_kv_cache
+        and config.attention not in ("vllm_rpa", "vllm_batched_rpa")
         else None
     )
 
@@ -555,6 +558,20 @@ class Attention(nnx.Module):
         debug_sharding=config.debug_sharding,
     )
 
+  def _logical_to_mesh_axes(self, logical_name):
+    # Pipeline parallelism uses context managers for logical rules instead of the config,
+    # so pass None to ensure `logical_to_mesh_axes` defers to using the current Flax context manager
+    logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
+    return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
+
+  def _validate_kv_heads(self) -> None:
+    """Validates the number of key/value heads."""
+    if self.num_kv_heads == -1:
+      raise ValueError("num_kv_heads is not defined.")
+
+    if self.num_query_heads % self.num_kv_heads != 0:
+      raise ValueError("Invalid num_kv_heads for GQA.")
+
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
     """Initializes the query, key, value, and output projections."""
     if self.config.fused_qkv:
@@ -575,7 +592,9 @@ class Attention(nnx.Module):
     #       linear transformations, which is equivalent under Adafactor.
     # We disable depth_scaling when using qk_norm or a query_pre_attn_scalar
     # to avoid applying scaling twice.
-    if self.config.use_qk_norm or (self.query_pre_attn_scalar is not None and self.query_pre_attn_scalar != 1.0):
+    if getattr(self.config, "use_qk_norm", False) or (
+        self.query_pre_attn_scalar is not None and self.query_pre_attn_scalar != 1.0
+    ):
       depth_scaling = 1.0
     else:
       depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
@@ -622,11 +641,7 @@ class Attention(nnx.Module):
     Returns:
       A DenseGeneral module that performs the key or value projection.
     """
-    if self.num_kv_heads == -1:
-      raise ValueError("num_kv_heads is not defined.")
-
-    if self.num_query_heads % self.num_kv_heads != 0:
-      raise ValueError("Invalid num_kv_heads for GQA.")
+    self._validate_kv_heads()
 
     kernel_axes = (
         (None, None, None)
@@ -672,12 +687,15 @@ class Attention(nnx.Module):
       raise ValueError(f"proj_name must be 'key' or 'value', but got {proj_name}")
 
   def init_qkv_w(self, inputs_shape: Tuple) -> nnx.Module:
+    """Initializes the a fused QKV projection using only one DenseGeneral module."""
+    self._validate_kv_heads()
+
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_shape),
-        out_features_shape=(3, self.num_query_heads, self.head_dim),
+        out_features_shape=(self.num_query_heads + 2 * self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "qkv", "heads", "kv"),
+        kernel_axes=("embed", "heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -692,8 +710,22 @@ class Attention(nnx.Module):
 
     qkv_proj = self.qkv_proj(inputs, out_sharding)
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
-    query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
-    return query, key, value
+
+    # Since fused QKV projection places all heads along the same axis which could be tensor
+    # parallel partitioned, we must use shard_map to split into equally partitioned Q, K, V arrays.
+    q_bshd = self._logical_to_mesh_axes(self.query_axis_names)
+    k_bshd = self._logical_to_mesh_axes(self.key_axis_names)
+    v_bshd = self._logical_to_mesh_axes(self.value_axis_names)
+
+    @jax.shard_map(mesh=self.mesh, in_specs=(q_bshd,), out_specs=(q_bshd, k_bshd, v_bshd))
+    def split_qkv(qkv_proj: Array) -> tuple[Array, Array, Array]:
+      num_local_heads = qkv_proj.shape[2]
+      num_query_heads = (num_local_heads * self.num_query_heads) // (self.num_query_heads + 2 * self.num_kv_heads)
+      num_kv_heads = (num_local_heads - num_query_heads) // 2
+
+      return tuple(jnp.split(qkv_proj, [num_query_heads, num_query_heads + num_kv_heads], axis=2))
+
+    return split_qkv(qkv_proj)
 
   @property
   def out_head_dim(self) -> int:
@@ -1014,6 +1046,8 @@ class Attention(nnx.Module):
       rpa_metadata: dict[str, Any] | None = None,
   ) -> tuple[Array, list[Array]]:
     """Forward function for vLLM serving with RPA attention."""
+    if self.config.attention == "vllm_batched_rpa":
+      os.environ["USE_BATCHED_RPA_KERNEL"] = "1"
     try:
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
@@ -1214,7 +1248,7 @@ class Attention(nnx.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
-    if self.config.attention == "vllm_rpa" and model_mode != MODEL_MODE_TRAIN:
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") and model_mode != MODEL_MODE_TRAIN:
       batch, seq_len, num_heads, head_dim = query.shape
       attn_out, updated_kv = self.forward_serve_vllm(
           query, key, value, rpa_kv_cache=kv_cache, rpa_metadata=attention_metadata
@@ -1249,7 +1283,7 @@ class Attention(nnx.Module):
       out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
       out = out * jax.nn.sigmoid(gate)
     out = self.out_projection(out, out_sharding=out_sharding)
-    if self.config.distill_beta > 0.0:
+    if getattr(self.config, "distill_beta", 0.0) > 0.0:
       self.sow(nnx.Intermediate, "out_projection_activations", out)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache

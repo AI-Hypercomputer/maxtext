@@ -217,8 +217,8 @@ class TestCreateCheckpointManager(unittest.TestCase):
 
     with (
         mock.patch.object(
-            train_utils.checkpointing,
-            "create_orbax_emergency_replicator_checkpoint_manager",
+            train_utils.emergency_checkpointing,
+            "create_replicator_checkpoint_manager",
             return_value=checkpoint_manager,
         ) as create_manager,
         mock.patch.object(

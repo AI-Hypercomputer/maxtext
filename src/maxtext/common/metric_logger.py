@@ -218,7 +218,7 @@ class MetricLogger:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
       log_parts.append(f"moe_lb_loss: {moe_lb_loss:.3f}")
 
-    if self.config.mtp_num_layers > 0:
+    if getattr(self.config, "mtp_num_layers", 0) > 0:
       mtp_loss = scalars.get("learning/mtp_loss", 0.0)
       log_parts.append(f"main_model_loss: {loss - mtp_loss:.3f}")
       log_parts.append(f"mtp_loss: {mtp_loss:.3f}")
@@ -237,7 +237,7 @@ class MetricLogger:
     ]
     if self.config.num_experts > 1:
       log_parts.append(f"avg_moe_lb_loss={scalars['eval/avg_moe_lb_loss']:.3f}")
-    if self.config.mtp_num_layers > 0:
+    if getattr(self.config, "mtp_num_layers", 0) > 0:
       log_parts.extend(
           [
               f"avg_mtp_loss={scalars['eval/avg_mtp_loss']:.3f}",
@@ -258,7 +258,7 @@ class MetricLogger:
         f"running perplexity={scalars['eval/avg_perplexity']:.3f}",
         f"running total_weights={scalars['eval/total_weights']}",
     ]
-    if self.config.mtp_num_layers > 0:
+    if getattr(self.config, "mtp_num_layers", 0) > 0:
       log_parts.extend(
           [
               f"running mtp_loss={scalars['eval/avg_mtp_loss']:.3f}",

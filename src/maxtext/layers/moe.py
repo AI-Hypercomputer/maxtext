@@ -43,7 +43,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec
+from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec, get_logical_axis_rules
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -453,13 +453,13 @@ class RoutedMoE(nnx.Module):
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
       self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
 
-    if self.config.attention == "vllm_rpa":
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # vLLM uses 'model' as the tensor parallelism axis name
       self._tensor_parallelism_name = ("model", "attn_dp")
     else:
       self._tensor_parallelism_name = "tensor"
 
-    if self.config.attention == "vllm_rpa" and self.config.enable_dp_attention:
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") and self.config.enable_dp_attention:
       self._expert_parallelism_name = "attn_dp_expert"
     elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
@@ -481,7 +481,7 @@ class RoutedMoE(nnx.Module):
         # tpu-inference applies the score function in the fused_moe_gmm kernel,
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
-        score_func="" if self.config.attention == "vllm_rpa" else self.config.routed_score_func,
+        score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") else self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
         shard_mode=config.shard_mode,
         rngs=self.rngs,
@@ -644,7 +644,7 @@ class RoutedMoE(nnx.Module):
     )
 
   def _logical_to_mesh_axes(self, logical_name):
-    logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
+    logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
   def _maybe_shard_with_pspec(self, inputs, pspec: jax.sharding.PartitionSpec | None):
@@ -917,6 +917,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -1005,6 +1006,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -1069,6 +1071,7 @@ class RoutedMoE(nnx.Module):
       use_custom_sort_vjp=True,
       use_ragged_sort=False,
       ragged_buffer_factor=-1.0,
+      use_single_sparsecore=False,
   ):
     """Permutes tokens locally within an expert shard.
 
@@ -1152,7 +1155,12 @@ class RoutedMoE(nnx.Module):
       # the worst-case ragged buffer. Restricting the gather to that prefix
       # makes both forward and backward proportional to the routed token count.
       valid_end = jnp.sum(local_group_size).astype(jnp.int32)
-      sorted_inputs = a2a_ragged_sort(inputs, sorted_indices, valid_end)
+      sorted_inputs = a2a_ragged_sort(
+          inputs,
+          sorted_indices,
+          valid_end,
+          use_single_sparsecore=use_single_sparsecore,
+      )
     else:
       sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
     sorted_experts_ids = expert_indices[sorted_indices]
@@ -1426,7 +1434,7 @@ class RoutedMoE(nnx.Module):
     def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
       if self.config.use_qwix_quantization:
         return group_sizes
-      elif self.config.attention == "vllm_rpa":
+      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
         return group_sizes
       else:
         return tokamax.RaggedDotGroupSizes(
@@ -1762,6 +1770,7 @@ class RoutedMoE(nnx.Module):
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.config.ragged_buffer_factor,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
@@ -1774,6 +1783,7 @@ class RoutedMoE(nnx.Module):
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.config.ragged_buffer_factor,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
 
       return (
@@ -1959,6 +1969,7 @@ class RoutedMoE(nnx.Module):
               intermediate_output,
               jnp.argsort(route_metadata.local_sorted_indices),  # pylint: disable=undefined-variable
               valid_end,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
           local_output = _sort_activations(
@@ -3066,7 +3077,7 @@ class RoutedMoE(nnx.Module):
     fused_kernel = None
     w0_kernel = None
     w1_kernel = None
-    if cfg.prefuse_moe_weights and cfg.attention == "vllm_rpa" and not self.is_hash_routing:
+    if cfg.prefuse_moe_weights and cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
       fused_kernel = jnp.asarray(self.wi[...], self.dtype)
     elif cfg.prefuse_moe_weights:
       wi = jnp.asarray(self.wi[...], self.dtype)
@@ -3096,7 +3107,7 @@ class RoutedMoE(nnx.Module):
     # The fused MoE kernel currently only supports standard Top-K routing with associated
     # weights. Hash routed layers bypass this kernel and fall back
     # to the sparse matmul implementation.
-    if cfg.attention == "vllm_rpa" and not self.is_hash_routing:
+    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
       output, lb_loss, bias_updates = self.fused_moe_matmul(
           inputs,
           gate_logits,

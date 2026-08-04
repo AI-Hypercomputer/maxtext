@@ -19,7 +19,7 @@ import functools
 import os
 from typing import Sequence
 
-from flax import linen as nn, nnx
+from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.training.train_state import TrainState
 import jax
@@ -1496,10 +1496,15 @@ def get_intermediate_value(model, nested_key, default=None, clear=False):
   intermediate_value = default
   match nested_key:
     case "out_projection_activations":
-      if nested_key in model.decoder.layers["self_attention"]:
-        intermediate_value = model.decoder.layers["self_attention"][nested_key].get_value()[-1]
-        if clear:
-          del model.decoder.layers["self_attention"][nested_key]
+      layers = model.decoder.get_layers()
+      last_layer = layers[-1]
+      if hasattr(last_layer, "self_attention"):
+        attn = last_layer.self_attention
+        if hasattr(attn, nested_key):
+          var = getattr(attn, nested_key)
+          intermediate_value = var.get_value()[-1]
+          if clear:
+            delattr(attn, nested_key)
     case _:
       # Default case to handle any unknown nested keys
       raise ValueError(f"Incorrect nested_key: {nested_key}")
@@ -1716,6 +1721,43 @@ def setup_initial_state(
           in_shardings=None,
           out_shardings=state_mesh_shardings,
       )()
+      if raw_params:
+        # Params-only load (base model weights): overlay restored weights, keep init for everything else.
+        target_model = (
+            state["model"]
+            if (isinstance(state, (nnx.State, dict)) and "model" in state)
+            else getattr(state, "model", state)
+        )
+        raw_model_params = (
+            raw_params["model"] if (isinstance(raw_params, (nnx.State, dict)) and "model" in raw_params) else raw_params
+        )
+        if hasattr(raw_model_params, "to_pure_dict"):
+          raw_model_params = raw_model_params.to_pure_dict()
+        if isinstance(raw_model_params, dict) and "params" in raw_model_params:
+          raw_model_params = raw_model_params["params"]
+        target_pure = target_model.to_pure_dict() if hasattr(target_model, "to_pure_dict") else target_model
+
+        def _reshard_aligned(target, raw):
+          """Aligns raw arrays with target device shardings using Flax's native flatten_dict utilities."""
+          target_flat = traverse_util.flatten_dict(target)
+          raw_flat = traverse_util.flatten_dict(raw)
+
+          res_flat = {}
+          for k, target_val in target_flat.items():
+            if k in raw_flat and not isinstance(raw_flat[k], jax.ShapeDtypeStruct):
+              raw_val = raw_flat[k]
+              if hasattr(target_val, "sharding") and target_val.sharding is not None:
+                res_flat[k] = jax.device_put(raw_val, target_val.sharding)
+              else:
+                res_flat[k] = raw_val
+            else:
+              res_flat[k] = target_val
+
+          return traverse_util.unflatten_dict(res_flat)
+
+        sharded_aligned = _reshard_aligned(target_pure, raw_model_params)
+        nnx.update(target_model, sharded_aligned)
+
       if restored:
         is_emergency = isinstance(
             checkpoint_manager,
@@ -1724,21 +1766,29 @@ def setup_initial_state(
                 emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
             ),
         )
-        # data_iterator state is updated in place during restore.
-        # The restore already overlaid the checkpoint onto a copy of the abstract, so a leaf it
-        # didn't carry is still an unmaterialized placeholder. Fill those from the fresh init: a
-        # present leaf comes from the checkpoint, an absent one keeps its init value.
         overlay = restored if is_emergency else restored["items"]
-        merged = jax.tree.map(
-            lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
-            overlay.to_pure_dict(),
-            state.to_pure_dict(),
-            is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
-        )
+        overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
+
+        def _has_shape_dtype_struct(tree):
+          return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
+
+        def _merge_restored_overlay(ckpt_node, init_node):
+          """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
+          if _has_shape_dtype_struct(ckpt_node):
+            if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
+              res = {}
+              for k in init_node:
+                if k in ckpt_node:
+                  res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
+                else:
+                  res[k] = init_node[k]
+              return res
+            else:
+              return init_node
+          return ckpt_node
+
+        merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
         nnx.replace_by_pure_dict(state, merged)
-      elif raw_params:
-        # params-only load: overlay the restored weights, keep init for everything else.
-        nnx.update(state.model, raw_params)
     else:
       if restored:
         if isinstance(
@@ -1878,10 +1928,48 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
     named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
+
+    def _to_abstract_var(a_var, s_var):
+      a_val = a_var.get_value()
+      s_val = getattr(s_var, "sharding", None) if isinstance(s_var, nnx.Variable) else s_var
+      if s_val is None and isinstance(s_var, nnx.Variable):
+        s_val = s_var.get_value()
+
+      def _extract_primary_sharding(s):
+        if isinstance(s, (jax.sharding.Sharding, jax.sharding.PartitionSpec)):
+          return s
+        if hasattr(s, "qvalue"):
+          return _extract_primary_sharding(s.qvalue)
+        leaves = jax.tree.leaves(s)
+        return leaves[0] if leaves else s
+
+      def _make_abstract_leaf(leaf_a, leaf_s):
+        leaf_s = _extract_primary_sharding(leaf_s)
+        if hasattr(leaf_s, "spec") and len(leaf_a.shape) != len(leaf_s.spec):
+          leaf_s = jax.sharding.NamedSharding(leaf_s.mesh, jax.sharding.PartitionSpec(*leaf_s.spec[: len(leaf_a.shape)]))
+        return jax.ShapeDtypeStruct(leaf_a.shape, leaf_a.dtype, sharding=leaf_s)
+
+      if type(a_val) in (jax.Array, jax.ShapeDtypeStruct) or (hasattr(a_val, "shape") and not hasattr(a_val, "qvalue")):
+        new_val = _make_abstract_leaf(a_val, s_val)
+      else:
+        s_tree = (
+            jax.tree.map(lambda _: s_val, a_val)
+            if isinstance(s_val, (jax.sharding.Sharding, jax.sharding.PartitionSpec))
+            else s_val
+        )
+        new_val = jax.tree.map(
+            _make_abstract_leaf,
+            a_val,
+            s_tree,
+            is_leaf=lambda x: hasattr(x, "shape") and hasattr(x, "dtype"),
+        )
+      return a_var.replace(value=new_val)
+
     abstract_state = jax.tree.map(
-        lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
+        _to_abstract_var,
         abs_var_state,
         named_sharding_state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
   state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(abstract_state)
@@ -2039,7 +2127,7 @@ def create_device_mesh(config, devices=None):
   if devices is None:
     devices = jax.devices()
 
-  if config.elastic_enabled:
+  if getattr(config, "elastic_enabled", False):
     devices = elastic_utils.live_devices(config)
     num_slices = len(elastic_utils.live_slice_indices(config))
   else:
@@ -2062,18 +2150,61 @@ def create_device_mesh(config, devices=None):
     devices = subslice_devices
 
   num_devices = len(devices)
-  num_slices = 1 if config.inference_benchmark_test else num_slices
+  num_slices = 1 if getattr(config, "inference_benchmark_test", False) else num_slices
   num_devices_per_slice = num_devices // num_slices
 
-  multi_slice_env = num_slices > 1
-
   # Find possible unspecified parallelisms
-  ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
+  ici_parallelism = getattr(config, "ici_parallelism", None)
+  if ici_parallelism is None:
+    ici_map = {
+        "diloco": getattr(config, "ici_diloco_parallelism", 1),
+        "data": getattr(config, "ici_data_parallelism", 1),
+        "stage": getattr(config, "ici_pipeline_parallelism", 1),
+        "fsdp": getattr(config, "ici_fsdp_parallelism", -1),
+        "fsdp_transpose": getattr(config, "ici_fsdp_transpose_parallelism", 1),
+        "sequence": getattr(config, "ici_sequence_parallelism", 1),
+        "context": getattr(config, "ici_context_parallelism", 1),
+        "context_autoregressive": getattr(config, "ici_context_autoregressive_parallelism", 1),
+        "tensor": getattr(config, "ici_tensor_parallelism", 1),
+        "tensor_sequence": getattr(config, "ici_tensor_sequence_parallelism", 1),
+        "model": getattr(config, "ici_tensor_parallelism", 1),
+        "expert": getattr(config, "ici_expert_parallelism", 1),
+        "autoregressive": getattr(config, "ici_autoregressive_parallelism", 1),
+        "attn_dp": 1,
+        "attn_dp_expert": 1,
+    }
+    ici_parallelism = [ici_map[axis] for axis in config.mesh_axes]
+  else:
+    ici_parallelism = ici_parallelism.copy()
+  ici_parallelism = max_utils.fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if multi_slice_env:
-    dcn_parallelism = max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
+  if num_slices > 1:
+    dcn_parallelism = getattr(config, "dcn_parallelism", None)
+    if dcn_parallelism is None:
+      dcn_map = {
+          "diloco": getattr(config, "dcn_diloco_parallelism", 1),
+          "data": getattr(config, "dcn_data_parallelism", 1),
+          "stage": getattr(config, "dcn_pipeline_parallelism", 1),
+          "fsdp": getattr(config, "dcn_fsdp_parallelism", 1),
+          "fsdp_transpose": getattr(config, "dcn_fsdp_transpose_parallelism", 1),
+          "sequence": getattr(config, "dcn_sequence_parallelism", 1),
+          "context": getattr(config, "dcn_context_parallelism", 1),
+          "context_autoregressive": getattr(config, "dcn_context_autoregressive_parallelism", 1),
+          "tensor": getattr(config, "dcn_tensor_parallelism", 1),
+          "tensor_sequence": getattr(config, "dcn_tensor_sequence_parallelism", 1),
+          "model": getattr(config, "dcn_tensor_parallelism", 1),
+          "expert": getattr(config, "dcn_expert_parallelism", 1),
+          "autoregressive": getattr(config, "dcn_autoregressive_parallelism", 1),
+          "attn_dp": 1,
+          "attn_dp_expert": 1,
+      }
+      dcn_parallelism = [dcn_map[axis] for axis in config.mesh_axes]
+    else:
+      dcn_parallelism = dcn_parallelism.copy()
+    dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
+
     if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
       mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
     else:

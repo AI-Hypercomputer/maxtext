@@ -31,7 +31,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 import jsonlines
-from maxtext.configs import pyconfig
+from maxtext.configs import pyconfig, types
 from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.common.common_types import Array, MODEL_MODE_TRAIN
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, generate_completions, grpo_loss_fn, grpo_loss_fn_nnx
@@ -91,6 +91,7 @@ class GRPOTest(unittest.TestCase):
     super().setUp()
     self.cfg = pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml")],
+        config_class=types.RLConfig,
         model_name="llama3.1-8b",
         run_name="generate_grpo_test_data",
         load_parameters_path="gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
@@ -98,11 +99,13 @@ class GRPOTest(unittest.TestCase):
     )
     self.cfg_no_ckpt_loading = pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml")],
+        config_class=types.RLConfig,
         run_name="generate_grpo_test_data_no_ckpt_loading",
         enable_checkpointing=False,
     )
     self.cfg_no_ckpt_loading_inference = pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml")],
+        config_class=types.RLConfig,
         run_name="generate_grpo_test_data_no_ckpt_loading_inference",
         enable_checkpointing=False,
         ici_tensor_parallelism=4,

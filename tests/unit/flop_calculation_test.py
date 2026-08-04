@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for verifying FLOPs calculation in maxtext_utils.py"""
+"""Tests for verifying FLOPs calculation in maxtext_utils.py"""
 
 from typing import Any
 import unittest
