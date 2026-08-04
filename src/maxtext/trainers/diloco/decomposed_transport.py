@@ -77,6 +77,30 @@ class ThreadedTransportManager:
       buffer[(rec_step, rec_frag)] = data
 
 
+def _put_on_local_cpu_mesh(tree: Any, local_cpu_mesh: jax.sharding.Mesh) -> Any:
+  """Safely transfers a PyTree of TPU arrays to local colocated CPU mesh.
+
+  Transfers per single-device shard using make_array_from_single_device_arrays
+  to avoid triggering multislice JIT resharding kernels in Pathways.
+  """
+  cpu_devices = list(local_cpu_mesh.devices.flat)
+
+  def _put_leaf(leaf):
+    if not isinstance(leaf, jax.Array):
+      return leaf
+    spec = leaf.sharding.spec if isinstance(leaf.sharding, jax.sharding.NamedSharding) else jax.sharding.PartitionSpec()
+    target_sharding = jax.sharding.NamedSharding(local_cpu_mesh, spec)
+    if not hasattr(leaf, "addressable_shards") or not leaf.addressable_shards:
+      return jax.device_put(leaf, target_sharding)
+    cpu_shards = [
+        jax.device_put(shard.data, cpu_devices[i])
+        for i, shard in enumerate(leaf.addressable_shards)
+    ]
+    return jax.make_array_from_single_device_arrays(leaf.shape, target_sharding, cpu_shards)
+
+  return jax.tree_util.tree_map(_put_leaf, tree)
+
+
 class LearnerTransport:
   """Wrapper for learner threads to communicate with the syncer."""
 
@@ -93,12 +117,8 @@ class LearnerTransport:
 
   def send_to_syncer_async(self, step: int, fragment_id: int, data: Any):
     """Asynchronously offloads TPU data to local CPU mesh and sends to syncer."""
-    # 1. Asynchronously offload to CPU colocated mesh (non-blocking on main thread)
-    cpu_sharding = jax.tree_util.tree_map(
-        lambda s: jax.sharding.NamedSharding(self.local_cpu_mesh, s.spec),
-        jax.tree_util.tree_map(lambda x: x.sharding, data),
-    )
-    frag_cpu = jax.device_put(data, cpu_sharding)
+    # 1. Initiate copy to local CPU mesh
+    frag_cpu = _put_on_local_cpu_mesh(data, self.local_cpu_mesh)
 
     # 2. Block and send in the background executor thread
     def _send():
@@ -117,11 +137,7 @@ class LearnerTransport:
 
   def send_to_syncer(self, step: int, fragment_id: int, data: Any):
     """Synchronously offloads TPU data to local CPU mesh and sends to syncer."""
-    cpu_sharding = jax.tree_util.tree_map(
-        lambda s: jax.sharding.NamedSharding(self.local_cpu_mesh, s.spec),
-        jax.tree_util.tree_map(lambda x: x.sharding, data),
-    )
-    frag_cpu = jax.device_put(data, cpu_sharding)
+    frag_cpu = _put_on_local_cpu_mesh(data, self.local_cpu_mesh)
     jax.block_until_ready(frag_cpu)
     self.manager.send_to_syncer(self.learner_idx, step, fragment_id, frag_cpu)
 
