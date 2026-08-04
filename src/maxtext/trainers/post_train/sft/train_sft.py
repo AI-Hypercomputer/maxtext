@@ -49,10 +49,12 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
+from tunix.sft import diffusion as tunix_diffusion_sft
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
 from maxtext.optimizers import optimizers
 from maxtext.configs import pyconfig
+from maxtext.integration.tunix import diffusion_sft as maxtext_diffusion_sft
 from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -219,6 +221,9 @@ def use_maxtext_loss_function(trainer, mt_config):
       targets,
       targets_position,
       targets_segmentation,
+      completion_mask=None,
+      corruption_mask=None,
+      targets_loss_mask=None,
   ):
     data = {
         "inputs": inputs,
@@ -228,10 +233,34 @@ def use_maxtext_loss_function(trainer, mt_config):
         "targets_position": targets_position,
         "targets_segmentation": targets_segmentation,
     }
+    if completion_mask is not None:
+      data["completion_mask"] = completion_mask
+    if corruption_mask is not None:
+      data["corruption_mask"] = corruption_mask
+    if targets_loss_mask is not None:
+      data["targets_loss_mask"] = targets_loss_mask
     return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=True)
 
   trainer = trainer.with_loss_fn(loss_func, has_aux=True)
   return trainer
+
+
+def configure_training_objective(trainer, mt_config):
+  """Configures AR or target-aligned diffusion loss without changing AR defaults."""
+  if getattr(mt_config, "training_objective", "causal_lm") != "block_diffusion":
+    return use_maxtext_loss_function(trainer, mt_config)
+  max_logging.log("Configuring Tunix target-aligned block-diffusion SFT adapter.")
+  return tunix_diffusion_sft.configure_diffusion_sft(
+      trainer,
+      maxtext_diffusion_sft.create_batch_adapter(mt_config),
+      maxtext_diffusion_sft.create_target_aligned_logits_fn(mt_config),
+  )
+
+
+def _create_trainer(model, optimizer, tunix_config, mt_config):
+  if getattr(mt_config, "training_objective", "causal_lm") == "block_diffusion":
+    return peft_trainer.PeftTrainer(model, optimizer, tunix_config)
+  return MaxTextPeftTrainer(model, optimizer, tunix_config)
 
 
 def validate_config(config):
@@ -246,6 +275,7 @@ def validate_config(config):
 
 def setup_trainer_state(mt_config, goodput_recorder=None):
   """Set up prerequisites for training loop."""
+  validate_config(mt_config)
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
@@ -272,10 +302,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
       nnx.pop(model, nnx.Intermediate)
       if mt_config.lora.lora_restore_path:
         lora_utils.restore_lora_from_path(model, mt_config)
-      trainer = MaxTextPeftTrainer(model, optimizer, tunix_config)
+      trainer = _create_trainer(model, optimizer, tunix_config, mt_config)
       trainer.with_training_hooks(training_hooks)
       trainer.with_data_hooks(data_hooks)
-      trainer = use_maxtext_loss_function(trainer, mt_config)
+      trainer = configure_training_objective(trainer, mt_config)
 
   return trainer, mesh
 
