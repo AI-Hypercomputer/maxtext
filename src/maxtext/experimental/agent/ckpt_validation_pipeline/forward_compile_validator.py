@@ -50,7 +50,8 @@ def run_mock_forward(*overrides):
   logger.info(f"Loading model from {config.load_parameters_path}...")
   # create a dummy 1-device hardware mesh using pod's single CPU
   mesh_shape = (1,) * len(config.mesh_axes)
-  dummy_mesh = Mesh(np.array(jax.devices()).reshape(mesh_shape), tuple(config.mesh_axes))
+  dummy_device = jax.devices("cpu")[0]
+  dummy_mesh = Mesh(np.array([dummy_device]).reshape(mesh_shape), tuple(config.mesh_axes))
   # dynamically generate tensor shapes based on the parsed config
   batch_size = int(config.per_device_batch_size)
   seq_len = int(config.max_target_length)
