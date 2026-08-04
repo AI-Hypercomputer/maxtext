@@ -17,6 +17,7 @@
 
 import copy
 import datetime
+import functools
 import gc
 import threading
 import traceback
