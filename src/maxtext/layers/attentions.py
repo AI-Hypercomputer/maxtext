@@ -51,7 +51,7 @@ from maxtext.common.common_types import (
     AttentionType,
 )
 from maxtext.layers import nnx_wrappers
-from maxtext.layers.attention_op import AttentionOp
+from maxtext.layers.attention_op import AttentionOp, _resolve_attention_type
 from maxtext.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
@@ -120,7 +120,7 @@ def attention_as_linen(
     float32_logits: bool = False,  # cast logits in float32 for stability.
     quant: Optional[Quant] = None,
     kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+    attention_type: AttentionType | None = None,
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
     use_ragged_attention: bool = False,
@@ -277,7 +277,7 @@ class Attention(nnx.Module):
       float32_logits: bool = False,  # cast logits in float32 for stability.
       quant: Optional[Quant] = None,
       kv_quant: Optional[KVQuant] = None,
-      attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+      attention_type: AttentionType | None = None,
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
       use_ragged_attention: bool = False,
@@ -388,7 +388,7 @@ class Attention(nnx.Module):
     self.float32_logits = float32_logits
     self.quant = quant
     self.kv_quant = kv_quant
-    self.attention_type = attention_type
+    self.attention_type = _resolve_attention_type(self.config, attention_type)
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.use_ragged_attention = use_ragged_attention

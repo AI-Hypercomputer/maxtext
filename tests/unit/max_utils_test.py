@@ -23,10 +23,12 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from jax import random
+from maxtext.common.common_types import ReorderStrategy
 from maxtext.configs import pyconfig
 from maxtext.utils import max_utils
 from maxtext.utils.train_utils import setup_train_loop
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
 import optax
 import pytest
 
@@ -654,6 +656,31 @@ class TestReorderSequence(unittest.TestCase):
 
     # 3. Assert roundtrip is lossless
     self.assertTrue(jnp.allclose(x, restored, rtol=1e-5, atol=1e-6))
+
+  def test_block_diffusion_masks_are_reordered_with_tokens(self):
+    completion_mask = jnp.arange(16, dtype=jnp.int32).reshape(1, 16)
+    targets_loss_mask = completion_mask + 100
+    corruption_mask = completion_mask + 50
+    batch = {
+        "inputs": completion_mask + 200,
+        "completion_mask": completion_mask,
+        "corruption_mask": corruption_mask,
+        "targets_loss_mask": targets_loss_mask,
+    }
+
+    reordered = max_utils.reorder_causal_load_balanced(
+        batch,
+        cp_size=2,
+        reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP,
+        hardware="cpu",
+    )
+
+    np.testing.assert_array_equal(reordered["completion_mask"], max_utils.reorder_sequence(completion_mask, 2))
+    np.testing.assert_array_equal(reordered["corruption_mask"], max_utils.reorder_sequence(corruption_mask, 2))
+    np.testing.assert_array_equal(
+        reordered["targets_loss_mask"],
+        max_utils.reorder_sequence(targets_loss_mask, 2),
+    )
 
 
 if __name__ == "__main__":

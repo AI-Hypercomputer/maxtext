@@ -574,7 +574,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
@@ -621,6 +621,10 @@ class Attention(BaseModel):
   )
   sliding_window_size: NonNegativeInt = Field(0, description="The size of the sliding window for local attention.")
   chunk_attn_window_size: NonNegativeInt = Field(0, description="The window size for chunked attention.")
+  causal_block_size: PositiveInt = Field(
+      32,
+      description="The number of token positions in each bidirectional block for block-causal attention.",
+  )
   attn_logits_soft_cap: None | NonNegativeFloat = Field(
       None, description="Soft-cap value for attention logits. None means no cap."
   )
@@ -1551,6 +1555,35 @@ class Distillation(BaseModel):
       description="GCS or local path to the pre-generated ArrayRecord teacher data.",
   )
 
+  distill_data_source: Literal["dataset", "student_rollout"] = Field(
+      "dataset",
+      description="Whether distillation consumes dataset targets or fresh rollouts from the current student.",
+  )
+  distill_rollout_algorithm: Literal["low_confidence"] = Field(
+      "low_confidence",
+      description="Block-diffusion rollout algorithm used for on-policy distillation.",
+  )
+  distill_rollout_confidence_threshold: float = Field(
+      0.9,
+      ge=0.0,
+      le=1.0,
+      description="Confidence threshold for parallel token commits during diffusion rollout.",
+  )
+  distill_rollout_temperature: float = Field(
+      1.0,
+      gt=0.0,
+      description="Temperature used to compute rollout token confidence.",
+  )
+  distill_rollout_max_denoise_steps: int = Field(
+      -1,
+      ge=-1,
+      description="Maximum denoising iterations per block; -1 uses causal_block_size.",
+  )
+  distill_rollout_stop_token_ids: list[int] = Field(
+      default_factory=list,
+      description="Generated token IDs that terminate the OPD completion; empty uses the tokenizer EOS ID.",
+  )
+
   # --- Loss Params ---
   distill_alpha: float = Field(0.5, description="Weight for the distillation loss component.")
   distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
@@ -1623,6 +1656,29 @@ class Distillation(BaseModel):
 class TrainingLoop(BaseModel):
   """Configuration for the main training loop, evaluation, and reproducibility."""
 
+  # Block-diffusion training objective.
+  training_objective: Literal["causal_lm", "block_diffusion"] = Field(
+      "causal_lm",
+      description="The token-prediction objective used to prepare targets and compute loss.",
+  )
+  block_diffusion_mask_id: int = Field(
+      -1,
+      description="The tokenizer mask-token id required by the block-diffusion training objective.",
+  )
+  block_diffusion_min_noise: float = Field(
+      1.0e-3,
+      gt=0.0,
+      le=1.0,
+      description="The minimum corruption probability sampled independently for each block.",
+  )
+  block_diffusion_logit_alignment: Literal["same_position", "shifted"] = Field(
+      "same_position",
+      description="How model logits align to clean target-token positions.",
+  )
+  block_diffusion_canvas_policy: Literal["all_masked", "seed_and_mask"] = Field(
+      "all_masked",
+      description="Whether every block is fully maskable or begins with a clean anchor token.",
+  )
   steps: int = Field(
       150_001,
       ge=-1,
@@ -1641,6 +1697,10 @@ class TrainingLoop(BaseModel):
   eval_steps: int = Field(
       -1,
       description="Number of steps to run for each evaluation. -1 runs on entire eval split.",
+  )
+  loss_is_preaveraged: bool = Field(
+      False,
+      description="Whether the evaluation hook receives a loss already averaged across evaluation batches.",
   )
   target_eval_loss: float = Field(
       0.0,
@@ -2336,6 +2396,29 @@ class RL(BaseModel):
           "Number of model keys to chunk for resharding tensors between trainer and rollout devices."
           "If None, no chunking is applied, which may lead to OOM errors if tensors are too large."
       ),
+  )
+  diffusion_rollout: bool = Field(
+      False,
+      description="Use an in-process block-diffusion rollout with exact denoising-trace policy scores.",
+  )
+  diffusion_score_mode: Literal["denoising_trace"] = Field(
+      "denoising_trace",
+      description="Policy-score semantics shared by rollout, live actor, anchor actor, and reference model.",
+  )
+  diffusion_confidence_threshold: float = Field(
+      0.9,
+      ge=0.0,
+      le=1.0,
+      description="Confidence threshold for parallel token commits during diffusion rollout.",
+  )
+  diffusion_max_denoise_steps: int = Field(
+      -1,
+      ge=-1,
+      description="Maximum denoising iterations per block; -1 uses causal_block_size.",
+  )
+  diffusion_stop_token_ids: list[int] = Field(
+      default_factory=list,
+      description="Generated stop-token IDs; empty uses the tokenizer EOS ID.",
   )
 
 
@@ -3479,6 +3562,65 @@ class MaxTextConfig(
         not isinstance(self.sliding_window_size, int) or self.sliding_window_size <= 0
     ):
       raise ValueError("`sliding_window_size` must be an integer > 0 for 'local_sliding' attention.")
+    if self.attention_type == AttentionType.BLOCK_DIFFUSION.value:
+      if self.attention not in ("autoselected", "dot_product", "flash"):
+        raise ValueError("Block-diffusion attention is supported only by dot_product attention and TPU Splash attention.")
+      if self.attention in ("autoselected", "flash") and self.hardware != "tpu":
+        raise ValueError(
+            "Block-diffusion attention with attention='autoselected' or attention='flash' requires hardware='tpu'; "
+            "use attention='dot_product' on other hardware."
+        )
+    if self.training_objective == "block_diffusion":
+      if self.attention_type != AttentionType.BLOCK_DIFFUSION.value:
+        raise ValueError("`training_objective='block_diffusion'` requires `attention_type='block_diffusion'`.")
+      if self.block_diffusion_mask_id < 0 or self.block_diffusion_mask_id >= self.vocab_size:
+        raise ValueError(
+            f"`block_diffusion_mask_id` ({self.block_diffusion_mask_id}) must satisfy "
+            f"0 <= block_diffusion_mask_id < vocab_size ({self.vocab_size})."
+        )
+      if getattr(self, "packing", False):
+        raise ValueError("`training_objective='block_diffusion'` requires `packing=False`.")
+      if self.mtp_num_layers > 0:
+        raise ValueError("`training_objective='block_diffusion'` is not compatible with MTP.")
+      if self.num_vocab_tiling > 1:
+        raise ValueError("`training_objective='block_diffusion'` is not compatible with vocabulary tiling.")
+      rl_config = getattr(self, "rl", None)
+      if (
+          hasattr(self, "dataset_type")
+          and self.dataset_type != "hf"
+          and not (rl_config is not None and rl_config.diffusion_rollout)
+      ):
+        raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'`.")
+      if getattr(self, "use_dpo", False):
+        raise ValueError("`training_objective='block_diffusion'` is not compatible with DPO.")
+      if getattr(self, "use_multimodal", False) or getattr(self, "use_audio", False):
+        raise ValueError("`training_objective='block_diffusion'` currently supports text-only training.")
+      valid_model_contracts = {
+          ("same_position", "all_masked"),
+          ("shifted", "seed_and_mask"),
+      }
+      model_contract = (self.block_diffusion_logit_alignment, self.block_diffusion_canvas_policy)
+      if model_contract not in valid_model_contracts:
+        raise ValueError(
+            "Block-diffusion training supports only `same_position/all_masked` or `shifted/seed_and_mask`; "
+            f"received `{model_contract[0]}/{model_contract[1]}`."
+        )
+    rl_config = getattr(self, "rl", None)
+    if rl_config is not None and rl_config.diffusion_rollout:
+      if self.training_objective != "block_diffusion":
+        raise ValueError("`rl.diffusion_rollout=True` requires `training_objective='block_diffusion'`.")
+      if rl_config.use_agentic_rollout:
+        raise ValueError("block-diffusion RL does not yet support agentic or asynchronous rollouts")
+      if self.decode_sampling_top_k not in (None, -1):
+        raise ValueError("block-diffusion RL currently requires `decode_sampling_top_k=-1`")
+      if self.decode_sampling_nucleus_p != 1.0:
+        raise ValueError("block-diffusion RL currently requires `decode_sampling_nucleus_p=1.0`")
+      if len(set(rl_config.diffusion_stop_token_ids)) != len(rl_config.diffusion_stop_token_ids) or any(
+          token_id < 0 or token_id >= self.vocab_size for token_id in rl_config.diffusion_stop_token_ids
+      ):
+        raise ValueError("`rl.diffusion_stop_token_ids` must contain unique IDs in the model vocabulary")
+      if rl_config.diffusion_max_denoise_steps != -1 and rl_config.diffusion_max_denoise_steps < self.causal_block_size:
+        raise ValueError("`rl.diffusion_max_denoise_steps` must be -1 or at least causal_block_size")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
     if (
@@ -3909,51 +4051,19 @@ class MaxTextConfig(
 
 
 class RLConfig(
-    LogitsAndLoss,
-    Engram,
-    RematAndOffload,
-    Attention,
-    Llama4Attention,
-    LayoutAndSharding,
-    InferenceLayout,
-    InferenceGeneral,
-    Decoding,
-    IciParallelism,
-    DcnParallelism,
-    HardwareAndMesh,
-    ModelArchitecture,
-    MoBa,
-    # Positional Embeddings
-    PositionalEmbedding,
-    Rope,
-    YarnRope,
-    # Mixture of Experts
-    MoEGeneral,
-    MoEKernels,
-    DeepSeekMoE,
-    # General MaxText Configs
-    RunInfo,
-    Checkpointing,
-    OrbaxStorage,
-    DataTypes,
-    Tokenizer,
-    AdamW,
-    Optimizer,
-    Quantization,
-    # Debugging and Profiling
-    DevelopmentAndDebugging,
-    Profiling,
-    # For compatibility with trainer in post_train/rl
+    MaxTextConfig,
     RL,
     RLCluster,
     RLDataset,
     RLEvaluation,
     RLReward,
     RLSpecialTokens,
-    VLLM,
 ):
-  """
-  Configuration for Reinforcement Learning in MaxText.
+  """Configuration for Reinforcement Learning in MaxText.
+
+  Inheriting ``MaxTextConfig`` preserves the complete authoritative model and
+  training schema for RL. The RL-specific mixins extend that schema; they do
+  not replace or remove fields used by pretraining and post-training.
   """
 
   num_epoch: int = Field(1, ge=1, description="Number of epochs to train for.")
@@ -4091,6 +4201,50 @@ class RLConfig(
           f"Vocab Tiling is not supported with RL. "
           f"num_vocab_tiling was configured to {self.num_vocab_tiling}, but it must be 1 when running train_rl."
       )
+
+    if self.training_objective == "block_diffusion" and not self.rl.diffusion_rollout:
+      raise ValueError("RL with `training_objective='block_diffusion'` requires `rl.diffusion_rollout=True`.")
+
+    if self.rl.diffusion_rollout:
+      if self.training_objective != "block_diffusion":
+        raise ValueError("`rl.diffusion_rollout=True` requires `training_objective='block_diffusion'`.")
+      if self.attention_type != AttentionType.BLOCK_DIFFUSION.value:
+        raise ValueError("block-diffusion RL requires `attention_type='block_diffusion'`")
+      if self.block_diffusion_mask_id < 0 or self.block_diffusion_mask_id >= self.vocab_size:
+        raise ValueError("block-diffusion RL requires a mask token ID inside the model vocabulary")
+      if (self.block_diffusion_logit_alignment, self.block_diffusion_canvas_policy) not in {
+          ("same_position", "all_masked"),
+          ("shifted", "seed_and_mask"),
+      }:
+        raise ValueError("block-diffusion RL received an unsupported logit-alignment/canvas-policy contract")
+      if self.mtp_num_layers > 0:
+        raise ValueError("block-diffusion RL does not support MTP")
+      if self.rl.use_agentic_rollout:
+        raise ValueError("block-diffusion RL does not yet support agentic or asynchronous rollouts")
+      if not self.cluster.use_pathways:
+        raise ValueError("block-diffusion RL currently requires Pathways single-controller execution")
+      if self.decode_sampling_top_k not in (None, -1):
+        raise ValueError("block-diffusion RL currently requires `decode_sampling_top_k=-1`")
+      if self.decode_sampling_nucleus_p != 1.0:
+        raise ValueError("block-diffusion RL currently requires `decode_sampling_nucleus_p=1.0`")
+      if self.decode_sampling_temperature <= 0.0:
+        raise ValueError("block-diffusion RL requires a positive sampling temperature")
+      if self.stop_strings:
+        raise ValueError("block-diffusion RL supports token stop IDs, not vLLM stop strings")
+      if self.num_test_batches > 0:
+        eval_sampling = self.generation_configs.get(self.eval_sampling_strategy)
+        if eval_sampling is None:
+          raise ValueError("block-diffusion evaluation requires a configured eval_sampling_strategy")
+        if eval_sampling["eval_top_k"] not in (None, -1, 1) or eval_sampling["eval_top_p"] not in (None, 1.0):
+          raise ValueError("block-diffusion evaluation supports greedy or unfiltered categorical sampling")
+      if len(set(self.rl.diffusion_stop_token_ids)) != len(self.rl.diffusion_stop_token_ids) or any(
+          token_id < 0 or token_id >= self.vocab_size for token_id in self.rl.diffusion_stop_token_ids
+      ):
+        raise ValueError("`rl.diffusion_stop_token_ids` must contain unique IDs in the model vocabulary")
+      if self.block_diffusion_mask_id in self.rl.diffusion_stop_token_ids:
+        raise ValueError("the block-diffusion mask token cannot also be a generated stop token")
+      if self.rl.diffusion_max_denoise_steps != -1 and self.rl.diffusion_max_denoise_steps < self.causal_block_size:
+        raise ValueError("`rl.diffusion_max_denoise_steps` must be -1 or at least causal_block_size")
 
     # Set checkpoint_dir based on run_name and base_output_directory.
     if self.run_name and self.base_output_directory:

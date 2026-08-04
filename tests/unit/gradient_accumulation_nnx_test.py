@@ -14,6 +14,8 @@
 
 """Unit tests for the NNX branch of gradient_accumulation_loss_and_grad."""
 
+# pylint: disable=too-many-positional-arguments
+
 import unittest
 from dataclasses import dataclass
 
@@ -65,6 +67,20 @@ def _fake_loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "mtp_loss": jnp.array(0.0),
   }
   return xent_sum / total_weights, aux
+
+
+def _zero_weight_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+  """Produces model-dependent sums with a zero token denominator."""
+  del config, dropout_rng, params, is_train
+  xent_sum = jnp.sum(model(data["inputs"]) ** 2) + 1.0
+  aux = {
+      "xent_sum": xent_sum,
+      "total_weights": jnp.array(0.0),
+      "moe_lb_loss": jnp.array(0.0),
+      "indexer_loss": jnp.array(0.0),
+      "mtp_loss": jnp.array(0.0),
+  }
+  return xent_sum, aux
 
 
 class TestGradientAccumulationNNX(unittest.TestCase):
@@ -150,6 +166,22 @@ class TestGradientAccumulationNNX(unittest.TestCase):
     self.assertTrue(jnp.isfinite(loss))
     for g in jax.tree.leaves(raw_grads):
       self.assertTrue(jnp.all(jnp.isfinite(g)))
+
+  def test_zero_total_weights_returns_zero_loss_and_gradients(self):
+    loss, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _zero_weight_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+
+    self.assertEqual(float(loss), 0.0)
+    for gradient in jax.tree.leaves(raw_grads):
+      self.assertTrue(jnp.all(jnp.isfinite(gradient)))
+      self.assertTrue(jnp.all(gradient == 0))
 
 
 if __name__ == "__main__":

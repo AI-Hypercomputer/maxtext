@@ -29,7 +29,12 @@ class SFTTrainingHooks(BaseTrainingHooks):
   @override
   def get_total_weights(self, batch) -> jax.Array:
     """Calculate the number of non-padded tokens in the batch."""
-    return jnp.sum(batch["targets_segmentation"] != 0)
+    return jnp.sum(batch.get("targets_loss_mask", batch["targets_segmentation"]) != 0)
+
+  @override
+  def eval_loss_is_preaveraged(self) -> bool:
+    """Whether the configured objective supplies a preaveraged eval loss."""
+    return self.config.loss_is_preaveraged
 
 
 class SFTDataHooks(BaseDataHooks):
