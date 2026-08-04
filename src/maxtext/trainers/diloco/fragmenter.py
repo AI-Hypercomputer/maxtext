@@ -113,7 +113,7 @@ class FragmentedTreeManipulator:
         indices = list(range(sync_id * num_synced, (sync_id + 1) * num_synced))
       else:
         indices = list(range(sync_id, num_layers, num_transformer_fragments))
-      fragment_to_layer_indices[i] = jnp.array(indices)
+      fragment_to_layer_indices[i] = tuple(indices)
 
     # Regex to identify scanned layer parameters
     scanned_regex = re.compile(r"/(?:layers|blocks|moe_layers|dense_layers|layers_outside_pipeline)(?:/|$)")
@@ -156,7 +156,13 @@ class FragmentedTreeManipulator:
             take_fn = self._make_take_jit_null(v, indices, axis)
             flat_frag[keystr] = take_fn(v)
           else:
-            flat_frag[keystr] = jnp.take(v, indices, axis=axis)
+            indices_list = list(indices)
+            if indices_list == list(range(indices_list[0], indices_list[-1] + 1)):
+              slc = [slice(None)] * v.ndim
+              slc[axis] = slice(indices_list[0], indices_list[-1] + 1)
+              flat_frag[keystr] = v[tuple(slc)]
+            else:
+              flat_frag[keystr] = jnp.take(v, jnp.array(indices), axis=axis)
     return flat_frag
 
   def apply_flat_fragment(
@@ -196,7 +202,12 @@ class FragmentedTreeManipulator:
             scatter_fn = self._make_scatter_jit_null(v, frag, indices, axis)
             new_kvs.append(scatter_fn(v, frag))
           else:
-            idx_tuple = tuple(slice(None) if i != axis else indices for i in range(v.ndim))
+            indices_list = list(indices)
+            if indices_list == list(range(indices_list[0], indices_list[-1] + 1)):
+              slc = slice(indices_list[0], indices_list[-1] + 1)
+              idx_tuple = tuple(slice(None) if i != axis else slc for i in range(v.ndim))
+            else:
+              idx_tuple = tuple(slice(None) if i != axis else jnp.array(indices) for i in range(v.ndim))
             new_kvs.append(v.at[idx_tuple].set(frag))
         else:
           new_kvs.append(v)

@@ -129,6 +129,30 @@ def get_first_step(model, state):
     return 0
 
 
+def _extract_scalar_metrics(tree):
+  """Extracts Python scalar numbers from a JAX metric PyTree safely while inside mesh context."""
+
+  def _leaf_to_scalar(x):
+    if isinstance(x, jax.Array):
+      try:
+        if hasattr(x, "addressable_shards") and len(x.addressable_shards) > 0:
+          s = x.addressable_shards[0].data
+        else:
+          s = x
+        s_f32 = s.astype(jnp.float32)
+        val = jax.device_get(s_f32)
+        if isinstance(val, np.ndarray):
+          return float(val.mean())
+        return float(val)
+      except Exception:
+        return 0.0
+    elif isinstance(x, (np.ndarray, np.generic)):
+      return float(x.mean())
+    return x
+
+  return jax.tree_util.tree_map(_leaf_to_scalar, tree)
+
+
 def make_learner_config(config, learner_idx, num_learners):
   """Creates a modified deep copy of the global configuration for a specific learner."""
   learner_config = copy.deepcopy(config)
@@ -224,21 +248,22 @@ def _run_learner_loop(
   with jax.set_mesh(submesh), submesh, nn_partitioning.axis_rules(learner_config.logical_axis_rules):
     learner_config._flat_config["checkpoint_dir"] = config.checkpoint_dir + f"/learner_{learner_idx}"
 
-    max_logging.log(f"Learner {learner_idx}: setup_train_loop starting")
-    (
-        init_rng,
-        checkpoint_manager,
-        state_mesh_shardings,
-        model,
-        mesh,
-        learning_rate_schedule,
-        data_iterator,
-        data_loader,
-        rampup_manager,
-        eval_data_iterator,
-        state,
-    ) = train_utils.setup_train_loop(learner_config, recorder, mesh=submesh)
-    max_logging.log(f"Learner {learner_idx}: setup_train_loop done")
+    with init_lock:
+      max_logging.log(f"Learner {learner_idx}: setup_train_loop starting")
+      (
+          init_rng,
+          checkpoint_manager,
+          state_mesh_shardings,
+          model,
+          mesh,
+          learning_rate_schedule,
+          data_iterator,
+          data_loader,
+          rampup_manager,
+          eval_data_iterator,
+          state,
+      ) = train_utils.setup_train_loop(learner_config, recorder, mesh=submesh)
+      max_logging.log(f"Learner {learner_idx}: setup_train_loop done")
 
     params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(
         learner_config, state_mesh_shardings
@@ -335,6 +360,7 @@ def _run_learner_loop(
               if learner_config.shard_optimizer_over_data and isinstance(model, nn.Module):
                 state = sharding.maybe_shard_with_name(state, state_mesh_shardings, learner_config.shard_mode)
               state, metrics = p_train_step(state, example_batch, *step_rng_args)
+              metrics = _extract_scalar_metrics(metrics)
 
           max_logging.log(f"Learner {learner_idx}: Step {step} finished")
           step_time_delta = datetime.datetime.now() - last_step_completion
@@ -346,6 +372,10 @@ def _run_learner_loop(
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
               frag_data = manipulator.get_flat_fragment(params, frag_idx)
+              frag_data = jax.tree_util.tree_map(
+                  lambda leaf: jnp.copy(leaf) if isinstance(leaf, jax.Array) else leaf,
+                  frag_data,
+              )
             transport.send_to_syncer_async(completed_step, frag_idx, frag_data)
 
           if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
@@ -388,6 +418,7 @@ def _run_learner_loop(
                 break
               with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
                 eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
+                eval_metrics = _extract_scalar_metrics(eval_metrics)
               eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
               last_eval_step_completion = datetime.datetime.now()
               metric_logger_instance.buffer_and_write_metrics(
