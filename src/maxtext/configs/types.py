@@ -1241,6 +1241,9 @@ class RematAndOffload(BaseModel):
   decoder_layer_input: RematLocation = Field(
       RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
   )
+  indexer_cutoff_threshold: RematLocation = Field(
+      RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
+  )
   context: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the attention context.")
   mlpwi: RematLocation = Field(
       RematLocation.REMAT,
@@ -3228,6 +3231,7 @@ class MaxTextConfig(
     if self.remat_policy == "custom":
       tensors = [
           "decoder_layer_input",
+          "indexer_cutoff_threshold",
           "context",
           "mlpwi",
           "moe_mlpwi_0",
@@ -3471,6 +3475,11 @@ class MaxTextConfig(
             "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
             "short-circuits to select all tokens and no indexer loss is produced."
         )
+    if not self.use_indexer and self.indexer_cutoff_threshold != RematLocation.REMAT:
+      raise ValueError(
+          f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
+          "`use_indexer=True` (DeepSeek Sparse Attention / MLA Indexer)."
+      )
     if self.attention_type == AttentionType.CHUNK.value and (
         not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
     ):
@@ -4167,6 +4176,7 @@ class RLConfig(
     if self.remat_policy == "custom":
       tensors = [
           "decoder_layer_input",
+          "indexer_cutoff_threshold",
           "context",
           "mlpwi",
           "moe_mlpwi_0",

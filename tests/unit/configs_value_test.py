@@ -334,6 +334,47 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_indexer_cutoff_threshold_remat_policy(self):
+    """Tests custom remat policy and validation for indexer_cutoff_threshold."""
+    # 1. Verify custom remat policy puts indexer_cutoff_threshold on device
+    argv_device = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_indexer=true",
+        "q_lora_rank=1536",
+        "attention=dot_product",
+        "remat_policy=custom",
+        "indexer_cutoff_threshold=device",
+    ]
+    config_device = pyconfig.initialize(argv_device)
+    self.assertIn("indexer_cutoff_threshold", config_device.tensors_on_device)
+
+    # 2. Verify custom remat policy puts indexer_cutoff_threshold on offload
+    argv_offload = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_indexer=true",
+        "q_lora_rank=1536",
+        "attention=dot_product",
+        "remat_policy=custom",
+        "indexer_cutoff_threshold=offload",
+    ]
+    config_offload = pyconfig.initialize(argv_offload)
+    self.assertIn("indexer_cutoff_threshold", config_offload.tensors_to_offload)
+
+    # 3. Verify validation error when use_indexer=False and indexer_cutoff_threshold != 'remat'
+    argv_invalid = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_indexer=false",
+        "indexer_cutoff_threshold=device",
+    ]
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(argv_invalid)
+
 
 if __name__ == "__main__":
   absltest.main()
