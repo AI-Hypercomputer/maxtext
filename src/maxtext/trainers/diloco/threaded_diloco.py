@@ -44,9 +44,6 @@ from maxtext.utils import train_utils
 from maxtext.utils.mesh_utils import partition_mesh_by_diloco_axis, stack_across_meshes_pytree
 
 
-@jax.jit
-def mix_frags(i_frag, o_frag, alpha):
-  return jax.tree_util.tree_map(lambda x, y: alpha * x + (1 - alpha) * y, i_frag, o_frag)
 
 
 def _slice_global_mesh_to_submesh(
@@ -308,11 +305,16 @@ def _run_learner_loop(
     )
     metric_logger_instance.write_setup_info_to_tensorboard(params_template)
 
+    @functools.partial(jax.jit)
+    def p_mix_frags(i_frag, o_frag):
+      return jax.tree_util.tree_map(lambda x, y: alpha * x + (1.0 - alpha) * y, i_frag, o_frag)
+
     # Pre-compile the mix function for each fragment to avoid concurrent compilation crashes
     with init_lock:
-      for f_idx in range(num_fragments):
-        dummy_frag = manipulator.get_flat_fragment(params_template, f_idx)
-        _ = mix_frags(dummy_frag, dummy_frag, alpha)
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
+        for f_idx in range(num_fragments):
+          dummy_frag = manipulator.get_flat_fragment(params_template, f_idx)
+          _ = p_mix_frags(dummy_frag, dummy_frag)
 
     try:
       last_step_completion = datetime.datetime.now()
@@ -340,19 +342,20 @@ def _run_learner_loop(
 
           if completed_step > 0 and completed_step % steps_between_syncs_plus_1 == 0:
             frag_idx = (completed_step % period) // steps_between_syncs_plus_1
-            params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-            frag_data = manipulator.get_flat_fragment(params, frag_idx)
+            with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
+              params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
+              frag_data = manipulator.get_flat_fragment(params, frag_idx)
             transport.send_to_syncer_async(completed_step, frag_idx, frag_data)
 
           if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
             frag_idx = ((completed_step - tau) % period) // steps_between_syncs_plus_1
             received_frag = transport.recv_from_syncer(completed_step - tau, frag_idx)
 
-            params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-            inner_frag = manipulator.get_flat_fragment(params, frag_idx)
-
-            mixed_frag = mix_frags(inner_frag, received_frag, alpha)
-            new_params = manipulator.apply_flat_fragment(params, frag_idx, mixed_frag)
+            with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
+              params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
+              inner_frag = manipulator.get_flat_fragment(params, frag_idx)
+              mixed_frag = p_mix_frags(inner_frag, received_frag)
+              new_params = manipulator.apply_flat_fragment(params, frag_idx, mixed_frag)
 
             if learner_config.pure_nnx:
               non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
@@ -364,7 +367,8 @@ def _run_learner_loop(
             else:
               state = state.replace(params=new_params)
 
-          checkpointing.maybe_save_checkpoint(checkpoint_manager, state, learner_config, data_iterator, step)
+          with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
+            checkpointing.maybe_save_checkpoint(checkpoint_manager, state, learner_config, data_iterator, step)
 
           metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
 
