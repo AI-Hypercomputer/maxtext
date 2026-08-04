@@ -69,17 +69,28 @@ class SyncerState(struct.PyTreeNode):
 def get_first_step(model, state):
   """Extracts step integer safely across Linen (state.step) and NNX/Optax (state.optimizer.step).
 
-  Prevents AttributeError when step is a standard jax.Array lacking .get_value().
+  Prevents AttributeError and multislice host transfer errors.
   """
-  if hasattr(state, "step"):
-    return int(state.step)
-  if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
-    step_obj = state.optimizer.step
-    if hasattr(step_obj, "value"):
-      return int(step_obj.value)
-    if hasattr(step_obj, "get_value"):
-      return int(step_obj.get_value())
-    return int(step_obj)
+  try:
+    if hasattr(state, "step"):
+      return int(state.step)
+    if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+      step_obj = state.optimizer.step
+      if hasattr(step_obj, "get_value"):
+        return int(step_obj.get_value())
+      if hasattr(step_obj, "value"):
+        val = step_obj.value
+        if hasattr(val, "get_value"):
+          return int(val.get_value())
+        if hasattr(val, "addressable_shards") and val.addressable_shards:
+          return int(val.addressable_shards[0].data)
+        return int(val)
+      if hasattr(step_obj, "addressable_shards") and step_obj.addressable_shards:
+        return int(step_obj.addressable_shards[0].data)
+      return int(step_obj)
+  except Exception as e:
+    max_logging.warn(f"get_first_step encountered exception reading step, defaulting to 0: {e}")
+    return 0
   return 0
 
 
