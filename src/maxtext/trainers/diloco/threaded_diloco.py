@@ -597,12 +597,10 @@ def _run_syncer_loop(
       new_params = manipulator.apply_flat_fragment(
           syncer_state.params, frag_idx, new_outer_params_frag, has_replica_dim=True, use_null_layout_jit=False
       )
-      new_params = jax.device_put(new_params, params_full_sharding)
 
       new_trace = manipulator.apply_flat_fragment(
           syncer_state.opt_state[0].trace, frag_idx, new_opt_state_trace, has_replica_dim=True, use_null_layout_jit=False
       )
-      new_trace = jax.device_put(new_trace, params_full_sharding)
 
       new_opt_state = (optax.TraceState(trace=new_trace), syncer_state.opt_state[1])
 
