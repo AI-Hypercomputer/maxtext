@@ -483,7 +483,6 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     with self.assertRaises(AssertionError):
       assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
 
-  @pytest.mark.skip(reason="This test is skipped due to a sharding issue. b/542212958")
   def test_mixed_sharding_fails(self):
     """Tests that a mix of sharded and unsharded parameters fails when the unsharded
 
@@ -536,7 +535,6 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     with self.assertRaises(AssertionError):
       assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
 
-  @pytest.mark.skip(reason="This test is skipped due to a sharding issue. b/542212958")
   def test_multi_axis_mixed_sharding_fails(self):
     """Tests that a mix of sharded (correctly) and unsharded tensors on a complex mesh fails."""
     devices = np.array(jax.devices()).reshape((jax.device_count(), 1, 1, 1, 1))
