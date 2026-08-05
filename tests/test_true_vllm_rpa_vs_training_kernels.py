@@ -21,6 +21,7 @@ Compares:
 """
 
 import gc
+import os
 import sys
 
 import jax
