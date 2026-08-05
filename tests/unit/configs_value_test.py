@@ -679,6 +679,7 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.attention_type, "global")
     self.assertEqual(config.training_objective, "causal_lm")
     self.assertEqual(config.block_diffusion_mask_id, -1)
+    self.assertFalse(config.loss_is_preaveraged)
 
   def test_block_diffusion_pretraining_config(self):
     config = pyconfig.initialize(
@@ -735,7 +736,6 @@ class ConfigTest(absltest.TestCase):
         ({"num_vocab_tiling": 2}, "vocabulary tiling"),
         ({"dataset_type": "grain"}, "dataset_type='hf'"),
         ({"use_dpo": True}, "DPO"),
-        ({"use_sft": True}, "pre-training only"),
         ({"use_multimodal": True}, "text-only"),
         ({"block_diffusion_logit_alignment": "shifted"}, "seed_and_mask"),
         ({"block_diffusion_canvas_policy": "seed_and_mask"}, "same_position/all_masked"),
@@ -754,6 +754,33 @@ class ConfigTest(absltest.TestCase):
         argv = ["", _BASE_CONFIG_PATH, *(f"{key}={value}" for key, value in values.items())]
         with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
           pyconfig.initialize(argv)
+
+  def test_block_diffusion_sft_config(self):
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "training_objective=block_diffusion",
+            "attention=dot_product",
+            "attention_type=block_diffusion",
+            "causal_block_size=8",
+            "block_diffusion_mask_id=100",
+            "vocab_size=256",
+            "packing=False",
+            "dataset_type=hf",
+            "hf_path=parquet",
+            "use_sft=True",
+            "sft_train_on_completion_only=True",
+            "loss_is_preaveraged=True",
+            "hardware=cpu",
+        ]
+    )
+
+    self.assertTrue(config.use_sft)
+    self.assertTrue(config.sft_train_on_completion_only)
+    self.assertTrue(config.loss_is_preaveraged)
 
   def test_shifted_block_diffusion_requires_seeded_canvas(self):
     config = pyconfig.initialize(

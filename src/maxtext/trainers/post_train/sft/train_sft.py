@@ -50,10 +50,12 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
+from tunix.sft import diffusion as tunix_diffusion_sft
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
 from maxtext.optimizers import optimizers
 from maxtext.configs import pyconfig
+from maxtext.integration.tunix import diffusion_sft as maxtext_diffusion_sft
 from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -278,6 +280,24 @@ def use_maxtext_loss_function(trainer, mt_config):
   return trainer
 
 
+def configure_training_objective(trainer, mt_config):
+  """Configures causal or target-aligned diffusion SFT."""
+  if getattr(mt_config, "training_objective", "causal_lm") != "block_diffusion":
+    return use_maxtext_loss_function(trainer, mt_config)
+  max_logging.log("Configuring Tunix target-aligned block-diffusion SFT adapter.")
+  return tunix_diffusion_sft.configure_diffusion_sft(
+      trainer,
+      maxtext_diffusion_sft.create_batch_adapter(mt_config),
+      maxtext_diffusion_sft.create_target_aligned_logits_fn(mt_config),
+  )
+
+
+def _create_trainer(model, optimizer, tunix_config, mt_config):
+  if getattr(mt_config, "training_objective", "causal_lm") == "block_diffusion":
+    return peft_trainer.PeftTrainer(model, optimizer, tunix_config)
+  return MaxTextPeftTrainer(model, optimizer, tunix_config)
+
+
 def validate_config(config):
   """Validates the configuration parameters for SFT training."""
   if config.optimizer_memory_host_offload:
@@ -290,6 +310,7 @@ def validate_config(config):
 
 def setup_trainer_state(mt_config, goodput_recorder=None):
   """Set up prerequisites for training loop."""
+  validate_config(mt_config)
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
@@ -316,10 +337,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
       nnx.pop(model, nnx.Intermediate)
       if mt_config.lora.lora_restore_path:
         lora_utils.restore_lora_from_path(model, mt_config)
-      trainer = MaxTextPeftTrainer(model, optimizer, tunix_config)
+      trainer = _create_trainer(model, optimizer, tunix_config, mt_config)
       trainer.with_training_hooks(training_hooks)
       trainer.with_data_hooks(data_hooks)
-      trainer = use_maxtext_loss_function(trainer, mt_config)
+      trainer = configure_training_objective(trainer, mt_config)
 
   return trainer, mesh
 
@@ -327,9 +348,9 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-    # Disable NNX graph caching for MoE models (where experts > 1) to allow
-    # necessary dynamic metadata synchronization during forward passes (e.g., in jax.lax.scan).
-    enable_nnx_cache = mt_config.num_experts <= 1
+    is_block_diffusion = getattr(mt_config, "training_objective", "causal_lm") == "block_diffusion"
+    records_internal_metrics = bool(getattr(mt_config, "record_internal_nn_metrics", False))
+    enable_nnx_cache = mt_config.num_experts <= 1 and not (is_block_diffusion and records_internal_metrics)
 
     trainer.train(
         trainer.data_hooks.train_data_iterator,
