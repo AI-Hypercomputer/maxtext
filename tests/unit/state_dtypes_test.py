@@ -46,13 +46,9 @@ class StateDtypes(unittest.TestCase):
     mesh = Mesh(devices_array, config.mesh_axes)
 
     if config.pure_nnx:
-      _create_model_partial, model = (
-          model_creation_utils.create_nnx_abstract_model(config, mesh)
-      )
+      _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh)
     else:
-      model = Transformer(
-          config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN
-      )
+      model = Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
     tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
@@ -96,9 +92,7 @@ class StateDtypes(unittest.TestCase):
         return
 
       # Skip PRNG keys
-      if type(leaf_dtype).__name__ == "KeyTy" or str(leaf_dtype).startswith(
-          "key<"
-      ):
+      if type(leaf_dtype).__name__ == "KeyTy" or str(leaf_dtype).startswith("key<"):
         return
 
       if jnp.issubdtype(leaf_dtype, jnp.integer):

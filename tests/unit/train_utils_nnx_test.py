@@ -79,9 +79,7 @@ class TestCreateTrainStateFnClosure(unittest.TestCase):
 
     def create_train_state_fn():
       model = _create_model()
-      return train_state_nnx.TrainStateNNX(
-          model, nnx.Optimizer(model, tx, wrt=nnx.Param)
-      )
+      return train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
 
     s1 = create_train_state_fn()
     s2 = create_train_state_fn()
@@ -99,16 +97,12 @@ class TestSetupTrainLoopNNXTreeOps(unittest.TestCase):
   def setUp(self):
     self.tx = optax.sgd(0.01)
     self.model = _Model(rngs=nnx.Rngs(0))
-    self.state = train_state_nnx.TrainStateNNX(
-        self.model, nnx.Optimizer(self.model, self.tx, wrt=nnx.Param)
-    )
+    self.state = train_state_nnx.TrainStateNNX(self.model, nnx.Optimizer(self.model, self.tx, wrt=nnx.Param))
 
   def test_nnx_split_yields_param_only_state(self):
     """state_params used for assert_params_sufficiently_sharded must contain only nnx.Param leaves."""
     _, state_params, _ = nnx.split(self.state.model, nnx.Param, ...)
-    leaves = jax.tree.leaves(
-        state_params, is_leaf=lambda x: isinstance(x, nnx.Variable)
-    )
+    leaves = jax.tree.leaves(state_params, is_leaf=lambda x: isinstance(x, nnx.Variable))
     self.assertGreater(len(leaves), 0)
     for leaf in leaves:
       self.assertIsInstance(leaf, nnx.Param)
@@ -143,9 +137,7 @@ class TestInitStateFnIsCallable(unittest.TestCase):
 
     def init_state_fn():
       model = _create_model()
-      return train_state_nnx.TrainStateNNX(
-          model, nnx.Optimizer(model, tx, wrt=nnx.Param)
-      )
+      return train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
 
     state = init_state_fn()  # must not raise / require args
     self.assertIsInstance(state, train_state_nnx.TrainStateNNX)
@@ -157,9 +149,7 @@ class TestInitStateFnIsCallable(unittest.TestCase):
       del model, tx, config, is_training, init_rng
       return "linen-state"
 
-    init_state_fn = partial(
-        init_initial_state, "model", "tx", "config", True, "rng"
-    )
+    init_state_fn = partial(init_initial_state, "model", "tx", "config", True, "rng")
     self.assertEqual(init_state_fn(), "linen-state")
 
 

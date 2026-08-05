@@ -83,7 +83,17 @@ class EstimatorE2ETest(unittest.TestCase):
   def test_is_oom_returns_bool(self):
     """Verify is_oom returns a boolean for a small model with full remat."""
     base_argv = self._make_base_argv()
-    tensor_names = ["context", "query_proj", "key_proj", "value_proj", "mlpwi_0", "mlpwi_1", "mlpwo", "out_proj"]
+    tensor_names = [
+        "context",
+        "query_proj",
+        "key_proj",
+        "value_proj",
+        "kv_proj",
+        "mlpwi_0",
+        "mlpwi_1",
+        "mlpwo",
+        "out_proj",
+    ]
     policy = RematPolicy(tensor_names=tensor_names, initial_level=Action.REMAT)
 
     jax.clear_caches()
@@ -98,7 +108,17 @@ class EstimatorE2ETest(unittest.TestCase):
   def test_search_policy_only_small_model(self):
     """E2E: search_policy_only returns a valid policy for a small model."""
     base_argv = self._make_base_argv()
-    tensor_names = ["context", "query_proj", "key_proj", "value_proj", "mlpwi_0", "mlpwi_1", "mlpwo", "out_proj"]
+    tensor_names = [
+        "context",
+        "query_proj",
+        "key_proj",
+        "value_proj",
+        "kv_proj",
+        "mlpwi_0",
+        "mlpwi_1",
+        "mlpwo",
+        "out_proj",
+    ]
 
     jax.clear_caches()
     result = search_policy_only(tensor_names, base_argv, pdb=2.0)

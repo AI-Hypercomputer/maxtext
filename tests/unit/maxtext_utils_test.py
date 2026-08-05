@@ -17,6 +17,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import functools
+from types import SimpleNamespace
 from typing import Any, Sequence
 import unittest
 from unittest.mock import MagicMock, Mock, patch
@@ -106,21 +107,33 @@ class TestIntermediateValueRetrieval(unittest.TestCase):
     # 2. Create the Decoder Mock
     self.mock_decoder = MagicMock(name="Decoder")
     self.mock_model.decoder = self.mock_decoder
-    self.mock_layers = {}
-    self.mock_model.decoder.layers = self.mock_layers
-    self.self_attention = {}
-    self.mock_layers["self_attention"] = self.self_attention
+    self.mock_layer = MagicMock(name="Layer")
+    self.mock_decoder.get_layers.return_value = [self.mock_layer]
+    self.self_attention = MagicMock(name="Attention", spec=[])
+    self.mock_layer.self_attention = self.self_attention
 
   def test_valid_intermediate_key(self):
     expected_sowed_data = [0.1, 0.5, 0.9]
     mock_sowed_variable = Mock(name="out_projection_activations")
     mock_sowed_variable.get_value.return_value = (expected_sowed_data,)
 
-    self.mock_decoder.layers["self_attention"]["out_projection_activations"] = mock_sowed_variable
+    self.self_attention.out_projection_activations = mock_sowed_variable
 
     result = maxtext_utils.get_intermediate_value(self.mock_model, "out_projection_activations")
 
     self.assertEqual(result, expected_sowed_data)
+
+  def test_clear_intermediate_key(self):
+    expected_sowed_data = [0.1, 0.5, 0.9]
+    mock_sowed_variable = Mock(name="out_projection_activations")
+    mock_sowed_variable.get_value.return_value = (expected_sowed_data,)
+
+    self.self_attention.out_projection_activations = mock_sowed_variable
+
+    result = maxtext_utils.get_intermediate_value(self.mock_model, "out_projection_activations", clear=True)
+
+    self.assertEqual(result, expected_sowed_data)
+    self.assertFalse(hasattr(self.self_attention, "out_projection_activations"))
 
   def test_returns_default_if_sow_did_not_happen(self):
     """
@@ -1135,17 +1148,18 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
     self.assertEqual(len(in_shardings), 3)
 
 
-@pytest.mark.cpu_only
 class TestGetShapedBatch(unittest.TestCase):
   """Tests for get_shaped_batch."""
 
-  def _make_cfg(self, *, enable_diloco=False, use_multimodal=False, use_audio=False):
+  def _make_cfg(self, *, enable_diloco=False, use_multimodal=False, use_audio=False, model_name="llama3.1-8b"):
+    """Build a minimal config mock for get_shaped_batch tests."""
     cfg = MagicMock()
     cfg.enable_diloco = enable_diloco
     cfg.global_batch_size_to_load = 4
     cfg.max_target_length = 16
     cfg.use_multimodal = use_multimodal
     cfg.use_audio = use_audio
+    cfg.model_name = model_name
     if enable_diloco:
       cfg.num_diloco_replicas = 2
     return cfg
@@ -1185,6 +1199,20 @@ class TestGetShapedBatch(unittest.TestCase):
   def test_no_audio_key_without_audio(self):
     batch = maxtext_utils.get_shaped_batch(self._make_cfg(use_audio=False))
     self.assertNotIn("audios", batch)
+
+  def test_llama4_includes_image_masks(self):
+    """Llama4 uses tile masks shaped as image_shape[:2] = (B*N, num_tiles)."""
+    batch = maxtext_utils.get_shaped_batch(self._make_cfg(use_multimodal=True, model_name="llama4-17b-16e"))
+    self.assertIn("images", batch)
+    self.assertIn("image_masks", batch)
+    self.assertEqual(batch["image_masks"].shape, batch["images"].shape[:2])
+
+  def test_qwen_and_gemma_omit_image_masks(self):
+    """Non-tiled VLMs must not treat image_shape[:2] (e.g. channels) as masks."""
+    for model_name in ("qwen3-vl-2b", "gemma3-4b", "gemma4-e2b"):
+      batch = maxtext_utils.get_shaped_batch(self._make_cfg(use_multimodal=True, model_name=model_name))
+      self.assertIn("images", batch)
+      self.assertNotIn("image_masks", batch, msg=f"{model_name} should omit image_masks")
 
   def test_all_values_are_shape_dtype_struct(self):
     batch = maxtext_utils.get_shaped_batch(self._make_cfg())
@@ -1728,6 +1756,56 @@ class TestKVCacheScanHelpers(unittest.TestCase):
     returned_kv_cache = [(jnp.array([10.0]), jnp.array([20.0]))]
     with self.assertRaises(TypeError):
       maxtext_utils.update_kv_caches_after_scan(kv_caches_tuple, returned_kv_cache, scan_length=1, block_len=2)
+
+
+class TestGetSaveAndOffloadNames(unittest.TestCase):
+  """Tests for maxtext_utils.get_save_and_offload_names (pure config logic, no device needed)."""
+
+  @staticmethod
+  def _cfg(remat_policy, tensors_on_device=None, tensors_to_offload=None):
+    return SimpleNamespace(
+        remat_policy=remat_policy,
+        tensors_on_device=tensors_on_device,
+        tensors_to_offload=tensors_to_offload,
+    )
+
+  def test_named_preset_matches_equivalent_custom(self):
+    """qkv_proj_offloaded's offload names resolve identically to an equivalent custom config.
+
+    A real custom config keeps decoder_layer_input on device by default, so its full tuple
+    differs from the preset by that (benign, boundary) save entry -- assert only the offload halves.
+    """
+    _, preset_offload = maxtext_utils.get_save_and_offload_names(self._cfg("qkv_proj_offloaded"))
+    _, custom_offload = maxtext_utils.get_save_and_offload_names(
+        self._cfg(
+            "custom",
+            tensors_on_device=["decoder_layer_input"],
+            tensors_to_offload=["query_proj", "value_proj", "key_proj", "kv_proj"],
+        )
+    )
+    self.assertEqual(custom_offload, preset_offload)
+
+  def test_kv_proj_retained_in_offload_presets(self):
+    """Regression guard: kv_proj must stay in the offload presets (it is a real checkpoint name)."""
+    _, qkv_offload = maxtext_utils.get_save_and_offload_names(self._cfg("qkv_proj_offloaded"))
+    _, minimal_offload = maxtext_utils.get_save_and_offload_names(self._cfg("minimal_offloaded"))
+    self.assertIn("kv_proj", qkv_offload)
+    self.assertIn("kv_proj", minimal_offload)
+
+  def test_custom_reads_config_lists(self):
+    save, offload = maxtext_utils.get_save_and_offload_names(
+        self._cfg("custom", tensors_on_device=["context"], tensors_to_offload=["out_proj"])
+    )
+    self.assertEqual(save, ["context"])
+    self.assertEqual(offload, ["out_proj"])
+
+  def test_custom_handles_none_lists(self):
+    self.assertEqual(maxtext_utils.get_save_and_offload_names(self._cfg("custom")), ([], []))
+
+  def test_non_offloading_policies_return_empty(self):
+    """Policies that don't use the save/offload split contribute no names to it."""
+    for policy in ("full", "minimal", "save_out_proj", "save_qkv_proj", "none"):
+      self.assertEqual(maxtext_utils.get_save_and_offload_names(self._cfg(policy)), ([], []))
 
 
 if __name__ == "__main__":

@@ -410,7 +410,14 @@ def _preprocess(
 
 
 @functools.partial(
-    jax.jit, static_argnames=("reduce_group_size", "enforce_fallback", "flops_override", "bytes_accessed_override")
+    jax.jit,
+    static_argnames=(
+        "reduce_group_size",
+        "enforce_fallback",
+        "flops_override",
+        "bytes_accessed_override",
+        "use_single_sparsecore",
+    ),
 )
 def ragged_gather_reduce(
     x: jax.Array,
@@ -421,6 +428,7 @@ def ragged_gather_reduce(
     enforce_fallback: bool = False,
     flops_override: int = -1,
     bytes_accessed_override: int = -1,
+    use_single_sparsecore: bool = False,
 ) -> jax.Array:
   """Gathers `x` according to `indices`, applies weights and masks, and reduces.
 
@@ -457,9 +465,14 @@ def ragged_gather_reduce(
   assert topk_weights.ndim == 1, "ragged_gather_reduce only supports 1d topk_weights."
   assert valid_rows_mask.ndim == 1, "ragged_gather_reduce only supports 1d valid_rows_mask."
 
+  # Guard against eager initialization on non-TPU hardware (e.g. during CPU tests).
+  # pltpu.get_tpu_info() expects TPU hardware and will crash if executed on CPU.
+  if enforce_fallback or jax.devices()[0].platform != "tpu":
+    return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
+
   sc_info = pltpu.get_tpu_info().sparse_core
-  if sc_info is None or enforce_fallback:
-    # Sparse core is not available or fallback is enforced. Use JAX reference.
+  if sc_info is None:
+    # Sparse core is not available. Use JAX reference.
     return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
 
   # Heuristic threshold on whether to fallback for small inputs.
@@ -469,7 +482,8 @@ def ragged_gather_reduce(
   hidden_size = x.shape[-1]
   input_size = indices.size
   num_simd_lanes = sc_info.num_lanes
-  num_cores = sc_info.num_cores * sc_info.num_subcores
+  num_sc_cores = 1 if use_single_sparsecore else sc_info.num_cores
+  num_cores = num_sc_cores * sc_info.num_subcores
 
   # This kernel partitions the output's columns into `num_column_partitions`
   # and partition the output's rows into `num_row_partitions` and run each
@@ -523,7 +537,7 @@ def ragged_gather_reduce(
   )
 
   vector_mesh = plsc.VectorSubcoreMesh(
-      num_cores=sc_info.num_cores,
+      num_cores=num_sc_cores,
       num_subcores=sc_info.num_subcores,
       core_axis_name="core",
       subcore_axis_name="subcore",

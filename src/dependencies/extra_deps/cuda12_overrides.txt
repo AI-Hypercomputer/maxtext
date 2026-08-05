@@ -1,3 +1,4 @@
 datasets>=4.8.5
 fsspec==2026.2.0
 gcsfs==2026.2.0
+orbax-checkpoint>=0.12.1

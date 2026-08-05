@@ -25,12 +25,14 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from maxtext.common import checkpointing
+from maxtext.common import emergency_checkpointing
 from maxtext.common import train_state_nnx
 from maxtext.common.common_types import ReorderStrategy
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
+from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -52,7 +54,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
   # pass in model for muon
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
-    checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+    checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager(
         config.local_checkpoint_directory,
         config.local_checkpoint_period,
         mesh,
@@ -60,7 +62,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
     )
   elif config.enable_emergency_checkpoint:
     abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
-    checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
+    checkpoint_manager = emergency_checkpointing.create_emergency_checkpoint_manager(
         config.local_checkpoint_directory,
         config.checkpoint_dir,
         mesh,
@@ -91,9 +93,6 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_continuous_checkpointing,
         config.max_num_checkpoints_to_keep,
         config.checkpoint_storage_concurrent_gb,
-        config.enable_single_controller,
-        config.colocated_python_checkpointing,
-        config.enable_single_replica_ckpt_restoring,
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
@@ -191,13 +190,14 @@ def jit_train_and_eval_step(
   if config.enable_diloco:
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
     train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
-  data_sharding = sharding.get_input_data_sharding(config, mesh)
+  data_sharding_for_train = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules)
+  data_sharding_for_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
   p_train_step = jit_train_step(
-      config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=mesh
+      config, model, state, state_mesh_shardings, data_sharding_for_train, train_step, params_shardings, mesh=mesh
   )
   p_eval_step = None
   if eval_data_iterator:
-    p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
+    p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding_for_eval, eval_step)
 
   return p_train_step, p_eval_step
 
@@ -241,7 +241,12 @@ def setup_train_loop(config, recorder, devices=None):
       # For NNX, the train state is wrapped in the TrainStateNNX module.
       def create_train_state_fn():
         model = _create_model_partial()
-        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+        wrt = (
+            getattr(nnx, "LoRAParam", nnx.Param)
+            if getattr(getattr(config, "lora", None), "enable_lora", False)
+            else nnx.Param
+        )
+        optimizer = nnx.Optimizer(model, tx, wrt=wrt)
         return train_state_nnx.TrainStateNNX(model, optimizer)
 
       init_state_fn = create_train_state_fn
@@ -249,7 +254,7 @@ def setup_train_loop(config, recorder, devices=None):
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
     if checkpoint_manager is not None:
-      checkpoint_step = checkpoint_manager.latest_step()
+      checkpoint_step = checkpointing.latest_step(checkpoint_manager)
       if checkpoint_step is not None:
         validate_completed_steps(checkpoint_step + 1, config.steps)
 
@@ -279,11 +284,15 @@ def setup_train_loop(config, recorder, devices=None):
     with jax.set_mesh(mesh):
       if context_parallel_size > 1 and config.context_parallel_load_balance:
 
-        # Determine load balancing reorder strategy based on whether packing is enabled
+        # Determine load balancing reorder strategy.
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
           reorder_strategy = (
               ReorderStrategy.STRIPED
-              if config.packing and context_parallel_strategy == "ring"
+              if (
+                  config.packing
+                  and context_parallel_strategy == "ring"
+                  and config.hardware in ("gpu", "gpu_multiprocess")
+              )
               else ReorderStrategy.DUAL_CHUNK_SWAP
           )
         else:
@@ -303,6 +312,16 @@ def setup_train_loop(config, recorder, devices=None):
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
     if config.pure_nnx:
+      if getattr(getattr(config, "lora", None), "enable_lora", False) and getattr(config.lora, "lora_restore_path", None):
+        # Restore standalone LoRA adapter weights onto the base model state after initialization.
+        target_model_state = (
+            state["model"]
+            if (isinstance(state, (nnx.State, dict)) and "model" in state)
+            else getattr(state, "model", state)
+        )
+        # pyrefly: ignore[bad-argument-type]
+        lora_utils.restore_lora_from_path(target_model_state, config)
+        _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
       with nn_partitioning.axis_rules(config.logical_axis_rules):
         # We only need the graphdef here; it's merged with state below. Avoid
         # nnx.get_abstract_model: it eagerly builds a NamedSharding for every variable

@@ -33,6 +33,7 @@ rope_max_timescale: 1_000_000
 rope_linear_scaling_factor: 8.0
 
 # Multimodal flags (need to set use_multimodal=true)
+vision_encoder_block: "gemma3"
 image_size_for_vit: 896
 num_channels_for_vit: 3
 patch_size_for_vit: 14

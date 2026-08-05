@@ -36,7 +36,7 @@ from functools import partial
 import os
 import subprocess
 import sys
-from typing import Callable, overload
+from typing import Any, Callable, overload
 from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
@@ -650,7 +650,13 @@ def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=
     return model
 
 
-def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None = None, **extra_kwargs):
+def setup_configs_and_devices(
+    argv: list[str] | None = None,
+    kwargs: dict | None = None,
+    *,
+    config_class: type[Any],
+    **extra_kwargs,
+):
   """Setup device allocation and configs for training and inference.
   This API is particularly useful for Reinforcement Learning where we might split the available
   devices into separate mesh for trainer and sampler
@@ -660,7 +666,7 @@ def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None
 
   combined_kwargs = dict(kwargs) if kwargs else {}
   combined_kwargs.update(extra_kwargs)
-  config = pyconfig.initialize_pydantic(argv, **combined_kwargs)
+  config = pyconfig.initialize_pydantic(argv, config_class=config_class, **combined_kwargs)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running on a single slice")
@@ -735,8 +741,8 @@ def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None
         }
     )
 
-    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_kwargs)
-    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_kwargs)
+    trainer_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **trainer_kwargs)
+    sampler_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **sampler_kwargs)
 
   else:
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
@@ -777,7 +783,7 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
           use_no_op_mappings=use_no_op_mappings,
           pad_id=tokenizer_pad_id,
       )
-      actor_model.config = None
+      actor_model.config = None  # pyrefly: ignore[missing-attribute]
     actor_mesh = reference_mesh
   else:
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
@@ -819,6 +825,7 @@ def verify_and_sync_scan_layers(config):
       )
   else:
     max_logging.log(f"Setting scan_layers={saved_scan_layers} loaded from checkpoint metadata.")
+    # pyrefly: ignore[missing-attribute]
     new_pydantic_config = pydantic_config.model_copy(update={"scan_layers": saved_scan_layers})
     # Wrap back in HyperParameters if the original config was wrapped
     if getattr(config, "_pydantic_config", None) is not None:
@@ -902,7 +909,7 @@ def from_pretrained(
     load_parameters_path = epath.Path(config.base_output_directory) / "0" / "items"
     # Create a copied Pydantic model with the updated values
     pydantic_config = getattr(config, "_pydantic_config", config)
-    new_config = pydantic_config.model_copy(
+    new_config = pydantic_config.model_copy(  # pyrefly: ignore[missing-attribute]
         update={
             "load_parameters_path": load_parameters_path,
         }
@@ -930,7 +937,7 @@ def from_pretrained(
   sharded_state = nnx.state(model)
 
   if mesh is None:
-    mesh = model.mesh
+    mesh = model.mesh  # pyrefly: ignore[missing-attribute]
 
   with mesh:
     if config.load_parameters_path:
@@ -1088,9 +1095,15 @@ def from_pretrained(
       # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
       # Skip transient runtime variables (RngState, Cache, Intermediate, BatchStat) — they hold runtime state
       # that is not present in the checkpoint and must remain valid after the restore.
-      def _free_device_memory(node):
-        if isinstance(node, nnx.Variable) and not isinstance(
-            node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)
+      def _free_device_memory(path, node):
+        # Check if the path contains any name containing 'custom' which indicates a customized layer.
+        # If yes, skip freeing device memory for this node and its children so they can be
+        # initialized with random values.
+        is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
+        if (
+            isinstance(node, nnx.Variable)
+            and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+            and not is_custom
         ):
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
@@ -1099,12 +1112,12 @@ def from_pretrained(
           for leaf in jax.tree_util.tree_leaves(inner):
             if isinstance(leaf, jax.Array) and not leaf.is_deleted():
               leaf.delete()
-        elif isinstance(node, jax.Array) and not node.is_deleted():
+        elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
           node.delete()
 
         return node
 
-      jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+      jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
       restored = ckptr.restore(
           epath.Path(config.load_parameters_path),
@@ -1114,7 +1127,7 @@ def from_pretrained(
       )
 
       if is_nnx_checkpoint:
-        restored_root = restored["base"] if has_base_key else restored
+        restored_root = restored["base"] if has_base_key else restored  # pyrefly: ignore[unbound-name]
         checkpoint = jax.tree.map(
             lambda v: v["value"],
             restored_root,
@@ -1202,11 +1215,11 @@ def from_pretrained(
       with mesh:
         use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
         model = TunixMaxTextAdapter(
-            base_model=model,
+            base_model=model,  # pyrefly: ignore[bad-argument-type]
             use_no_op_mappings=use_no_op_mappings,
             pad_id=tokenizer_pad_id,
         )
-        model.config = None
+        model.config = None  # pyrefly: ignore[missing-attribute]
 
     if original_mesh:
       return model

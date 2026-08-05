@@ -15,7 +15,7 @@
 """Data processing tests for SFT."""
 import pytest
 
-pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
+pytestmark = [pytest.mark.post_training]
 
 import subprocess
 import unittest

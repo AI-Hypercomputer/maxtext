@@ -30,7 +30,6 @@ from maxtext.common import checkpointing
 from maxtext.common import train_state_nnx
 import optax
 import orbax.checkpoint as ocp
-import pytest
 
 
 class MockModel(nnx.Module):
@@ -73,8 +72,8 @@ class TestEmergencyReplicatorCheckpointManager(unittest.TestCase):
     mesh = object()
 
     with mock.patch.object(
-        checkpointing,
-        "EmergencyReplicatorCheckpointManager",
+        checkpointing.emergency_checkpointing,
+        "ReplicatorCheckpointManager",
         return_value=checkpoint_manager,
     ) as manager_cls:
       result = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
@@ -94,7 +93,6 @@ class TestEmergencyReplicatorCheckpointManager(unittest.TestCase):
     self.assertIs(kwargs["global_mesh"], mesh)
 
 
-@pytest.mark.cpu_only
 class TestTrainStateNNXCheckpoint(unittest.TestCase):
   """Class to test NNX checkpoint."""
 
@@ -333,7 +331,6 @@ class TestTrainStateNNXCheckpoint(unittest.TestCase):
       shutil.rmtree(temp_dir)
 
 
-@pytest.mark.cpu_only
 class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   """Verify maybe_save_checkpoint's fallback step matches the last completed step.
 
@@ -363,6 +360,7 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         "enable_multi_tier_checkpointing": False,
         "local_checkpoint_period": 0,
         "enable_autocheckpoint": False,
+        "elastic_enabled": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -433,13 +431,31 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     )
 
   def test_nnx_state_is_saved_in_linen_layout(self):
-    """For pure_nnx=True, maybe_save_checkpoint reshapes the NNX state to the Linen on-disk layout."""
+    """For pure_nnx=True, save_checkpoint reshapes the NNX state to the Linen on-disk layout."""
     state = self._build_nnx_state(self.N_STEPS)
     self.assertIsInstance(state, nnx.State)  # precondition: NNX train_step returns an nnx.State
 
-    captured = self._invoke_maybe_save(state, pure_nnx=True)
+    config = self._config(pure_nnx=True, enable_checkpointing=True, checkpoint_period=1)
+    mgr = mock.MagicMock()
+    mgr.reached_preemption.return_value = False
 
-    # save_checkpoint should receive a plain dict in Linen layout, not the nnx.State.
+    captured = {}
+
+    def fake_save(_step, *args, **kwargs):
+      composite = kwargs.get("args")
+      if composite:
+        for key in ["items", "state"]:
+          if hasattr(composite, "_items") and key in composite._items:  # pylint: disable=protected-access
+            val = composite[key]
+            if val is not None and hasattr(val, "item"):
+              captured["state"] = val.item
+              break
+      return True
+
+    mgr.save.side_effect = fake_save
+    checkpointing.save_checkpoint(mgr, self.N_STEPS - 1, state, config=config, force=True)
+
+    # save_checkpoint should pass a plain dict in Linen layout to Orbax, not the nnx.State.
     self.assertIsInstance(captured["state"], dict)
     self.assertNotIsInstance(captured["state"], nnx.State)
     # Linen layout: {params: {params: ...}, step, opt_state}; not the NNX {model, optimizer}.
@@ -557,16 +573,12 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         mgr.reached_preemption.return_value = False
         save_checkpoint_mock = mock.MagicMock(return_value=False)
 
-        with (
-            mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock),
-            mock.patch.object(train_state_nnx, "to_checkpoint_dict") as to_checkpoint_dict_mock,
-        ):
+        with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
           checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=5)
 
         mgr.latest_step.assert_called_once_with()
         mgr.reached_preemption.assert_called_once_with(5)
         mgr.wait_until_finished.assert_not_called()
-        to_checkpoint_dict_mock.assert_called_once_with(state)
         save_checkpoint_mock.assert_called_once()
 
   def test_maybe_save_checkpoint_allows_mtc_period_with_continuous_policy(
@@ -586,17 +598,31 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     mgr.reached_preemption.return_value = False
     save_checkpoint_mock = mock.MagicMock(return_value=False)
 
-    with (
-        mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock),
-        mock.patch.object(train_state_nnx, "to_checkpoint_dict") as to_checkpoint_dict_mock,
-    ):
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
       checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=5)
 
     mgr.should_save.assert_called_once_with(5)
     mgr.latest_step.assert_called_once_with()
     mgr.reached_preemption.assert_called_once_with(5)
-    to_checkpoint_dict_mock.assert_called_once_with(state)
     save_checkpoint_mock.assert_called_once()
+
+  def test_maybe_save_checkpoint_checks_scale_up_after_unsaved_dispatch(self):
+    """Elastic scale-up is checked after save dispatch even when no checkpoint was saved."""
+    state = mock.Mock()
+    config = self._config(checkpoint_period=1, elastic_enabled=True)
+    mgr = mock.MagicMock()
+    mgr.latest_step.return_value = None
+    mgr.reached_preemption.return_value = False
+    save_checkpoint_mock = mock.MagicMock(return_value=False)
+
+    with (
+        mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock),
+        mock.patch.object(checkpointing.elastic_utils, "maybe_elastic_scale_up") as mock_maybe_scale_up,
+    ):
+      checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=5)
+
+    save_checkpoint_mock.assert_called_once()
+    mock_maybe_scale_up.assert_called_once_with(config, mgr)
 
 
 class TestLinenCheckpointFormatConverters(unittest.TestCase):

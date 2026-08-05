@@ -111,6 +111,15 @@ class MetricLogger:
     if self.config.managed_mldiagnostics:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
 
+    if self.config.enable_wandb and jax.process_index() == 0:
+      import wandb  # pylint: disable=import-outside-toplevel # pytype: disable=import-error # lazy import: wandb is an optional dependency
+
+      wandb.init(
+          project=config.wandb_project_name,
+          name=config.wandb_run_name,
+          resume="allow",
+      )  # Initialize wandb logger.
+
   def reset_eval_metrics(self):
     """Resets the cumulative metrics dictionary for a new evaluation run."""
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
@@ -132,6 +141,9 @@ class MetricLogger:
 
       if self.config.managed_mldiagnostics:
         self.write_metrics_to_managed_mldiagnostics(metrics, step)
+
+      if self.config.enable_wandb and jax.process_index() == 0:
+        self.write_metrics_to_wandb(metrics, step)
 
       if metric_type == "train":
         self._maybe_abort_after_write_metrics(metrics)
@@ -206,7 +218,7 @@ class MetricLogger:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
       log_parts.append(f"moe_lb_loss: {moe_lb_loss:.3f}")
 
-    if self.config.mtp_num_layers > 0:
+    if getattr(self.config, "mtp_num_layers", 0) > 0:
       mtp_loss = scalars.get("learning/mtp_loss", 0.0)
       log_parts.append(f"main_model_loss: {loss - mtp_loss:.3f}")
       log_parts.append(f"mtp_loss: {mtp_loss:.3f}")
@@ -225,7 +237,7 @@ class MetricLogger:
     ]
     if self.config.num_experts > 1:
       log_parts.append(f"avg_moe_lb_loss={scalars['eval/avg_moe_lb_loss']:.3f}")
-    if self.config.mtp_num_layers > 0:
+    if getattr(self.config, "mtp_num_layers", 0) > 0:
       log_parts.extend(
           [
               f"avg_mtp_loss={scalars['eval/avg_mtp_loss']:.3f}",
@@ -246,7 +258,7 @@ class MetricLogger:
         f"running perplexity={scalars['eval/avg_perplexity']:.3f}",
         f"running total_weights={scalars['eval/total_weights']}",
     ]
-    if self.config.mtp_num_layers > 0:
+    if getattr(self.config, "mtp_num_layers", 0) > 0:
       log_parts.extend(
           [
               f"running mtp_loss={scalars['eval/avg_mtp_loss']:.3f}",
@@ -332,6 +344,18 @@ class MetricLogger:
           value = value.item()
         mapped_metric_name = _METRICS_TO_MANAGED.get(metric_name, metric_name)
         mldiag.metrics.record(mapped_metric_name, value, step=int(step))
+
+  def write_metrics_to_wandb(self, metrics, step):
+    """Write metrics to weights and biases (wandb)."""
+    import wandb  # pylint: disable=import-outside-toplevel # pytype: disable=import-error # lazy import: wandb is an optional dependency
+
+    flat_metrics = {}
+    for key, val in metrics.get("scalar", {}).items():
+      flat_metrics[key] = float(val)
+    for key, val in metrics.get("scalars", {}).items():
+      for subkey, subval in val.items():
+        flat_metrics[f"{key}/{subkey}"] = float(subval)
+    wandb.log(flat_metrics, step=step)
 
   def write_setup_info_to_tensorboard(self, params):
     """Writes setup information like train config params, num model params, and XLA flags to TensorBoard."""

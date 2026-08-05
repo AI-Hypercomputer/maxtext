@@ -114,6 +114,19 @@ class DecoderBlockType(enum.Enum):
   LLAMA4 = "llama4"
   OLMO3 = "olmo3"
   DEEPSEEK4 = "deepseek4"
+  ENVY = "envy"
+
+
+class VisionEncoderBlockType(enum.Enum):
+  """Vision encoder block types."""
+
+  NONE = "none"
+  GEMMA3 = "gemma3"
+  LLAMA4 = "llama4"
+  QWEN3_OMNI = "qwen3_omni"
+  GEMMA4 = "gemma4"
+  QWEN3_5 = "qwen3_5"
+  QWEN3_VL = "qwen3_vl"
 
 
 class AttentionType(enum.Enum):

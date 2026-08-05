@@ -90,6 +90,9 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       )
       overrides["load_parameters_path"] = None
 
+  if overrides.get("attention") == "vllm_batched_rpa" or overrides.get("use_batched_rpa", False):
+    os.environ["USE_BATCHED_RPA_KERNEL"] = "1"
+
   # Add base config path to positional args
   base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
   argv_list = ["", str(base_config_path)]
@@ -200,6 +203,10 @@ class MaxTextForCausalLM(nnx.Module):
 
     elif self.maxtext_config.load_parameters_path is None:
       max_logging.log("Warning: No load_parameters_path provided. The model will be initialized with random weights.")
+
+  def modules(self):
+    """Dummy method to satisfy vLLM's internal cleanup logic."""
+    return []
 
   def __call__(
       self,
@@ -345,9 +352,7 @@ class MaxTextForCausalLM(nnx.Module):
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
       if self.maxtext_config.lora.enable_lora:
-        model = lora_utils.apply_lora_to_model(
-            model, self.mesh, self.maxtext_config
-        )
+        model = lora_utils.apply_lora_to_model(model, self.mesh, self.maxtext_config)
         if self.maxtext_config.lora.lora_restore_path:
           lora_utils.restore_lora_from_path(model, self.maxtext_config)
       self.model = nnx.data(model)

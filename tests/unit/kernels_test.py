@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for kernels. """
+"""Tests for kernels."""
 
 import unittest
 
@@ -109,7 +109,6 @@ class RaggedAttentionTest(unittest.TestCase):
     )
 
 
-@pytest.mark.cpu_only
 class RaggedAttentionCpuTest(unittest.TestCase):
   """Tests for ragged attention kernel on CPU (interpret mode)."""
 

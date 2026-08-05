@@ -13,8 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Forked from:
-# https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/
-# tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py
+# https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py
 """TGMM kernel"""
 
 import dataclasses
@@ -350,7 +349,7 @@ def tgmm_inner_kernel(
         scale_slice = tiled_rhs_scale_ref[0]  # pyrefly: ignore[unsupported-operation]
         acc *= scale_slice
       if cfgs.has_partial_sum:
-        acc += tiled_ps_ref[...].astype(acc.dtype)
+        acc += tiled_ps_ref[...].astype(acc.dtype)  # pyrefly: ignore[unsupported-operation]
       tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
     else:
       acc_ref[...] = acc
@@ -763,6 +762,13 @@ def tgmm_v2(
       partial_sum_spec,
   ]
 
+  input_output_aliases = {}
+  if partial_sum is not None:
+    flat_args_preceding = (group_sizes, group_offset, lhs, rhs)
+    leaves = jax.tree_util.tree_leaves(flat_args_preceding)
+    partial_sum_idx = sum(1 for x in leaves if x is not None)
+    input_output_aliases = {partial_sum_idx: 0}
+
   raw_out = pl.pallas_call(
       functools.partial(tgmm_kernel_main, cfgs=cfgs),
       out_shape=out_init,
@@ -781,6 +787,7 @@ def tgmm_v2(
       # the metadata here is for profiling, debugging, and cost modeling.
       # It does not affect the kernel's computation.
       metadata=gmm_v2.get_metadata(cfgs),
+      input_output_aliases=input_output_aliases,
   )(group_sizes, group_offset, lhs, rhs, partial_sum)[:, : dims.size_k, : dims.size_n]
 
   if partial_sum is not None:

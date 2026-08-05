@@ -16,7 +16,7 @@
 
 import pytest
 
-pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
+pytestmark = [pytest.mark.post_training]
 
 import argparse
 import os

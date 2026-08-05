@@ -213,8 +213,8 @@ jobs:
 
       container_resource_option: >-
         ${{ contains(inputs.flavor, 'gpu')
-            && '--shm-size 2g --runtime=nvidia --gpus all --privileged'
-            || '--privileged' }}
+            && '--init --shm-size 2g --runtime=nvidia --gpus all --privileged'
+            || '--init --privileged' }}
 
       # Metadata
       base_image: ${{ inputs.base_image }}

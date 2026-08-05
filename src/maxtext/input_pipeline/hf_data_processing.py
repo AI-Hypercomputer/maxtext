@@ -181,7 +181,7 @@ def vision_sft_preprocessing_pipeline(
       data_source=dataset,
       operations=operations,
       sampler=dummy_index_sampler,
-      worker_count=1,  # only supports <=1 for now, more workers results in duplicated data
+      worker_count=config.grain_worker_count,
       worker_buffer_size=1,
       read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=batch_size * 4),
   )
@@ -446,6 +446,7 @@ def make_hf_train_iterator(
         chat_template=config.chat_template,
         formatting_func_path=config.formatting_func_path,
         formatting_func_kwargs=config.formatting_func_kwargs,
+        grain_worker_count=config.grain_worker_count,
     )
   return train_iter
 
@@ -506,5 +507,6 @@ def make_hf_eval_iterator(
         chat_template=config.chat_template,
         formatting_func_path=config.formatting_func_path,
         formatting_func_kwargs=config.formatting_func_kwargs,
+        grain_worker_count=config.grain_worker_count,
     )
   return eval_iter

@@ -14,8 +14,8 @@
 
 """Utility functions for Elastic Training."""
 
-import functools
 from collections import Counter
+import functools
 from types import SimpleNamespace
 
 import jax
@@ -62,6 +62,22 @@ def record_elastic_reinit_end() -> None:
 def elastic_enabled(config) -> bool:
   """Returns whether elastic mode is enabled."""
   return pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
+
+
+def elastic_snapshot(config) -> bool:
+  """Returns whether elastic snapshot mode is enabled."""
+  return elastic_enabled(config) and config.elastic_backup_kind == "snapshot"
+
+
+def maybe_bubble_elastic_exception(config, e: Exception) -> None:
+  """Checks JAX/ScaleUp elastic errors and re-raises them if elasticity is enabled.
+
+  Args:
+    config: Maxtext configuration object.
+    e: The exception currently being evaluated.
+  """
+  if elastic_enabled(config) and isinstance(e, (jax.errors.JaxRuntimeError, manager.ScaleUpSignalError)):
+    raise e
 
 
 def should_use_elastic(config) -> bool:
@@ -211,20 +227,29 @@ def is_scale_up_event(config) -> bool:
   if elastic_enabled(config):
     ensure_elastic_manager_initialized(config)
     assert elastic_manager is not None
-    return elastic_manager.new_slice_event.is_set()
+    return bool(elastic_manager.available_inactive_slices)
 
   return False
 
 
 def maybe_elastic_scale_up(config, checkpoint_manager):
   """Waits for a checkpoint to finish before interrupting for scale up."""
+  if not should_use_elastic(config):
+    max_logging.log("maybe_elastic_scale_up: Elastic training is not enabled.")
+    return
   if is_scale_up_event(config):
     max_logging.log(
         "Started a checkpoint and a new slice is available. Waiting for current"
         " checkpoint to finish before interrupting."
     )
     if checkpoint_manager is not None:
-      checkpoint_manager.wait_until_finished()
+      # The v1 Checkpointer exposes `.wait()`, the v0 emergency/replicator
+      # managers expose `.wait_until_finished()`; this module cannot import
+      # `checkpointing`'s dispatcher (checkpointing imports elastic_utils).
+      if hasattr(checkpoint_manager, "wait"):
+        checkpoint_manager.wait()
+      else:
+        checkpoint_manager.wait_until_finished()
     max_logging.log("Checkpoint save completed. Interrupting")
     raise manager.ScaleUpSignalError()
 

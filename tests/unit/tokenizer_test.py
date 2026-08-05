@@ -21,7 +21,6 @@ from maxtext.trainers.tokenizer import train_tokenizer
 from maxtext.common.gcloud_stub import is_decoupled
 
 import unittest
-import pytest
 import subprocess
 import os
 
@@ -60,12 +59,10 @@ class TrainTokenizerTest(unittest.TestCase):
   def tearDownClass(cls):
     os.remove(cls.tokenizer_path)
 
-  @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), self.test_tokenizer.encode(text)))
 
-  @pytest.mark.tpu_only
   def test_detokenize(self):
     tokens = [66, 12, 10, 702]
     self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), np.asarray(self.test_tokenizer.decode(tokens)))
@@ -86,13 +83,11 @@ class TikTokenTest(unittest.TestCase):
     )
     cls.dataset = train_tokenizer.build_grain_iterator(grain_train_files, "parquet")
 
-  @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
     tokens = [2028, 374, 264, 1296]
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), tokens))
 
-  @pytest.mark.tpu_only
   def test_detokenize(self):
     tokens = [2028, 374, 264, 1296]
     text = "This is a test"
@@ -118,7 +113,6 @@ class HFTokenizerTest(unittest.TestCase):
         os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
     )
 
-  @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.hf_tokenizer.encode(text), self.sp_tokenizer.encode(text)))

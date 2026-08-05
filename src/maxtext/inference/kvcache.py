@@ -844,7 +844,13 @@ class KVCache(BaseCache):
       elif dtype == jnp.float8_e4m3fn:
         scale_value /= E4M3_MAX
 
-      cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])  # pyrefly: ignore[unexpected-keyword]
+      cache_value = KVTensor(
+          qvalue=cache_value,  # pyrefly: ignore[unexpected-keyword]
+          scale=[scale_value],  # pyrefly: ignore[unexpected-keyword]
+          scale_t=None,  # pyrefly: ignore[unexpected-keyword]
+          dequant_dtype=target_dtype,  # pyrefly: ignore[unexpected-keyword]
+          bias=[],  # pyrefly: ignore[unexpected-keyword]
+      )  # pyrefly: ignore[unexpected-keyword]
     cache_value_in_logical_shape = jax.tree.map(lambda x: reverse_transpose(x, cache_axis_order), cache_value)
     return cache_value_in_logical_shape
 

@@ -39,14 +39,13 @@ def _make_config():
       penalty_incorrect_format=-0.5,
       penalty_incorrect_answer=-0.5,
       dataset_name="test",
-      debug=SimpleNamespace(rl=False),
+      debug=False,
   )
 
 
 class TestProcessAnswer(unittest.TestCase):
   """Tests for utils_rl.process_answer."""
 
-  @pytest.mark.cpu_only
   def test_for_mcq(self):
     self.assertEqual(len(utils_rl.process_answer("(A) 1\n(B) 2\n(C) 3\n", "B", "MCQ")), 2)
     self.assertEqual(len(utils_rl.process_answer("A. 1\nB. 2\n(C) 3\n", "B", "MCQ")), 2)
@@ -59,34 +58,29 @@ class TestProcessAnswer(unittest.TestCase):
 class TestNormalizeFinalAnswer(unittest.TestCase):
   """Tests for utils_rl.normalize_final_answer."""
 
-  @pytest.mark.cpu_only
   def test_comma_boxed_and_currency(self):
     # Comma-separated numbers, \\boxed{}, and leading $ are all normalized to plain integers
     self.assertEqual(utils_rl.normalize_final_answer("1,000"), "1000")
     self.assertEqual(utils_rl.normalize_final_answer("$1,000"), "1000")
     self.assertEqual(utils_rl.normalize_final_answer("\\boxed{1,000}"), "1000")
 
-  @pytest.mark.cpu_only
   def test_equation_splitting_and_unit_removal(self):
     # Expressions with '=' are split on '='; trailing unit words are stripped
     self.assertEqual(utils_rl.normalize_final_answer("x = 10"), "10")
     self.assertEqual(utils_rl.normalize_final_answer("total = 100 meters"), "100")
     self.assertEqual(utils_rl.normalize_final_answer("42 mph"), "42")
 
-  @pytest.mark.cpu_only
   def test_latex_wrappers(self):
     # \\text{}, \\textbf{}, and \\overline{} wrappers are removed, leaving inner content
     self.assertEqual(utils_rl.normalize_final_answer("\\text{hello}"), "hello")
     self.assertEqual(utils_rl.normalize_final_answer("\\textbf{42}"), "42")
     self.assertEqual(utils_rl.normalize_final_answer("\\overline{AB}"), "AB")
 
-  @pytest.mark.cpu_only
   def test_dollar_math_extraction(self):
     # Content inside $...$ is extracted
     self.assertEqual(utils_rl.normalize_final_answer("The answer is $\\frac{1}{2}$"), "\\frac{1}{2}")
     self.assertEqual(utils_rl.normalize_final_answer("The answer is 3 $\\frac{1}{2}$"), "3\\frac{1}{2}")
 
-  @pytest.mark.cpu_only
   def test_shorthand_frac_and_sqrt(self):
     # Shorthand \\fracab and \\sqrta are expanded to their full LaTeX forms
     self.assertEqual(utils_rl.normalize_final_answer("\\fracab"), "\\frac{a}{b}")
@@ -107,27 +101,22 @@ class TestMatchFormatApproximatelyScores(unittest.TestCase):
   def _score(self, completion):
     return utils_rl.match_format_approximately(None, completion, self.config)
 
-  @pytest.mark.cpu_only
   def test_score_all_tags_present_exactly_once(self):
     # All four tags present exactly once -> 4 * 0.5 = 2.0
     self.assertEqual(self._score(["<reasoning>think</reasoning><answer>42</answer>"])[0], 2.0)
 
-  @pytest.mark.cpu_only
   def test_score_no_tags_present(self):
     # No tags at all -> 4 * -0.5 = -2.0
     self.assertEqual(self._score(["The answer is 42."])[0], -2.0)
 
-  @pytest.mark.cpu_only
   def test_score_only_answer_tags_present(self):
     # Only <answer>...</answer> present -> 2 * 0.5 + 2 * -0.5 = 0.0
     self.assertEqual(self._score(["<answer>42</answer>"])[0], 0.0)
 
-  @pytest.mark.cpu_only
   def test_score_duplicate_reasoning_start_tag(self):
     # Duplicate <reasoning> tag -> 3 * 0.5 + 1 * -0.5 = 1.0
     self.assertEqual(self._score(["<reasoning><reasoning>think</reasoning><answer>42</answer>"])[0], 1.0)
 
-  @pytest.mark.cpu_only
   def test_score_multiple_completions(self):
     # Multiple completions at once -> one score per entry
     multi_completions = [
@@ -164,7 +153,6 @@ class TestCheckNumbers(unittest.TestCase):
   # Scenario 1: regex extraction succeeds / fails
   # ---------------------------------------------------------------
 
-  @pytest.mark.cpu_only
   def test_extraction_succeeds_full_format(self):
     """Full <reasoning>…</reasoning><answer>…</answer> format allows extraction."""
     scores = self._check(
@@ -173,7 +161,6 @@ class TestCheckNumbers(unittest.TestCase):
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
-  @pytest.mark.cpu_only
   def test_extraction_fails_no_tags(self):
     """Plain-text completion without any tags yields score 0 (cannot extract)."""
     scores = self._check(
@@ -182,7 +169,6 @@ class TestCheckNumbers(unittest.TestCase):
     )
     self.assertEqual(scores[0], self.config.penalty_incorrect_format)
 
-  @pytest.mark.cpu_only
   def test_extraction_fails_answer_tags_only(self):
     """<answer> tag alone (no <reasoning> block) is matched by the regex as a fallback, score 1.5."""
     scores = self._check(
@@ -191,7 +177,6 @@ class TestCheckNumbers(unittest.TestCase):
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
-  @pytest.mark.cpu_only
   def test_extraction_fails_reasoning_tags_only(self):
     """<reasoning> block with no <answer> tag cannot be extracted, score 0."""
     scores = self._check(
@@ -200,7 +185,6 @@ class TestCheckNumbers(unittest.TestCase):
     )
     self.assertEqual(scores[0], self.config.penalty_incorrect_format)
 
-  @pytest.mark.cpu_only
   def test_extraction_batch_mixed(self):
     """Batch with one extractable and one non-extractable completion."""
     scores = self._check(
@@ -213,7 +197,6 @@ class TestCheckNumbers(unittest.TestCase):
     self.assertEqual(scores[0], self.config.reward_exact_answer)
     self.assertEqual(scores[1], self.config.penalty_incorrect_format)
 
-  @pytest.mark.cpu_only
   def test_extraction_for_mcq(self):
     """Batch with two multiple-choice questions and one single-answer question."""
     scores = self._check(
@@ -232,7 +215,6 @@ class TestCheckNumbers(unittest.TestCase):
   # Scenario 2: extraction succeeds, value matches/mismatches the answer
   # ---------------------------------------------------------------
 
-  @pytest.mark.cpu_only
   def test_extracted_matches_integer_answer(self):
     """Extracted integer equal to reference answer earns 1.5."""
     scores = self._check(
@@ -241,7 +223,6 @@ class TestCheckNumbers(unittest.TestCase):
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
-  @pytest.mark.cpu_only
   def test_extracted_does_not_match_answer(self):
     """Extracted number that differs from the reference answer earns 0.0."""
     scores = self._check(
@@ -250,7 +231,6 @@ class TestCheckNumbers(unittest.TestCase):
     )
     self.assertEqual(scores[0], self.config.penalty_incorrect_answer)
 
-  @pytest.mark.cpu_only
   def test_extracted_matches_comma_formatted_number(self):
     """Comma-formatted guess (e.g. '1,000') normalizes to match integer answer '1000'."""
     scores = self._check(
@@ -259,7 +239,6 @@ class TestCheckNumbers(unittest.TestCase):
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
-  @pytest.mark.cpu_only
   def test_extracted_matches_with_currency_prefix(self):
     """Leading '$' in extracted answer is normalized away before comparison."""
     scores = self._check(
@@ -268,7 +247,6 @@ class TestCheckNumbers(unittest.TestCase):
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
-  @pytest.mark.cpu_only
   def test_extracted_non_numeric_no_match(self):
     """Non-numeric extraction that cannot be float-converted and does not math-verify returns 0."""
     scores = self._check(
@@ -281,14 +259,12 @@ class TestCheckNumbers(unittest.TestCase):
 class TestExtractHashAnswer(unittest.TestCase):
   """Tests for utils_rl.extract_hash_answer."""
 
-  @pytest.mark.cpu_only
   def test_with_hash(self):
     """Test extraction when #### is present."""
     self.assertEqual(utils_rl.extract_hash_answer("The answer is #### 42"), "42")
     self.assertEqual(utils_rl.extract_hash_answer("Some reasoning ####   123.45  "), "123.45")
     self.assertEqual(utils_rl.extract_hash_answer("####"), "")
 
-  @pytest.mark.cpu_only
   def test_without_hash(self):
     """Test extraction when #### is not present."""
     self.assertIsNone(utils_rl.extract_hash_answer("The answer is 42"))
@@ -306,27 +282,26 @@ class TestGetOptimizer(unittest.TestCase):
         adam_b1=0.9,
         adam_b2=0.999,
         adam_weight_decay=0.01,
+        train_steps=100,
     )
 
-  @pytest.mark.cpu_only
   def test_returns_optimizer_without_clipping(self):
     """get_optimizer returns an optax optimizer when gradient clipping is disabled."""
     import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
 
     config = self._make_optimizer_config(gradient_clipping_threshold=0.0)
-    opt = utils_rl.get_optimizer(config, max_train_steps=100)
+    opt = utils_rl.get_optimizer(config)
     # Should be usable: init on a simple param tree
     params = {"w": jnp.ones(3)}
     state = opt.init(params)
     self.assertIn("learning_rate", state.hyperparams)
 
-  @pytest.mark.cpu_only
   def test_returns_optimizer_with_clipping(self):
     """get_optimizer includes gradient clipping when threshold > 0."""
     import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
 
     config = self._make_optimizer_config(gradient_clipping_threshold=1.0)
-    opt = utils_rl.get_optimizer(config, max_train_steps=100)
+    opt = utils_rl.get_optimizer(config)
     params = {"w": jnp.ones(3)}
     state = opt.init(params)
     self.assertIn("learning_rate", state.hyperparams)
@@ -343,7 +318,6 @@ class TestFormatMaxTextMessages(unittest.TestCase):
         "TEMPLATE": "system: {system_prompt}\nquestion: {question}",
     }
 
-  @pytest.mark.cpu_only
   def test_format_with_template(self):
     """Test formatting when a template is provided."""
     messages = ["What is 2+2?"]
@@ -357,7 +331,6 @@ class TestFormatMaxTextMessages(unittest.TestCase):
     )
     self.assertEqual(formatted[0]["content"], expected_content)
 
-  @pytest.mark.cpu_only
   def test_format_without_template(self):
     """Test formatting when template_config is None (the fix)."""
     messages = ["What is 2+2?"]

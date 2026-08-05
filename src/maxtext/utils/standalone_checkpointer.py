@@ -60,7 +60,12 @@ def checkpoint_loop(config, state=None):
 
     def init_state_fn():
       nnx_model = _create_model_partial()
-      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      wrt = (
+          getattr(nnx, "LoRAParam", nnx.Param)
+          if getattr(getattr(config, "lora", None), "enable_lora", False)
+          else nnx.Param
+      )
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
       return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
   else:
@@ -96,7 +101,7 @@ def checkpoint_loop(config, state=None):
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
       state_to_save = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict()) if config.pure_nnx else state
       if checkpointing.save_checkpoint(checkpoint_manager, int(step), state_to_save):
-        checkpoint_manager.wait_until_finished()
+        checkpointing.wait_until_finished(checkpoint_manager)
         end_time = datetime.datetime.now()
         if jax.process_index() == 0:
           max_logging.log(

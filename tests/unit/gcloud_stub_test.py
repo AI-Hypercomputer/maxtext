@@ -23,13 +23,10 @@ import os
 import unittest
 from unittest import mock
 
-import pytest
-
 from maxtext.common import gcloud_stub
 from maxtext.utils import gcs_utils
 
 
-@pytest.mark.cpu_only
 class GCloudStubTest(unittest.TestCase):
   # pylint: disable=protected-access
 

@@ -9,7 +9,7 @@
 
 # Add files or directories to the blocked list. They should be base names, not
 # paths.
-ignore=third_party
+ignore=simple_evals_template
 
 # Add files or directories matching the regex patterns to the blocked list. The
 # regex matches against base names, not paths.

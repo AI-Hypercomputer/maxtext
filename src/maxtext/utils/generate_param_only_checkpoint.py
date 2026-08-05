@@ -213,7 +213,12 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
 
     def init_state_fn():
       nnx_model = _create_model_partial()
-      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      wrt = (
+          getattr(nnx, "LoRAParam", nnx.Param)
+          if getattr(getattr(config, "lora", None), "enable_lora", False)
+          else nnx.Param
+      )
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
       return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
   else:
@@ -290,7 +295,7 @@ def _save_decode_checkpoint(config, state, checkpoint_manager):
   if checkpoint_manager is not None:
     if checkpointing.save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")
-  checkpoint_manager.wait_until_finished()
+  checkpointing.wait_until_finished(checkpoint_manager)
 
 
 def _save_decode_checkpoint_nnx(config, state, checkpoint_manager):
@@ -318,7 +323,7 @@ def _save_decode_checkpoint_nnx(config, state, checkpoint_manager):
   if checkpoint_manager is not None:
     if checkpointing.save_checkpoint(checkpoint_manager, 0, bf16_model):
       max_logging.log(f"saved an NNX decode checkpoint at {config.checkpoint_dir}")
-    checkpoint_manager.wait_until_finished()
+    checkpointing.wait_until_finished(checkpoint_manager)
 
 
 def _possibly_unroll_lora_params_nnx(config, lora_state, lora_state_annotations, mesh):
@@ -402,7 +407,7 @@ def _save_lora_decode_checkpoint_nnx(config, lora_state, checkpoint_manager):
   if checkpoint_manager is not None:
     if checkpointing.save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved a LoRA decode checkpoint at {config.checkpoint_dir}")
-    checkpoint_manager.wait_until_finished()
+    checkpointing.wait_until_finished(checkpoint_manager)
 
 
 def _generate_lora_decode_checkpoints_nnx(config, mesh):

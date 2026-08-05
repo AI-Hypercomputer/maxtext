@@ -56,9 +56,14 @@ https://docs.docker.com/engine/install/debian/
 
 https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 
-If you get the NVML Error: Please follow these instructions.
+If you get an NVML error, try the following:
 
-https://stackoverflow.com/questions/72932940/failed-to-initialize-nvml-unknown-error-in-docker-after-few-hours
+1. Edit `/etc/nvidia-container-runtime/config.toml` (e.g., `sudo vim /etc/nvidia-container-runtime/config.toml`), change `no-cgroups = false`, and save.
+2. Restart the Docker daemon: `sudo systemctl restart docker`.
+3. Test by running:
+   ```bash
+   sudo docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi
+   ```
 
 ## Build MaxText Docker image
 
