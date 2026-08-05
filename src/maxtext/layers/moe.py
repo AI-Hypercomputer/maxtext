@@ -2702,6 +2702,7 @@ class RoutedMoE(nnx.Module):
     top_k_weights, top_k_indices = self.get_topk(
         gate_logits, pre_bias_logits, self.rngs, input_ids=input_ids, forced_routed_experts=forced_routed_experts
     )
+    self.sow(nnx.Intermediate, "selected_experts", top_k_indices)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
