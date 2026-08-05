@@ -185,17 +185,17 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_gemma3(
-        tokens, max_num_images=processor_output.num_images
+        tokens, max_num_images=processor_output.num_images  # pyrefly: ignore[missing-attribute]
     )  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import add_extra_tokens_for_images_gemma4  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_gemma4(
-        tokens, max_num_images=processor_output.num_images
+        tokens, max_num_images=processor_output.num_images  # pyrefly: ignore[missing-attribute]
     )  # pyrefly: ignore[missing-attribute]
   elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     from maxtext.multimodal.processor_llama4 import add_extra_tokens_for_images_llama4  # pylint: disable=import-outside-toplevel
-
+    # pyrefly: ignore[bad-argument-type]
     return add_extra_tokens_for_images_llama4(tokens, processor_output)
   elif config.model_name in [
       "qwen3-omni-30b-a3b",

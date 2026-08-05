@@ -602,7 +602,7 @@ def apply_lora_to_model(
   if mesh is not None and "data" in mesh.shape:
     dp_size = mesh.shape["data"]
 
-  model_rngs = getattr(model.decoder, "rngs", None)
+  model_rngs = getattr(model.decoder, "rngs", None)  # pyrefly: ignore[missing-attribute]
   decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(dummy_bs=dp_size)
 
   lora_model = qwix.apply_lora_to_model(
@@ -646,9 +646,9 @@ def apply_lora_to_model(
 
       lora_model = nnx.merge(graph_def, state)
 
-  _verify_lora_parameters(lora_model, mt_config)
+  _verify_lora_parameters(lora_model, mt_config)  # pyrefly: ignore[bad-argument-type]
 
-  return lora_model
+  return lora_model  # pyrefly: ignore[bad-return]
 
 
 def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameters) -> nnx.Module:
@@ -930,7 +930,7 @@ def get_lora_abstract_state_nnx(base_abstract_params, lora_config):
   )
   lora_state_mesh_annotations = train_state.TrainState(
       step=0,
-      apply_fn=None,
+      apply_fn=None,  # pyrefly: ignore[bad-argument-type]
       params=jax.tree_util.tree_map(
           lambda x: x.sharding.spec if x.sharding is not None else None,
           lora_abstract_params,

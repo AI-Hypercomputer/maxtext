@@ -1268,7 +1268,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
-
+    # pyrefly: ignore[unsupported-operation]
     hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
         process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
     )
@@ -1392,7 +1392,7 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       prefix = f"params-decoder-layers-layer_{block_idx}"
 
       # Layer norms
-      mapping[f"{prefix}-input_layernorm-scale"] = [
+      mapping[f"{prefix}-input_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
       ]  # pyrefly: ignore[bad-assignment]
       mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
@@ -1953,6 +1953,7 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     hooks[f"{prefix}-GptOssMlp-gate-kernel"] = transpose
     # `composite_mt_key`: A hook for combining multiple MaxText params.
     hooks[(f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1")] = interleave  # pyrefly: ignore[unsupported-operation]
+    # pyrefly: ignore[unsupported-operation]
     hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = (
         interleave  # pyrefly: ignore[unsupported-operation]
     )
@@ -2874,10 +2875,10 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
     local_positions = list(range(attention_pattern_length - 1))
     for subkey, suffix, gate in param_specs:
       if _spec_active(gate):
-        mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[no-matching-overload]
+        mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
             [hf_layer(b * attention_pattern_length + l, suffix) for l in local_positions] for b in range(num_blocks)
         ]
-    mapping[f"{local_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[no-matching-overload]
+    mapping[f"{local_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
         [hf_layer(b * attention_pattern_length + l, "self_attn.v_proj.weight") for l in local_positions]
         for b in range(num_blocks)
     ]
@@ -2887,11 +2888,11 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
     global_position = attention_pattern_length - 1
     for subkey, suffix, gate in param_specs:
       if _spec_active(gate):
-        mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[no-matching-overload]
+        mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
             hf_layer(b * attention_pattern_length + global_position, suffix) for b in range(num_blocks)
         ]
     if not share_kv_projections:
-      mapping[f"{global_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[no-matching-overload]
+      mapping[f"{global_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
           hf_layer(b * attention_pattern_length + global_position, "self_attn.v_proj.weight") for b in range(num_blocks)
       ]
 
@@ -4014,7 +4015,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
             }
         )
 
-    mapping.update(layer_map)
+    mapping.update(layer_map)  # pyrefly: ignore[no-matching-overload]
 
   if not scan_layers:
     for i in range(n_layers):
@@ -4038,7 +4039,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     return np.transpose(input_tensor)
 
   def ones_norm(input_tensor, target_shape=None):
-    return np.ones(target_shape, dtype=np.float32)
+    return np.ones(target_shape, dtype=np.float32)  # pyrefly: ignore[no-matching-overload]
 
   def identity(input_tensor, target_shape=None):
     return input_tensor
@@ -4069,9 +4070,9 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     if saving_to_hf:
       tensor = np.transpose(input_tensor, (0, 2, 1))
       return tensor.reshape(target_shape)
-    num_heads = target_shape[0]
-    embed_dim = target_shape[1]
-    kv_lora_rank = target_shape[2]
+    num_heads = target_shape[0]  # pyrefly: ignore[unsupported-operation]
+    embed_dim = target_shape[1]  # pyrefly: ignore[unsupported-operation]
+    kv_lora_rank = target_shape[2]  # pyrefly: ignore[unsupported-operation]
     tensor = input_tensor.reshape((num_heads, kv_lora_rank, embed_dim))
     return np.transpose(tensor, (0, 2, 1))
 

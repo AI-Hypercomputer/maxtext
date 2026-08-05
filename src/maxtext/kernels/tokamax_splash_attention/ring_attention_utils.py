@@ -34,14 +34,14 @@ def dynamic_slice_mask_info(mask_info: MaskInfo, kv_shard_idx: jax.Array, ring_s
     return lax.dynamic_slice_in_dim(arr, start_idx, shard_len, axis=-1)
 
   return MaskInfo(
-      mask_next=slice_if_exists(mask_info.mask_next),
-      active_rows=slice_if_exists(mask_info.active_rows),
-      active_cols=slice_if_exists(mask_info.active_cols),
-      num_active_blocks=slice_if_exists(mask_info.num_active_blocks),
-      block_mask=slice_if_exists(mask_info.block_mask),
+      mask_next=slice_if_exists(mask_info.mask_next),  # pyrefly: ignore[bad-argument-type]
+      active_rows=slice_if_exists(mask_info.active_rows),  # pyrefly: ignore[bad-argument-type]
+      active_cols=slice_if_exists(mask_info.active_cols),  # pyrefly: ignore[bad-argument-type]
+      num_active_blocks=slice_if_exists(mask_info.num_active_blocks),  # pyrefly: ignore[bad-argument-type]
+      block_mask=slice_if_exists(mask_info.block_mask),  # pyrefly: ignore[bad-argument-type]
       partial_mask_blocks=mask_info.partial_mask_blocks,  # partial mask blocks are global
       q_sequence=mask_info.q_sequence,  # Q sequence stays stationary
-      kv_sequence=slice_if_exists(mask_info.kv_sequence),
+      kv_sequence=slice_if_exists(mask_info.kv_sequence),  # pyrefly: ignore[bad-argument-type]
   )
 
 
@@ -72,7 +72,7 @@ def has_no_active_blocks(mask_info: MaskInfo) -> jax.Array | bool:
 
 
 def has_empty_attention_rows(logsumexp: jax.Array, max_logits: jax.Array, mask_value: float) -> jax.Array:
-  mask_value = jnp.asarray(mask_value, dtype=logsumexp.dtype)
+  mask_value = jnp.asarray(mask_value, dtype=logsumexp.dtype)  # pyrefly: ignore[bad-assignment]
   return jnp.logical_and(logsumexp == mask_value, max_logits == mask_value)
 
 

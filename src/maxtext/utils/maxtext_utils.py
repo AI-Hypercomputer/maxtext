@@ -1603,7 +1603,7 @@ def get_abstract_param(model, config):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32)
+      encoder_images=np.ones(image_shape, dtype=jnp.int32)  # pyrefly: ignore[no-matching-overload]
       if config.use_multimodal
       else None,  # pyrefly: ignore[no-matching-overload]
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,

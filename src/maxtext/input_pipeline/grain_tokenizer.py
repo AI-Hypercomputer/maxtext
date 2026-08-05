@@ -72,7 +72,7 @@ class TokenizeAndTrim(TokenizerTransformBase, grain.MapTransform):
   def map(self, element: dict[str, Any]) -> dict[str, Any]:
     """Maps to each element."""
     for feature_name, max_length in zip(
-        self.feature_names, self.sequence_length, strict=True
+        self.feature_names, self.sequence_length, strict=True  # pyrefly: ignore[bad-argument-type]
     ):  # pyrefly: ignore[bad-argument-type]
       text = element[feature_name]
       token_ids = self._encode(text)[:max_length]
@@ -91,7 +91,7 @@ class TokenizeAndChunk(TokenizerTransformBase, grain.experimental.FlatMapTransfo
     # TokenizeAndChunk only supports single feature for chunking
     assert len(self.feature_names) == 1, "TokenizeAndChunk only supports single feature name"
     assert (
-        len(self.sequence_length) == 1
+        len(self.sequence_length) == 1  # pyrefly: ignore[bad-argument-type]
     ), "TokenizeAndChunk only supports single sequence length"  # pyrefly: ignore[bad-argument-type]
     self.feature_name = self.feature_names[0]  # For backward compatibility
     self.sequence_length = self.sequence_length[0]  # Convert back to int for chunking  # pyrefly: ignore[bad-index]
@@ -109,7 +109,7 @@ class TokenizeAndChunk(TokenizerTransformBase, grain.experimental.FlatMapTransfo
     output_elements = []
     for start_idx in range(0, len(token_ids), chunk_size):  # pyrefly: ignore[bad-argument-type]
       chunk = np.asarray(
-          token_ids[start_idx : start_idx + chunk_size], dtype=np.int32
+          token_ids[start_idx : start_idx + chunk_size], dtype=np.int32  # pyrefly: ignore[unsupported-operation]
       )  # pyrefly: ignore[unsupported-operation]
       new_element = {self.feature_name: chunk}
       output_elements.append(new_element)

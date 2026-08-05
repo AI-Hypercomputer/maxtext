@@ -319,6 +319,7 @@ def setup_train_loop(config, recorder, devices=None):
             if (isinstance(state, (nnx.State, dict)) and "model" in state)
             else getattr(state, "model", state)
         )
+        # pyrefly: ignore[bad-argument-type]
         lora_utils.restore_lora_from_path(target_model_state, config)
         _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
       with nn_partitioning.axis_rules(config.logical_axis_rules):

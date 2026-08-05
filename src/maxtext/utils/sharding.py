@@ -278,6 +278,7 @@ def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Vari
       if 0 < orig_len < len(pspec):
         pspec = P(*pspec[:orig_len])
 
+  # pyrefly: ignore[bad-argument-type]
   return v.replace(NamedSharding(mesh, pspec))
 
 
@@ -633,12 +634,12 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
     else:
       raise NotImplementedError(f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}")
-    if "params" not in sharded_fp32_params.keys():
+    if "params" not in sharded_fp32_params.keys():  # pyrefly: ignore[missing-attribute]
       # When quantization=fp8 is enabled the sharded_fp32_params
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
     state_mesh_shardings = state_mesh_shardings.replace(
-        params=dict(prev_params_shardings, **sharded_fp32_params)
+        params=dict(prev_params_shardings, **sharded_fp32_params)  # pyrefly: ignore[bad-unpacking]
     )  # pyrefly: ignore[bad-unpacking]
   return prev_params_shardings, state_mesh_shardings
 

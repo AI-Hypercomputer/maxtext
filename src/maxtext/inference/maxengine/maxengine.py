@@ -231,7 +231,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     graphdef = self.graphdef_ar if model_mode == MODEL_MODE_AUTOREGRESSIVE else self.graphdef
     # copy=True avoids reusing Variable objects across traces (TraceContextError),
     # mirroring the workaround in train.py's diff_wrapper.
-    model = nnx.merge(
+    model = nnx.merge(  # pyrefly: ignore[no-matching-overload]
         graphdef, params, cache_state, self._nnx_rest_state, copy=True
     )  # pyrefly: ignore[no-matching-overload]
     logits = model(
@@ -296,8 +296,11 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         return x
       # Somehow this can be None sometimes.
       dll = (
-          (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l
-      )  # pyrefly: ignore[missing-attribute]
+          # pyrefly: ignore[missing-attribute]
+          (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout)
+          if isinstance(l, Format)
+          else l  # pyrefly: ignore[missing-attribute]
+      )
       f = jax.jit(self._identity, out_shardings=Format(dll, s)).lower(x).compile(compiler_options=xla_flags)
       y = f(x)
       # Achieves donation of the input argument, but allows for different memory
@@ -417,8 +420,8 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       _, full_abs = nnx.split(self.model)
       full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
       concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
-          self.model,
-          self._create_model_fn,
+          self.model,  # pyrefly: ignore[bad-argument-type]
+          self._create_model_fn,  # pyrefly: ignore[bad-argument-type]
           mesh=self._mesh,
           named_sharding=full_sharding,  # pyrefly: ignore[bad-argument-type]
       )
@@ -947,7 +950,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       flat_video_grid = jax.device_get(video_grid_thw).reshape(-1)
       if flat_video_grid.size != 3:
         raise ValueError(f"Decode currently supports one video grid with 3 values, got shape {video_grid_thw.shape}.")
-      video_grid_thw = tuple(int(dim) for dim in flat_video_grid)
+      video_grid_thw = tuple(int(dim) for dim in flat_video_grid)  # pyrefly: ignore[bad-assignment]
 
     # Update page state before JIT call
 
@@ -1130,7 +1133,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         token_logps.append(p)  # pytype: disable=attribute-error
     first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
     if self.config.return_log_prob:
-      token_logps = jnp.concatenate(token_logps, axis=0)
+      token_logps = jnp.concatenate(token_logps, axis=0)  # pyrefly: ignore[bad-argument-type]
 
     all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
     generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
@@ -1300,7 +1303,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         prefill_results[k].append(v)
       first_tokens.append(first_token)
     prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
-    prefill_results["prompt_logp"] = prompt_logp
+    prefill_results["prompt_logp"] = prompt_logp  # pyrefly: ignore[unsupported-operation]
     return cache, prefill_results, first_tokens
 
   # Public non-JIT generate method that updates page state
@@ -1384,7 +1387,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     """
 
     previous_token = decode_state["tokens"]
-    rng, new_rng = jax.random.split(rng)
+    rng, new_rng = jax.random.split(rng)  # pyrefly: ignore[bad-argument-type]
     # run one step generation
     if self.config.pure_nnx:
       with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -1864,13 +1867,16 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
       )
     try:
-      tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[self.config.tokenizer_type].number
+      # pyrefly: ignore[missing-attribute]
+      tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[
+          self.config.tokenizer_type
+      ].number  # pyrefly: ignore[missing-attribute]
       return TokenizerParameters(
-          path=self.config.tokenizer_path,
-          tokenizer_type=tokenizer_type_val,
-          access_token=self.config.hf_access_token,
-          use_chat_template=self.config.use_chat_template,
-          extra_ids=0,
+          path=self.config.tokenizer_path,  # pyrefly: ignore[unexpected-keyword]
+          tokenizer_type=tokenizer_type_val,  # pyrefly: ignore[unexpected-keyword]
+          access_token=self.config.hf_access_token,  # pyrefly: ignore[unexpected-keyword]
+          use_chat_template=self.config.use_chat_template,  # pyrefly: ignore[unexpected-keyword]
+          extra_ids=0,  # pyrefly: ignore[unexpected-keyword]
       )
     except KeyError as _:
       raise KeyError(f"Unsupported tokenizer type: {self.config.tokenizer_type}") from None
@@ -1884,11 +1890,11 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; build_tokenizer is unsupported. "
           "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
       )
-    if metadata.tokenizer_type == TokenizerType.tiktoken:
+    if metadata.tokenizer_type == TokenizerType.tiktoken:  # pyrefly: ignore[missing-attribute]
       return token_utils.TikToken(metadata)
-    elif metadata.tokenizer_type == TokenizerType.sentencepiece:
+    elif metadata.tokenizer_type == TokenizerType.sentencepiece:  # pyrefly: ignore[missing-attribute]
       return token_utils.SentencePieceTokenizer(metadata)
-    elif metadata.tokenizer_type == TokenizerType.huggingface:
+    elif metadata.tokenizer_type == TokenizerType.huggingface:  # pyrefly: ignore[missing-attribute]
       tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
       if tokenizer_model.tokenizer.pad_token_id is None:
         if tokenizer_model.tokenizer.unk_token_id is not None:

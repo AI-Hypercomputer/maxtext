@@ -180,6 +180,7 @@ def _gmm_fwd(
 
   # Quantize activation and weight
   if quantization_rule:
+    # pyrefly: ignore[bad-assignment]
     lhs, rhs = _fwd_quantize_activation_and_weight(
         lhs, rhs, quantization_rule, use_gmm_v2, use_manual_quantization, transpose_rhs
     )
@@ -193,6 +194,7 @@ def _gmm_fwd(
       and isinstance(rhs, qpl.QArray)
       and weight_gather_axes
   ):
+    # pyrefly: ignore[bad-assignment]
     rhs = _fwd_gather_weight(rhs, weight_gather_axes)
 
   # Backend Execution Routing
@@ -216,7 +218,7 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
-  return out, (lhs, rhs, group_sizes, group_offset, partial_sum)
+  return out, (lhs, rhs, group_sizes, group_offset, partial_sum)  # pyrefly: ignore[bad-return]
 
 
 def _fwd_quantize_activation_and_weight(
@@ -233,6 +235,7 @@ def _fwd_quantize_activation_and_weight(
         lhs,
         quantization_rule.act_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+        # pyrefly: ignore[bad-argument-type]
         calibration_method=quantization_rule.act_calibration_method,
     )
 
@@ -336,6 +339,7 @@ def _fwd_run_tokamax_v2(
   rhs_scale = None
 
   if isinstance(rhs, qpl.QArray):
+    # pyrefly: ignore[missing-attribute]
     rhs_operand = rhs_operand.qvalue
     rhs_scale = _fwd_prepare_rhs_scale(rhs, transpose_rhs=transpose_rhs)
 
@@ -520,7 +524,9 @@ def _bwd_prepare_inputs(
     lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
         lhs,
         quantization_rule.act_qtype,
+        # pyrefly: ignore[bad-argument-type]
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+        # pyrefly: ignore[bad-argument-type]
         calibration_method=quantization_rule.act_calibration_method,
     )
 
@@ -542,12 +548,14 @@ def _bwd_quantize_gradient(
   """Applies backward quantization to incoming gradients."""
   if quantization_rule.bwd_qtype:
     dlhs_dout = qpl.quantize(
+        # pyrefly: ignore[bad-argument-type]
         dlhs_dout,
         quantization_rule.bwd_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
         calibration_method=quantization_rule.bwd_calibration_method,
     )
     drhs_dout = qpl.quantize(
+        # pyrefly: ignore[bad-argument-type]
         drhs_dout,
         quantization_rule.bwd_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],

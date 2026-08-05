@@ -909,7 +909,9 @@ def calculate_tiling(
 
   def _is_tile_k_quant_block_compatible(tk: int) -> bool:
     if (
-        tk % rhs_cfgs.quant_block_size != 0 and rhs_cfgs.quant_block_size % tk != 0
+        # pyrefly: ignore[unsupported-operation]
+        tk % rhs_cfgs.quant_block_size != 0
+        and rhs_cfgs.quant_block_size % tk != 0  # pyrefly: ignore[unsupported-operation]
     ):  # pyrefly: ignore[unsupported-operation]
       return False
     return True

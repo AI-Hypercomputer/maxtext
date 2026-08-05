@@ -394,7 +394,7 @@ def _get_int8_quant_config(config):
     drhs_bits = 8
     drhs_accumulator_dtype = jnp.int32
     drhs_local_aqt = aqt_config.LocalAqt(
-        contraction_axis_shard_count=config.quantization_local_shard_count
+        contraction_axis_shard_count=config.quantization_local_shard_count  # pyrefly: ignore[unexpected-keyword]
     )  # pyrefly: ignore[unexpected-keyword]
   return aqt_config.config_v3(
       fwd_bits=8,
@@ -568,11 +568,11 @@ def _dot_general_make(quant_cfg):
   rhs_scale = quant_cfg[_W_SCALE]
   aqt_dg = aqt_config.dot_general_make(lhs_bits=lhs_bits, rhs_bits=rhs_bits)
   if lhs_scale < 1.0:
-    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(
+    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
         calibration.AbsMaxCalibration, scale=lhs_scale
     )  # pyrefly: ignore[missing-attribute]
   if rhs_scale < 1.0:
-    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(
+    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
         calibration.AbsMaxCalibration, scale=rhs_scale
     )  # pyrefly: ignore[missing-attribute]
   return aqt_dg

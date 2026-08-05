@@ -40,7 +40,7 @@ class Train(unittest.TestCase):
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
     train_main(
-        [
+        [  # pyrefly: ignore[bad-argument-type]
             None,
             get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
@@ -68,7 +68,7 @@ class Train(unittest.TestCase):
   def test_tiny_config_no_scan(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
     train_main(
-        [
+        [  # pyrefly: ignore[bad-argument-type]
             None,
             get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
@@ -96,8 +96,8 @@ class Train(unittest.TestCase):
 
   def test_tiny_eval(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
-    train_main(
-        [
+    train_main(  # pyrefly: ignore[bad-argument-type]
+        [  # pyrefly: ignore[bad-argument-type]
             None,
             get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
@@ -126,8 +126,8 @@ class Train(unittest.TestCase):
 
   def test_qwen3_custom_moe_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
-    train_main(
-        [
+    train_main(  # pyrefly: ignore[bad-argument-type]
+        [  # pyrefly: ignore[bad-argument-type]
             None,
             get_test_config_path(),
             "model_name=qwen3-custom-30b-a3b",
@@ -162,8 +162,8 @@ class Train(unittest.TestCase):
 
   def test_tiny_config_explicit_shardmode(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
-    train_main(
-        [
+    train_main(  # pyrefly: ignore[bad-argument-type]
+        [  # pyrefly: ignore[bad-argument-type]
             None,
             get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
@@ -191,8 +191,8 @@ class Train(unittest.TestCase):
 
   def test_eval_explicit_shardmode(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
-    train_main(
-        [
+    train_main(  # pyrefly: ignore[bad-argument-type]
+        [  # pyrefly: ignore[bad-argument-type]
             None,
             get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
