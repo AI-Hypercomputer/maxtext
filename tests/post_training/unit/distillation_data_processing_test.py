@@ -20,8 +20,6 @@ pytestmark = [pytest.mark.post_training]
 
 import argparse
 import os
-import filelock
-import subprocess
 import unittest
 
 import transformers
@@ -30,6 +28,9 @@ from datasets import Dataset
 
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import distillation_data_processing
+from tests.utils.test_helpers import ensure_tokenizer_downloaded
+
+LLAMA2_TOKENIZER_PATH = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "llama2-chat-tokenizer")
 
 PROMPT_DATA = [
     [
@@ -81,26 +82,12 @@ class DistillationDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    tokenizer_dir = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
-    lock_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer.lock")
-    with filelock.FileLock(lock_path):
-      if not os.path.exists(tokenizer_dir):
-        command = [
-            "gcloud",
-            "storage",
-            "cp",
-            "--recursive",
-            "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
-            os.path.join(MAXTEXT_ASSETS_ROOT, ""),
-        ]
-        exit_code = subprocess.call(command)
-        if exit_code != 0:
-          raise ValueError(f"Download tokenizer failed ({exit_code})")
+    ensure_tokenizer_downloaded("llama2-chat-tokenizer", LLAMA2_TOKENIZER_PATH, skip_test_on_failure=True)
 
   def setUp(self):
     super().setUp()
     self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer"),
+        LLAMA2_TOKENIZER_PATH,
     )
     self.parser = argparse.ArgumentParser()
     self.parser = add_arguments_to_parser(self.parser)
