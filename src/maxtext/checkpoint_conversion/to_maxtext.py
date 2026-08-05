@@ -49,9 +49,6 @@ Example Usage:
     scan_layers=True
 """
 
-import torch  # pylint: disable=unused-import
-import transformers  # pylint: disable=unused-import
-from transformers import AutoModelForCausalLM  # pylint: disable=unused-import
 import argparse
 from functools import partial
 import json
@@ -216,7 +213,6 @@ class LazyHFLoader:
       if shard_name not in self._open_files:
         self._open_files[shard_name] = safe_open(local_path, framework="np", device="cpu")
       return self._open_files[shard_name].get_tensor(key)
-
 
 
 class LazyTensor:

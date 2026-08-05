@@ -594,7 +594,7 @@ def main(config, test_args):  # pylint: disable=W0621
           f"Truncating HF model from {hf_model.config.num_hidden_layers} to {config.base_num_decoder_layers} layers "
           f"to match MaxText base_num_decoder_layers."
       )
-      hf_model.model.layers = hf_model.model.layers[:config.base_num_decoder_layers]
+      hf_model.model.layers = hf_model.model.layers[: config.base_num_decoder_layers]
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
       max_logging.log(f"Loading HF PEFT LoRA adapter from {hf_lora_path}")
