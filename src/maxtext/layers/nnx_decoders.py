@@ -2154,7 +2154,7 @@ class NNXDecoder(nnx.Module):
     cycle_interval = cfg.inhomogeneous_layer_cycle_interval
     scan_length = cfg.num_decoder_layers // cycle_interval
 
-    block_unroll = max(1, scan_length)
+    block_unroll = 1
     if scan_length > 0:
       grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, cycle_interval, stack=False)
       y, self.scanned_blocks, _ = self._apply_layers_sequentially(
