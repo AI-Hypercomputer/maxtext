@@ -425,6 +425,39 @@ class PostTrainCheckpointSubclassHookTest(unittest.TestCase):
     self.assertEqual([k for k in keys if "student_model" in k.split("/")], [])
 
 
+class PostTrainCheckpointBaseManagerTest(unittest.TestCase):
+  """The base class builds a manager over Tunix's item names before we replace it."""
+
+  def test_closes_the_base_class_manager_it_replaces(self):
+    created = []
+    real_cls = ocp.CheckpointManager
+
+    class _Tracking(real_cls):
+      """Records close calls so a replaced manager cannot be left open."""
+
+      def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.close_calls = 0
+        created.append(self)
+
+      def close(self):
+        self.close_calls += 1
+        super().close()
+
+    with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
+      with mock.patch.object(ocp, "CheckpointManager", _Tracking):
+        manager = post_train_checkpointing.MaxTextLayoutCheckpointManager(
+            root_directory=d,
+            options=ocp.CheckpointManagerOptions(save_interval_steps=1),
+        )
+      self.assertEqual(len(created), 2, "expected the base class's manager and its replacement")
+      base, live = created[0], created[1]
+      self.assertEqual(base.close_calls, 1, "the base class's manager was left open")
+      self.assertEqual(live.close_calls, 0, "the live manager should still be open")
+      manager.close()
+      self.assertEqual(live.close_calls, 1)
+
+
 class InstallTest(unittest.TestCase):
   """`install` swaps in the MaxText-layout manager and restores what it finds."""
 
