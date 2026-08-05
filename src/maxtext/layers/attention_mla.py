@@ -231,7 +231,9 @@ class Indexer(nnx.Module):
     Returns:
         mask: [b, t, s] - `0.0` for top-k selected elements, `DEFAULT_MASK_VALUE` elsewhere.
     """
-    cutoff_threshold = topk_values[..., -1:]
+    indexer_cutoff_threshold = topk_values[..., -1]
+    indexer_cutoff_threshold = checkpoint_name(indexer_cutoff_threshold, "indexer_cutoff_threshold")
+    indexer_cutoff_threshold = indexer_cutoff_threshold[..., None]
 
     val_true = jnp.array(0.0, dtype=self.dtype)
     val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=self.dtype)
@@ -239,8 +241,8 @@ class Indexer(nnx.Module):
     if self.config.indexer_mask_exact_topk:
       # Prune ties by keeping only the first k unmasked tokens along sequence dimension
       k = topk_values.shape[-1]
-      is_strictly_greater = indexer_score > cutoff_threshold
-      is_equal = indexer_score == cutoff_threshold
+      is_strictly_greater = indexer_score > indexer_cutoff_threshold
+      is_equal = indexer_score == indexer_cutoff_threshold
 
       # Use cumsum to rank both strictly greater and equal tokens (XLA fuses these scans)
       sg_rank = jnp.cumsum(is_strictly_greater.astype(jnp.int32), axis=-1)
@@ -258,7 +260,7 @@ class Indexer(nnx.Module):
       return jnp.where(selected, val_true, val_false)
     else:
       # Raw threshold cutoff masking (optional: enables speedups, but may unmask > k tokens under indexer scores ties)
-      raw_mask = indexer_score >= cutoff_threshold
+      raw_mask = indexer_score >= indexer_cutoff_threshold
       return jnp.where(raw_mask, val_true, val_false)
 
   def __call__(
