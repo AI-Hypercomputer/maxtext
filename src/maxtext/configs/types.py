@@ -4578,8 +4578,6 @@ class MaxTextConfig(
         raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'`.")
       if self.use_dpo:
         raise ValueError("`training_objective='block_diffusion'` is not compatible with DPO.")
-      if self.use_sft:
-        raise ValueError("`training_objective='block_diffusion'` currently supports pre-training only.")
       if self.use_multimodal or self.use_audio:
         raise ValueError("`training_objective='block_diffusion'` currently supports text-only training.")
       valid_model_contracts = {
