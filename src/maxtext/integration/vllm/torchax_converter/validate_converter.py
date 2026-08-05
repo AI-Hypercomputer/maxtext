@@ -315,11 +315,16 @@ def validate_converter(argv) -> None:
   # load_format="dummy" skips loading real weights — converted MaxText weights
   # are assigned afterwards.  Pass vllm_load_format=auto to load an HF checkpoint
   # for reference stats comparison before assignment.
+  dp_size = (
+      sampler_config.rollout_data_parallelism
+      if sampler_config.rollout_data_parallelism > 0
+      else max(1, len(sampler_devices) // sampler_config.rollout_tensor_parallelism)
+  )
   vllm_kwargs = {
       "model": getattr(trainer_config, "vllm_model_path", None) or vllm_model_name_mapping[trainer_config.model_name],
       "max_model_len": trainer_config.max_target_length,
       "load_format": vllm_load_format,
-      "data_parallel_size": sampler_config.rollout_data_parallelism if sampler_config.rollout_data_parallelism > 0 else 1,
+      "data_parallel_size": dp_size,
       "tensor_parallel_size": sampler_config.rollout_tensor_parallelism,
       "gpu_memory_utilization": getattr(sampler_config, "hbm_utilization_vllm", 0.5),
       "async_scheduling": getattr(sampler_config, "async_scheduling", False),
@@ -350,10 +355,10 @@ def validate_converter(argv) -> None:
   if multislice:
     # Pin vLLM to its assigned sampler devices so it doesn't overlap with trainer.
     additional_config["sharding"] = {
-            "sharding_strategy": {
-                "device_indexes": [d.id for d in sampler_devices],
-            }
+        "sharding_strategy": {
+            "device_indexes": [d.id for d in sampler_devices],
         }
+    }
         
   if additional_config:
     vllm_kwargs["additional_config"] = additional_config
@@ -387,6 +392,9 @@ def validate_converter(argv) -> None:
     converter = WeightConverter(rules, tp=sampler_config.rollout_tensor_parallelism)
     with timer("Overall Conversion"):
       maxtext_vllm_state = converter.convert(model_state, target_state=golden_llm_state)
+  if isinstance(maxtext_vllm_state, dict) and any(isinstance(v, dict) for v in maxtext_vllm_state.values()):
+    from flax import traverse_util
+    maxtext_vllm_state = {'.'.join(str(k) for k in key): v for key, v in traverse_util.flatten_dict(maxtext_vllm_state).items()}
   del model_state, model, mesh, converter
   gc.collect()
   try:
@@ -468,6 +476,10 @@ def validate_converter(argv) -> None:
 
       if search_key.startswith("vllm_model.") and search_key not in golden_llm_state and getattr(golden_llm_state, '__class__', type).__name__ != 'State':
           search_key = search_key[len("vllm_model."):]
+      if "model" in golden_llm_state and not search_key.startswith("model."):
+          search_key = f"model.{search_key}"
+      elif "model" not in golden_llm_state and search_key.startswith("model."):
+          search_key = search_key[len("model."):]
           
       if search_key not in golden_llm_state and ".experts." in search_key and ".experts.routed_experts." not in search_key:
           alt_key = search_key.replace(".experts.", ".experts.routed_experts.", 1)

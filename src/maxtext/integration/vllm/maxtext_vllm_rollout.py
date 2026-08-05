@@ -41,9 +41,21 @@ from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO
 from maxtext.integration.vllm.convert_utils import _reshard_in_chunks
 
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
-def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh, use_hf_mapping: bool = False):
+def _create_model_converter(
+    model_name: str,
+    config: Any,
+    mesh: jax.sharding.Mesh,
+    use_hf_mapping: bool = False,
+    use_weight_converter: bool = False,
+):
   """Instantiate the converter for a MaxText model name."""
   tp = config.rollout_tensor_parallelism
+  if not use_hf_mapping and not use_weight_converter:
+    # Default MaxText-to-MaxText sync uses legacy transfer_state_directly unless explicitly opted in
+    if model_name.startswith("gemma4"):
+      return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+    return None
+
   if model_name in {"qwen3-0.6b"}:
     rules = _MODEL_TO_CONVERSION_RULES.get("qwen3", []) if use_hf_mapping else []
     return WeightConverter(rules=rules, tp=tp)
@@ -294,7 +306,38 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     model_version = bool(getattr(rollout_config, "rollout_vllm_model_version", ""))
     force_maxtext = "MaxTextForCausalLM" in str(getattr(rollout_config, "rollout_vllm_hf_overrides", ""))
     use_hf = bool(model_version and not force_maxtext) 
-    converter = _create_model_converter(maxtext_config.model_name, config=maxtext_config, mesh=mesh, use_hf_mapping=use_hf)
+
+    vllm_additional_config = (
+        getattr(rollout_config, "rollout_vllm_additional_config", None)
+        or getattr(maxtext_config, "vllm_additional_config", None)
+        or {}
+    )
+    if isinstance(vllm_additional_config, str):
+      import ast
+      import json
+      try:
+        vllm_additional_config = json.loads(vllm_additional_config)
+      except Exception:
+        try:
+          vllm_additional_config = ast.literal_eval(vllm_additional_config)
+        except Exception:
+          vllm_additional_config = {}
+    use_mt_converter = (
+        vllm_additional_config.get("use_weight_converter", False)
+        if isinstance(vllm_additional_config, dict)
+        else False
+    )
+    use_weight_converter = (
+        use_mt_converter
+        or getattr(maxtext_config, "use_weight_converter", False)
+    )
+    converter = _create_model_converter(
+        maxtext_config.model_name,
+        config=maxtext_config,
+        mesh=mesh,
+        use_hf_mapping=use_hf,
+        use_weight_converter=use_weight_converter,
+    )
 
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,

@@ -248,9 +248,14 @@ class WeightConverter(abc.ABC):
                 )
             # Repack the flat_src dictionary with tuple keys for the algorithm
             pure_src_unflat = traverse_util.unflatten_dict(flat_src, sep='.')
+            has_model_prefix = isinstance(full_target_spec, dict) and "model" in full_target_spec
+            if isinstance(pure_src_unflat, dict) and "base" in pure_src_unflat:
+                pure_src_unflat = pure_src_unflat["base"]
+            while isinstance(full_target_spec, dict) and "model" in full_target_spec:
+                full_target_spec = full_target_spec["model"]
             
             final_source, _ = intersect_trees(pure_src_unflat, full_target_spec)
-            vllm_state = final_source
+            vllm_state = {"model": final_source} if has_model_prefix else final_source
 
         return vllm_state
 
