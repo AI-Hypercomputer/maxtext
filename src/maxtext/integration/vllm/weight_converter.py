@@ -4,10 +4,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import gc
-from typing import List, Union, Any, Dict
-from flax import traverse_util
-
-_MOE_MLP_WEIGHTS = ('wi_0', 'wi_1', 'wi', 'wo', 'gate', 'w13_weight', 'w2_weight', 'wi_0.kernel', 'wi_1.kernel', 'wo.kernel', 'wi.kernel', 'gate.kernel')
+from typing import List, Union, Any, Dict, Optional, Callable, Mapping
+from flax import traverse_util, nnx
+from maxtext.integration.vllm.convert_utils import intersect_trees
 
 # ==========================================
 # 1. Operations
@@ -147,6 +146,11 @@ class MoEFuseGateUpPrefused(Operation):
         fused = _fuse_all(tensors[0])
         return list(jnp.unstack(fused, axis=0))
 
+
+class Identity(Operation):
+    def __call__(self, tensors, **kwargs):
+        return tensors[0]
+
 # ==========================================
 # 2. Rule
 # ==========================================
@@ -164,11 +168,17 @@ class Rule:
 # 3. Engine
 # ==========================================
 class WeightConverter(abc.ABC):
-    def __init__(self, rules: List[Rule], tp: int = 1):
+    def __init__(self, rules: List[Rule], tp: int = 1, num_kv_heads: Optional[int] = None, head_dim: Optional[int] = None):
         self.rules = rules
         self.tp = tp
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
 
-    def convert(self, src_pytree: Any, target_state: Any = None) -> Dict[str, Any]:
+    def convert(
+        self, 
+        src_pytree: Any, 
+        target_state: Any = None
+    ) -> Any:
         def _to_pure(x):
             if hasattr(x, 'to_pure_dict'): x = x.to_pure_dict()
             if hasattr(x, 'unfreeze'): x = x.unfreeze()
@@ -184,44 +194,66 @@ class WeightConverter(abc.ABC):
         if hasattr(src_pytree, 'clear'):
             src_pytree.clear()
         gc.collect()
-        if not self.rules:
-            self.rules = build_mt_rules(flat_src)
+
+        # Extract pure state dictionary from the target for matching Sharding specs
+        if target_state is None:
+            full_target_spec = None
+        elif isinstance(target_state, nnx.State):
+            state_dict = target_state.to_pure_dict() if hasattr(target_state, "to_pure_dict") else dict(target_state)
+            full_target_spec = _to_pure(state_dict)
         else:
+            full_target_spec = _to_pure(target_state)
+
+        # DYNAMIC ROUTING: Rules (HF) vs Direct Tree Intersection (MT)
+        if self.rules:
+            # 1. HuggingFace Mappings via Dedicated Rules
             self.rules = build_hf_rules(flat_src, target_state, self.rules)
 
-        result = {}
-        for rule in self.rules:
-            tensors = []
-            for src_pat in rule.source_patterns:
-                if src_pat in flat_src:
-                    tensors.append(flat_src.pop(src_pat))
+            result = {}
+            for rule in self.rules:
+                tensors = []
+                for src_pat in rule.source_patterns:
+                    if src_pat in flat_src:
+                        tensors.append(flat_src.pop(src_pat))
+                    else:
+                        pass # Ignore unfound keys gracefully
+    
+                if not tensors:
+                    continue
+    
+                out = tensors
+                for op in rule.operations:
+                    out = op(out, tp=self.tp)
+                    if not isinstance(out, list) and op != rule.operations[-1]:
+                        out = [out]
+    
+                if isinstance(out, list) and len(out) > 1 and "{}" in rule.target_pattern:
+                    for i, tensor in enumerate(out):
+                        result[rule.target_pattern.format(i)] = tensor
+                elif isinstance(out, list) and len(out) == 1:
+                    result[rule.target_pattern] = out[0]
                 else:
-                    # Ignore unfound keys for robustness across subtle model variant differences,
-                    # like we do gracefully in the regex matching case
-                    pass
+                    result[rule.target_pattern] = out
+    
+                del out
+                del tensors
+                gc.collect()
+                
+            vllm_state = traverse_util.unflatten_dict(result, sep='.')
+        else:
+            # 2. MaxText-to-MaxText Direct Sync (no rules entirely)
+            if full_target_spec is None:
+                raise ValueError(
+                    "target_state must be provided when converting with empty rules (MaxText-to-MaxText direct tree intersection)."
+                )
+            # Repack the flat_src dictionary with tuple keys for the algorithm
+            pure_src_unflat = traverse_util.unflatten_dict(flat_src, sep='.')
+            
+            final_source, _ = intersect_trees(pure_src_unflat, full_target_spec)
+            vllm_state = final_source
 
-            if not tensors:
-                continue
+        return vllm_state
 
-            out = tensors
-            for op in rule.operations:
-                out = op(out, tp=self.tp)
-                if not isinstance(out, list) and op != rule.operations[-1]:
-                    out = [out]
-
-            if isinstance(out, list) and len(out) > 1 and "{}" in rule.target_pattern:
-                for i, tensor in enumerate(out):
-                    result[rule.target_pattern.format(i)] = tensor
-            elif isinstance(out, list) and len(out) == 1:
-                result[rule.target_pattern] = out[0]
-            else:
-                result[rule.target_pattern] = out
-
-            del out
-            del tensors
-            gc.collect()
-
-        return result
 # ==========================================
 # 4. Registries and Builders
 # ==========================================
@@ -245,103 +277,6 @@ _MODEL_TO_CONVERSION_RULES = {
     ],
     "qwen35_moe": []
 }
-
-
-class MTMoEFuseGateUp(Operation):
-    def __call__(self, tensors, **kwargs):
-        tp = kwargs.get('tp', 1)
-        wi_0, wi_1 = tensors[0], tensors[1]
-
-        @jax.jit
-        def _f(w0, w1):
-            axis = w0.ndim - 1
-            chunk_size = w0.shape[axis] // tp
-            target_chunk_size = ((chunk_size + 127) // 128) * 128
-            target_half_dim = target_chunk_size * tp
-
-            def _pad_and_chunk(arr):
-                new_shape = list(arr.shape)
-                new_shape[axis] = tp
-                new_shape.insert(axis + 1, chunk_size)
-                arr_reshaped = arr.reshape(new_shape)
-                pad_amount = target_chunk_size - chunk_size
-                if pad_amount > 0:
-                    pad_widths = [(0, 0)] * arr_reshaped.ndim
-                    pad_widths[axis + 1] = (0, pad_amount)
-                    arr_reshaped = jnp.pad(arr_reshaped, pad_widths)
-                return arr_reshaped
-
-            p_wi_0 = _pad_and_chunk(w0)
-            p_wi_1 = _pad_and_chunk(w1)
-            combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
-
-            tgt_shape = list(w0.shape)
-            tgt_shape[axis] = target_half_dim * 2
-            return combined.reshape(tgt_shape)
-
-        return _f(wi_0, wi_1)
-
-class MTMoEDownPad(Operation):
-    def __call__(self, tensors, **kwargs):
-        wo = tensors[0]
-        tp = kwargs.get('tp', 1)
-
-        @jax.jit
-        def _f(w):
-            axis = w.ndim - 2
-            chunk_size = w.shape[axis] // tp
-            target_chunk_size = ((chunk_size + 127) // 128) * 128
-            target_dim = target_chunk_size * tp
-
-            pad_amount = target_dim - w.shape[axis]
-            if pad_amount > 0:
-                new_shape = list(w.shape)
-                new_shape[axis] = tp
-                new_shape.insert(axis + 1, chunk_size)
-                arr_reshaped = w.reshape(new_shape)
-
-                per_shard_extra = target_chunk_size - chunk_size
-                pad_widths = [(0, 0)] * arr_reshaped.ndim
-                pad_widths[axis + 1] = (0, per_shard_extra)
-                arr_reshaped = jnp.pad(arr_reshaped, pad_widths)
-
-                tgt_shape = list(w.shape)
-                tgt_shape[axis] = target_dim
-                w = arr_reshaped.reshape(tgt_shape)
-            return w
-
-        return _f(wo)
-
-class Identity(Operation):
-    def __call__(self, tensors, **kwargs):
-        return tensors[0]
-
-def build_mt_rules(flat_src: Dict[str, Any]) -> list:
-    rules = []
-    processed = set()
-    for key in flat_src.keys():
-        if key in processed: continue
-
-        target_key = key.replace("base.", "model.", 1) if key.startswith("base.") else key
-
-        if key.endswith(".wi_0"):
-            wi_1_key = key.replace(".wi_0", ".wi_1")
-            wi_key = target_key.replace(".wi_0", ".wi")
-            if wi_1_key in flat_src:
-                rules.append(Rule([key, wi_1_key], wi_key, [MTMoEFuseGateUp()]))
-                processed.add(wi_1_key)
-            else:
-                rules.append(Rule([key], target_key, [Identity()]))
-        elif key.endswith(".wi_1"):
-            continue
-        elif key.endswith(".wo") and "moe_block" in key:
-            rules.append(Rule([key], target_key, [MTMoEDownPad()]))
-        else:
-            rules.append(Rule([key], target_key, [Identity()]))
-
-        processed.add(key)
-
-    return rules
 
 def build_hf_rules(flat_src: Dict[str, Any], target_state: Any, rules: List[Rule]) -> list:
     return rules

@@ -309,38 +309,6 @@ def validate_converter(argv) -> None:
       logging.info("Name: %s, shape: %s", path_str, leaf.shape)
       logging.info("\tSharding: %s", leaf.sharding)
 
-  if getattr(trainer_config, "use_standalone_converter", False) or getattr(getattr(trainer_config, "vllm", None), "use_standalone_converter", False):
-    if trainer_config.model_name.startswith("gemma4"):
-      converter = Gemma4MaxTextToVLLMConverter(trainer_config, mesh)
-    elif trainer_config.model_name.startswith("qwen3.5"):
-      converter = Qwen35MaxTextToVLLMConverter(trainer_config, mesh)
-    else:
-      converter = Qwen3MaxTextToVLLMConverter(trainer_config, mesh)
-    with timer("Overall Conversion"):
-      maxtext_vllm_state = converter.convert(model_state)
-  else:
-    from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO_CONVERSION_RULES
-    vllm_hf_overrides = getattr(trainer_config, "vllm_hf_overrides", None) or getattr(getattr(trainer_config, "vllm", None), "vllm_hf_overrides", None) or ""
-    force_maxtext = "MaxTextForCausalLM" in str(vllm_hf_overrides)
-    
-    # We want to properly select rules.
-    if force_maxtext:
-      rules = []
-    else:
-      # use qwen3_moe fall back
-      rules = _MODEL_TO_CONVERSION_RULES.get(trainer_config.model_name,
-               _MODEL_TO_CONVERSION_RULES.get('qwen3_moe', []))
-               
-    converter = WeightConverter(rules, tp=sampler_config.rollout_tensor_parallelism)
-    with timer("Overall Conversion"):
-      maxtext_vllm_state = converter.convert(model_state)
-  del model_state, model, mesh, converter
-  gc.collect()
-  try:
-    jax.clear_caches()
-  except Exception:
-    pass
-
   print("=" * 80)
   print(f"Loading vLLM model (load_format={vllm_load_format})...")
   print("=" * 80)
@@ -393,6 +361,38 @@ def validate_converter(argv) -> None:
   llm = LLM(**vllm_kwargs)
   print("\n" + "=" * 80)
   golden_llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
+
+  if getattr(trainer_config, "use_standalone_converter", False) or getattr(getattr(trainer_config, "vllm", None), "use_standalone_converter", False):
+    if trainer_config.model_name.startswith("gemma4"):
+      converter = Gemma4MaxTextToVLLMConverter(trainer_config, mesh)
+    elif trainer_config.model_name.startswith("qwen3.5"):
+      converter = Qwen35MaxTextToVLLMConverter(trainer_config, mesh)
+    else:
+      converter = Qwen3MaxTextToVLLMConverter(trainer_config, mesh)
+    with timer("Overall Conversion"):
+      maxtext_vllm_state = converter.convert(model_state)
+  else:
+    from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO_CONVERSION_RULES
+    vllm_hf_overrides = getattr(trainer_config, "vllm_hf_overrides", None) or getattr(getattr(trainer_config, "vllm", None), "vllm_hf_overrides", None) or ""
+    force_maxtext = "MaxTextForCausalLM" in str(vllm_hf_overrides)
+    
+    # We want to properly select rules.
+    if force_maxtext:
+      rules = []
+    else:
+      # use qwen3_moe fall back
+      rules = _MODEL_TO_CONVERSION_RULES.get(trainer_config.model_name,
+               _MODEL_TO_CONVERSION_RULES.get('qwen3_moe', []))
+               
+    converter = WeightConverter(rules, tp=sampler_config.rollout_tensor_parallelism)
+    with timer("Overall Conversion"):
+      maxtext_vllm_state = converter.convert(model_state, target_state=golden_llm_state)
+  del model_state, model, mesh, converter
+  gc.collect()
+  try:
+    jax.clear_caches()
+  except Exception:
+    pass
 
   # --- Debug checks (key coverage, weight stats, GCS upload) ---------------
   # These run only when debug_converter=true, since they are purely for

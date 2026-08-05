@@ -32,12 +32,13 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 
-from pathwaysutils.experimental import reshard as _experimental_reshard
+from tunix.rl import reshard
 from tunix.generate import mappings
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
 
 from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO_CONVERSION_RULES
+from maxtext.integration.vllm.convert_utils import _reshard_in_chunks
 
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh, use_hf_mapping: bool = False):
@@ -204,41 +205,46 @@ class MaxTextVllmSampler(VllmSampler):
     jax.effects_barrier()
 
     logging.info("MaxTextVllmSampler.update_params: starting converter.convert()...")
-    vllm_state = self._converter.convert(updated_weights)
-    jax.block_until_ready(vllm_state)
-
-    logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
-    model_runner_state = self.transformer_state
-
-    logging.info("Weight sync: using pathwaysutils experimental_reshard")
-
-    keys = list(vllm_state.keys())
     start_time = time.time()
-    for i, key in enumerate(keys):
-      weight = vllm_state.pop(key)  # free immediately to avoid accumulating all weights in RAM
-      weight_array = (
-          weight.value if hasattr(weight, "value") else weight
-      )  # handle both jnp arrays and ShardedDeviceArrays
-      weight_shape_matches = weight_array.shape == model_runner_state[key].shape
-      assert (
-          weight_shape_matches
-      ), f"Shape mismatch for {key}: converter produced {weight_array.shape}, expected {model_runner_state[key].shape}"
-      # logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
-      target_sharding = model_runner_state[key].sharding
-      model_runner_state[key] = _experimental_reshard.reshard(
-          weight_array,
-          target_sharding,
-          donate=True,
-          may_alias=None,
-          cache_resharding_plans=True,
+    vllm_state = self._converter.convert(
+        src_pytree=updated_weights, target_state=self.transformer_state
+    )
+    if isinstance(self.transformer_state, nnx.State):
+      state_dict = (
+          self.transformer_state.to_pure_dict()
+          if hasattr(self.transformer_state, "to_pure_dict")
+          else dict(self.transformer_state)
       )
-      del weight, weight_array  # release TPU buffer before pushing back to device
-      # Periodically flush async ops and GC to prevent host RAM accumulation.
-      if i % 16 == 15:
-        jax.effects_barrier()
-        gc.collect()
-    jax.effects_barrier()
-    gc.collect()
+    else:
+      state_dict = self.transformer_state
+
+    if getattr(self.config, "reshard_chunk_size", None) is not None:
+      src_flat = flatten_dict(vllm_state)
+      spec_flat = flatten_dict(state_dict)
+
+      resharded_flat = _reshard_in_chunks(
+          src_flat,
+          spec_flat,
+          reshard.reshard_pytree,
+          getattr(self.config, "reshard_chunk_size", None),
+          getattr(self.config, "delete_dst_buffers", False),
+      )
+      resharded_weights = unflatten_dict(resharded_flat)
+    else:
+      resharded_weights = reshard.reshard_pytree(
+          source=vllm_state,
+          target=state_dict,
+      )
+
+    if isinstance(self.transformer_state, nnx.State):
+      nnx.update(self.transformer_state, resharded_weights)
+    elif hasattr(self.transformer_state, "update"):
+      self.transformer_state.update(resharded_weights)
+    elif isinstance(self.transformer_state, dict):
+      self.transformer_state.update(resharded_weights)
+    else:
+      self._model_runner.state = resharded_weights
+    jax.block_until_ready(self.transformer_state)
     end_time = time.time()
     logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
 
