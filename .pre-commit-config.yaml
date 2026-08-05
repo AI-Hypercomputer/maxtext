@@ -29,6 +29,7 @@ repos:
       - id: pylint
         args:
           - '--disable=R0401,R0917,W0201,W0613'
+          - '--ignored-modules=datasets'
           - "--ignore-patterns='.pytype,.*pyi$'"
           - '--ignore-paths=src/maxtext/input_pipeline/protos|src/maxtext/eval/simple_evals_template'
 
