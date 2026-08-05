@@ -273,10 +273,10 @@ def run_agent_workflow(context: dict, failure_log: str):
   try:
     plan_json = json.loads(analyst_response.text)
     logger.info(f"Analyst diagnosis: {plan_json.get('diagnosis')}")
-    # Phase 2 Hallucination Guard: Verify failing_file exists
     failing_file = plan_json.get("failing_file", "")
-    if failing_file and not Path(failing_file).exists():
-      raise ValueError(f"Unsafe diagnosis: failing_file does not exist: {failing_file}")
+    remediation_level = plan_json.get("remediation_level", "")
+    if failing_file and remediation_level != "level_1_config" and not Path(failing_file).exists():
+      logger.warning(f"Note: failing_file '{failing_file}' not found at exact root path; Fixer will locate.")
   except Exception as e:
     logger.error("Analyst returned invalid JSON: %s", e)
     raise ValueError("Unsafe to patch because Analyst output was not valid JSON") from e
