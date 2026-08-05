@@ -101,7 +101,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   # 2 Special weights
   # 2.1 Special weights: MoE, [0, L, -2, -1]
   # L (optional) stands for layer when scan_layers=True
-  if "MoeBlock_0" in path:
+  if "MoeBlock_0" in path or "routed_experts" in path:
     # exclude gate
     if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
       return mdn((-2,), (-1,))

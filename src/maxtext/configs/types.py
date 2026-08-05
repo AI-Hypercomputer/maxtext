@@ -1806,6 +1806,10 @@ class Muon(BaseModel):
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
   )
+  muon_ns_steps: int = Field(
+      5,
+      description="Number of Newton-Schulz iterations for Muon optimizer.",
+  )
 
 
 class PositionalEmbedding(BaseModel):
@@ -3786,6 +3790,7 @@ class MaxTextConfig(
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
     ]:
