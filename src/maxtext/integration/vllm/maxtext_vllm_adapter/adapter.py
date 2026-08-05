@@ -272,17 +272,16 @@ class MaxTextForCausalLM(nnx.Module):
       )
 
       expert_indices = None
-      if getattr(self.vllm_config.model_config, "enable_return_routed_experts", False):
-        try:
-          expert_indices_list = []
-          intermediates = nnx.state(self.model, nnx.Intermediate)
-          for path, val in intermediates.flat_state().items():
-            if path and path[-1] == "selected_experts":
-              expert_indices_list.append(val.value if hasattr(val, "value") else val)
-          if expert_indices_list:
-            expert_indices = jnp.stack(expert_indices_list, axis=0)
-        except Exception as e:
-          max_logging.log(f"Warning: Failed to extract expert_indices in MaxTextForCausalLM: {e}")
+      try:
+        expert_indices_list = []
+        intermediates = nnx.pop(self.model, nnx.Intermediate)
+        for path, val in intermediates.flat_state().items():
+          if path and path[-1] == "selected_experts":
+            expert_indices_list.append(val.value if hasattr(val, "value") else val)
+        if expert_indices_list:
+          expert_indices = jnp.stack(expert_indices_list, axis=0)
+      except Exception as e:
+        max_logging.log(f"Warning: Failed to extract expert_indices in MaxTextForCausalLM: {e}")
 
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
       hidden = hidden.reshape((-1, hidden.shape[-1]))
