@@ -152,6 +152,17 @@ jobs:
       - name: Run Tests
         shell: bash
         run: |
+          # Cleanly release TPU device locks upon SIGTERM / PR cancellation
+          cleanup_tpu_locks() {
+            echo "Received cancellation signal; cleaning up /dev/accel* locks and /tmp/libtpu_lockfile..."
+            kill -9 "${PYTEST_PID:-}" 2>/dev/null || true
+            rm -f /tmp/libtpu_lockfile
+            fuser -k -9 /dev/accel* 2>/dev/null || true
+            sleep 0.5
+            exit 143
+          }
+          trap cleanup_tpu_locks TERM INT
+
           # Determine environment and entry directory
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.
@@ -227,7 +238,9 @@ jobs:
               --junitxml=test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}.xml \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
-              ${INPUTS_PYTEST_EXTRA_ARGS}
+              ${INPUTS_PYTEST_EXTRA_ARGS} &
+            PYTEST_PID=$!
+            wait $PYTEST_PID
           fi
 
         env:
