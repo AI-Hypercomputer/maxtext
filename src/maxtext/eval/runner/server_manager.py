@@ -16,6 +16,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
+import importlib
 import logging
 import os
 import threading
@@ -25,10 +28,80 @@ from typing import Any
 
 import requests
 
+from maxtext.eval.runner.debug_utils import (
+    MemoryMonitor,
+    log_request_diagnostics,
+)
+
 logger = logging.getLogger(__name__)
 
 
 _HEALTH_ENDPOINT = "/health"
+_AUTO_REQUESTS_PER_ACCELERATOR = 4
+_CHAT_BATCH_WAIT_S = 0.02
+_HARMONY_UTILS_MODULE = "vllm.entrypoints.openai.parser.harmony_utils"
+
+
+def _load_harmony_utils() -> Any:
+  """Load vLLM's version-specific Harmony helper module lazily."""
+  return importlib.import_module(_HARMONY_UTILS_MODULE)
+
+
+def _is_harmony_model(llm: Any) -> bool:
+  """Whether the in-process vLLM model uses GPT-OSS Harmony messages."""
+  model_config = getattr(llm, "model_config", None)
+  hf_config = getattr(model_config, "hf_config", None)
+  return getattr(hf_config, "model_type", None) == "gpt_oss"
+
+
+def _get_harmony_stop_token_ids() -> list[int]:
+  """Return stop IDs only for vLLM revisions that explicitly override them.
+
+  vLLM removed get_stop_tokens_for_assistant_actions in #44009 together with
+  its frontend stop_token_ids override. Newer revisions rely on model/engine
+  EOS handling, so an absent helper deliberately means "do not override".
+  """
+  harmony_utils = _load_harmony_utils()
+  get_stop_tokens = getattr(harmony_utils, "get_stop_tokens_for_assistant_actions", None)
+  if get_stop_tokens is None:
+    logger.info("vLLM uses model/engine-managed GPT-OSS stop tokens; no frontend override needed.")
+    return []
+  return list(get_stop_tokens())
+
+
+def _parse_harmony_chat_output(token_ids: list[int]) -> tuple[str | None, str | None, bool]:
+  """Parse GPT-OSS token IDs with the parser used by vLLM's OpenAI server."""
+  harmony_utils = _load_harmony_utils()
+  parse_chat_output = getattr(harmony_utils, "parse_chat_output", None)
+  if parse_chat_output is None:
+    raise RuntimeError(f"Installed vLLM does not provide {_HARMONY_UTILS_MODULE}.parse_chat_output.")
+  return parse_chat_output(token_ids)
+
+
+def _render_harmony_chat_prompt(messages: list[dict[str, Any]], reasoning_effort: str | None) -> list[int]:
+  """Render GPT-OSS messages exactly as vLLM's OpenAI chat server does."""
+  harmony_utils = _load_harmony_utils()
+  required_helpers = (
+      "get_system_message",
+      "parse_chat_inputs_to_harmony_messages",
+      "render_for_completion",
+  )
+  missing_helpers = [name for name in required_helpers if not callable(getattr(harmony_utils, name, None))]
+  if missing_helpers:
+    raise RuntimeError(f"Installed vLLM Harmony API is missing required helper(s): {', '.join(missing_helpers)}.")
+
+  if reasoning_effort == "none":
+    raise ValueError("Harmony does not support reasoning_effort='none'.")
+  harmony_messages = [
+      harmony_utils.get_system_message(
+          reasoning_effort=reasoning_effort,
+          browser_description=None,
+          python_description=None,
+          with_custom_tools=True,
+      )
+  ]
+  harmony_messages.extend(harmony_utils.parse_chat_inputs_to_harmony_messages(messages))
+  return list(harmony_utils.render_for_completion(harmony_messages))
 
 
 def _top_logprobs_dict(tokenizer: Any, lp_dict: dict | None) -> "dict[str, float] | None":
@@ -37,7 +110,72 @@ def _top_logprobs_dict(tokenizer: Any, lp_dict: dict | None) -> "dict[str, float
   return {tokenizer.decode([tid]): lp.logprob for tid, lp in lp_dict.items()}
 
 
-def _build_app(llm: Any) -> Any:
+class _ChatBatchQueue:
+  """Collect chat requests into short, bounded vLLM generation batches."""
+
+  def __init__(self, llm: Any, max_batch: int):
+    self._llm = llm
+    self._max_batch = max_batch
+    self._pending: list[tuple[Any, Any, "asyncio.Future"]] = []
+    self._timer: "asyncio.TimerHandle | None" = None
+
+  async def submit(self, prompt: Any, sampling_params: Any) -> Any:
+    """Queue one rendered prompt and await its vLLM RequestOutput."""
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    item = (prompt, sampling_params, future)
+    self._pending.append(item)
+    if len(self._pending) >= self._max_batch:
+      if self._timer is not None:
+        self._timer.cancel()
+      self._timer = None
+      self._flush()
+    elif self._timer is None:
+      self._timer = loop.call_later(_CHAT_BATCH_WAIT_S, self._flush)
+    try:
+      return await future
+    except asyncio.CancelledError:
+      if item in self._pending:
+        self._pending.remove(item)
+        if not self._pending and self._timer is not None:
+          self._timer.cancel()
+          self._timer = None
+      raise
+
+  def _flush(self) -> None:
+    """Submit the pending batch and resolve each request future."""
+    self._timer = None
+    batch, self._pending = self._pending, []
+    if not batch:
+      return
+    prompts = [item[0] for item in batch]
+    sampling_params = [item[1] for item in batch]
+    try:
+      outputs = self._llm.generate(prompts, sampling_params)
+    except BaseException as exc:  # noqa: B902  pylint: disable=broad-except
+      if isinstance(exc, Exception):
+        logger.exception("Batched generate() failed for %d requests [%s]: %s", len(batch), type(exc).__name__, exc)
+        for _, _, future in batch:
+          if not future.done():
+            future.set_exception(exc)
+        return
+      logger.critical(
+          "Fatal error in batched generate() [%s]: %s -- terminating process.",
+          type(exc).__name__,
+          exc,
+          exc_info=exc,
+      )
+      os._exit(1)  # pylint: disable=protected-access
+    for (_, _, future), output in zip(batch, outputs):
+      if not future.done():
+        future.set_result(output)
+
+
+def _build_app(
+    llm: Any,
+    enable_chat_api: bool = False,
+    request_concurrency: int = 16,
+) -> Any:
   """Return a FastAPI app that wraps an in-process vLLM LLM instance."""
   import fastapi  # pylint: disable=import-outside-toplevel
   from vllm.sampling_params import SamplingParams  # pylint: disable=import-outside-toplevel
@@ -55,8 +193,11 @@ def _build_app(llm: Any) -> Any:
     body = await request.json()
 
     raw_prompt = body.get("prompt", "")
+    # raw_prompt can be: str, list[int] (single token-ID prompt), list[str] (batch of
+    # text prompts), or list[list[int]] (batch of token-ID prompts).  Normalise to a
+    # list where each element is either a str or a list[int].
     if isinstance(raw_prompt, list) and raw_prompt and isinstance(raw_prompt[0], int):
-      prompts = [raw_prompt]
+      prompts = [raw_prompt]  # single prompt sent as token IDs
     else:
       prompts = raw_prompt if isinstance(raw_prompt, list) else [raw_prompt]
     model_name = body.get("model", "")
@@ -151,6 +292,18 @@ def _build_app(llm: Any) -> Any:
         },
     }
 
+  if not enable_chat_api:
+    return app
+
+  app.state.request_count = 0
+  app.state.use_harmony = _is_harmony_model(llm)
+  app.state.harmony_stop_token_ids = _get_harmony_stop_token_ids() if app.state.use_harmony else []
+  configured_max_model_len = getattr(getattr(llm, "model_config", None), "max_model_len", None)
+  app.state.max_model_len = (
+      configured_max_model_len if isinstance(configured_max_model_len, int) and configured_max_model_len > 0 else None
+  )
+  app.state.chat_batch_queue = _ChatBatchQueue(llm, max_batch=request_concurrency)
+
   @app.post("/v1/chat/completions")
   async def chat_completions(request: fastapi.Request):  # pylint: disable=unused-variable
     """OpenAI-compatible chat completions endpoint.
@@ -160,27 +313,110 @@ def _build_app(llm: Any) -> Any:
     body = await request.json()
     messages = body.get("messages", [])
     model_name = body.get("model", "")
-    max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
-    temperature = float(body.get("temperature") or 0.0)
+    try:
+      max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
+      temperature = float(body.get("temperature") or 0.0)
+    except (TypeError, ValueError) as exc:
+      raise fastapi.HTTPException(status_code=400, detail="max_tokens and temperature must be numeric.") from exc
     stop = body.get("stop")
+    # Sent by the sampler via extra_body; OpenAI client hoists it to top-level body.
+    reasoning_effort = body.get("reasoning_effort")
+    include_reasoning = bool(body.get("include_reasoning", True))
+    include_raw_output = bool(body.get("include_raw_output", False))
 
-    tokenizer = llm.get_tokenizer()
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
+    try:
+      if not isinstance(messages, list):
+        raise ValueError("messages must be a list.")
+      if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive.")
+
+      if app.state.use_harmony:
+        prompt_token_ids = _render_harmony_chat_prompt(messages, reasoning_effort)
+      else:
+        tokenizer = llm.get_tokenizer()
+        template_kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+        prompt_token_ids = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            **template_kwargs,
+        )
+
+      if isinstance(prompt_token_ids, Mapping):
+        prompt_token_ids = prompt_token_ids["input_ids"]
+      prompt_token_ids = list(prompt_token_ids)
+      if app.state.max_model_len is not None:
+        if len(prompt_token_ids) >= app.state.max_model_len:
+          raise ValueError(
+              f"Input length ({len(prompt_token_ids)}) must be shorter than the model's maximum "
+              f"context length ({app.state.max_model_len})."
+          )
+        # Match vLLM's OpenAI serving behavior: cap the requested output budget
+        # to the context space remaining after chat rendering.
+        max_tokens = min(max_tokens, app.state.max_model_len - len(prompt_token_ids))
+      prompt = {"prompt_token_ids": list(prompt_token_ids)}
+
+      sp_kwargs: dict = {"max_tokens": max_tokens, "temperature": temperature}
+      if stop:
+        sp_kwargs["stop"] = [stop] if isinstance(stop, str) else list(stop)
+      if app.state.use_harmony:
+        requested_stop_token_ids = body.get("stop_token_ids") or []
+        if isinstance(requested_stop_token_ids, int):
+          requested_stop_token_ids = [requested_stop_token_ids]
+        if not isinstance(requested_stop_token_ids, list) or not all(
+            isinstance(token_id, int) for token_id in requested_stop_token_ids
+        ):
+          raise ValueError("stop_token_ids must be an integer or a list of integers.")
+        harmony_stop_token_ids = list(dict.fromkeys([*requested_stop_token_ids, *app.state.harmony_stop_token_ids]))
+        if harmony_stop_token_ids:
+          sp_kwargs["stop_token_ids"] = harmony_stop_token_ids
+    except Exception as exc:  # pylint: disable=broad-except
+      raise fastapi.HTTPException(status_code=400, detail=f"Request formatting failed: {exc}") from exc
+
+    try:
+      sampling_params = SamplingParams(**sp_kwargs)
+      output = await app.state.chat_batch_queue.submit(prompt, sampling_params)
+    except BaseException as exc:
+      logger.exception("chat_completions generate failed [%s]: %s", type(exc).__name__, exc)
+      if isinstance(exc, Exception):
+        raise fastapi.HTTPException(status_code=500, detail=str(exc)) from exc
+      raise
+
+    gen = output.outputs[0]
+    prompt_tokens = len(output.prompt_token_ids)
+    completion_tokens = len(gen.token_ids)
+    raw_output = gen.text
+    reasoning = None
+    final_content = raw_output
+    if app.state.use_harmony:
+      try:
+        reasoning, final_content, _ = _parse_harmony_chat_output(list(gen.token_ids))
+      except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("Failed to parse GPT-OSS Harmony output token IDs: %s", exc)
+        logger.debug("Unparsed GPT-OSS raw output: %r", raw_output)
+        raise fastapi.HTTPException(status_code=500, detail="Failed to parse GPT-OSS Harmony output.") from exc
+      logger.debug(
+          "Parsed GPT-OSS Harmony output: raw=%r reasoning=%r final=%r",
+          raw_output,
+          reasoning,
+          final_content,
+      )
+
+    app.state.request_count += 1
+    log_request_diagnostics(
+        llm,
+        app.state.request_count,
+        prompt_tokens,
+        completion_tokens,
+        gen.finish_reason,
     )
 
-    sp_kwargs: dict = {"max_tokens": max_tokens, "temperature": temperature}
-    if stop:
-      sp_kwargs["stop"] = [stop] if isinstance(stop, str) else list(stop)
+    message: dict[str, Any] = {"role": "assistant", "content": final_content}
+    if include_reasoning and reasoning is not None:
+      # Matches the field emitted by vLLM's OpenAI-compatible ChatMessage.
+      message["reasoning"] = reasoning
 
-    outputs = llm.generate([prompt], SamplingParams(**sp_kwargs))
-    gen = outputs[0].outputs[0]
-    prompt_tokens = len(outputs[0].prompt_token_ids)
-    completion_tokens = len(gen.token_ids)
-
-    return {
+    response = {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -188,7 +424,7 @@ def _build_app(llm: Any) -> Any:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": gen.text},
+                "message": message,
                 "finish_reason": gen.finish_reason or "stop",
                 "logprobs": None,
             }
@@ -199,6 +435,11 @@ def _build_app(llm: Any) -> Any:
             "total_tokens": prompt_tokens + completion_tokens,
         },
     }
+    if include_raw_output:
+      # Non-standard, opt-in diagnostics extension. Raw Harmony output must not
+      # leak into message.content because graders should see final content only.
+      response["diagnostics"] = {"raw_output": raw_output}
+    return response
 
   return app
 
@@ -220,6 +461,9 @@ class VllmServerManager:
     max_num_seqs: Max concurrent sequences (None = vLLM default).
     startup_timeout: Seconds to wait for /health to return healthy.
     hbm_memory_utilization: Fraction of HBM reserved for KV cache.
+    enable_chat_api: Whether to expose /v1/chat/completions.
+    concurrency: Maximum chat request concurrency. None selects an automatic
+      value from CPU, accelerator count, and max_num_seqs.
     env: Optional environment-variable overrides.
     additional_vllm_kwargs: Extra kwargs merged into the vLLM LLM() constructor.
   """
@@ -240,6 +484,8 @@ class VllmServerManager:
       max_num_seqs: int | None = None,
       startup_timeout: int = 600,
       hbm_memory_utilization: float = 0.3,
+      enable_chat_api: bool = False,
+      concurrency: int | None = None,
       env: dict[str, str] | None = None,
       additional_vllm_kwargs: dict | None = None,
   ):
@@ -264,16 +510,41 @@ class VllmServerManager:
     self.max_num_seqs = max_num_seqs
     self.startup_timeout = startup_timeout
     self.hbm_memory_utilization = hbm_memory_utilization
+    self.enable_chat_api = enable_chat_api
+    if concurrency is not None and concurrency <= 0:
+      raise ValueError("concurrency must be positive when specified.")
+    self._requested_concurrency = concurrency
+    self._concurrency: int | None = None
     self.env = env
     self.additional_vllm_kwargs = additional_vllm_kwargs or {}
 
     self._llm: Any | None = None
     self._uvicorn_server: Any | None = None
     self._server_thread: threading.Thread | None = None
+    self._memory_monitor: MemoryMonitor | None = None
 
   @property
   def base_url(self) -> str:
     return f"http://{self.host}:{self.port}"
+
+  @property
+  def concurrency(self) -> int:
+    """Resolved request concurrency; available after the server starts."""
+    if self._concurrency is None:
+      raise RuntimeError("Request concurrency is not resolved until the server starts.")
+    return self._concurrency
+
+  def _resolve_concurrency(self, cpu_count: int, accelerator_count: int) -> int:
+    """Resolve the sole request-pressure knob from host and accelerator capacity."""
+    if self._requested_concurrency is not None:
+      return self._requested_concurrency
+    limits = [
+        max(1, cpu_count),
+        max(1, accelerator_count * _AUTO_REQUESTS_PER_ACCELERATOR),
+    ]
+    if self.max_num_seqs is not None:
+      limits.append(max(1, self.max_num_seqs))
+    return min(limits)
 
   def start(self) -> None:
     """Initialize the in-process vLLM LLM and start the HTTP server."""
@@ -345,12 +616,31 @@ class VllmServerManager:
 
     import jax as _jax  # pylint: disable=import-outside-toplevel
 
+    if self.enable_chat_api:
+      detected_accelerators = max(1, _jax.device_count())
+      active_accelerators = min(
+          detected_accelerators,
+          max(1, self.tensor_parallel_size * self.data_parallel_size),
+      )
+      self._concurrency = self._resolve_concurrency(
+          cpu_count=os.cpu_count() or 1,
+          accelerator_count=active_accelerators,
+      )
+      logger.info("Chat request concurrency=%d", self._concurrency)
+
     logger.info("Rank %d: vLLM LLM ready.", _jax.process_index())
+
+    self._memory_monitor = MemoryMonitor(self._llm, _jax.process_index())
+    self._memory_monitor.start()
 
     if _jax.process_index() == 0:
       import uvicorn  # pylint: disable=import-outside-toplevel
 
-      app = _build_app(self._llm)
+      app = _build_app(
+          self._llm,
+          enable_chat_api=self.enable_chat_api,
+          request_concurrency=self.concurrency if self.enable_chat_api else 1,
+      )
       config = uvicorn.Config(
           app,
           host=self.host,
@@ -386,6 +676,9 @@ class VllmServerManager:
 
   def stop(self) -> None:
     """Stop the HTTP server and release the LLM."""
+    if self._memory_monitor is not None:
+      self._memory_monitor.stop()
+      self._memory_monitor = None
     if self._uvicorn_server is not None:
       logger.info("Stopping vLLM HTTP server.")
       self._uvicorn_server.should_exit = True

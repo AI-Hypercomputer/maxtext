@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Tests intentionally exercise private concurrency resolution helpers.
+# pylint: disable=protected-access
+
 """Unit tests for server_manager.VllmServerManager."""
 
 import os
@@ -122,6 +125,22 @@ class TestVllmServerManagerConfig(unittest.TestCase):
     mgr = _make_manager(max_num_seqs=None)
     kwargs = _start_capturing_llm_kwargs(mgr)
     self.assertNotIn("max_num_seqs", kwargs)
+
+  def test_concurrency_auto_uses_cpu_and_accelerator_capacity(self):
+    mgr = _make_manager(enable_chat_api=True)
+    self.assertEqual(mgr._resolve_concurrency(cpu_count=192, accelerator_count=8), 32)
+
+  def test_concurrency_auto_honors_max_num_seqs(self):
+    mgr = _make_manager(enable_chat_api=True, max_num_seqs=12)
+    self.assertEqual(mgr._resolve_concurrency(cpu_count=192, accelerator_count=8), 12)
+
+  def test_explicit_concurrency_is_honored(self):
+    mgr = _make_manager(enable_chat_api=True, concurrency=7, max_num_seqs=4)
+    self.assertEqual(mgr._resolve_concurrency(cpu_count=2, accelerator_count=1), 7)
+
+  def test_nonpositive_concurrency_raises(self):
+    with self.assertRaises(ValueError):
+      _make_manager(concurrency=0)
 
   def test_env_applied_to_os_environ_before_llm_init(self):
     mgr = _make_manager(env={"_TEST_EVAL_TOKEN": "abc123"})
