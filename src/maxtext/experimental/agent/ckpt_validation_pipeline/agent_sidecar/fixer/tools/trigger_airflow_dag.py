@@ -15,8 +15,10 @@
 """Tool for the Overwatch Agent to remotely trigger Airflow DAG runs."""
 
 import argparse
+import json
 import requests
 import os
+import sys
 
 import google.auth
 import google.auth.transport.requests
@@ -30,10 +32,9 @@ DAG_ID = "maxtext_validation_master_dag"
 
 
 def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, overrides=None, dag_id=None):
-  """Triggers an Airflow DAG (defaulting to master DAG or specified sub-DAG), passing the specified branch and optional parameter overrides in conf."""
+  """Triggers a DAG and returns structured run metadata."""
   target_dag = dag_id or os.environ.get("TARGET_DAG_ID", DAG_ID)
   url = f"{AIRFLOW_URL}/api/v1/dags/{target_dag}/dagRuns"
-
   conf_dict = {"maxtext_branch": branch_name}
   if cluster_name:
     conf_dict["xpk_cluster_name"] = cluster_name
@@ -41,51 +42,37 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
     conf_dict["xpk_project"] = project_name
   if zone:
     conf_dict["xpk_zone"] = zone
-
   if overrides:
     if isinstance(overrides, dict):
       conf_dict.update(overrides)
     elif isinstance(overrides, str):
       try:
-        import json
-
         parsed = json.loads(overrides)
         if isinstance(parsed, dict):
           conf_dict.update(parsed)
-      except Exception:
-        for kv in overrides.split(","):
-          if "=" in kv:
-            k, v = kv.split("=", 1)
-            conf_dict[k.strip()] = v.strip()
+      except json.JSONDecodeError:
+        for item in overrides.split(","):
+          if "=" in item:
+            key, value = item.split("=", 1)
+            conf_dict[key.strip()] = value.strip()
 
-  payload = {"conf": conf_dict}
-
-  headers = {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
+  headers = {"Content-Type": "application/json", "Accept": "application/json"}
+  credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+  credentials.refresh(google.auth.transport.requests.Request())
+  headers["Authorization"] = f"Bearer {credentials.token}"
+  response = requests.post(url, json={"conf": conf_dict}, headers=headers, timeout=30)
+  if response.status_code not in (200, 201):
+    raise RuntimeError(f"Airflow trigger failed ({response.status_code}): {response.text}")
+  result = response.json()
+  output = {
+      "ok": True,
+      "dag_id": target_dag,
+      "dag_run_id": result.get("dag_run_id"),
+      "state": result.get("state"),
+      "conf": conf_dict,
   }
-  try:
-    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    auth_req = google.auth.transport.requests.Request()
-    credentials.refresh(auth_req)
-    if credentials.token:
-      headers["Authorization"] = f"Bearer {credentials.token}"
-  except Exception as auth_e:
-    print(f"Warning: Failed to refresh Google auth credentials: {auth_e}")
-
-  try:
-    print(f"Triggering Airflow DAG '{target_dag}' on branch '{branch_name}' (conf: {conf_dict})...")
-    response = requests.post(url, json=payload, headers=headers, timeout=10)
-
-    if response.status_code in (200, 201):
-      run_info = response.json()
-      print(f"✅ Successfully triggered DAG Run ID: {run_info.get('dag_run_id')}")
-      print(f"Status: {run_info.get('state')}")
-    else:
-      print(f"❌ Failed to trigger DAG. Status Code: {response.status_code}")
-      print(f"Response: {response.text}")
-  except requests.exceptions.RequestException as e:
-    print(f"❌ Error communicating with Airflow API: {e}")
+  print(json.dumps(output))
+  return output
 
 
 if __name__ == "__main__":
@@ -112,4 +99,8 @@ if __name__ == "__main__":
   )
   args = parser.parse_args()
 
-  trigger_dag(args.branch, args.cluster_name, args.project_name, args.zone, args.overrides, args.dag_id)
+  try:
+    trigger_dag(args.branch, args.cluster_name, args.project_name, args.zone, args.overrides, args.dag_id)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    print(json.dumps({"ok": False, "error": str(exc)}))
+    sys.exit(1)

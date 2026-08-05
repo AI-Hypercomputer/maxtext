@@ -18,26 +18,13 @@ import os
 import logging
 import sys
 
-from monitor.state_manager import load_state, save_state, MAX_RETRIES
+from monitor.state_manager import MAX_RETRIES, can_attempt, update_run_state
 from monitor.alerter import dispatch_email_alert
 from monitor.gcs_poller import check_for_failures, mark_handled
 from adk_agent import run_agent_workflow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def _check_and_send_victory_laps(state):
-  """Checks if any previously failing runs have succeeded and dispatches Victory Lap emails."""
-  from monitor.alerter import dispatch_victory_lap_alert
-  for run_id, entry in list(state.items()):
-    if isinstance(entry, dict) and entry.get("retries", 0) > 0 and not entry.get("victory_lap_sent", False):
-      logger.info("Run ID %s succeeded after %s retries! Sending Victory Lap email...", run_id, entry["retries"])
-      last_attempt = entry.get("attempts", [{}])[-1] if entry.get("attempts") else {}
-      pr_url = last_attempt.get("pr_url", "")
-      dispatch_victory_lap_alert(run_id=run_id, model_name=entry.get("model", "unknown"), pr_url=pr_url)
-      entry["victory_lap_sent"] = True
-  save_state(state)
 
 
 def main():
@@ -49,9 +36,20 @@ def main():
     airflow_error = os.environ.get("AIRFLOW_ERROR_MESSAGE", "").strip()
     if airflow_error:
       logger.info("Detected direct failure context from Airflow on_failure_callback!")
-      run_id = os.environ.get("RUN_NAME", "airflow_run")
-      model_name = os.environ.get("MAXTEXT_MODEL_NAME", "unknown_model")
-      run_agent_workflow(run_id, model_name, airflow_error, "airflow_callback")
+      context = {
+          "remediation_key": os.environ.get("REMEDIATION_KEY", os.environ.get("RUN_NAME", "airflow_run")),
+          "run_name": os.environ.get("RUN_NAME", "airflow_run"),
+          "maxtext_model_name": os.environ.get("MAXTEXT_MODEL_NAME", "unknown_model"),
+          "airflow_dag_id": os.environ.get("TARGET_DAG_ID", ""),
+          "airflow_task_id": os.environ.get("AIRFLOW_TASK_ID", ""),
+          "airflow_run_id": os.environ.get("AIRFLOW_RUN_ID", ""),
+      }
+      run_key = context["remediation_key"]
+      if not can_attempt(run_key):
+        update_run_state(run_key, status="exhausted", max_attempts=MAX_RETRIES)
+        logger.error("Run %s exhausted its %s patch attempts", run_key, MAX_RETRIES)
+        return
+      run_agent_workflow(context, airflow_error)
       return
 
     # Check if Airflow passed failure context via direct GCS trigger blob (roles/run.invoker compatible)
@@ -59,8 +57,7 @@ def main():
     direct_trigger = check_for_direct_airflow_failures()
     if direct_trigger:
       logger.info("Detected direct failure trigger blob from GCS!")
-      run_id = direct_trigger.get("run_name", "airflow_run")
-      model_name = direct_trigger.get("maxtext_model_name", "unknown_model")
+      run_key = direct_trigger.get("remediation_key") or direct_trigger.get("run_name", "airflow_run")
       error_msg = direct_trigger.get("airflow_error_message", "")
       if direct_trigger.get("airflow_dag_id"):
         os.environ["TARGET_DAG_ID"] = direct_trigger["airflow_dag_id"]
@@ -72,7 +69,11 @@ def main():
         os.environ["ALERT_RECIPIENT"] = direct_trigger["alert_recipient"]
       if direct_trigger.get("maxtext_branch"):
         os.environ["MAXTEXT_BRANCH"] = direct_trigger["maxtext_branch"]
-      run_agent_workflow(run_id, model_name, error_msg, "airflow_callback")
+      if not can_attempt(run_key):
+        update_run_state(run_key, status="exhausted", max_attempts=MAX_RETRIES)
+        logger.error("Run %s exhausted its %s patch attempts", run_key, MAX_RETRIES)
+        return
+      run_agent_workflow(direct_trigger, error_msg)
       return
 
     logger.info("No direct Airflow failure trigger blobs found in GCS. Exiting cleanly.")

@@ -2,6 +2,7 @@ import os
 import time
 import subprocess
 import logging
+import json
 from pathlib import Path
 from google import genai
 from google.genai import types
@@ -121,6 +122,14 @@ def trigger_airflow_dag(branch_name: str, overrides: str = "", dag_id: str = "")
   return _run_script("trigger_airflow_dag.py", args)
 
 
+def wait_for_airflow_run(dag_id: str, dag_run_id: str, timeout_seconds: int = 7200) -> str:
+  """Waits for an exact Airflow DAG run to reach success or failure."""
+  return _run_script(
+      "wait_for_airflow_run.py",
+      ["--dag_id", dag_id, "--dag_run_id", dag_run_id, "--timeout_seconds", str(timeout_seconds)],
+  )
+
+
 def write_remediation_report(run_id: str, content: str) -> str:
   """Writes the final victory lap markdown report to the root of the project."""
   report_path = Path(__file__).resolve().parents[6] / f"remediation_report_{run_id}.md"
@@ -199,9 +208,12 @@ def _load_prompt_file(filename: str) -> str:
     return ""
 
 
-def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_source: str = ""):
+def run_agent_workflow(context: dict, failure_log: str):
   """Executes the 4-Phase Meta-Agent Orchestrator loop using Gemini."""
-  logger.info(f"Starting 4-Phase Meta-Agent Orchestrator workflow for run_id: {run_id}")
+  run_id = context.get("remediation_key") or context.get("run_name", "unknown_run")
+  model_name = context.get("maxtext_model_name", "unknown_model")
+  report_source = context.get("report_source", "")
+  logger.info("Starting 4-Phase workflow for remediation key: %s", run_id)
 
   # Check for manager 1B-token API key first
   api_key = os.environ.get("GEMINI_API_KEY")
@@ -216,9 +228,15 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
     )
     model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-3.1-pro-preview-customtools")
 
-  maxtext_branch = os.environ.get("MAXTEXT_BRANCH", "main")
-  hf_ref_code_url = os.environ.get("HF_REF_CODE_URL", "")
-  hf_config_url = os.environ.get("HF_CONFIG_URL", "")
+  maxtext_branch = context.get("maxtext_branch") or os.environ.get("MAXTEXT_BRANCH", "main")
+  hf_ref_code_url = context.get("hf_ref_code_url") or os.environ.get("HF_REF_CODE_URL", "")
+  hf_config_url = context.get("hf_config_url") or os.environ.get("HF_CONFIG_URL", "")
+  maxtext_overrides = context.get("maxtext_overrides", {})
+  airflow_dag_id = context.get("airflow_dag_id") or os.environ.get("TARGET_DAG_ID", "")
+  airflow_task_id = context.get("airflow_task_id", "")
+  airflow_run_id = context.get("airflow_run_id", "")
+  safe_run_id = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in run_id)[:80]
+  new_branch = f"fix-validation-pipeline-{model_name}-{safe_run_id}"
 
   # --- PHASE 1: ANALYST SUBAGENT (01_diagnose.txt) ---
   logger.info("Phase 1: Invoking Analyst subagent to generate structured JSON One-Pager...")
@@ -230,9 +248,12 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
       hf_ref_code_url=hf_ref_code_url,
       hf_config_url=hf_config_url,
       failure_log=failure_log,
+      maxtext_overrides=json.dumps(maxtext_overrides, indent=2),
+      airflow_dag_id=airflow_dag_id,
+      airflow_task_id=airflow_task_id,
+      airflow_run_id=airflow_run_id,
   )
 
-  import json
 
   analyst_tools = [read_local_file, fetch_reference_code, run_shape_analysis, send_alert_email]
   analyst_chat = client.chats.create(
@@ -255,20 +276,10 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
     # Phase 2 Hallucination Guard: Verify failing_file exists
     failing_file = plan_json.get("failing_file", "")
     if failing_file and not Path(failing_file).exists():
-      logger.warning(f"Overseer detected hallucinated file path '{failing_file}'. Resetting to config override.")
-      plan_json["failing_file"] = ""
-      plan_json["structured_plan"] = ["Step 1: Fix via maxtext_overrides without editing Python files."]
+      raise ValueError(f"Unsafe diagnosis: failing_file does not exist: {failing_file}")
   except Exception as e:
-    logger.error(f"Analyst returned invalid JSON ({e}). Forcing fallback diagnosis...")
-    plan_json = {
-        "diagnosis": "JAX rematerialization array deletion error or config failure.",
-        "error_type": "Logit Divergence",
-        "failing_file": "src/maxtext/layers/normalizations.py",
-        "structured_plan": [
-            "Step 1: Check if failure is Array has been deleted. If so, pass overrides remat_policy=none via trigger_airflow_dag without editing Python files.",
-            "Step 2: Otherwise, apply precise fix to failing file and run linters.",
-        ],
-    }
+    logger.error("Analyst returned invalid JSON: %s", e)
+    raise ValueError("Unsafe to patch because Analyst output was not valid JSON") from e
 
   # --- PHASE 2.5: OVERSEER SURVEILLANCE LOOP (meta_agent.txt) ---
   overseer_instruction = ""
@@ -303,7 +314,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
       "META-AGENT STRICT CONSTRAINTS:\n"
       "- For forward pass or eval verification tasks, if the error is 'RuntimeError: Array has been deleted', DO NOT edit normalizations.py or any nnx code. Fix via maxtext_overrides (remat_policy=none).\n"
       "- For training verification tasks, if 'RuntimeError: Array has been deleted' occurs, report it as an upstream MaxText NNX framework issue.\n"
-      f"- Target branch to fork from: '{maxtext_branch}'. Newly created fix branch will be 'fix-validation-pipeline-{model_name}-{run_id}'.\n"
+      f"- Target branch to fork from: '{maxtext_branch}'. Newly created fix branch will be '{new_branch}'.\n"
       f"{overseer_instruction}"
       f"- Here is the Analyst Structured One-Pager Plan:\n{json.dumps(plan_json, indent=2)}"
   )
@@ -364,7 +375,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
   verifier_template = _load_prompt_file("03_verify.txt")
 
   # Determine the correct sub-DAG ID based on report source filename
-  dag_id_to_trigger = ""
+  dag_id_to_trigger = airflow_dag_id
   if report_source.endswith("_forward_pass.json"):
     dag_id_to_trigger = "dag_verify_forward_pass"
   elif report_source.endswith("_decoding.json"):
@@ -374,11 +385,13 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
   elif report_source.endswith("_forward_compile.json"):
     dag_id_to_trigger = "dag_verify_forward_compile"
 
-  new_branch = f"fix-validation-pipeline-{model_name}-{run_id}"
   verifier_system = (
       f"{verifier_template}\n\n"
       "EXPLICIT META-AGENT VERIFICATION INSTRUCTIONS:\n"
       f"1. The newly created fix branch is exactly: '{new_branch}'.\n"
+      f"Original DAG: '{airflow_dag_id}'; task: '{airflow_task_id}'; run: '{airflow_run_id}'.\n"
+      f"Original overrides: {json.dumps(maxtext_overrides)}\n"
+      f"Fixer result: {fixer_response.text[:4000]}\n"
       "2. For Level 2 (Python Code Patch): Call clear_failed_airflow_task to resume the existing DAG run and preserve upstream context.\n"
       f"3. For Level 1 (Config Override): Call trigger_airflow_dag passing branch_name='{new_branch}' and dag_id='{dag_id_to_trigger}'.\n"
       "4. Upon completion, you MUST call write_remediation_report to create remediation_report_{run_id}.md in the project root and send_alert_email to notify the team."
@@ -386,10 +399,23 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
 
   verifier_tools = [
       trigger_airflow_dag,
+      wait_for_airflow_run,
       clear_failed_airflow_task,
       write_remediation_report,
       send_alert_email,
   ]
+  from monitor.state_manager import record_attempt
+  record_attempt(
+      run_id,
+      status="verification_started",
+      branch=new_branch,
+      diagnosis=plan_json.get("diagnosis", ""),
+      remediation_level=plan_json.get("remediation_level", "unknown"),
+      airflow_dag_id=airflow_dag_id,
+      airflow_task_id=airflow_task_id,
+      airflow_run_id=airflow_run_id,
+  )
+
   verifier_chat = client.chats.create(
       model=model_id,
       config=types.GenerateContentConfig(
@@ -401,7 +427,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
   )
   verifier_prompt = f"Verify branch '{new_branch}' for run_id '{run_id}' and write the final Remediation Report."
   verifier_response = _send_message_with_retry(verifier_chat, verifier_prompt)
-  logger.info("4-Phase Meta-Agent Orchestrator workflow completed successfully.")
+  logger.info("4-Phase agent interaction completed; Airflow terminal state must determine remediation success.")
   return verifier_response.text
 
 

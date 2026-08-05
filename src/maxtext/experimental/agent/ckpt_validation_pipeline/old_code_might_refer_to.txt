@@ -1,0 +1,146 @@
+{MAIN.PY}
+
+import subprocess
+import json
+import os
+import argparse
+from src.maxtext.experimental.agent.checkpoint_validation_agent.model_registry import get_model_config
+
+def validate_checkpoint(model_name, override_length=None, user_json_config=None):
+    #fetch configuration dynamically
+    config = get_model_config(model_name)
+    target_length = override_length or config['max_target_length'] #override if provided, else use registry
+    if user_json_config:
+        print("Applying runtime overrides from JSON config...")
+        if "checkpoint_gcs_path" in user_json_config:
+            #override local path with GCS bucket path
+            config['load_parameters_path'] = user_json_config["checkpoint_gcs_path"]
+        if "max_target_length" in user_json_config:
+            target_length = user_json_config["max_target_length"]
+    print(f"Validating {model_name} with parameters at: {config['load_parameters_path']}")
+    
+    #run a smoke test using decode.py to check if model can load and initialize layers
+    command = [
+        "python3", "src/maxtext/inference/decode.py", "src/maxtext/configs/base.yml",
+        f"load_parameters_path={config['load_parameters_path']}",
+        f"model_name={config['maxtext_model_name']}",
+        f"tokenizer_path={config['tokenizer_path']}",
+        f"scan_layers={config['scan_layers']}",
+        f"max_target_length={target_length}"
+    ]
+    
+    #capture terminal printouts
+    result = subprocess.run(command, capture_output=True, text=True) #error might be coming from 2nd tag here
+
+    #create the report
+    report = {
+        "model": model_name,
+        "success": result.returncode == 0, #if returncode is 0, command worked
+        "stderr": result.stderr if result.returncode != 0 else "Success", #store error message if there's a failure
+        "checkpoint_used": config['load_parameters_path']
+    }
+    
+    report_dir = os.path.join(os.path.dirname(__file__), "reports")
+    os.makedirs(report_dir, exist_ok=True)
+    output_path = os.path.join(report_dir, f"report_{model_name}.json")
+    with open(output_path, "w") as f:
+        json.dump(report, f, indent=4)
+    print(f"Report saved to {output_path}")
+
+#script runs only if called directly
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Validate MaxText Checkpoints")
+    parser.add_argument("model_name", type=str, help="Model key in registry (Optional if using JSON)")
+    parser.add_argument("--max_target_length", type=int, help="Override target length")
+    parser.add_argument("--json_config", type=str,  help="Path to JSON config file with runtime overrides")
+    args = parser.parse_args()
+
+    #choose execution path based on the user input
+    try:
+        if args.json_config:
+            #read user's json config file
+            with open(args.json_config, 'r') as f:
+                json_data = json.load(f)
+            
+            #model_name must come from the JSON in this case
+            if "model_name" not in json_data:
+                raise ValueError("JSON config must contain a 'model_name' key.")
+                
+            validate_checkpoint(json_data["model_name"], args.max_target_length, json_data)
+            
+        elif args.model_name:
+            #fallback to the old way (CLI model name only)
+            validate_checkpoint(args.model_name, args.max_target_length)
+            
+        else:
+            print("FAILED: You must provide either --model_name or --json_config")
+            parser.print_help()
+            
+    except Exception as e:
+        print(f"FAILED: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+{MODEL_REGISTRY.PY}
+
+import os
+
+#base path for checkpoints. should be strictly provided by the environment
+BASE_PATH = os.getenv("MAXTEXT_CHECKPOINT_DIR")
+
+#stop program if user didn't set the variable
+if not BASE_PATH:
+    raise EnvironmentError("MAXTEXT_CHECKPOINT_DIR not set.")
+
+#store metadata for supported models
+MODEL_REGISTRY = {
+    "qwen3-4b-unscanned": {
+        "maxtext_model_name": "qwen3-4b",
+        "checkpoint_dir": "MaxText-Qwen3-4B-Unscanned", 
+        "tokenizer_path": "Qwen/Qwen3-4B",
+        "max_target_length": 2048,
+        "scan_layers": False
+    },
+    #more will be added as progress is made
+}
+
+#used by main.py to get info
+def get_model_config(model_name):
+    if model_name not in MODEL_REGISTRY:
+        raise ValueError(f"Model '{model_name}' not registered.")
+    
+    #copy of registry to prevent accidental edits 
+    configuration = MODEL_REGISTRY[model_name].copy()
+    configuration["load_parameters_path"] = os.path.join(BASE_PATH, configuration["checkpoint_dir"], "0/items") #path to orbax weights
+    return configuration
+
+
+
+
+
+{RECENT MODEL_REGISTRY.PY}
+    #store metadata for supported models
+MODEL_REGISTRY = {
+    "qwen3-4b-unscanned": {
+        "maxtext_model_name": "qwen3-4b",
+        "tokenizer_path": "Qwen/Qwen3-4B",
+        "max_target_length": 2048,
+        "scan_layers": False
+    }
+    #more will be added as progress is made
+}
+
+def get_model_config(model_name):
+    if model_name not in MODEL_REGISTRY:
+        raise ValueError(f"Model '{model_name}' not registered.")
+    return MODEL_REGISTRY[model_name].copy()
