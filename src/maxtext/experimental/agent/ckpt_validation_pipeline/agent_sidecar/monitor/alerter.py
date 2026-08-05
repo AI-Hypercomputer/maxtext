@@ -91,3 +91,35 @@ def dispatch_victory_lap_alert(
     logger.info("Victory Lap email dispatched to %s", recipient)
   except Exception as e:
     logger.error("Failed to send victory lap email: %s", e)
+
+
+def dispatch_emergency_alert(error_summary: str, recipient: str = ""):
+  """Dispatches an emergency email alert if the Overwatch Agent sidecar crashes unexpectedly."""
+  email_script = _get_email_script_path()
+  recipient = recipient or _get_default_recipient()
+  if not recipient:
+    logger.warning("No email recipient configured. Skipping emergency alert email.")
+    return
+
+  subject = "EMERGENCY: Overwatch Agent Crashed During Execution"
+  body = (
+      "The Overwatch Agent Cloud Run sidecar encountered an unhandled top-level exception and terminated.\n\n"
+      f"Error Details:\n{error_summary}\n\n"
+      "Please check Cloud Run Job logs for maxtext-validation-job."
+  )
+
+  cmd = [
+      "python3",
+      email_script,
+      "--recipient",
+      recipient,
+      "--subject",
+      subject,
+      "--body",
+      body,
+  ]
+  try:
+    subprocess.run(cmd, check=True)
+    logger.info("Successfully dispatched emergency alert email to %s", recipient)
+  except Exception as e:
+    logger.error("Failed to execute email dispatch script for emergency alert: %s", e)

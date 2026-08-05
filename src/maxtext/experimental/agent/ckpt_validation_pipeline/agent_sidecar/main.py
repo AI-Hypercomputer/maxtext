@@ -113,6 +113,11 @@ def main():
 
   except Exception as e:
     logger.error("Error during job execution: %s", e)
+    try:
+      from monitor.alerter import dispatch_emergency_alert
+      dispatch_emergency_alert(str(e))
+    except Exception as alert_err:
+      logger.error("Failed to send emergency alert: %s", alert_err)
     sys.exit(1)
 
 
