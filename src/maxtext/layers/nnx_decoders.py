@@ -2022,7 +2022,7 @@ class NNXDecoder(nnx.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    if getattr(cfg, "mhc_expansion_rate", 1) > 1:
+    if getattr(cfg, "mhc_expansion_rate", 1) > 1 and cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4):
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
         hidden_state = self.hc_head(y)
       else:
