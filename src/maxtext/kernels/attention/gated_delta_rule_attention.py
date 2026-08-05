@@ -209,7 +209,8 @@ def gdn_scan_kernel_tpu(
     g_row = _fp32_dot(ones_cx1, g.reshape((1, chunk_size)))
     g_diff = g_col - g_row
 
-    attn_decay = jnp.where(mask_val > 0, jnp.exp(g_diff), 0.0)
+    g_diff_masked = jnp.where(mask_val > 0, g_diff, -1e30)
+    attn_decay = jnp.exp(g_diff_masked)
 
     attn_i = attn * attn_decay * mask_val
     term2 = _fp32_dot(attn_i, v_new)
@@ -300,7 +301,8 @@ def gdn_backward_kernel_tpu(
     g_row = _fp32_dot(ones_cx1, g.reshape((1, chunk_size)))
     g_diff = g_col - g_row
 
-    attn_decay = jnp.where(mask_val > 0, jnp.exp(g_diff), 0.0)
+    g_diff_masked = jnp.where(mask_val > 0, g_diff, -1e30)
+    attn_decay = jnp.exp(g_diff_masked)
 
     # Apply mask explicitly after decay
     attn_i = attn * attn_decay * mask_val
@@ -638,7 +640,8 @@ def pallas_chunk_gated_delta_rule(
   s_matrix = s_matrix.astype(jnp.float32)
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
   mask_val = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
-  s_matrix = s_matrix * jnp.where(mask_val > 0, jnp.exp(g_diff), 0.0)
+  g_diff_masked = jnp.where(mask_val > 0, g_diff, -1e30)
+  s_matrix = s_matrix * jnp.exp(g_diff_masked) * mask_val
 
   # --- Pallas Exact Decomposition ---
   identity = jnp.eye(chunk_size, dtype=jnp.float32)
