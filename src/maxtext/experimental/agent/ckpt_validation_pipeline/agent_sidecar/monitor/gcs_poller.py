@@ -79,7 +79,7 @@ def check_for_direct_airflow_failures():
       data = json.loads(content)
       logger.info("Detected direct Airflow failure trigger blob: %s", blob.name)
       try:
-        bucket.rename_blob(blob, "handled_" + blob.name, if_generation_match=blob.generation)
+        bucket.rename_blob(blob, "handled_" + blob.name, if_source_generation_match=blob.generation)
         return data
       except Exception as e:
         logger.info("Another container likely claimed %s (Error: %s), skipping to next...", blob.name, e)
