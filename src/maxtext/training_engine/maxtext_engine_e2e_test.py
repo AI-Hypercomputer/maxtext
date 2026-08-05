@@ -94,6 +94,33 @@ class TrainingLoopRunner:
 
 class MaxTextTrainingEngineE2ETest(absltest.TestCase):
 
+  def setUp(self):
+    """Sets up test dependencies and mocks."""
+    super().setUp()
+    prof_patcher = mock.patch.object(
+        maxtext_engine.profiler,
+        "Profiler",
+        return_value=mock.MagicMock(),
+    )
+    self.addCleanup(prof_patcher.stop)
+    prof_patcher.start()
+
+    tflops_patcher = mock.patch.object(
+        maxtext_engine.maxtext_utils,
+        "calculate_tflops_training_per_device",
+        return_value=(100.0, None, None),
+    )
+    self.addCleanup(tflops_patcher.stop)
+    tflops_patcher.start()
+
+    metric_logger_patcher = mock.patch.object(
+        maxtext_engine.metrics_module,
+        "MetricsLogger",
+        return_value=mock.MagicMock(),
+    )
+    self.addCleanup(metric_logger_patcher.stop)
+    metric_logger_patcher.start()
+
   def setup_config(self, enable_checkpointing: bool = False):
     """Sets up mock configuration for testing."""
     mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
@@ -102,6 +129,7 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
     mock_config.tensorboard_dir = "/tmp/tb_dir"
     mock_config.run_name = "test_run"
     mock_config.enable_tensorboard = False
+    mock_config.elastic_enabled = False
     if enable_checkpointing:
       mock_config.checkpoint_directory = "/tmp/test_out/e2e_checkpoints"
       mock_config.checkpoint_period = 2
