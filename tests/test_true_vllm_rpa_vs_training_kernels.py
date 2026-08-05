@@ -126,19 +126,23 @@ def run_true_kernel_comparison():
 
   real_vllm_routed_experts = output.routed_experts
   prompt_token_ids = outputs[0].prompt_token_ids
+  generated_token_ids = list(output.token_ids)
 
   vllm_engine.llm_engine.engine_core.shutdown()
   del vllm_engine
   gc.collect()
 
-  num_tokens, num_moe_layers, _ = real_vllm_routed_experts.shape
   batch_size = 1
-  seq_len = num_tokens
+  if real_vllm_routed_experts is not None:
+    num_tokens, num_moe_layers, _ = real_vllm_routed_experts.shape
+    seq_len = num_tokens
+    forced_routed_experts_jax = jnp.expand_dims(jnp.array(real_vllm_routed_experts, dtype=jnp.int32), axis=0)
+    print(f"Extracted vLLM Routed Experts Tensor Shape: {forced_routed_experts_jax.shape}\n")
+  else:
+    print("Warning: real_vllm_routed_experts is None (MaxTextForCausalLM adapter in vLLM does not return routed_experts).")
+    seq_len = len(prompt_token_ids) + len(generated_token_ids) - 1
+    forced_routed_experts_jax = None
 
-  forced_routed_experts_jax = jnp.expand_dims(jnp.array(real_vllm_routed_experts, dtype=jnp.int32), axis=0)
-
-  print(f"Extracted vLLM Routed Experts Tensor Shape: {forced_routed_experts_jax.shape}\n")
-  breakpoint()
   print("=" * 110)
   print("2. CONFIGURING MAXTEXT INFERENCE (vllm_rpa) AND TRAINING MODELS")
   print("=" * 110)
@@ -178,7 +182,7 @@ def run_true_kernel_comparison():
   init_rng, _ = jax.random.split(rng)
 
   input_ids = jnp.expand_dims(
-      jnp.array(prompt_token_ids + list(output.token_ids[:-1]), dtype=jnp.int32)[:seq_len], axis=0
+      jnp.array(prompt_token_ids + generated_token_ids[:-1], dtype=jnp.int32)[:seq_len], axis=0
   )
   segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
   positions = jnp.expand_dims(jnp.arange(seq_len, dtype=jnp.int32), axis=0)
@@ -235,20 +239,27 @@ def run_true_kernel_comparison():
   layer_outputs_train_nat = extract_layer_outputs(vars_train_nat)
 
   # Pass 3: True Training Mode WITH Real vLLM Router Replay (dot_product kernels, forced routing)
-  print("Pass 3: Running True Training Pass WITH Real vLLM Router Replay (attention='dot_product', router replay)...")
-  res_train_rep, vars_train_rep = model_train.apply(
-      vars_dict,
-      input_ids,
-      positions,
-      segment_ids,
-      enable_dropout=False,
-      forced_routed_experts=forced_routed_experts_jax,
-      mutable=["intermediates"],
-  )
-  logits_train_rep = res_train_rep
-  layer_outputs_train_rep = extract_layer_outputs(vars_train_rep)
+  if forced_routed_experts_jax is not None:
+    print("Pass 3: Running True Training Pass WITH Real vLLM Router Replay (attention='dot_product', router replay)...")
+    res_train_rep, vars_train_rep = model_train.apply(
+        vars_dict,
+        input_ids,
+        positions,
+        segment_ids,
+        enable_dropout=False,
+        forced_routed_experts=forced_routed_experts_jax,
+        mutable=["intermediates"],
+    )
+    logits_train_rep = res_train_rep
+    layer_outputs_train_rep = extract_layer_outputs(vars_train_rep)
+  else:
+    print("Pass 3: Skipping Router Replay pass (forced_routed_experts_jax is None).")
+    logits_train_rep = None
+    layer_outputs_train_rep = []
 
-  print("All forward passes completed successfully!\n")
+  print("All forward passes completed!\n")
+
+  num_moe_layers = len(layer_outputs_infer_rpa)
 
   print("=" * 110)
   print("4. COMPARISON 1: TRUE INFERENCE KERNELS (vllm_rpa) VS TRAINING KERNELS (WITHOUT REPLAY)")
@@ -274,50 +285,51 @@ def run_true_kernel_comparison():
     print(f"{'Final Output Logits':<25} | Deferred in vllm_rpa mode (logits computed at serving head)")
   print("-" * 110)
 
-  print("\n" + "=" * 110)
-  print("5. COMPARISON 2: TRUE INFERENCE KERNELS (vllm_rpa) VS TRAINING KERNELS (WITH ROUTER REPLAY)")
-  print("=" * 110)
-  print(f"{'Layer / Output':<25} | {'L_inf (Max Err)':<15} | {'MAE':<15} | {'Cosine Sim':<12} | {'Kernel Status':<15}")
-  print("-" * 110)
+  if layer_outputs_train_rep:
+    print("\n" + "=" * 110)
+    print("5. COMPARISON 2: TRUE INFERENCE KERNELS (vllm_rpa) VS TRAINING KERNELS (WITH ROUTER REPLAY)")
+    print("=" * 110)
+    print(f"{'Layer / Output':<25} | {'L_inf (Max Err)':<15} | {'MAE':<15} | {'Cosine Sim':<12} | {'Kernel Status':<15}")
+    print("-" * 110)
 
-  for lyr in range(num_moe_layers):
-    act_inf = layer_outputs_infer_rpa[lyr]
-    act_rep = layer_outputs_train_rep[lyr]
-    max_err, mae, _, cos_sim = compute_metrics(act_inf, act_rep)
-    status = "EXACT MATCH" if max_err < 1e-5 else "KERNEL+REPLAY"
-    print(f"Layer {lyr:<19} | {max_err:<15.6e} | {mae:<15.6e} | {cos_sim:<12.6f} | {status:<15}")
+    for lyr in range(num_moe_layers):
+      act_inf = layer_outputs_infer_rpa[lyr]
+      act_rep = layer_outputs_train_rep[lyr]
+      max_err, mae, _, cos_sim = compute_metrics(act_inf, act_rep)
+      status = "EXACT MATCH" if max_err < 1e-5 else "KERNEL+REPLAY"
+      print(f"Layer {lyr:<19} | {max_err:<15.6e} | {mae:<15.6e} | {cos_sim:<12.6f} | {status:<15}")
 
-  if logits_infer_rpa is not None:
-    max_err_log2, mae_log2, _, cos_sim_log2 = compute_metrics(logits_infer_rpa, logits_train_rep)
-    status_log2 = "EXACT MATCH" if max_err_log2 < 1e-5 else "KERNEL+REPLAY"
+    if logits_infer_rpa is not None:
+      max_err_log2, mae_log2, _, cos_sim_log2 = compute_metrics(logits_infer_rpa, logits_train_rep)
+      status_log2 = "EXACT MATCH" if max_err_log2 < 1e-5 else "KERNEL+REPLAY"
+      print(
+          f"{'Final Output Logits':<25} | {max_err_log2:<15.6e} |"
+          f" {mae_log2:<15.6e} | {cos_sim_log2:<12.6f} | {status_log2:<15}"
+      )
+    else:
+      print(f"{'Final Output Logits':<25} | Deferred in vllm_rpa mode (logits computed at serving head)")
+    print("-" * 110)
+
+    print("\n" + "=" * 110)
+    print("6. COMPARISON 3: TRAINING WITH ROUTER REPLAY VS TRAINING WITHOUT ROUTER REPLAY")
+    print("=" * 110)
+    print(f"{'Layer / Output':<25} | {'L_inf (Max Err)':<15} | {'MAE':<15} | {'Cosine Sim':<12} | {'Replay Impact':<15}")
+    print("-" * 110)
+
+    for lyr in range(num_moe_layers):
+      act_rep = layer_outputs_train_rep[lyr]
+      act_nat = layer_outputs_train_nat[lyr]
+      max_err, mae, _, cos_sim = compute_metrics(act_rep, act_nat)
+      status = "NO IMPACT" if max_err < 1e-5 else "ROUTER IMPACT"
+      print(f"Layer {lyr:<19} | {max_err:<15.6e} | {mae:<15.6e} | {cos_sim:<12.6f} | {status:<15}")
+
+    max_err_log3, mae_log3, _, cos_sim_log3 = compute_metrics(logits_train_rep, logits_train_nat)
+    status_log3 = "NO IMPACT" if max_err_log3 < 1e-5 else "ROUTER IMPACT"
     print(
-        f"{'Final Output Logits':<25} | {max_err_log2:<15.6e} |"
-        f" {mae_log2:<15.6e} | {cos_sim_log2:<12.6f} | {status_log2:<15}"
+        f"{'Final Output Logits':<25} | {max_err_log3:<15.6e} |"
+        f" {mae_log3:<15.6e} | {cos_sim_log3:<12.6f} | {status_log3:<15}"
     )
-  else:
-    print(f"{'Final Output Logits':<25} | Deferred in vllm_rpa mode (logits computed at serving head)")
-  print("-" * 110)
-
-  print("\n" + "=" * 110)
-  print("6. COMPARISON 3: TRAINING WITH ROUTER REPLAY VS TRAINING WITHOUT ROUTER REPLAY")
-  print("=" * 110)
-  print(f"{'Layer / Output':<25} | {'L_inf (Max Err)':<15} | {'MAE':<15} | {'Cosine Sim':<12} | {'Replay Impact':<15}")
-  print("-" * 110)
-
-  for lyr in range(num_moe_layers):
-    act_rep = layer_outputs_train_rep[lyr]
-    act_nat = layer_outputs_train_nat[lyr]
-    max_err, mae, _, cos_sim = compute_metrics(act_rep, act_nat)
-    status = "NO IMPACT" if max_err < 1e-5 else "ROUTER IMPACT"
-    print(f"Layer {lyr:<19} | {max_err:<15.6e} | {mae:<15.6e} | {cos_sim:<12.6f} | {status:<15}")
-
-  max_err_log3, mae_log3, _, cos_sim_log3 = compute_metrics(logits_train_rep, logits_train_nat)
-  status_log3 = "NO IMPACT" if max_err_log3 < 1e-5 else "ROUTER IMPACT"
-  print(
-      f"{'Final Output Logits':<25} | {max_err_log3:<15.6e} |"
-      f" {mae_log3:<15.6e} | {cos_sim_log3:<12.6f} | {status_log3:<15}"
-  )
-  print("-" * 110)
+    print("-" * 110)
 
 
 if __name__ == "__main__":
