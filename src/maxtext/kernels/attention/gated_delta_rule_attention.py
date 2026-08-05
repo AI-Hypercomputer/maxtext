@@ -415,7 +415,8 @@ def _gdn_pallas_forward(w, u, q, k, v, g, beta, h_init):
       ],
       out_specs=[out_spec, state_spec],
       compiler_params=pltpu.CompilerParams(
-          dimension_semantics=('parallel', 'parallel')
+          dimension_semantics=('parallel', 'arbitrary'),
+          disable_bounds_checks=True,
       ),
   )(w, u, q, k, v, g, beta, h_init)
 
@@ -507,7 +508,8 @@ def _gdn_pallas_backward(residuals, grad_out_tuple):
       ],
       grid_spec=grid_spec,
       compiler_params=pltpu.CompilerParams(
-          dimension_semantics=('parallel', 'parallel')
+          dimension_semantics=('parallel', 'arbitrary'),
+          disable_bounds_checks=True,
       ),
   )(w, u, q, k, v, g, beta, h_init, grad_out, grad_h_final)
 
