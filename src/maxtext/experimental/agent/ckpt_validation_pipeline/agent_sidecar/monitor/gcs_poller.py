@@ -57,6 +57,28 @@ def check_for_failures():
   return None, None
 
 
+def check_for_direct_airflow_failures():
+  """Checks GCS for direct Airflow on_failure_callback trigger blobs (airflow_direct_failure_*.json)."""
+  logger.info("Checking for direct Airflow failure triggers in gs://%s/", GCS_BUCKET_NAME)
+  try:
+    client = storage.Client()
+    bucket = client.bucket(GCS_BUCKET_NAME)
+    blobs = list(bucket.list_blobs(prefix="airflow_direct_failure_"))
+    valid_blobs = [b for b in blobs if b.name.endswith(".json")]
+    valid_blobs.sort(key=lambda b: b.time_created, reverse=True)
+
+    for blob in valid_blobs:
+      content = blob.download_as_string()
+      data = json.loads(content)
+      logger.info("Detected direct Airflow failure trigger blob: %s", blob.name)
+      # Rename to handled_ so we don't process it twice
+      bucket.rename_blob(blob, "handled_" + blob.name)
+      return data
+  except Exception as e:
+    logger.error("Error checking GCS for direct Airflow failure triggers: %s", e)
+  return None
+
+
 def mark_handled(blob_name):
   """Renames a blob to include 'handled_' so it is ignored in future polls."""
   try:

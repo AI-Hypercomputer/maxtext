@@ -54,6 +54,25 @@ def main():
       run_agent_workflow(run_id, model_name, airflow_error, "airflow_callback")
       return
 
+    # Check if Airflow passed failure context via direct GCS trigger blob (roles/run.invoker compatible)
+    from monitor.gcs_poller import check_for_direct_airflow_failures
+    direct_trigger = check_for_direct_airflow_failures()
+    if direct_trigger:
+      logger.info("Detected direct failure trigger blob from GCS!")
+      run_id = direct_trigger.get("run_name", "airflow_run")
+      model_name = direct_trigger.get("maxtext_model_name", "unknown_model")
+      error_msg = direct_trigger.get("airflow_error_message", "")
+      if direct_trigger.get("hf_ref_code_url"):
+        os.environ["HF_REF_CODE_URL"] = direct_trigger["hf_ref_code_url"]
+      if direct_trigger.get("hf_config_url"):
+        os.environ["HF_CONFIG_URL"] = direct_trigger["hf_config_url"]
+      if direct_trigger.get("alert_recipient"):
+        os.environ["ALERT_RECIPIENT"] = direct_trigger["alert_recipient"]
+      if direct_trigger.get("maxtext_branch"):
+        os.environ["MAXTEXT_BRANCH"] = direct_trigger["maxtext_branch"]
+      run_agent_workflow(run_id, model_name, error_msg, "airflow_callback")
+      return
+
     failure, blob_name = check_for_failures()
     if not failure:
       logger.info("No failures detected in GCS. Checking if any retry runs completed successfully...")
