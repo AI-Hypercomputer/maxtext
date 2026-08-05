@@ -48,17 +48,19 @@ def _get_training_objective_transform(
     shift: bool,
     use_dpo: bool,
     use_sft: bool,
+    completion_only: bool,
     packing: bool,
     pad_id: int,
     bos_token_id: int | None,
 ) -> input_pipeline_utils.ShiftData | input_pipeline_utils.BlockDiffusionCorruption | None:
-  """Selects target preparation for causal or block-diffusion pre-training.
+  """Selects target preparation for causal or block-diffusion training.
 
   Args:
     config: Training configuration containing the objective-specific settings.
     shift: Whether causal language-model targets should be shifted by one token.
     use_dpo: Whether the pipeline is preparing direct-preference data.
     use_sft: Whether the pipeline is preparing supervised fine-tuning data.
+    completion_only: Whether SFT supervision is restricted to completion tokens.
     packing: Whether multiple examples are packed into each sequence.
     pad_id: Token ID used to pad causal language-model examples.
     bos_token_id: Beginning-of-sequence token ID, or None when unavailable.
@@ -68,16 +70,14 @@ def _get_training_objective_transform(
 
   Raises:
     ValueError: If the objective is unsupported or block diffusion is combined with
-      an incompatible post-training or packing mode.
+      DPO or packing.
   """
   objective = getattr(config, "training_objective", "causal_lm")
   if objective == "block_diffusion":
-    if use_sft:
-      raise ValueError("This block-diffusion integration currently supports pre-training only.")
     if use_dpo:
-      raise ValueError("Block-diffusion pre-training is not compatible with DPO.")
+      raise ValueError("Block-diffusion training is not compatible with DPO.")
     if packing:
-      raise ValueError("Block-diffusion pre-training requires packing=False.")
+      raise ValueError("Block-diffusion training requires packing=False.")
     return input_pipeline_utils.BlockDiffusionCorruption(
         block_size=config.causal_block_size,
         mask_id=config.block_diffusion_mask_id,
@@ -85,6 +85,7 @@ def _get_training_objective_transform(
         logit_alignment=config.block_diffusion_logit_alignment,
         canvas_policy=config.block_diffusion_canvas_policy,
         axis=1,
+        completion_only=bool(use_sft and completion_only),
     )
   if objective != "causal_lm":
     raise ValueError(f"Unsupported training objective: {objective}")
@@ -389,6 +390,7 @@ def preprocessing_pipeline(
             completion_only=sft_train_on_completion_only,
             max_target_length=max_target_length,
             unk_id=pad_id,
+            training_objective=getattr(config, "training_objective", "causal_lm"),
         )
     )
     data_column_names = ("inputs", "targets")
@@ -424,6 +426,7 @@ def preprocessing_pipeline(
       shift=shift,
       use_dpo=use_dpo,
       use_sft=use_sft,
+      completion_only=sft_train_on_completion_only,
       packing=packing,
       pad_id=pad_id,
       bos_token_id=tokenizer.bos_token_id,
