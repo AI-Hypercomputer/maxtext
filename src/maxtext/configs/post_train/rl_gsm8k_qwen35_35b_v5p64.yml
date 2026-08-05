@@ -131,7 +131,7 @@ reasoning_start_token_in_prompt: true
 # model closes it itself, then emits the task-specific answer block requested
 # above. Stop as soon as that answer is complete so a later repetition cannot
 # invalidate an otherwise valid sample.
-stop_strings: ["</answer>"]
+stop_strings: []
 
 # ====== Reward ======
 reward_exact_answer: 1.0
