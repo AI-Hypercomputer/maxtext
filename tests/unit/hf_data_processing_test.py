@@ -190,6 +190,7 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
         shift=True,
         use_dpo=False,
         use_sft=False,
+        completion_only=False,
         packing=False,
         pad_id=0,
         bos_token_id=1,
@@ -204,6 +205,7 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
         shift=False,
         use_dpo=False,
         use_sft=False,
+        completion_only=False,
         packing=False,
         pad_id=0,
         bos_token_id=1,
@@ -218,6 +220,7 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
           shift=False,
           use_dpo=False,
           use_sft=False,
+          completion_only=False,
           packing=False,
           pad_id=0,
           bos_token_id=1,
@@ -229,6 +232,7 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
         shift=True,
         use_dpo=False,
         use_sft=False,
+        completion_only=False,
         packing=False,
         pad_id=0,
         bos_token_id=1,
@@ -240,6 +244,7 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
     self.assertEqual(transform.min_noise, 0.05)
     self.assertEqual(transform.logit_alignment, "shifted")
     self.assertEqual(transform.canvas_policy, "seed_and_mask")
+    self.assertFalse(transform.completion_only)
 
   def test_preprocessing_pipeline_installs_block_diffusion_transform(self):
     operations = self._pipeline_operations(self._block_diffusion_config(), shift=True)
@@ -261,18 +266,33 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
         )
     )
 
-  def test_block_diffusion_rejects_packing_and_post_training_modes(self):
+  def test_block_diffusion_sft_uses_completion_scope(self):
+    transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+        self._block_diffusion_config(),
+        shift=True,
+        use_dpo=False,
+        use_sft=True,
+        completion_only=True,
+        packing=False,
+        pad_id=0,
+        bos_token_id=1,
+    )
+
+    self.assertIsInstance(transform, input_pipeline_utils.BlockDiffusionCorruption)
+    self.assertTrue(transform.completion_only)
+
+  def test_block_diffusion_rejects_packing_and_dpo(self):
     base_args = {
         "shift": True,
         "use_dpo": False,
         "use_sft": False,
+        "completion_only": False,
         "packing": False,
         "pad_id": 0,
         "bos_token_id": 1,
     }
     cases = (
         ({"packing": True}, "packing=False"),
-        ({"use_sft": True}, "pre-training only"),
         ({"use_dpo": True}, "not compatible with DPO"),
     )
     for overrides, expected_message in cases:
