@@ -1815,6 +1815,10 @@ class Muon(BaseModel):
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
   )
+  muon_ns_steps: int = Field(
+      5,
+      description="Number of Newton-Schulz iterations for Muon optimizer.",
+  )
 
 
 class PositionalEmbedding(BaseModel):

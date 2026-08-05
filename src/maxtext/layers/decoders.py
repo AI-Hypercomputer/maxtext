@@ -1492,7 +1492,7 @@ class Decoder(nn.Module):
           split_rngs={"params": True, "dropout": cfg.enable_dropout},
           in_axes=in_axes_tuple,
           length=num_full_blocks,
-          unroll=num_full_blocks,
+          unroll=1,
           metadata_params={
               nn.PARTITION_NAME: "layers",
               "abstract_init": False,
