@@ -295,10 +295,8 @@ class DenseGeneral(nnx.Module):
       if self.quant is not None:
         raise ValueError("sliced contraction is only supported when quant is None")
       begin, end = slice_bounds
-      if not (0 <= begin < end <= kernel.shape[-1]):
-        raise ValueError(
-            f"slice_bounds {slice_bounds} must be valid and within [0, {kernel.shape[-1]}]"
-        )
+      if not 0 <= begin < end <= kernel.shape[-1]:
+        raise ValueError(f"slice_bounds {slice_bounds} must be valid and within [0, {kernel.shape[-1]}]")
       kernel = kernel[..., begin:end]
 
     kernel = self._maybe_two_stage_all_gather(kernel)

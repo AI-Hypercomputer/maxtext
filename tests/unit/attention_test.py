@@ -2128,6 +2128,7 @@ class MLATest(attention_test_util.MLATestBase):
         loss_fn, argnums=(0, 1), has_aux=True
     )(mla_sliced, lnx)
 
+    self.assertTrue(jnp.allclose(loss_normal, loss_sliced, rtol=1e-05, atol=1e-05, equal_nan=False))
     self.assertTrue(jnp.allclose(out_normal_train, out_sliced_train, rtol=1e-05, atol=1e-05, equal_nan=False))
     self.assertTrue(jnp.allclose(grad_x_normal, grad_x_sliced, rtol=1e-05, atol=1e-05, equal_nan=False))
 
