@@ -16,7 +16,6 @@
 
 from typing import Any
 import unittest
-import pytest
 from unittest.mock import MagicMock
 from absl.testing import parameterized
 
@@ -26,7 +25,6 @@ from maxtext.utils.maxtext_utils import calculate_tflops_training_per_device
 from tests.utils.test_helpers import get_test_config_path
 
 
-@pytest.mark.cpu_only
 class FlopCalculation(parameterized.TestCase):
   """Tests for verifying FLOP calculation in MaxText"""
 

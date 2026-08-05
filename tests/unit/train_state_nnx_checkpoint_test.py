@@ -30,7 +30,6 @@ from maxtext.common import checkpointing
 from maxtext.common import train_state_nnx
 import optax
 import orbax.checkpoint as ocp
-import pytest
 
 
 class MockModel(nnx.Module):
@@ -94,7 +93,6 @@ class TestEmergencyReplicatorCheckpointManager(unittest.TestCase):
     self.assertIs(kwargs["global_mesh"], mesh)
 
 
-@pytest.mark.cpu_only
 class TestTrainStateNNXCheckpoint(unittest.TestCase):
   """Class to test NNX checkpoint."""
 
@@ -333,7 +331,6 @@ class TestTrainStateNNXCheckpoint(unittest.TestCase):
       shutil.rmtree(temp_dir)
 
 
-@pytest.mark.cpu_only
 class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   """Verify maybe_save_checkpoint's fallback step matches the last completed step.
 

@@ -46,7 +46,6 @@ except ImportError:
   HAS_TORCH = False
 
 pytestmark = [
-    pytest.mark.cpu_only,
     pytest.mark.scheduled_only,
     pytest.mark.skipif(not HAS_TORCH, reason="Torch or transformers not available"),
 ]

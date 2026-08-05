@@ -16,7 +16,6 @@
 
 import unittest
 import numpy as np
-import pytest
 
 from maxtext.integration.vllm.maxtext_vllm_rollout import unroll_gemma_scanned_weights
 
@@ -34,14 +33,12 @@ class MockWeights:
 class GemmaScannedWeightsUnrollTest(unittest.TestCase):
   """Verify the correctness of the unroll_gemma_scanned_weights utility."""
 
-  @pytest.mark.cpu_only
   def test_bypasses_non_pytree_weights(self):
     """If the weights object doesn't have `to_pure_dict`, it should be returned unchanged."""
     raw_weights = {"dummy": np.ones(5)}
     result = unroll_gemma_scanned_weights(raw_weights)
     self.assertIs(result, raw_weights)
 
-  @pytest.mark.cpu_only
   def test_bypasses_non_scanned_checkpoints(self):
     """If the checkpoint is not scanned (no 'layers_0' inside 'decoder/layers/'), return unchanged."""
     pure_dict = {
@@ -56,7 +53,6 @@ class GemmaScannedWeightsUnrollTest(unittest.TestCase):
     result = unroll_gemma_scanned_weights(weights)
     self.assertIs(result, weights)
 
-  @pytest.mark.cpu_only
   def test_correctly_unrolls_gemma_scanned_weights(self):
     """Verify that scanned layers are properly interleaved and mapped, and remainder layers are appended."""
     # Pattern length = 2 (layers_0 and layers_1)
@@ -131,7 +127,6 @@ class GemmaScannedWeightsUnrollTest(unittest.TestCase):
     np.testing.assert_array_equal(decoder_dict["layers_0"]["attn"]["wq"], np.array([[9], [9]]))
     np.testing.assert_array_equal(decoder_dict["layers_2"]["attn"]["wq"], np.array([[9], [9]]))
 
-  @pytest.mark.cpu_only
   def test_correctly_unrolls_gemma3_gemma4_scanned_blocks(self):
     """Verify that scanned layers under scanned_blocks are properly interleaved and mapped."""
     arr0 = np.zeros((2, 3, 1))
