@@ -46,6 +46,7 @@ class Profiler:
     if config.profiler != "" and self.start_initial_profile_step >= config.steps:
       raise ValueError("Profiling requested but initial profiling step set past training final step")
     self.prof = None  # managed mldiagnostics xprof collector.
+    self.is_active = False
     self.managed_mldiagnostics = config.managed_mldiagnostics
     if config.managed_mldiagnostics:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
@@ -88,6 +89,8 @@ class Profiler:
   def activate(self, blocking_object=None, optional_postfix=""):
     """Start the profiler.
     nsys profiler becomes no-op when libcudart.so is not available on the system."""
+    if self.is_active:
+      return
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
 
@@ -98,6 +101,7 @@ class Profiler:
         # Only profiling on the first device, if not upload_all_profiler_results. None is for all devices.
         self.prof = mldiag.xprof(process_index_list=None if self.upload_all_profiler_results else [0])
       self.prof.start()
+      self.is_active = True
       return
 
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
@@ -113,6 +117,7 @@ class Profiler:
       self.libcudart.cudaProfilerStart()
     elif self.mode == "xplane":
       jax.profiler.start_trace(self.output_path, profiler_options=self.profiling_options)
+    self.is_active = True
 
   def maybe_deactivate_profiler(self, step, state):
     """Conditionally deactivates the profiler based on the current step.
@@ -126,6 +131,8 @@ class Profiler:
   def deactivate(self, blocking_object=None):
     """End the profiler.
     The result is uploaded to the output bucket."""
+    if not self.is_active:
+      return
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
 
@@ -133,6 +140,7 @@ class Profiler:
       # Handle the special profileing logic for managed_mldiagnostics
       if self.prof is not None:
         self.prof.stop()
+      self.is_active = False
       return
 
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
@@ -150,6 +158,7 @@ class Profiler:
         max_logging.log("WARNING: gcloud is not installed or not found in the system's PATH. Skipping upload...")
     elif self.mode == "xplane":
       jax.profiler.stop_trace()
+    self.is_active = False
 
   def _set_first_profiler_step(self, skip_steps, start_step):
     return start_step + skip_steps
