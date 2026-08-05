@@ -103,6 +103,8 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   max_tokens = int(cfg.get("max_tokens", 1024))
   temperature = float(cfg.get("temperature", 0.0))
   concurrency = int(cfg.get("concurrency", 64))
+  request_timeout = int(cfg.get("request_timeout", 600))
+  max_retries = int(cfg.get("max_retries", 3))
   if "max_model_len" not in cfg:
     raise ValueError("Error: max_model_len is required.")
   gcs_results_path = cfg.get("gcs_results_path")
@@ -145,6 +147,8 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
           max_tokens=max_tokens,
           temperature=temperature,
           concurrency=concurrency,
+          request_timeout=request_timeout,
+          max_retries=max_retries,
       )
       elapsed = time.time() - t0
       logger.info("Generation completed in %.1fs (%.1f samples/s).", elapsed, len(prompts) / elapsed)
@@ -210,6 +214,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--max_tokens", type=int, help="Max tokens per generation.")
   parser.add_argument("--temperature", type=float, help="Sampling temperature.")
   parser.add_argument("--concurrency", type=int, help="HTTP request concurrency.")
+  parser.add_argument("--request_timeout", type=int, help="Per-request HTTP timeout in seconds.")
+  parser.add_argument("--max_retries", type=int, help="Retries per request on timeout/connection error.")
   parser.add_argument("--tensor_parallel_size", type=int, help="vLLM tensor parallelism.")
   parser.add_argument("--max_model_len", type=int, help="vLLM max context length.")
   parser.add_argument("--server_host", help="vLLM server host.")
