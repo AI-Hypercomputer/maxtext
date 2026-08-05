@@ -3777,6 +3777,10 @@ class MaxTextConfig(
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_5,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
     ]:

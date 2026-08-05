@@ -91,6 +91,11 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
               "hc_base",
               "sinks",
               "tid2eid",
+              "A_log",
+              "dt_bias",
+              "conv1d",
+              "gate",
+              "shared_expert_gate",
           )
       )
       or segment == "bias"
@@ -101,7 +106,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   # 2 Special weights
   # 2.1 Special weights: MoE, [0, L, -2, -1]
   # L (optional) stands for layer when scan_layers=True
-  if "MoeBlock_0" in path:
+  if _is_path_contain_any(("MoeBlock_0", "routed_experts"), path):
     # exclude gate
     if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
       return mdn((-2,), (-1,))
@@ -117,6 +122,13 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
     # Attention qkv projection: [0, L, -2, -1]
     # MLA, exclude wq_a / wkv_a
     elif _is_path_contain_any(("query", "key", "value", "wq_b", "wkv_b", "wkv"), path):
+      return mdn((0,), (-2, -1))
+
+  # 2.3 Special weights: Gated Delta Net (GDN)
+  elif "gdn" in path:
+    if "out_proj" in path:
+      return mdn((0, -2), (-1,))
+    elif _is_path_contain_any(("in_proj_qkvz", "in_proj_ba"), path):
       return mdn((0,), (-2, -1))
 
   # 3 Standard weights, [0, L, -1]
