@@ -37,101 +37,59 @@ def _fp32_matmul(lhs, rhs):
 # 1. OPTIMAL TRIANGLE_SOLVE DECOMPOSE PALLAS KERNEL
 # ==========================================
 
-def local_forward_substitution(a_matrix, b_matrix):
-  """Performs forward substitution for a batch of lower triangular systems.
+def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
+  """Compute inverse of a batch of lower triangular matrices (B, N, N)."""
+  out_dtype = t.dtype
+  chunk = t.shape[-1]
+  block_size = min(block_size, chunk)
+  num_blocks = chunk // block_size
 
-  Solves systems of the form A * x = b, where A is a batch of lower
-  triangular matrices.
+  def local_forward_sub(t_mat: jax.Array, b_mat: jax.Array) -> jax.Array:
+    x_list = []
+    for i in range(block_size):
+      b_i = b_mat[:, i, :]
+      if i == 0:
+        x_i = b_i
+      else:
+        stacked_x = jnp.stack(x_list, axis=1)
+        all_prev_t = t_mat[:, i, :i]
+        prev_sum = jnp.sum(all_prev_t[..., None] * stacked_x, axis=1)
+        x_i = b_i - prev_sum
+      x_list.append(x_i)
+    return jnp.stack(x_list, axis=1)
 
-  Args:
-      a_matrix: A JAX array of shape (B, N, N) representing a batch of lower
-        triangular matrices.
-      b_matrix: A JAX array of shape (B, N, K) representing the right-hand side
-        of the linear systems.
-
-  Returns:
-      A JAX array of shape (B, N, K) containing the solutions x.
-  """
-  _, n_size, _ = b_matrix.shape
-  x_list = []
-  for i in range(n_size):
-    b_i = b_matrix[:, i, :]
-    if i == 0:
-      x_i = b_i
-    else:
-      stacked_x = jnp.stack(x_list, axis=1)  # (B, i, K)
-      all_prev_a = a_matrix[:, i, :i]  # (B, i)
-      prev_sum = jnp.sum(all_prev_a[..., None] * stacked_x, axis=1)  # (B, K)
-      x_i = b_i - prev_sum  # (B, K) for the row i
-    x_list.append(x_i)
-  x = jnp.stack(x_list, axis=1)  # (B, N, K)
-  return x
-
-
-def optimal_decompose_kernel(a_ref, x_ref, *, block_size=16):
-  """Pallas kernel to compute the inverse of a lower triangular matrix block-wise.
-
-  This kernel solves for X in AX = I, where A is a batch of lower triangular
-  matrices. It iterates through blocks of A and uses
-  `local_forward_substitution` to solve for each block of X. The result is
-  written back to `x_ref`.
-  """
-  a = a_ref[...]
-  batch_size, n, _ = a.shape
-  num_blocks = n // block_size
-
-  # AX = I, solve for X block wise. X = I - sum(AX_prev)
+  x_blocks = []
+  identity_mask = jnp.eye(chunk, dtype=t.dtype)
   for i in range(num_blocks):
     start, end = i * block_size, (i + 1) * block_size
-    e_block = jnp.eye(n, dtype=a.dtype)[start:end, :]
-    e_block = jnp.broadcast_to(e_block, (batch_size, block_size, n))
+    e_block = jnp.broadcast_to(
+        identity_mask[start:end, :], (t.shape[0], block_size, chunk)
+    )
 
     if i == 0:
       target_b = e_block
     else:
-      interaction_a = a[:, start:end, :start]
-      solved_x = x_ref[:, :start, :]
-      prev_sum = _fp32_matmul(interaction_a, solved_x)
+      interaction_t = t[:, start:end, :start]
+      solved_x = jnp.concatenate(x_blocks, axis=1)
+      prev_sum = _fp32_matmul(interaction_t, solved_x)
       target_b = e_block - prev_sum
 
-    local_a = a[:, start:end, start:end]
-    x_block = local_forward_substitution(local_a, target_b)
-    x_ref[..., start:end, :] = x_block
+    local_t = t[:, start:end, start:end].astype(jnp.float32)
+    x_block = local_forward_sub(local_t, target_b)
+    x_blocks.append(x_block.astype(out_dtype))
+
+  return jnp.concatenate(x_blocks, axis=1)
 
 
 @functools.partial(
     jax.custom_vjp, nondiff_argnums=(1, 2)
 )
 def run_optimal_decompose(a, n_block_size=8, block_size=16):
-  """Differentiable wrapper for the Pallas exact decompose kernel."""
+  """Differentiable wrapper for the exact decompose solver."""
   orig_shape = a.shape
   n = orig_shape[-1]
-
-  # Flatten all leading dimensions to handle (batch, chunks, heads, N, N)
   a_flat = a.reshape(-1, n, n)
-  b_total = a_flat.shape[0]
-
-  # Pad batch dimension if it's not cleanly divisible by n_block_size
-  pad_b = (n_block_size - (b_total % n_block_size)) % n_block_size
-  if pad_b > 0:
-    a_flat = jnp.pad(a_flat, ((0, pad_b), (0, 0), (0, 0)))
-
-  grid_size = a_flat.shape[0] // n_block_size
-  kernel = functools.partial(optimal_decompose_kernel, block_size=block_size)
-
-  x_flat = pl.pallas_call(
-      kernel,
-      out_shape=jax.ShapeDtypeStruct(a_flat.shape, a_flat.dtype),
-      grid=(grid_size,),
-      in_specs=[pl.BlockSpec((n_block_size, n, n), lambda idx: (idx, 0, 0))],
-      out_specs=pl.BlockSpec((n_block_size, n, n), lambda idx: (idx, 0, 0)),
-      compiler_params=pltpu.CompilerParams(vmem_limit_bytes=100663296),
-  )(a_flat)
-
-  # Strip padding and restore original shape
-  if pad_b > 0:
-    x_flat = x_flat[:b_total]
-
+  x_flat = invert_triangular_matrix(a_flat, block_size=block_size)
   return x_flat.reshape(orig_shape)
 
 
