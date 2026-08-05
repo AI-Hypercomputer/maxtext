@@ -122,7 +122,10 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
       _, diff_params, rest = nnx.split(model, wrt, ...)
 
       def loss_wrapper(diff_params, rest, **inputs_kw):
-        local_model = nnx.merge(graphdef, diff_params, rest)
+        # copy=True keeps the merge from handing back the variables the graphdef was built
+        # from, which belong to the outer trace. Writing to those raises TraceContextError, as
+        # the unscanned decoder does when it updates each layer.
+        local_model = nnx.merge(graphdef, diff_params, rest, copy=True)
         out = loss_fn_ref(local_model, **inputs_kw)
         # Capture updated non-param state (e.g. RNG counters) from local_model.
         _, _, new_rest = nnx.split(local_model, wrt, ...)
