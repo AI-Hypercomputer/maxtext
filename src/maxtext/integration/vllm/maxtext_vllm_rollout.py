@@ -52,6 +52,23 @@ from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextT
 # entry whose value is None", which means direct-sync-only.
 _NO_RULE_TABLE = object()
 
+import vllm.config.utils as vllm_config_utils
+
+# Monkey-patch VLLM's is_init_field to gracefully handle dynamically added
+# fields (like sharding_config injected by tpu-inference) which would otherwise
+# cause ValueError/AssertionError during vllm_config.with_hf_config replacement.
+_orig_is_init_field = vllm_config_utils.is_init_field
+
+
+def _patched_is_init_field(cls, name):
+  try:
+    return _orig_is_init_field(cls, name)
+  except ValueError:
+    return False
+
+
+vllm_config_utils.is_init_field = _patched_is_init_field
+
 
 def _rule_table_for(model_name: str):
   """Maps a MaxText model name to its torchax rule table.
