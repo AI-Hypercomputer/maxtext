@@ -73,10 +73,10 @@ log_period: 20
 eval_interval: 100
 
 # ====== Evaluation ======
-# 20 * 32 = 640 held-out GSM8K prompts per eval pass. Increase this once the
+# 1 * 8 = 8 held-out GSM8K prompts per eval pass. Increase this once the
 # run is stable if you need lower-variance reporting.
-num_test_batches: 20
-eval_batch_size: 32
+num_test_batches: 1
+eval_batch_size: 8
 # Qwen3.5 is a thinking model; top-k=1 greedy decoding can fall into endless
 # token loops. Match the model's published sampling defaults instead.
 eval_sampling_strategy: "standard"

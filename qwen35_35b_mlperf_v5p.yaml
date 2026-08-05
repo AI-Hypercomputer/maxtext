@@ -1,10 +1,10 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: maz-qw35-9
+  name: maz-qw35-10
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: maz-qw35-9
+    xpk.google.com/workload: maz-qw35-10
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -105,7 +105,7 @@ spec:
                 restartPolicy: Always
             containers:
               - name: jax-tpu
-                image: gcr.io/cloud-tpu-multipod-dev/anisha-tmvp/anisha-0805:fixes3
+                image: gcr.io/cloud-tpu-multipod-dev/anisha-tmvp/anisha-0805:ym-fixes
                 imagePullPolicy: Always
                 env:
                 - name: PATHWAYS_HEAD
@@ -174,7 +174,7 @@ spec:
                   
                   python3 -m maxtext.trainers.post_train.rl.train_rl \
                   maxtext/configs/post_train/rl_gsm8k_qwen35_35b_v5p64.yml \
-                  run_name=maz-qw35-01 \
+                  run_name=maz-qw35-10 \
                   enable_tunix_perf_metrics=True \
                   scan_layers=True \
                   use_standalone_converter=False \
@@ -217,7 +217,7 @@ spec:
         template:
           metadata:
             labels:
-              xpk.google.com/workload: maz-qw35-9
+              xpk.google.com/workload: maz-qw35-10
             annotations:
               cloud.google.com/skip-tpu-webhook-check: "true"
           spec:
