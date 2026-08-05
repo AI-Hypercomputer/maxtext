@@ -17,30 +17,41 @@
 import json
 import os
 from datetime import datetime, timezone
-from pathlib import Path
+from google.cloud import storage
 
 DATA_DIR = os.environ.get("ANTIGRAVITY_EXECUTABLE_DATA_DIR", "./data")
-STATE_FILE = Path(DATA_DIR) / "retry_state.json"
+GCS_BUCKET_NAME = "maxtext-validation-agent-reports"
+STATE_BLOB_NAME = "retry_state.json"
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "25"))
 
 
-def load_state():
-  if STATE_FILE.exists():
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-      return json.load(f)
+def _get_blob(run_key: str):
+  client = storage.Client()
+  bucket = client.bucket(GCS_BUCKET_NAME)
+  return bucket.blob(f"retry_state_{run_key}.json")
+
+
+def load_state(run_key: str):
+  try:
+    blob = _get_blob(run_key)
+    if blob.exists():
+      content = blob.download_as_string()
+      return json.loads(content)
+  except Exception as e:
+    print(f"Failed to load state from GCS for {run_key}: {e}")
   return {}
 
 
-def save_state(state):
-  Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
-  temporary = STATE_FILE.with_suffix(".tmp")
-  with open(temporary, "w", encoding="utf-8") as f:
-    json.dump(state, f, indent=2, sort_keys=True)
-  temporary.replace(STATE_FILE)
+def save_state(run_key: str, state: dict):
+  try:
+    blob = _get_blob(run_key)
+    blob.upload_from_string(json.dumps(state, indent=2, sort_keys=True), content_type="application/json")
+  except Exception as e:
+    print(f"Failed to save state to GCS for {run_key}: {e}")
 
 
 def get_run_state(run_key: str) -> dict:
-  entry = load_state().get(run_key, {})
+  entry = load_state(run_key)
   if isinstance(entry, int):
     entry = {"retries": entry}
   return {
@@ -56,7 +67,6 @@ def can_attempt(run_key: str) -> bool:
 
 
 def record_attempt(run_key: str, **details) -> dict:
-  state = load_state()
   entry = get_run_state(run_key)
   entry["retries"] += 1
   attempt = {
@@ -66,16 +76,13 @@ def record_attempt(run_key: str, **details) -> dict:
   }
   entry["attempts"].append(attempt)
   entry["status"] = details.get("status", "attempt_started")
-  state[run_key] = entry
-  save_state(state)
+  save_state(run_key, entry)
   return entry
 
 
 def update_run_state(run_key: str, **updates) -> dict:
-  state = load_state()
   entry = get_run_state(run_key)
   entry.update(updates)
   entry["updated_at"] = datetime.now(timezone.utc).isoformat()
-  state[run_key] = entry
-  save_state(state)
+  save_state(run_key, entry)
   return entry

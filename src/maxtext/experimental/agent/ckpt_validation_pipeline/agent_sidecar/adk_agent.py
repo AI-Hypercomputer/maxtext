@@ -112,9 +112,9 @@ def create_pull_request(base_branch: str, fix_branch_name: str, commit_message: 
 # --- VERIFIER TOOLS ---
 
 
-def trigger_airflow_dag(branch_name: str, overrides: str = "", dag_id: str = "") -> str:
+def trigger_airflow_dag(branch: str, overrides: str = "", dag_id: str = "") -> str:
   """Triggers the Airflow pipeline (specific sub-DAG or master DAG) to verify the patched branch, optionally passing parameter overrides in conf and a specific dag_id."""
-  args = ["--branch", branch_name]
+  args = ["--branch", branch]
   if overrides:
     args.extend(["--overrides", overrides])
   if dag_id:
@@ -136,14 +136,26 @@ def write_remediation_report(run_id: str, content: str) -> str:
   try:
     with open(report_path, "w", encoding="utf-8") as f:
       f.write(content)
-    return f"Report successfully written to {report_path}"
+      
+    # Upload to the reports bucket so it persists after the Cloud Run job exits
+    from google.cloud import storage
+    gcs_bucket = os.environ.get("AGENT_TRIGGER_BUCKET", "maxtext-validation-agent-reports")
+    if gcs_bucket.startswith("gs://"):
+      gcs_bucket = gcs_bucket[5:]
+      
+    client = storage.Client()
+    bucket = client.bucket(gcs_bucket)
+    blob = bucket.blob(f"remediation_report_{run_id}.md")
+    blob.upload_from_filename(str(report_path), content_type="text/markdown")
+    
+    return f"Report successfully written locally and uploaded to gs://{gcs_bucket}/remediation_report_{run_id}.md"
   except Exception as e:
-    return f"Error writing report: {e}"
+    return f"Error writing/uploading report: {e}"
 
 
-def clear_failed_airflow_task(dag_id: str, task_id: str, new_branch: str = "", run_id: str = "") -> str:
+def clear_failed_airflow_task(dag_id: str, task_id: str, new_branch: str = "", base_run_name: str = "", logical_date: str = "") -> str:
   """Clears a failed Airflow task instance to resume an existing DAG run after patching a Python file (Level 2)."""
-  if new_branch and run_id:
+  if new_branch and base_run_name:
     var_cmd = [
         "gcloud",
         "composer",
@@ -151,10 +163,10 @@ def clear_failed_airflow_task(dag_id: str, task_id: str, new_branch: str = "", r
         "run",
         "ml-auto-solutions",
         "--location",
-        "us-central2",
+        os.environ.get("COMPOSER_LOCATION", "us-central1"),
         "variables",
         "set",
-        f"OVERRIDE_BRANCH_{run_id}",
+        f"OVERRIDE_BRANCH_{base_run_name}",
         new_branch,
     ]
     logger.info(f"Setting override branch variable in Composer: {var_cmd}")
@@ -170,7 +182,7 @@ def clear_failed_airflow_task(dag_id: str, task_id: str, new_branch: str = "", r
       "run",
       "ml-auto-solutions",
       "--location",
-      "us-central2",
+      os.environ.get("COMPOSER_LOCATION", "us-central1"),
       "tasks",
       "clear",
       dag_id,
@@ -178,6 +190,8 @@ def clear_failed_airflow_task(dag_id: str, task_id: str, new_branch: str = "", r
       task_id,
       "-y",
   ]
+  if logical_date:
+    cmd.extend(["-s", logical_date, "-e", logical_date])
   logger.info(f"Clearing Airflow task: {cmd}")
   try:
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -186,12 +200,26 @@ def clear_failed_airflow_task(dag_id: str, task_id: str, new_branch: str = "", r
     return f"Error clearing Airflow task: {e}"
 
 
-def send_alert_email(subject: str, body: str, recipient: str = "") -> str:
+def send_alert_email(subject: str, body: str, recipient: str = "", attachment_path: str = "") -> str:
   """Executes send_email.py to alert the engineering team of remediation status or failures."""
   args = ["--subject", subject, "--body", body]
+  recipient = recipient or os.environ.get("ALERT_RECIPIENT") or os.environ.get("USER_EMAIL") or ""
   if recipient:
     args.extend(["--recipient", recipient])
-  return _run_script("send_email.py", args)
+  else:
+    # If no recipient is found, we must pass a dummy value because the argument is required
+    args.extend(["--recipient", "overwatch-team@google.com"])
+    
+  if attachment_path:
+    args.extend(["--attachment", attachment_path])
+  
+  script_path = Path(__file__).resolve().parents[1] / "send_email.py"
+  cmd = ["python3", str(script_path)] + args
+  try:
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return f"Successfully sent email alert: {result.stdout}"
+  except subprocess.CalledProcessError as e:
+    return f"Failed to send email alert: {e.stderr}"
 
 
 # --- AGENT EXECUTION LOOP ---
@@ -199,7 +227,7 @@ def send_alert_email(subject: str, body: str, recipient: str = "") -> str:
 
 def _load_prompt_file(filename: str) -> str:
   """Loads a prompt template from fixer/prompts/ directory."""
-  prompt_path = Path(__file__).parent / "fixer" / "prompts" / filename
+  prompt_path = Path(__file__).resolve().parent / "fixer" / "prompts" / filename
   try:
     with open(prompt_path, "r", encoding="utf-8") as f:
       return f.read()
@@ -271,7 +299,15 @@ def run_agent_workflow(context: dict, failure_log: str):
   logger.info("Phase 2: Reviewing Analyst JSON One-Pager plan...")
   plan_json = {}
   try:
-    plan_json = json.loads(analyst_response.text)
+    # LLMs frequently leak markdown blocks even with response_mime_type="application/json"
+    raw_text = (analyst_response.text or "").strip()
+    if raw_text.startswith("```json"):
+      raw_text = raw_text[7:]
+    if raw_text.startswith("```"):
+      raw_text = raw_text[3:]
+    if raw_text.endswith("```"):
+      raw_text = raw_text[:-3]
+    plan_json = json.loads(raw_text.strip())
     logger.info(f"Analyst diagnosis: {plan_json.get('diagnosis')}")
     failing_file = plan_json.get("failing_file", "")
     remediation_level = plan_json.get("remediation_level", "")
@@ -350,7 +386,7 @@ def run_agent_workflow(context: dict, failure_log: str):
     )
     fixer_prompt = f"Execute the Analyst structured plan for run_id {run_id} and model {model_name}."
     fixer_response = _send_message_with_retry(fixer_chat, fixer_prompt)
-    fixer_response_text = fixer_response.text
+    fixer_response_text = fixer_response.text or ""
     logger.info(f"Fixer Phase completed: {fixer_response_text[:200]}...")
 
     # --- PHASE 3.5: OVERSEER OUTPUT & FIX HALLUCINATION GUARD (meta_agent.txt) ---
@@ -376,7 +412,7 @@ def run_agent_workflow(context: dict, failure_log: str):
         logger.warning(f"Overseer detected hallucination or syntax issue in Fixer output! Directing repair:\n{audit_res}")
         fixer_repair_prompt = f"Overseer Intervention: Repair your fix immediately based on this audit:\n{audit_res}\nRun run_linters after repairing."
         fixer_response = _send_message_with_retry(fixer_chat, fixer_repair_prompt)
-        fixer_response_text = fixer_response.text
+        fixer_response_text = fixer_response.text or ""
         logger.info(f"Fixer Syntactic & Hallucination Repair completed: {fixer_response_text[:200]}...")
       else:
         logger.info("Overseer verified Fixer output: VALID_FIX.")
@@ -385,6 +421,7 @@ def run_agent_workflow(context: dict, failure_log: str):
 
   # --- PHASE 4: VERIFIER SUBAGENT (03_verify.txt) ---
   logger.info("Phase 4: Invoking Verifier subagent to trigger pipeline and write remediation report...")
+  base_run_name = context.get("dag_conf", {}).get("run_name", "default_run")
   verifier_template = _load_prompt_file("03_verify.txt")
 
   # Determine the correct sub-DAG ID based on report source filename
@@ -406,16 +443,22 @@ def run_agent_workflow(context: dict, failure_log: str):
       f"Original overrides: {json.dumps(maxtext_overrides)}\n"
       f"Identified config_overrides: {json.dumps(config_overrides)}\n"
       f"Fixer result: {fixer_response_text[:4000]}\n"
-      "2. For Level 2 (Python Code Patch): Call clear_failed_airflow_task to resume the existing DAG run.\n"
+      "2. For Level 2 (Python Code Patch): Call wrapped_clear_failed_airflow_task to resume the existing DAG run.\n"
       f"3. For Level 1 (Config Override): Call trigger_airflow_dag passing branch='{new_branch}', dag_id='{dag_id_to_trigger}', and overrides='{json.dumps(config_overrides)}'.\n"
       "4. You MUST capture the returned dag_id and dag_run_id, then call wait_for_airflow_run to wait for the execution to complete.\n"
-      "5. Upon successful verification, call write_remediation_report and send_alert_email."
+      "5. Upon successful verification, call write_remediation_report. Then, call send_alert_email and pass the local path to the generated markdown file into the 'attachment_path' argument."
   )
+
+  logical_date = context.get("airflow_logical_date", "")
+
+  def wrapped_clear_failed_airflow_task(dag_id: str, task_id: str) -> str:
+    """Clears a failed Airflow task instance to resume an existing DAG run after a Python Code Patch (Level 2)."""
+    return clear_failed_airflow_task(dag_id, task_id, new_branch, base_run_name, logical_date)
 
   verifier_tools = [
       trigger_airflow_dag,
       wait_for_airflow_run,
-      clear_failed_airflow_task,
+      wrapped_clear_failed_airflow_task,
       write_remediation_report,
       send_alert_email,
   ]
@@ -442,8 +485,9 @@ def run_agent_workflow(context: dict, failure_log: str):
   )
   verifier_prompt = f"Verify branch '{new_branch}' for run_id '{run_id}' and write the final Remediation Report."
   verifier_response = _send_message_with_retry(verifier_chat, verifier_prompt)
+  verifier_response_text = verifier_response.text or ""
   logger.info("4-Phase agent interaction completed; Airflow terminal state must determine remediation success.")
-  return verifier_response.text
+  return verifier_response_text
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@
 import os
 import logging
 import sys
+import json
 
 from monitor.state_manager import MAX_RETRIES, can_attempt, update_run_state
 from monitor.alerter import dispatch_email_alert
@@ -73,6 +74,14 @@ def main():
         update_run_state(run_key, status="exhausted", max_attempts=MAX_RETRIES)
         logger.error("Run %s exhausted its %s patch attempts", run_key, MAX_RETRIES)
         return
+        
+      # CRITICAL BUG FIX: Fetch the actual detailed logit/shape divergence report from the bucket
+      # because Airflow's exception trace does NOT contain the mathematical failure details.
+      validator_report, report_blob = check_for_failures(expected_run_name=direct_trigger.get("run_name"))
+      if validator_report:
+        error_msg += f"\n\n--- DETAILED VALIDATOR REPORT ---\n{json.dumps(validator_report, indent=2)}"
+        mark_handled(report_blob)
+        
       run_agent_workflow(direct_trigger, error_msg)
       return
 

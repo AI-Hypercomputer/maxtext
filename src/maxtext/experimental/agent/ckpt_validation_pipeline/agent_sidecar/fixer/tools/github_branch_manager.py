@@ -29,7 +29,12 @@ def main():
   try:
     subprocess.run(["git", "fetch", "origin"], check=False)
     if args.action == "create":
-      # Create branch based on HEAD or origin/main if available
+      import os
+      base_branch = os.environ.get("MAXTEXT_BRANCH", "main")
+      # Check out the base branch first so we branch off the correct code
+      res = subprocess.run(["git", "checkout", base_branch], check=False)
+      if res.returncode != 0:
+        subprocess.run(["git", "checkout", "-b", base_branch, f"origin/{base_branch}"], check=True)
       subprocess.run(["git", "checkout", "-b", args.branch], check=True)
     elif args.action == "checkout":
       # Checkout local branch or track remote branch

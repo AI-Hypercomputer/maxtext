@@ -24,7 +24,10 @@ import google.auth
 import google.auth.transport.requests
 import requests
 
-AIRFLOW_URL = os.environ["AIRFLOW_WEBSERVER_URL"].rstrip("/")
+AIRFLOW_URL = os.environ.get(
+    "AIRFLOW_WEBSERVER_URL",
+    "https://4bae0a6de8f94e92aa8ee3a6ffc8b278-dot-us-central1.composer.googleusercontent.com"
+).rstrip("/")
 TERMINAL_STATES = {"success", "failed"}
 
 

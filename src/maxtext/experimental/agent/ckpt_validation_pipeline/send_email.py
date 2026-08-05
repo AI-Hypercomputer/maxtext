@@ -25,11 +25,13 @@ from email.message import EmailMessage
 from maxtext.utils import max_logging as logger
 
 
-def send_alert(subject: str, body: str, recipient: str):
+def send_alert(subject: str, body: str, recipient: str, attachment_path: str = None):
   """Dispatches an email alert, gracefully degrading to local logging if SMTP is unavailable."""
   # In a production environment, you would pull these from a secure secrets manager or env.
   smtp_server = os.environ.get("SMTP_SERVER", "localhost")
   smtp_port = int(os.environ.get("SMTP_PORT", 1025))  # Default to a local mock server port
+  smtp_user = os.environ.get("SMTP_USERNAME", "")
+  smtp_pass = os.environ.get("SMTP_PASSWORD", "")
   sender_email = os.environ.get("SENDER_EMAIL", "overwatch-agent@ml-auto-solutions.com")
 
   msg = EmailMessage()
@@ -37,10 +39,18 @@ def send_alert(subject: str, body: str, recipient: str):
   msg["Subject"] = subject
   msg["From"] = sender_email
   msg["To"] = recipient
+  
+  if attachment_path and os.path.exists(attachment_path):
+    with open(attachment_path, 'rb') as f:
+      file_data = f.read()
+      file_name = os.path.basename(attachment_path)
+    msg.add_attachment(file_data, maintype='text', subtype='markdown', filename=file_name)
 
   try:
     with smtplib.SMTP(smtp_server, smtp_port) as server:
-      # server.login(user, password) # Add login here if authentication is required by the SMTP server
+      server.starttls()
+      if smtp_user and smtp_pass:
+        server.login(smtp_user, smtp_pass)
       server.send_message(msg)
     logger.info(f"Successfully sent email alert to {recipient} regarding: {subject}")
   except ConnectionRefusedError:
@@ -50,6 +60,8 @@ def send_alert(subject: str, body: str, recipient: str):
     logger.info(f"To: {recipient}")
     logger.info(f"Subject: {subject}")
     logger.info(f"Body:\n{body}")
+    if attachment_path:
+      logger.info(f"Attachment: {attachment_path}")
     logger.info("--- EMAIL END ---")
   except Exception as e:  # pylint: disable=broad-exception-caught
     logger.error(f"Failed to dispatch email. Exception: {e}")
@@ -61,7 +73,8 @@ if __name__ == "__main__":
   parser.add_argument("--subject", type=str, required=True, help="The subject line of the email.")
   parser.add_argument("--body", type=str, required=True, help="The main content/body of the email.")
   parser.add_argument("--recipient", type=str, required=True, help="The destination email address.")
+  parser.add_argument("--attachment", type=str, required=False, help="Path to a file to attach.")
 
   args = parser.parse_args()
 
-  send_alert(args.subject, args.body, args.recipient)
+  send_alert(args.subject, args.body, args.recipient, args.attachment)

@@ -16,6 +16,7 @@
 
 import argparse
 import json
+import sys
 import time
 import jax
 import absl.logging
@@ -104,7 +105,14 @@ if __name__ == "__main__":
   args, _overrides = parser.parse_known_args()
   report_gcs_dir = args.report_gcs_dir
 
+  run_name_override = "unknown"
+  for override in _overrides:
+    if override.startswith("run_name="):
+      run_name_override = override.split("=", 1)[1]
+      break
+
   report = {
+      "run_name": run_name_override,
       "task": "mock_tensor_validation",
       "timestamp": time.time(),
       "status": "SUCCESS",
@@ -113,7 +121,7 @@ if __name__ == "__main__":
   def _save_report(report_data):
     """Saves the mock tensor validation report locally and uploads to GCS."""
     if report_gcs_dir:
-      report_name = f"mock_tensor_report_{int(time.time())}.json"
+      report_name = f"mock_tensor_report_run_name_{run_name_override}_{int(time.time())}.json"
       gcs_dir = report_gcs_dir
       if not gcs_dir.endswith("/"):
         gcs_dir += "/"
@@ -125,10 +133,12 @@ if __name__ == "__main__":
   try:
     _out_shape = run_mock_forward(*_overrides)
     report["output_shape"] = str(_out_shape)
-  except Exception as e:  # pylint: disable=broad-exception-caught
+  except BaseException as e:  # pylint: disable=broad-exception-caught
     report["status"] = "FAILURE"
-    report["error_message"] = str(e)
+    report["error_message"] = str(e) if str(e) else type(e).__name__
     _save_report(report)
+    if isinstance(e, SystemExit):
+      sys.exit(e.code)
     raise e
 
   _save_report(report)

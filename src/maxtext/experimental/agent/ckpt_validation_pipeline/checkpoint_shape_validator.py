@@ -63,6 +63,7 @@ def check_mismatches(ideal, actual):
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS dir to upload report")
+  parser.add_argument("--run_name", type=str, default="unknown_run", help="Unique Airflow run identifier")
   parser.add_argument(
       "--ideal_shapes_path",
       type=str,
@@ -83,6 +84,7 @@ if __name__ == "__main__":
   _has_mismatch, _mismatched_layers = check_mismatches(ideal_shapes, actual_shapes)
 
   report = {
+      "run_name": args.run_name,
       "task": "checkpoint_shape_validation",
       "timestamp": time.time(),
       "status": "FAILURE" if _has_mismatch else "SUCCESS",
@@ -91,7 +93,7 @@ if __name__ == "__main__":
   }
 
   if args.report_gcs_dir:
-    report_name = f"shape_validation_report_{int(time.time())}.json"
+    report_name = f"shape_validation_report_run_name_{args.run_name}_{int(time.time())}.json"
     gcs_dir = args.report_gcs_dir
     if not gcs_dir.endswith("/"):
       gcs_dir += "/"
