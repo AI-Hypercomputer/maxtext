@@ -214,7 +214,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
     client = genai.Client(
         vertexai=True, project="tpu-prod-env-multipod", location=os.environ.get("VERTEX_LOCATION", "global")
     )
-    model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-3.1-pro-preview")
+    model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-3.1-pro-preview-customtools")
 
   maxtext_branch = os.environ.get("MAXTEXT_BRANCH", "main")
   hf_ref_code_url = os.environ.get("HF_REF_CODE_URL", "")
