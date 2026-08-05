@@ -681,9 +681,14 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
   # adapter (used to synthesize segment_ids that mask pad positions from
   # attention — without this the trainer attends to pad tokens and produces
   # corrupted log-probs).
-  model_tokenizer = AutoTokenizer.from_pretrained(
-      trainer_config.tokenizer_path,
-      token=trainer_config.hf_access_token or None,
+  from maxtext.input_pipeline import tokenizer  # pylint: disable=import-outside-toplevel
+
+  model_tokenizer = tokenizer.build_tokenizer(
+      tokenizer_path=trainer_config.tokenizer_path,
+      tokenizer_type=trainer_config.tokenizer_type,
+      add_bos=False,
+      add_eos=False,
+      hf_access_token=trainer_config.hf_access_token,
   )
   configure_tokenizer_chat_template(model_tokenizer, trainer_config)
 
@@ -692,7 +697,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       sampler_config,
       trainer_devices,
       sampler_devices,
-      tokenizer_pad_id=model_tokenizer.pad_token_id,
+      tokenizer_pad_id=model_tokenizer.pad_id,
   )
 
   if not trainer_config.debug:
