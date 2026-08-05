@@ -84,6 +84,11 @@ def run_true_kernel_comparison():
   prompt = "The capital of France is Paris and it is known for"
   ckpt_path = "gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
 
+  # Set environment variables for MaxText vLLM integration
+  os.environ["NEW_MODEL_DESIGN"] = "1"
+  os.environ["SKIP_JAX_PRECOMPILE"] = "1"
+  os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
   # Initialize real vLLM engine with MaxTextForCausalLM adapter to run MaxText model through vLLM
   vllm_engine = LLM(
       model="Qwen/Qwen3.5-35B-A3B",
