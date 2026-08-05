@@ -121,10 +121,11 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     """
     self._config = config
     super().__init__(root_directory=root_directory, options=options)
-    # pylint: disable=access-member-before-definition
-    if self._checkpoint_manager is not None:
-      directory = self._checkpoint_manager.directory
-      options = options or getattr(self._checkpoint_manager, "options", None)
+    # The Tunix base class initializes its own checkpointer, which we must close.
+    if getattr(self, "_checkpointer", None) is not None:
+      self._checkpointer.close()
+
+    if root_directory is not None:
       # Pathways only supports the persistence APIs, so drop ocdbt/zarr3 there as Tunix does.
       pathways = "proxy" in os.getenv("JAX_PLATFORMS", "")
 
@@ -139,19 +140,24 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
           "custom_metadata": ocp.JsonCheckpointHandler(),
           **(extra_item_handlers or {}),
       }
-      self._checkpoint_manager.close()
       self._checkpoint_manager = ocp.CheckpointManager(
-          directory,
+          root_directory,
           item_names=tuple(handlers),
           item_handlers=handlers,
           options=options,
       )
-    # pylint: enable=access-member-before-definition
+    else:
+      self._checkpoint_manager = None
 
   def wait_until_finished(self):
     """Blocks until outstanding async checkpoint writes are complete."""
     if self._checkpoint_manager is not None:
       self._checkpoint_manager.wait_until_finished()
+
+  def close(self):
+    """Closes the checkpoint manager."""
+    if self._checkpoint_manager is not None:
+      self._checkpoint_manager.close()
 
   def model_to_checkpoint(self, model: nnx.Module) -> nnx.Module:
     """Returns the module whose weights belong in the checkpoint.
