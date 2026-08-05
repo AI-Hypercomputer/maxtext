@@ -46,7 +46,7 @@ Respond ONLY with a valid JSON payload matching the following schema:
   "safe_to_patch": true,
   "remediation_level": "level_1_config | level_2_code | escalate",
   "evidence": ["Specific evidence from logs or source"],
-  "config_overrides": {},
+  "config_overrides": {{}},
   "failing_file": "Path to the failing MaxText python file.",
   "structured_plan": [
     "Step 1: Check out the branch and open file X.",
