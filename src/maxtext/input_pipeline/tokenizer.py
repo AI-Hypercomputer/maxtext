@@ -291,8 +291,8 @@ class HFTokenizer:
   def decode(self, t: Sequence[int]) -> str:
     return self.tokenizer.decode(t)
 
-  def apply_chat_template(self, *args, **kwargs):
-    return self.tokenizer.apply_chat_template(*args, **kwargs)
+  def __getattr__(self, name: str):
+    return getattr(self.tokenizer, name)
 
 
 def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token):
