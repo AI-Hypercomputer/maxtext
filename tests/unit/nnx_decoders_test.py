@@ -51,7 +51,7 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.models import gemma4, gemma4_small
+from maxtext.models import gemma4, gemma4_small, qwen3
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils
@@ -842,6 +842,94 @@ class TestGemma4ScannableBlock(unittest.TestCase):
     np.testing.assert_array_equal(
         block.local_layers.received_attention_metadata.value,
         jnp.ones(5, dtype=jnp.bool_),
+    )
+    np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
+    np.testing.assert_array_equal(block.global_layer.received_attention_metadata.value, True)
+
+
+class _StatefulQwen3NextDecoderLayer(nnx.Module):
+  """Small stand-in that exposes cache ordering and mutable-state updates for Qwen3-Next."""
+
+  def __init__(self, *, layer_idx, **unused_kwargs):
+    is_global = (layer_idx + 1) % 4 == 0
+    self.increment = 10 if is_global else 1
+    self.call_count = nnx.Intermediate(jnp.array(0, dtype=jnp.int32))
+    self.received_attention_metadata = nnx.Intermediate(jnp.array(False))
+
+  def __call__(
+      self,
+      inputs,
+      *unused_args,
+      kv_cache=None,
+      attention_metadata=None,
+      **unused_kwargs,
+  ):
+    self.call_count.value += 1
+    self.received_attention_metadata.value = attention_metadata is not None
+    output = inputs + self.increment
+    if kv_cache is None:
+      return output
+    return output, kv_cache + self.increment
+
+
+class TestQwen3NextScannableBlock(unittest.TestCase):
+  """Tests Qwen3-Next's nested local/global decoder block behavior."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = SimpleNamespace(
+        dtype=jnp.float32,
+        param_scan_axis=1,
+        remat_policy="none",
+        scan_layers=True,
+        inhomogeneous_layer_cycle_interval=4,
+    )
+
+  def _make_block(self):
+    return qwen3.Qwen3NextScannableBlock(
+        config=self.config,
+        mesh=None,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=nnx.Rngs(0),
+    )
+
+  def test_updates_state_through_global_single_iteration_scan(self):
+    with mock.patch.object(qwen3, "Qwen3NextDecoderLayer", _StatefulQwen3NextDecoderLayer):
+      block = self._make_block()
+      output, updated_kvs = block(
+          jnp.zeros((1, 1, 1)),
+          decoder_segment_ids=None,
+          decoder_positions=None,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 13))
+    self.assertIsNone(updated_kvs)
+    np.testing.assert_array_equal(block.local_layers.call_count.value, jnp.ones(3, dtype=jnp.int32))
+    np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
+
+  def test_restores_local_state_and_preserves_kv_order(self):
+    attention_metadata = object()
+
+    with mock.patch.object(qwen3, "Qwen3NextDecoderLayer", _StatefulQwen3NextDecoderLayer):
+      block = self._make_block()
+      output, updated_kvs = block(
+          jnp.zeros((1, 1, 1)),
+          decoder_segment_ids=None,
+          decoder_positions=None,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=tuple(jnp.array(i) for i in range(4)),
+          attention_metadata=attention_metadata,
+      )
+
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 13))
+    np.testing.assert_array_equal(jnp.stack(updated_kvs), jnp.array([1, 2, 3, 13]))
+    np.testing.assert_array_equal(block.local_layers.call_count.value, jnp.ones(3, dtype=jnp.int32))
+    np.testing.assert_array_equal(
+        block.local_layers.received_attention_metadata.value,
+        jnp.ones(3, dtype=jnp.bool_),
     )
     np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
     np.testing.assert_array_equal(block.global_layer.received_attention_metadata.value, True)
