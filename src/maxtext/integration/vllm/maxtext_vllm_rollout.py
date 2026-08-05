@@ -32,26 +32,46 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 
-from pathwaysutils.experimental import reshard as _experimental_reshard
+from tunix.rl import reshard
 from tunix.generate import mappings
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
 
-from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
-from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
-
+from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO_CONVERSION_RULES
+from maxtext.integration.vllm.convert_utils import _reshard_in_chunks
 
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
-
-
-def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
+def _create_model_converter(
+    model_name: str,
+    config: Any,
+    mesh: jax.sharding.Mesh,
+    use_hf_mapping: bool = False,
+    use_weight_converter: bool = False,
+):
   """Instantiate the converter for a MaxText model name."""
-  if model_name.startswith("qwen3.5"):
-    return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
-  elif model_name.startswith("qwen3"):
-    return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
+  tp = config.rollout_tensor_parallelism
+  if not use_hf_mapping and not use_weight_converter:
+    # Default MaxText-to-MaxText sync uses legacy transfer_state_directly unless explicitly opted in
+    if model_name.startswith("gemma4"):
+      return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+    return None
+
+  if model_name in {"qwen3-0.6b"}:
+    rules = _MODEL_TO_CONVERSION_RULES.get("qwen3", []) if use_hf_mapping else []
+    return WeightConverter(rules=rules, tp=tp)
+  if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b"} or (model_name.startswith("qwen3-") and not "3.5" in model_name):
+    # Target state HuggingFace mapping
+    rules = _MODEL_TO_CONVERSION_RULES.get("qwen3_moe", []) if use_hf_mapping else []
+    return WeightConverter(rules=rules, tp=tp)
+  if model_name in {"qwen3.5-35b-a3b"} or model_name.startswith("qwen3.5-"):
+    # Target state HuggingFace mapping
+    rules = _MODEL_TO_CONVERSION_RULES.get("qwen35_moe", []) if use_hf_mapping else []
+    return WeightConverter(rules=rules, tp=tp)
   elif model_name.startswith("gemma4"):
     return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+
+  # For all other models, return None to fallback to transfer_state_with_mappings()
+
   return None
 
 
@@ -197,41 +217,46 @@ class MaxTextVllmSampler(VllmSampler):
     jax.effects_barrier()
 
     logging.info("MaxTextVllmSampler.update_params: starting converter.convert()...")
-    vllm_state = self._converter.convert(updated_weights)
-    jax.block_until_ready(vllm_state)
-
-    logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
-    model_runner_state = self.transformer_state
-
-    logging.info("Weight sync: using pathwaysutils experimental_reshard")
-
-    keys = list(vllm_state.keys())
     start_time = time.time()
-    for i, key in enumerate(keys):
-      weight = vllm_state.pop(key)  # free immediately to avoid accumulating all weights in RAM
-      weight_array = (
-          weight.value if hasattr(weight, "value") else weight
-      )  # handle both jnp arrays and ShardedDeviceArrays
-      weight_shape_matches = weight_array.shape == model_runner_state[key].shape
-      assert (
-          weight_shape_matches
-      ), f"Shape mismatch for {key}: converter produced {weight_array.shape}, expected {model_runner_state[key].shape}"
-      # logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
-      target_sharding = model_runner_state[key].sharding
-      model_runner_state[key] = _experimental_reshard.reshard(
-          weight_array,
-          target_sharding,
-          donate=True,
-          may_alias=None,
-          cache_resharding_plans=True,
+    vllm_state = self._converter.convert(
+        src_pytree=updated_weights, target_state=self.transformer_state
+    )
+    if isinstance(self.transformer_state, nnx.State):
+      state_dict = (
+          self.transformer_state.to_pure_dict()
+          if hasattr(self.transformer_state, "to_pure_dict")
+          else dict(self.transformer_state)
       )
-      del weight, weight_array  # release TPU buffer before pushing back to device
-      # Periodically flush async ops and GC to prevent host RAM accumulation.
-      if i % 16 == 15:
-        jax.effects_barrier()
-        gc.collect()
-    jax.effects_barrier()
-    gc.collect()
+    else:
+      state_dict = self.transformer_state
+
+    if getattr(self.config, "reshard_chunk_size", None) is not None:
+      src_flat = flatten_dict(vllm_state)
+      spec_flat = flatten_dict(state_dict)
+
+      resharded_flat = _reshard_in_chunks(
+          src_flat,
+          spec_flat,
+          reshard.reshard_pytree,
+          getattr(self.config, "reshard_chunk_size", None),
+          getattr(self.config, "delete_dst_buffers", False),
+      )
+      resharded_weights = unflatten_dict(resharded_flat)
+    else:
+      resharded_weights = reshard.reshard_pytree(
+          source=vllm_state,
+          target=state_dict,
+      )
+
+    if isinstance(self.transformer_state, nnx.State):
+      nnx.update(self.transformer_state, resharded_weights)
+    elif hasattr(self.transformer_state, "update"):
+      self.transformer_state.update(resharded_weights)
+    elif isinstance(self.transformer_state, dict):
+      self.transformer_state.update(resharded_weights)
+    else:
+      self._model_runner.state = resharded_weights
+    jax.block_until_ready(self.transformer_state)
     end_time = time.time()
     logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
 
@@ -245,10 +270,7 @@ class MaxTextVllmSampler(VllmSampler):
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
-  """VllmRollout that uses MaxTextVllmSampler for weight synchronisation.
-
-  The extra `maxtext_config` argument is forwarded to the model-specific converter
-  together with `mesh`.  All other arguments mirror VllmRollout.__init__.
+  """VllmRollout that uses VllmSampler with WeightConverter for weight sync.
 
   Usage (direct):
       rollout = MaxTextVllmRollout(
@@ -281,7 +303,41 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     if cache_config_or_size is None:
       cache_config_or_size = rollout_config.kv_cache_size
 
-    converter = _create_model_converter(maxtext_config.model_name, config=maxtext_config, mesh=mesh)
+    model_version = bool(getattr(rollout_config, "rollout_vllm_model_version", ""))
+    force_maxtext = "MaxTextForCausalLM" in str(getattr(rollout_config, "rollout_vllm_hf_overrides", ""))
+    use_hf = bool(model_version and not force_maxtext) 
+
+    vllm_additional_config = (
+        getattr(rollout_config, "rollout_vllm_additional_config", None)
+        or getattr(maxtext_config, "vllm_additional_config", None)
+        or {}
+    )
+    if isinstance(vllm_additional_config, str):
+      import ast
+      import json
+      try:
+        vllm_additional_config = json.loads(vllm_additional_config)
+      except Exception:
+        try:
+          vllm_additional_config = ast.literal_eval(vllm_additional_config)
+        except Exception:
+          vllm_additional_config = {}
+    use_mt_converter = (
+        vllm_additional_config.get("use_weight_converter", False)
+        if isinstance(vllm_additional_config, dict)
+        else False
+    )
+    use_weight_converter = (
+        use_mt_converter
+        or getattr(maxtext_config, "use_weight_converter", False)
+    )
+    converter = _create_model_converter(
+        maxtext_config.model_name,
+        config=maxtext_config,
+        mesh=mesh,
+        use_hf_mapping=use_hf,
+        use_weight_converter=use_weight_converter,
+    )
 
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,
@@ -301,7 +357,16 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     if hasattr(rollout_config, "rollout_vllm_kwargs") and rollout_config.rollout_vllm_kwargs:
       engine_kwargs.update(rollout_config.rollout_vllm_kwargs)
 
-    self._sampler = MaxTextVllmSampler(
+    # Safely extract and parse vllm_additional_config from maxtext_config
+    additional_config = rollout_config.rollout_vllm_additional_config
+    if not additional_config and hasattr(maxtext_config, 'vllm_additional_config'):
+        if type(maxtext_config.vllm_additional_config).__name__ == "DictConfig":
+            from omegaconf import OmegaConf
+            additional_config = OmegaConf.to_container(maxtext_config.vllm_additional_config, resolve=True)
+        elif isinstance(maxtext_config.vllm_additional_config, dict):
+            additional_config = maxtext_config.vllm_additional_config
+
+    self._sampler = VllmSampler(
         tokenizer=tokenizer,
         config=VllmConfig(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
             mesh=mesh,
@@ -314,8 +379,19 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
-            engine_kwargs=engine_kwargs,
-            additional_config=getattr(rollout_config, "rollout_vllm_additional_config", None),
+            additional_config=additional_config,  # <-- Fix: Pass the safely parsed config!
+            engine_kwargs={
+                "model": rollout_config.rollout_vllm_model_version,
+                "max_model_len": cache_config_or_size,
+                "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
+                "max_num_batched_tokens": getattr(rollout_config, "rollout_vllm_max_num_batched_tokens", None),
+                "max_num_seqs": getattr(rollout_config, "rollout_vllm_max_num_seqs", None),
+                "hf_config_path": getattr(rollout_config, "rollout_vllm_hf_config_path", None),
+                "hf_overrides": getattr(rollout_config, "rollout_vllm_hf_overrides", None),
+                "max_logprobs": 1,
+                "logprobs_mode": getattr(rollout_config, "rollout_vllm_logprobs_mode", "processed_logprobs"),
+                **getattr(rollout_config, "rollout_vllm_kwargs", {}),
+            },
         ),
         converter=converter,
     )
@@ -323,3 +399,20 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     # Initial weight sync: run the converter so vLLM starts with real weights.
     state = nnx.state(rollout_actor)
     self._sampler.load_checkpoint(state)
+
+  def update_params(
+      self,
+      params: Any,
+      filter_types: Optional[Tuple[Any, ...]] = None,
+  ) -> None:
+    """Updates rollout parameters with logging of L2 norm for weight propagation verification."""
+    leaves = jax.tree_util.tree_leaves(params)
+    param_leaves = [p.value if hasattr(p, "value") else p for p in leaves if hasattr(p, "shape")]
+    if param_leaves:
+      import jax.numpy as jnp
+      sq_sums = [jnp.sum(jnp.square(p.astype(jnp.float32))) for p in param_leaves]
+      l2_norm = float(jnp.sqrt(sum(sq_sums)))
+      logging.info("STEP WEIGHT SYNC - MaxText Actor Model Parameters L2 Norm: %.6f", l2_norm)
+      print(f"\n[STEP WEIGHT SYNC] MaxText Actor Model Parameters L2 Norm: {l2_norm:.6f}\n", flush=True)
+    super().update_params(params, filter_types)
+

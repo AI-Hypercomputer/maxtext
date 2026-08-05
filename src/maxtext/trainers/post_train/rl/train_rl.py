@@ -145,6 +145,7 @@ from maxtext.input_pipeline.instruction_data_processing import load_data_templat
 from maxtext.utils import max_logging, max_utils, model_creation_utils
 
 
+
 def get_dataset(
     tmvp_config: Any,
     split: str = "train",
@@ -461,11 +462,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list, config_class=types.RLConfig)
 
-  rl_rollout_engine = (
-      functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
-      if trainer_config.use_standalone_converter
-      else "vllm"
-  )
+  rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
 
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
@@ -501,7 +498,10 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           top_k=trainer_config.decode_sampling_top_k,
           rollout_vllm_model_version=trainer_config.tokenizer_path,
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
-          rollout_vllm_tpu_backend_type="jax",
+          rollout_vllm_tpu_backend_type=getattr(
+              trainer_config, "vllm_tpu_backend_type", 
+              "maxtext" if "MaxText" in str(trainer_config.vllm_hf_overrides.get("architectures", [])) else "jax"
+          ),
           rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
           rollout_vllm_additional_config=rollout_additional_config,
           rollout_vllm_init_with_random_weights=True,
