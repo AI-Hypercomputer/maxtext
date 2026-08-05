@@ -66,6 +66,11 @@ class CheckpointManager:
       return self._checkpoint_manager.latest_step()
     return None
 
+  def wait_until_finished(self) -> None:
+    """Waits for any ongoing async checkpoint saves to finish."""
+    if self._checkpoint_manager:
+      self._checkpoint_manager.wait_until_finished()
+
   def save_checkpoint(
       self,
       step: int,
