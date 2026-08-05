@@ -26,17 +26,18 @@ def main():
 
   args = parser.parse_args()
 
-  cmd = []
-  if args.action == "create":
-    # Create and checkout
-    cmd = ["git", "checkout", "-b", args.branch]
-  elif args.action == "checkout":
-    cmd = ["git", "checkout", args.branch]
-  elif args.action == "delete":
-    cmd = ["git", "branch", "-D", args.branch]
-
   try:
-    subprocess.run(cmd, check=True)
+    subprocess.run(["git", "fetch", "origin"], check=False)
+    if args.action == "create":
+      # Create branch based on HEAD or origin/main if available
+      subprocess.run(["git", "checkout", "-b", args.branch], check=True)
+    elif args.action == "checkout":
+      # Checkout local branch or track remote branch
+      res = subprocess.run(["git", "checkout", args.branch], check=False)
+      if res.returncode != 0:
+        subprocess.run(["git", "checkout", "-b", args.branch, f"origin/{args.branch}"], check=True)
+    elif args.action == "delete":
+      subprocess.run(["git", "branch", "-D", args.branch], check=True)
     print(f"Successfully executed {args.action} for branch {args.branch}")
   except subprocess.CalledProcessError as e:
     print(f"Failed to execute git command. Error: {e}")

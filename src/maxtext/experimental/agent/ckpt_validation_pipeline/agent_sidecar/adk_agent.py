@@ -306,69 +306,82 @@ def run_agent_workflow(context: dict, failure_log: str):
   except Exception as e:
     logger.warning(f"Overseer surveillance loop skipped ({e}). Proceeding with primary plan...")
 
-  # --- PHASE 3: FIXER SUBAGENT (02_patch.txt) ---
-  logger.info("Phase 3: Invoking Fixer subagent to execute structured plan...")
-  fixer_template = _load_prompt_file("02_patch.txt")
-  fixer_system = (
-      f"{fixer_template}\n\n"
-      "META-AGENT STRICT CONSTRAINTS:\n"
-      "- For forward pass or eval verification tasks, if the error is 'RuntimeError: Array has been deleted', DO NOT edit normalizations.py or any nnx code. Fix via maxtext_overrides (remat_policy=none).\n"
-      "- For training verification tasks, if 'RuntimeError: Array has been deleted' occurs, report it as an upstream MaxText NNX framework issue.\n"
-      f"- Target branch to fork from: '{maxtext_branch}'. Newly created fix branch will be '{new_branch}'.\n"
-      f"{overseer_instruction}"
-      f"- Here is the Analyst Structured One-Pager Plan:\n{json.dumps(plan_json, indent=2)}"
-  )
+  max_agent_calls = int(os.environ.get("MAX_AGENT_CALLS", "35"))
 
-  fixer_tools = [
-      read_local_file,
-      fetch_reference_code,
-      run_shape_analysis,
-      patch_file,
-      run_linters,
-      manage_github_branch,
-      create_pull_request,
-  ]
-  fixer_chat = client.chats.create(
-      model=model_id,
-      config=types.GenerateContentConfig(
-          system_instruction=fixer_system,
-          tools=fixer_tools,
-          temperature=0.2,
-          automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=20),
-      ),
-  )
-  fixer_prompt = f"Execute the Analyst structured plan for run_id {run_id} and model {model_name}."
-  fixer_response = _send_message_with_retry(fixer_chat, fixer_prompt)
-  logger.info(f"Fixer Phase completed: {fixer_response.text[:200]}...")
+  remediation_level = plan_json.get("remediation_level", "level_2_code")
+  config_overrides = plan_json.get("config_overrides", {})
+  fixer_response_text = ""
 
-  # --- PHASE 3.5: OVERSEER OUTPUT & FIX HALLUCINATION GUARD (meta_agent.txt) ---
-  logger.info("Phase 3.5: Overwatch Overseer inspecting Fixer output for hallucinations, API validity, and syntactic regressions...")
-  try:
-    meta_template = _load_prompt_file("meta_agent.txt")
-    overseer_guard_chat = client.chats.create(
+  if remediation_level == "level_1_config":
+    logger.info("Level 1 Config Repair detected. Short-circuiting Phase 3 code patching and git branch creation.")
+    fixer_response_text = f"Level 1 Config Repair: Overrides identified = {json.dumps(config_overrides)}"
+    new_branch = maxtext_branch
+  else:
+    # --- PHASE 3: FIXER SUBAGENT (02_patch.txt) ---
+    logger.info("Phase 3: Invoking Fixer subagent to execute structured plan...")
+    fixer_template = _load_prompt_file("02_patch.txt")
+    fixer_system = (
+        f"{fixer_template}\n\n"
+        "META-AGENT STRICT CONSTRAINTS:\n"
+        "- For forward pass or eval verification tasks, if the error is 'RuntimeError: Array has been deleted', DO NOT edit normalizations.py or any nnx code. Fix via maxtext_overrides (remat_policy=none).\n"
+        "- For training verification tasks, if 'RuntimeError: Array has been deleted' occurs, report it as an upstream MaxText NNX framework issue.\n"
+        f"- Target branch to fork from: '{maxtext_branch}'. Newly created fix branch will be '{new_branch}'.\n"
+        f"{overseer_instruction}"
+        f"- Here is the Analyst Structured One-Pager Plan:\n{json.dumps(plan_json, indent=2)}"
+    )
+
+    fixer_tools = [
+        read_local_file,
+        fetch_reference_code,
+        run_shape_analysis,
+        patch_file,
+        run_linters,
+        manage_github_branch,
+        create_pull_request,
+    ]
+    fixer_chat = client.chats.create(
         model=model_id,
         config=types.GenerateContentConfig(
-            system_instruction=meta_template,
+            system_instruction=fixer_system,
+            tools=fixer_tools,
             temperature=0.2,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=max_agent_calls),
         ),
     )
-    overseer_audit_prompt = (
-        f"Audit the following Fixer output against the original error log and Analyst plan.\n"
-        f"1. Did the Fixer hallucinate non-existent JAX/NNX APIs or edit irrelevant files?\n"
-        f"2. Are there syntactic regressions (pyink/pylint/SyntaxError)?\n"
-        f"3. If valid, respond with 'VALID_FIX'. Otherwise, output a specific correction prompt for the Fixer.\n\n"
-        f"Fixer Output:\n{fixer_response.text[:2000]}"
-    )
-    audit_res = _send_message_with_retry(overseer_guard_chat, overseer_audit_prompt).text.strip()
-    if "VALID_FIX" not in audit_res or "SyntaxError" in fixer_response.text:
-      logger.warning(f"Overseer detected hallucination or syntax issue in Fixer output! Directing repair:\n{audit_res}")
-      fixer_repair_prompt = f"Overseer Intervention: Repair your fix immediately based on this audit:\n{audit_res}\nRun run_linters after repairing."
-      fixer_response = _send_message_with_retry(fixer_chat, fixer_repair_prompt)
-      logger.info(f"Fixer Syntactic & Hallucination Repair completed: {fixer_response.text[:200]}...")
-    else:
-      logger.info("Overseer verified Fixer output: VALID_FIX.")
-  except Exception as e:
-    logger.warning(f"Overseer Fixer audit skipped ({e}). Proceeding to verification...")
+    fixer_prompt = f"Execute the Analyst structured plan for run_id {run_id} and model {model_name}."
+    fixer_response = _send_message_with_retry(fixer_chat, fixer_prompt)
+    fixer_response_text = fixer_response.text
+    logger.info(f"Fixer Phase completed: {fixer_response_text[:200]}...")
+
+    # --- PHASE 3.5: OVERSEER OUTPUT & FIX HALLUCINATION GUARD (meta_agent.txt) ---
+    logger.info("Phase 3.5: Overwatch Overseer inspecting Fixer output for hallucinations, API validity, and syntactic regressions...")
+    try:
+      meta_template = _load_prompt_file("meta_agent.txt")
+      overseer_guard_chat = client.chats.create(
+          model=model_id,
+          config=types.GenerateContentConfig(
+              system_instruction=meta_template,
+              temperature=0.2,
+          ),
+      )
+      overseer_audit_prompt = (
+          f"Audit the following Fixer output against the original error log and Analyst plan.\n"
+          f"1. Did the Fixer hallucinate non-existent JAX/NNX APIs or edit irrelevant files?\n"
+          f"2. Are there syntactic regressions (pyink/pylint/SyntaxError)?\n"
+          f"3. If valid, respond with 'VALID_FIX'. Otherwise, output a specific correction prompt for the Fixer.\n\n"
+          f"Fixer Output:\n{fixer_response_text[:2000]}"
+      )
+      audit_res = _send_message_with_retry(overseer_guard_chat, overseer_audit_prompt).text.strip()
+      if "VALID_FIX" not in audit_res or "SyntaxError" in fixer_response_text:
+        logger.warning(f"Overseer detected hallucination or syntax issue in Fixer output! Directing repair:\n{audit_res}")
+        fixer_repair_prompt = f"Overseer Intervention: Repair your fix immediately based on this audit:\n{audit_res}\nRun run_linters after repairing."
+        fixer_response = _send_message_with_retry(fixer_chat, fixer_repair_prompt)
+        fixer_response_text = fixer_response.text
+        logger.info(f"Fixer Syntactic & Hallucination Repair completed: {fixer_response_text[:200]}...")
+      else:
+        logger.info("Overseer verified Fixer output: VALID_FIX.")
+    except Exception as e:
+      logger.warning(f"Overseer Fixer audit skipped ({e}). Proceeding to verification...")
 
   # --- PHASE 4: VERIFIER SUBAGENT (03_verify.txt) ---
   logger.info("Phase 4: Invoking Verifier subagent to trigger pipeline and write remediation report...")
@@ -388,13 +401,15 @@ def run_agent_workflow(context: dict, failure_log: str):
   verifier_system = (
       f"{verifier_template}\n\n"
       "EXPLICIT META-AGENT VERIFICATION INSTRUCTIONS:\n"
-      f"1. The newly created fix branch is exactly: '{new_branch}'.\n"
+      f"1. Target branch: '{new_branch}'.\n"
       f"Original DAG: '{airflow_dag_id}'; task: '{airflow_task_id}'; run: '{airflow_run_id}'.\n"
       f"Original overrides: {json.dumps(maxtext_overrides)}\n"
-      f"Fixer result: {fixer_response.text[:4000]}\n"
-      "2. For Level 2 (Python Code Patch): Call clear_failed_airflow_task to resume the existing DAG run and preserve upstream context.\n"
-      f"3. For Level 1 (Config Override): Call trigger_airflow_dag passing branch_name='{new_branch}' and dag_id='{dag_id_to_trigger}'.\n"
-      "4. Upon completion, you MUST call write_remediation_report to create remediation_report_{run_id}.md in the project root and send_alert_email to notify the team."
+      f"Identified config_overrides: {json.dumps(config_overrides)}\n"
+      f"Fixer result: {fixer_response_text[:4000]}\n"
+      "2. For Level 2 (Python Code Patch): Call clear_failed_airflow_task to resume the existing DAG run.\n"
+      f"3. For Level 1 (Config Override): Call trigger_airflow_dag passing branch='{new_branch}', dag_id='{dag_id_to_trigger}', and overrides='{json.dumps(config_overrides)}'.\n"
+      "4. You MUST capture the returned dag_id and dag_run_id, then call wait_for_airflow_run to wait for the execution to complete.\n"
+      "5. Upon successful verification, call write_remediation_report and send_alert_email."
   )
 
   verifier_tools = [
