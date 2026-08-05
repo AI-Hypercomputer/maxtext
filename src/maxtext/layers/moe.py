@@ -713,7 +713,8 @@ class RoutedMoE(nnx.Module):
       tid2eid_int = self.tid2eid.value
       # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
       tid2eid_int = tid2eid_int.astype(jnp.int32)
-      top_k_indices = tid2eid_int[input_ids]
+      # Cast input_ids to int32 to safely index the hash routing table
+      top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     # NOTE: deepseek2 has a different pattern
     elif self.config.model_name.startswith(("deepseek3", "deepseek4")):

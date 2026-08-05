@@ -3185,6 +3185,75 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     np.testing.assert_allclose(mask_np[:, s_len + 1], 0.0)
     print("Mask logic for uncompressed & compressed attention passed perfectly.")
 
+  def test_generate_attention_mask_compressed_all_modes(self):
+    """Verifies AttentionType.COMPRESSED across train, prefill, and autoregressive modes."""
+    batch_size = 2
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=3,
+    )
+
+    # 1. Training mode (batch_size=2, 4D compressed_mask)
+    q_train = jnp.zeros((batch_size, s_len, 1, 128))
+    k_train = jnp.zeros((batch_size, kv_len, 1, 128))
+    c_mask_4d = jnp.zeros((batch_size, 1, s_len, c_len), dtype=jnp.float32)
+    mask_train = op.generate_attention_mask(
+        query=q_train,
+        key=k_train,
+        decoder_segment_ids=None,
+        model_mode="train",
+        compressed_mask=c_mask_4d,
+    )
+    self.assertEqual(mask_train.shape, (batch_size, 1, s_len, kv_len))
+
+    # 2. Prefill mode (batch_size=2, 5D compressed_mask with segment_positions)
+    c_mask_5d = jnp.zeros((batch_size, 1, 1, s_len, c_len), dtype=jnp.float32)
+    seg_pos = jnp.arange(s_len)[None, :].repeat(batch_size, axis=0)
+    mask_prefill = op.generate_attention_mask(
+        query=q_train,
+        key=k_train,
+        decoder_segment_ids=None,
+        model_mode="prefill",
+        compressed_mask=c_mask_5d,
+        segment_positions=seg_pos,
+    )
+    self.assertEqual(mask_prefill.shape, (batch_size, 1, 1, s_len, kv_len))
+
+    # 3. Autoregressive mode (q_seq_len=1, batch_size=2, decoder_segment_ids)
+    q_ar = jnp.zeros((batch_size, 1, 1, 128))
+    k_ar = jnp.zeros((batch_size, kv_len, 1, 128))
+    c_mask_ar = jnp.zeros((batch_size, 1, 1, c_len), dtype=jnp.float32)
+    seg_ids = jnp.ones((batch_size, 16), dtype=jnp.int32)
+    mask_ar = op.generate_attention_mask(
+        query=q_ar,
+        key=k_ar,
+        decoder_segment_ids=seg_ids,
+        model_mode="autoregressive",
+        compressed_mask=c_mask_ar,
+    )
+    self.assertEqual(mask_ar.shape, (batch_size, 1, 1, 1, kv_len))
+
+    # 4. Compressed mask is None (fallback to uncompressed mask shape)
+    mask_none = op.generate_attention_mask(
+        query=q_train,
+        key=k_train,
+        decoder_segment_ids=None,
+        model_mode="train",
+        compressed_mask=None,
+    )
+    self.assertEqual(mask_none.ndim, 4)
+    self.assertEqual(mask_none.shape[-1], kv_len)
+
 
 if __name__ == "__main__":
   unittest.main()
