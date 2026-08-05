@@ -29,6 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental import colocated_python
+from jax.experimental.layout import Format
 import numpy as np
 import optax
 
@@ -82,19 +83,57 @@ def _slice_global_mesh_to_submesh(
     return jax.make_array_from_single_device_arrays(target_shape, target_sharding, local_shards)
 
   if target_shapes is not None:
-    return jax.tree_util.tree_map(_slice_leaf, tree, target_shardings, target_shapes)
-  return jax.tree_util.tree_map(_slice_leaf, tree, target_shardings)
+    res = jax.tree_util.tree_map(_slice_leaf, tree, target_shardings, target_shapes)
+  else:
+    res = jax.tree_util.tree_map(_slice_leaf, tree, target_shardings)
+  return _normalize_to_null_layout(res)
 
 
-def _normalize_to_null_layout(tree):
-  """Ensures consistent JAX device placement without materializing data to host NumPy memory."""
+_IDENTITY_JIT_CACHE = {}
+_IDENTITY_CACHE_LOCK = threading.Lock()
 
-  def normalize_leaf(x):
+
+def _sharding_cache_key(s):
+  if s is None:
+    return "None"
+  if isinstance(s, Format):
+    return (str(s.layout), _sharding_cache_key(s.sharding))
+  mesh_devs = tuple(int(d.id) for d in s.mesh.devices.flat) if hasattr(s, "mesh") and hasattr(s.mesh, "devices") else ()
+  return (str(s), mesh_devs)
+
+
+def _get_cached_identity_jit(in_format, out_s):
+  """Returns a thread-safe cached JIT identity function for formatting/layout transfer."""
+  cache_key = (_sharding_cache_key(in_format), _sharding_cache_key(out_s))
+  with _IDENTITY_CACHE_LOCK:
+    if cache_key not in _IDENTITY_JIT_CACHE:
+      @functools.partial(jax.jit, in_shardings=(in_format,), out_shardings=out_s)
+      def _id_fn(arr):
+        return arr
+      _IDENTITY_JIT_CACHE[cache_key] = _id_fn
+    return _IDENTITY_JIT_CACHE[cache_key]
+
+
+def _normalize_to_null_layout(tree, target_shardings=None):
+  """Compiles an identity function specifying both in_shardings and out_shardings to forcefully convert layouts."""
+
+  def _convert_leaf(x, out_s):
     if not isinstance(x, jax.Array):
       return x
-    return jax.device_put(x, x.sharding)
+    if out_s is None:
+      out_s = x.sharding
+    layout = getattr(x, "layout", None)
+    if layout is not None:
+      in_format = Format(layout=layout, sharding=x.sharding)
+    else:
+      in_format = x.sharding
 
-  return jax.tree_util.tree_map(normalize_leaf, tree)
+    id_fn = _get_cached_identity_jit(in_format, out_s)
+    return id_fn(x)
+
+  if target_shardings is not None:
+    return jax.tree_util.tree_map(_convert_leaf, tree, target_shardings)
+  return jax.tree_util.tree_map(lambda x: _convert_leaf(x, None), tree)
 
 
 # pylint: disable=abstract-method
@@ -134,18 +173,14 @@ def _extract_scalar_metrics(tree):
 
   def _leaf_to_scalar(x):
     if isinstance(x, jax.Array):
-      try:
-        if hasattr(x, "addressable_shards") and len(x.addressable_shards) > 0:
-          s = x.addressable_shards[0].data
-        else:
-          s = x
-        s_f32 = s.astype(jnp.float32)
-        val = jax.device_get(s_f32)
-        if isinstance(val, np.ndarray):
-          return float(val.mean())
-        return float(val)
-      except Exception:
-        return 0.0
+      if hasattr(x, "addressable_shards") and len(x.addressable_shards) > 0:
+        s = x.addressable_shards[0].data
+        val = jax.device_get(s)
+      else:
+        val = jax.device_get(x)
+      if isinstance(val, np.ndarray):
+        return float(val.mean())
+      return float(val)
     elif isinstance(x, (np.ndarray, np.generic)):
       return float(x.mean())
     return x
@@ -301,14 +336,12 @@ def _run_learner_loop(
       else:
         global_params = transport.recv_from_syncer(step=start_step, fragment_id=-1)
         if learner_config.pure_nnx:
-          non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
-          new_model = nnx.merge_state(non_param_model, global_params)
-          new_state = type(state)({})
-          new_state["model"] = new_model
-          new_state["optimizer"] = state["optimizer"]
-          state = new_state
+          with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
+            global_params = _normalize_to_null_layout(global_params)
+            nnx.update(state.model, global_params)
         else:
-          raw_state = raw_state.replace(params=global_params)
+          with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
+            raw_state = raw_state.replace(params=_normalize_to_null_layout(global_params))
     except Exception as e:
       max_logging.error(f"Learner {learner_idx} crashed in init: {e}")
       max_logging.error(traceback.format_exc())
@@ -360,7 +393,8 @@ def _run_learner_loop(
               if learner_config.shard_optimizer_over_data and isinstance(model, nn.Module):
                 state = sharding.maybe_shard_with_name(state, state_mesh_shardings, learner_config.shard_mode)
               state, metrics = p_train_step(state, example_batch, *step_rng_args)
-              metrics = _extract_scalar_metrics(metrics)
+
+            metrics = _extract_scalar_metrics(metrics)
 
           max_logging.log(f"Learner {learner_idx}: Step {step} finished")
           step_time_delta = datetime.datetime.now() - last_step_completion
@@ -385,18 +419,15 @@ def _run_learner_loop(
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
               inner_frag = manipulator.get_flat_fragment(params, frag_idx)
+              received_frag = _normalize_to_null_layout(received_frag)
               mixed_frag = p_mix_frags(inner_frag, received_frag)
               new_params = manipulator.apply_flat_fragment(params, frag_idx, mixed_frag)
+              new_params = _normalize_to_null_layout(new_params)
 
-            if learner_config.pure_nnx:
-              non_param_model = nnx.filter_state(state.model, nnx.Not(nnx.Param))
-              new_model = nnx.merge_state(non_param_model, new_params)
-              new_state = type(state)({})
-              new_state["model"] = new_model
-              new_state["optimizer"] = state["optimizer"]
-              state = new_state
-            else:
-              state = state.replace(params=new_params)
+              if learner_config.pure_nnx:
+                nnx.update(state.model, new_params)
+              else:
+                state = state.replace(params=new_params)
 
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
             checkpointing.maybe_save_checkpoint(checkpoint_manager, state, learner_config, data_iterator, step)
