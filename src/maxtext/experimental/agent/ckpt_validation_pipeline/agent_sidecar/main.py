@@ -62,6 +62,8 @@ def main():
       run_id = direct_trigger.get("run_name", "airflow_run")
       model_name = direct_trigger.get("maxtext_model_name", "unknown_model")
       error_msg = direct_trigger.get("airflow_error_message", "")
+      if direct_trigger.get("airflow_dag_id"):
+        os.environ["TARGET_DAG_ID"] = direct_trigger["airflow_dag_id"]
       if direct_trigger.get("hf_ref_code_url"):
         os.environ["HF_REF_CODE_URL"] = direct_trigger["hf_ref_code_url"]
       if direct_trigger.get("hf_config_url"):
