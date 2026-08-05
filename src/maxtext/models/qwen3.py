@@ -729,6 +729,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       # Reshape GDN output and apply gated norm + out projection.
       gdn_output = gdn_output.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+      gdn_output = checkpoint_name(gdn_output, "context")
       gated_output = self.norm(gdn_output, z)
       gated_output = gated_output.reshape(batch, seq_len, -1)
       output = self.out_proj(gated_output)
@@ -1026,6 +1027,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
+
+    core_attn_out = checkpoint_name(core_attn_out, "context")
 
     # =========================================================================
     # STEP D: Final Output Stage
