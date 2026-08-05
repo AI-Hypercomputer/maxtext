@@ -218,6 +218,10 @@ def make_learner_config(config, learner_idx, num_learners):
   learner_config._flat_config["enable_streaming_diloco"] = False
   learner_config._flat_config["enable_diloco"] = False
 
+  # Only enable profiling on the first island (learner 0); disable for all other islands
+  if learner_idx != 0:
+    learner_config._flat_config["profiler"] = ""
+
   return learner_config
 
 
@@ -381,7 +385,7 @@ def _run_learner_loop(
         max_logging.log(f"Learner {learner_idx}: Step {step} starting")
         prof.maybe_activate_profiler(step, state)
 
-        with jax.profiler.StepTraceAnnotation("train", step_num=step):
+        with jax.profiler.StepTraceAnnotation(f"train_learner_{learner_idx}", step_num=step):
           example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
           if isinstance(model, nn.Module):
             step_rng_args = (jax.jit(jax.random.fold_in)(init_rng, step),)
