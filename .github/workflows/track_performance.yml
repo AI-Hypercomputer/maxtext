@@ -55,10 +55,9 @@ jobs:
             --baseline per_test_baseline.json \
             --save-baseline new_per_test_baseline.json \
             --output-benchmark benchmark-results.json \
-            ${{ (github.event_name == 'schedule' && github.ref == 'refs/heads/main' || github.head_ref == 'ci/test-duration-tracking') && '--warn-only' || '' }}
+            --warn-only
 
       - name: Push per-test baseline to gh-pages
-        if: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
