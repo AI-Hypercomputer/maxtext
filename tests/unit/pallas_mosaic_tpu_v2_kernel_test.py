@@ -19,6 +19,7 @@ import pytest
 
 from absl.testing import absltest
 from absl.testing import parameterized
+
 chex = pytest.importorskip("chex", reason="chex not installed")
 import jax
 from jax.experimental import pallas as pl
