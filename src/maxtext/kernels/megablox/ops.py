@@ -26,6 +26,7 @@ from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.layers import quantizations
 import qwix
+from qwix._src.core import numerics
 import qwix.pallas as qpl
 import tokamax
 
@@ -200,7 +201,15 @@ def _gmm_fwd(
     out = _fwd_run_tokamax_v1(lhs, rhs, group_sizes, preferred_element_type, transpose_rhs, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
     out = _fwd_run_tokamax_v2(
-        lhs, rhs, group_sizes, preferred_element_type, tiling, group_offset, partial_sum, transpose_rhs
+        lhs,
+        rhs,
+        group_sizes,
+        preferred_element_type,
+        tiling,
+        group_offset,
+        partial_sum,
+        transpose_rhs,
+        quantization_rule,
     )
   else:
     out = _fwd_run_megablox(
@@ -319,6 +328,45 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
   return jnp.broadcast_to(rhs_scale, (G, num_quant_blocks, 1, N))
 
 
+def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule) -> jax.Array | None:
+  """Extracts the static LHS (activation) scale for the GMM V2 forward pass.
+
+  Based on qwix's calibrate and compute_scale_zero_point functions.
+  Enforces a default (1, 1) shape for per-tensor quantization kernels.
+
+  Args:
+    quantization_rule: The Qwix quantization rule from which to extract the scale.
+
+  Returns:
+    The extracted static scale array, or None if not using purely fixed calibration.
+  """
+  method = getattr(quantization_rule, "act_calibration_method", None)
+  qtype = getattr(quantization_rule, "act_qtype", None)
+
+  # Use dynamic quantization or no quantization
+  if method is None or qtype is None or not method.lower().startswith("fixed"):
+    return None
+
+  args = [float(a) for a in method.split(",")[1:]]
+  if len(args) not in (1, 2):
+    raise ValueError("Fixed range must be 'fixed,bound' or 'fixed,min,max'.")
+
+  if len(args) == 1:
+    args = [-args[0], args[0]]
+
+  if args[0] > 0 or args[1] < 0 or args[0] >= args[1]:
+    raise ValueError(f"The range must contain 0 and be non-empty, got: {method}")
+
+  if args[0] + args[1] == 0:
+    qmax = float(numerics.get_symmetric_bound(qtype))
+    scale_val = args[1] / qmax
+  else:
+    qmin, qmax = numerics.get_asymmetric_bound(qtype)
+    scale_val = (args[1] - args[0]) / float(qmax - qmin)
+
+  return jnp.full((1, 1), scale_val, jnp.float32)
+
+
 def _fwd_run_tokamax_v2(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
@@ -328,6 +376,7 @@ def _fwd_run_tokamax_v2(
     group_offset: jnp.ndarray | None,
     partial_sum: jnp.ndarray | None,
     transpose_rhs: bool,
+    quantization_rule: qwix.QtRule,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
   # if transpose_rhs=False, rhs is [g, k, n], remain unchanged
@@ -354,6 +403,7 @@ def _fwd_run_tokamax_v2(
       preferred_element_type=preferred_element_type,
       partial_sum=partial_sum,
       group_offset=group_offset,
+      lhs_scale=_fwd_prepare_lhs_scale(quantization_rule),
   )
 
 
@@ -498,7 +548,7 @@ def _bwd_prepare_inputs(
   dlhs_dout = grad
   drhs_dout = grad
 
-  # Apply rhs.scale to dlhs_dout, dlhs_dout[m, n] @ rhs_tranpose[g, n, k] = dlhs[m, k]
+  # Apply rhs.scale to dlhs_dout, dlhs_dout[m, n] @ rhs_transpose[g, n, k] = dlhs[m, k]
   # Assume channelwise scale on rhs n.
   # Apply rhs.scale to dlhs_dout to avoid dequantizing or requantizing rhs.
   # We cannot apply the scale to dlhs because axis n will disappear there.

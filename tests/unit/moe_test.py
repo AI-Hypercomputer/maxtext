@@ -27,6 +27,7 @@ import qwix
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import Config, DType
+from maxtext.kernels.megablox import ops
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
@@ -2052,6 +2053,47 @@ class FusedMlpMoETest(unittest.TestCase):
         rtol=1e-2,
         atol=1e-2,
     )
+
+
+class LhsScaleTest(unittest.TestCase):
+  """Tests for LHS scale extraction in GMM forward."""
+
+  def test_fwd_prepare_lhs_scale_fixed_symmetric(self):
+    rule = qwix.QtRule(
+        act_qtype=jnp.float8_e4m3fn,
+        act_calibration_method="fixed,224.0",
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNotNone(scale)
+    self.assertEqual(scale.shape, (1, 1))
+    self.assertEqual(scale.dtype, jnp.float32)
+    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
+
+  def test_fwd_prepare_lhs_scale_fixed_asymmetric(self):
+    rule = qwix.QtRule(
+        act_qtype=jnp.float8_e4m3fn,
+        act_calibration_method="fixed,-224.0,224.0",
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNotNone(scale)
+    self.assertEqual(scale.shape, (1, 1))
+    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
+
+  def test_fwd_prepare_lhs_scale_dynamic_returns_none(self):
+    rule = qwix.QtRule(
+        act_qtype=jnp.float8_e4m3fn,
+        act_calibration_method="absmax",
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNone(scale)
+
+  def test_fwd_prepare_lhs_scale_no_rule_returns_none(self):
+    rule = qwix.QtRule(
+        act_qtype=None,
+        act_calibration_method=None,
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNone(scale)
 
 
 if __name__ == "__main__":
