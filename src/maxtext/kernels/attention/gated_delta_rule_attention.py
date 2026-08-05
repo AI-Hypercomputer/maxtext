@@ -14,6 +14,25 @@ from jax.sharding import PartitionSpec as P
 
 from maxtext.layers.normalizations import l2norm
 
+
+def _fp32_dot(lhs, rhs):
+  return jax.lax.dot(
+      lhs,
+      rhs,
+      precision=jax.lax.Precision.HIGHEST,
+      preferred_element_type=jnp.float32,
+  )
+
+
+def _fp32_matmul(lhs, rhs):
+  return jnp.matmul(
+      lhs,
+      rhs,
+      precision=jax.lax.Precision.HIGHEST,
+      preferred_element_type=jnp.float32,
+  )
+
+
 # ==========================================
 # 1. OPTIMAL TRIANGLE_SOLVE DECOMPOSE PALLAS KERNEL
 # ==========================================
@@ -72,9 +91,7 @@ def optimal_decompose_kernel(a_ref, x_ref, *, block_size=16):
     else:
       interaction_a = a[:, start:end, :start]
       solved_x = x_ref[:, :start, :]
-      prev_sum = jnp.matmul(
-          interaction_a, solved_x, precision=jax.lax.Precision.HIGHEST
-      )
+      prev_sum = _fp32_matmul(interaction_a, solved_x)
       target_b = e_block - prev_sum
 
     local_a = a[:, start:end, start:end]
@@ -135,10 +152,9 @@ def _run_optimal_decompose_bwd(n_block_size, block_size, res, g):
   x = res
   # d(A^{-1}) = -x^T @ dA @ x^T
   x_t = x.swapaxes(-1, -2)
-  d_a = -jnp.matmul(
+  d_a = -_fp32_matmul(
       x_t,
-      jnp.matmul(g, x_t, precision=jax.lax.Precision.HIGHEST),
-      precision=jax.lax.Precision.HIGHEST,
+      _fp32_matmul(g, x_t),
   )
 
   # Original A = I - S is strictly lower triangular (or lower triangular).
@@ -166,50 +182,48 @@ def gdn_scan_kernel_tpu(
   h = h_init_ref[0, 0].astype(jnp.float32)
 
   mask_val = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
-  large_neg = -1e30
 
   ones_1xk = jnp.ones((1, key_dim), dtype=jnp.float32)
   ones_1xc = jnp.ones((1, chunk_size), dtype=jnp.float32)
   ones_cx1 = jnp.ones((chunk_size, 1), dtype=jnp.float32)
 
   for i in range(num_chunks):
-    w = w_ref[0, 0, i].astype(jnp.float32) 
-    u = u_ref[0, 0, i].astype(jnp.float32) 
-    q = q_ref[0, 0, i].astype(jnp.float32) 
-    k = k_ref[0, 0, i].astype(jnp.float32) 
+    w = w_ref[0, 0, i].astype(jnp.float32)
+    u = u_ref[0, 0, i].astype(jnp.float32)
+    q = q_ref[0, 0, i].astype(jnp.float32)
+    k = k_ref[0, 0, i].astype(jnp.float32)
     g = g_ref[0, 0, i].astype(jnp.float32)
 
     g_exp = jnp.exp(g).reshape((chunk_size, 1))
-    g_exp_2d = jnp.dot(g_exp, ones_1xk)
+    g_exp_2d = _fp32_dot(g_exp, ones_1xk)
     q_g = q * g_exp_2d
 
-    term1 = jnp.dot(q_g, h) 
+    term1 = _fp32_dot(q_g, h)
 
-    v_prime = jnp.dot(w, h)
+    v_prime = _fp32_dot(w, h)
     v_new = u - v_prime
 
-    attn = jnp.dot(q, k.T)
+    attn = _fp32_dot(q, k.T)
 
-    g_col = jnp.dot(g.reshape((chunk_size, 1)), ones_1xc)
-    g_row = jnp.dot(ones_cx1, g.reshape((1, chunk_size)))
+    g_col = _fp32_dot(g.reshape((chunk_size, 1)), ones_1xc)
+    g_row = _fp32_dot(ones_cx1, g.reshape((1, chunk_size)))
     g_diff = g_col - g_row
 
-    g_diff_masked = g_diff * mask_val + (1.0 - mask_val) * large_neg
-    attn_decay = jnp.exp(g_diff_masked)
+    attn_decay = jnp.where(mask_val > 0, jnp.exp(g_diff), 0.0)
 
     attn_i = attn * attn_decay * mask_val
-    term2 = jnp.dot(attn_i, v_new)
+    term2 = _fp32_dot(attn_i, v_new)
 
     o_chunk = term1 + term2
     o_ref[0, 0, i] = o_chunk.astype(dtype)
 
-    chunk_decay = jnp.exp(g[chunk_size - 1]) 
+    chunk_decay = jnp.exp(g[chunk_size - 1])
 
     vec = jnp.exp(g[chunk_size - 1] - g).reshape((chunk_size, 1))
-    vec_2d = jnp.dot(vec, ones_1xk)
+    vec_2d = _fp32_dot(vec, ones_1xk)
     k_decayed = k * vec_2d
 
-    update = jnp.dot(k_decayed.T, v_new)
+    update = _fp32_dot(k_decayed.T, v_new)
     h = h * chunk_decay + update
 
   h_final_ref[0, 0] = h.astype(dtype)
@@ -240,21 +254,20 @@ def gdn_backward_kernel_tpu(
     k = k_ref[0, 0, i].astype(jnp.float32) 
     g = g_ref[0, 0, i].astype(jnp.float32)
 
-    v_prime = jnp.dot(w, h)
+    v_prime = _fp32_dot(w, h)
     v_new = u - v_prime
 
     chunk_decay = jnp.exp(g[chunk_size - 1])
     vec = jnp.exp(g[chunk_size - 1] - g).reshape((chunk_size, 1))
-    vec_2d = jnp.dot(vec, ones_1xk)
+    vec_2d = _fp32_dot(vec, ones_1xk)
     k_decayed = k * vec_2d
 
-    update = jnp.dot(k_decayed.T, v_new)
+    update = _fp32_dot(k_decayed.T, v_new)
     h = h * chunk_decay + update
 
   grad_h = grad_h_final_ref[0, 0].astype(jnp.float32)
 
   mask_val = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
-  large_neg = -1e30
 
   ones_kx1 = jnp.ones((key_dim, 1), dtype=jnp.float32)
   ones_1xc = jnp.ones((1, chunk_size), dtype=jnp.float32)
@@ -271,58 +284,57 @@ def gdn_backward_kernel_tpu(
     v = v_ref[0, 0, i].astype(jnp.float32)
     grad_o = grad_o_ref[0, 0, i].astype(jnp.float32)
 
-    h = h_buffer_ref[i] 
+    h = h_buffer_ref[i]
 
     # 1. Recompute Forward Vars
     g_exp = jnp.exp(g).reshape((chunk_size, 1))
-    g_exp_2d = jnp.dot(g_exp, ones_1xk)
+    g_exp_2d = _fp32_dot(g_exp, ones_1xk)
     q_g = q * g_exp_2d
 
-    v_prime = jnp.dot(w, h)
+    v_prime = _fp32_dot(w, h)
     v_new = u - v_prime
 
-    attn = jnp.dot(q, k.T)
+    attn = _fp32_dot(q, k.T)
 
-    g_col = jnp.dot(g.reshape((chunk_size, 1)), ones_1xc)
-    g_row = jnp.dot(ones_cx1, g.reshape((1, chunk_size)))
+    g_col = _fp32_dot(g.reshape((chunk_size, 1)), ones_1xc)
+    g_row = _fp32_dot(ones_cx1, g.reshape((1, chunk_size)))
     g_diff = g_col - g_row
 
-    g_diff_masked = g_diff * mask_val + (1.0 - mask_val) * large_neg
-    attn_decay = jnp.exp(g_diff_masked)
+    attn_decay = jnp.where(mask_val > 0, jnp.exp(g_diff), 0.0)
 
     # Apply mask explicitly after decay
-    attn_i = attn * attn_decay * mask_val 
+    attn_i = attn * attn_decay * mask_val
 
     chunk_decay = jnp.exp(g[chunk_size - 1])
     vec = jnp.exp(g[chunk_size - 1] - g).reshape((chunk_size, 1))
-    vec_2d = jnp.dot(vec, ones_1xk)
+    vec_2d = _fp32_dot(vec, ones_1xk)
     k_decayed = k * vec_2d
 
     # 2. Output Gradients
     grad_term2 = grad_o
     grad_attn_inter = grad_o
 
-    grad_q_g = jnp.dot(grad_attn_inter, h.T)
-    grad_h_from_inter = jnp.dot(q_g.T, grad_attn_inter)
+    grad_q_g = _fp32_dot(grad_attn_inter, h.T)
+    grad_h_from_inter = _fp32_dot(q_g.T, grad_attn_inter)
 
-    grad_attn_i = jnp.dot(grad_term2, v_new.T)
-    grad_v_new_from_term2 = jnp.dot(attn_i.T, grad_term2)
+    grad_attn_i = _fp32_dot(grad_term2, v_new.T)
+    grad_v_new_from_term2 = _fp32_dot(attn_i.T, grad_term2)
 
     # 3. State Gradients
     grad_h_prev_from_decay = grad_h * chunk_decay
-    grad_chunk_decay = jnp.dot(ones_1xk, jnp.dot(grad_h * h, ones_vx1))[0, 0]
+    grad_chunk_decay = _fp32_dot(ones_1xk, _fp32_dot(grad_h * h, ones_vx1))[0, 0]
 
     grad_update_term = grad_h
-    grad_k_decayed = jnp.dot(v_new, grad_update_term.T)
-    grad_v_new_from_update = jnp.dot(k_decayed, grad_update_term)
+    grad_k_decayed = _fp32_dot(v_new, grad_update_term.T)
+    grad_v_new_from_update = _fp32_dot(k_decayed, grad_update_term)
 
     # 4. Delta Gradients
     grad_v_new = grad_v_new_from_term2 + grad_v_new_from_update
     grad_u = grad_v_new
     grad_v_prime = -grad_v_new
 
-    grad_w = jnp.dot(grad_v_prime, h.T)
-    grad_h_from_v_prime = jnp.dot(w.T, grad_v_prime)
+    grad_w = _fp32_dot(grad_v_prime, h.T)
+    grad_h_from_v_prime = _fp32_dot(w.T, grad_v_prime)
 
     # 5. Accumulate grad_h for previous chunk
     grad_h_prev = (
@@ -331,30 +343,30 @@ def gdn_backward_kernel_tpu(
 
     # 6. q, k, g intra-chunk gradients
     grad_q = grad_q_g * g_exp_2d
-    grad_g_from_q_g = jnp.dot(grad_q_g * q_g, ones_kx1).reshape((chunk_size,))
+    grad_g_from_q_g = _fp32_dot(grad_q_g * q_g, ones_kx1).reshape((chunk_size,))
 
     grad_attn_i = grad_attn_i * mask_val
     grad_attn = grad_attn_i * attn_decay
     grad_attn_decay = grad_attn_i * attn
 
-    grad_q += jnp.dot(grad_attn, k)
-    grad_k = jnp.dot(grad_attn.T, q)
+    grad_q += _fp32_dot(grad_attn, k)
+    grad_k = _fp32_dot(grad_attn.T, q)
 
     # Fix: Remove redundant mask_val multiplication here
     grad_g_diff = grad_attn_decay * attn_decay
 
-    grad_g_from_diff_0 = jnp.dot(ones_1xc, grad_g_diff).reshape((chunk_size,))
-    grad_g_from_diff_1 = jnp.dot(grad_g_diff, ones_cx1).reshape((chunk_size,))
+    grad_g_from_diff_0 = _fp32_dot(ones_1xc, grad_g_diff).reshape((chunk_size,))
+    grad_g_from_diff_1 = _fp32_dot(grad_g_diff, ones_cx1).reshape((chunk_size,))
     grad_g_from_diff = grad_g_from_diff_1 - grad_g_from_diff_0
 
     grad_k += grad_k_decayed * vec_2d
 
-    grad_g_diff_state = jnp.dot(grad_k_decayed * k_decayed, ones_kx1).reshape((
+    grad_g_diff_state = _fp32_dot(grad_k_decayed * k_decayed, ones_kx1).reshape((
         chunk_size,
     ))
     grad_g_from_state_decay = -grad_g_diff_state
 
-    grad_g_last_from_state_decay = jnp.dot(
+    grad_g_last_from_state_decay = _fp32_dot(
         ones_1xc, grad_g_diff_state.reshape((chunk_size, 1))
     )[0, 0]
 
@@ -622,14 +634,11 @@ def pallas_chunk_gated_delta_rule(
   g_cumsum = jnp.cumsum(g_c, axis=-1)
   k_beta = k_c * beta_c[..., None]
 
-  s_matrix = jnp.matmul(
-      k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST
-  )
+  s_matrix = _fp32_matmul(k_beta, k_c.swapaxes(-1, -2))
   s_matrix = s_matrix.astype(jnp.float32)
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
   mask_val = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
-  g_diff_masked = g_diff * mask_val + (1.0 - mask_val) * -1e30
-  s_matrix = s_matrix * jnp.exp(g_diff_masked) * mask_val
+  s_matrix = s_matrix * jnp.where(mask_val > 0, jnp.exp(g_diff), 0.0)
 
   # --- Pallas Exact Decomposition ---
   identity = jnp.eye(chunk_size, dtype=jnp.float32)
@@ -663,13 +672,11 @@ def pallas_chunk_gated_delta_rule(
     )
 
   v_beta = v_c * beta_c[..., None]
-  u_chunks = jnp.matmul(
-      matrix_a, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST
-  )
+  u_chunks = _fp32_matmul(matrix_a, v_beta.astype(jnp.float32))
   u_chunks = u_chunks.astype(compute_dtype)
 
   k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
-  w_chunks = jnp.matmul(matrix_a, k_beta_g, precision=jax.lax.Precision.HIGHEST)
+  w_chunks = _fp32_matmul(matrix_a, k_beta_g)
   w_chunks = w_chunks.astype(compute_dtype)
 
   # STAGE 3: INTER-CHUNK RECURRENCE (Pallas Kernel + shard_map)
