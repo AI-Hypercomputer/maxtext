@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests validating DeepSeek-V4 MaxText components against PyTorch references."""
+"""Tests validating DeepSeek-V4 MaxText components against PyTorch references.
+
+Note on numerical tolerances:
+Tolerances across this file are tuned for TPU execution (bfloat16/float32 mixed precision
+and XLA instruction differences), requiring lower/relaxed tolerances compared to CPU execution.
+"""
 
 import os
 import sys
@@ -934,8 +939,8 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
 
     # Explicitly initialize PyTorch weights since torch.empty leaves garbage in memory,
     # which causes NaN/Inf drift between PyTorch and MaxText/XLA execution.
-    torch.nn.init.normal_(pt_router.weight)
-    torch.nn.init.normal_(pt_router.e_score_correction_bias)
+    torch.nn.init.normal_(pt_router.weight, std=0.02)
+    torch.nn.init.normal_(pt_router.e_score_correction_bias, std=0.02)
 
     mx_moe = RoutedMoE(
         config=self.mx_config,
