@@ -240,3 +240,12 @@ class AbstractTrainingEngine(abc.ABC):
     Returns:
       Synchronization endpoints or file coordinates for weight transfer.
     """
+
+  @property
+  @abc.abstractmethod
+  def train_step(self) -> int:
+    """Returns the current training step integer."""
+
+  @abc.abstractmethod
+  def close(self) -> None:
+    """Cleans up engine resources and blocks until async saves complete."""

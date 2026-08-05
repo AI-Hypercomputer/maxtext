@@ -34,6 +34,7 @@ class DummyTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def __init__(self, training_config: abstract_engine.TrainingConfig) -> None:
     self.config = training_config
     self.loss_fn = None
+    self._gen_model_input_fn = None
     self.compiled = False
     self.fwd_bwd_called = 0
     self.update_called = 0
@@ -71,6 +72,13 @@ class DummyTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def prepare_weight_sync(self, **kwargs: Any) -> Any:
     return {"endpoint": "grpc://dummy-trainer:55555"}
 
+  @property
+  def train_step(self) -> int:
+    return 0
+
+  def close(self) -> None:
+    pass
+
 
 class AbstractTrainingEngineTest(absltest.TestCase):
 
@@ -83,7 +91,7 @@ class AbstractTrainingEngineTest(absltest.TestCase):
     config = abstract_engine.TrainingConfig(max_steps=100)
     t = DummyTrainingEngine(config)
     self.assertEqual(t.config.max_steps, 100)
-    payload = DummyPayload(
+    payload = DummyPayload(  # pylint: disable=unexpected-keyword-arg
         data="dummy",
         token_ids=jnp.ones((2, 2)),
         token_mask=jnp.ones((2, 2)),

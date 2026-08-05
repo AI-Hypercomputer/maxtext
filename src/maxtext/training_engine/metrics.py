@@ -18,13 +18,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import dataclasses
+import os
 from typing import Any
 
 from absl import logging
 import jax
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
-from maxtext.utils import max_utils
+from maxtext.utils import max_logging, max_utils, maxtext_utils
 import numpy as np
 
 
@@ -166,6 +167,16 @@ class MetricsLogger:
           config.tensorboard_dir, config.run_name, config.enable_tensorboard
       )
     self._config = config
+
+  def write_setup_info_to_tensorboard(self, params: Any) -> None:
+    """Writes setup information like train config params, num model params, and XLA flags to TensorBoard."""
+    num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
+    max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
+    if self._tb_writer is None:
+      return
+    max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self._tb_writer)
+    max_utils.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self._tb_writer)
+    maxtext_utils.add_config_to_summary_writer(self._config, self._tb_writer)
 
   def _log_metrics(self, step: int, metrics: dict[str, Any]) -> None:
     """Logs the metrics to the console.

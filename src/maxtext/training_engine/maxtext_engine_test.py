@@ -65,6 +65,31 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     )
     self.addCleanup(from_pretrained_patcher.stop)
     self.mock_from_pretrained = from_pretrained_patcher.start()
+
+    prof_patcher = mock.patch.object(
+        maxtext_engine.profiler,
+        "Profiler",
+        return_value=mock.MagicMock(),
+    )
+    self.addCleanup(prof_patcher.stop)
+    prof_patcher.start()
+
+    tflops_patcher = mock.patch.object(
+        maxtext_engine.maxtext_utils,
+        "calculate_tflops_training_per_device",
+        return_value=(100.0, None, None),
+    )
+    self.addCleanup(tflops_patcher.stop)
+    tflops_patcher.start()
+
+    metric_logger_patcher = mock.patch.object(
+        maxtext_engine.metrics_module,
+        "MetricsLogger",
+        return_value=mock.MagicMock(),
+    )
+    self.addCleanup(metric_logger_patcher.stop)
+    metric_logger_patcher.start()
+
     self.mock_config = self.setup_config()
 
   def setup_config(self, enable_checkpointing: bool = False):
@@ -77,6 +102,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_config.tensorboard_dir = "/tmp/tb_dir"
     mock_config.run_name = "test_run"
     mock_config.enable_tensorboard = False
+    mock_config.elastic_enabled = False
     if enable_checkpointing:
       mock_config.checkpoint_directory = "/tmp/test_out/checkpoints"
       mock_config.checkpoint_period = 500
@@ -278,10 +304,15 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_metadata.custom_metadata = {"micro_step_count": 2, "additional_metadata": dummy_metadata}
     mock_orbax_mgr.metadata.return_value = mock_metadata
 
-    metrics_buf = abstract_engine.MetricsBuffer(id=5, mode="train")
-    metrics_buf.weighted_metrics["loss"] = abstract_engine.WeightedMetric(
-        unreduced_sum=jnp.array([4.0, 6.0]),
-        denominator=jnp.array([2.0, 2.0]),
+    metrics_buf = abstract_engine.MetricsBuffer(
+        id=5,
+        mode="train",
+        weighted_metrics={
+            "loss": abstract_engine.WeightedMetric(
+                unreduced_sum=jnp.array([4.0, 6.0]),
+                denominator=jnp.array([2.0, 2.0]),
+            )
+        },
     )
     dummy_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
     dummy_model = DummyNNXModel()
@@ -394,6 +425,51 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # Closing trainer drains remaining inflight items.
     t.close()
     self.assertTrue(t._throttler._inflight_queue.empty())
+
+  @mock.patch.object(maxtext_engine.gcs_utils, "upload_dump")
+  def test_hlo_dump_uploading(self, mock_upload_dump):
+    mock_config = self.setup_config()
+    mock_config.dump_hlo = True
+    mock_config.dump_step = 1
+    mock_config.dump_hlo_local_dir = "/tmp/hlo"
+    mock_config.dump_hlo_gcs_dir = "gs://hlo"
+    mock_config.dump_hlo_module_name = "maxtext"
+    mock_config.dump_hlo_delete_local_after = False
+    mock_config.dump_hlo_upload_all = False
+
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    t._train_step = 1
+    t._maybe_upload_hlo_dump(1)
+    mock_upload_dump.assert_called_once_with(
+        "/tmp/hlo",
+        "gs://hlo",
+        module_name="maxtext",
+        delete_local_after=False,
+        all_host_upload=False,
+    )
+
+  @mock.patch.object(maxtext_engine, "record_goodput")
+  @mock.patch.object(maxtext_engine, "maybe_record_goodput")
+  @mock.patch.object(
+      maxtext_engine.gradient_accumulation,
+      "gradient_accumulation_loss_and_grad",
+  )
+  def test_goodput_recording(self, mock_ga, mock_maybe_record, mock_record):
+    mock_ga.return_value = (
+        jnp.array(0.5),
+        {},
+        {"weights": jnp.array([0.1, 0.2])},
+    )
+    mock_recorder = mock.MagicMock()
+    mock_config = self.setup_config()
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config, goodput_recorder=mock_recorder)
+    mock_maybe_record.assert_called_with(mock_recorder, maxtext_engine.GoodputEvent.TPU_INIT)
+
+    t.fwd_bwd(DummyPayload())
+    mock_record.assert_any_call(mock_recorder, "record_step_start_time", 0)
+
+    t.update()
+    mock_record.assert_any_call(mock_recorder, "record_step_end_time", 0)
 
 
 if __name__ == "__main__":
