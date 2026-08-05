@@ -41,13 +41,17 @@ from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToV
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
 
 
+from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
+
+
 def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
   """Instantiate the converter for a MaxText model name."""
-  if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b"}:
-    return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
-  elif model_name in {"qwen3.5-35b-a3b"}:
+  if model_name.startswith("qwen3.5"):
     return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
-
+  elif model_name.startswith("qwen3"):
+    return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
+  elif model_name.startswith("gemma4"):
+    return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
   return None
 
 
@@ -98,7 +102,8 @@ def unroll_gemma_scanned_weights(weights):
       layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
       pattern_keys.add(layer_sub_idx)
       if hasattr(v, "shape") and len(v.shape) >= 2:
-        scan_length = max(scan_length, v.shape[1])
+        if "mlp" in k and "wi_0" in k:
+          scan_length = max(scan_length, v.shape[1])
 
   pattern_length = max(pattern_keys) + 1 if pattern_keys else 0
   logging.info("MaxTextVllmSampler: Discovered scan_length=%d, pattern_length=%d", scan_length, pattern_length)
@@ -106,17 +111,16 @@ def unroll_gemma_scanned_weights(weights):
   unrolled_count = 0
   for k, v in flat_w.items():
     if "dropout" in k or "rngs" in k:
-      new_flat_w[k] = v
       continue
 
     container_idx, container_name = _find_scanned_layer_idx(k)
 
     if container_idx != -1 and container_name in ("layers", "scanned_blocks"):
       layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
-      prefix = k[:container_idx] + ("layers",)
+      prefix = k[:container_idx]
       suffix = k[container_idx + 2 :]
 
-      if hasattr(v, "shape") and len(v.shape) > 1:
+      if hasattr(v, "shape") and len(v.shape) >= 2 and v.shape[1] == scan_length:
         v_swapped = jnp.swapaxes(v, 1, 0)
         unstacked = [v_swapped[i] for i in range(scan_length)]
       else:
@@ -124,17 +128,17 @@ def unroll_gemma_scanned_weights(weights):
 
       for i in range(scan_length):
         global_idx = i * pattern_length + layer_sub_idx
-        new_k = prefix + (global_idx,) + suffix
+        new_k = prefix + (f"layers_{global_idx}",) + suffix
         new_flat_w[new_k] = unstacked[i]
         unrolled_count += 1
 
     elif container_idx != -1 and container_name == "layers_remainder":
       layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
-      prefix = k[:container_idx] + ("layers",)
+      prefix = k[:container_idx]
       suffix = k[container_idx + 2 :]
 
       global_idx = scan_length * pattern_length + layer_sub_idx
-      new_k = prefix + (global_idx,) + suffix
+      new_k = prefix + (f"layers_{global_idx}",) + suffix
       new_flat_w[new_k] = v
       unrolled_count += 1
     else:

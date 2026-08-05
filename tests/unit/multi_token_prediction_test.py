@@ -16,6 +16,7 @@
 import unittest
 import functools
 
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -31,6 +32,7 @@ from maxtext.common.common_types import Config
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.trainers.pre_train import train as pre_train
 from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 
 from tests.utils.test_helpers import get_test_config_path
@@ -921,6 +923,31 @@ class TestRollAndMaskBySegmentWithCp(unittest.TestCase):
     self.assertEqual(result.shape, (B, T, F))
     self.assertTrue(jnp.all(result[:, 7, :] == 0), "Boundary position should be all-zero")
     self.assertTrue(jnp.all(result[:, 15, :] == 0), "Last position should be all-zero")
+class CrossEntropyWithIntegerLabelsTest(unittest.TestCase):
+  """Unit tests verifying _cross_entropy_with_integer_labels alignment."""
+
+  def test_cross_entropy_with_integer_labels_matches_max_utils(self):
+    """Verifies loss and gradients match max_utils.cross_entropy_with_logits when z_loss=0."""
+    rng = jax.random.PRNGKey(1234)
+    logits_rng, labels_rng = jax.random.split(rng)
+    batch_size, seq_len, vocab_size = 4, 16, 64
+    logits = jax.random.normal(logits_rng, (batch_size, seq_len, vocab_size), dtype=jnp.float32)
+    labels = jax.random.randint(labels_rng, (batch_size, seq_len), 0, vocab_size)
+    one_hot_targets = jax.nn.one_hot(labels, vocab_size)
+
+    def expected_fn(l):
+      loss, _ = max_utils.cross_entropy_with_logits(l, one_hot_targets, z_loss=0.0)
+      return jnp.sum(loss)
+
+    def actual_fn(l):
+      loss = multi_token_prediction._cross_entropy_with_integer_labels(l, labels)  # pylint: disable=protected-access
+      return jnp.sum(loss)
+
+    expected_loss, expected_grad = jax.value_and_grad(expected_fn)(logits)
+    actual_loss, actual_grad = jax.value_and_grad(actual_fn)(logits)
+
+    np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(actual_grad, expected_grad, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

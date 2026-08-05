@@ -52,7 +52,7 @@ Before you begin, ensure you have the necessary client tools installed and permi
   ```bash
   gcloud components install kubectl gke-gcloud-auth-plugin
   ```
-- **gcluster CLI:** Follow the official [Cluster Toolkit CLI Installation Guide](https://cloud.google.com/cluster-toolkit/docs/install-cli) (or download the binary from the [releases page](https://github.com/GoogleCloudPlatform/cluster-toolkit/releases)) and ensure `gcluster` is in your `$PATH`.
+- **gcluster CLI:** Follow the official [Cluster Toolkit CLI Installation Guide](https://docs.cloud.google.com/cluster-toolkit/docs/setup/configure-environment) (or download the binary from the [releases page](https://github.com/GoogleCloudPlatform/cluster-toolkit/releases)) and ensure `gcluster` is in your `$PATH`.
 - **Docker Credentials:** Configure Docker authentication for your target Artifact Registry region:
   ```bash
   gcloud auth configure-docker <region>-docker.pkg.dev --quiet
@@ -173,7 +173,7 @@ Ahead-of-Time (AOT) compilation can significantly reduce the startup time of you
 
 ### Step 1: Generate the AOT artifact
 
-Note that running `train_compile.py` locally requires a Python environment with MaxText and JAX installed. Follow the [MaxText Getting Started Guide](https://github.com/AI-Hypercomputer/maxtext#getting-started) to set up your local environment before running compilation.
+Note that running `train_compile.py` locally requires a Python environment with MaxText and JAX installed. Follow the [MaxText Getting Started Guide](../getting_started.md) to set up your local environment before running compilation.
 
 Run `train_compile.py` locally to create the compiled artifact for the target TPU topology:
 

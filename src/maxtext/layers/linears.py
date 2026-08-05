@@ -272,7 +272,9 @@ class DenseGeneral(nnx.Module):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
-      kernel = self.kernel[...]
+      kernel = getattr(self.kernel, "value", self.kernel)
+      if hasattr(kernel, "value"):
+        kernel = kernel.value
       # Move logit_dense kernel to device if parameter offloading is enabled
       if self.parameter_memory_host_offload:
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")

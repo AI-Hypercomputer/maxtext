@@ -32,7 +32,8 @@ from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
-from maxtext.training_engine import metrics
+from maxtext.training_engine import inflight_throttler
+from maxtext.training_engine import metrics as metrics_module
 from maxtext.utils import gradient_accumulation
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -87,7 +88,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         checkpoint_dir=getattr(self._config, "checkpoint_directory", ""),
         config=self._config,
     )
-    self._metrics_logger = metrics.MetricsLogger(self._config)
+    self._metrics_recorder = metrics_module.MetricsRecorder()
+    self._throttler = inflight_throttler.InflightThrottler(config=self._config)
 
   @property
   def model(self) -> Any:
@@ -155,9 +157,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     model = getattr(self._state, "model", None) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
-      raise TypeError("MaxRL requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
+      raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
+
+    # Wait for previous computations to finish before dispatching the next one to TPU.
+    self._throttler.wait_for_next()
+
     # TODO(mazumdera): This function call should be pre-compiled.
-    loss, _, micro_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+    loss, aux, micro_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
         loss_callable,
         self._config,
         model,
@@ -167,8 +173,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         None,
     )
 
+    # Don't add metrics to the throttler queue because metrics are logged after
+    # the update step.
+    self._throttler.add_computation(computation=loss, metrics=None)
+
     if isinstance(loss, abstract_engine.WeightedMetric):
       self.record_metrics("loss", loss)
+
+    # Record auxiliary metrics.
+    if isinstance(aux, dict):
+      for key, value in aux.items():
+        self.record_metrics(key, value)
 
     self._cached_losses.append(loss)
     if self._accumulated_grads is None:
@@ -184,30 +199,53 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if self._accumulated_grads is None:
       return
+
+    if self._learning_rate_schedule is not None:
+      try:
+        lr = self._learning_rate_schedule(self.train_step)
+        self.record_metrics("learning_rate", lr)
+      except Exception:  # pylint: disable=broad-except
+        pass
+
+    # Wait for previous computations to finish before dispatching the update step to TPU.
+    self._throttler.wait_for_next()
+
     # TODO(mazumdera): The logic below should be pre-compiled.
     if self._state is not None:
       # TODO(mazumdera): Figure out how exactly we should normalize the losses
       # (if at all). Given that inputs are varying in size, it not correct to
       # simply divide by the number of micro-steps.
-      grads = jax.tree.map(lambda g: g / max(self._micro_step_count, 1), self._accumulated_grads)
+      grads = jax.tree.map(
+          lambda g: g / max(self._micro_step_count, 1),
+          self._accumulated_grads,
+      )
       if getattr(self._config, "gradient_clipping_threshold", 0.0) > 0:
         grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       if hasattr(self._state, "apply_gradients"):
         if getattr(self._config, "skip_step_on_spikes", False):
           grad_norm = max_utils.l2norm_pytree(grads)
+          self.record_metrics("gradient_norm", grad_norm)
           mean_loss = jnp.mean(jnp.array(self._cached_losses)) if self._cached_losses else jnp.array(0.0)
           self._state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
+          opt_obj = getattr(self._state, "optimizer", self._optimizer)
+          if opt_obj is not None:
+            opt_state = nnx.to_pure_dict(nnx.state(opt_obj)).get("opt_state", {})
+            is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
+            if is_skipped is not None:
+              self.record_metrics("step_skipped", is_skipped.astype(jnp.float32))
         else:
           self._state.apply_gradients(grads)
+
+    # Add the state to the throttler queue so jax.block_until_ready() waits
+    # for the optimizer update to complete before logging the metrics.
+    self._throttler.add_computation(
+        self._state if self._state is not None else self._model,
+        self._metrics_recorder.get_step_metrics(self.train_step),
+    )
+
     self._cached_losses.clear()
     self._accumulated_grads = None
     self._micro_step_count = 0
-    if hasattr(self, "_learning_rate_schedule") and self._learning_rate_schedule is not None:
-      try:
-        lr = self._learning_rate_schedule(self.train_step)
-        self.record_metrics("lr", lr)
-      except Exception:  # pylint: disable=broad-except
-        pass
     self._train_step += 1
 
   def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
@@ -225,13 +263,38 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metadata: Checkpoint metadata payload from Orchestrator.
       **kwargs: Additional checkpoint saving options.
     """
+    # Drain all inflight computations and log pending metrics before checkpointing.
+    self._throttler.wait_for_all()
+
     step = kwargs.get("step", self.train_step)
-    # TODO(mazumdera): Also save self._accumulated_grads and _micro_step_count.
+    force_ckpt_save = kwargs.get("force", False)
+
+    custom_metadata = {}
+    if self._micro_step_count > 0:
+      logging.info(
+          "Saving intra-step checkpoint at step %d (micro_step_count=%d).",
+          step,
+          self._micro_step_count,
+      )
+      force_ckpt_save = True
+      custom_metadata["micro_step_count"] = self._micro_step_count
+    else:
+      logging.info("Saving checkpoint at step %d.", step)
+
+    if metadata:
+      # Metadata from Orchestrator
+      custom_metadata["additional_metadata"] = metadata
+
     ckpt_saved = self._checkpoint_manager.save_checkpoint(
         step=step,
-        model=self.model,
-        optimizer=self.optimizer,
-        custom_metadata=metadata,
+        checkpoint_state=checkpointing.CheckpointState(
+            model=self.model,
+            optimizer=self.optimizer,
+            accumulated_metrics=self.get_metrics(clear_cache=False),
+            accumulated_grads=self._accumulated_grads,
+        ),
+        custom_metadata=custom_metadata,
+        force_ckpt_save=force_ckpt_save,
     )
     if ckpt_saved:
       logging.info("Checkpoint saved at step %d.", step)
@@ -246,15 +309,53 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       The metadata PyTree of the restored checkpoint.
     """
     step = kwargs.get("step", None)
-    restored_step, restored_metadata = self._checkpoint_manager.restore_checkpoint(
+    checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
         optimizer=self.optimizer,
+        accumulated_grads=self._accumulated_grads,
+    )
+
+    restored_step, restored_checkpoint_state, restored_metadata = self._checkpoint_manager.restore_checkpoint(
+        checkpoint_state=checkpoint_state,
         step=step,
     )
-    if restored_step:
-      logging.info("Checkpoint restored from step %d.", restored_step)
-      self.train_step = restored_step
-    return restored_metadata
+    if not restored_step:
+      return None
+
+    logging.info("Checkpoint restored from step %d.", restored_step)
+    self.train_step = restored_step
+
+    if restored_checkpoint_state.accumulated_metrics:
+      # pylint: disable-next=protected-access
+      self._metrics_recorder._metrics_buffer = restored_checkpoint_state.accumulated_metrics
+
+    restored_additional_metadata = None
+    if restored_metadata:
+      self._micro_step_count = restored_metadata.get("micro_step_count", 0)
+      restored_additional_metadata = restored_metadata.get("additional_metadata", None)
+
+    # Restore intra-step state if it exists.
+    if restored_checkpoint_state.accumulated_grads:
+      self._accumulated_grads = restored_checkpoint_state.accumulated_grads
+
+      if self._micro_step_count > 0 and self._metrics_recorder._metrics_buffer:  # pylint: disable=protected-access
+        active_buf = self._metrics_recorder.get_step_metrics(restored_step)
+        if active_buf and "loss" in active_buf.weighted_metrics:
+          wm = active_buf.weighted_metrics["loss"]
+          if wm.unreduced_sum.ndim > 0:
+            self._cached_losses = [
+                abstract_engine.WeightedMetric(
+                    unreduced_sum=wm.unreduced_sum[i],
+                    denominator=wm.denominator[i],
+                    eps=wm.eps,
+                    min_denom=wm.min_denom,
+                )
+                for i in range(wm.unreduced_sum.shape[0])
+            ]
+          else:
+            self._cached_losses = [wm]
+
+    return restored_additional_metadata
 
   def record_metrics(
       self,
@@ -269,7 +370,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metric: The metric to record.
       aggregation_fn: The aggregation function to apply to the metric.
     """
-    self._metrics_logger.buffer_metrics(
+    self._metrics_recorder.buffer_metrics(
         train_step=self.train_step,
         name=name,
         metric=metric,
@@ -285,7 +386,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       On-device MetricsBuffer containing WeightedMetric and scalar arrays.
     """
-    return self._metrics_logger.get_metrics(clear_cache=clear_cache)
+    return self._metrics_recorder.get_metrics(clear_cache=clear_cache)
 
   def prepare_weight_sync(self, **kwargs: Any) -> Any:
     """Stages weights for transfer and returns access coordinates.
@@ -300,4 +401,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def close(self) -> None:
     """Closes the trainer and its associated resources."""
+    self._throttler.cleanup()
+    self._metrics_recorder.cleanup()
     self._checkpoint_manager.close()

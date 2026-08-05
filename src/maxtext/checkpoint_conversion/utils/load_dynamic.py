@@ -73,18 +73,22 @@ import time
 
 from flax import nnx
 import flax.traverse_util
-from google.cloud import storage
 import huggingface_hub
 import jax
 from maxtext.checkpoint_conversion.utils import hf_model_configs
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import tensor_handling
+from maxtext.common.gcloud_stub import gcs_storage
 from maxtext.utils import gcs_utils
 from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_logging
 from orbax.checkpoint import v1 as ocp_v1
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
+
+# Route GCS through the decoupling helper so this module imports cleanly in
+# decoupled environments where google-cloud-storage is intentionally absent.
+storage = gcs_storage()
 
 HF_MODEL_CONFIGS = hf_model_configs.HF_MODEL_CONFIGS
 get_hf_loading_function = tensor_handling.get_hf_loading_function

@@ -44,8 +44,12 @@ jobs:
       - name: Check if image exists
         id: check
         shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
-          if gcloud container images describe "gcr.io/${{ vars.PROJECT_NAME }}/${{ inputs.image_name }}:${{ inputs.image_tag }}" >/dev/null 2>&1; then
+          if gcloud container images describe "gcr.io/${PROJECT_NAME}/${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
           else
             echo "exists=false" >> $GITHUB_OUTPUT

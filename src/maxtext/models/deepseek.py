@@ -24,7 +24,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Config
+from maxtext.common.common_types import Config, AttentionType
 from maxtext.common.common_types import HyperConnectionType, MODEL_MODE_PREFILL, DecoderBlockType
 from maxtext.layers import attention_mla
 from maxtext.layers import initializers
@@ -149,7 +149,7 @@ class DeepSeekGenericLayer(nnx.Module):
           max_target_length=self.config.max_target_length,
           max_prefill_predict_length=self.config.max_prefill_predict_length,
           attention_kernel=self.config.attention,
-          attention_type=self.config.attention_type,
+          attention_type=AttentionType(self.config.attention_type),
           inputs_q_shape=self.dummy_inputs_shape,
           inputs_kv_shape=self.dummy_inputs_shape,
           mesh=mesh,
@@ -211,6 +211,7 @@ class DeepSeekGenericLayer(nnx.Module):
       decoder_segment_ids,
       decoder_positions,
       deterministic,
+      model_mode,
       previous_chunk=None,
       slot: None | int = None,
   ):
@@ -221,7 +222,7 @@ class DeepSeekGenericLayer(nnx.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
-        model_mode=self.model_mode,
+        model_mode=model_mode,
         out_sharding=self.out_sharding,
         previous_chunk=previous_chunk,
         slot=slot,
@@ -270,6 +271,7 @@ class DeepSeekGenericLayer(nnx.Module):
       decoder_segment_ids,
       decoder_positions,
       deterministic,
+      model_mode,
       previous_chunk=None,
       slot: None | int = None,
   ):
@@ -283,7 +285,7 @@ class DeepSeekGenericLayer(nnx.Module):
           decoder_segment_ids=decoder_segment_ids,
           inputs_positions=decoder_positions,
           deterministic=deterministic,
-          model_mode=self.model_mode,
+          model_mode=model_mode,
           out_sharding=self.out_sharding,
           previous_chunk=previous_chunk,
           slot=slot,
@@ -295,6 +297,7 @@ class DeepSeekGenericLayer(nnx.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
+          model_mode,
           previous_chunk,
           slot,
       )
@@ -368,6 +371,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
+        model_mode,
         previous_chunk,
         slot,
     )
@@ -446,7 +450,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # in `Decoder`, since they will never be executed together.
     if self.config.use_batch_split_schedule:
       # The older version of batch-split that fully uses qwix quantization.
-      if self.config.use_qwix_quantization and not self.config.use_manual_quantization:
+      if self.config.quantization and self.config.use_qwix_quantization and not self.config.use_manual_quantization:
         activation_pspec = jax.sharding.PartitionSpec(
             ("data", "fsdp", "fsdp_transpose", "expert", "context"),
             None,
@@ -581,6 +585,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
+        model_mode,
         previous_chunk,
         slot,
     )

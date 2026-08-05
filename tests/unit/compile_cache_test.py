@@ -34,7 +34,6 @@ To debug:
 import os
 import tempfile
 import shutil
-import pytest
 import subprocess
 import sys
 
@@ -44,7 +43,6 @@ from tests.utils.test_helpers import (
 )
 
 
-@pytest.mark.cpu_only
 def test_train_step_cache_hit():
   temp_dir = tempfile.mkdtemp()
   _base_output_directory = get_test_base_output_directory()

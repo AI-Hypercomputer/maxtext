@@ -26,7 +26,6 @@ pytestmark = [pytest.mark.post_training]
 class TrainDPOTest(unittest.TestCase):
   """Tests for train_dpo.py."""
 
-  @pytest.mark.cpu_only
   def test_validate_config_valid(self):
     config = SimpleNamespace(
         optimizer_memory_host_offload=False,
@@ -35,7 +34,6 @@ class TrainDPOTest(unittest.TestCase):
     # Should not raise any exception
     train_dpo.validate_config(config)
 
-  @pytest.mark.cpu_only
   def test_validate_config_invalid_offload(self):
     config = SimpleNamespace(
         optimizer_memory_host_offload=True,
@@ -44,7 +42,6 @@ class TrainDPOTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "optimizer_memory_host_offload=True is not supported"):
       train_dpo.validate_config(config)
 
-  @pytest.mark.cpu_only
   def test_validate_config_invalid_vocab_tiling(self):
     config = SimpleNamespace(
         optimizer_memory_host_offload=False,

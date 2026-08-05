@@ -27,7 +27,6 @@ pytestmark = [pytest.mark.post_training]
 class TrainSFTTest(unittest.TestCase):
   """Tests for train_sft.py."""
 
-  @pytest.mark.cpu_only
   def test_validate_config_valid(self):
     config = SimpleNamespace(
         optimizer_memory_host_offload=False,
@@ -35,7 +34,6 @@ class TrainSFTTest(unittest.TestCase):
     # Should not raise any exception
     train_sft.validate_config(config)
 
-  @pytest.mark.cpu_only
   def test_validate_config_invalid_offload(self):
     config = SimpleNamespace(
         optimizer_memory_host_offload=True,
@@ -43,7 +41,6 @@ class TrainSFTTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "optimizer_memory_host_offload=True is not supported"):
       train_sft.validate_config(config)
 
-  @pytest.mark.cpu_only
   def test_train_model_caching_moe(self):
     """Test that NNX graph caching is disabled for MoE models (num_experts > 1)."""
     mt_config = SimpleNamespace(
@@ -64,7 +61,6 @@ class TrainSFTTest(unittest.TestCase):
         cache_nnx_graph=False,
     )
 
-  @pytest.mark.cpu_only
   def test_train_model_caching_dense(self):
     """Test that NNX graph caching is enabled for dense models (num_experts <= 1)."""
     mt_config = SimpleNamespace(

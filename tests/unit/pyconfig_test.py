@@ -20,6 +20,7 @@ import unittest
 
 from maxtext.configs import pyconfig
 from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
+from maxtext.configs.types import _normalize_axes, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
@@ -331,6 +332,68 @@ class PyconfigTest(unittest.TestCase):
         eval_start_step=50,
     )
     self.assertEqual(config_override.eval_start_step, 50)
+
+  def test_eval_start_step_negative_raises_error(self):
+    """Verifies that eval_start_step < 0 raises a validation error."""
+    with self.assertRaises((ValueError, Exception)):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          eval_start_step=-1,
+      )
+
+  # ------------------------------------------------------------------
+  # Tests for infer_cp_axes / infer_ep_axes and EP rank flag disabling
+  # ------------------------------------------------------------------
+
+  def test_normalize_axes_basics(self):
+    """_normalize_axes handles None, str, list, and empty list."""
+    self.assertEqual(_normalize_axes(None), ())
+    self.assertEqual(_normalize_axes("expert"), ("expert",))
+    self.assertEqual(_normalize_axes(["a", "b"]), ("a", "b"))
+    self.assertEqual(_normalize_axes([]), ())
+
+  def test_ep_rank_1_raises_on_ep_flags(self):
+    """When EP rank is 1 (no EP rules), setting EP-only flags must raise ValueError."""
+    # No 'exp' rule -> infer_ep_axes returns () -> EP rank is 1.
+    rules_no_ep = [["activation_length", ["context"]]]
+    self.assertEqual(infer_ep_axes(rules_no_ep), ())
+
+    # Each flag that must be disabled when EP rank == 1.
+    ep_disabled_flags = {
+        "use_random_routing": (False, True),
+        "use_ragged_sort": (False, True),
+        "ragged_buffer_factor": (-1.0, 2.0),
+        "use_ring_of_experts": (False, True),
+        "num_moe_emb_chunks": (0, 2),
+    }
+    for flag_name, (_, bad_value) in ep_disabled_flags.items():
+      with self.subTest(flag=flag_name):
+        with self.assertRaises(ValueError, msg=f"{flag_name}={bad_value} should raise when EP rank is 1"):
+          pyconfig.initialize(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+              skip_jax_distributed_system=True,
+              **{flag_name: bad_value},
+          )
+
+  def test_cp_as_ep_infer_axes(self):
+    """cp-as-ep: exp -> ['context', 'expert'], so ici_context_parallelism contributes to EP rank."""
+    cp_as_ep_rules = [
+        ["exp", ["context", "expert"]],
+        ["activation_length", ["context"]],
+    ]
+    self.assertEqual(infer_ep_axes(cp_as_ep_rules), ("context", "expert"))
+    # CP still inferred from activation_length
+    self.assertEqual(infer_cp_axes(cp_as_ep_rules), ("context",))
+
+  def test_ep_as_cp_infer_axes(self):
+    """ep-as-cp: activation_length -> ['expert'], exp -> 'expert'. Expert axis serves both CP and EP."""
+    ep_as_cp_rules = [
+        ["activation_length", ["expert"]],
+        ["exp", "expert"],
+    ]
+    self.assertEqual(infer_cp_axes(ep_as_cp_rules), ("expert",))
+    self.assertEqual(infer_ep_axes(ep_as_cp_rules), ("expert",))
 
 
 if __name__ == "__main__":

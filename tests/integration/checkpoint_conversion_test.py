@@ -29,13 +29,11 @@ pytestmark = [pytest.mark.integration_test]
 class Qwen3CheckpointConversionTest(unittest.TestCase):
   """Tests HuggingFace to Orbax checkpoint conversion."""
 
-  @pytest.mark.cpu_only
   def test_import_to_maxtext(self):
     # This test validates that to_maxtext can be imported without errors,
     # and ensures its top-level statements are covered by Codecov.
     self.assertIsNotNone(to_maxtext)
 
-  @pytest.mark.cpu_only
   def test_qwen3_30b_a3b_roundtrip_conversion(self):
     model_name = "qwen3-30b-a3b"
     base_num_decoder_layers = 2
@@ -50,6 +48,7 @@ class Qwen3CheckpointConversionTest(unittest.TestCase):
           "override_model_config=True",
           "scan_layers=False",
           "hardware=cpu",
+          "attention=dot_product",
           "skip_jax_distributed_system=True",
           "checkpoint_storage_use_ocdbt=False",
           "checkpoint_storage_use_zarr3=False",
@@ -83,6 +82,7 @@ class Qwen3CheckpointConversionTest(unittest.TestCase):
           "scan_layers=false",
           "weight_dtype=bfloat16",
           "hardware=cpu",
+          "attention=dot_product",
           "skip_jax_distributed_system=True",
           "--override_model_architecture=True",
       ]

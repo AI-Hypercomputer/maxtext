@@ -917,6 +917,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -1005,6 +1006,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -1069,6 +1071,7 @@ class RoutedMoE(nnx.Module):
       use_custom_sort_vjp=True,
       use_ragged_sort=False,
       ragged_buffer_factor=-1.0,
+      use_single_sparsecore=False,
   ):
     """Permutes tokens locally within an expert shard.
 
@@ -1152,7 +1155,12 @@ class RoutedMoE(nnx.Module):
       # the worst-case ragged buffer. Restricting the gather to that prefix
       # makes both forward and backward proportional to the routed token count.
       valid_end = jnp.sum(local_group_size).astype(jnp.int32)
-      sorted_inputs = a2a_ragged_sort(inputs, sorted_indices, valid_end)
+      sorted_inputs = a2a_ragged_sort(
+          inputs,
+          sorted_indices,
+          valid_end,
+          use_single_sparsecore=use_single_sparsecore,
+      )
     else:
       sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
     sorted_experts_ids = expert_indices[sorted_indices]
@@ -1383,6 +1391,7 @@ class RoutedMoE(nnx.Module):
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
+      # Clamps the tile size using the minimum
       tiling = (
           min(tiling[0], m),
           min(tiling[1], k),
@@ -1393,7 +1402,7 @@ class RoutedMoE(nnx.Module):
         if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
           raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
         rhs_inputs = kernel.qvalue
-      if self.config.use_qwix_quantization:
+      if self.config.quantization and self.config.use_qwix_quantization:
         # Use full contraction for QWIX quantization to allow quantization
         # fusion (max reduce over contracting dimension).
         tiling = (tiling[0], k, tiling[2])
@@ -1424,7 +1433,7 @@ class RoutedMoE(nnx.Module):
       return output
 
     def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
-      if self.config.use_qwix_quantization:
+      if self.config.quantization and self.config.use_qwix_quantization:
         return group_sizes
       elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
         return group_sizes
@@ -1484,42 +1493,28 @@ class RoutedMoE(nnx.Module):
       # mode on a TPU target breaks check_vma and bloats HBM temporaries.
       megablox_interpret = self.mesh.devices.flat[0].platform != "tpu"
 
-      # We support three implementations for gmm - tokamax, older forked kernel, or jax.lax.ragged_dot
-      # For quantized tokamax we call a forked version that supports our quantization recipes.
-      if self.config.use_tokamax_gmm:
-        # tokamax gmm v1 (quantized) or tokamax gmm v2 (unquantized)
-        # tokamax gmm v2 (quantized) not supported yet
-        if self.config.quantization or self.config.use_gmm_v2:
-          output = mblx.gmm(
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=group_sizes,
-              preferred_element_type=self.dtype,
-              tiling=tiling,
-              group_offset=group_offset,
-              lhs_quantize_dtype=lhs_quantize_dtype,
-              rhs_quantize_dtype=rhs_quantize_dtype,
-              use_qwix_quantization=self.config.use_qwix_quantization,
-              use_tokamax_backend=self.config.use_tokamax_gmm,
-              weight_gather_axes=weight_gather_axes,
-              lhs_vma_axes=lhs_vma_axes,
-              rhs_vma_axes=rhs_vma_axes,
-              use_gmm_v2=self.config.use_gmm_v2,
-              partial_sum=partial_sum,
-              interpret=megablox_interpret,
-          )
-        else:  # tokamax (unquantized)
-          output = tokamax.ragged_dot(
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=tokamax_group_sizes,
-              precision=jax.lax.Precision.DEFAULT,
-              preferred_element_type=self.dtype,
-              implementation="mosaic",
-              # `group_offset` is not yet supported
-              group_offset=None,
-          )
-      elif self.config.megablox:  # Older forked megablox
+      # We support various implementations for gmm - tokamax gmm (v1, v2), older forked megablox, or jax.lax.ragged_dot
+      # Determine whether we can use: tokamax gmm v1 (quantized)
+      is_tokamax_v1_unquantized = (
+          self.config.use_tokamax_gmm and not self.config.quantization and not self.config.use_gmm_v2
+      )
+      # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
+      use_custom_vjp_gmm = self.config.use_tokamax_gmm or self.config.megablox
+
+      if is_tokamax_v1_unquantized:
+        # tokamax v1 (unquantized)
+        output = tokamax.ragged_dot(
+            lhs=inputs,
+            rhs=kernel,
+            group_sizes=tokamax_group_sizes,
+            precision=jax.lax.Precision.DEFAULT,
+            preferred_element_type=self.dtype,
+            implementation="mosaic",
+            # `group_offset` is not yet supported
+            group_offset=None,
+        )
+      elif use_custom_vjp_gmm:
+        # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
         output = mblx.gmm(
             lhs=inputs,
             rhs=kernel,
@@ -1529,14 +1524,17 @@ class RoutedMoE(nnx.Module):
             group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
+            use_qwix_quantization=bool(self.config.quantization) and self.config.use_qwix_quantization,
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,
             rhs_vma_axes=rhs_vma_axes,
+            use_gmm_v2=self.config.use_gmm_v2,
+            partial_sum=partial_sum,
             interpret=megablox_interpret,
         )
-      else:  # jax.lax.ragged_dot
+      else:
+        # jax.lax.ragged_dot
         output = jax_ragged_dot_gmm(
             inputs,
             kernel,
@@ -1545,6 +1543,7 @@ class RoutedMoE(nnx.Module):
             expert_assignments,
             padding_amount,
         )
+
       if padding_amount > 0:
         output = output[: orig_inputs_shape[0]]
       return output
@@ -1762,6 +1761,7 @@ class RoutedMoE(nnx.Module):
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.config.ragged_buffer_factor,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
@@ -1774,6 +1774,7 @@ class RoutedMoE(nnx.Module):
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.config.ragged_buffer_factor,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
 
       return (
@@ -1959,6 +1960,7 @@ class RoutedMoE(nnx.Module):
               intermediate_output,
               jnp.argsort(route_metadata.local_sorted_indices),  # pylint: disable=undefined-variable
               valid_end,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
           local_output = _sort_activations(
