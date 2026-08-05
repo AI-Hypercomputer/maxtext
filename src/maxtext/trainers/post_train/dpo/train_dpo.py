@@ -110,8 +110,9 @@ def get_tunix_config(mt_config: MaxTextConfig) -> DPOTrainingConfig:
       lambda_orpo=mt_config.dpo.orpo_lambda,
       beta=mt_config.dpo.dpo_beta,
       label_smoothing=mt_config.dpo.dpo_label_smoothing,
-      max_prompt_length=mt_config.dpo.max_prompt_length,
-      max_response_length=mt_config.max_target_length - mt_config.dpo.max_prompt_length,
+      max_prompt_length=mt_config.dpo.max_prompt_length or (mt_config.max_target_length // 2),
+      max_response_length=mt_config.max_target_length
+      - (mt_config.dpo.max_prompt_length or (mt_config.max_target_length // 2)),
   )
 
 
