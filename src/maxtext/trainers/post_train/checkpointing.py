@@ -237,12 +237,23 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     metadata = checkpointing.checkpoint_custom_metadata(self._config)
     metadata.update(custom_metadata or {})
 
-    saved = self._checkpoint_manager.save(
-        step,
-        args=ocp.args.Composite(**save_args),
-        custom_metadata=metadata,
-        force=force,
-    )
+    if not force and step in self._checkpoint_manager.all_steps(read=True):
+      max_logging.log(f"Step {step} already exists in MaxText layout. Skipping save.")
+      return False
+
+    try:
+      saved = self._checkpoint_manager.save(
+          step,
+          args=ocp.args.Composite(**save_args),
+          custom_metadata=metadata,
+          force=force,
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      if "StepAlreadyExistsError" in type(e).__name__:
+        max_logging.log(f"Step {step} already exists. Skipping save.")
+        saved = False
+      else:
+        raise e
     if saved:
       max_logging.log(f"Saved post-training checkpoint at step {step} in MaxText's on-disk layout")
     return saved

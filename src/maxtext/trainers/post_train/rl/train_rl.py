@@ -526,7 +526,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           temperature=trainer_config.decode_sampling_temperature,
           top_p=trainer_config.decode_sampling_nucleus_p,
           top_k=trainer_config.decode_sampling_top_k,
-          rollout_vllm_model_version=trainer_config.tokenizer_path,
+          rollout_vllm_model_version=trainer_config.vllm_hf_config_path or trainer_config.tokenizer_path,
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
@@ -542,6 +542,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
               "hf_overrides": trainer_config.vllm_hf_overrides,
               "enable_expert_parallel": sampler_config.enable_expert_parallel,
               "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
+              "trust_remote_code": True,
               # Ensures vLLM model initializes with correct dtype (not float32 default)
               "dtype": trainer_config.weight_dtype.value,
           },
