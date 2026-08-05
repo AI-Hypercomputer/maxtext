@@ -1,0 +1,84 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow builds and pushes GPU MaxText images.
+# It runs automatically daily at 12am UTC, or manually via Workflow Dispatch.
+
+name: Build GPU Nightly Docker Images
+
+on:
+  schedule:
+    # Run the job daily at 12AM UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      image_suffix:
+        description: 'An image suffix can be provided to add to the image name'
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build_maxtext_package:
+    name: Build MaxText Package
+    uses: ./.github/workflows/build_package.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      cloud_runner: linux-x86-n2-16-buildkit
+
+  build_and_push_docker_images:
+    name: Build ${{ matrix.name }} Docker Image
+    needs: build_maxtext_package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "GPU Pre-Training Stable"
+            build_mode: stable
+            workflow: pre-training
+            image_name: maxtext_gpu_jax_stable
+          - name: "GPU Pre-Training Nightly"
+            build_mode: nightly
+            workflow: pre-training
+            image_name: maxtext_gpu_jax_nightly
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+      device: gpu
+      build_mode: ${{ matrix.build_mode }}
+      workflow: ${{ matrix.workflow }}
+      dockerfile: maxtext_gpu_dependencies.Dockerfile
+      maxtext_sha: ${{ needs.build_maxtext_package.outputs.maxtext_sha }}
+      include_test_assets: true
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  notify_failure:
+    name: Notify failed build
+    needs: [build_and_push_docker_images]
+    if: ${{ failure() && inputs.image_suffix == '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create issue on failure
+        uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          title-template: "MaxText Docker Image Build Failure"
+          label-name: "docker-image-build-failure"
