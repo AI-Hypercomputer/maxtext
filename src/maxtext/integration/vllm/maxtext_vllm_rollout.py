@@ -43,6 +43,23 @@ from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextT
 
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 
+import vllm.config.utils as vllm_config_utils
+
+# Monkey-patch VLLM's is_init_field to gracefully handle dynamically added
+# fields (like sharding_config injected by tpu-inference) which would otherwise
+# cause ValueError/AssertionError during vllm_config.with_hf_config replacement.
+_orig_is_init_field = vllm_config_utils.is_init_field
+
+
+def _patched_is_init_field(cls, name):
+  try:
+    return _orig_is_init_field(cls, name)
+  except ValueError:
+    return False
+
+
+vllm_config_utils.is_init_field = _patched_is_init_field
+
 
 def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
   """Instantiate the converter for a MaxText model name."""
