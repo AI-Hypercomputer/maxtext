@@ -83,7 +83,8 @@ def run_true_kernel_comparison():
   print("=" * 110)
 
   prompt = "The capital of France is Paris and it is known for"
-  ckpt_path = "gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
+  scanned_ckpt_path = "gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
+  unscanned_ckpt_path = "gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/unscanned/0/items"
 
   # Set environment variables for MaxText vLLM integration
   os.environ["NEW_MODEL_DESIGN"] = "1"
@@ -106,7 +107,7 @@ def run_true_kernel_comparison():
       additional_config={
           "maxtext_config": {
               "model_name": "qwen3.5-35b-a3b",
-              "load_parameters_path": ckpt_path,
+              "load_parameters_path": unscanned_ckpt_path,
               "scan_layers": False,
               "weight_dtype": "float32",
               "attention": "vllm_rpa",
@@ -146,7 +147,7 @@ def run_true_kernel_comparison():
   base_kwargs = {
       "run_name": "true_kernel_comparison",
       "enable_checkpointing": True,
-      "load_parameters_path": ckpt_path,
+      "load_parameters_path": scanned_ckpt_path,
       "override_model_config": True,
       "model_name": "qwen3.5-35b-a3b",
       "max_target_length": seq_len,
