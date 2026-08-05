@@ -139,7 +139,9 @@ def run_true_kernel_comparison():
     forced_routed_experts_jax = jnp.expand_dims(jnp.array(real_vllm_routed_experts, dtype=jnp.int32), axis=0)
     print(f"Extracted vLLM Routed Experts Tensor Shape: {forced_routed_experts_jax.shape}\n")
   else:
-    print("Warning: real_vllm_routed_experts is None (MaxTextForCausalLM adapter in vLLM does not return routed_experts).")
+    print(
+        "Warning: real_vllm_routed_experts is None (MaxTextForCausalLM adapter in vLLM does not return routed_experts)."
+    )
     seq_len = len(prompt_token_ids) + len(generated_token_ids) - 1
     forced_routed_experts_jax = None
 
@@ -172,7 +174,7 @@ def run_true_kernel_comparison():
 
   # Configuration for True Training (using rl.yml and splash / linear attention kernels)
   cfg_train = pyconfig.initialize(
-      [sys.argv[0], get_test_config_path()],
+      [sys.argv[0], get_test_config_path(), "attention=splash"],
       **base_kwargs,
   )
 
@@ -181,9 +183,7 @@ def run_true_kernel_comparison():
   rng = jax.random.PRNGKey(42)
   init_rng, _ = jax.random.split(rng)
 
-  input_ids = jnp.expand_dims(
-      jnp.array(prompt_token_ids + generated_token_ids[:-1], dtype=jnp.int32)[:seq_len], axis=0
-  )
+  input_ids = jnp.expand_dims(jnp.array(prompt_token_ids + generated_token_ids[:-1], dtype=jnp.int32)[:seq_len], axis=0)
   segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
   positions = jnp.expand_dims(jnp.arange(seq_len, dtype=jnp.int32), axis=0)
 

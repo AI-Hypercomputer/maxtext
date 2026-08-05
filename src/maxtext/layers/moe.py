@@ -2702,7 +2702,7 @@ class RoutedMoE(nnx.Module):
     top_k_weights, top_k_indices = self.get_topk(
         gate_logits, pre_bias_logits, self.rngs, input_ids=input_ids, forced_routed_experts=forced_routed_experts
     )
-    self.sow(nnx.Intermediate, "selected_experts", top_k_indices)
+    self.selected_experts = nnx.Intermediate(top_k_indices)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
@@ -3024,7 +3024,7 @@ class RoutedMoE(nnx.Module):
     gating_output = jnp.reshape(gate_logits, (batch_size * seq_len, self.num_experts))
 
     _, top_k_indices = jax.lax.top_k(gating_output, self.num_experts_per_tok)
-    self.sow(nnx.Intermediate, "selected_experts", top_k_indices)
+    self.selected_experts = nnx.Intermediate(top_k_indices)
 
     # Concatenate gate and up projections: [E, D, H] + [E, D, H] -> [E, D, 2H]
     # fused_moe_func splits this internally: gate=w1[..., :H], up=w1[..., H:]

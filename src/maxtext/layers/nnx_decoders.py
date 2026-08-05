@@ -2037,10 +2037,22 @@ class NNXDecoder(nnx.Module):
       logits = None
       self.sow(nnx.Intermediate, "hidden_states", hidden_state)
 
-    else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
-    return logits, hidden_state, kv_caches
+    expert_indices = None
+    try:
+      expert_indices_list = []
+      intermediates = nnx.state(self, nnx.Intermediate)
+      for path, val in intermediates.flat_state():
+        if path and str(path[-1]) == "selected_experts":
+          v = val.value if hasattr(val, "value") else val
+          expert_indices_list.append(v)
+      if expert_indices_list:
+        expert_indices = jnp.stack(expert_indices_list, axis=0)
+    except Exception:
+      expert_indices = None
+
+    return logits, hidden_state, kv_caches, expert_indices
 
   def _apply_deepseek4_scanned_blocks(
       self,

@@ -15,6 +15,7 @@
 """vLLM adapter for MaxText models."""
 
 import os
+import sys
 from flax import nnx
 import flax.linen as nn
 import jax
@@ -262,7 +263,7 @@ class MaxTextForCausalLM(nnx.Module):
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
-      hidden, kv_caches = self.model(
+      res = self.model(
           decoder_input_tokens=input_ids,
           decoder_positions=input_positions,
           kv_caches=kv_caches,
@@ -272,16 +273,12 @@ class MaxTextForCausalLM(nnx.Module):
       )
 
       expert_indices = None
-      try:
-        expert_indices_list = []
-        intermediates = nnx.pop(self.model, nnx.Intermediate)
-        for path, val in intermediates.flat_state().items():
-          if path and path[-1] == "selected_experts":
-            expert_indices_list.append(val.value if hasattr(val, "value") else val)
-        if expert_indices_list:
-          expert_indices = jnp.stack(expert_indices_list, axis=0)
-      except Exception as e:
-        max_logging.log(f"Warning: Failed to extract expert_indices in MaxTextForCausalLM: {e}")
+      if isinstance(res, tuple) and len(res) == 3:
+        hidden, kv_caches, expert_indices = res
+      elif isinstance(res, tuple) and len(res) == 4:
+        _, hidden, kv_caches, expert_indices = res
+      else:
+        hidden, kv_caches = res
 
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
       hidden = hidden.reshape((-1, hidden.shape[-1]))
