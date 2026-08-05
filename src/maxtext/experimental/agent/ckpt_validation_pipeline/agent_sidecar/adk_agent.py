@@ -208,7 +208,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
   if api_key:
     logger.info("Initializing GenAI Client using GEMINI_API_KEY (1B token quota)...")
     client = genai.Client(api_key=api_key)
-    model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-2.5-pro")
+    model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-3.1-pro-preview-customtools")
   else:
     logger.info("Initializing GenAI Client using Vertex AI default credentials...")
     client = genai.Client(
