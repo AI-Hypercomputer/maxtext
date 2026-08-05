@@ -30,22 +30,23 @@ import subprocess
 import sys
 import unittest
 
+import filelock
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 import jsonlines
-from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
-from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.configs import pyconfig
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
 import numpy as np
 import pytest
 from transformers import AutoTokenizer
@@ -177,8 +178,11 @@ class SFTTrainerCorrectnessTest(unittest.TestCase):
           os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
       )
 
-    exit_code = subprocess.call(
-        [
+    tokenizer_dir = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
+    lock_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer.lock")
+    with filelock.FileLock(lock_path):
+      if not os.path.exists(tokenizer_dir):
+        command = [
             "gcloud",
             "storage",
             "cp",
@@ -186,9 +190,9 @@ class SFTTrainerCorrectnessTest(unittest.TestCase):
             "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
             os.path.join(MAXTEXT_ASSETS_ROOT, ""),
         ]
-    )
-    if exit_code != 0:
-      raise ValueError(f"Download tokenizer with gcloud storage cp failed with exit code: {exit_code}")
+        exit_code = subprocess.call(command)
+        if exit_code != 0:
+          raise ValueError(f"Download tokenizer failed ({exit_code})")
 
   @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 b/425997645")
   @pytest.mark.integration_test

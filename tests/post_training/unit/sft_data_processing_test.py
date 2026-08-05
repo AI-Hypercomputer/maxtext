@@ -20,6 +20,7 @@ pytestmark = [pytest.mark.post_training]
 import subprocess
 import unittest
 import os.path
+import filelock
 import numpy as np
 import jax
 from jax.sharding import Mesh
@@ -320,8 +321,11 @@ class SFTDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    exit_code = subprocess.call(
-        [
+    tokenizer_dir = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
+    lock_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer.lock")
+    with filelock.FileLock(lock_path):
+      if not os.path.exists(tokenizer_dir):
+        command = [
             "gcloud",
             "storage",
             "cp",
@@ -329,11 +333,9 @@ class SFTDataProcessingTest(unittest.TestCase):
             "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
             os.path.join(MAXTEXT_ASSETS_ROOT, ""),
         ]
-    )
-    if exit_code != 0:
-      raise unittest.SkipTest(
-          f"Skipping SFTDataProcessingTest: Download tokenizer with gcloud storage cp failed with exit code: {exit_code}"
-      )
+        exit_code = subprocess.call(command)
+        if exit_code != 0:
+          raise unittest.SkipTest(f"Download tokenizer failed ({exit_code})")
 
   def setUp(self):
     super().setUp()
@@ -494,19 +496,20 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    if not os.path.exists(cls.LLAMA_TOKENIZER_PATH):
-      exit_code = subprocess.call(
-          [
-              "gcloud",
-              "storage",
-              "cp",
-              "-r",
-              "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
-              os.path.join(MAXTEXT_ASSETS_ROOT, ""),
-          ]
-      )
-      if exit_code != 0:
-        raise unittest.SkipTest("Skipping SFTChatTemplateLogicTest: Failed to download llama tokenizer")
+    lock_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer.lock")
+    with filelock.FileLock(lock_path):
+      if not os.path.exists(cls.LLAMA_TOKENIZER_PATH):
+        command = [
+            "gcloud",
+            "storage",
+            "cp",
+            "-r",
+            "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
+            os.path.join(MAXTEXT_ASSETS_ROOT, ""),
+        ]
+        exit_code = subprocess.call(command)
+        if exit_code != 0:
+          raise unittest.SkipTest("Download tokenizer failed")
 
   def setUp(self):
     super().setUp()
