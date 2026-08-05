@@ -151,7 +151,7 @@ class HfDataProcessingTest(unittest.TestCase):
 class TrainingObjectiveTransformTest(unittest.TestCase):
   """Tests the pre-training objective boundary in the HF pipeline."""
 
-  def _block_diffusion_config(self):
+  def _block_diffusion_config(self, *, completion_only=False):
     return SimpleNamespace(
         elastic_enabled=False,
         training_objective="block_diffusion",
@@ -160,6 +160,7 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
         block_diffusion_min_noise=0.05,
         block_diffusion_canvas_policy="seed_and_mask",
         block_diffusion_logit_alignment="shifted",
+        sft_train_on_completion_only=completion_only,
     )
 
   def _pipeline_operations(self, config, *, shift):
@@ -261,6 +262,7 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
     self.assertEqual(transform.min_noise, 0.05)
     self.assertEqual(transform.logit_alignment, "shifted")
     self.assertEqual(transform.canvas_policy, "seed_and_mask")
+    self.assertFalse(transform.completion_only)
 
   def test_preprocessing_pipeline_installs_block_diffusion_transform(self):
     operations = self._pipeline_operations(self._block_diffusion_config(), shift=True)
@@ -282,7 +284,23 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
         )
     )
 
-  def test_block_diffusion_rejects_packing_and_post_training_modes(self):
+  def test_block_diffusion_sft_uses_configured_completion_scope(self):
+    for completion_only in (False, True):
+      with self.subTest(completion_only=completion_only):
+        transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+            self._block_diffusion_config(completion_only=completion_only),
+            shift=True,
+            use_dpo=False,
+            use_sft=True,
+            packing=False,
+            pad_id=0,
+            bos_token_id=1,
+        )
+
+        self.assertIsInstance(transform, input_pipeline_utils.BlockDiffusionCorruption)
+        self.assertEqual(transform.completion_only, completion_only)
+
+  def test_block_diffusion_rejects_packing_and_dpo(self):
     base_args = {
         "shift": True,
         "use_dpo": False,
@@ -293,7 +311,6 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
     }
     cases = (
         ({"packing": True}, "packing=False"),
-        ({"use_sft": True}, "pre-training only"),
         ({"use_dpo": True}, "not compatible with DPO"),
     )
     for overrides, expected_message in cases:
