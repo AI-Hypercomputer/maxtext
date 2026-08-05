@@ -1,4 +1,5 @@
 import os
+import time
 import subprocess
 import logging
 from pathlib import Path
@@ -7,6 +8,23 @@ from google.genai import types
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _send_message_with_retry(chat, prompt, max_retries=3, sleep_seconds=30):
+  """Sends a message to Gemini with retry and a 30-second sleep on 429 rate-limit/quota errors."""
+  for attempt in range(1, max_retries + 1):
+    try:
+      return chat.send_message(prompt)
+    except Exception as e:
+      err_str = str(e)
+      if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+        if attempt < max_retries:
+          logger.warning(
+              f"Received 429 rate-limit error (attempt {attempt}/{max_retries}). Sleeping {sleep_seconds}s before retry..."
+          )
+          time.sleep(sleep_seconds)
+          continue
+      raise e
 
 
 # Helper to run local scripts
@@ -190,13 +208,14 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
   if api_key:
     logger.info("Initializing GenAI Client using GEMINI_API_KEY (1B token quota)...")
     client = genai.Client(api_key=api_key)
+    model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-2.5-pro")
   else:
     logger.info("Initializing GenAI Client using Vertex AI default credentials...")
     client = genai.Client(
         vertexai=True, project="tpu-prod-env-multipod", location=os.environ.get("VERTEX_LOCATION", "global")
     )
+    model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-3.1-pro-preview")
 
-  model_id = os.environ.get("OVERWATCH_MODEL_ID", "gemini-3.1-pro-preview")
   maxtext_branch = os.environ.get("MAXTEXT_BRANCH", "main")
   hf_ref_code_url = os.environ.get("HF_REF_CODE_URL", "")
   hf_config_url = os.environ.get("HF_CONFIG_URL", "")
@@ -225,7 +244,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
           automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=15),
       ),
   )
-  analyst_response = analyst_chat.send_message(analyst_prompt)
+  analyst_response = _send_message_with_retry(analyst_chat, analyst_prompt)
 
   # --- PHASE 2: REVIEW PHASE (Meta-Agent Validation) ---
   logger.info("Phase 2: Reviewing Analyst JSON One-Pager plan...")
@@ -270,7 +289,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
           f"Analyze attempt history for run_id '{run_id}' and synthesize corrective instruction:\n"
           f"{json.dumps(run_state['attempts'], indent=2)}"
       )
-      overseer_res = overseer_chat.send_message(overseer_prompt)
+      overseer_res = _send_message_with_retry(overseer_chat, overseer_prompt)
       overseer_instruction = f"\n- OVERSEER SURVEILLANCE INTERVENTION:\n  {overseer_res.text.strip()}\n"
       logger.info(f"Overseer intervention synthesized:\n{overseer_instruction}")
   except Exception as e:
@@ -308,7 +327,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
       ),
   )
   fixer_prompt = f"Execute the Analyst structured plan for run_id {run_id} and model {model_name}."
-  fixer_response = fixer_chat.send_message(fixer_prompt)
+  fixer_response = _send_message_with_retry(fixer_chat, fixer_prompt)
   logger.info(f"Fixer Phase completed: {fixer_response.text[:200]}...")
 
   # --- PHASE 3.5: OVERSEER OUTPUT & FIX HALLUCINATION GUARD (meta_agent.txt) ---
@@ -329,11 +348,11 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
         f"3. If valid, respond with 'VALID_FIX'. Otherwise, output a specific correction prompt for the Fixer.\n\n"
         f"Fixer Output:\n{fixer_response.text[:2000]}"
     )
-    audit_res = overseer_guard_chat.send_message(overseer_audit_prompt).text.strip()
+    audit_res = _send_message_with_retry(overseer_guard_chat, overseer_audit_prompt).text.strip()
     if "VALID_FIX" not in audit_res or "SyntaxError" in fixer_response.text:
       logger.warning(f"Overseer detected hallucination or syntax issue in Fixer output! Directing repair:\n{audit_res}")
       fixer_repair_prompt = f"Overseer Intervention: Repair your fix immediately based on this audit:\n{audit_res}\nRun run_linters after repairing."
-      fixer_response = fixer_chat.send_message(fixer_repair_prompt)
+      fixer_response = _send_message_with_retry(fixer_chat, fixer_repair_prompt)
       logger.info(f"Fixer Syntactic & Hallucination Repair completed: {fixer_response.text[:200]}...")
     else:
       logger.info("Overseer verified Fixer output: VALID_FIX.")
@@ -381,7 +400,7 @@ def run_agent_workflow(run_id: str, model_name: str, failure_log: str, report_so
       ),
   )
   verifier_prompt = f"Verify branch '{new_branch}' for run_id '{run_id}' and write the final Remediation Report."
-  verifier_response = verifier_chat.send_message(verifier_prompt)
+  verifier_response = _send_message_with_retry(verifier_chat, verifier_prompt)
   logger.info("4-Phase Meta-Agent Orchestrator workflow completed successfully.")
   return verifier_response.text
 

@@ -75,43 +75,8 @@ def main():
       run_agent_workflow(run_id, model_name, error_msg, "airflow_callback")
       return
 
-    failure, blob_name = check_for_failures()
-    if not failure:
-      logger.info("No failures detected in GCS. Checking if any retry runs completed successfully...")
-      state = load_state()
-      _check_and_send_victory_laps(state)
-      logger.info("Exiting cleanly.")
-      return
-
-    run_id = (
-        failure.get("run_name") or failure.get("run_id") or failure.get("task") or failure.get("stage") or "unknown_run"
-    )
-    model_name = failure.get("model") or failure.get("model_name", "unknown")
-    failure_log = failure.get("stderr") or failure.get("error_message") or failure.get("log", "")
-    if not failure_log or failure_log == "Success":
-      failure_log = failure.get("stdout", "No logs provided.")
-
-    state = load_state()
-    retries = state.get(run_id, 0)
-
-    if retries >= MAX_RETRIES:
-      logger.info("Run ID %s has hit the maximum of %s retries. Escalating to human.", run_id, MAX_RETRIES)
-      dispatch_email_alert(run_id, model_name)
-      state[run_id] = retries + 1  # Mark as handled
-      save_state(state)
-      mark_handled(blob_name)
-    elif retries < MAX_RETRIES:
-      logger.info("Detected failure for %s. Attempt %s/%s.", run_id, retries + 1, MAX_RETRIES)
-
-      # Immediately mark the report as handled and increment retries to prevent duplicate concurrent triggers
-      state[run_id] = retries + 1
-      save_state(state)
-      if not mark_handled(blob_name):
-        logger.info("Report %s was already claimed or deleted by a concurrent worker. Exiting cleanly.", blob_name)
-        return
-
-      # Trigger the ADK workflow instead of shelling out to agentapi CLI
-      run_agent_workflow(run_id, model_name, failure_log, blob_name)
+    logger.info("No direct Airflow failure trigger blobs found in GCS. Exiting cleanly.")
+    return
 
   except Exception as e:
     logger.error("Error during job execution: %s", e)
