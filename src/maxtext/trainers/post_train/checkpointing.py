@@ -121,9 +121,12 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     """
     self._config = config
     super().__init__(root_directory=root_directory, options=options)
-    # The Tunix base class initializes its own checkpointer, which we must close.
-    if getattr(self, "_checkpointer", None) is not None:
-      self._checkpointer.close()
+    # The base class built a manager over Tunix's item names. Close it before replacing it with
+    # one that knows MaxText's layout, or its open handles and threads outlive it.
+    # pylint: disable=access-member-before-definition
+    if self._checkpoint_manager is not None:
+      self._checkpoint_manager.close()
+    # pylint: enable=access-member-before-definition
 
     if root_directory is not None:
       # Pathways only supports the persistence APIs, so drop ocdbt/zarr3 there as Tunix does.
