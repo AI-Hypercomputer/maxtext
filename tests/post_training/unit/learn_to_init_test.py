@@ -26,6 +26,9 @@ from maxtext.trainers.post_train.distillation.lti_utils import prepare_student_w
 from unittest import mock
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.layers.learn_to_init_layer import apply_lti_modification
+import pytest
+
+pytestmark = pytest.mark.post_training
 
 
 # Minimal dummy models for testing
