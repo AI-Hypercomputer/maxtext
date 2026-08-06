@@ -48,6 +48,9 @@ WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY ${PACKAGE_DIR}/dependencies/extra_deps/ src/dependencies/extra_deps/
+RUN if ls src/dependencies/extra_deps/*.whl 1> /dev/null 2>&1; then \
+        pip install --no-deps src/dependencies/extra_deps/*.whl; \
+    fi
 COPY ${PACKAGE_DIR}/dependencies/requirements/ src/dependencies/requirements/
 COPY ${PACKAGE_DIR}/dependencies/scripts/ src/dependencies/scripts/
 COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/

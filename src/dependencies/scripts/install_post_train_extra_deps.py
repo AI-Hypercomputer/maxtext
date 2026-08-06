@@ -97,16 +97,26 @@ def main():
     _ = subprocess.run(github_deps_command, check=True, capture_output=True, text=True, env=os.environ)
     print("Github dependencies installed successfully!")
 
-    # Attempt optional Raiden dependencies installation (non-blocking for outside users)
+    # Attempt optional Raiden dependencies installation if not already installed locally
     try:
-      print(f"Installing optional Raiden keyring dependency: {' '.join(raiden_keyring_command)}")
-      _ = subprocess.run(raiden_keyring_command, check=True, capture_output=True, text=True, env=os.environ)
-      print("Raiden keyring dependency installed successfully!")
-      print(f"Installing optional Raiden dependencies: {' '.join(raiden_deps_command)}")
-      _ = subprocess.run(raiden_deps_command, check=True, capture_output=True, text=True, env=os.environ)
-      print("Raiden dependencies installed successfully!")
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      print(f"Warning: Optional Raiden dependencies installation skipped/failed: {e}")
+      try:
+        import tpu_raiden  # pylint: disable=import-outside-toplevel,unused-import
+
+        print("tpu_raiden is already installed locally; skipping Artifact Registry download.")
+      except ImportError:
+        import tpu_raiden_jax  # pylint: disable=import-outside-toplevel,unused-import
+
+        print("tpu_raiden_jax is already installed locally; skipping Artifact Registry download.")
+    except ImportError:
+      try:
+        print(f"Installing optional Raiden keyring dependency: {' '.join(raiden_keyring_command)}")
+        _ = subprocess.run(raiden_keyring_command, check=True, capture_output=True, text=True, env=os.environ)
+        print("Raiden keyring dependency installed successfully!")
+        print(f"Installing optional Raiden dependencies: {' '.join(raiden_deps_command)}")
+        _ = subprocess.run(raiden_deps_command, check=True, capture_output=True, text=True, env=os.environ)
+        print("Raiden dependencies installed successfully!")
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"Warning: Optional Raiden dependencies installation skipped/failed: {e}")
 
     # Run the command to install the MaxText vLLM directory
     print(f"Installing MaxText vLLM dependency: {' '.join(local_vllm_install_command)}")
