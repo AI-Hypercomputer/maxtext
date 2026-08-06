@@ -3954,6 +3954,7 @@ class RLConfig(
     HardwareAndMesh,
     ModelArchitecture,
     MoBa,
+    ManifoldConstrainedHyperConnections,
     # Positional Embeddings
     PositionalEmbedding,
     Rope,
