@@ -3650,8 +3650,6 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention does not support ragged attention.")
       if self.attention_sink:
         raise ValueError("TPU Tokamax ring attention does not support attention sinks.")
-      if self.use_indexer:
-        raise ValueError("TPU Tokamax ring attention does not support sparse indexer masks.")
       if self.use_chunked_prefill:
         raise ValueError("TPU Tokamax ring attention does not support chunked prefill yet.")
       if self.moba:

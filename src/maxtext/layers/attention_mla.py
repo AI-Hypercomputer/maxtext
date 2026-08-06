@@ -78,6 +78,10 @@ from maxtext.utils.globals import EPS
 PLACEHOLDER_SEQ_LEN = 1
 
 
+class indexer_losses(nnx.Variable):  # pylint: disable=invalid-name
+  """Variable type for storing Indexer loss components -> bypasses nnx.Intermediate scan filters."""
+
+
 class Indexer(nnx.Module):
   """Indexer for DeepSeek Sparse Attention (DSA).
 
@@ -1314,7 +1318,7 @@ class MLA(Attention):
             sparse_loss=self.config.indexer_sparse_training,
             scaling_factor=self.config.indexer_loss_scaling_factor,
         )
-        self.indexer_loss = nnx.Intermediate(indexer_loss)
+        self.indexer_loss = indexer_losses(indexer_loss)
 
     # Check if we need QK Clip stats
     use_qk_clip = self.model_mode == MODEL_MODE_TRAIN and self.config.use_qk_clip

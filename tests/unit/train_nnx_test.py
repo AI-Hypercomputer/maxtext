@@ -109,6 +109,16 @@ class _TinyDecoderMoEBias(_TinyDecoder):
     return out
 
 
+class _TinyDecoderIndexerLoss(_TinyDecoder):
+  """`_TinyDecoder` that also sows `indexer_loss` intermediates across its layers."""
+
+  def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+    out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
+    self.sow(nnx.Intermediate, "indexer_loss", jnp.array([0.25]))
+    self.sow(nnx.Intermediate, "indexer_loss", jnp.array([0.75]))
+    return out
+
+
 def _make_data(batch=2, seq=4, vocab=8):
   return {
       "inputs": jnp.zeros((batch, seq), dtype=jnp.int32),
@@ -182,6 +192,25 @@ class TestLossFnNNX(unittest.TestCase):
     loss, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
     self.assertEqual(float(aux["xent_sum"]), 0.0)
     self.assertEqual(float(loss), 0.0)
+
+  def test_indexer_losses_harvested_and_injected_into_loss(self):
+    cfg = _Cfg()
+    cfg.use_indexer = True
+    cfg.indexer_sparse_training = True
+    cfg.indexer_loss_scaling_factor = 0.1
+    model = _TinyDecoderIndexerLoss(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    loss_without_indexer, _ = pre_train.loss_fn(
+        _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0)), cfg, data, None, None, is_train=True
+    )
+
+    loss, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
+    expected_indexer_loss = 0.5  # mean of 0.25 and 0.75
+
+    self.assertTrue(jnp.isfinite(loss))
+    self.assertAlmostEqual(float(aux["indexer_loss"]), expected_indexer_loss, places=5)
+    self.assertAlmostEqual(float(loss), float(loss_without_indexer) + expected_indexer_loss, places=5)
 
 
 class TestTrainStepNNX(unittest.TestCase):
