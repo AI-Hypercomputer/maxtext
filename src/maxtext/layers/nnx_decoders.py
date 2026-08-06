@@ -1386,10 +1386,18 @@ class NNXDecoder(nnx.Module):
 
     return y
 
-  def apply_output_head(self, shared_embedding, y, deterministic, model_mode):
+  def apply_output_head(self, shared_embedding, y, deterministic, model_mode, reduce_mhc=True):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
+    if reduce_mhc and cfg.mhc_expansion_rate > 1 and y.ndim >= 4:
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+        y = self.hc_head(y)
+      else:
+
+        _, mhc_reduce_fn = mhc.get_functions(cfg.mhc_expansion_rate)
+        y = mhc_reduce_fn(y)
+
     if cfg.shard_mode == ShardMode.EXPLICIT:
       norm_out_sharding = create_sharding(
           self.mesh,
@@ -1581,9 +1589,8 @@ class NNXDecoder(nnx.Module):
         multimodal_input=multimodal_input,
     )
 
-    mhc_reduce = None
     if hasattr(cfg, "mhc_expansion_rate"):
-      mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
+      mhc_expand, _ = mhc.get_functions(cfg.mhc_expansion_rate)
       if cfg.mhc_expansion_rate > 1:
         # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
         y = mhc_expand(y)
@@ -1949,14 +1956,7 @@ class NNXDecoder(nnx.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    if getattr(cfg, "mhc_expansion_rate", 1) > 1:
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
-        hidden_state = self.hc_head(y)
-      else:
-        # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
-        hidden_state = mhc_reduce(y)
-    else:
-      hidden_state = y
+    hidden_state = y
 
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
     if cfg.attention in ("vllm_rpa", "vllm_batched_rpa"):
