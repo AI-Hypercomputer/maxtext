@@ -249,11 +249,21 @@ class DenseGeneral(nnx.Module):
     kernel = shard(kernel, stage2)
     return kernel
 
-  def __call__(self, inputs: Array, _initializing: bool = False, out_sharding: NamedSharding | None = None) -> Array:
+  def __call__(
+      self,
+      inputs: Array,
+      _initializing: bool = False,
+      out_sharding: NamedSharding | None = None,
+      slice_bounds: tuple[int, int] | None = None,
+  ) -> Array:
     """Applies a linear transformation to the inputs along multiple dimensions.
 
     Args:
       inputs: The nd-array to be transformed.
+      _initializing: Whether the module is initializing.
+      out_sharding: Optional sharding for the output.
+      slice_bounds: Optional tuple (begin, end) to slice the kernel and bias on
+        the last (output-feature) axis before contraction. Unquantized only.
 
     Returns:
       The transformed input.
@@ -281,6 +291,14 @@ class DenseGeneral(nnx.Module):
         kernel = jax.device_put(kernel, max_utils.device_space())
       kernel = jnp.asarray(kernel, self.dtype)
 
+    if slice_bounds is not None:
+      if self.quant is not None:
+        raise ValueError("sliced contraction is only supported when quant is None")
+      begin, end = slice_bounds
+      if not 0 <= begin < end <= kernel.shape[-1]:
+        raise ValueError(f"slice_bounds {slice_bounds} must be valid and within [0, {kernel.shape[-1]}]")
+      kernel = kernel[..., begin:end]
+
     kernel = self._maybe_two_stage_all_gather(kernel)
 
     # out_sharding should be None for auto mesh axis
@@ -294,13 +312,16 @@ class DenseGeneral(nnx.Module):
         norm_axis,
         contract_ind,
         self.matmul_precision,
-        self.quant_dot_general,
+        self.quant_dot_general if slice_bounds is None else None,
         _initializing,
         out_sharding,
     )
 
     if self.bias is not None:
       bias = jnp.asarray(self.bias[...], self.dtype)
+      if slice_bounds is not None:
+        begin, end = slice_bounds
+        bias = bias[..., begin:end]
       output += bias
     return output
 

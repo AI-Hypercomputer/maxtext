@@ -2093,6 +2093,108 @@ class MLATest(attention_test_util.MLATestBase):
       self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
       self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=2e-02, atol=2e-02, equal_nan=False))
 
+  def test_sliced_mla_projections(self):
+    config_arguments = self.config_arguments.copy()
+
+    # Enable sliced projections for one config
+    config_arguments_sliced = config_arguments.copy()
+    config_arguments_sliced["use_sliced_mla_proj"] = True
+
+    cfg_normal, mla_normal = self.init_mla(config_arguments, rope_type="default")
+    _, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")
+
+    # Sync weights
+    nnx.update(mla_sliced, nnx.state(mla_normal))
+
+    # Test TRAIN mode with gradient comparison
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_normal, cfg_normal.dtype)
+
+    def loss_fn(model, x):
+      out, _ = model(
+          x,
+          x,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(out.astype(jnp.float32) ** 2), out
+
+    (loss_normal, out_normal_train), (grad_model_normal, grad_x_normal) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1), has_aux=True
+    )(mla_normal, lnx)
+
+    (loss_sliced, out_sliced_train), (grad_model_sliced, grad_x_sliced) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1), has_aux=True
+    )(mla_sliced, lnx)
+
+    self.assertTrue(jnp.allclose(loss_normal, loss_sliced, rtol=1e-05, atol=1e-05, equal_nan=False))
+    self.assertTrue(jnp.allclose(out_normal_train, out_sliced_train, rtol=1e-05, atol=1e-05, equal_nan=False))
+    self.assertTrue(jnp.allclose(grad_x_normal, grad_x_sliced, rtol=1e-05, atol=1e-05, equal_nan=False))
+
+    grad_model_close = jax.tree_util.tree_map(
+        lambda x, y: jnp.allclose(x, y, rtol=1e-05, atol=1e-05, equal_nan=False),
+        grad_model_normal,
+        grad_model_sliced,
+    )
+    self.assertTrue(jax.tree_util.tree_all(grad_model_close))
+
+    # Test PREFILL mode followed by AUTOREGRESSIVE mode to test caching
+    prefill_length = cfg_normal.max_prefill_predict_length
+    decode_total_length = cfg_normal.max_target_length
+
+    # Re-initialize to ensure clean cache
+    cfg_normal, mla_normal = self.init_mla(config_arguments, rope_type="default")
+    _, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")
+    nnx.update(mla_sliced, nnx.state(mla_normal))
+
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    out_normal_prefill, _ = mla_normal(
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+
+    out_sliced_prefill, _ = mla_sliced(
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+
+    self.assertTrue(jnp.allclose(out_normal_prefill, out_sliced_prefill, rtol=1e-05, atol=1e-05, equal_nan=False))
+
+    # Run autoregressive steps
+    for idx in range(prefill_length, decode_total_length):
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+
+      out_normal_idx, _ = mla_normal(
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+      out_sliced_idx, _ = mla_sliced(
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+      self.assertTrue(jnp.allclose(out_normal_idx, out_sliced_idx, rtol=1e-05, atol=1e-05, equal_nan=False))
+
   def test_projection_initialization(self):
     """Tests that MLA and Attention layers initialize the correct projection weights."""
     # 1. Initialize a standard Attention layer for comparison
