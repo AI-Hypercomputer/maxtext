@@ -73,6 +73,47 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
 import tunix.generate.utils as tunix_utils
+from tunix.generate.tokenizer_adapter import TokenizerAdapter
+
+# Monkey-patch TokenizerAdapter to handle MaxText tokenizer properties
+_old_eos_id = TokenizerAdapter.eos_id
+
+
+def _patched_eos_id(self):
+  # pylint: disable=protected-access
+  if hasattr(self._tokenizer, "eos_id") and not callable(self._tokenizer.eos_id):
+    return self._tokenizer.eos_id
+  return _old_eos_id(self)
+
+
+TokenizerAdapter.eos_id = _patched_eos_id
+
+_old_bos_id = TokenizerAdapter.bos_id
+
+
+def _patched_bos_id(self):
+  # pylint: disable=protected-access
+  if hasattr(self._tokenizer, "bos_id") and not callable(self._tokenizer.bos_id):
+    return self._tokenizer.bos_id
+  return _old_bos_id(self)
+
+
+TokenizerAdapter.bos_id = _patched_bos_id
+
+_old_pad_id = TokenizerAdapter.pad_id
+
+
+def _patched_pad_id(self):
+  # pylint: disable=protected-access
+  if hasattr(self._tokenizer, "pad_id") and not callable(self._tokenizer.pad_id):
+    pad_id = self._tokenizer.pad_id
+    if pad_id is None or pad_id < 0:
+      return self.eos_id()
+    return pad_id
+  return _old_pad_id(self)
+
+
+TokenizerAdapter.pad_id = _patched_pad_id
 
 
 @contextlib.contextmanager
@@ -558,7 +599,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
       **rl_cluster_kwargs,
   )
   if checkpoint_dir is not None:
-    post_train_checkpointing.install(rl_cluster.actor_trainer, checkpoint_dir, trainer_config)
+    post_train_checkpointing.install(rl_cluster.actor_trainer, os.path.join(checkpoint_dir, "actor"), trainer_config)
 
   def make_reward_fn(fn):
     # pragma: no cover
