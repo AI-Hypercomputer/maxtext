@@ -34,7 +34,8 @@
 1. Formulate a technical diagnosis of the failure log.
 2. Classify the failure without forcing it into a narrow category. Infrastructure/authentication failures must be marked unsafe for code patching.
 3. If it is a logit divergence or architecture issue, cross-reference the MaxText code with the provided PyTorch Reference Code and Config to identify the discrepancy using binary search debugging logic.
-4. Output a **strict JSON payload** containing a "structured one-pager plan document". This plan MUST provide clear, constrained, step-by-step instructions for the Fixer agent to mitigate hallucination risks.
+4. If you need to delete a parameter from the configuration because it is incompatible or invalid, you MUST include it in `config_overrides` with the exact string value `"REMOVE"`. If you just omit it, it will not be deleted!
+5. Output a **strict JSON payload** containing a "structured one-pager plan document". This plan MUST provide clear, constrained, step-by-step instructions for the Fixer agent to mitigate hallucination risks.
 
 **Output Format:**
 Respond ONLY with a valid JSON payload matching the following schema:
@@ -46,7 +47,7 @@ Respond ONLY with a valid JSON payload matching the following schema:
   "safe_to_patch": true,
   "remediation_level": "level_1_config | level_2_code | escalate",
   "evidence": ["Specific evidence from logs or source"],
-  "config_overrides": {{}},
+  "config_overrides": {{"key": "value", "key_to_delete": "REMOVE"}},
   "failing_file": "Path to the failing MaxText python file.",
   "structured_plan": [
     "Step 1: Check out the branch and open file X.",
