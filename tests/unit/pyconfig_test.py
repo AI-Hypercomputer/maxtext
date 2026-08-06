@@ -15,6 +15,8 @@
 """Tests for pyconfig."""
 
 import os.path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -148,6 +150,38 @@ class PyconfigTest(unittest.TestCase):
     module_file = train_module.__file__
     result = _module_from_path(module_file)
     self.assertEqual(result, "maxtext.trainers.pre_train.train")
+
+  def test_train_import_without_tensorflow(self):
+    """Verifies that importing the pre-training entrypoint does not require TensorFlow.
+
+    This runs in a subprocess because TensorFlow may already be cached in the main process.
+    The subprocess temporarily replaces Python's built-in import function with
+    a wrapper that raises ``ModuleNotFoundError`` only for TensorFlow imports.
+    A successful subprocess proves that ``train`` remains importable and sets
+    ``_TF_AVAILABLE`` to False when TensorFlow is absent.
+    """
+    script = """
+import builtins
+
+# Save Python's real import function so non-TensorFlow imports continue to work.
+original_import = builtins.__import__
+
+
+def import_without_tensorflow(name, *args, **kwargs):
+  if name == "tensorflow" or name.startswith("tensorflow."):
+    raise ModuleNotFoundError("TensorFlow blocked by test")
+  return original_import(name, *args, **kwargs)
+
+
+# Simulate TensorFlow not being installed for the remainder of this subprocess.
+builtins.__import__ = import_without_tensorflow
+
+from maxtext.trainers.pre_train import train
+
+assert train._TF_AVAILABLE is False
+"""
+
+    subprocess.run([sys.executable, "-c", script], check=True)
 
   def test_hlo_dump_module_names_none_coercion(self):
     config = pyconfig.initialize(
