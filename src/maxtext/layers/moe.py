@@ -201,7 +201,7 @@ def plan_expert_duplication(
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5))
-def _manage_dynamic_expert_weights(
+def _manage_dynamic_expert_weights_targeted(
     w_home: jax.Array,
     slot_assignments: jax.Array,
     num_ep: int,
@@ -209,75 +209,124 @@ def _manage_dynamic_expert_weights(
     num_slots_B: int,
     axis_name: str,
 ) -> jax.Array:
-  """Dynamic weight manager: prefetches weights into slots [B] and reduces backward slot gradients."""
-  return _manage_dynamic_expert_weights_fwd(
+  """Targeted dynamic expert weight prefetcher: uses all_to_all to fetch only requested redundant experts."""
+  return _manage_dynamic_expert_weights_targeted_fwd(
       w_home, slot_assignments, num_ep, experts_per_rank, num_slots_B, axis_name
   )[0]
 
 
-def _manage_dynamic_expert_weights_fwd(
+def _manage_dynamic_expert_weights_targeted_fwd(
     w_home: jax.Array,
     slot_assignments: jax.Array,
     num_ep: int,
     experts_per_rank: int,
     num_slots_B: int,
     axis_name: str,
-) -> tuple[jax.Array, tuple[jax.Array]]:
-  all_weights = jax.lax.all_gather(w_home, axis_name=axis_name)
-  all_weights_flat = jnp.reshape(all_weights, (-1, *w_home.shape[1:]))
-
+):
   my_shard_id = jax.lax.axis_index(axis_name)
-  my_slot_experts = slot_assignments[my_shard_id]
+  requested_experts = slot_assignments
+  owner_ranks = jnp.where(requested_experts >= 0, requested_experts // experts_per_rank, -1)
+  local_indices = jnp.where(requested_experts >= 0, requested_experts % experts_per_rank, 0)
 
-  valid_slot_mask = (my_slot_experts >= 0).reshape((num_slots_B,) + (1,) * (w_home.ndim - 1))
-  safe_indices = jnp.maximum(my_slot_experts, 0)
-  prefetched_weights = jnp.take(all_weights_flat, safe_indices, axis=0)
-  prefetched_weights = jnp.where(valid_slot_mask, prefetched_weights, 0.0)
+  is_owner = (owner_ranks == my_shard_id)
+  safe_local_indices = jnp.maximum(local_indices, 0)
+  gathered_local = jnp.take(w_home, safe_local_indices, axis=0)
+
+  mask = is_owner.reshape((num_ep, num_slots_B) + (1,) * (w_home.ndim - 1))
+  to_send = jnp.where(mask, gathered_local, 0.0)
+
+  received = jax.lax.all_to_all(to_send, axis_name=axis_name, split_axis=0, concat_axis=0)
+  prefetched_weights = jnp.sum(received, axis=0)
 
   w_active = jnp.concatenate([w_home, prefetched_weights], axis=0)
-  res = (slot_assignments,)
+  res = (slot_assignments, owner_ranks, local_indices, is_owner)
   return w_active, res
 
 
-def _manage_dynamic_expert_weights_bwd(
+def _manage_dynamic_expert_weights_targeted_bwd(
     num_ep: int,
     experts_per_rank: int,
     num_slots_B: int,
     axis_name: str,
-    res: tuple[jax.Array],
+    res: tuple,
     g_w_active: jax.Array,
-) -> tuple[jax.Array, None]:
-  (slot_assignments,) = res
+):
+  slot_assignments, owner_ranks, local_indices, is_owner = res
   my_shard_id = jax.lax.axis_index(axis_name)
 
-  local_e = g_w_active.shape[0] - num_slots_B
+  local_e = experts_per_rank
   g_home = g_w_active[:local_e]
   g_slots = g_w_active[local_e:]
 
-  my_slot_experts = slot_assignments[my_shard_id]
+  my_requested_owners = owner_ranks[my_shard_id]
+  rank_indices = jnp.arange(num_ep)
+  target_mask = (rank_indices.reshape(num_ep, 1) == my_requested_owners.reshape(1, num_slots_B))
+  mask = target_mask.reshape((num_ep, num_slots_B) + (1,) * (g_home.ndim - 1))
 
-  g_global_sparse = jnp.zeros((num_ep * local_e, *g_home.shape[1:]), dtype=g_home.dtype)
-  valid_slots = (my_slot_experts >= 0).reshape((num_slots_B,) + (1,) * (g_home.ndim - 1))
-  safe_indices = jnp.maximum(my_slot_experts, 0)
-
-  g_global_sparse = g_global_sparse.at[safe_indices].add(
-      jnp.where(valid_slots, g_slots, 0.0)
+  g_slots_expanded = jnp.broadcast_to(
+      g_slots.reshape((1, num_slots_B) + g_slots.shape[1:]),
+      (num_ep, num_slots_B) + g_slots.shape[1:],
   )
+  g_to_send = jnp.where(mask, g_slots_expanded, 0.0)
 
-  g_global_summed = jax.lax.psum(g_global_sparse, axis_name=axis_name)
+  g_received = jax.lax.all_to_all(g_to_send, axis_name=axis_name, split_axis=0, concat_axis=0)
 
-  my_home_start = my_shard_id * local_e
-  remote_slot_grads_for_me = jax.lax.dynamic_slice_in_dim(
-      g_global_summed, my_home_start, local_e, axis=0
-  )
+  flat_is_owner = is_owner.reshape(-1)
+  flat_local_idx = local_indices.reshape(-1)
+  flat_g_rec = g_received.reshape((-1,) + g_home.shape[1:])
 
-  g_w_final = g_home + remote_slot_grads_for_me
+  safe_local_idx = jnp.maximum(flat_local_idx, 0)
+  mask_rec = flat_is_owner.reshape((-1,) + (1,) * (g_home.ndim - 1))
+  valid_g_rec = jnp.where(mask_rec, flat_g_rec, 0.0)
+
+  g_home_accum = jnp.zeros_like(g_home).at[safe_local_idx].add(valid_g_rec)
+
+  g_w_final = g_home + g_home_accum
   return (g_w_final, None)
 
 
-_manage_dynamic_expert_weights.defvjp(
-    _manage_dynamic_expert_weights_fwd, _manage_dynamic_expert_weights_bwd
+_manage_dynamic_expert_weights_targeted.defvjp(
+    _manage_dynamic_expert_weights_targeted_fwd, _manage_dynamic_expert_weights_targeted_bwd
 )
+
+
+def manage_moe_layer_weights_fused(
+    w0_home: jax.Array,
+    w1_home: jax.Array,
+    wo_home: jax.Array,
+    slot_assignments: jax.Array,
+    num_ep: int,
+    experts_per_rank: int,
+    num_slots_B: int,
+    axis_name: str,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Fused prefetching for w0, w1, and wo using a single targeted all_to_all call per layer."""
+  local_e = experts_per_rank
+  dim0 = int(np.prod(w0_home.shape[1:]))
+  dim1 = int(np.prod(w1_home.shape[1:]))
+  dimo = int(np.prod(wo_home.shape[1:]))
+
+  w0_flat = jnp.reshape(w0_home, (local_e, dim0))
+  w1_flat = jnp.reshape(w1_home, (local_e, dim1))
+  wo_flat = jnp.reshape(wo_home, (local_e, dimo))
+
+  w_fused = jnp.concatenate([w0_flat, w1_flat, wo_flat], axis=1)
+
+  w_fused_active = _manage_dynamic_expert_weights_targeted(
+      w_fused, slot_assignments, num_ep, experts_per_rank, num_slots_B, axis_name
+  )
+
+  total_active_e = local_e + num_slots_B
+  w0_active_flat = w_fused_active[:, :dim0]
+  w1_active_flat = w_fused_active[:, dim0:dim0 + dim1]
+  wo_active_flat = w_fused_active[:, dim0 + dim1:]
+
+  w0_active = jnp.reshape(w0_active_flat, (total_active_e, *w0_home.shape[1:]))
+  w1_active = jnp.reshape(w1_active_flat, (total_active_e, *w1_home.shape[1:]))
+  wo_active = jnp.reshape(wo_active_flat, (total_active_e, *wo_home.shape[1:]))
+
+  return w0_active, w1_active, wo_active
+
 
 
 
@@ -2485,14 +2534,15 @@ class RoutedMoE(nnx.Module):
         else:
           w0_home, w1_home, wo_home = w0, w1, wo
 
-        w0 = _manage_dynamic_expert_weights(
-            w0_home, slot_assignments, num_ep, local_expert_size, num_slots_B, self._expert_parallelism_name
-        )
-        w1 = _manage_dynamic_expert_weights(
-            w1_home, slot_assignments, num_ep, local_expert_size, num_slots_B, self._expert_parallelism_name
-        )
-        wo = _manage_dynamic_expert_weights(
-            wo_home, slot_assignments, num_ep, local_expert_size, num_slots_B, self._expert_parallelism_name
+        w0, w1, wo = manage_moe_layer_weights_fused(
+            w0_home,
+            w1_home,
+            wo_home,
+            slot_assignments,
+            num_ep,
+            local_expert_size,
+            num_slots_B,
+            self._expert_parallelism_name,
         )
 
       if self.config.num_moe_emb_chunks > 0:

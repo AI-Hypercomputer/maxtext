@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, PartitionSpec as P
 
-from maxtext.layers.moe import _manage_dynamic_expert_weights
+from maxtext.layers.moe import _manage_dynamic_expert_weights_targeted
 
 
 class MoeDynamicRedundantWeightsTest(unittest.TestCase):
@@ -70,7 +70,7 @@ class MoeDynamicRedundantWeightsTest(unittest.TestCase):
     def compute_loss(w_local, slots):
       # w_local shape inside shard_map: [1, experts_per_rank, H, H_ffn] -> squeeze out the leading shard dim
       w_local_squeezed = jnp.squeeze(w_local, axis=0)
-      w_active = _manage_dynamic_expert_weights(
+      w_active = _manage_dynamic_expert_weights_targeted(
           w_local_squeezed, slots, num_ep, experts_per_rank, num_slots_B, "expert"
       )
       # Compute dummy loss: sum of squares
