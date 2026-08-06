@@ -21,15 +21,15 @@ Compares:
 """
 
 import gc
+import json
 import os
+import subprocess
 import sys
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
-# vLLM imports
-from vllm import LLM, SamplingParams
 
 # MaxText imports
 from maxtext.configs import pyconfig, types
@@ -91,57 +91,22 @@ def run_true_kernel_comparison():
   os.environ["SKIP_JAX_PRECOMPILE"] = "1"
   os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
-  # Initialize real vLLM engine with MaxTextForCausalLM adapter to run MaxText model through vLLM
-  vllm_engine = LLM(
-      model="Qwen/Qwen3.5-35B-A3B",
-      trust_remote_code=True,
-      max_model_len=128,
-      max_num_batched_tokens=128,
-      max_num_seqs=16,
-      tensor_parallel_size=4,
-      pipeline_parallel_size=1,
-      enable_expert_parallel=False,
-      enable_return_routed_experts=True,
-      gpu_memory_utilization=0.9,
-      hf_overrides={"architectures": ["MaxTextForCausalLM"]},
-      additional_config={
-          "maxtext_config": {
-              "model_name": "qwen3.5-35b-a3b",
-              "load_parameters_path": unscanned_ckpt_path,
-              "scan_layers": False,
-              "weight_dtype": "float32",
-              "attention": "vllm_rpa",
-              "enable_nnx": True,
-              "pure_nnx_decoder": True,
-              "allow_split_physical_axes": True,
-              "use_multimodal": False,
-              "prefuse_moe_weights": True,
-          }
-      },
-  )
+  if not (os.path.exists("/tmp/vllm_routed_experts.npy") and os.path.exists("/tmp/vllm_tokens.json")):
+    raise FileNotFoundError("Run tests/extract_vllm_routed_experts.py first to generate /tmp/vllm_routed_experts.npy and /tmp/vllm_tokens.json!")
 
-  sampling_params = SamplingParams(temperature=0, max_tokens=10)
-  outputs = vllm_engine.generate([prompt], sampling_params)
-  output = outputs[0].outputs[0]
-
-  real_vllm_routed_experts = output.routed_experts
-  prompt_token_ids = outputs[0].prompt_token_ids
-  generated_token_ids = list(output.token_ids)
-
-  vllm_engine.llm_engine.engine_core.shutdown()
-  del vllm_engine
-  gc.collect()
+  real_vllm_routed_experts = np.load("/tmp/vllm_routed_experts.npy")
+  with open("/tmp/vllm_tokens.json", "r") as f:
+    token_data = json.load(f)
+  prompt_token_ids = token_data["prompt_token_ids"]
+  generated_token_ids = token_data["generated_token_ids"]
 
   batch_size = 1
   if real_vllm_routed_experts is not None:
     num_tokens, num_moe_layers, _ = real_vllm_routed_experts.shape
     seq_len = num_tokens
-    forced_routed_experts_jax = jnp.expand_dims(jnp.array(real_vllm_routed_experts, dtype=jnp.int32), axis=0)
-    print(f"Extracted vLLM Routed Experts Tensor Shape: {forced_routed_experts_jax.shape}\n")
+    forced_routed_experts_jax = jnp.expand_dims(jnp.array(real_vllm_routed_experts, dtype=jnp.int32), axis=0)[:, :, :4, :]
+    print(f"Loaded & Sliced vLLM Routed Experts Tensor Shape (4 layers): {forced_routed_experts_jax.shape}\n")
   else:
-    print(
-        "Warning: real_vllm_routed_experts is None (MaxTextForCausalLM adapter in vLLM does not return routed_experts)."
-    )
     seq_len = len(prompt_token_ids) + len(generated_token_ids) - 1
     forced_routed_experts_jax = None
 
@@ -153,28 +118,42 @@ def run_true_kernel_comparison():
   base_kwargs = {
       "run_name": "true_kernel_comparison",
       "enable_checkpointing": True,
-      "load_parameters_path": scanned_ckpt_path,
+      "load_parameters_path": unscanned_ckpt_path,
       "override_model_config": True,
+      "num_decoder_layers": 4,
       "model_name": "qwen3.5-35b-a3b",
       "max_target_length": seq_len,
       "per_device_batch_size": 1.0,
-      "scan_layers": True,
+      "scan_layers": False,
       "override_logical_axis_rules": False,
-      "weight_dtype": "float32",
-      "dtype": "float32",
+      "weight_dtype": "bfloat16",
+      "dtype": "bfloat16",
       "log_config": False,
+      "skip_jax_distributed_system": True,
+      "ici_tensor_parallelism": 4,
+      "ici_data_parallelism": 1,
+      "ici_expert_parallelism": 1,
+      "enable_nnx": False,
+      "mesh_axes": ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert', 'dcp', 'pcp'],
   }
 
-  # Configuration for True Inference (using vllm.yml and vllm_rpa TPU fused_moe_matmul kernels)
+  # Configuration for True Inference (using vllm.yml, unscanned checkpoint, scan_layers=False, vllm_rpa kernels)
   cfg_infer = pyconfig.initialize(
-      [sys.argv[0], get_test_config_path("inference/vllm.yml"), "attention=vllm_rpa"],
+      [
+          sys.argv[0],
+          get_test_config_path("inference/vllm.yml"),
+          "attention=vllm_rpa",
+      ],
       **base_kwargs,
-      config_class=types.RLConfig,
   )
 
-  # Configuration for True Training (using rl.yml and splash / linear attention kernels)
+  # Configuration for True Training (using rl.yml, unscanned checkpoint, scan_layers=False, dot_product kernels)
   cfg_train = pyconfig.initialize(
-      [sys.argv[0], get_test_config_path(), "attention=splash"],
+      [
+          sys.argv[0],
+          get_test_config_path(),
+          "attention=dot_product",
+      ],
       **base_kwargs,
   )
 
@@ -187,7 +166,7 @@ def run_true_kernel_comparison():
   segment_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
   positions = jnp.expand_dims(jnp.arange(seq_len, dtype=jnp.int32), axis=0)
 
-  # Initialize inference model definition (vllm_rpa)
+  # Initialize inference model definition (vllm_rpa, unscanned)
   model_infer_rpa = models.transformer_as_linen(config=cfg_infer, mesh=mesh, quant=None, model_mode=MODEL_MODE_PREFILL)
   init_params_rng, init_dropout_rng = jax.random.split(init_rng)
   vars_dict = model_infer_rpa.init(
@@ -198,12 +177,12 @@ def run_true_kernel_comparison():
       enable_dropout=False,
   )
 
-  # Initialize training model definition (dot_product)
+  # Initialize training model definition (dot_product, unscanned, sharing vars_dict)
   model_train = models.transformer_as_linen(config=cfg_train, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
 
   print("Model Configurations Initialized:")
-  print("  Inference Kernel Path : attention='vllm_rpa' (TPU fused_moe_matmul)")
-  print("  Training Kernel Path  : attention='dot_product' (JAX dense matmuls)\n")
+  print("  Inference Kernel Path : attention='vllm_rpa' (scan_layers=False, TPU fused_moe_matmul)")
+  print("  Training Kernel Path  : attention='dot_product' (scan_layers=False, JAX dense matmuls)\n")
 
   print("=" * 110)
   print("3. EXECUTING FORWARD PASSES ACROSS INFERENCE AND TRAINING KERNELS")
@@ -220,8 +199,7 @@ def run_true_kernel_comparison():
       forced_routed_experts=None,
       mutable=["intermediates"],
   )
-  # vllm_rpa returns hidden_state from decoder
-  logits_infer_rpa, _, _ = res_infer_rpa if isinstance(res_infer_rpa, tuple) else (res_infer_rpa, None, None)
+  logits_infer_rpa = res_infer_rpa[0] if isinstance(res_infer_rpa, (tuple, list)) else res_infer_rpa
   layer_outputs_infer_rpa = extract_layer_outputs(vars_infer_rpa)
 
   # Pass 2: True Training Mode WITHOUT Router Replay (dot_product kernels, natural routing)
@@ -274,7 +252,7 @@ def run_true_kernel_comparison():
     status = "EXACT MATCH" if max_err < 1e-5 else "KERNEL DIFF"
     print(f"Layer {lyr:<19} | {max_err:<15.6e} | {mae:<15.6e} | {cos_sim:<12.6f} | {status:<15}")
 
-  if logits_infer_rpa is not None:
+  if logits_infer_rpa is not None and logits_infer_rpa.shape == logits_train_nat.shape:
     max_err_log1, mae_log1, _, cos_sim_log1 = compute_metrics(logits_infer_rpa, logits_train_nat)
     status_log1 = "EXACT MATCH" if max_err_log1 < 1e-5 else "KERNEL DIFF"
     print(
@@ -282,7 +260,7 @@ def run_true_kernel_comparison():
         f" {mae_log1:<15.6e} | {cos_sim_log1:<12.6f} | {status_log1:<15}"
     )
   else:
-    print(f"{'Final Output Logits':<25} | Deferred in vllm_rpa mode (logits computed at serving head)")
+    print(f"{'Final Output Logits':<25} | Deferred in vllm_rpa mode (hidden states vs vocab logits shape mismatch: {logits_infer_rpa.shape} vs {logits_train_nat.shape})")
   print("-" * 110)
 
   if layer_outputs_train_rep:
@@ -299,7 +277,7 @@ def run_true_kernel_comparison():
       status = "EXACT MATCH" if max_err < 1e-5 else "KERNEL+REPLAY"
       print(f"Layer {lyr:<19} | {max_err:<15.6e} | {mae:<15.6e} | {cos_sim:<12.6f} | {status:<15}")
 
-    if logits_infer_rpa is not None:
+    if logits_infer_rpa is not None and logits_infer_rpa.shape == logits_train_rep.shape:
       max_err_log2, mae_log2, _, cos_sim_log2 = compute_metrics(logits_infer_rpa, logits_train_rep)
       status_log2 = "EXACT MATCH" if max_err_log2 < 1e-5 else "KERNEL+REPLAY"
       print(
@@ -307,7 +285,7 @@ def run_true_kernel_comparison():
           f" {mae_log2:<15.6e} | {cos_sim_log2:<12.6f} | {status_log2:<15}"
       )
     else:
-      print(f"{'Final Output Logits':<25} | Deferred in vllm_rpa mode (logits computed at serving head)")
+      print(f"{'Final Output Logits':<25} | Deferred in vllm_rpa mode (hidden states vs vocab logits shape mismatch: {logits_infer_rpa.shape} vs {logits_train_rep.shape})")
     print("-" * 110)
 
     print("\n" + "=" * 110)

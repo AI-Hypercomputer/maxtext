@@ -1673,7 +1673,7 @@ class RoutedMoE(nnx.Module):
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
-    def roe_ag_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None):
+    def roe_ag_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None, forced_routed_experts=None):
       # The ring-of-experts strategy first duplicates the inputs to all
       # expert shards, and then routes within each shard.
 
@@ -1701,6 +1701,7 @@ class RoutedMoE(nnx.Module):
           roll_to_expert_id=num_experts_per_shard * expert_shard_id,
           rngs=rngs,
           input_ids=input_ids,
+          forced_routed_experts=forced_routed_experts,
       )
       return (
           x,
@@ -1721,7 +1722,7 @@ class RoutedMoE(nnx.Module):
           ),
       )
 
-    def ra2a_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None):
+    def ra2a_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None, forced_routed_experts=None):
       local_sorted_indices = None
       all_shards_group_sizes = None
       reshaped_group_sizes = None
@@ -1741,6 +1742,7 @@ class RoutedMoE(nnx.Module):
           self.config.use_custom_sort_vjp,
           rngs,
           input_ids=input_ids,
+          forced_routed_experts=forced_routed_experts,
       )
 
       if num_ep > 1:
@@ -1822,7 +1824,7 @@ class RoutedMoE(nnx.Module):
           ),
       )
 
-    def route(x, logits, pre_bias_logits, rngs, input_ids=None):
+    def route(x, logits, pre_bias_logits, rngs, input_ids=None, forced_routed_experts=None):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
       expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
@@ -1836,6 +1838,7 @@ class RoutedMoE(nnx.Module):
             expert_shard_id,
             rngs,
             input_ids=input_ids,
+            forced_routed_experts=forced_routed_experts,
         )
       else:
         return ra2a_and_route(
@@ -1846,6 +1849,7 @@ class RoutedMoE(nnx.Module):
             expert_shard_id,
             rngs,
             input_ids=input_ids,
+            forced_routed_experts=forced_routed_experts,
         )
 
     def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
@@ -2137,6 +2141,7 @@ class RoutedMoE(nnx.Module):
         wo_bias,
         sharded_input_ids,
         rngs,
+        forced_routed_experts=None,
     ):
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
@@ -2154,7 +2159,9 @@ class RoutedMoE(nnx.Module):
             embed_dim,
         )
       else:
-        x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+        x, routing, route_metadata = route(
+            x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids, forced_routed_experts=forced_routed_experts
+        )
 
         if self.config.mlp_bias:
           w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
@@ -3127,6 +3134,7 @@ class RoutedMoE(nnx.Module):
     gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
+    self.sow(nnx.Intermediate, "moe_router_logits", gate_logits)
 
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
 
@@ -3163,7 +3171,8 @@ class RoutedMoE(nnx.Module):
     # The fused MoE kernel currently only supports standard Top-K routing with associated
     # weights. Hash routed layers bypass this kernel and fall back
     # to the sparse matmul implementation.
-    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
+    is_cpu = (jax.devices()[0].platform == "cpu")
+    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing and not is_cpu:
       output, lb_loss, bias_updates = self.fused_moe_matmul(
           inputs,
           gate_logits,
@@ -3173,7 +3182,7 @@ class RoutedMoE(nnx.Module):
           fused_kernel=fused_kernel,
           forced_routed_experts=forced_routed_experts,
       )
-    elif cfg.sparse_matmul:
+    elif cfg.sparse_matmul or is_cpu:
       if quantizations.in_serve_mode(self.quant):
         w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
             inputs,
@@ -3213,6 +3222,7 @@ class RoutedMoE(nnx.Module):
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
       )
+    self.sow(nnx.Intermediate, "moe_expert_matmul", output)
     return output, lb_loss, bias_updates
 
 

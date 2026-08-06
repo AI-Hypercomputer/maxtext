@@ -195,6 +195,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
     # First LayerNorm, applied before the attention block.
     hidden_states = self.input_layernorm(inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    self.sow(nnx.Intermediate, "pre_attn_layernorm", hidden_states)
 
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3_5FullAttention):
@@ -215,6 +216,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
           decoder_segment_ids=decoder_segment_ids,
           attention_metadata=attention_metadata,
       )
+    self.sow(nnx.Intermediate, "self_attention", attention_output)
 
     # First residual connection after attention
     hidden_states = residual + attention_output
@@ -226,6 +228,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
     # Second LayerNorm, applied before the MoE block.
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    self.sow(nnx.Intermediate, "post_attn_layernorm", hidden_states)
 
     # Instantiate and call our `Qwen3_5SparseMoEBlock`.
     mlp_output, load_balance_loss = self.mlp(
@@ -243,6 +246,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
         layer_output,
         self.activation_axis_names,
     )
+    self.sow(nnx.Intermediate, "post_moe_residual", layer_output)
     return layer_output, new_kv_cache
 
 
