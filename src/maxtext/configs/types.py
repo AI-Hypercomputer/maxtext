@@ -233,6 +233,8 @@ ModelName = Literal[
     "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
+    "hy3-tiny",
+    "hy3-295b",
     "gemma-7b",
     "gemma-2b",
     "gemma2-2b",
@@ -3261,7 +3263,7 @@ class MaxTextConfig(
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
     if self.pipeline_parallel_layers == -1:
-      if self.decoder_block == DecoderBlockType.DEEPSEEK:
+      if self.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers
         self.pipeline_parallel_layers = moe_layers
       else:
@@ -3531,8 +3533,16 @@ class MaxTextConfig(
           )
       if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
-      if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if (
+          self.routed_bias
+          and self.routed_bias_update_rate > 0.0
+          and self.decoder_block
+          not in (
+              DecoderBlockType.DEEPSEEK,
+              DecoderBlockType.HY3,
+          )
+      ):
+        raise ValueError("Loss-free load balancing is only supported for the DeepSeek and Hy3 decoder blocks.")
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()

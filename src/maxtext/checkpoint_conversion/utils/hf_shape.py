@@ -1164,6 +1164,102 @@ def QWEN3_VL_HF_WEIGHTS_TO_SHAPE(config):
 # {maxtext model name: {hf weight name: hf shape}}
 
 
+def HY3_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace Hy3 weights path and their shape.
+
+  Combines QWEN_HF_WEIGHTS_TO_SHAPE's plain GQA + QK-Norm attention block
+  (Hy3 has no MLA) with DEEPSEEK_HF_WEIGHTS_TO_SHAPE's dense/MoE-split +
+  shared-expert loop structure (Hy3 has `first_k_dense_replace` and 1 shared
+  expert, like DeepSeek V3). The MTP layer (index `num_hidden_layers`) is
+  intentionally not included -- MTP weights are not mapped by the checkpoint
+  conversion framework for Hy3 today.
+
+  Args:
+      config (dict): HF configuration dictionary
+        e.g., https://huggingface.co/tencent/Hy3/blob/main/config.json
+
+  Returns:
+      dict: A mapping where:
+          - Keys are HuggingFace model parameter paths
+          - Values are parameter shape as a list
+
+  To check expected mapping:
+    from transformers import AutoModelForCausalLM
+    model_name = "tencent/Hy3"
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto", trust_remote_code=True)
+    for name, val in model.named_parameters():
+      print(name, val.shape)
+  """
+  hidden_size = config["hidden_size"]
+  num_hidden_layers = config["num_hidden_layers"]
+  vocab_size = config["vocab_size"]
+  num_attention_heads = config["num_attention_heads"]
+  num_key_value_heads = config["num_key_value_heads"]
+  head_dim = config.get("head_dim", hidden_size // num_attention_heads)
+  intermediate_size = config["intermediate_size"]  # For the dense layer
+  moe_intermediate_size = config["moe_intermediate_size"]  # For expert layers
+  num_experts = config["num_experts"]
+  num_shared_experts = config.get("num_shared_experts", 0)
+  first_k_dense = config.get("first_k_dense_replace", 0)
+
+  mapping = {
+      "model.embed_tokens.weight": [vocab_size, hidden_size],
+      "model.norm.weight": [hidden_size],
+      "lm_head.weight": [vocab_size, hidden_size],
+  }
+
+  for layer_idx in range(num_hidden_layers):
+    layer_prefix = f"model.layers.{layer_idx}"
+    layer_mapping = {
+        f"{layer_prefix}.input_layernorm.weight": [hidden_size],
+        f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
+        f"{layer_prefix}.self_attn.q_proj.weight": [num_attention_heads * head_dim, hidden_size],
+        f"{layer_prefix}.self_attn.k_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+        f"{layer_prefix}.self_attn.v_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+        f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, num_attention_heads * head_dim],
+        f"{layer_prefix}.self_attn.q_norm.weight": [head_dim],
+        f"{layer_prefix}.self_attn.k_norm.weight": [head_dim],
+    }
+
+    if layer_idx < first_k_dense:
+      # Dense MLP layer
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+          }
+      )
+    else:
+      # MoE layer: router + expert_bias + shared_mlp + routed experts
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.mlp.router.gate.weight": [num_experts, hidden_size],
+              f"{layer_prefix}.mlp.expert_bias": [num_experts],
+          }
+      )
+      if num_shared_experts > 0:
+        shared_intermediate_size = moe_intermediate_size * num_shared_experts
+        layer_mapping.update(
+            {
+                f"{layer_prefix}.mlp.shared_mlp.gate_proj.weight": [shared_intermediate_size, hidden_size],
+                f"{layer_prefix}.mlp.shared_mlp.up_proj.weight": [shared_intermediate_size, hidden_size],
+                f"{layer_prefix}.mlp.shared_mlp.down_proj.weight": [hidden_size, shared_intermediate_size],
+            }
+        )
+      for expert_j in range(num_experts):
+        expert_prefix = f"{layer_prefix}.mlp.experts.{expert_j}"
+        layer_mapping.update(
+            {
+                f"{expert_prefix}.gate_proj.weight": [moe_intermediate_size, hidden_size],
+                f"{expert_prefix}.up_proj.weight": [moe_intermediate_size, hidden_size],
+                f"{expert_prefix}.down_proj.weight": [hidden_size, moe_intermediate_size],
+            }
+        )
+    mapping.update(layer_mapping)
+  return mapping
+
+
 def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   """Returns a dictionary mapping HuggingFace weight names to shapes for DeepSeek V4."""
   hidden_size = config["hidden_size"]
@@ -1303,6 +1399,7 @@ HF_SHAPE = {
     "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek3.2-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek4-284b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
+    "hy3-295b": HY3_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,

@@ -52,6 +52,7 @@ from maxtext.models import (
     gemma4_small,
     gpt3,
     gpt_oss,
+    hy3,
     llama2,
     llama4,
     mistral,
@@ -454,6 +455,11 @@ class Decoder(nn.Module):
             deepseek.DeepSeekDenseLayerToLinen,
             deepseek.DeepSeekMoELayerToLinen,
         ]
+      case DecoderBlockType.HY3:
+        return [
+            hy3.Hy3DenseLayerToLinen,
+            hy3.Hy3MoELayerToLinen,
+        ]
       case DecoderBlockType.DEEPSEEK4:
         return (
             [deepseek4.DeepSeek4ScannableBlockToLinen] if self.config.scan_layers else [deepseek4.DeepSeek4LayerToLinen]
@@ -529,6 +535,7 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer],
+        DecoderBlockType.HY3: [hy3.Hy3DenseLayer, hy3.Hy3MoELayer],
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
@@ -569,7 +576,9 @@ class Decoder(nn.Module):
   def _build_nnx_pipeline_stage(self, decoder_blocks, rngs):
     """Creates a single NNX pipeline stage module."""
     cfg = self.config
-    base_stage_cls = decoder_blocks[1] if cfg.decoder_block == DecoderBlockType.DEEPSEEK else decoder_blocks[0]
+    base_stage_cls = (
+        decoder_blocks[1] if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3) else decoder_blocks[0]
+    )
 
     if cfg.num_layers_per_pipeline_stage == 1:
       return base_stage_cls(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
@@ -585,7 +594,7 @@ class Decoder(nn.Module):
     """get pipeline stage module"""
 
     def get_layer_to_pipeline(blocks, cfg):
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+      if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
         return blocks[1]  # return the sparse block
       else:
         return blocks[0]
@@ -627,6 +636,7 @@ class Decoder(nn.Module):
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.HY3,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -896,8 +906,8 @@ class Decoder(nn.Module):
           if cfg.pipeline_fsdp_ag_once or cfg.pipeline_fsdp_ag_per_repeat
           else None
       )
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-        assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
+      if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
+        assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek/hy3."
         dense_layer = RemattedBlockLayers[0]
         moe_layer = RemattedBlockLayers[1]
         num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
@@ -942,8 +952,8 @@ class Decoder(nn.Module):
             )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
+        if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
+          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek/hy3."
           layer_call_kwargs = {
               "previous_chunk": previous_chunk,
               "slot": slot,
@@ -1148,8 +1158,8 @@ class Decoder(nn.Module):
                 **layer_kwargs,
             )(y, *current_broadcast_args)
       else:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
+        if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
+          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek/hy3."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
 
