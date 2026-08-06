@@ -117,6 +117,171 @@ def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax
   return jnp.diff(clamped_cumsum_extended, axis=0)
 
 
+def plan_expert_duplication(
+    token_counts_global: jax.Array,
+    num_ep: int,
+    experts_per_rank: int,
+    num_slots_B: int,
+    rebalance_threshold: float = 1.15,
+) -> tuple[jax.Array, jax.Array]:
+  """Pure JAX greedy load balancer for MoonEP-style dynamic redundant expert allocation.
+
+  Args:
+    token_counts_global: [num_ep, E] matrix of token counts routed from each rank to each expert.
+    num_ep: Number of EP ranks (R).
+    experts_per_rank: E / R (E_local).
+    num_slots_B: Number of prefetch slots per rank (B).
+    rebalance_threshold: Minimum ratio of rank load to average load to trigger duplication.
+
+  Returns:
+    slot_assignments: [num_ep, num_slots_B] int32 - Global expert ID assigned to each rank's slot (-1 if unused).
+    reroute_fractions: [num_experts] float32 - Fraction of tokens for each expert to divert to redundant slots.
+  """
+  total_tokens_per_expert = jnp.sum(token_counts_global, axis=0)
+  num_experts = num_ep * experts_per_rank
+
+  # 1. Compute baseline rank load: shape [num_ep]
+  rank_loads = jnp.sum(total_tokens_per_expert.reshape(num_ep, experts_per_rank), axis=-1).astype(jnp.float32)
+  avg_load = jnp.mean(rank_loads)
+
+  # 2. State for the greedy loop: runs num_ep * num_slots_B times
+  max_iterations = num_ep * num_slots_B
+
+  init_state = (
+      rank_loads,
+      jnp.full((num_ep, num_slots_B), -1, dtype=jnp.int32),
+      jnp.zeros((num_ep,), dtype=jnp.int32),
+      jnp.zeros((num_experts,), dtype=jnp.float32),
+      jnp.zeros((num_experts,), dtype=jnp.bool_),
+  )
+
+  def greedy_step(i, state):
+    loads, slots, fill_counts, fractions, dup_mask = state
+
+    r_max = jnp.argmax(loads)
+    r_min = jnp.argmin(loads)
+
+    max_load = loads[r_max]
+    min_load = loads[r_min]
+
+    has_free_slot = fill_counts[r_min] < num_slots_B
+    is_overloaded = max_load > (avg_load * rebalance_threshold)
+    can_balance = jnp.logical_and(has_free_slot, is_overloaded)
+
+    # Find hottest un-duplicated expert belonging to r_max
+    r_max_expert_start = r_max * experts_per_rank
+    expert_indices = jnp.arange(num_experts)
+    r_max_expert_mask = (expert_indices >= r_max_expert_start) & (expert_indices < r_max_expert_start + experts_per_rank)
+    candidate_expert_scores = jnp.where(
+        r_max_expert_mask & (~dup_mask),
+        total_tokens_per_expert,
+        -1,
+    )
+    e_hot = jnp.argmax(candidate_expert_scores)
+    hot_tokens = total_tokens_per_expert[e_hot].astype(jnp.float32)
+
+    # Calculate tokens to divert: 50% of the hot expert's load (capped by load delta)
+    tokens_to_divert = jnp.minimum(hot_tokens * 0.5, (max_load - min_load) * 0.5)
+    divert_fraction = jnp.where(hot_tokens > 0.0, tokens_to_divert / hot_tokens, 0.0)
+
+    # Update state conditionally
+    slot_idx = jnp.clip(fill_counts[r_min], 0, num_slots_B - 1)
+    new_slots = slots.at[r_min, slot_idx].set(jnp.where(can_balance, e_hot, slots[r_min, slot_idx]))
+    new_fill_counts = fill_counts.at[r_min].add(jnp.where(can_balance, 1, 0))
+    new_fractions = fractions.at[e_hot].set(jnp.where(can_balance, divert_fraction, fractions[e_hot]))
+    new_dup_mask = dup_mask.at[e_hot].set(jnp.where(can_balance, True, dup_mask[e_hot]))
+
+    new_loads = loads.at[r_max].add(jnp.where(can_balance, -tokens_to_divert, 0.0))
+    new_loads = new_loads.at[r_min].add(jnp.where(can_balance, tokens_to_divert, 0.0))
+
+    return (new_loads, new_slots, new_fill_counts, new_fractions, new_dup_mask)
+
+  final_state = jax.lax.fori_loop(0, max_iterations, greedy_step, init_state)
+  return final_state[1], final_state[3]
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5))
+def _manage_dynamic_expert_weights(
+    w_home: jax.Array,
+    slot_assignments: jax.Array,
+    num_ep: int,
+    experts_per_rank: int,
+    num_slots_B: int,
+    axis_name: str,
+) -> jax.Array:
+  """Dynamic weight manager: prefetches weights into slots [B] and reduces backward slot gradients."""
+  return _manage_dynamic_expert_weights_fwd(
+      w_home, slot_assignments, num_ep, experts_per_rank, num_slots_B, axis_name
+  )[0]
+
+
+def _manage_dynamic_expert_weights_fwd(
+    w_home: jax.Array,
+    slot_assignments: jax.Array,
+    num_ep: int,
+    experts_per_rank: int,
+    num_slots_B: int,
+    axis_name: str,
+) -> tuple[jax.Array, tuple[jax.Array]]:
+  all_weights = jax.lax.all_gather(w_home, axis_name=axis_name)
+  all_weights_flat = jnp.reshape(all_weights, (-1, *w_home.shape[1:]))
+
+  my_shard_id = jax.lax.axis_index(axis_name)
+  my_slot_experts = slot_assignments[my_shard_id]
+
+  valid_slot_mask = (my_slot_experts >= 0).reshape((num_slots_B,) + (1,) * (w_home.ndim - 1))
+  safe_indices = jnp.maximum(my_slot_experts, 0)
+  prefetched_weights = jnp.take(all_weights_flat, safe_indices, axis=0)
+  prefetched_weights = jnp.where(valid_slot_mask, prefetched_weights, 0.0)
+
+  w_active = jnp.concatenate([w_home, prefetched_weights], axis=0)
+  res = (slot_assignments,)
+  return w_active, res
+
+
+def _manage_dynamic_expert_weights_bwd(
+    num_ep: int,
+    experts_per_rank: int,
+    num_slots_B: int,
+    axis_name: str,
+    res: tuple[jax.Array],
+    g_w_active: jax.Array,
+) -> tuple[jax.Array, None]:
+  (slot_assignments,) = res
+  my_shard_id = jax.lax.axis_index(axis_name)
+
+  local_e = g_w_active.shape[0] - num_slots_B
+  g_home = g_w_active[:local_e]
+  g_slots = g_w_active[local_e:]
+
+  my_slot_experts = slot_assignments[my_shard_id]
+
+  g_global_sparse = jnp.zeros((num_ep * local_e, *g_home.shape[1:]), dtype=g_home.dtype)
+  valid_slots = (my_slot_experts >= 0).reshape((num_slots_B,) + (1,) * (g_home.ndim - 1))
+  safe_indices = jnp.maximum(my_slot_experts, 0)
+
+  g_global_sparse = g_global_sparse.at[safe_indices].add(
+      jnp.where(valid_slots, g_slots, 0.0)
+  )
+
+  g_global_summed = jax.lax.psum(g_global_sparse, axis_name=axis_name)
+
+  my_home_start = my_shard_id * local_e
+  remote_slot_grads_for_me = jax.lax.dynamic_slice_in_dim(
+      g_global_summed, my_home_start, local_e, axis=0
+  )
+
+  g_w_final = g_home + remote_slot_grads_for_me
+  return (g_w_final, None)
+
+
+_manage_dynamic_expert_weights.defvjp(
+    _manage_dynamic_expert_weights_fwd, _manage_dynamic_expert_weights_bwd
+)
+
+
+
+
 def _sort_activations(
     inputs: jax.Array,
     sort_indices: jax.Array,
@@ -2084,9 +2249,14 @@ class RoutedMoE(nnx.Module):
         experts_start = route_metadata.expert_shard_id * num_experts_per_shard
       else:
         experts_start = 0
+      group_sizes = routing.group_sizes
+      if self.config.enable_moe_dynamic_redundant_experts and num_ep > 1:
+        num_slots_B = self.config.moe_redundant_slots_per_rank
+        group_sizes = jnp.pad(group_sizes, (0, num_slots_B), constant_values=0)
+
       return functools.partial(
           gmm,
-          group_sizes=routing.group_sizes,
+          group_sizes=group_sizes,
           expert_assignments=routing.selected_experts,
           group_offset=experts_start,
       )
@@ -2289,6 +2459,42 @@ class RoutedMoE(nnx.Module):
         rngs,
     ):
       batch_size, sequence_length, embed_dim = x.shape
+      if self.config.enable_moe_dynamic_redundant_experts and self.get_expert_parallelism_size() > 1:
+        num_ep = self.get_expert_parallelism_size()
+        local_expert_size = self.config.num_experts // num_ep
+        num_slots_B = self.config.moe_redundant_slots_per_rank
+        my_shard_id = jax.lax.axis_index(self._expert_parallelism_name)
+
+        _, selected_experts_init = self.get_topk(logits, pre_bias_logits, rngs, sharded_input_ids)
+        flat_selected = selected_experts_init.reshape(-1)
+        local_counts = jnp.bincount(flat_selected, length=self.config.num_experts)
+        global_counts = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
+
+        slot_assignments, _ = plan_expert_duplication(
+            global_counts,
+            num_ep=num_ep,
+            experts_per_rank=local_expert_size,
+            num_slots_B=num_slots_B,
+            rebalance_threshold=self.config.moe_rebalance_threshold_ratio,
+        )
+
+        if w0.shape[0] == self.config.num_experts:
+          w0_home = jax.lax.dynamic_slice_in_dim(w0, my_shard_id * local_expert_size, local_expert_size, axis=0)
+          w1_home = jax.lax.dynamic_slice_in_dim(w1, my_shard_id * local_expert_size, local_expert_size, axis=0)
+          wo_home = jax.lax.dynamic_slice_in_dim(wo, my_shard_id * local_expert_size, local_expert_size, axis=0)
+        else:
+          w0_home, w1_home, wo_home = w0, w1, wo
+
+        w0 = _manage_dynamic_expert_weights(
+            w0_home, slot_assignments, num_ep, local_expert_size, num_slots_B, self._expert_parallelism_name
+        )
+        w1 = _manage_dynamic_expert_weights(
+            w1_home, slot_assignments, num_ep, local_expert_size, num_slots_B, self._expert_parallelism_name
+        )
+        wo = _manage_dynamic_expert_weights(
+            wo_home, slot_assignments, num_ep, local_expert_size, num_slots_B, self._expert_parallelism_name
+        )
+
       if self.config.num_moe_emb_chunks > 0:
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
             x,

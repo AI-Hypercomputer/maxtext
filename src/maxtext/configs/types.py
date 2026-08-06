@@ -860,6 +860,18 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  enable_moe_dynamic_redundant_experts: bool = Field(
+      False,
+      description="Whether to use MoonEP-style dynamic redundant expert duplication and rebalancing.",
+  )
+  moe_redundant_slots_per_rank: int = Field(
+      2,
+      description="Number of prefetch slots (B) per EP rank for dynamic expert duplication.",
+  )
+  moe_rebalance_threshold_ratio: float = Field(
+      1.15,
+      description="Load threshold ratio (rank_load / avg_load) to trigger expert duplication.",
+  )
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
       description=(
@@ -1340,6 +1352,7 @@ class DatasetGeneral(BaseModel):
   """General configuration for dataset and data loading."""
 
   dataset_type: DatasetType = Field(DatasetType.TFDS, description="The type of the data loading pipeline.")
+  synthetic_data_distribution: str = Field("uniform", description="Token distribution for synthetic dataset ('uniform' or 'zipf').")
   per_device_batch_size: int | float = Field(12, description="The batch size per device.")
   eval_per_device_batch_size: int | float = Field(
       0.0,
