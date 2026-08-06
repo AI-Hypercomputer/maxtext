@@ -20,11 +20,10 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 from typing import Optional, Any
 
-from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
+from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL, ShardMode
 from maxtext.layers import initializers
 from maxtext.layers import moe
 from maxtext.layers import nnx_scan, nnx_wrappers
@@ -37,6 +36,9 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils.sharding import create_sharding
+from maxtext.utils.sharding import maybe_shard_with_logical
+from maxtext.utils.sharding import get_logical_axis_rules
 
 
 GEMMA4_ATTENTION_PATTERN = (
@@ -308,6 +310,24 @@ class Gemma4DecoderLayer(nnx.Module):
     else:
       self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
+    self.out_sharding = (
+        create_sharding(self.mesh, self.activation_axis_names, rules=get_logical_axis_rules()) if self.mesh else None
+    )
+
+  def with_logical_constraint(self, x):
+    if self.mesh is None:
+      # No mesh (e.g. unit tests instantiating layers directly): nothing to shard against.
+      return x
+    return maybe_shard_with_logical(
+        x,
+        logical_axes=self.activation_axis_names,
+        mesh=self.mesh,
+        shard_mode=getattr(self.config, "shard_mode", ShardMode.AUTO),
+        debug_sharding=getattr(self.config, "debug_sharding", False),
+        extra_stack_level=1,
+        rules=get_logical_axis_rules(),
+    )
+
   def __call__(
       self,
       inputs,
@@ -332,11 +352,11 @@ class Gemma4DecoderLayer(nnx.Module):
       is_scan_carry = True
     elif isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self.with_logical_constraint(inputs)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     lnx = self.pre_self_attention_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = self.with_logical_constraint(lnx)
 
     # Gemma4 only applies bidirectional attention in sliding (local) layers,
     # not in full (global) attention layers.
@@ -354,10 +374,11 @@ class Gemma4DecoderLayer(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
+        out_sharding=self.out_sharding,
     )
     if cfg.use_post_attn_norm:
       attention_lnx = self.post_self_attention_norm(attention_lnx)
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = self.with_logical_constraint(attention_lnx)
 
     attention_lnx += inputs
     residual = attention_lnx
@@ -365,7 +386,9 @@ class Gemma4DecoderLayer(nnx.Module):
 
     # MLP block.
     if getattr(self.config, "num_experts", 1) > 1:
-      mlp_lnx, load_balance_loss, _ = self.mlp(attn_output, original_inputs=attention_lnx)
+      mlp_lnx, load_balance_loss, _ = self.mlp(
+          attn_output, original_inputs=attention_lnx, out_sharding=self.out_sharding
+      )
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
         self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
     else:
@@ -374,13 +397,13 @@ class Gemma4DecoderLayer(nnx.Module):
     if cfg.use_post_ffw_norm:
       mlp_lnx = self.post_ffw_norm(mlp_lnx)
 
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self.with_logical_constraint(mlp_lnx)
 
     next_layer_addition = mlp_lnx + residual
     layer_output = next_layer_addition
     layer_output = layer_output * jnp.asarray(self.layer_scalar.value, cfg.dtype)
 
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self.with_logical_constraint(layer_output)
 
     if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
@@ -658,7 +681,15 @@ class Gemma4ScannableBlock(nnx.Module):
       attention_metadata=None,
   ):
     cfg = self.config
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    if self.mesh is not None:
+      inputs = maybe_shard_with_logical(
+          inputs,
+          logical_axes=("activation_batch", "activation_norm_length", "activation_embed"),
+          mesh=self.mesh,
+          shard_mode=getattr(self.config, "shard_mode", ShardMode.AUTO),
+          debug_sharding=getattr(self.config, "debug_sharding", False),
+          rules=get_logical_axis_rules(),
+      )
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     # Arguments shared by every layer in the block. model_mode differentiates
