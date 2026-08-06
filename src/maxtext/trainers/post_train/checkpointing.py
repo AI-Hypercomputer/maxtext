@@ -154,12 +154,12 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
 
   def wait_until_finished(self):
     """Blocks until outstanding async checkpoint writes are complete."""
-    if self._checkpoint_manager is not None:
+    if getattr(self, "_checkpoint_manager", None) is not None:
       self._checkpoint_manager.wait_until_finished()
 
   def close(self):
     """Closes the checkpoint manager."""
-    if self._checkpoint_manager is not None:
+    if getattr(self, "_checkpoint_manager", None) is not None:
       self._checkpoint_manager.close()
 
   def model_to_checkpoint(self, model: nnx.Module) -> nnx.Module:
