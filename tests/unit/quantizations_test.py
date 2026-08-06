@@ -716,5 +716,72 @@ class MaybeQuantizeModelTest(unittest.TestCase):
     self.assertNotIn("intermediates", state_dict)
 
 
+class StaticScaleTest(unittest.TestCase):
+  """Tests for static scale extraction."""
+
+  def test_get_static_scale_fixed_symmetric(self):
+    scale = quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,224.0")
+    self.assertIsNotNone(scale)
+    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
+
+  def test_get_static_scale_fixed_asymmetric(self):
+    scale = quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,-224.0,224.0")
+    self.assertIsNotNone(scale)
+    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
+
+  def test_get_static_scale_manual_quantization(self):
+    scale = quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,-224.0,224.0", manual_quantization=True)
+    self.assertIsNotNone(scale)
+    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
+
+    with self.assertRaisesRegex(ValueError, "Expected format for manual quantization"):
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,224.0", manual_quantization=True)
+
+  def test_get_static_scale_invalid_format(self):
+    with self.assertRaisesRegex(ValueError, "Expected format for fixed range"):
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,1,2,3")
+
+    with self.assertRaisesRegex(ValueError, "Only static scale quantization is supported, got absmax"):
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "absmax")
+
+
+class LhsScaleTest(unittest.TestCase):
+  """Tests for LHS scale extraction in GMM v2 forward."""
+
+  def test_fwd_prepare_lhs_scale_fixed_symmetric(self):
+    from maxtext.kernels.megablox import ops
+    import qwix
+    rule = qwix.QtRule(
+        act_qtype=jnp.float8_e4m3fn,
+        act_calibration_method="fixed,224.0",
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNotNone(scale)
+    self.assertEqual(scale.shape, (1, 1))
+    self.assertEqual(scale.dtype, jnp.float32)
+    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
+
+  def test_fwd_prepare_lhs_scale_dynamic_returns_none(self):
+    from maxtext.kernels.megablox import ops
+    import qwix
+    rule = qwix.QtRule(
+        act_qtype=jnp.float8_e4m3fn,
+        act_calibration_method="absmax",
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNone(scale)
+
+  def test_fwd_prepare_lhs_scale_no_rule_returns_none(self):
+    from maxtext.kernels.megablox import ops
+    import qwix
+    rule = qwix.QtRule(
+        act_qtype=None,
+        act_calibration_method=None,
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNone(scale)
+
+
+
 if __name__ == "__main__":
   unittest.main()

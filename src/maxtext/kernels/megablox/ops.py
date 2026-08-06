@@ -26,7 +26,6 @@ from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.layers import quantizations
 import qwix
-from qwix._src.core import numerics
 import qwix.pallas as qpl
 import tokamax
 
@@ -331,7 +330,6 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
 def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule) -> jax.Array | None:
   """Extracts the static LHS (activation) scale for the GMM V2 forward pass.
 
-  Based on qwix's calibrate and compute_scale_zero_point functions.
   Enforces a default (1, 1) shape for per-tensor quantization kernels.
 
   Args:
@@ -347,22 +345,7 @@ def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule) -> jax.Array | None:
   if method is None or qtype is None or not method.lower().startswith("fixed"):
     return None
 
-  args = [float(a) for a in method.split(",")[1:]]
-  if len(args) not in (1, 2):
-    raise ValueError("Fixed range must be 'fixed,bound' or 'fixed,min,max'.")
-
-  if len(args) == 1:
-    args = [-args[0], args[0]]
-
-  if args[0] > 0 or args[1] < 0 or args[0] >= args[1]:
-    raise ValueError(f"The range must contain 0 and be non-empty, got: {method}")
-
-  if args[0] + args[1] == 0:
-    qmax = float(numerics.get_symmetric_bound(qtype))
-    scale_val = args[1] / qmax
-  else:
-    qmin, qmax = numerics.get_asymmetric_bound(qtype)
-    scale_val = (args[1] - args[0]) / float(qmax - qmin)
+  scale_val = quantizations.get_static_scale(qtype, method)
 
   return jnp.full((1, 1), scale_val, jnp.float32)
 
