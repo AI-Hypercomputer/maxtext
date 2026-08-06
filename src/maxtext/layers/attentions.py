@@ -879,6 +879,7 @@ class Attention(nnx.Module):
           interleave=self.config.rope_interleave,
           truncate=self.config.rope_truncate,
           attention_scaling=self.config.rope_attention_scaling,
+          pairwise=self.config.rope_pairwise,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )

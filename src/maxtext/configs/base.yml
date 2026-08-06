@@ -982,6 +982,9 @@ mscale: 1.0
 rope_interleave: true # RoPE with sin/cos interleaved vs concatenated
 rope_truncate: true # Floor lower bound and ceil upper bound for correction range
 rope_attention_scaling: false # Scale the rotary embedding output
+# Keep rank-5 pair tensor intact [batch_size, sequence_length, num_heads, half_dim, 2]
+# where half_dim is the number of 2D rotation planes and 2 contains [real, imag] coordinates, returning interleaved RoPE
+rope_pairwise: false
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
