@@ -40,7 +40,17 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
   if original_conf_str:
     try:
       original_conf = json.loads(original_conf_str)
-      conf_dict.update(original_conf)
+      # The failure log wraps the original clean Airflow config inside the 'dag_conf' key.
+      # We extract it to avoid sending K8s manifests, error messages, and appended run_names
+      # back into Airflow and creating infinitely nested configs.
+      clean_conf = original_conf.get("dag_conf", original_conf)
+      
+      # Just in case we are dealing with an already nested config from before this fix,
+      # gracefully un-nest it.
+      while "dag_conf" in clean_conf:
+        clean_conf = clean_conf["dag_conf"]
+        
+      conf_dict.update(clean_conf)
     except Exception as e:
       print(f"Warning: Failed to parse ORIGINAL_DAG_CONF: {e}")
 
