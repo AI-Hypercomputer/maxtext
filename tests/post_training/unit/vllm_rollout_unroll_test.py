@@ -16,10 +16,12 @@
 
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 import numpy as np
 import pytest
 
 from maxtext.integration.vllm.maxtext_vllm_rollout import (
+    MaxTextVllmRollout,
     prepare_direct_sync_additional_config,
     requires_maxtext_scanned_weight_unroll,
     unroll_gemma_scanned_weights,
@@ -345,6 +347,90 @@ class DirectSyncRolloutConfigTest(unittest.TestCase):
         ),
         original,
     )
+
+
+class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
+  """Verify the custom rollout preserves Tunix rollout options."""
+
+  @pytest.mark.cpu_only
+  def test_forwards_sampling_parallelism_and_capacity_options(self):
+    sampling_kwargs = {
+        "stop": ["</answer>"],
+        "detokenize": True,
+        "include_stop_str_in_output": True,
+    }
+    rollout_config = SimpleNamespace(
+        kv_cache_size=1280,
+        rollout_mapping_config=None,
+        rollout_vllm_model_version="Qwen/Qwen3.5-35B-A3B",
+        rollout_vllm_swap_space_size_gb=2,
+        rollout_vllm_async_scheduling=False,
+        rollout_vllm_max_num_batched_tokens=16384,
+        rollout_vllm_max_num_seqs=32,
+        rollout_vllm_hf_config_path=None,
+        rollout_vllm_logprobs_mode="raw_logprobs",
+        rollout_vllm_kwargs={"dtype": "bfloat16"},
+        rollout_vllm_additional_config={"maxtext_config": {"model_name": "qwen3.5-35b-a3b"}},
+        rollout_vllm_hbm_utilization=0.6,
+        rollout_vllm_init_with_random_weights=True,
+        rollout_vllm_tpu_backend_type="jax",
+        rollout_vllm_lora_config=None,
+        rollout_vllm_server_mode=False,
+        rollout_vllm_server_mode_submission_threshold=7,
+        rollout_vllm_server_mode_submission_timeout_s=3.0,
+        return_logprobs=True,
+        tensor_parallel_size=4,
+        data_parallel_size=2,
+        expert_parallel_size=1,
+        rollout_vllm_enable_dp_attention=False,
+        rollout_vllm_delete_dst_buffers=True,
+        rollout_vllm_reshard_chunk_size=8,
+        rollout_vllm_sampling_kwargs=sampling_kwargs,
+    )
+    maxtext_config = SimpleNamespace(
+        model_name="qwen3.5-35b-a3b",
+        num_experts=256,
+        param_scan_axis=1,
+        inhomogeneous_layer_cycle_interval=4,
+        swap_space_vllm_gb=2,
+        vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
+    )
+    fake_sampler = mock.MagicMock()
+
+    with (
+        mock.patch(
+            "maxtext.integration.vllm.maxtext_vllm_rollout.mappings.MappingConfig.build",
+            return_value=object(),
+        ),
+        mock.patch(
+            "maxtext.integration.vllm.maxtext_vllm_rollout.VllmConfig",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+        mock.patch(
+            "maxtext.integration.vllm.maxtext_vllm_rollout.MaxTextVllmSampler",
+            return_value=fake_sampler,
+        ) as sampler_cls,
+        mock.patch("maxtext.integration.vllm.maxtext_vllm_rollout.nnx.state", return_value={"base": {}}),
+    ):
+      MaxTextVllmRollout(
+          rollout_actor=object(),
+          tokenizer=object(),
+          mesh=object(),
+          rollout_config=rollout_config,
+          maxtext_config=maxtext_config,
+      )
+
+    config = sampler_cls.call_args.kwargs["config"]
+    self.assertEqual(config.sampling_kwargs, sampling_kwargs)
+    self.assertEqual(config.expert_parallel_size, 1)
+    self.assertEqual(config.return_logprobs, True)
+    self.assertEqual(config.reshard_chunk_size, 8)
+    self.assertEqual(config.server_mode_submission_threshold, 7)
+    self.assertEqual(config.server_mode_submission_timeout_s, 3.0)
+    self.assertEqual(config.engine_kwargs["max_num_batched_tokens"], 16384)
+    self.assertEqual(config.engine_kwargs["max_num_seqs"], 32)
+    self.assertEqual(config.engine_kwargs["logprobs_mode"], "raw_logprobs")
+    fake_sampler.load_checkpoint.assert_called_once_with({"base": {}})
 
 
 class MaxTextAdapterSelectionTest(unittest.TestCase):

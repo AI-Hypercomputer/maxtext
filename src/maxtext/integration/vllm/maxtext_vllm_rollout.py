@@ -519,6 +519,11 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         # Async scheduling causes KeyError in dp_scheduler on slow models
         # (30B+) where inference latency exceeds the scheduler's window.
         "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
+        "max_num_batched_tokens": rollout_config.rollout_vllm_max_num_batched_tokens,
+        "max_num_seqs": rollout_config.rollout_vllm_max_num_seqs,
+        "hf_config_path": rollout_config.rollout_vllm_hf_config_path,
+        "max_logprobs": 1,
+        "logprobs_mode": rollout_config.rollout_vllm_logprobs_mode,
     }
 
     # Merge additional kwargs like dtype and hf_overrides provided by train_rl.py
@@ -542,11 +547,18 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             mapping_config=mapping_config,
             lora_config=rollout_config.rollout_vllm_lora_config,
             server_mode=rollout_config.rollout_vllm_server_mode,
+            server_mode_submission_threshold=rollout_config.rollout_vllm_server_mode_submission_threshold,
+            server_mode_submission_timeout_s=rollout_config.rollout_vllm_server_mode_submission_timeout_s,
+            return_logprobs=rollout_config.return_logprobs,
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
+            expert_parallel_size=rollout_config.expert_parallel_size,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
+            delete_dst_buffers=rollout_config.rollout_vllm_delete_dst_buffers,
+            reshard_chunk_size=rollout_config.rollout_vllm_reshard_chunk_size,
             engine_kwargs=engine_kwargs,
             additional_config=rollout_additional_config,
+            sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
         ),
         converter=converter,
         direct_maxtext_sync=direct_maxtext_sync,
