@@ -660,7 +660,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       try:
         from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from tpu_inference.layers.common.utils import (  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+            reorder_concatenated_tensor_for_sharding,
+            truncate_sharded_tensor,
+        )
         from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
       except ImportError as e:
@@ -702,6 +705,26 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       conv_state_paged, recurrent_state_paged = kv_cache
 
+      # Compile against the active request bucket rather than the runner's
+      # maximum-size metadata buffers.
+      dp_size = get_mesh_shape_product(self.mesh, attn_data)
+      padded_num_reqs_per_dp = attention_metadata.padded_num_reqs // dp_size  # pyrefly: ignore[missing-attribute]
+      state_indices = truncate_sharded_tensor(
+          attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
+          padded_num_reqs_per_dp,
+          dp_size,
+      )
+      query_start_loc = truncate_sharded_tensor(
+          attention_metadata.query_start_loc,  # pyrefly: ignore[missing-attribute]
+          padded_num_reqs_per_dp + 1,
+          dp_size,
+      )
+      seq_lens = truncate_sharded_tensor(
+          attention_metadata.seq_lens,  # pyrefly: ignore[missing-attribute]
+          padded_num_reqs_per_dp,
+          dp_size,
+      )
+
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
           b_flat,
@@ -712,10 +735,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           None,  # conv_bias: MaxText conv1d uses use_bias=False.
           jnp.asarray(self.A_log[...], dtype=cfg.dtype),
           jnp.asarray(self.dt_bias[...], dtype=cfg.dtype),
-          attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
-          attention_metadata.query_start_loc,  # pyrefly: ignore[missing-attribute]
+          state_indices,
+          query_start_loc,
           attention_metadata.request_distribution,  # pyrefly: ignore[missing-attribute]
-          attention_metadata.seq_lens,  # pyrefly: ignore[missing-attribute]
+          seq_lens,
           self.num_k_heads,
           self.num_v_heads,
           self.head_k_dim,

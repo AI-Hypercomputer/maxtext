@@ -3029,6 +3029,82 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     )
     return lnx
 
+  @pytest.mark.cpu_only
+  @pytest.mark.post_training
+  def test_paged_state_truncates_metadata_to_active_requests(self):
+    """The paged-state bridge trims maximum-size metadata buffers."""
+    gdn_attention = pytest.importorskip("tpu_inference.layers.common.gdn_attention")
+
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path("inference/vllm.yml")],
+        run_name="paged_gdn_metadata_test",
+        enable_checkpointing=False,
+        log_config=False,
+        base_emb_dim=16,
+        gdn_num_value_heads=2,
+        gdn_num_key_heads=2,
+        gdn_key_head_dim=4,
+        gdn_value_head_dim=4,
+        gdn_conv_kernel_dim=4,
+        gdn_chunk_size=4,
+        dtype="float32",
+        weight_dtype="float32",
+        max_prefill_predict_length=2,
+        max_target_length=4,
+        per_device_batch_size=1.0,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    hidden_states = jnp.ones((1, 1, cfg.emb_dim), dtype=cfg.dtype)
+    gdn = Qwen3NextGatedDeltaNet(
+        config=cfg,
+        inputs_shape=hidden_states.shape,
+        mesh=mesh,
+        dtype=cfg.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=nnx.Rngs(params=0, dropout=1),
+    )
+
+    num_blocks = 2
+    key_dim = cfg.gdn_num_key_heads * cfg.gdn_key_head_dim
+    value_dim = cfg.gdn_num_value_heads * cfg.gdn_value_head_dim
+    conv_dim = 2 * key_dim + value_dim
+    conv_state = jnp.zeros((num_blocks, cfg.gdn_conv_kernel_dim - 1, conv_dim), dtype=cfg.dtype)
+    recurrent_state = jnp.zeros(
+        (num_blocks, cfg.gdn_num_value_heads, cfg.gdn_key_head_dim, cfg.gdn_value_head_dim),
+        dtype=cfg.dtype,
+    )
+    attention_metadata = types.SimpleNamespace(
+        padded_num_reqs=1,
+        mamba_state_indices=jnp.array([1, 101, 102], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 101, 201], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
+        seq_lens=jnp.array([1, 101, 102], dtype=jnp.int32),
+    )
+
+    with mock.patch.object(gdn_attention, "run_jax_gdn_attention", autospec=True) as mock_run_gdn:
+      mock_run_gdn.return_value = (
+          (conv_state, recurrent_state),
+          jnp.zeros((hidden_states.shape[1], value_dim), dtype=cfg.dtype),
+      )
+      output, new_cache = gdn(
+          hidden_states,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=(conv_state, recurrent_state),
+          attention_metadata=attention_metadata,
+      )
+
+    mock_run_gdn.assert_called_once()
+    self.assertEqual(len(mock_run_gdn.call_args.args), 18)
+    self.assertEqual(set(mock_run_gdn.call_args.kwargs), {"mesh"})
+    self.assertIs(mock_run_gdn.call_args.kwargs["mesh"], mesh)
+    np.testing.assert_array_equal(mock_run_gdn.call_args.args[9], jnp.array([1], dtype=jnp.int32))
+    np.testing.assert_array_equal(mock_run_gdn.call_args.args[10], jnp.array([0, 1], dtype=jnp.int32))
+    np.testing.assert_array_equal(mock_run_gdn.call_args.args[12], jnp.array([1], dtype=jnp.int32))
+    self.assertEqual(output.shape, hidden_states.shape)
+    self.assertEqual(new_cache[0].shape, conv_state.shape)
+    self.assertEqual(new_cache[1].shape, recurrent_state.shape)
+
   @pytest.mark.tpu_only
   def test_autoregression(self):
     cfg = self.cfg
