@@ -357,6 +357,7 @@ remat_policy: 'full'
 # If "custom" remat_policy is chosen, you can select tensors from the following list to offload on host memory, rematerialize or save on device memory.
 # Pick one of these options for following tensors: ['remat','device','offload']
 decoder_layer_input: 'device' # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
+indexer_cutoff_threshold: 'remat' # Remat policy for indexer cutoff threshold (can be set to 'remat', 'offload', or 'device')
 context: 'remat' # From https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py#L581-L583
 mlpwi: 'remat'
 mlpwi_0: 'remat'

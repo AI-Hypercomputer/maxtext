@@ -1916,7 +1916,10 @@ class NNXDecoder(nnx.Module):
 
           graphdef, state = nnx.split(layer)
           if kv_caches is not None:
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5) and cfg.attention not in (
+                "vllm_rpa",
+                "vllm_batched_rpa",
+            ):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_cache = (
                     kv_caches["key_cache"][lyr],
@@ -1954,7 +1957,10 @@ class NNXDecoder(nnx.Module):
             nnx.update(layer, new_state)
 
           if kv_caches is not None and kv_cache is not None:
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5) and cfg.attention not in (
+                "vllm_rpa",
+                "vllm_batched_rpa",
+            ):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_caches["key_cache"][lyr] = kv_cache[0]
                 kv_caches["value_cache"][lyr] = kv_cache[1]

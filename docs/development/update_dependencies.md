@@ -134,6 +134,16 @@ mv generated_artifacts/python3_12/cuda12-requirements.txt \
   src/dependencies/requirements/generated_requirements/cuda12-requirements.txt
 ```
 
+### Decoupled mode
+
+`generated_requirements/decoupled-requirements.txt` is derived from the GPU pre-training requirements above: the same packages at the same versions, minus the Google Cloud clients and the accelerator wheels. [Decoupled mode](../run_maxtext/decoupled_mode.md) is only exercised when those packages are genuinely absent, so this file is what CI installs for the decoupled test run. It carries no `seed-env` step of its own, it is a filter over a lock that `seed-env` already produced, which is why regenerating it needs no network. Pass `--source` to derive the same thing from another hardware lock. Regenerate it after updating any requirements file:
+
+```bash
+python3 src/dependencies/scripts/generate_decoupled_requirements.py
+```
+
+The `decoupled-requirements` pre-commit hook fails when a change under `src/dependencies/requirements/` leaves this file stale.
+
 ## Step 4: Verify the new dependencies
 
 Finally, test that the new dependencies install correctly and that MaxText runs
