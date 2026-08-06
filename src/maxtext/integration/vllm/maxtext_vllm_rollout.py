@@ -204,7 +204,13 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
 
 
 def validate_direct_sync_layer_coverage(source, target) -> int:
-  """Fail if an unrolled source would leave MaxText target layers untouched."""
+  """Fail if an unrolled source would leave MaxText target layers untouched.
+
+  Tunix intentionally intersects direct-sync trees. For heterogeneous Qwen
+  scans, a schema error can therefore skip every transformer layer without an
+  exception. This check runs on the initial full-parameter load and requires
+  every unscanned target-layer parameter path to exist in the source.
+  """
 
   def to_pure_params(state):
     if hasattr(state, "filter") and hasattr(state, "to_pure_dict"):
@@ -232,8 +238,6 @@ def validate_direct_sync_layer_coverage(source, target) -> int:
     return any(isinstance(part, str) and re.fullmatch(r"layers_\d+", part) for part in path)
 
   source_layer_keys = {key for key in source_flat if is_unscanned_layer_path(key)}
-  if not source_layer_keys:
-    return 0
   target_layer_keys = {key for key in target_flat if is_unscanned_layer_path(key)}
 
   def source_covers(target_key):

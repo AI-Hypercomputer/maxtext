@@ -270,6 +270,14 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
       validate_direct_sync_layer_coverage(source, target)
 
   @pytest.mark.cpu_only
+  def test_rejects_source_without_unrolled_layers(self):
+    source = {"base": {"decoder": {"layers": {"layer_0": {"probe": np.ones((2, 1))}}}}}
+    target = {"model": {"decoder": {"layers_0": {"probe": np.zeros((2, 1))}}}}
+
+    with self.assertRaisesRegex(ValueError, "matched 0/1 target layer parameters"):
+      validate_direct_sync_layer_coverage(source, target)
+
+  @pytest.mark.cpu_only
   def test_accepts_split_moe_weights_for_prefused_target(self):
     source = {
         "base": {
