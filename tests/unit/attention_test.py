@@ -31,6 +31,7 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ma
 from jax.sharding import AxisType, Mesh
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
 from maxtext.common.gcloud_stub import is_decoupled
 
 from maxtext.common.common_types import (
@@ -3028,6 +3029,30 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
         dtype=dtype,
     )
     return lnx
+
+  @pytest.mark.cpu_only
+  def test_train_path_checks_all_batch_sharding_specs(self):
+    """The non-paged GDN path makes every batch-sharded spec shape-compatible."""
+    lnx = self.get_structured_data(self.cfg.dtype)
+    gdn = Qwen3NextGatedDeltaNet(
+        config=self.cfg,
+        inputs_shape=lnx.shape,
+        mesh=self.mesh,
+        dtype=self.cfg.dtype,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=self.nnx_rng,
+    )
+
+    with mock.patch(
+        "maxtext.models.qwen3.remove_incompatible_mesh_axes_from_partition_spec",
+        wraps=sharding.remove_incompatible_mesh_axes_from_partition_spec,
+    ) as make_compatible:
+      output, _ = gdn(lnx, model_mode=MODEL_MODE_TRAIN)
+
+    self.assertEqual(output.shape, lnx.shape)
+    self.assertEqual(make_compatible.call_count, 4)
+    self.assertEqual([len(call.args[1]) for call in make_compatible.call_args_list], [4, 4, 3, 4])
+    self.assertTrue(all(call.kwargs["dims"] == (0,) for call in make_compatible.call_args_list))
 
   @pytest.mark.cpu_only
   @pytest.mark.post_training

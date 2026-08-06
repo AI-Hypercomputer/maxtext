@@ -42,8 +42,15 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec, get_logical_axis_rules
+from maxtext.utils.sharding import (
+    create_sharding,
+    get_logical_axis_rules,
+    logical_to_mesh_axes,
+    maybe_shard_with_logical,
+    maybe_shard_with_pspec,
+    remove_expert_from_partition_spec,
+    remove_incompatible_mesh_axes_from_partition_spec,
+)
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -1647,6 +1654,48 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
+    output_pspec = self._logical_to_mesh_axes(
+        (
+            batch_logical_axis,
+            "activation_norm_length",
+            "activation_embed",
+        )
+    )
+    # Replicating the batch is only safe when expert routing does not depend on
+    # batch shards. Keep the existing strict behavior for expert-parallel meshes.
+    if self.get_expert_parallelism_size() == 1:
+      input_partition_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+          input_partition_pspec,
+          inputs.shape,
+          self.mesh,
+          dims=(0,),
+      )
+      gate_logits_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+          gate_logits_pspec,
+          gate_logits.shape,
+          self.mesh,
+          dims=(0,),
+      )
+      if pre_bias_logits_pspec is not None:
+        pre_bias_logits_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            pre_bias_logits_pspec,
+            pre_bias_logits.shape,
+            self.mesh,
+            dims=(0,),
+        )
+      if decoder_tokens_pspec is not None:
+        decoder_tokens_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            decoder_tokens_pspec,
+            input_ids.shape,
+            self.mesh,
+            dims=(0,),
+        )
+      output_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+          output_pspec,
+          inputs.shape,
+          self.mesh,
+          dims=(0,),
+      )
 
     def roe_ag_and_route(x, logits, pre_bias_logits, num_ep, expert_shard_id, rngs, input_ids=None):
       # The ring-of-experts strategy first duplicates the inputs to all
@@ -2234,13 +2283,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Replicate the input key
         ),
         out_specs=(
-            self._logical_to_mesh_axes(
-                (
-                    batch_logical_axis,
-                    "activation_norm_length",
-                    "activation_embed",
-                )
-            ),
+            output_pspec,
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
         ),
@@ -2341,18 +2384,9 @@ class RoutedMoE(nnx.Module):
       w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", None))
 
-    input_axes = (batch_logical_axis, "activation_norm_length", None)
-
-    gate_logits_axes = (batch_logical_axis, "activation_norm_length", None)
-    # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4")):
-      pre_bias_logits_axes = (batch_logical_axis, "activation_norm_length", None)
-    else:
-      pre_bias_logits_axes = None
-
-    inputs = self._maybe_shard_with_logical(inputs, input_axes)
-    gate_logits = self._maybe_shard_with_logical(gate_logits, gate_logits_axes)
-    pre_bias_logits = self._maybe_shard_with_logical(pre_bias_logits, pre_bias_logits_axes)
+    inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec)
+    gate_logits = self._maybe_shard_with_pspec(gate_logits, gate_logits_pspec)
+    pre_bias_logits = self._maybe_shard_with_pspec(pre_bias_logits, pre_bias_logits_pspec)
 
     w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
     w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)

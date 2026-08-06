@@ -910,6 +910,52 @@ def remove_mesh_axes_from_partition_spec(pspec, axes_to_remove, dims=None):
   return jax.sharding.PartitionSpec(*new_spec)
 
 
+def remove_incompatible_mesh_axes_from_partition_spec(pspec, shape, mesh, dims=None):
+  """Replicate tensor dimensions that cannot be evenly sharded by their mesh axes.
+
+  `shard_map` requires every tensor dimension to be evenly divisible by the
+  product of the mesh axes assigned to that dimension. When that requirement is
+  not met, remove the assigned axes from the dimension so JAX replicates it
+  instead.
+
+  Args:
+    pspec: Physical PartitionSpec to make compatible with `shape`.
+    shape: Global tensor shape described by `pspec`.
+    mesh: Device mesh containing the physical axes referenced by `pspec`.
+    dims: Dim indices to check; `None` (the default) checks every dim.
+
+  Returns:
+    A PartitionSpec whose checked dimensions are evenly shardable.
+  """
+  if len(pspec) > len(shape):
+    raise ValueError(f"PartitionSpec rank {len(pspec)} exceeds tensor rank {len(shape)}")
+
+  dims_to_check = None if dims is None else set(dims)
+  compatible_pspec = pspec
+  for dim, (dim_size, partition) in enumerate(zip(shape, pspec)):
+    if (dims_to_check is not None and dim not in dims_to_check) or partition is None or partition == P.UNCONSTRAINED:
+      continue
+
+    if isinstance(partition, str):
+      mesh_axes = (partition,)
+    elif isinstance(partition, (list, tuple)):
+      mesh_axes = tuple(partition)
+    else:
+      raise ValueError(f"Unsupported axis type: {type(partition)}")
+
+    shard_count = 1
+    for mesh_axis in mesh_axes:
+      shard_count *= mesh.shape[mesh_axis]
+    if dim_size % shard_count:
+      compatible_pspec = remove_mesh_axes_from_partition_spec(
+          compatible_pspec,
+          mesh_axes,
+          dims=(dim,),
+      )
+
+  return compatible_pspec
+
+
 def remove_mesh_axes_from_sharding(sharding_tree, axes_to_remove):
   """Recursively traverses a sharding tree removing `axes_to_remove` from each spec."""
 
