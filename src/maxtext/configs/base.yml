@@ -226,7 +226,7 @@ use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
 enable_moe_dynamic_redundant_experts: false # whether to use MoonEP-style dynamic redundant expert duplication and rebalancing
-moe_redundant_slots_per_rank: 2 # number of prefetch slots (B) per EP rank for dynamic expert duplication
+moe_redundant_slots_per_rank: 1 # number of prefetch slots (B) per EP rank for dynamic expert duplication
 moe_rebalance_threshold_ratio: 1.15 # load threshold ratio (rank_load / avg_load) to trigger expert duplication
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
