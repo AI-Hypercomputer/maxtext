@@ -70,12 +70,29 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
           "maxtext_model_name", "report_gcs_dir", "run_name", "xpk_cluster_name", 
           "xpk_project", "xpk_zone", "maxtext_overrides"
       }
+      
+      is_delete = value is None or (isinstance(value, str) and value.upper() in ("REMOVE", "DELETE"))
+      
+      # Edge case: If the agent explicitly nests its output like {"maxtext_overrides": {"attention": "dot_product"}}, 
+      # we must not overwrite the entire dictionary. We should merge its contents recursively.
+      if key == "maxtext_overrides" and isinstance(value, dict):
+        for sub_k, sub_v in value.items():
+          _merge_override(sub_k, sub_v)
+        return
+
       if key in root_keys:
-        conf_dict[key] = value
+        if is_delete:
+          conf_dict.pop(key, None)
+        else:
+          conf_dict[key] = value
       else:
         if "maxtext_overrides" not in conf_dict:
           conf_dict["maxtext_overrides"] = {}
-        conf_dict["maxtext_overrides"][key] = value
+        
+        if is_delete:
+          conf_dict["maxtext_overrides"].pop(key, None)
+        else:
+          conf_dict["maxtext_overrides"][key] = value
 
     if isinstance(overrides, dict):
       for k, v in overrides.items():
