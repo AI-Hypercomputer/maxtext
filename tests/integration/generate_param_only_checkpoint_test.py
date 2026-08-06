@@ -41,19 +41,27 @@ def get_model_params(quantization):
   ]
 
 
-def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", state_path=None):
+def run_e2e_test_flow(
+    hardware,
+    model_config,
+    attention_type="autoselected",
+    state_path=None,
+    train_attention_type=None,
+    decode_config_extra=None,
+):
   """Helper function to run training, generate parameter-only checkpoint, and decode."""
   base_output_directory = get_test_base_output_directory()
   dataset_path = get_test_dataset_path()
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-  test_config = [
+  train_attention = train_attention_type if train_attention_type is not None else attention_type
+  decode_extra = decode_config_extra or []
+  shared_config = [
       None,
       get_test_config_path(),
       f"base_output_directory={base_output_directory}",
       "async_checkpointing=False",
       "enable_checkpointing=True",
       f"hardware={hardware}",
-      f"attention={attention_type}",
       "max_target_length=128",
       "per_device_batch_size=1",
   ] + model_config
@@ -70,7 +78,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
             hardware=hardware,
             steps=1,
             metrics_file="run_metrics.txt",
-            attention_type=attention_type,
+            attention_type=train_attention,
             dataset_type="synthetic",
             dataset_path=dataset_path,
         )
@@ -79,8 +87,9 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
 
   # Generate parameter-only checkpoint
   generate_param_only_ckpt_config = (
-      test_config
+      shared_config
       + [
+          f"attention={train_attention}",
           f"run_name=generate_param_{run_date}",
           f"load_full_state_path={state_path}",
       ]
@@ -90,11 +99,13 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
 
   # Run inference on parameter-only checkpoint
   decode_config = (
-      test_config
+      shared_config
       + [
+          f"attention={attention_type}",
           f"run_name=decode_{run_date}",
           f"load_parameters_path={base_output_directory}/generate_param_{run_date}/checkpoints/0/items",
       ]
+      + decode_extra
       + pathways_command
   )
   decode_main(decode_config)
@@ -157,6 +168,32 @@ def test_param_ckpt_generation_with_dot_product(quantization, capsys):
   os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
   model_config = get_model_params(quantization)
   run_e2e_test_flow(hardware="gpu", attention_type="dot_product", model_config=model_config)
+  captured = capsys.readouterr()
+  expected_output = "Input `I love to`"
+  assert expected_output in captured.out
+
+
+AR_SDPA_DECODE_OVERRIDES = [
+    "ici_fsdp_parallelism=1",
+    "ici_autoregressive_parallelism=-1",
+    "skip_jax_distributed_system=True",
+    "max_prefill_predict_length=8",
+    "max_target_length=16",
+]
+
+
+@pytest.mark.external_serving
+@pytest.mark.integration_test
+@pytest.mark.gpu_only
+def test_param_ckpt_generation_with_cudnn_flash_jax_ar_decode(capsys):
+  model_config = get_model_params("")
+  run_e2e_test_flow(
+      hardware="gpu",
+      attention_type="cudnn_flash_jax",
+      train_attention_type="dot_product",
+      model_config=model_config,
+      decode_config_extra=AR_SDPA_DECODE_OVERRIDES,
+  )
   captured = capsys.readouterr()
   expected_output = "Input `I love to`"
   assert expected_output in captured.out
