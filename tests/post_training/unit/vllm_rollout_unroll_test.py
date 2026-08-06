@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from maxtext.integration.vllm.maxtext_vllm_rollout import (
+    prepare_direct_sync_additional_config,
     requires_maxtext_scanned_weight_unroll,
     unroll_gemma_scanned_weights,
     unroll_qwen_scanned_weights,
@@ -267,6 +268,75 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "leave rollout transformer parameters at random initialization"):
       validate_direct_sync_layer_coverage(source, target)
+
+  @pytest.mark.cpu_only
+  def test_accepts_split_moe_weights_for_prefused_target(self):
+    source = {
+        "base": {
+            "decoder": {
+                "layers_0": {
+                    "mlp": {
+                        "routed_experts": {
+                            "wi_0": np.ones((2, 3, 4)),
+                            "wi_1": np.ones((2, 3, 4)),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    target = {
+        "model": {
+            "decoder": {
+                "layers_0": {
+                    "mlp": {"routed_experts": {"wi": np.zeros((2, 3, 8))}}
+                }
+            }
+        }
+    }
+
+    self.assertEqual(validate_direct_sync_layer_coverage(source, target), 1)
+
+
+class DirectSyncRolloutConfigTest(unittest.TestCase):
+  """Verify TP-sharded MoE rollout targets request the safe fused layout."""
+
+  @pytest.mark.cpu_only
+  def test_enables_prefusion_for_direct_moe_tp(self):
+    original = {"maxtext_config": {"model_name": "qwen3.5-35b-a3b"}}
+
+    prepared = prepare_direct_sync_additional_config(
+        original,
+        direct_maxtext_sync=True,
+        num_experts=256,
+        tensor_parallel_size=4,
+    )
+
+    self.assertTrue(prepared["maxtext_config"]["prefuse_moe_weights"])
+    self.assertNotIn("prefuse_moe_weights", original["maxtext_config"])
+
+  @pytest.mark.cpu_only
+  def test_leaves_dense_or_single_tp_config_unchanged(self):
+    original = {"maxtext_config": {"model_name": "qwen3-0.6b"}}
+
+    self.assertIs(
+        prepare_direct_sync_additional_config(
+            original,
+            direct_maxtext_sync=True,
+            num_experts=1,
+            tensor_parallel_size=4,
+        ),
+        original,
+    )
+    self.assertIs(
+        prepare_direct_sync_additional_config(
+            original,
+            direct_maxtext_sync=True,
+            num_experts=256,
+            tensor_parallel_size=1,
+        ),
+        original,
+    )
 
 
 class MaxTextAdapterSelectionTest(unittest.TestCase):

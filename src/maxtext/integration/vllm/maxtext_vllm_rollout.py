@@ -22,12 +22,13 @@ converters and scanned MaxText-to-MaxText state unrolling. The converters handle
   - Layer-norm and LM-head transposes
 """
 
-from typing import Any, Optional, Tuple
-
+import copy
 import gc
 import logging
 import re
 import time
+from typing import Any, Optional, Tuple
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -72,6 +73,39 @@ def uses_maxtext_vllm_adapter(config: Any) -> bool:
 def requires_maxtext_scanned_weight_unroll(config: Any) -> bool:
   """Returns whether direct MaxText-to-MaxText sync needs a custom unroll."""
   return bool(getattr(config, "scan_layers", False) and uses_maxtext_vllm_adapter(config))
+
+
+def prepare_direct_sync_additional_config(
+    additional_config: Optional[dict[str, Any]],
+    *,
+    direct_maxtext_sync: bool,
+    num_experts: int,
+    tensor_parallel_size: int,
+) -> Optional[dict[str, Any]]:
+  """Makes the direct MaxText MoE target use TPU-safe prefused weights.
+
+  TPU inference shards the fused gate/up dimension across tensor-parallel
+  devices. Each shard must therefore contain its local gate chunk followed by
+  its local up chunk. The unfused MaxText inference path concatenates the two
+  complete tensors globally, which gives incorrect local shards when TP > 1.
+  Tunix's direct-sync MoE fusion builds the required per-shard layout once at
+  weight-load time when the target exposes a prefused ``wi`` parameter.
+  """
+  if not direct_maxtext_sync or num_experts <= 1 or tensor_parallel_size <= 1:
+    return additional_config
+
+  prepared = copy.deepcopy(additional_config) if additional_config is not None else {}
+  maxtext_overrides = prepared.setdefault("maxtext_config", {})
+  if not isinstance(maxtext_overrides, dict):
+    raise ValueError("vLLM additional_config.maxtext_config must be a dictionary for direct MaxText sync.")
+
+  if not maxtext_overrides.get("prefuse_moe_weights", False):
+    logging.info(
+        "MaxTextVllmRollout: enabling prefuse_moe_weights for correct MoE gate/up layout with TP=%d.",
+        tensor_parallel_size,
+    )
+  maxtext_overrides["prefuse_moe_weights"] = True
+  return prepared
 
 
 def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_blocks", "layers_remainder")):
@@ -201,7 +235,18 @@ def validate_direct_sync_layer_coverage(source, target) -> int:
   if not source_layer_keys:
     return 0
   target_layer_keys = {key for key in target_flat if is_unscanned_layer_path(key)}
-  missing = target_layer_keys - source_layer_keys
+
+  def source_covers(target_key):
+    if target_key in source_layer_keys:
+      return True
+    # Tunix fuses split training weights into the inference-only prefused
+    # parameter before transfer. Treat the pair as coverage for target `wi`.
+    if target_key and target_key[-1] == "wi":
+      prefix = target_key[:-1]
+      return prefix + ("wi_0",) in source_layer_keys and prefix + ("wi_1",) in source_layer_keys
+    return False
+
+  missing = {key for key in target_layer_keys if not source_covers(key)}
   if not target_layer_keys or missing:
     examples = [".".join(map(str, key)) for key in sorted(missing)[:5]]
     raise ValueError(
@@ -476,6 +521,13 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     if hasattr(rollout_config, "rollout_vllm_kwargs") and rollout_config.rollout_vllm_kwargs:
       engine_kwargs.update(rollout_config.rollout_vllm_kwargs)
 
+    rollout_additional_config = prepare_direct_sync_additional_config(
+        getattr(rollout_config, "rollout_vllm_additional_config", None),
+        direct_maxtext_sync=direct_maxtext_sync,
+        num_experts=getattr(maxtext_config, "num_experts", 1),
+        tensor_parallel_size=rollout_config.tensor_parallel_size,
+    )
+
     self._sampler = MaxTextVllmSampler(
         tokenizer=tokenizer,
         config=VllmConfig(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
@@ -490,7 +542,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             data_parallel_size=rollout_config.data_parallel_size,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
             engine_kwargs=engine_kwargs,
-            additional_config=getattr(rollout_config, "rollout_vllm_additional_config", None),
+            additional_config=rollout_additional_config,
         ),
         converter=converter,
         direct_maxtext_sync=direct_maxtext_sync,
