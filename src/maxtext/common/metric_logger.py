@@ -180,14 +180,9 @@ class MetricLogger:
           [
               f"completed step: {step}",
               f"seconds: {scalars['perf/step_time_seconds']:.3f}",
+              f"active_slices: {len(elastic_utils.live_slice_indices(self.config))}" if elastic_utils.elastic_enabled(self.config) else "",
           ]
       )
-      if elastic_utils.elastic_enabled(self.config):
-        log_parts.extend(
-            [
-                f"live slice count: {len(elastic_utils.live_slice_indices(self.config))}",
-            ]
-        )
 
     # Add performance metrics only if strictly NOT in rampup phase
     # TODO(b/452468482): Enable performance metric (TFLOPs, Tokens/s) tracking during batch size rampup.

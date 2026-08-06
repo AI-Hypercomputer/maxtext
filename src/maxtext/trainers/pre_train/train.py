@@ -22,16 +22,21 @@ from typing import Any, Sequence
 import datetime
 import functools
 import os
+import sys
+import logging
 
 from absl import app
-
-
 import optax
 
 import pathwaysutils  # pylint: disable=unused-import
+import threading
+from pathwaysutils.elastic import manager as pathways_manager
+from pathwaysutils.elastic import elastic
+from pathwaysutils.debug import watchdog
+from orbax.checkpoint.experimental.v1._src.training.pathways.snapshotter import Snapshotter
 
-import logging
 _logger = logging.getLogger(__name__)
+logging.getLogger("pathwaysutils.debug.watchdog").setLevel(logging.DEBUG)
 
 import tensorflow as tf
 
@@ -42,6 +47,10 @@ from jax.sharding import NamedSharding
 from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
+
+from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.common.data_loader import create_dataloader
+from maxtext.common.common_types import ReorderStrategy
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import EPS
@@ -641,6 +650,52 @@ def eval_step(model, config, state, data, dropout_rng=None):
   return metrics
 
 
+def recreate_dataloaders(config, mesh, recorder, rampup_manager):
+  """Recreates data and eval iterators and dataloader for the new mesh."""
+  new_data_iter, new_eval_iter = input_pipeline_interface.create_data_iterator(config, mesh)
+  context_parallel_size = mesh.shape.get(config.context_sharding, 1)
+  with jax.set_mesh(mesh):
+    if context_parallel_size > 1 and config.context_parallel_load_balance:
+      reorder_strategy = (
+          ReorderStrategy.STRIPED
+          if config.packing and config.context_parallel_strategy.lower() == "ring"
+          else ReorderStrategy.DUAL_CHUNK_SWAP
+      )
+      reorder_strategy = (
+          config.context_parallel_reorder_strategy
+          if config.context_parallel_reorder_strategy != ReorderStrategy.AUTO
+          else reorder_strategy
+      )
+      reorder_fn = maxtext_utils.get_reorder_callable(
+          context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
+      )
+      new_data_iter = map(reorder_fn, new_data_iter)
+      if new_eval_iter:
+        new_eval_iter = map(reorder_fn, new_eval_iter)
+
+  new_data_loader = create_dataloader(config, mesh, new_data_iter, recorder, rampup_manager)
+  return new_data_loader, new_data_iter, new_eval_iter
+
+
+def save_snapshot(snapshot_mgr, state, step, model):
+  """Saves a host memory snapshot of the current model and optimizer state."""
+  if isinstance(model, nn.Module):
+    state_dict = {
+        "step": state.step,
+        "params": state.params,
+        "opt_state": state.opt_state,
+    }
+  else:
+    model_state = nnx.state(state.model)
+    opt_state = nnx.state(state.optimizer)
+    state_dict = {
+        "model": nnx.to_pure_dict(model_state),
+        "optimizer": nnx.to_pure_dict(opt_state),
+    }
+  state_dict = train_utils.replicate_single_device_sharded_arrays(state_dict)
+  snapshot_mgr.save(step, state_dict)
+
+
 def training_loop_iteration(
     jax_device_state: dict[str, Any],
     python_vars: dict[str, Any],
@@ -663,6 +718,7 @@ def training_loop_iteration(
   rampup_manager = python_vars["rampup_manager"]
   recorder = python_vars["recorder"]
   checkpoint_manager = python_vars["checkpoint_manager"]
+  snapshot_mgr = python_vars["snapshot"]
   data_iterator = python_vars["data_iterator"]
   eval_data_iterator = python_vars["eval_data_iterator"]
   metric_logger_instance = python_vars["metric_logger_instance"]
@@ -689,8 +745,6 @@ def training_loop_iteration(
   dump_hlo_upload_all = immutable_data["dump_hlo_upload_all"]
 
   prof.maybe_activate_profiler(step, state)
-  if config.elastic_enabled:
-    elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
 
   with jax.profiler.StepTraceAnnotation("train", step_num=step):
     example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
@@ -759,26 +813,329 @@ def training_loop_iteration(
 
   metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
 
+  # Async Host Backup (Elastic Mode only)
+  if snapshot_mgr is not None and step % config.elastic_snapshot_interval == 0:
+    save_snapshot(snapshot_mgr, state, step, model)
+
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
   python_vars["last_step_completion"] = last_step_completion
 
 
+def recover(
+    jax_device_state: dict[str, Any],
+    python_vars: dict[str, Any],
+    immutable_data: dict[str, Any],
+    active_state: Any = None,
+):
+  """Rebuilds MaxText JAX device state and restores state from host snapshot or active state."""
+  config = immutable_data["config"]
+  recorder = python_vars["recorder"]
+  elastic_manager = python_vars["elastic_manager"]
+  snapshot_mgr = python_vars["snapshot"]
+  rampup_manager = python_vars["rampup_manager"]
+  metric_logger_instance = python_vars["metric_logger_instance"]
+
+  # Clear poisoned state to allow garbage collection
+  jax_device_state["state"] = None
+  jax_device_state["p_train_step"] = None
+  jax_device_state["p_eval_step"] = None
+  jax_device_state["model"] = None
+
+  if metric_logger_instance is not None:
+    metric_logger_instance.buffered_metrics.clear()
+
+  # Delete old iterators and loaders to release colocated python resources
+  for key in ["data_iterator", "eval_data_iterator", "data_loader"]:
+    if key in python_vars:
+      _logger.info(
+          "Deleting old %s to release colocated python resources...", key
+      )
+      del python_vars[key]
+
+  while True:
+    try:
+      # 1. Find currently active slices (wait if none are active)
+      min_slices = config.elastic_min_slice_count if config.elastic_min_slice_count > 0 else config.num_slices
+
+      all_active_slices = elastic.wait_for_slices(
+          slice_count=min_slices,
+          poll_interval=1,
+          slice_to_devices=elastic_manager.slice_to_devices,
+          timeout=config.elastic_timeout_seconds,
+      )
+      elastic_manager.active_slice_indices = all_active_slices
+      jax.config.update("jax_default_device", elastic_manager.default_device)
+      _logger.info(
+          "Active slices after recovery: %s",
+          elastic_manager.active_slice_indices,
+      )
+      _logger.info(
+          "Active devices after recovery: %d",
+          len(elastic_utils.live_devices(config)),
+      )
+
+      # Dynamically mutate the config to match the new slice topology
+      elastic_utils.mutate_config_for_topology(config, elastic_manager)
+      # Immediately cancel any in-flight background checkpoint saving operations
+      existing_checkpoint_manager = python_vars["checkpoint_manager"]
+      if existing_checkpoint_manager is not None:
+        checkpointing.cancel_checkpoint_manager(existing_checkpoint_manager)
+
+      # 2. Re-run setup_train_loop to rebuild Mesh, Model, Optimizers
+      (
+          init_rng,
+          checkpoint_manager,
+          state_mesh_shardings,
+          model,
+          mesh,
+          learning_rate_schedule,
+          _,
+          _,
+          rampup_manager,
+          eval_data_iterator,
+          state,  # Newly initialized scratch state
+      ) = train_utils.setup_train_loop(
+          config,
+          recorder,
+          devices=elastic_utils.live_devices(config),
+          restore_checkpoint=False,
+          checkpoint_manager=existing_checkpoint_manager,
+      )
+      init_rng = jax.device_put(
+          init_rng,
+          jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()),
+      )
+
+      params_shardings, state_mesh_shardings = (
+          sharding.maybe_update_params_sharding_with_opt(
+              config, state_mesh_shardings
+          )
+      )
+
+      # 3. Re-compile train and eval steps for the NEW mesh
+      if isinstance(model, nn.Module):
+        jit_model = model
+      else:
+        jit_model, _ = nnx.split(state)
+
+      with (
+          jax.set_mesh(mesh),
+          nn_partitioning.axis_rules(config.logical_axis_rules),
+      ):
+        p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+            config,
+            jit_model,
+            mesh,
+            state,
+            state_mesh_shardings,
+            train_step,
+            eval_step,
+            eval_data_iterator,
+            params_shardings,
+        )
+
+      # 4. Restore TrainState from active state (device-to-device) or host snapshot
+      if active_state is not None:
+        _logger.info(
+            "[*] Resharding active state directly (device-to-device)..."
+        )
+        if isinstance(model, nn.Module):
+          for_sharding_dict = {
+              "step": state.step,
+              "params": state.params,
+              "opt_state": state.opt_state,
+          }
+          sharding_dict = jax.tree.map(lambda x: x.sharding, for_sharding_dict)
+          active_dict = {
+              "step": active_state.step,
+              "params": active_state.params,
+              "opt_state": active_state.opt_state,
+          }
+          restored_dict = jax.device_put(active_dict, sharding_dict)
+          restored_state = state.replace(
+              step=restored_dict["step"],
+              params=restored_dict["params"],
+              opt_state=restored_dict["opt_state"],
+          )
+          restored_step = int(restored_state.step)
+        else:
+          for_sharding_dict = {
+              "model": nnx.to_pure_dict(nnx.state(state.model)),
+              "optimizer": nnx.to_pure_dict(nnx.state(state.optimizer)),
+          }
+          sharding_dict = jax.tree.map(lambda x: x.sharding, for_sharding_dict)
+          active_dict = {
+              "model": nnx.to_pure_dict(nnx.state(active_state.model)),
+              "optimizer": nnx.to_pure_dict(nnx.state(active_state.optimizer)),
+          }
+          restored_dict = jax.device_put(active_dict, sharding_dict)
+          nnx.update(state.model, restored_dict["model"])
+          nnx.update(state.optimizer, restored_dict["optimizer"])
+          restored_state = state
+          restored_step = int(state.optimizer.step.value)
+        _logger.info(
+            "Resharding complete. Retrying. Slices used: %s",
+            elastic_manager.active_slice_indices,
+        )
+      else:
+        if snapshot_mgr.latest is None:
+          raise RuntimeError(
+              "No snapshots available to restore from. Cannot recover."
+          )
+        restored_step = snapshot_mgr.latest.step
+        if isinstance(model, nn.Module):
+          abstract_dict = {
+              "step": state.step,
+              "params": state.params,
+              "opt_state": state.opt_state,
+          }
+          replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+          restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+          restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+          restored_state = state.replace(
+              step=restored_dict["step"],
+              params=restored_dict["params"],
+              opt_state=restored_dict["opt_state"],
+          )
+        else:
+          abstract_dict = {
+              "model": nnx.to_pure_dict(nnx.state(state.model)),
+              "optimizer": nnx.to_pure_dict(nnx.state(state.optimizer)),
+          }
+          replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+          restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+          restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+          nnx.update(state.model, restored_dict["model"])
+          nnx.update(state.optimizer, restored_dict["optimizer"])
+          restored_state = state
+
+        if metric_logger_instance is not None:
+          metric_logger_instance.learning_rate_schedule = learning_rate_schedule
+
+      # Update jax_device_state with the newly built JAX objects
+      if not isinstance(model, nn.Module) and isinstance(
+          restored_state, train_state_nnx.TrainStateNNX
+      ):
+        _, restored_state = nnx.split(restored_state)
+      jax_device_state["state"] = restored_state
+      jax_device_state["init_rng"] = init_rng
+      jax_device_state["model"] = model
+      jax_device_state["mesh"] = mesh
+      jax_device_state["state_mesh_shardings"] = state_mesh_shardings
+      jax_device_state["p_train_step"] = p_train_step
+      jax_device_state["p_eval_step"] = p_eval_step
+
+      new_data_loader, new_data_iter, new_eval_iter = recreate_dataloaders(
+          config, mesh, recorder, rampup_manager
+      )
+
+      python_vars["step"] = restored_step
+      python_vars["data_loader"] = new_data_loader
+      python_vars["data_iterator"] = new_data_iter
+      python_vars["eval_data_iterator"] = new_eval_iter
+      python_vars["checkpoint_manager"] = checkpoint_manager
+      python_vars["rampup_manager"] = rampup_manager
+      python_vars["last_step_completion"] = datetime.datetime.now()
+
+      _logger.info(
+          "Recovery complete! Resuming safely at step %d...", restored_step
+      )
+      break
+
+    except pathways_manager.ScaleUpSignalError as e:
+      _logger.info(
+          "ScaleUpSignalError caught during recovery: %s. Retrying recovery.", e
+      )
+
+
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
-  (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      data_loader,
-      rampup_manager,
-      eval_data_iterator,
-      state,
-  ) = train_utils.setup_train_loop(config, recorder)
+  elastic_manager = None
+  snapshot_mgr = None
+  devices = None
+  stop_event = None
+  monitor_thread = None
+
+  if config.elastic_enabled:
+    elastic_utils.ensure_elastic_manager_initialized(config)
+    elastic_manager = elastic_utils.elastic_manager
+    _logger.info(
+        "[*] Active slices at startup: %s", elastic_manager.active_slice_indices
+    )
+    stop_event = threading.Event()
+    monitor_thread = threading.Thread(
+        target=elastic_manager._monitor_new_slices,  # pylint: disable=protected-access
+        args=(stop_event, config.elastic_new_slice_check_period),
+        daemon=True,
+    )
+    monitor_thread.start()
+    elastic_utils.mutate_config_for_topology(config, elastic_manager)
+    devices = elastic_utils.live_devices(config)
+  else:
+    _logger.info("[*] Standard Non-Elastic Training.")
+
+  # Kills the workload if initialization takes longer than 20 minutes
+  with watchdog.watchdog(name="initialization", timeout=20 * 60, repeat=False):
+    setup_results = {}
+    init_complete_event = threading.Event()
+
+    def run_setup():
+      try:
+        results = train_utils.setup_train_loop(
+            config, recorder, devices=devices
+        )
+        setup_results["results"] = results
+      except Exception as e:
+        setup_results["exception"] = e
+      finally:
+        init_complete_event.set()
+
+    setup_thread = threading.Thread(target=run_setup, daemon=True)
+    setup_thread.start()
+
+    while True:
+      init_done = init_complete_event.wait(timeout=1)
+
+      if elastic_manager and elastic_utils.elastic_enabled(config):
+        new_slice = bool(elastic_manager.available_inactive_slices)
+
+        if new_slice and not init_done:
+          max_logging.log(
+              "New slice detected during initialization. Triggering retry."
+          )
+          raise elastic_utils.manager.ScaleUpSignalError(
+              "Scale up during initialization"
+          )
+
+        if init_done and new_slice:
+          raise elastic_utils.manager.ScaleUpSignalError(
+              "Both events set during initialization"
+          )
+
+      if init_done:
+        break
+
+    if "exception" in setup_results:
+      raise setup_results["exception"]
+
+    (
+        init_rng,
+        checkpoint_manager,
+        state_mesh_shardings,
+        model,
+        mesh,
+        learning_rate_schedule,
+        data_iterator,
+        data_loader,
+        rampup_manager,
+        eval_data_iterator,
+        state,
+    ) = setup_results["results"]
+
+    init_rng = jax.device_put(
+        init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    )
 
   # Throttling is applied only if configured (dcn_bandwidth_limit is set).
   # The default flag value is empty, meaning no throttling is applied by default.
@@ -847,6 +1204,12 @@ def train_loop(config, recorder, state=None):
 
   elastic_utils.record_elastic_reinit_end()
 
+  # Initialize host snapshot manager only in elastic mode
+  if config.elastic_enabled:
+    replica_axis_idx = config.mesh_axes.index("data")
+    snapshot_mgr = Snapshotter(replica_axis_index=replica_axis_idx)
+    save_snapshot(snapshot_mgr, state, start_step, model)
+
   # Initialize dictionaries for refactored iteration
   jax_device_state = {
       "state": state,
@@ -869,6 +1232,8 @@ def train_loop(config, recorder, state=None):
       "eval_data_iterator": eval_data_iterator,
       "metric_logger_instance": metric_logger_instance,
       "prof": prof,
+      "elastic_manager": elastic_manager,
+      "snapshot": snapshot_mgr,
   }
 
   immutable_data = {
@@ -895,11 +1260,58 @@ def train_loop(config, recorder, state=None):
   _job_completed_gracefully = False
   try:
     python_vars["last_step_completion"] = datetime.datetime.now()
+    needs_recovery = False
 
-    # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
-      training_loop_iteration(jax_device_state, python_vars, immutable_data)
-      python_vars["step"] += 1
+      # Print the stacktrace every 60s and also exit the workload if longer than 600s
+      with (
+          watchdog.watchdog("step-stack-status", timeout=60),
+          watchdog.watchdog("step-timebomb", timeout=10 * 60, repeat=False),
+      ):
+        try:
+          # Scale-up check at the end of the step (only if elastic)
+          if (
+              config.elastic_enabled
+              and elastic_manager.available_inactive_slices
+          ):
+            recover(
+                jax_device_state,
+                python_vars,
+                immutable_data,
+                active_state=jax_device_state["state"],
+            )
+            # Start snapshot save immediately on the new mesh
+            save_snapshot(snapshot_mgr, jax_device_state["state"], python_vars["step"], model)
+
+          training_loop_iteration(jax_device_state, python_vars, immutable_data)
+          python_vars["step"] += 1
+
+        except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
+          if config.elastic_enabled and (
+              isinstance(e, pathways_manager.ScaleUpSignalError)
+              or elastic.is_error_due_to_slice_down(e)
+          ):
+            _logger.error(
+                "[!] Elastic event detected around step %d", python_vars["step"]
+            )
+            needs_recovery = True
+          else:
+            # Non-elastic or unrelated JAX error: log and re-raise
+            _logger.exception(
+                "[!] JAX Runtime Error detected around step %d. Re-raising.",
+                python_vars["step"],
+            )
+            raise
+
+        if needs_recovery:
+          needs_recovery = False
+
+          # Slice Failure Recovery
+          recover(jax_device_state, python_vars, immutable_data)
+
+          # Save snapshot across the newly recovered mesh layout
+          save_snapshot(snapshot_mgr, jax_device_state["state"], python_vars["step"], model)
+          continue
 
     # Unpack state for post-loop actions
     state = jax_device_state["state"]
@@ -909,13 +1321,18 @@ def train_loop(config, recorder, state=None):
 
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
-      checkpointing.wait_until_finished(checkpoint_manager)
+      checkpoint_manager.wait_until_finished()
     _job_completed_gracefully = True
   except exceptions.StopTraining as e:
     prof.deactivate()
     max_logging.log(f"Training stopped: {str(e)}")
     _job_completed_gracefully = True
   finally:
+    # Terminate monitoring thread (Elastic Mode only)
+    if stop_event is not None:
+      stop_event.set()
+    if monitor_thread is not None:
+      monitor_thread.join()
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
     metric_logger_instance.flush_metrics_and_cleanup()
@@ -963,9 +1380,11 @@ def run(config, recorder):
 
 
 def get_train_func(config, recorder, argv):
-  """Returns the train function, wrapping in elastic_retry if elastic training is enabled."""
+  """Returns the train function, wrapping in elastic_retry if backup_kind is checkpoint."""
   if config.elastic_enabled:
-    max_logging.log("Elastic utils: Elastic training enabled.")
+    max_logging.log(f"Elastic utils: Elastic training enabled with {config.elastic_backup_kind} backup.")
+
+  if config.elastic_enabled and config.elastic_backup_kind == "checkpoint":
 
     def on_elastic_event():
       elastic_utils.record_elastic_event_start(recorder, config)

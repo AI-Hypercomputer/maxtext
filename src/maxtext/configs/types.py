@@ -2062,6 +2062,8 @@ class ElasticTraining(BaseModel):
       "snapshot",
       description=("The kind of backup to use for elastic training: 'snapshot' or 'checkpoint'."),
   )
+  elastic_snapshot_interval: int = Field(10, description="The interval in steps to save snapshots to host memory.")
+  elastic_new_slice_check_period: int = Field(10, description="The interval in seconds to poll for newly joined active slices.")
   elastic_timeout_seconds: int = Field(
       300,
       description=(
@@ -2973,6 +2975,14 @@ class MaxTextConfig(
     self.moe_mlp_dim = (2**mlp_dim_scale) * self.base_moe_mlp_dim
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
 
+    # Automatically determine number of slices if not specified.
+    raw_keys_for_num_slices = {
+        "num_slices": self.num_slices,
+        "hardware": self.hardware,
+        "compile_topology_num_slices": self.compile_topology_num_slices,
+    }
+    self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices, config=self)
+
     # E. HARDWARE-DEPENDENT CALCULATIONS
     if self.elastic_enabled:
       elastic_utils.ensure_elastic_manager_initialized(self)
@@ -3000,14 +3010,6 @@ class MaxTextConfig(
       self.num_target_devices = get_num_target_devices()
     except (RuntimeError, IndexError):
       logger.warning("JAX device system not available for config validation. Assuming 1 device.")
-
-    # Automatically determine number of slices if not specified.
-    raw_keys_for_num_slices = {
-        "num_slices": self.num_slices,
-        "hardware": self.hardware,
-        "compile_topology_num_slices": self.compile_topology_num_slices,
-    }
-    self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
 
     # Check for AQT deprecation warning
     if self.quantization and not self.use_qwix_quantization:

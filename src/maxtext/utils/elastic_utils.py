@@ -14,19 +14,75 @@
 
 """Utility functions for Elastic Training."""
 
-from collections import Counter
 import functools
+import math
+from collections import Counter
 from types import SimpleNamespace
+from typing import Any
 
 import jax
+import jax.numpy as jnp
+from flax import nnx
+from maxtext.common import train_state_nnx
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 import pathwaysutils
+from pathwaysutils.elastic import elastic
 from pathwaysutils.elastic import manager
 
 elastic_manager: manager.Manager | None = None
 pending_reinit_recorder = None
 pending_elastic_event_type = None
+
+
+def maybe_snapshot_state(
+    elastic_mgr: Any,
+    step: int,
+    state: Any,
+    force: bool = False,
+    block: bool = False,
+) -> None:
+  """Takes an elasticity snapshot of TrainStateNNX or Linen TrainState."""
+  if isinstance(state, train_state_nnx.TrainStateNNX):
+    model_state = nnx.state(state.model)
+    opt_state = nnx.state(state.optimizer)
+    snapshot_jax_arrays = {
+        "model": nnx.to_pure_dict(model_state),
+        "optimizer": nnx.to_pure_dict(opt_state),
+    }
+  else:
+    linen_dict = {
+        "params": state.params,
+        "opt_state": state.opt_state,
+        "step": state.step,
+    }
+    snapshot_jax_arrays = train_state_nnx.from_linen_checkpoint_dict(linen_dict)
+
+  elastic_mgr.maybe_snapshot(
+      step=step,
+      snapshot_jax_arrays=snapshot_jax_arrays,
+      force=force,
+      block=block,
+  )
+
+
+def restore_resharded_state(elastic_mgr: Any, mesh: Any, state: Any):
+  """Restores state from an elasticity snapshot on a new mesh."""
+  step, snapshot_jax_arrays, _ = elastic_mgr.get_resharded_snapshot(mesh)
+
+  if isinstance(state, train_state_nnx.TrainStateNNX):
+    if "model" in snapshot_jax_arrays:
+      nnx.update(state.model, snapshot_jax_arrays["model"])
+    if "optimizer" in snapshot_jax_arrays:
+      nnx.update(state.optimizer, snapshot_jax_arrays["optimizer"])
+      state.optimizer.step.value = jnp.asarray(step, dtype=jnp.uint32)
+  else:
+    linen_dict = train_state_nnx.to_linen_checkpoint_dict(snapshot_jax_arrays)
+    state = state.replace(**linen_dict)
+    state = state.replace(step=state.step.at[None].set(step))
+
+  return step, state
+
 
 
 def record_elastic_event_start(recorder, config) -> None:
@@ -62,22 +118,6 @@ def record_elastic_reinit_end() -> None:
 def elastic_enabled(config) -> bool:
   """Returns whether elastic mode is enabled."""
   return pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
-
-
-def elastic_snapshot(config) -> bool:
-  """Returns whether elastic snapshot mode is enabled."""
-  return elastic_enabled(config) and config.elastic_backup_kind == "snapshot"
-
-
-def maybe_bubble_elastic_exception(config, e: Exception) -> None:
-  """Checks JAX/ScaleUp elastic errors and re-raises them if elasticity is enabled.
-
-  Args:
-    config: Maxtext configuration object.
-    e: The exception currently being evaluated.
-  """
-  if elastic_enabled(config) and isinstance(e, (jax.errors.JaxRuntimeError, manager.ScaleUpSignalError)):
-    raise e
 
 
 def should_use_elastic(config) -> bool:
@@ -120,11 +160,52 @@ def clean_up_checkpoints(checkpoint_dir: str):
 
 
 def ensure_elastic_manager_initialized(config):
-  """Initializes elastic manager if it's not initialized and pathways is used."""
+  """Initializes elastic manager and waits for slices if not initialized and pathways is used."""
   global elastic_manager
   if should_use_elastic(config) and elastic_manager is None:
-    elastic_manager = manager.Manager()
+    min_slices = config.elastic_min_slice_count
+    if min_slices <= 0:
+      min_slices = config.num_slices
+    all_devices = jax.devices()
+    slice_to_devices = elastic.get_slice_to_devices(all_devices)
+    if min_slices <= 0:
+      min_slices = len(slice_to_devices)
+    timeout = config.elastic_timeout_seconds
+    max_logging.log(f"[*] Waiting for {min_slices} slices to be active before initializing config...")
+    all_active_slices = elastic.wait_for_slices(
+        slice_count=len(slice_to_devices),  # Temporary for tests, min_slices,
+        slice_to_devices=slice_to_devices,
+        timeout=timeout,
+    )
 
+    max_logging.log("[*] Pathways Elastic Training enabled. Initializing Pathways Manager...")
+    elastic_manager = manager.Manager()
+    if all_active_slices:
+      elastic_manager.active_slice_indices = all_active_slices
+    if elastic_manager.active_slice_indices:
+      jax.config.update("jax_default_device", elastic_manager.default_device)
+
+def mutate_config_for_topology(config, el_manager):
+  """Dynamically mutate the config to match the degraded slice topology."""
+  new_slice_count = el_manager.active_slice_count
+  max_logging.log(
+      f"[*] Dynamically mutating config.num_slices and "
+      f"config.dcn_data_parallelism to: {new_slice_count}"
+  )
+  object.__setattr__(config, "num_slices", new_slice_count)
+  object.__setattr__(config, "dcn_data_parallelism", new_slice_count)
+
+  # Update DCN data parallel axis in dcn_parallelism list
+  if hasattr(config, "mesh_axes") and hasattr(config, "dcn_parallelism"):
+    if "data" in config.mesh_axes:
+      data_axis_idx = config.mesh_axes.index("data")
+      config.dcn_parallelism[data_axis_idx] = new_slice_count
+
+  # Recalculate num_target_devices and batch sizes for the new topology
+  new_num_devices = len([
+      d for d in jax.devices() if getattr(d, "slice_index", 0) in el_manager.active_slice_indices
+  ])
+  recalculate_batch_sizes(config, new_num_devices)
 
 def get_local_batch_size(config) -> int:
   """Returns the local batch size based on the config."""
@@ -137,16 +218,19 @@ def live_devices(config=None):
   if should_use_elastic(config):
     ensure_elastic_manager_initialized(config)
     assert elastic_manager is not None
+
     # Filter devices that are in active slices
-    return [
-        d for d in jax.devices() if d is not None and getattr(d, "slice_index", 0) in elastic_manager.active_slice_indices
+    active_devices = [
+        d for d in jax.devices() if d.slice_index in elastic_manager.active_slice_indices
     ]
+    return sorted(active_devices, key=lambda d: (d.slice_index, d.process_index))
+
   return jax.devices()
 
 
 def live_slice_indices(config) -> set[int]:
   """Returns the set of live slice indices."""
-  return {getattr(d, "slice_index", 0) for d in live_devices(config) if d is not None}
+  return {d.slice_index for d in live_devices(config)}
 
 
 def get_devices_per_host(config):
@@ -234,22 +318,13 @@ def is_scale_up_event(config) -> bool:
 
 def maybe_elastic_scale_up(config, checkpoint_manager):
   """Waits for a checkpoint to finish before interrupting for scale up."""
-  if not should_use_elastic(config):
-    max_logging.log("maybe_elastic_scale_up: Elastic training is not enabled.")
-    return
   if is_scale_up_event(config):
     max_logging.log(
         "Started a checkpoint and a new slice is available. Waiting for current"
         " checkpoint to finish before interrupting."
     )
     if checkpoint_manager is not None:
-      # The v1 Checkpointer exposes `.wait()`, the v0 emergency/replicator
-      # managers expose `.wait_until_finished()`; this module cannot import
-      # `checkpointing`'s dispatcher (checkpointing imports elastic_utils).
-      if hasattr(checkpoint_manager, "wait"):
-        checkpoint_manager.wait()
-      else:
-        checkpoint_manager.wait_until_finished()
+      checkpoint_manager.wait_until_finished()
     max_logging.log("Checkpoint save completed. Interrupting")
     raise manager.ScaleUpSignalError()
 
@@ -263,12 +338,16 @@ def single_controller_mtc_init_kwargs(raw_keys):
   if not raw_keys.get("elastic_enabled", False):
     return kwargs
 
+  if "elastic_min_slice_count" not in raw_keys:
+    raw_keys["elastic_min_slice_count"] = raw_keys.get("num_slices", 0)
+  if "elastic_timeout_seconds" not in raw_keys:
+    raw_keys["elastic_timeout_seconds"] = 600
   config = SimpleNamespace(**raw_keys)
   if not should_use_elastic(config):
     return kwargs
 
   active_devices = tuple(live_devices(config))
-  active_slice_indices = {getattr(device, "slice_index", 0) for device in active_devices if device is not None}
+  active_slice_indices = live_slice_indices(config)
   if not active_devices or not active_slice_indices:
     raise ValueError("Elastic single-controller MTC initialization found no active devices.")
 
@@ -283,3 +362,101 @@ def single_controller_mtc_init_kwargs(raw_keys):
       f"configured_num_slices={raw_keys['num_slices']}."
   )
   return kwargs
+
+
+def recalculate_batch_sizes(config, new_num_devices: int):
+  """Recalculates config.num_target_devices and all dependent batch sizes for new_num_devices."""
+  if new_num_devices <= 0:
+    return
+  object.__setattr__(config, "num_target_devices", new_num_devices)
+
+  def calc_gbs(
+      per_device_batch_size, expansion_factor, num_devices, grad_accum_steps
+  ):
+    if per_device_batch_size < 1.0:
+      mbs_load = int(num_devices * (expansion_factor if expansion_factor > 0 else 1))
+    else:
+      mbs_load = int(
+          num_devices
+          * per_device_batch_size
+          * (expansion_factor if expansion_factor > 0 else 1)
+      )
+    mbs_train = int(num_devices * per_device_batch_size)
+    gbs_load = int(mbs_load * grad_accum_steps)
+    gbs_train = int(mbs_train * grad_accum_steps)
+    return gbs_load, gbs_train, mbs_train
+
+  # Update train batch sizes
+  gbs_load, gbs_train, mbs_train = calc_gbs(
+      config.per_device_batch_size,
+      config.expansion_factor_real_data,
+      new_num_devices,
+      config.gradient_accumulation_steps,
+  )
+  object.__setattr__(config, "global_batch_size_to_load", gbs_load)
+  object.__setattr__(config, "global_batch_size_to_train_on", gbs_train)
+  object.__setattr__(config, "micro_batch_size_to_train_on", mbs_train)
+
+  # Update eval batch sizes
+  gbs_load_eval, gbs_eval, mbs_eval = calc_gbs(
+      config.eval_per_device_batch_size,
+      config.expansion_factor_real_data,
+      new_num_devices,
+      1,
+  )
+  object.__setattr__(
+      config, "global_batch_size_to_load_eval", gbs_load_eval
+  )
+  object.__setattr__(config, "global_batch_size_to_eval_on", gbs_eval)
+  object.__setattr__(config, "micro_batch_size_to_eval_on", mbs_eval)
+
+  if config.enable_rampup_batch_size:
+    gbs_load_start = calc_gbs(
+        config.per_device_batch_size_start,
+        config.expansion_factor_real_data,
+        new_num_devices,
+        config.gradient_accumulation_steps,
+    )[0]
+    gbs_load_inc, _, _ = calc_gbs(
+        config.per_device_batch_size_increment,
+        config.expansion_factor_real_data,
+        new_num_devices,
+        config.gradient_accumulation_steps,
+    )
+    object.__setattr__(
+        config, "global_batch_size_to_load_start", gbs_load_start
+    )
+    object.__setattr__(
+        config, "global_batch_size_to_load_increment", gbs_load_inc
+    )
+
+    diff_batch_size = gbs_load - gbs_load_start
+    if gbs_load_inc > 0:
+      num_increments = diff_batch_size // gbs_load_inc
+      if num_increments > 0:
+        rampup_samples_per_increment = (
+            config.global_rampup_samples / num_increments
+        )
+        object.__setattr__(
+            config,
+            "rampup_samples_per_increment_to_load",
+            rampup_samples_per_increment,
+        )
+
+        total_rampup_steps = 0
+        current_batch_size = gbs_load_start
+        for _ in range(int(num_increments)):
+          steps_for_this_stage = (
+              math.ceil(rampup_samples_per_increment / current_batch_size)
+              if current_batch_size > 0
+              else 0
+          )
+          total_rampup_steps += steps_for_this_stage
+          current_batch_size += gbs_load_inc
+        object.__setattr__(config, "rampup_end_step", total_rampup_steps)
+      else:
+        object.__setattr__(config, "rampup_end_step", 0)
+    else:
+      object.__setattr__(config, "rampup_end_step", 0)
+
+

@@ -204,7 +204,7 @@ def jit_train_and_eval_step(
   return p_train_step, p_eval_step
 
 
-def setup_train_loop(config, recorder, devices=None):
+def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, checkpoint_manager=None):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -229,17 +229,18 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     is_training = True
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    with jax.set_mesh(mesh):
+      init_rng = jax.random.PRNGKey(config.init_weights_seed)
+      init_rng = jax.device_put(
+          init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      )
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     if config.pure_nnx:
       # Create abstract NNX model.
       _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
-    else:
-      model = model_creation_utils.from_config(config, devices)
-    learning_rate_schedule, tx = create_training_optimizer(config, model)
+      learning_rate_schedule, tx = create_training_optimizer(config, model)
 
-    if config.pure_nnx:
       # For NNX, the train state is wrapped in the TrainStateNNX module.
       def create_train_state_fn():
         model = _create_model_partial()
@@ -248,9 +249,12 @@ def setup_train_loop(config, recorder, devices=None):
 
       init_state_fn = create_train_state_fn
     else:
+      model = model_creation_utils.from_config(config, devices)
+      learning_rate_schedule, tx = create_training_optimizer(config, model)
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
-    checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
-    if checkpoint_manager is not None:
+    if checkpoint_manager is None:
+      checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
+    if checkpoint_manager is not None and restore_checkpoint:
       checkpoint_step = checkpointing.latest_step(checkpoint_manager)
       if checkpoint_step is not None:
         validate_completed_steps(checkpoint_step + 1, config.steps)
@@ -306,7 +310,7 @@ def setup_train_loop(config, recorder, devices=None):
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
     state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
-        data_iterator, config, mesh, checkpoint_manager, init_state_fn
+        data_iterator, config, mesh, checkpoint_manager if restore_checkpoint else None, init_state_fn
     )
     if config.pure_nnx:
       with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -389,6 +393,12 @@ def setup_train_loop(config, recorder, devices=None):
 
 def validate_train_config(config):
   """Validates the configuration is set correctly for 'train.py'."""
+
+  if config.elastic_enabled and (config.enable_emergency_checkpoint or config.enable_multi_tier_checkpointing):
+    raise ValueError(
+        "Emergency checkpointing and multi-tier checkpointing are not supported when elasticity is enabled "
+        "(elastic_enabled=True). Please disable enable_emergency_checkpoint and enable_multi_tier_checkpointing."
+    )
 
   if getattr(config, "use_dpo", False):
     raise ValueError("Legacy DPO implementation in train.py is removed. Please use post-training train_dpo.py instead.")
@@ -473,3 +483,45 @@ def maybe_cleanup_dcn_throttling(config):
     max_logging.log("DCN Bandwidth throttling cleaned up successfully.")
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.error(f"Failed to clean up DCN bandwidth throttling: {e}")
+
+
+def replicate_single_device_sharded_arrays(pytree):
+  """Replicates any single-device sharded arrays across the whole mesh."""
+  mesh = None
+  for leaf in jax.tree.leaves(pytree):
+    if isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
+        leaf.sharding, jax.sharding.NamedSharding
+    ):
+      mesh = leaf.sharding.mesh
+      break
+  if mesh is None:
+    return pytree
+  replicated_sharding = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec()
+  )
+
+  def _replicate(x):
+    if isinstance(x, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
+        x.sharding, jax.sharding.SingleDeviceSharding
+    ):
+      if isinstance(x, jax.ShapeDtypeStruct):
+        return jax.ShapeDtypeStruct(
+            x.shape, x.dtype, sharding=replicated_sharding
+        )
+      return jax.device_put(x, replicated_sharding)
+    return x
+
+  return jax.tree.map(_replicate, pytree)
+
+
+def restore_original_shardings(restored_pytree, original_abstract_pytree):
+  """Puts restored state back onto the original abstract state shardings."""
+  def _put(restored_leaf, abstract_leaf):
+    if isinstance(restored_leaf, jax.Array) and isinstance(
+        abstract_leaf, (jax.Array, jax.ShapeDtypeStruct)
+    ):
+      if restored_leaf.sharding != abstract_leaf.sharding:
+        return jax.device_put(restored_leaf, abstract_leaf.sharding)
+    return restored_leaf
+
+  return jax.tree.map(_put, restored_pytree, original_abstract_pytree)
