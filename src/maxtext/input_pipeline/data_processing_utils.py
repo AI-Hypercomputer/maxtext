@@ -143,6 +143,8 @@ def apply_multiprocessing_and_prefetch(dataset, config, grain_worker_count, grai
   if config.grain_use_elastic_iterator:
     # ElasticIterator applies multiprocessing itself.
     return dataset
+  if hasattr(dataset, "to_iter_dataset"):
+    dataset = dataset.to_iter_dataset()
   multiprocessing_options = (
       pick_performance_config(
           ds=dataset,
