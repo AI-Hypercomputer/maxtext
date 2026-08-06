@@ -48,6 +48,36 @@ class TrainRLTest(unittest.TestCase):
 
     self.assertEqual(config.engram_layers, [])
     self.assertEqual(config.engram_max_ngram_size, 3)
+    self.assertFalse(config.enable_prefix_caching)
+
+  @pytest.mark.cpu_only
+  def test_rollout_prefix_caching_respects_config_for_attention_model(self):
+    config = SimpleNamespace(
+        enable_prefix_caching=True,
+        decoder_block=train_rl.DecoderBlockType.QWEN3,
+    )
+
+    self.assertTrue(train_rl.rollout_prefix_caching_enabled(config))
+
+  @pytest.mark.cpu_only
+  def test_rollout_prefix_caching_disabled_for_recurrent_model(self):
+    for decoder_block in (train_rl.DecoderBlockType.QWEN3_NEXT, train_rl.DecoderBlockType.QWEN3_5):
+      with self.subTest(decoder_block=decoder_block):
+        config = SimpleNamespace(
+            enable_prefix_caching=True,
+            decoder_block=decoder_block,
+        )
+
+        with mock.patch.object(train_rl.max_logging, "log") as mock_log:
+          self.assertFalse(train_rl.rollout_prefix_caching_enabled(config))
+
+        mock_log.assert_called_once()
+
+  @pytest.mark.cpu_only
+  def test_rollout_prefix_caching_defaults_to_disabled(self):
+    config = SimpleNamespace(decoder_block=train_rl.DecoderBlockType.QWEN3)
+
+    self.assertFalse(train_rl.rollout_prefix_caching_enabled(config))
 
   def test_setup_configs_and_devices_pathways_split(self):
     """Test setup_configs_and_devices with multiple VMs and Pathways."""

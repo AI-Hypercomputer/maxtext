@@ -3948,6 +3948,7 @@ class RLConfig(
     LayoutAndSharding,
     InferenceLayout,
     InferenceGeneral,
+    PrefixCaching,
     Decoding,
     IciParallelism,
     DcnParallelism,
