@@ -3942,6 +3942,7 @@ class MaxTextConfig(
 class RLConfig(
     LogitsAndLoss,
     Engram,
+    ManifoldConstrainedHyperConnections,
     RematAndOffload,
     Attention,
     Llama4Attention,
