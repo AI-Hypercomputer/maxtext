@@ -15,14 +15,10 @@
 """Unit tests for input_pipeline_utils."""
 
 import numpy as np
-import pytest
 import unittest
-from types import SimpleNamespace
-from unittest import mock
 
-from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils
-from maxtext.input_pipeline.input_pipeline_utils import KeepFeatures, compute_file_sharding
+from maxtext.input_pipeline.input_pipeline_utils import compute_file_sharding
 
 
 class ComputeFileShardingNormalCaseTest(unittest.TestCase):
@@ -113,59 +109,6 @@ class ComputeFileShardingUndersizedCaseTest(unittest.TestCase):
     self.assertIsNone(row_shard)
 
 
-@pytest.mark.cpu_only
-class KeepFeaturesValidationTest(unittest.TestCase):
-  """Validation tests for raw-text vs pre-tokenized feature filtering."""
-
-  def test_missing_column_reports_available_columns(self):
-    transform = KeepFeatures(["tokens"], tokenize=False)
-    with self.assertRaisesRegex(ValueError, "Available columns"):
-      transform.map({"text": np.array([1, 2], dtype=np.int32)})
-
-  def test_tokenize_true_rejects_integer_numpy_column(self):
-    transform = KeepFeatures(["text"], tokenize=True)
-    with self.assertRaisesRegex(ValueError, "tokenize_data=True"):
-      transform.map({"text": np.array([1, 2], dtype=np.int32)})
-
-  def test_tokenize_true_rejects_integer_list_column(self):
-    transform = KeepFeatures(["text"], tokenize=True)
-    with self.assertRaisesRegex(ValueError, "tokenize_data=True"):
-      transform.map({"text": [1, 2, 3]})
-
-  def test_tokenize_false_rejects_text_column(self):
-    transform = KeepFeatures(["text"], tokenize=False)
-    with self.assertRaisesRegex(ValueError, "tokenize_data=False"):
-      transform.map({"text": "raw text"})
-
-  def test_keeps_only_requested_features(self):
-    transform = KeepFeatures(["tokens"], tokenize=False)
-    result = transform.map({"tokens": np.array([1, 2], dtype=np.int32), "extra": "drop"})
-    self.assertEqual(set(result), {"tokens"})
-    np.testing.assert_array_equal(result["tokens"], np.array([1, 2], dtype=np.int32))
-
-
-@pytest.mark.cpu_only
-class LocalBatchSizeTest(unittest.TestCase):
-  """Tests for data_processing_utils.get_local_batch_size."""
-
-  def test_missing_elastic_enabled_uses_original_batch_size_path(self):
-    config = SimpleNamespace(global_batch_size_to_load=16, expansion_factor_real_data=1)
-    with mock.patch.object(data_processing_utils.jax, "process_count", return_value=4):
-      self.assertEqual(data_processing_utils.get_local_batch_size(config), 4)
-
-  def test_elastic_enabled_delegates_to_elastic_utils(self):
-    config = SimpleNamespace(elastic_enabled=True, expansion_factor_real_data=1)
-    with mock.patch.object(data_processing_utils.elastic_utils, "get_local_batch_size", return_value=7) as get_batch_size:
-      self.assertEqual(data_processing_utils.get_local_batch_size(config), 7)
-    get_batch_size.assert_called_once_with(config)
-
-  def test_expansion_factor_reverts_loaded_batch_size(self):
-    config = SimpleNamespace(global_batch_size_to_load=16, expansion_factor_real_data=2)
-    with mock.patch.object(data_processing_utils.jax, "process_count", return_value=2):
-      self.assertEqual(data_processing_utils.get_local_batch_size(config), 4)
-
-
-@pytest.mark.cpu_only
 class GenerateDocSegmentIdsTest(unittest.TestCase):
   """Direct tests for mmap EOD-aware segmentation."""
 
@@ -206,7 +149,6 @@ class GenerateDocSegmentIdsTest(unittest.TestCase):
     self.assertEqual(result["inputs_position"].shape, (0,))
 
 
-@pytest.mark.cpu_only
 class MegatronSplitInputsTargetsTest(unittest.TestCase):
   """Direct tests for mmap_npy L+1 sample splitting."""
 

@@ -775,7 +775,7 @@ class TestMegatronBlendingHelpers:
     assert [cached[i] for i in range(len(cached))] == [0, 1, 2]
 
   def test_datasource_skips_cache_write_on_non_primary_process(self, tmp_dir):
-    with mock.patch.object(_megatron_blending._mmap_index_utils, "is_primary_process", return_value=False):
+    with mock.patch.object(_mmap_index_utils, "is_primary_process", return_value=False):
       source = MegatronBlendedDataSource([list(range(10))], weights=[1.0], size=3, cache_dir=tmp_dir)
 
     assert [source[i] for i in range(len(source))] == [0, 1, 2]

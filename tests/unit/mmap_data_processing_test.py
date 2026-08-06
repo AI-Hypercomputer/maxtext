@@ -1359,6 +1359,7 @@ class TestMMapPretrainPipeline:
     config.max_target_length = max_target_length
     config.global_batch_size_to_load = batch_size
     config.expansion_factor_real_data = 1
+    config.elastic_enabled = False
     config.packing = packing
     config.grain_packing_type = "concat_then_split"
     config.max_segments_per_seq = None
