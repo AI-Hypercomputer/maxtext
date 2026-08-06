@@ -30,6 +30,9 @@ import optax
 
 import pathwaysutils  # pylint: disable=unused-import
 
+import logging
+_logger = logging.getLogger(__name__)
+
 import tensorflow as tf
 
 import jax
@@ -47,7 +50,7 @@ from maxtext.utils import elastic_utils
 
 # pylint: disable=too-many-positional-arguments
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
-from maxtext.common import checkpointing, profiler
+from maxtext.common import checkpointing, profiler, train_state_nnx
 from maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,

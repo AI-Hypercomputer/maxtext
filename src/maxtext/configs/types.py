@@ -3031,7 +3031,7 @@ class MaxTextConfig(
     def calculate_global_batch_sizes(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps):
       """Helper to calculate global and micro batch sizes for training and loading."""
       if per_device_batch_size < 1.0:
-        micro_batch_to_load = num_devices * (expansion_factor if expansion_factor > 0 else 1)
+        micro_batch_to_load = int(num_devices * (expansion_factor if expansion_factor > 0 else 1))
       else:
         micro_batch_to_load = int(num_devices * per_device_batch_size * (expansion_factor if expansion_factor > 0 else 1))
       micro_batch_to_train = int(num_devices * per_device_batch_size)
