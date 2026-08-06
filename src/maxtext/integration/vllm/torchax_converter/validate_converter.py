@@ -286,10 +286,31 @@ def validate_converter(argv) -> None:
   debug_converter = getattr(trainer_config, "debug_converter", False)
   gcs_debug_path = getattr(trainer_config, "gcs_debug_path", "")
 
-  # In single-slice mode setup_configs_and_devices returns the same object for both.
+  if len(trainer_devices) > sampler_config.rollout_tensor_parallelism:
+    target_dev_count = sampler_config.rollout_tensor_parallelism
+    # Group devices by host / task so subslice bounds align with host bounds (e.g. 2,2,1)
+    by_host = collections.defaultdict(list)
+    for d in trainer_devices:
+      task = getattr(d, "logical_task", getattr(d, "task_id", getattr(d, "host_id", 0)))
+      by_host[task].append(d)
+
+    selected_devices = []
+    for host_devs in by_host.values():
+      selected_devices.extend(host_devs)
+      if len(selected_devices) >= target_dev_count:
+        break
+    trainer_devices = selected_devices[:target_dev_count]
+    sampler_devices = selected_devices[:target_dev_count]
+    logging.info(
+        "Clipping devices to rollout_tensor_parallelism=%d on host %s: %s",
+        target_dev_count,
+        getattr(trainer_devices[0], "logical_task", "unknown"),
+        trainer_devices,
+    )
+
   multislice = trainer_devices is not sampler_devices
 
-  logging.info("Creating MaxText model...")
+  logging.info("Creating MaxText model with %d devices...", len(trainer_devices))
   model, mesh = model_creation_utils.from_pretrained(
       trainer_config,
       devices=trainer_devices,
@@ -303,6 +324,7 @@ def validate_converter(argv) -> None:
   print("Converting weights to vLLM format")
   print("=" * 80)
   model_state = {"base": nnx.state(model)}
+
   for path, leaf in jax.tree_util.tree_flatten_with_path(model_state)[0]:
     if hasattr(leaf, "shape") and hasattr(leaf, "sharding"):
       path_str = jax.tree_util.keystr(path)
@@ -326,7 +348,8 @@ def validate_converter(argv) -> None:
       "load_format": vllm_load_format,
       "data_parallel_size": dp_size,
       "tensor_parallel_size": sampler_config.rollout_tensor_parallelism,
-      "gpu_memory_utilization": getattr(sampler_config, "hbm_utilization_vllm", 0.5),
+      "gpu_memory_utilization": 0.55,
+      "num_gpu_blocks_override": 512,
       "async_scheduling": getattr(sampler_config, "async_scheduling", False),
   }
   import ast
@@ -367,6 +390,10 @@ def validate_converter(argv) -> None:
   print("\n" + "=" * 80)
   golden_llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
 
+  vllm_hf_overrides = getattr(trainer_config, "vllm_hf_overrides", None) or getattr(getattr(trainer_config, "vllm", None), "vllm_hf_overrides", None) or ""
+  force_maxtext = "MaxTextForCausalLM" in str(vllm_hf_overrides)
+  use_weight_converter = additional_config.get("use_weight_converter", False) or getattr(trainer_config, "use_weight_converter", False)
+
   if getattr(trainer_config, "use_standalone_converter", False) or getattr(getattr(trainer_config, "vllm", None), "use_standalone_converter", False):
     if trainer_config.model_name.startswith("gemma4"):
       converter = Gemma4MaxTextToVLLMConverter(trainer_config, mesh)
@@ -376,26 +403,38 @@ def validate_converter(argv) -> None:
       converter = Qwen3MaxTextToVLLMConverter(trainer_config, mesh)
     with timer("Overall Conversion"):
       maxtext_vllm_state = converter.convert(model_state)
+    del model_state, model, mesh, converter
+  elif force_maxtext and not use_weight_converter:
+    # Legacy Direct Sync path: transfer_state_directly from tunix
+    logging.info("Branch 2 (Direct Sync): Testing fallback tunix transfer_state_directly() (use_weight_converter is False).")
+    print("Branch 2 (Direct Sync): Testing fallback tunix transfer_state_directly() (use_weight_converter is False).", flush=True)
+    from tunix.generate import utils as gen_utils
+    with timer("Overall Transfer (tunix transfer_state_directly)"):
+      gen_utils.transfer_state_directly(
+          src_state=model_state,
+          dst_state=golden_llm_state,
+          reshard_fn=reshard_pytree,
+          delete_dst_buffers=True,
+          reshard_chunk_size=128,
+      )
+    del model_state, model, mesh
+    maxtext_vllm_state = None
   else:
+    # New WeightConverter path
     from maxtext.integration.vllm.weight_converter import WeightConverter, _MODEL_TO_CONVERSION_RULES
-    vllm_hf_overrides = getattr(trainer_config, "vllm_hf_overrides", None) or getattr(getattr(trainer_config, "vllm", None), "vllm_hf_overrides", None) or ""
-    force_maxtext = "MaxTextForCausalLM" in str(vllm_hf_overrides)
-    
-    # We want to properly select rules.
     if force_maxtext:
+      logging.info("Branch 2 (Direct Sync): Testing NEW WeightConverter(rules=[]) (use_weight_converter is True).")
+      print("Branch 2 (Direct Sync): Testing NEW WeightConverter(rules=[]) (use_weight_converter is True).", flush=True)
       rules = []
     else:
-      # use qwen3_moe fall back
       rules = _MODEL_TO_CONVERSION_RULES.get(trainer_config.model_name,
                _MODEL_TO_CONVERSION_RULES.get('qwen3_moe', []))
                
     converter = WeightConverter(rules, tp=sampler_config.rollout_tensor_parallelism)
-    with timer("Overall Conversion"):
+    with timer("Overall Conversion (WeightConverter)"):
       maxtext_vllm_state = converter.convert(model_state, target_state=golden_llm_state)
-  if isinstance(maxtext_vllm_state, dict) and any(isinstance(v, dict) for v in maxtext_vllm_state.values()):
-    from flax import traverse_util
-    maxtext_vllm_state = {'.'.join(str(k) for k in key): v for key, v in traverse_util.flatten_dict(maxtext_vllm_state).items()}
-  del model_state, model, mesh, converter
+    del model_state, model, mesh, converter
+
   gc.collect()
   try:
     jax.clear_caches()
@@ -403,9 +442,7 @@ def validate_converter(argv) -> None:
     pass
 
   # --- Debug checks (key coverage, weight stats, GCS upload) ---------------
-  # These run only when debug_converter=true, since they are purely for
-  # debugging and add significant overhead + log volume in production runs.
-  if debug_converter:
+  if debug_converter and maxtext_vllm_state is not None:
     print("=" * 80)
     print("Checking key coverage and shapes...")
     print("=" * 80)
@@ -419,159 +456,41 @@ def validate_converter(argv) -> None:
         _upload_tensors_to_gcs(maxtext_vllm_state, gcs_debug_path)
 
   # --- Weight assignment ----------------------------------------------------
-  with timer(f"Assigning {len(maxtext_vllm_state)} weights to vLLM model"):
-    is_nnx_state = hasattr(golden_llm_state, '__iter__') and not isinstance(golden_llm_state, dict) # flax.nnx.State
-    
-    # MaxText native (and some legacy) models unroll the scan_layers when vLLM explicitly asks for scan_layers=False.
-    # Our WeightConverter might output a single tensor with axis [48, ...] under '.layers.'.
-    # We must unroll it so it maps linearly to golden_llm_state's 'layers_0', 'layers_1'.
-    need_unroll = getattr(trainer_config, "scan_layers", True) and not getattr(sampler_config, "scan_layers", False)
-    # Only unroll for MaxText targets (they have '.layers.', while HF has '.layers.0.')
-    if any(".layers." in k and not k.split(".layers.")[1][0].isdigit() for k in maxtext_vllm_state):
-        expanded = {}
-        is_inhomogeneous = any(".layer_0." in k for k in maxtext_vllm_state)
-        default_num_blocks = 10 if is_inhomogeneous else getattr(trainer_config, "base_num_decoder_layers", 48)
+  if force_maxtext:
+    if use_weight_converter and maxtext_vllm_state is not None:
+      with timer("Resharding and assigning converted weights to vLLM model"):
+        from flax import traverse_util
+        from tunix.generate import utils as gen_utils
 
-        for k, v in maxtext_vllm_state.items():
-            if ".layers." in k and not k.split(".layers.")[1][0].isdigit():
-                val = v if hasattr(v, "shape") else v.value
-                num_blocks = default_num_blocks
-                scan_axis = 0
-                if hasattr(val, "shape") and len(val.shape) > 1:
-                    if default_num_blocks in val.shape:
-                        scan_axis = val.shape.index(default_num_blocks)
-                
-                slot = None
-                for s in range(10):
-                    if f".layer_{s}." in k:
-                        slot = s
-                        break
+        if isinstance(golden_llm_state, nnx.State):
+          state_dict = (
+              golden_llm_state.to_pure_dict()
+              if hasattr(golden_llm_state, "to_pure_dict")
+              else dict(golden_llm_state)
+          )
+        else:
+          state_dict = golden_llm_state
 
-                if slot is not None:
-                    cycle_interval = getattr(trainer_config, "inhomogeneous_layer_cycle_interval", 4)
-                    for i in range(num_blocks):
-                        global_idx = i * cycle_interval + slot
-                        new_k = k.replace(f".layers.layer_{slot}.", f".layers_{global_idx}.")
-                        expanded[new_k] = val.take(i, axis=scan_axis)
-                else:
-                    for i in range(num_blocks):
-                        new_k = k.replace(".layers.", f".layers_{i}.")
-                        expanded[new_k] = val.take(i, axis=scan_axis)
-            else:
-                expanded[k] = v
-        maxtext_vllm_state = expanded
+        src_flat = traverse_util.flatten_dict(maxtext_vllm_state)
+        spec_flat = traverse_util.flatten_dict(state_dict)
 
-    assigned_count = 0
-    skipped_keys = []
-    for key in list(maxtext_vllm_state.keys()):
-      weight = maxtext_vllm_state.pop(key)
-      weight_array = weight.value if hasattr(weight, "value") else weight
-      
-      # Strip 'vllm_model.' prefix if the golden state doesn't use it (e.g., HF Qwen)
-      search_key = key
-      if search_key not in golden_llm_state and ".experts." in search_key and ".experts.routed_experts." not in search_key:
-          alt_key = search_key.replace(".experts.", ".experts.routed_experts.", 1)
-          if alt_key in golden_llm_state:
-              search_key = alt_key
+        resharded_flat = gen_utils._reshard_in_chunks(
+            src_flat,
+            spec_flat,
+            reshard_pytree,
+            chunk_size=128,
+            delete_spec_buffers=True,
+        )
+        resharded_weights = traverse_util.unflatten_dict(resharded_flat)
 
-      if search_key.startswith("vllm_model.") and search_key not in golden_llm_state and getattr(golden_llm_state, '__class__', type).__name__ != 'State':
-          search_key = search_key[len("vllm_model."):]
-      if "model" in golden_llm_state and not search_key.startswith("model."):
-          search_key = f"model.{search_key}"
-      elif "model" not in golden_llm_state and search_key.startswith("model."):
-          search_key = search_key[len("model."):]
-          
-      if search_key not in golden_llm_state and ".experts." in search_key and ".experts.routed_experts." not in search_key:
-          alt_key = search_key.replace(".experts.", ".experts.routed_experts.", 1)
-          if alt_key in golden_llm_state:
-              search_key = alt_key
-
-      if search_key in golden_llm_state:
-          target_obj = golden_llm_state[search_key]
-          
-          # Match shape dynamically (vLLM TPU uses [in, out] but HF converter outputs [out, in])
-          target_shape = target_obj.shape if hasattr(target_obj, 'shape') else getattr(getattr(target_obj, 'value', target_obj), 'shape', None)
-          if target_shape and weight_array.shape != target_shape:
-              if weight_array.shape[::-1] == target_shape:
-                  weight_array = weight_array.T
-              elif len(weight_array.shape) == 3 and weight_array.shape[0] == target_shape[0] and weight_array.shape[1] == target_shape[2] and weight_array.shape[2] == target_shape[1]:
-                  weight_array = jnp.transpose(weight_array, (0, 2, 1))
-              else:
-                  logging.warning(f"Shape mismatch for {search_key}: expected {target_shape}, got {weight_array.shape}")
-          
-          # Extract sharding safely
-          dst_sharding = target_obj.sharding if hasattr(target_obj, 'sharding') else getattr(getattr(target_obj, 'value', target_obj), 'sharding', None)
-          resharded_val = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True) if dst_sharding else weight_array
-          if hasattr(golden_llm_state, '__setitem__'):
-              golden_llm_state[search_key] = resharded_val
-          else:
-              setattr(golden_llm_state, search_key, resharded_val)
-          assigned_count += 1
-      elif '.' in search_key:
-          parts = search_key.split('.')
-          if parts[0] not in golden_llm_state:
-              skipped_keys.append(f"{search_key} (root '{parts[0]}' not in golden_llm_state)")
-              continue
-          obj = golden_llm_state
-          for p in parts[:-1]:
-              p_key = int(p) if p.isdigit() else p
-              try:
-                  if hasattr(obj, '__getitem__'):
-                      obj = obj[p_key]
-                  else:
-                      obj = getattr(obj, p)
-              except (KeyError, AttributeError):
-                  obj = None
-                  break
-          if obj is None:
-              skipped_keys.append(f"{search_key} (subpath not found in golden_llm_state)")
-              continue
-          last_p = int(parts[-1]) if parts[-1].isdigit() else parts[-1]
-          target_obj = obj[last_p]
-          
-          # Match shape dynamically (vLLM TPU uses [in, out] but HF converter outputs [out, in])
-          target_shape = target_obj.shape if hasattr(target_obj, 'shape') else getattr(getattr(target_obj, 'value', target_obj), 'shape', None)
-          if target_shape and weight_array.shape != target_shape:
-              if weight_array.shape[::-1] == target_shape:
-                  weight_array = weight_array.T
-              elif len(weight_array.shape) == 3 and weight_array.shape[0] == target_shape[0] and weight_array.shape[1] == target_shape[2] and weight_array.shape[2] == target_shape[1]:
-                  weight_array = jnp.transpose(weight_array, (0, 2, 1))
-              elif len(weight_array.shape) == 3 and len(target_shape) == 3:
-                  if weight_array.shape[0] == target_shape[0] and weight_array.shape[2] == target_shape[2] and target_shape[1] % weight_array.shape[1] == 0:
-                      weight_array = jnp.repeat(weight_array, target_shape[1] // weight_array.shape[1], axis=1)
-                  elif weight_array.shape[0] == target_shape[0] and weight_array.shape[1] == target_shape[1] and target_shape[2] > weight_array.shape[2]:
-                      tp = 4
-                      chunk_size = weight_array.shape[2] // (tp * 2)
-                      arr = weight_array.reshape(weight_array.shape[0], weight_array.shape[1], tp, 2, chunk_size)
-                      target_chunk_size = target_shape[2] // (tp * 2)
-                      pad_amount = target_chunk_size - chunk_size
-                      arr_pad = jnp.pad(arr, ((0, 0), (0, 0), (0, 0), (0, 0), (0, pad_amount)))
-                      weight_array = arr_pad.reshape(target_shape)
-                  elif weight_array.shape[0] == target_shape[0] and weight_array.shape[2] == target_shape[2] and target_shape[1] > weight_array.shape[1]:
-                      pad_amount = target_shape[1] - weight_array.shape[1]
-                      weight_array = jnp.pad(weight_array, ((0, 0), (0, pad_amount), (0, 0)))
-                  else:
-                      logging.warning(f"Shape mismatch for {search_key}: expected {target_shape}, got {weight_array.shape}")
-              else:
-                  logging.warning(f"Shape mismatch for {search_key}: expected {target_shape}, got {weight_array.shape}")
-                  
-          dst_sharding = target_obj.sharding if hasattr(target_obj, 'sharding') else getattr(getattr(target_obj, 'value', target_obj), 'sharding', None)
-          resharded_val = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True) if dst_sharding else weight_array
-          if hasattr(obj, '__setitem__'):
-              obj[last_p] = resharded_val
-          else:
-              setattr(obj, str(last_p), resharded_val)
-          assigned_count += 1
-      else:
-          skipped_keys.append(f"{search_key} (no match)")
-
-    logging.info(f"ASSIGNMENT COMPLETE: Assigned {assigned_count} weights, Skipped {len(skipped_keys)} weights")
-    print(f"ASSIGNMENT COMPLETE: Assigned {assigned_count} weights, Skipped {len(skipped_keys)} weights")
-    if skipped_keys:
-        for sk in skipped_keys[:15]:
-            logging.warning(f"SKIPPED WEIGHT: {sk}")
-            print(f"SKIPPED WEIGHT: {sk}")
-        print("ALL KEYS IN GOLDEN_LLM_STATE CONTAINING MLP:", [k for k in (golden_llm_state.keys() if hasattr(golden_llm_state, 'keys') else []) if 'mlp' in str(k)])
+        if isinstance(golden_llm_state, nnx.State):
+          nnx.update(golden_llm_state, resharded_weights)
+        elif hasattr(golden_llm_state, "update"):
+          golden_llm_state.update(resharded_weights)
+        elif isinstance(golden_llm_state, dict):
+          golden_llm_state.update(resharded_weights)
+        else:
+          llm.llm_engine.model_executor.driver_worker.model_runner.model.state = resharded_weights
 
     model_runner = llm.llm_engine.model_executor.driver_worker.model_runner
     if hasattr(model_runner, "model"):
@@ -585,6 +504,191 @@ def validate_converter(argv) -> None:
       else:
         model_runner.state_leaves = model_runner.state
       logging.info("Updated model_runner.state_leaves after weight assignment.")
+    
+    num_assigned = len(jax.tree_util.tree_leaves(golden_llm_state))
+    logging.info(f"ASSIGNMENT COMPLETE: Assigned {num_assigned} weights, Skipped 0 weights")
+    print(f"ASSIGNMENT COMPLETE: Assigned {num_assigned} weights, Skipped 0 weights", flush=True)
+    try:
+      llm.reset_prefix_cache()
+    except Exception:
+      pass
+  else:
+    if isinstance(maxtext_vllm_state, dict) and any(isinstance(v, dict) for v in maxtext_vllm_state.values()):
+      from flax import traverse_util
+      maxtext_vllm_state = {'.'.join(str(k) for k in key): v for key, v in traverse_util.flatten_dict(maxtext_vllm_state).items()}
+
+    with timer(f"Assigning {len(maxtext_vllm_state)} weights to vLLM model"):
+      is_nnx_state = hasattr(golden_llm_state, '__iter__') and not isinstance(golden_llm_state, dict) # flax.nnx.State
+      
+      # MaxText native (and some legacy) models unroll the scan_layers when vLLM explicitly asks for scan_layers=False.
+      # Our WeightConverter might output a single tensor with axis [48, ...] under '.layers.'.
+      # We must unroll it so it maps linearly to golden_llm_state's 'layers_0', 'layers_1'.
+      need_unroll = getattr(trainer_config, "scan_layers", True) and not getattr(sampler_config, "scan_layers", False)
+      # Only unroll for MaxText targets (they have '.layers.', while HF has '.layers.0.')
+      if any(".layers." in k and not k.split(".layers.")[1][0].isdigit() for k in maxtext_vllm_state):
+          expanded = {}
+          is_inhomogeneous = any(".layer_0." in k for k in maxtext_vllm_state)
+          default_num_blocks = 10 if is_inhomogeneous else getattr(trainer_config, "base_num_decoder_layers", 48)
+
+          for k, v in maxtext_vllm_state.items():
+              if ".layers." in k and not k.split(".layers.")[1][0].isdigit():
+                  val = v if hasattr(v, "shape") else v.value
+                  num_blocks = default_num_blocks
+                  scan_axis = 0
+                  if hasattr(val, "shape") and len(val.shape) > 1:
+                      if default_num_blocks in val.shape:
+                          scan_axis = val.shape.index(default_num_blocks)
+                  
+                  slot = None
+                  for s in range(10):
+                      if f".layer_{s}." in k:
+                          slot = s
+                          break
+
+                  if slot is not None:
+                      cycle_interval = getattr(trainer_config, "inhomogeneous_layer_cycle_interval", 4)
+                      for i in range(num_blocks):
+                          global_idx = i * cycle_interval + slot
+                          new_k = k.replace(f".layers.layer_{slot}.", f".layers_{global_idx}.")
+                          expanded[new_k] = val.take(i, axis=scan_axis)
+                  else:
+                      for i in range(num_blocks):
+                          new_k = k.replace(".layers.", f".layers_{i}.")
+                          expanded[new_k] = val.take(i, axis=scan_axis)
+              else:
+                  expanded[k] = v
+          maxtext_vllm_state = expanded
+
+      assigned_count = 0
+      skipped_keys = []
+      for key in list(maxtext_vllm_state.keys()):
+        weight = maxtext_vllm_state.pop(key)
+        weight_array = weight.value if hasattr(weight, "value") else weight
+        
+        # Strip 'vllm_model.' prefix if the golden state doesn't use it (e.g., HF Qwen)
+        search_key = key
+        if search_key not in golden_llm_state and ".experts." in search_key and ".experts.routed_experts." not in search_key:
+            alt_key = search_key.replace(".experts.", ".experts.routed_experts.", 1)
+            if alt_key in golden_llm_state:
+                search_key = alt_key
+
+        if search_key.startswith("vllm_model.") and search_key not in golden_llm_state and getattr(golden_llm_state, '__class__', type).__name__ != 'State':
+            search_key = search_key[len("vllm_model."):]
+        if "model" in golden_llm_state and not search_key.startswith("model."):
+            search_key = f"model.{search_key}"
+        elif "model" not in golden_llm_state and search_key.startswith("model."):
+            search_key = search_key[len("model."):]
+            
+        if search_key not in golden_llm_state and ".experts." in search_key and ".experts.routed_experts." not in search_key:
+            alt_key = search_key.replace(".experts.", ".experts.routed_experts.", 1)
+            if alt_key in golden_llm_state:
+                search_key = alt_key
+
+        if search_key in golden_llm_state:
+            target_obj = golden_llm_state[search_key]
+            
+            # Match shape dynamically (vLLM TPU uses [in, out] but HF converter outputs [out, in])
+            target_shape = target_obj.shape if hasattr(target_obj, 'shape') else getattr(getattr(target_obj, 'value', target_obj), 'shape', None)
+            if target_shape and weight_array.shape != target_shape:
+                if weight_array.shape[::-1] == target_shape:
+                    weight_array = weight_array.T
+                elif len(weight_array.shape) == 3 and weight_array.shape[0] == target_shape[0] and weight_array.shape[1] == target_shape[2] and weight_array.shape[2] == target_shape[1]:
+                    weight_array = jnp.transpose(weight_array, (0, 2, 1))
+                else:
+                    logging.warning(f"Shape mismatch for {search_key}: expected {target_shape}, got {weight_array.shape}")
+            
+            # Extract sharding safely
+            dst_sharding = target_obj.sharding if hasattr(target_obj, 'sharding') else getattr(getattr(target_obj, 'value', target_obj), 'sharding', None)
+            if dst_sharding and getattr(weight_array, 'sharding', None) != dst_sharding:
+                resharded_val = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
+            else:
+                resharded_val = weight_array
+            if hasattr(golden_llm_state, '__setitem__'):
+                golden_llm_state[search_key] = resharded_val
+            else:
+                setattr(golden_llm_state, search_key, resharded_val)
+            assigned_count += 1
+        elif '.' in search_key:
+            parts = search_key.split('.')
+            if parts[0] not in golden_llm_state:
+                skipped_keys.append(f"{search_key} (root '{parts[0]}' not in golden_llm_state)")
+                continue
+            obj = golden_llm_state
+            for p in parts[:-1]:
+                p_key = int(p) if p.isdigit() else p
+                try:
+                    if hasattr(obj, '__getitem__'):
+                        obj = obj[p_key]
+                    else:
+                        obj = getattr(obj, p)
+                except (KeyError, AttributeError):
+                    obj = None
+                    break
+            if obj is None:
+                skipped_keys.append(f"{search_key} (subpath not found in golden_llm_state)")
+                continue
+            last_p = int(parts[-1]) if parts[-1].isdigit() else parts[-1]
+            target_obj = obj[last_p]
+            
+            # Match shape dynamically (vLLM TPU uses [in, out] but HF converter outputs [out, in])
+            target_shape = target_obj.shape if hasattr(target_obj, 'shape') else getattr(getattr(target_obj, 'value', target_obj), 'shape', None)
+            if target_shape and weight_array.shape != target_shape:
+                if weight_array.shape[::-1] == target_shape:
+                    weight_array = weight_array.T
+                elif len(weight_array.shape) == 3 and weight_array.shape[0] == target_shape[0] and weight_array.shape[1] == target_shape[2] and weight_array.shape[2] == target_shape[1]:
+                    weight_array = jnp.transpose(weight_array, (0, 2, 1))
+                elif len(weight_array.shape) == 3 and len(target_shape) == 3:
+                    if weight_array.shape[0] == target_shape[0] and weight_array.shape[2] == target_shape[2] and target_shape[1] % weight_array.shape[1] == 0:
+                        weight_array = jnp.repeat(weight_array, target_shape[1] // weight_array.shape[1], axis=1)
+                    elif weight_array.shape[0] == target_shape[0] and weight_array.shape[1] == target_shape[1] and target_shape[2] > weight_array.shape[2]:
+                        tp = 4
+                        chunk_size = weight_array.shape[2] // (tp * 2)
+                        arr = weight_array.reshape(weight_array.shape[0], weight_array.shape[1], tp, 2, chunk_size)
+                        target_chunk_size = target_shape[2] // (tp * 2)
+                        pad_amount = target_chunk_size - chunk_size
+                        arr_pad = jnp.pad(arr, ((0, 0), (0, 0), (0, 0), (0, 0), (0, pad_amount)))
+                        weight_array = arr_pad.reshape(target_shape)
+                    elif weight_array.shape[0] == target_shape[0] and weight_array.shape[2] == target_shape[2] and target_shape[1] > weight_array.shape[1]:
+                        pad_amount = target_shape[1] - weight_array.shape[1]
+                        weight_array = jnp.pad(weight_array, ((0, 0), (0, pad_amount), (0, 0)))
+                    else:
+                        logging.warning(f"Shape mismatch for {search_key}: expected {target_shape}, got {weight_array.shape}")
+                else:
+                    logging.warning(f"Shape mismatch for {search_key}: expected {target_shape}, got {weight_array.shape}")
+                    
+            dst_sharding = target_obj.sharding if hasattr(target_obj, 'sharding') else getattr(getattr(target_obj, 'value', target_obj), 'sharding', None)
+            if dst_sharding and getattr(weight_array, 'sharding', None) != dst_sharding:
+                resharded_val = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
+            else:
+                resharded_val = weight_array
+            if hasattr(obj, '__setitem__'):
+                obj[last_p] = resharded_val
+            else:
+                setattr(obj, str(last_p), resharded_val)
+            assigned_count += 1
+        else:
+            skipped_keys.append(f"{search_key} (no match)")
+
+      logging.info(f"ASSIGNMENT COMPLETE: Assigned {assigned_count} weights, Skipped {len(skipped_keys)} weights")
+      print(f"ASSIGNMENT COMPLETE: Assigned {assigned_count} weights, Skipped {len(skipped_keys)} weights")
+      if skipped_keys:
+          for sk in skipped_keys[:15]:
+              logging.warning(f"SKIPPED WEIGHT: {sk}")
+              print(f"SKIPPED WEIGHT: {sk}")
+          print("ALL KEYS IN GOLDEN_LLM_STATE CONTAINING MLP:", [k for k in (golden_llm_state.keys() if hasattr(golden_llm_state, 'keys') else []) if 'mlp' in str(k)])
+
+      model_runner = llm.llm_engine.model_executor.driver_worker.model_runner
+      if hasattr(model_runner, "model"):
+        try:
+          nnx.update(model_runner.model, golden_llm_state)
+        except Exception as e:
+          logging.warning(f"Could not nnx.update model_runner.model: {e}")
+      if hasattr(model_runner, "state"):
+        if isinstance(model_runner.state, nnx.State):
+          model_runner.state_leaves = tuple(jax.tree_util.tree_leaves(model_runner.state))
+        else:
+          model_runner.state_leaves = model_runner.state
+        logging.info("Updated model_runner.state_leaves after weight assignment.")
 
   # --- Generation test ------------------------------------------------------
   sampling_params = SamplingParams(
@@ -612,6 +716,7 @@ def validate_converter(argv) -> None:
   print("Generation test after weight transfer:")
   with timer("Generation"):
     print(llm.generate(prompt, sampling_params=sampling_params, use_tqdm=False))
+  print("validate_converter completed successfully", flush=True)
 
 
 def main(argv: Sequence[str]) -> None:

@@ -77,50 +77,51 @@ def _fuse_moe_weights(
     src_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
     tgt_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
 ) -> Dict[Tuple[str, ...], jax.Array | np.ndarray]:
-  """Fuses unscanned wi_0/wi_1 into wi for unscanned-fused targets.
-
-  Only catches the case where source and target share the same prefix (e.g.
-  src `('layers', 'wi_0')` + `('layers', 'wi_1')` → tgt `('layers', 'wi')`,
-  or src `('layers_0', 'wi_0')` + `('layers_0', 'wi_1')` →
-  tgt `('layers_0', 'wi')`). The scanned-source / unrolled-target case is
-  handled in `intersect_trees` via `_jit_fuse_and_unstack_moe`.
-
-  Args:
-    src_flat: Flat dict of source key tuples to JAX arrays.
-    tgt_flat: Flat dict of target key tuples to target leaves.
-
-  Returns:
-    A new flat dict with wi_0/wi_1 fused into wi at matching prefixes. Any
-    remaining shape mismatch on non-fused axes is left for the per-target
-    `_align_to_model_shape` call to handle (it composes repeat + zero-pad).
-  """
+  """Stage 1: Bulk fuses MoE wi_0/wi_1 into wi in the source tree."""
   new_src_flat = dict(src_flat)
-  for tgt_key in tgt_flat.keys():
-    if not tgt_key or tgt_key[-1] != 'wi':
+
+  sample_tgt_wi = None
+  for tgt_k, tgt_v in tgt_flat.items():
+    if tgt_k and tgt_k[-1] == 'wi':
+      sample_tgt_wi = tgt_v
+      break
+
+  for src_key in list(new_src_flat.keys()):
+    if not src_key or src_key[-1] != 'wi_0':
       continue
-    wi_0_key = tgt_key[:-1] + ('wi_0',)
-    wi_1_key = tgt_key[:-1] + ('wi_1',)
-    if wi_0_key not in new_src_flat or wi_1_key not in new_src_flat:
+    wi_0_key = src_key
+    wi_1_key = src_key[:-1] + ('wi_1',)
+    wi_target_key = src_key[:-1] + ('wi',)
+    if wi_1_key not in new_src_flat:
       continue
+
     wi_0 = new_src_flat.pop(wi_0_key)
     wi_1 = new_src_flat.pop(wi_1_key)
-    tgt_val = tgt_flat[tgt_key]
-    # Pick the fused axis as the last axis where src and tgt differ. For the
-    # canonical wi_0/wi_1 -> wi case this is the last axis (the mlp dim).
-    mismatched_axes = [
-        i for i, (s, t) in enumerate(zip(wi_0.shape, tgt_val.shape)) if s != t
-    ]
-    axis = mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
-    n_shards = _get_n_shards(tgt_val, axis)
+
+    axis = len(wi_0.shape) - 1
+    matching_tgt = tgt_flat.get(wi_target_key, sample_tgt_wi)
+    if matching_tgt is not None:
+      tgt_axis = len(matching_tgt.shape) - 1
+      n_shards = _get_n_shards(matching_tgt, tgt_axis)
+      target_dim = matching_tgt.shape[tgt_axis]
+    else:
+      n_shards = 1
+      target_dim = wi_0.shape[axis] + wi_1.shape[axis]
+
+    fused_shape = list(wi_0.shape)
+    fused_shape[axis] = target_dim
+    fused_shape_tuple = tuple(fused_shape)
+
     logging.info(
         'Fusing MoE %s: wi_0=%s, wi_1=%s -> %s on axis %d',
-        '.'.join(str(k) for k in tgt_key),
-        wi_0.shape, wi_1.shape, tgt_val.shape, axis,
+        '.'.join(str(k) for k in wi_target_key),
+        wi_0.shape, wi_1.shape, fused_shape_tuple, axis,
     )
-    new_src_flat[tgt_key] = _interleave_moe_weights(
-        wi_0, wi_1, tgt_val.shape, n_shards, axis=axis
+    new_src_flat[wi_target_key] = _interleave_moe_weights(
+        wi_0, wi_1, fused_shape_tuple, n_shards, axis=axis
     )
-    del wi_0, wi_1  # Free memory immediately after fusion.
+    del wi_0, wi_1
+
   return new_src_flat
 
 
@@ -502,44 +503,34 @@ def _scanned_sharding_from_per_layer(
       memory_kind=per_layer_sharding.memory_kind,
   )
 
-@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))
-def _jit_fuse_and_unstack_moe(
+@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6))
+def _jit_fuse_single_slice_moe(
     wi_0: jax.Array | np.ndarray,
     wi_1: jax.Array | np.ndarray,
+    slice_idx: int,
     scan_axis: int,
-    num_layers: int,
     n_shards: int,
     tgt_shape: Tuple[int, ...],
-    scan_padded_axis: int,
     tgt_padded_axis: int,
-) -> Tuple[jax.Array | np.ndarray, ...]:
-  """Fuses wi_0/wi_1 along the padded axis, then unstacks along scan_axis.
-
-  By combining concat and unstack under jax.jit, XLA fuses both ops and
-  avoids materializing the full concatenated intermediate on device.
-
-  Args:
-    wi_0: First MoE gate weight; per-layer layout matches `tgt_shape`
-      (with the padded dim halved), with `num_layers` inserted at `scan_axis`.
-    wi_1: Second MoE gate weight, same layout as `wi_0`.
-    scan_axis: Axis at which `num_layers` is stacked in `wi_0` / `wi_1`.
-    num_layers: Number of layers (== `wi_0.shape[scan_axis]`).
-    n_shards: Mesh shards along the per-layer fused/padded axis.
-    tgt_shape: Per-layer fused target shape (fused mlp dim on `tgt_padded_axis`).
-    scan_padded_axis: Position of the padded axis in the scanned layout.
-    tgt_padded_axis: Position of the padded axis in the per-layer layout.
-
-  Returns:
-    Tuple of `num_layers` per-layer arrays, each with shape `tgt_shape`.
-  """
-  del num_layers  # Only used to make this a static arg for JIT cache keying.
-  fused_shape = list(wi_0.shape)
-  fused_shape[scan_padded_axis] = tgt_shape[tgt_padded_axis]
-
-  fused = _interleave_moe_weights(
-      wi_0, wi_1, tuple(fused_shape), n_shards, axis=scan_padded_axis
+) -> jax.Array | np.ndarray:
+  """Fuses a single slice of wi_0/wi_1 on-demand to minimize HBM footprint."""
+  w0_slice = jnp.take(wi_0, slice_idx, axis=scan_axis)
+  w1_slice = jnp.take(wi_1, slice_idx, axis=scan_axis)
+  return _interleave_moe_weights(
+      w0_slice, w1_slice, tgt_shape, n_shards, axis=tgt_padded_axis
   )
-  return jnp.unstack(fused, axis=scan_axis)
+
+@functools.partial(jax.jit, static_argnums=(2, 3, 4))
+def _jit_extract_single_layer_slice(
+    arr: jax.Array | np.ndarray,
+    slice_idx: int,
+    scan_axis: int,
+    tgt_shape: Tuple[int, ...],
+    key_path: str,
+) -> jax.Array | np.ndarray:
+  """Extracts and aligns a single layer slice on-demand to minimize HBM footprint."""
+  slice_val = jnp.take(arr, slice_idx, axis=scan_axis)
+  return _align_per_axis(slice_val, tgt_shape, None, key_path)
 
 # ==============================================================================
 # Modular 4-Stage MaxText-to-MaxText Structural Synchronization Pipeline
@@ -550,11 +541,11 @@ _LAYER_PATTERN = re.compile(r'^layers?_(\d+)$')
 
 def _resolve_scanned_path(
     key_tuple: Tuple[Any, ...], src_flat: Mapping[Tuple[Any, ...], Any]
-) -> Tuple[Optional[int], Optional[Tuple[Any, ...]], int]:
+) -> Tuple[Optional[int], Optional[Tuple[Any, ...]], int, Optional[int]]:
   """Stage 2: Resolves an unrolled layer path ('layers_X' or 'layer_X' or ('layers', 'X')) to a scanned candidate in src_flat.
 
   Returns:
-      (layer_idx, candidate_key, match_index) or (None, None, -1) if not
+      (layer_idx, candidate_key, match_index, slice_idx) or (None, None, -1, None) if not
       scanned.
   """
   for i, part in enumerate(key_tuple):
@@ -573,31 +564,39 @@ def _resolve_scanned_path(
       if i > 0 and key_tuple[i - 1] in ('layers', 'layer'):
         prefix = list(key_tuple[: i - 1])
       suffix = list(key_tuple[i + 1:])
+      match_idx = (i - 1 if (i > 0 and key_tuple[i - 1] in ('layers', 'layer')) else i)
 
-      candidates = [
-          tuple(prefix + ['layers'] + suffix),
-          tuple(prefix + ['layers', f'layer_{layer_idx}'] + suffix),
-          tuple(prefix + ['layers', str(layer_idx)] + suffix),
-          tuple(prefix + [f'layers_{layer_idx}'] + suffix),
-          tuple(prefix + [f'layer_{layer_idx}'] + suffix),
-          tuple(prefix + suffix),
-      ]
-      for cand in candidates:
-        if cand in src_flat:
-          return layer_idx, cand, (i - 1 if (i > 0 and key_tuple[i - 1] in ('layers', 'layer')) else i), layer_idx
-
+      # 1. Inhomogeneous cyclic check (e.g. cycle_len = 4 for Qwen3.5, where src_flat has layer_0, layer_1, etc.)
       for cycle_len in (4, 2, 8, 16):
         cyclic_idx = layer_idx % cycle_len
-        if cyclic_idx != layer_idx:
-          slice_idx = layer_idx // cycle_len
-          for cand in [
-              tuple(prefix + ['layers', f'layer_{cyclic_idx}'] + suffix),
-              tuple(prefix + ['layers', str(cyclic_idx)] + suffix),
-              tuple(prefix + [f'layer_{cyclic_idx}'] + suffix),
-          ]:
-            if cand in src_flat:
-              return layer_idx, cand, (i - 1 if (i > 0 and key_tuple[i - 1] in ('layers', 'layer')) else i), slice_idx
-      return layer_idx, None, i, None
+        slice_idx = layer_idx // cycle_len
+        for cand in [
+            tuple(prefix + ['layers', f'layer_{cyclic_idx}'] + suffix),
+            tuple(prefix + ['layers', str(cyclic_idx)] + suffix),
+            tuple(prefix + [f'layer_{cyclic_idx}'] + suffix),
+        ]:
+          if cand in src_flat:
+            return layer_idx, cand, match_idx, slice_idx
+          if suffix and suffix[-1] == 'wi':
+            wi_0_cand = cand[:-1] + ('wi_0',)
+            if wi_0_cand in src_flat:
+              return layer_idx, None, match_idx, slice_idx
+
+      # 2. Homogeneous scanned check (e.g. all layers scanned under 'layers')
+      for cand in [
+          tuple(prefix + ['layers'] + suffix),
+          tuple(prefix + suffix),
+          tuple(prefix + [f'layers_{layer_idx}'] + suffix),
+          tuple(prefix + [f'layer_{layer_idx}'] + suffix),
+      ]:
+        if cand in src_flat:
+          return layer_idx, cand, match_idx, layer_idx
+        if suffix and suffix[-1] == 'wi':
+          wi_0_cand = cand[:-1] + ('wi_0',)
+          if wi_0_cand in src_flat:
+            return layer_idx, None, match_idx, layer_idx
+
+      return layer_idx, None, match_idx, None
   return None, None, -1, None
 
 
@@ -615,6 +614,21 @@ class ScannedLayerUnroller:
     self.scan_axis = scan_axis
     self._cache = {}
 
+  def _infer_scan_axis(self, src_shape: Tuple[int, ...], tgt_shape: Tuple[int, ...]) -> int:
+    """Infers which axis in src_shape is the scan dimension by comparing with tgt_shape."""
+    if len(src_shape) == len(tgt_shape) + 1:
+      for ax in range(len(src_shape)):
+        if src_shape[:ax] + src_shape[ax + 1 :] == tgt_shape:
+          return ax
+      for ax in range(len(src_shape)):
+        candidate = src_shape[:ax] + src_shape[ax + 1 :]
+        if _shapes_are_repeatable(candidate, tgt_shape):
+          return ax
+      for ax in range(len(src_shape)):
+        if src_shape[ax] in (4, 10, 18, 40, 48, 64, 72, 80) and len(src_shape) - 1 == len(tgt_shape):
+          return ax
+    return self.scan_axis
+
   def get_layer_slice(
       self,
       candidate_key: Tuple[Any, ...],
@@ -627,26 +641,10 @@ class ScannedLayerUnroller:
     if getattr(src_val, 'ndim', -1) == getattr(tgt_val, 'ndim', -2):
       return _align_to_model_shape(src_val, tgt_val, candidate_path)
 
-    cache_key = (candidate_key, tgt_val.shape, 'aligned')
-    if cache_key not in self._cache:
-      scanned_per_layer_shape = (
-          src_val.shape[: self.scan_axis] + src_val.shape[self.scan_axis + 1 :]
-      )
-      if scanned_per_layer_shape == tgt_val.shape:
-        self._cache[cache_key] = _unstack_scanned_param(
-            src_val, tgt_val, candidate_path, scan_axis=self.scan_axis
-        )
-      else:
-        logging.info(
-            'Bulk-aligning scanned %s: %s -> per-layer %s',
-            candidate_path,
-            src_val.shape,
-            tgt_val.shape,
-        )
-        self._cache[cache_key] = _bulk_align_and_unstack(
-            src_val, self.scan_axis, tgt_val, candidate_path
-        )
-    return self._cache[cache_key][layer_idx]
+    scan_axis = self._infer_scan_axis(src_val.shape, tgt_val.shape)
+    return _jit_extract_single_layer_slice(
+        src_val, layer_idx, scan_axis, tgt_val.shape, candidate_path
+    )
 
   def get_moe_fused_slice(
       self,
@@ -659,64 +657,52 @@ class ScannedLayerUnroller:
     if wi_0_key not in self.src_flat or wi_1_key not in self.src_flat:
       return None
 
-    fused_scanned_key = scanned_prefix + ('wi_fused',)
-    if fused_scanned_key not in self._cache:
-      scanned_prefix_path = '.'.join(str(k) for k in scanned_prefix)
-      logging.info('Fusing scanned MoE weights for %s', scanned_prefix_path)
-      wi_0_full = _apply_dtype_cast(
-          self.src_flat[wi_0_key],
-          tgt_val.dtype,
-          '.'.join(str(k) for k in wi_0_key),
+    wi_0_full = _apply_dtype_cast(
+        self.src_flat[wi_0_key],
+        tgt_val.dtype,
+        '.'.join(str(k) for k in wi_0_key),
+    )
+    wi_1_full = _apply_dtype_cast(
+        self.src_flat[wi_1_key],
+        tgt_val.dtype,
+        '.'.join(str(k) for k in wi_1_key),
+    )
+
+    if getattr(wi_0_full, 'ndim', -1) == getattr(tgt_val, 'ndim', -2):
+      mismatched_axes = [
+          i for i, (s, t) in enumerate(zip(wi_0_full.shape, tgt_val.shape)) if s != t
+      ]
+      tgt_axis = (
+          mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
       )
-      wi_1_full = _apply_dtype_cast(
-          self.src_flat[wi_1_key],
-          tgt_val.dtype,
-          '.'.join(str(k) for k in wi_1_key),
+      n_shards = _get_n_shards(tgt_val, tgt_axis)
+      return _interleave_moe_weights(
+          wi_0_full, wi_1_full, tgt_val.shape, n_shards, axis=tgt_axis
       )
 
-      if getattr(wi_0_full, 'ndim', -1) == getattr(tgt_val, 'ndim', -2):
-        mismatched_axes = [
-            i for i, (s, t) in enumerate(zip(wi_0_full.shape, tgt_val.shape)) if s != t
-        ]
-        tgt_axis = (
-            mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
-        )
-        n_shards = _get_n_shards(tgt_val, tgt_axis)
-        fused = _interleave_moe_weights(
-            wi_0_full, wi_1_full, tgt_val.shape, n_shards, axis=tgt_axis
-        )
-        self._cache[fused_scanned_key] = [fused] * (layer_idx + 1)
-      else:
-        num_layers = self.src_flat[wi_0_key].shape[self.scan_axis]
-
-        wi_0_single_shape = (
-            wi_0_full.shape[: self.scan_axis]
-            + wi_0_full.shape[self.scan_axis + 1 :]
-        )
-        mismatched_axes = [
-            i
-            for i, (s, t) in enumerate(zip(wi_0_single_shape, tgt_val.shape))
-            if s != t
-        ]
-        tgt_axis = (
-            mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
-        )
-        n_shards = _get_n_shards(tgt_val, tgt_axis)
-
-        scan_padded_axis = (
-            tgt_axis if tgt_axis < self.scan_axis else tgt_axis + 1
-        )
-        self._cache[fused_scanned_key] = _jit_fuse_and_unstack_moe(
-            wi_0_full,
-            wi_1_full,
-            self.scan_axis,
-            num_layers,
-            n_shards,
-            tgt_val.shape,
-            scan_padded_axis,
-            tgt_axis,
-        )
-    return self._cache[fused_scanned_key][layer_idx]
+    scan_axis = self._infer_scan_axis(wi_0_full.shape, tgt_val.shape)
+    wi_0_single_shape = (
+        wi_0_full.shape[: scan_axis]
+        + wi_0_full.shape[scan_axis + 1 :]
+    )
+    mismatched_axes = [
+        i
+        for i, (s, t) in enumerate(zip(wi_0_single_shape, tgt_val.shape))
+        if s != t
+    ]
+    tgt_axis = (
+        mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
+    )
+    n_shards = _get_n_shards(tgt_val, tgt_axis)
+    return _jit_fuse_single_slice_moe(
+        wi_0_full,
+        wi_1_full,
+        layer_idx,
+        scan_axis,
+        n_shards,
+        tgt_val.shape,
+        tgt_axis,
+    )
 
 
 def intersect_trees(
@@ -752,17 +738,15 @@ def intersect_trees(
 
   for key_tuple, tgt_val in tgt_flat.items():
     path_str = '.'.join(str(k) for k in key_tuple)
+    # Skip transient runtime cache/buffer/rng objects (not trainable/transferred weights)
+    if any(ignore_str in path_str for ignore_str in (".cache.", ".rngs.", "cache_ar_", "cached_prefill_", "cached_ar_", "rngs.")):
+      continue
+
     # Try 1: Direct Match (Unscanned leaves or global weights)
     if key_tuple in src_flat:
       filtered_src_flat[key_tuple] = _align_tensor_to_shape(
           src_flat[key_tuple], tgt_val, path_str
       )
-      filtered_tgt_flat[key_tuple] = tgt_val
-      continue
-
-    # Skip resolving scanned path for transient runtime cache/buffer/prng objects
-    if any(ignore_str in path_str for ignore_str in (".cache.", ".rngs.", "cache_ar_", "cached_prefill_")):
-      filtered_src_flat[key_tuple] = tgt_val
       filtered_tgt_flat[key_tuple] = tgt_val
       continue
 
@@ -789,24 +773,24 @@ def intersect_trees(
     ):
       cyclic_idx = layer_idx % 4
       for scanned_prefix in [
+          key_tuple[:match_idx]
+          + ('layers', f'layer_{cyclic_idx}')
+          + key_tuple[match_idx + 1 : -1],
           key_tuple[:match_idx] + ('layers',) + key_tuple[match_idx + 1 : -1],
           key_tuple[:match_idx]
           + ('layers', f'layer_{layer_idx}')
           + key_tuple[match_idx + 1 : -1],
           key_tuple[:match_idx]
-          + ('layers', f'layer_{cyclic_idx}')
+          + ('layers', str(cyclic_idx))
           + key_tuple[match_idx + 1 : -1],
           key_tuple[:match_idx]
           + ('layers', str(layer_idx))
           + key_tuple[match_idx + 1 : -1],
           key_tuple[:match_idx]
-          + ('layers', str(cyclic_idx))
+          + (f'layer_{cyclic_idx}',)
           + key_tuple[match_idx + 1 : -1],
           key_tuple[:match_idx]
           + (f'layer_{layer_idx}',)
-          + key_tuple[match_idx + 1 : -1],
-          key_tuple[:match_idx]
-          + (f'layer_{cyclic_idx}',)
           + key_tuple[match_idx + 1 : -1],
           key_tuple[:match_idx] + key_tuple[match_idx + 1 : -1],
       ]:
@@ -818,10 +802,9 @@ def intersect_trees(
               sliced_val, tgt_val, path_str
           )
           filtered_tgt_flat[key_tuple] = tgt_val
-    # Fallback: preserve target state leaf if unmatched (e.g. runtime rngs or buffers)
-    if key_tuple not in filtered_src_flat:
-      filtered_src_flat[key_tuple] = tgt_val
-      filtered_tgt_flat[key_tuple] = tgt_val
+          break
+      if key_tuple in filtered_src_flat:
+        continue
 
   print("DEBUG intersect_trees matched keys count:", len(filtered_src_flat), flush=True)
   print("DEBUG intersect_trees matched keys sample:", list(filtered_src_flat.keys())[:10], flush=True)

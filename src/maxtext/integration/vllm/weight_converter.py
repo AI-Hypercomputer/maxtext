@@ -1,4 +1,5 @@
 import abc
+import logging
 import re
 import jax
 import jax.numpy as jnp
@@ -173,6 +174,9 @@ class WeightConverter(abc.ABC):
         self.tp = tp
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
+        logging.info("Initialized WeightConverter (tp=%d, rules=%s)", self.tp, self.rules)
+        if not self.rules:
+            logging.info("Opt-in confirmation: WeightConverter initialized for MaxText-to-MaxText (rules = []).")
 
     def convert(
         self, 
@@ -248,14 +252,19 @@ class WeightConverter(abc.ABC):
                 )
             # Repack the flat_src dictionary with tuple keys for the algorithm
             pure_src_unflat = traverse_util.unflatten_dict(flat_src, sep='.')
-            has_model_prefix = isinstance(full_target_spec, dict) and "model" in full_target_spec
             if isinstance(pure_src_unflat, dict) and "base" in pure_src_unflat:
                 pure_src_unflat = pure_src_unflat["base"]
-            while isinstance(full_target_spec, dict) and "model" in full_target_spec:
-                full_target_spec = full_target_spec["model"]
+
+            model_depth = 0
+            curr_tgt = full_target_spec
+            while isinstance(curr_tgt, dict) and list(curr_tgt.keys()) == ["model"]:
+                curr_tgt = curr_tgt["model"]
+                model_depth += 1
             
-            final_source, _ = intersect_trees(pure_src_unflat, full_target_spec)
-            vllm_state = {"model": final_source} if has_model_prefix else final_source
+            final_source, _ = intersect_trees(pure_src_unflat, curr_tgt)
+            vllm_state = final_source
+            for _ in range(model_depth):
+                vllm_state = {"model": vllm_state}
 
         return vllm_state
 
