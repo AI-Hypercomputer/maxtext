@@ -9,18 +9,18 @@ import subprocess
 import csv
 
 MODELS = [
-    # "llama3.1-8b",
+    "llama3.1-8b",
     "gemma3-4b",
     # "gemma2-2b",
     # "gemma4-e2b",
     # "qwen2.5-1.5b",
     # "qwen3-0.6b",
-    "olmo3-7b",
-    "gpt-oss-20b",
+    # "olmo3-7b",
+    # "gpt-oss-20b",
 ]
 SCAN_MODES = ["scanned", "unscanned"]
 
-GCS_BASE = "gs://mesa-maxtext/validation_runs/post_train_layout_v13"
+GCS_BASE = "gs://mesa-maxtext/validation_runs/post_train_layout_v14"
 HF_BASE = "gs://mesa-maxtext/huggingface_transformers"
 LOCAL_LOGS = "local_logs"
 CSV_REPORT = "validation_summary.csv"
@@ -106,7 +106,6 @@ def run_matrix():
             f"model_name={model}",
             f"scan_layers={scan_bool}",
             f"base_output_directory={GCS_BASE}/{scan_mode}/{action}/{model}",
-            "checkpoint_period=1",
         ]
         # Handle steps vs num_batches for RL
         if action == "rl":
@@ -141,7 +140,9 @@ def run_matrix():
           # RL requires a chat template. Llama3's tiktoken lacks one, so we must use the HF tokenizer path instead.
           hf_model_name = f"meta-llama/Meta-Llama-3.1-{model.rsplit('-', maxsplit=1)[-1].upper()}-Instruct"
           cmd = [c for c in cmd if not c.startswith("tokenizer_path=") and not c.startswith("tokenizer_type=")]
-          cmd.extend([f"tokenizer_path={hf_model_name}", f"vllm_hf_config_path={hf_model_name}"])
+          cmd.extend(
+              [f"tokenizer_path={hf_model_name}", "tokenizer_type=huggingface", f"vllm_hf_config_path={hf_model_name}"]
+          )
 
         if load_path:
           cmd.append(f"load_parameters_path={load_path}")

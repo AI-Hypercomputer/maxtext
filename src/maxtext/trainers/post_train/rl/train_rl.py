@@ -625,7 +625,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
       **rl_cluster_kwargs,
   )
   if checkpoint_dir is not None:
-    post_train_checkpointing.install(rl_cluster.actor_trainer, checkpoint_dir, trainer_config)
+    post_train_checkpointing.install(rl_cluster.actor_trainer, os.path.join(checkpoint_dir, "actor"), trainer_config)
 
   def make_reward_fn(fn):
     # pragma: no cover

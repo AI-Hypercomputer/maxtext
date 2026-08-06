@@ -24,6 +24,7 @@ from typing import Any
 
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import orbax.checkpoint as ocp
 from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 
@@ -55,7 +56,9 @@ def unwrap_model(model: nnx.Module) -> nnx.Module:
     The wrapped model, or `model` itself if it is not wrapped.
   """
   base = getattr(model, _ADAPTER_CHILD, None)
-  return base if isinstance(base, nnx.Module) else model
+  if isinstance(base, nnx.Module):
+    return unwrap_model(base)
+  return model
 
 
 def _drop_adapter_level(tree):
@@ -96,6 +99,46 @@ def _add_adapter_level(tree, guide):
   if isinstance(guide, list) and isinstance(tree, list) and len(guide) == len(tree):
     return [_add_adapter_level(t, g) for t, g in zip(tree, guide)]
   return tree
+
+
+def _drop_inject_hyperparams(opt_state):
+  """Strips the `optax.inject_hyperparams` state wrapper if present.
+
+  RL and distillation trainers wrap their optimizer in `inject_hyperparams`. To produce
+  a checkpoint fully compatible with pre-training, we strip the outer shell and only save
+  the inner state.
+
+  Args:
+    opt_state: The optimizer state dict to inspect.
+
+  Returns:
+    The inner state if `inject_hyperparams` was found, otherwise `opt_state`.
+  """
+  if isinstance(opt_state, dict) and {"count", "hyperparams", "hyperparams_states", "inner_state"}.issubset(
+      opt_state.keys()
+  ):
+    return opt_state["inner_state"]
+  return opt_state
+
+
+def _add_inject_hyperparams(restored_opt_state, guide, step):
+  """Restores the `optax.inject_hyperparams` wrapper state.
+
+  Args:
+    restored_opt_state: The bare inner state loaded from disk.
+    guide: The currently initialized optimizer state dict, used as a structural guide.
+    step: The global step to restore into the wrapper's count.
+
+  Returns:
+    The reconstructed full state dict.
+  """
+  if isinstance(guide, dict) and {"count", "hyperparams", "hyperparams_states", "inner_state"}.issubset(guide.keys()):
+
+    new_state = dict(guide)
+    new_state["inner_state"] = restored_opt_state
+    new_state["count"] = jnp.array(step, dtype=guide["count"].dtype)
+    return new_state
+  return restored_opt_state
 
 
 class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
@@ -197,7 +240,7 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     del step
     return {}
 
-  def save(
+  def save(  # pylint: disable=too-many-positional-arguments
       self,
       step: int,
       model: nnx.Module,
@@ -228,8 +271,10 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     if save_only_lora_params:
       state = nnx.split_state(state, nnx.LoRAParam, ...)[0]
     items = train_state_nnx.to_checkpoint_dict(state)
-    if self.model_to_checkpoint(model) is not model and "opt_state" in items:
-      items["opt_state"] = _drop_adapter_level(items["opt_state"])
+    if "opt_state" in items:
+      items["opt_state"] = _drop_inject_hyperparams(items["opt_state"])
+      if self.model_to_checkpoint(model) is not model:
+        items["opt_state"] = _drop_adapter_level(items["opt_state"])
     jax.block_until_ready(items)
 
     save_args = {
@@ -311,8 +356,11 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     )
 
     restored_items = dict(restored[_ITEM_NAME])
-    if is_wrapped and opt_state_guide is not None and "opt_state" in restored_items:
-      restored_items["opt_state"] = _add_adapter_level(restored_items["opt_state"], opt_state_guide)
+    if "opt_state" in restored_items and opt_state_guide is not None:
+      restored_items["opt_state"] = _add_inject_hyperparams(restored_items["opt_state"], opt_state_guide, step)
+      if is_wrapped:
+        restored_items["opt_state"] = _add_adapter_level(restored_items["opt_state"], opt_state_guide)
+
     new_state = checkpointing.linen_items_to_nnx(restored_items, state)
     nnx.update(self.model_to_checkpoint(model), new_state["model"])
     if optimizer is not None and "optimizer" in new_state:
