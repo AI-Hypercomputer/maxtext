@@ -124,7 +124,7 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     # The base class built a manager over Tunix's item names. Close it before replacing it with
     # one that knows MaxText's layout, or its open handles and threads outlive it.
     # pylint: disable=access-member-before-definition
-    if self._checkpoint_manager is not None:
+    if getattr(self, "_checkpoint_manager", None) is not None:
       self._checkpoint_manager.close()
     # pylint: enable=access-member-before-definition
 

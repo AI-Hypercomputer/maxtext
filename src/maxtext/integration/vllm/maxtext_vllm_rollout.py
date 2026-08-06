@@ -63,6 +63,38 @@ def _patched_is_init_field(cls, name):
 vllm_config_utils.is_init_field = _patched_is_init_field
 
 
+_orig_with_hf_config = VllmConfig.with_hf_config
+
+
+def _patched_with_hf_config(self, *args, **kwargs):
+  """
+  Restore the original data_parallel_size which tpu_platform mutated,
+  so that the new VllmConfig passes the device_indexes length assertion.
+  tpu_inference deletes sharding_config before calling with_hf_config,
+  so we must reverse-engineer the data_parallel_size from device_indexes.
+  """
+  if self.additional_config and "sharding" in self.additional_config:
+    sharding_strategy = self.additional_config["sharding"].get("sharding_strategy", {})
+    device_indexes = sharding_strategy.get("device_indexes")
+    if device_indexes is not None:
+      pc = self.parallel_config
+      tp = sharding_strategy.get("tensor_parallelism") or pc.tensor_parallel_size
+      ep = sharding_strategy.get("expert_parallelism", 1)
+      sp = sharding_strategy.get("sequence_parallelism", 1)
+      attn_dp = sharding_strategy.get("attention_data_parallelism", 1)
+      attn_dp_ep = sharding_strategy.get("attention_data_expert_parallelism", 1)
+      dcp = pc.decode_context_parallel_size
+
+      other_parallelism = tp * ep * sp * attn_dp * attn_dp_ep * dcp
+      if other_parallelism > 0:
+        self.parallel_config.data_parallel_size = len(device_indexes) // other_parallelism
+
+  return _orig_with_hf_config(self, *args, **kwargs)
+
+
+VllmConfig.with_hf_config = _patched_with_hf_config
+
+
 def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
   """Instantiate the converter for a MaxText model name."""
   if model_name.startswith("qwen3.5"):
