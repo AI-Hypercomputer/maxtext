@@ -43,6 +43,7 @@ from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextT
 
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 
+import vllm.config.vllm
 import vllm.config.utils as vllm_config_utils
 
 # Monkey-patch VLLM's is_init_field to gracefully handle dynamically added
@@ -61,7 +62,7 @@ def _patched_is_init_field(cls, name):
 vllm_config_utils.is_init_field = _patched_is_init_field
 
 
-_orig_with_hf_config = VllmConfig.with_hf_config
+_orig_with_hf_config = vllm.config.vllm.VllmConfig.with_hf_config
 
 
 def _patched_with_hf_config(self, *args, **kwargs):
@@ -90,7 +91,7 @@ def _patched_with_hf_config(self, *args, **kwargs):
   return _orig_with_hf_config(self, *args, **kwargs)
 
 
-VllmConfig.with_hf_config = _patched_with_hf_config
+vllm.config.vllm.VllmConfig.with_hf_config = _patched_with_hf_config
 
 
 def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
