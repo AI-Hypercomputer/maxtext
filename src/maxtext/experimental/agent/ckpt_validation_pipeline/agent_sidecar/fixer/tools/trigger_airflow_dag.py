@@ -63,18 +63,34 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
     conf_dict["xpk_zone"] = zone
   
   if overrides:
+    def _merge_override(key, value):
+      root_keys = {
+          "alert_recipient", "checkpoint_gcs_path", "hf_config_url", "hf_model_path", 
+          "hf_ref_code_url", "max_kl_div", "maxtext_branch", "maxtext_commit_hash", 
+          "maxtext_model_name", "report_gcs_dir", "run_name", "xpk_cluster_name", 
+          "xpk_project", "xpk_zone", "maxtext_overrides"
+      }
+      if key in root_keys:
+        conf_dict[key] = value
+      else:
+        if "maxtext_overrides" not in conf_dict:
+          conf_dict["maxtext_overrides"] = {}
+        conf_dict["maxtext_overrides"][key] = value
+
     if isinstance(overrides, dict):
-      conf_dict.update(overrides)
+      for k, v in overrides.items():
+        _merge_override(k, v)
     elif isinstance(overrides, str):
       try:
         parsed = json.loads(overrides)
         if isinstance(parsed, dict):
-          conf_dict.update(parsed)
+          for k, v in parsed.items():
+            _merge_override(k, v)
       except json.JSONDecodeError:
         for item in overrides.split(","):
           if "=" in item:
             key, value = item.split("=", 1)
-            conf_dict[key.strip()] = value.strip()
+            _merge_override(key.strip(), value.strip())
 
   headers = {"Content-Type": "application/json", "Accept": "application/json"}
   credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
