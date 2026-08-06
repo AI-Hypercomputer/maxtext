@@ -137,6 +137,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None, test_only_training_hoo
         tokenizer_pad_id=tok.pad_id,
     )
 
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
@@ -144,16 +145,15 @@ def setup_trainer_state(mt_config, goodput_recorder=None, test_only_training_hoo
     if mt_config.gradient_clipping_threshold > 0:
       optimizer = optimizers.add_gradient_clipping(optimizer, mt_config.gradient_clipping_threshold)
 
-  # ORPO does not require a reference model.
-  ref_model = nnx.clone(model) if mt_config.dpo.algo == "dpo" else None
+    # ORPO does not require a reference model.
+    ref_model = nnx.clone(model) if mt_config.dpo.algo == "dpo" else None
 
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
-    training_hooks_class = test_only_training_hooks_class or hooks.DPOTrainingHooks
-    training_hooks = training_hooks_class(mt_config, mesh, learning_rate_schedule, goodput_recorder)
-    data_hooks = hooks.DPODataHooks(mt_config, mesh, goodput_recorder)
+    with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
+      training_hooks_class = test_only_training_hooks_class or hooks.DPOTrainingHooks
+      training_hooks = training_hooks_class(mt_config, mesh, learning_rate_schedule, goodput_recorder)
+      data_hooks = hooks.DPODataHooks(mt_config, mesh, goodput_recorder)
 
-    # Provide rules context so logical axes (e.g. 'norm') are translated to mesh axes during maybe_restore
-    with nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+      # Provide rules context so logical axes (e.g. 'norm') are translated to mesh axes during maybe_restore
       trainer = DPOTrainer(
           model=model, ref_model=ref_model, optimizer=optimizer, training_config=tunix_config, tokenizer=None
       )
