@@ -164,10 +164,18 @@ def boxed(x: str) -> str:
 
 def get_match_format_regex(tmvp_config: Any) -> re.Pattern[str]:
   """Returns a compiled regex to extract the answer from a completion."""
+  # Some thinking-model chat templates (Qwen3.5) prefill the opening
+  # reasoning marker in the prompt. The generated completion then begins with
+  # the reasoning body and contains only the closing marker.
+  reasoning_start = (
+      ""
+      if getattr(tmvp_config, "reasoning_start_token_in_prompt", False)
+      else re.escape(tmvp_config.reasoning_start_token)
+  )
   match_format = re.compile(
       (
-          rf"{tmvp_config.reasoning_start_token}.+{tmvp_config.reasoning_end_token}.*?"
-          rf"{tmvp_config.solution_start_token}(.+?){tmvp_config.solution_end_token}"
+          rf"{reasoning_start}.+{re.escape(tmvp_config.reasoning_end_token)}.*?"
+          rf"{re.escape(tmvp_config.solution_start_token)}(.+?){re.escape(tmvp_config.solution_end_token)}"
       ),
       flags=re.MULTILINE | re.DOTALL,
   )
@@ -220,7 +228,10 @@ def match_format_approximately(prompts: list[str], completions: list[str], tmvp_
     # If we see 1, then plus some points!
     score += (
         tmvp_config.reward_partial_format_match
-        if completion.count(tmvp_config.reasoning_start_token) == 1
+        if (
+            getattr(tmvp_config, "reasoning_start_token_in_prompt", False)
+            or completion.count(tmvp_config.reasoning_start_token) == 1
+        )
         else tmvp_config.penalty_incorrect_format
     )
     score += (
@@ -489,13 +500,19 @@ def extract_answer(response: str, tmvp_config: Any) -> str:
   Strategy (priority order):
     1. Narrow the search scope to the LAST
        `{solution_start_token}...{solution_end_token}` block (default
-       `<answer>...</answer>`) if present; otherwise use the full response.
+       `<answer>...</answer>`) if present. For a native thinking response, use
+       only the section after its reasoning close; otherwise use the full
+       response.
     2. Inside the search scope, find the last `\\boxed{N}` via a brace-
        balanced scan (handles nested braces in LaTeX). Fall back to a
        permissive `\\boxed{N}` regex if no balanced match is found.
     3. If no boxed expression is found, fall back to the same configured
        solution-tag regex over the full response, for recipes that emit the
        answer as plain text rather than `\\boxed{N}`.
+    4. For a thinking template that prefilled its opening marker, accept an
+       explicitly stated numeric conclusion in the final-answer section after
+       the closing reasoning marker. This keeps a valid native Qwen response
+       scoreable even if it uses prose instead of the requested answer tags.
 
   Step 1 + 2 are required for modern reasoning models (Qwen3, DeepSeek-R1,
   etc.) that emit `<think>...</think>\\boxed{N}` or `<answer>\\boxed{N}</answer>`
@@ -506,11 +523,23 @@ def extract_answer(response: str, tmvp_config: Any) -> str:
 
   The solution tags have a single source of truth: both the scoping (step 1)
   and the plain-text fallback (step 3) reuse `get_answer_fallback_regex`,
-  built from `tmvp_config.solution_start_token` / `solution_end_token`.
+  built from `tmvp_config.solution_start_token` / `solution_end_token`. Step 4
+  is enabled only for recipes that explicitly mark the reasoning opener as
+  part of the prompt.
   """
   answer_tag_regex = get_answer_fallback_regex(tmvp_config)
   answer_matches = answer_tag_regex.findall(response)
-  content = answer_matches[-1] if answer_matches else response
+  native_final_section = None
+  if getattr(tmvp_config, "reasoning_start_token_in_prompt", False):
+    reasoning_end = tmvp_config.reasoning_end_token
+    if reasoning_end in response:
+      native_final_section = response.rsplit(reasoning_end, maxsplit=1)[-1]
+  if answer_matches:
+    content = answer_matches[-1]
+  elif native_final_section is not None:
+    content = native_final_section
+  else:
+    content = response
   boxed_matches: list[str] = []
   stack: list[int] = []
   for i, ch in enumerate(content):
@@ -530,6 +559,29 @@ def extract_answer(response: str, tmvp_config: Any) -> str:
   fallback_matches = answer_tag_regex.findall(response)
   if fallback_matches:
     return fallback_matches[-1].strip()
+
+  if native_final_section is not None:
+    # GSM8K gold answers are numeric. Require either an explicit conclusion
+    # phrase or a numeric-only final section; do not reward an arbitrary
+    # trailing number in prose.
+    numeric_pattern = (
+        r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+|\.\d+)(?:\.\d+)?"
+        r"(?:\s*/\s*[-+]?\d+(?:\.\d+)?)?"
+    )
+    conclusion_matches = re.findall(
+        rf"(?:\b(?:the\s+)?(?:final\s+)?answer\s*(?:is|=|:)?|\b(?:therefore|thus|hence)\s*[,:]?)"
+        rf"\s*\$?({numeric_pattern})\$?",
+        native_final_section,
+        flags=re.IGNORECASE,
+    )
+    if conclusion_matches:
+      return conclusion_matches[-1].strip()
+    numeric_only = re.fullmatch(
+        rf"\s*\$?({numeric_pattern})\$?\s*[.!]?\s*",
+        native_final_section,
+    )
+    if numeric_only:
+      return numeric_only.group(1).strip()
   return FALLBACK_ANSWER
 
 
