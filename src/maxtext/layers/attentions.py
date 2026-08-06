@@ -61,7 +61,6 @@ from maxtext.layers.embeddings import (
     YarnRotaryEmbedding,
     PartialRotaryEmbedding,
     Gemma4PartialRotaryEmbedding,
-    DeepSeekV4RotaryEmbedding,
 )
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from maxtext.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
@@ -932,29 +931,16 @@ class Attention(nnx.Module):
       if self.config.model_name.startswith("gemma3") and self.attention_type == AttentionType.LOCAL_SLIDING:
         rope_linear_scaling_factor = 1.0
 
-      if self.config.rope_interleave:
-        rotary_embedding = DeepSeekV4RotaryEmbedding(
-            head_dim=rope_embedding_dims,
-            partial_rotary_factor=1.0,
-            rope_theta=max_timescale,
-            fprop_dtype=self.dtype,
-            min_timescale=self.config.rope_min_timescale,
-            max_timescale=max_timescale,
-            mesh=self.mesh,
-            shard_mode=self.config.shard_mode,
-            rngs=self.rngs,
-        )
-      else:
-        rotary_embedding = RotaryEmbedding(
-            min_timescale=self.config.rope_min_timescale,
-            max_timescale=max_timescale,
-            mesh=self.mesh,
-            embedding_dims=rope_embedding_dims,
-            fprop_dtype=self.dtype,
-            rope_linear_scaling_factor=rope_linear_scaling_factor,
-            shard_mode=self.config.shard_mode,
-            rngs=self.rngs,
-        )
+      rotary_embedding = RotaryEmbedding(
+          min_timescale=self.config.rope_min_timescale,
+          max_timescale=max_timescale,
+          mesh=self.mesh,
+          embedding_dims=rope_embedding_dims,
+          fprop_dtype=self.dtype,
+          rope_linear_scaling_factor=rope_linear_scaling_factor,
+          shard_mode=self.config.shard_mode,
+          rngs=self.rngs,
+      )
     return rotary_embedding
 
   def apply_rotary_embedding(
@@ -981,8 +967,6 @@ class Attention(nnx.Module):
       return cast(Qwen3OmniMoeVisionRotaryEmbedding, self.rotary_embedding)(
           inputs, num_frames, height, width, token_mask=token_mask, valid_grid=valid_grid
       )
-    elif isinstance(self.rotary_embedding, DeepSeekV4RotaryEmbedding):
-      return self.rotary_embedding(inputs, inputs_positions, unsqueeze_dim=2)
     else:
       return self.rotary_embedding(inputs, inputs_positions)
 
