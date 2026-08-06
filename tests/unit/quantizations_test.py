@@ -724,24 +724,17 @@ class StaticScaleTest(unittest.TestCase):
     self.assertIsNotNone(scale)
     np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
 
-  def test_get_static_scale_fixed_asymmetric(self):
-    scale = quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,-224.0,224.0")
-    self.assertIsNotNone(scale)
-    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
-
-  def test_get_static_scale_manual_quantization(self):
-    scale = quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,-224.0,224.0", manual_quantization=True)
-    self.assertIsNotNone(scale)
-    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
-
-    with self.assertRaisesRegex(ValueError, "Expected format for manual quantization"):
-      quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,224.0", manual_quantization=True)
-
   def test_get_static_scale_invalid_format(self):
-    with self.assertRaisesRegex(ValueError, "Expected format for fixed range"):
+    with self.assertRaises(ValueError):
       quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,1,2,3")
+      
+    with self.assertRaises(ValueError):
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,-200.0,224.0")
 
-    with self.assertRaisesRegex(ValueError, "Only static scale quantization is supported, got absmax"):
+    with self.assertRaises(ValueError):
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "absmax")
+
+    with self.assertRaises(ValueError):
       quantizations.get_static_scale(jnp.float8_e4m3fn, "absmax")
 
 

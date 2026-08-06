@@ -29,7 +29,6 @@ from aqt.jax.v2 import calibration
 
 import qwix
 from qwix._src.core import dot_general_qt
-from qwix._src.core import numerics
 from qwix._src.core import sparsity
 
 import jax
@@ -913,8 +912,10 @@ def _get_max_min(target_dtype):
     return jnp.finfo(target_dtype).max.astype(jnp.bfloat16), jnp.finfo(target_dtype).min.astype(jnp.bfloat16)
 
 
-def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str, manual_quantization: bool = False) -> float:
+def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> float:
   """Extracts the static scale.
+  Currently, only symmetric fixed range calibration is supported.
+  For symmetric calibration, the calibration_method must be in the format 'fixed,-max,max' or 'fixed,max'.
 
   Args:
     qtype: The dtype to quantize to.
@@ -927,24 +928,17 @@ def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str, manua
     raise ValueError(f"Only static scale quantization is supported, got {calibration_method}")
 
   args = [float(a) for a in calibration_method.split(",")[1:]]
-  
-  if manual_quantization and (len(args) != 2 or args[0] + args[1] != 0):
-    raise ValueError(f"Expected format for manual quantization is 'fixed,-max,max'. Got {calibration_method}")
-  elif not manual_quantization and len(args) not in (1, 2):
-    raise ValueError(f"Expected format for fixed range is 'fixed,bound' or 'fixed,min,max'. Got {calibration_method}")
-
   if len(args) == 1:
     args = [-args[0], args[0]]
+  
+  if args[0] + args[1] != 0:
+    raise ValueError(f"Expected format: 'fixed,max' or 'fixed,-max,max'. Got: {calibration_method}")
 
   if args[0] > 0 or args[1] < 0 or args[0] >= args[1]:
     raise ValueError(f"The range must contain 0 and be non-empty, got: {calibration_method}")
 
-  if args[0] + args[1] == 0:
-    qmax = float(numerics.get_symmetric_bound(qtype))
-    scale_val = args[1] / qmax
-  else:
-    qmin, qmax = numerics.get_asymmetric_bound(qtype)
-    scale_val = (args[1] - args[0]) / float(qmax - qmin)
+  qmax, _ = _get_max_min(qtype)
+  scale_val = args[1] / qmax
 
   # Prevent scale from being 0
   tiny_sqrt = jnp.sqrt(jnp.finfo(jnp.float32).tiny)
@@ -968,7 +962,7 @@ def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_
   Raises:
     ValueError: If calibration_method is None or has an unexpected format.
   """
-  scale = get_static_scale(dtype, calibration_method, manual_quantization=True)
+  scale = get_static_scale(dtype, calibration_method)
   dtype_max, dtype_min = _get_max_min(dtype)
   # scale must be converted to a tensor because grad has reduced axes.
   scale_tensor = _make_scale_tensor(scale, tensor)

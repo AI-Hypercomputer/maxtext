@@ -1437,32 +1437,13 @@ def gmm_v2(
   out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n), cfgs.out_dtype)
   lhs_in = LhsRef(value=lhs, scale=lhs_scale)
   rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
-  in_specs = [
-      pl.BlockSpec(memory_space=pltpu.HBM),
-      WeightsRef(
-          weight=pl.BlockSpec(memory_space=pltpu.HBM),
-          scale=rhs_scale_spec,
-          bias=rhs_bias_spec,
-      ),
-  ]
-
   partial_sum_spec = None
   if partial_sum is not None:
-    in_specs.append(pl.BlockSpec(memory_space=pltpu.HBM))
     partial_sum_spec = pl.BlockSpec(memory_space=pltpu.HBM)
-  in_specs = [
-      pl.BlockSpec(memory_space=pltpu.HBM),  # lhs
-      WeightsRef(
-          weight=pl.BlockSpec(memory_space=pltpu.HBM),
-          scale=rhs_scale_spec,
-          bias=rhs_bias_spec,
-      ),  # rhs_weights
-      partial_sum_spec,  # partial_sum
-  ]
 
   input_output_aliases = {}
   if partial_sum is not None:
-    flat_args_preceding = (group_sizes, group_offset, lhs, rhs_weights)
+    flat_args_preceding = (group_sizes, group_offset, lhs_in, rhs_weights)
     leaves = jax.tree_util.tree_leaves(flat_args_preceding)
     partial_sum_idx = sum(1 for x in leaves if x is not None)
     input_output_aliases = {partial_sum_idx: 0}
