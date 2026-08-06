@@ -35,13 +35,23 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
   """Triggers a DAG and returns structured run metadata."""
   target_dag = dag_id or os.environ.get("TARGET_DAG_ID", DAG_ID)
   url = f"{AIRFLOW_URL}/api/v1/dags/{target_dag}/dagRuns"
-  conf_dict = {"maxtext_branch": branch_name}
+  conf_dict = {}
+  original_conf_str = os.environ.get("ORIGINAL_DAG_CONF")
+  if original_conf_str:
+    try:
+      original_conf = json.loads(original_conf_str)
+      conf_dict.update(original_conf)
+    except Exception as e:
+      print(f"Warning: Failed to parse ORIGINAL_DAG_CONF: {e}")
+
+  conf_dict["maxtext_branch"] = branch_name
   if cluster_name:
     conf_dict["xpk_cluster_name"] = cluster_name
   if project_name:
     conf_dict["xpk_project"] = project_name
   if zone:
     conf_dict["xpk_zone"] = zone
+  
   if overrides:
     if isinstance(overrides, dict):
       conf_dict.update(overrides)

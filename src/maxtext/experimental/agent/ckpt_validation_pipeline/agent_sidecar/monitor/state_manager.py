@@ -22,7 +22,7 @@ from google.cloud import storage
 DATA_DIR = os.environ.get("ANTIGRAVITY_EXECUTABLE_DATA_DIR", "./data")
 GCS_BUCKET_NAME = "maxtext-validation-agent-reports"
 STATE_BLOB_NAME = "retry_state.json"
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "25"))
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
 
 
 def _get_blob(run_key: str):

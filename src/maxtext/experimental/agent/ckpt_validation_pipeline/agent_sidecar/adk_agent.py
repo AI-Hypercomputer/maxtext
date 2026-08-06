@@ -238,6 +238,7 @@ def _load_prompt_file(filename: str) -> str:
 
 def run_agent_workflow(context: dict, failure_log: str):
   """Executes the 4-Phase Meta-Agent Orchestrator loop using Gemini."""
+  os.environ["ORIGINAL_DAG_CONF"] = json.dumps(context)
   run_id = context.get("remediation_key") or context.get("run_name", "unknown_run")
   model_name = context.get("maxtext_model_name", "unknown_model")
   report_source = context.get("report_source", "")
