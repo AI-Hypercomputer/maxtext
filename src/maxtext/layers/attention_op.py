@@ -54,6 +54,7 @@ from maxtext.common.common_types import (
     DType,
     D_KV,
     HEAD,
+    KV_HEAD,
     KV_LENGTH,
     LENGTH,
     MODEL_MODE_AUTOREGRESSIVE,
@@ -63,13 +64,16 @@ from maxtext.common.common_types import (
     Q_LENGTH,
 )
 from maxtext.inference.kvcache import KVQuant, KVTensor
+from maxtext.kernels.attention import gpu_pallas_flash
 from maxtext.kernels.attention import jax_flash_attention
 from maxtext.kernels.attention import tokamax_ring_attention
+
 from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules
 import numpy as np
@@ -77,6 +81,12 @@ from tokamax._src.ops.attention import base as tokamax_attention_base
 from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
+
+try:  # optional dependency (flash-attn-jax); the pallas kernel covers its absence
+  from maxtext.kernels.attention import cutlass_flash as cutlass_flash_lib
+except ImportError:
+  cutlass_flash_lib = None
+
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
@@ -120,6 +130,16 @@ def apply_mask_to_logits(logits: Array, mask: Array):
     Masked logits.
   """
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
+
+
+@functools.cache
+def _cudnn_jax_supports_packed_layout() -> bool:
+  """jax's cuDNN SDPA packed (offsets) layout requires Hopper (sm90) or newer."""
+  compute_capability = getattr(jax.local_devices()[0], "compute_capability", None)
+  try:
+    return compute_capability is not None and float(compute_capability) >= 9.0
+  except ValueError:
+    return False
 
 
 def validate_gpu_flash_attention(sinks: Array | None, record_max_logits: bool) -> None:
@@ -1046,6 +1066,103 @@ class AttentionOp(nnx.Module):
     moba_mask = jax.vmap(self.generate_moba_mask_single_item, in_axes=(0, 0, None))(query, key, q_positions)
     return moba_mask
 
+  def _gpu_flash_window(self, key: Array) -> int | None:
+    """Sliding-window size for the GPU flash kernels (None for global attention)."""
+    if self.attention_type == AttentionType.LOCAL_SLIDING and self.sliding_window_size is not None:
+      return min(self.sliding_window_size, key.shape[1])
+    return None
+
+  def _shard_mapped_gpu_flash(self, kernel_fn, query, key, value, decoder_segment_ids, kv_heads_repeated):
+    """Runs a per-shard GPU flash kernel under shard_map.
+
+    shard_map keeps GSPMD from all-gathering sharded activations around the
+    opaque pallas/FFI call. The kernels mask from shard-local positions, so
+    context parallelism (sequence-sharded queries) is not supported.
+
+    `kv_heads_repeated` says whether the caller expanded K/V to one head per
+    query head, which decides between the query and kv head axes.
+    """
+    if self.mesh.shape.get(self.config.context_sharding, 1) > 1:
+      raise ValueError(
+          f"attention={self.attention_kernel!r} on GPU does not support context parallelism; "
+          "use attention='cudnn_flash_te'."
+      )
+    q_spec = self._logical_to_mesh_axes((BATCH_ATTN, LENGTH, HEAD, D_KV))
+    kv_head_axis = HEAD if kv_heads_repeated else KV_HEAD
+    kv_spec = self._logical_to_mesh_axes((BATCH_ATTN, KV_LENGTH, kv_head_axis, D_KV))
+    seg_spec = None if decoder_segment_ids is None else self._logical_to_mesh_axes((BATCH_ATTN, KV_LENGTH))
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(q_spec, kv_spec, kv_spec, seg_spec),
+        out_specs=q_spec,
+        check_vma=False,
+    )
+    def wrapped(q, k, v, seg):
+      return kernel_fn(q, k, v, seg)
+
+    return wrapped(query, key, value, decoder_segment_ids)
+
+  def _gpu_pallas_flash_attention(self, query, key, value, decoder_segment_ids, window, soft_cap=None):
+    """Runs the maxtext pallas (Triton) flash kernel on per-device shards.
+
+    Not the tokamax kernel `attention='flash'` uses: that one has no backward
+    for soft caps or for head_dim > 256, which are the shapes this backend
+    exists to cover. It can go away once those are supported upstream.
+    """
+    head_axis = -2
+    num_query_heads = query.shape[head_axis]
+    num_kv_heads = key.shape[head_axis]
+    if num_query_heads != num_kv_heads:
+      if num_query_heads % num_kv_heads != 0:
+        raise ValueError(
+            f"Number of query heads ({num_query_heads}) must be divisible"
+            f" by number of key/value heads ({num_kv_heads})."
+        )
+      q_heads_per_kv_head = num_query_heads // num_kv_heads
+      key = jnp.repeat(key, q_heads_per_kv_head, axis=head_axis)
+      value = jnp.repeat(value, q_heads_per_kv_head, axis=head_axis)
+
+    def kernel(q, k, v, seg):
+      return gpu_pallas_flash.mha(q, k, v, seg, sm_scale=1.0, causal=True, window=window, soft_cap=soft_cap)
+
+    return self._shard_mapped_gpu_flash(kernel, query, key, value, decoder_segment_ids, kv_heads_repeated=True)
+
+  def _cutlass_flash_attention(self, query, key, value, decoder_segment_ids, window, model_mode):
+    """Runs FlashAttention-2 (CUTLASS, via flash-attn-jax) on per-device shards."""
+    # The dense kernel is exact for unpacked batches; only pay the varlen
+    # overhead when segment boundaries actually need masking.
+    max_segments = self.config.max_segments_per_seq if self._needs_packed_masking(decoder_segment_ids, model_mode) else 1
+
+    def kernel(q, k, v, seg):
+      return cutlass_flash_lib.cutlass_flash_attention(
+          q, k, v, seg, sm_scale=1.0, window=window, max_segments_per_row=max_segments
+      )
+
+    # FA2 takes K/V with their own head count, so they keep the kv head axis.
+    return self._shard_mapped_gpu_flash(kernel, query, key, value, decoder_segment_ids, kv_heads_repeated=False)
+
+  def _gpu_flash_backend_dispatch(self, query, key, value, decoder_segment_ids, model_mode):
+    """Selects and runs a fused GPU flash backend (CUTLASS FA2 or pallas).
+
+    FA2 is used when eligible (half precision, head_dim <= 256, no soft cap, and
+    a set max_segments_per_seq when packed); everything else uses the pallas
+    kernel.
+    """
+    window = self._gpu_flash_window(key)
+    soft_cap = self.attn_logits_soft_cap if self.attn_logits_soft_cap else None
+    use_cutlass = (
+        cutlass_flash_lib is not None
+        and soft_cap is None
+        and query.shape[-1] <= 256
+        and query.dtype in (jnp.bfloat16, jnp.float16)
+        and (not self._needs_packed_masking(decoder_segment_ids, model_mode) or self.config.max_segments_per_seq >= 1)
+    )
+    if use_cutlass:
+      return self._cutlass_flash_attention(query, key, value, decoder_segment_ids, window, model_mode)
+    return self._gpu_pallas_flash_attention(query, key, value, decoder_segment_ids, window, soft_cap)
+
   def _validate_tpu_tokamax_ring_runtime(
       self,
       *,
@@ -1195,6 +1312,34 @@ class AttentionOp(nnx.Module):
           gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
           out = gpu_flash_attn(query, key, value, logits_scale=1.0, mask=mask)
           return out, None, None
+    elif self.attention_kernel == "cutlass_flash":
+      # FlashAttention-2 (flash-attn-jax FFI) with native GQA, sliding window and
+      # varlen packing; layers FA2 cannot run (head_dim > 256) fall to pallas.
+      validate_gpu_flash_attention(sinks, record_max_logits)
+      if isinstance(key, KVTensor):
+        key = key.dequant()
+      if isinstance(value, KVTensor):
+        value = value.dequant()
+      if model_mode == MODEL_MODE_AUTOREGRESSIVE:
+        # No decode path in FA2; fall back to unfused attention.
+        return self.apply_attention_dot(
+            query,
+            key,
+            value,
+            decoder_segment_ids,
+            model_mode,
+            bidirectional_mask=bidirectional_mask,
+            record_max_logits=record_max_logits,
+            qk_product_einsum=qk_product_einsum,
+            wv_product_einsum=wv_product_einsum,
+        )
+      if cutlass_flash_lib is None:
+        raise ValueError("attention='cutlass_flash' requires the flash-attn-jax package.")
+      # Soft caps, fp32 and head_dim > 256 all fall through to the pallas kernel
+      # below. Rejecting them here instead would send callers to
+      # attention='flash', which drops the soft cap without saying so.
+      out = self._gpu_flash_backend_dispatch(query, key, value, decoder_segment_ids, model_mode)
+      return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
       validate_gpu_flash_attention(sinks, record_max_logits)
       if isinstance(key, KVTensor):
@@ -1217,6 +1362,25 @@ class AttentionOp(nnx.Module):
         key = key.dequant()
       if isinstance(value, KVTensor):
         value = value.dequant()
+      if self._needs_packed_masking(decoder_segment_ids, model_mode) and not _cudnn_jax_supports_packed_layout():
+        # jax's cuDNN SDPA only accepts the packed (offsets) layout on Hopper+;
+        # on older GPUs run a fused flash kernel that masks segment boundaries
+        # rather than silently attending across them.
+        if self.dropout_rate > 0:
+          raise ValueError(
+              "attention='cudnn_flash_jax' with packing and dropout_rate > 0 needs Hopper or "
+              "newer: the pre-Hopper fallback kernels have no dropout, so the same config would "
+              "train with dropout on one GPU generation and without it on another. Use "
+              "attention='cudnn_flash_te' or set dropout_rate=0."
+          )
+        max_logging.log(
+            "cudnn_flash_jax: packed sequences need Hopper+ for the cuDNN packed layout; "
+            "falling back to a fused GPU flash kernel (CUTLASS FA2 or pallas). Note this "
+            "fallback also applies the sliding window and logit soft cap, which the cuDNN "
+            "path ignores."
+        )
+        out = self._gpu_flash_backend_dispatch(query, key, value, decoder_segment_ids, model_mode)
+        return out, None, None
       return (
           *self.cudnn_jax_flash_attention(query, key, value, decoder_segment_ids, model_mode),
           None,
@@ -1892,6 +2056,42 @@ class AttentionOp(nnx.Module):
     )
     return dpa_layer(query, key, value, sequence_descriptor=attn_mask)
 
+  def _needs_packed_masking(self, decoder_segment_ids: Array | None, model_mode: str) -> bool:
+    """Whether train-mode attention must mask across packed segment boundaries."""
+    return (
+        model_mode == MODEL_MODE_TRAIN
+        and self.config.packing
+        and self.config.dataset_type != "synthetic"
+        and decoder_segment_ids is not None
+    )
+
+  def _segment_ids_to_seqlens_offsets(self, decoder_segment_ids: Array) -> tuple[Array, Array]:
+    """Converts packed segment ids to cuDNN SDPA per-segment seqlens/offsets.
+
+    Segment ids are contiguous runs numbered 1..max_segments_per_seq within each
+    row, with 0 marking padding. Returns (seqlens [B, M], offsets [B, M+1]) with
+    -1 filling absent segments, as required by jax cudnn dot_product_attention's
+    q_seqlen/q_offsets.
+
+    Not every packing implementation caps the run count at max_segments_per_seq
+    (grain 'best_fit' and 'concat_then_split' do not), so ids above the bound are
+    folded into the last segment. Those tokens then attend across one boundary,
+    which is wrong but bounded; leaving them out of every segment would instead
+    hand cuDNN uninitialized memory for them.
+    """
+    max_segments = max(1, self.config.max_segments_per_seq)
+    ids = decoder_segment_ids.astype(jnp.int32)
+    ids = jnp.where(ids > max_segments, max_segments, ids)
+    segment_numbers = jnp.arange(1, max_segments + 1, dtype=jnp.int32)
+    matches = ids[:, None, :] == segment_numbers[None, :, None]  # [B, M, S]
+    lengths = jnp.sum(matches, axis=-1, dtype=jnp.int32)  # [B, M]
+    starts = jnp.argmax(matches, axis=-1).astype(jnp.int32)  # [B, M], 0 when absent
+    present = lengths > 0
+    seqlens = jnp.where(present, lengths, -1)
+    offsets = jnp.where(present, starts, -1)
+    tail = jnp.full((ids.shape[0], 1), -1, dtype=jnp.int32)
+    return seqlens, jnp.concatenate([offsets, tail], axis=-1)
+
   def cudnn_jax_flash_attention(
       self,
       query: Array,
@@ -1920,6 +2120,26 @@ class AttentionOp(nnx.Module):
           q_seqlen=lengths,
           kv_seqlen=lengths,
           mask_type=MaskType.PADDING,
+          scale=1.0,
+          dropout_rate=self.dropout_rate,
+          qkv_layout="BTNH",
+          return_residual=True,
+      )
+    elif self._needs_packed_masking(decoder_segment_ids, model_mode):
+      # Packed sequences: causal attention must not cross segment boundaries.
+      # cuDNN consumes packing as per-segment seqlens/offsets (THD ragged
+      # format), which cuDNN only accepts on Hopper+ (the pre-Hopper fallback
+      # lives at the apply_attention dispatch).
+      seqlens, offsets = self._segment_ids_to_seqlens_offsets(decoder_segment_ids)
+      output, lse = dot_product_attention(
+          query,
+          key,
+          value,
+          q_seqlen=seqlens,
+          kv_seqlen=seqlens,
+          q_offsets=offsets,
+          kv_offsets=offsets,
+          mask_type=MaskType.PADDING_CAUSAL,
           scale=1.0,
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
