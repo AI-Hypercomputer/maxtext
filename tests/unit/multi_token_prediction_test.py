@@ -314,6 +314,29 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     self.assertGreater(mtp_loss_for_logging, 0.0)
     self.assertFalse(jnp.isnan(mtp_loss_for_logging).any())
 
+  def test_packed_segment_ids_are_binary_loss_weights(self):
+    """Packed target segment IDs must not become numerical MTP weights."""
+    packed_target_segmentation = jnp.array([[1, 1, 2, 2, 3, 3, 0, 0]], dtype=jnp.int32)
+    packed_target_segmentation = jnp.repeat(packed_target_segmentation, self.batch_size, axis=0)
+
+    _ = self.test_model(
+        main_hidden_state=self.main_hidden_state,
+        input_ids=self.input_ids,
+        target_ids=self.target_ids,
+        target_mask=packed_target_segmentation,
+        position_ids=self.position_ids,
+        decoder_segment_ids=self.decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
+    weights = nnx.state(self.test_model).mtp_block.weights[...]
+
+    # Each MTP layer shifts once more to the left. Starting from six valid
+    # targets, the two layers therefore have five and four valid positions per
+    # example, regardless of whether their packed segment IDs are 1, 2, or 3.
+    expected_weights = jnp.array([5, 4], dtype=jnp.float32) * self.batch_size
+    np.testing.assert_array_equal(weights, expected_weights)
+
 
 class TestRollAndMask(unittest.TestCase):
   """Test class for utility functions supporting Roll and Mask."""
