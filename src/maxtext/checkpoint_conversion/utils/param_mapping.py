@@ -1742,15 +1742,22 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     else:
       # HF -> JAX
       if "glm" in maxtext_config.model_name.lower():
+        if input_tensor.ndim == 3:
+          t_tensor = input_tensor.transpose(0, 2, 1)
+          return t_tensor.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_nope_head_dim + v_head_dim)
         return input_tensor.T.reshape(input_tensor.shape[1], num_heads, qk_nope_head_dim + v_head_dim)
       # input_tensor: [num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]
       # target_shape: [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
-      t_tensor = input_tensor.T
+      t_tensor = input_tensor.transpose(0, 2, 1) if input_tensor.ndim == 3 else input_tensor.T
       split_idx = num_heads * qk_nope_head_dim
-      k_nope_weight = t_tensor[:, :split_idx]
-      value_weight = t_tensor[:, split_idx:]
-      k_nope_weight = k_nope_weight.reshape(t_tensor.shape[0], num_heads, qk_nope_head_dim)
-      value_weight = value_weight.reshape(t_tensor.shape[0], num_heads, v_head_dim)
+      k_nope_weight = t_tensor[..., :split_idx]
+      value_weight = t_tensor[..., split_idx:]
+      if input_tensor.ndim == 3:
+        k_nope_weight = k_nope_weight.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_nope_head_dim)
+        value_weight = value_weight.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, v_head_dim)
+      else:
+        k_nope_weight = k_nope_weight.reshape(t_tensor.shape[0], num_heads, qk_nope_head_dim)
+        value_weight = value_weight.reshape(t_tensor.shape[0], num_heads, v_head_dim)
       return np.concatenate([k_nope_weight, value_weight], axis=-1)
 
   def reshape_wq_b_kernel(input_tensor, target_shape):
@@ -1767,6 +1774,8 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     if saving_to_hf:
       # JAX -> HF
       if "glm" in maxtext_config.model_name.lower():
+        if input_tensor.ndim == 4: # [q_lora_rank, L, num_heads, head_dim_sum]
+          return input_tensor.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * (qk_nope_head_dim + qk_rope_head_dim)).transpose(1, 2, 0)
         return input_tensor.reshape(input_tensor.shape[0], num_heads * (qk_nope_head_dim + qk_rope_head_dim)).T
       q_nope, q_rope = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
       q_nope = q_nope.reshape(input_tensor.shape[0], num_heads * qk_nope_head_dim)
@@ -1776,13 +1785,20 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     else:
       # HF -> JAX
       if "glm" in maxtext_config.model_name.lower():
+        if input_tensor.ndim == 3:
+          t_tensor = input_tensor.transpose(0, 2, 1)
+          return t_tensor.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_nope_head_dim + qk_rope_head_dim)
         return input_tensor.T.reshape(input_tensor.shape[1], num_heads, qk_nope_head_dim + qk_rope_head_dim)
-      t_tensor = input_tensor.T
+      t_tensor = input_tensor.transpose(0, 2, 1) if input_tensor.ndim == 3 else input_tensor.T
       split_idx = num_heads * qk_nope_head_dim
-      q_nope_weight = t_tensor[:, :split_idx]
-      q_rope_weight = t_tensor[:, split_idx:]
-      q_nope_weight = q_nope_weight.reshape(t_tensor.shape[0], num_heads, qk_nope_head_dim)
-      q_rope_weight = q_rope_weight.reshape(t_tensor.shape[0], num_heads, qk_rope_head_dim)
+      q_nope_weight = t_tensor[..., :split_idx]
+      q_rope_weight = t_tensor[..., split_idx:]
+      if input_tensor.ndim == 3:
+        q_nope_weight = q_nope_weight.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_nope_head_dim)
+        q_rope_weight = q_rope_weight.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_rope_head_dim)
+      else:
+        q_nope_weight = q_nope_weight.reshape(t_tensor.shape[0], num_heads, qk_nope_head_dim)
+        q_rope_weight = q_rope_weight.reshape(t_tensor.shape[0], num_heads, qk_rope_head_dim)
       return np.concatenate([q_nope_weight, q_rope_weight], axis=-1)
 
   def reshape_indexer_wq_b_kernel(input_tensor, target_shape):
