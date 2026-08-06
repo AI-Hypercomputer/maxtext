@@ -204,13 +204,11 @@ class MaxTextVllmSampler(VllmSampler):
 
     del filter_types
 
-    # delete kv_cache
+    # Reset prefix cache for fresh rollouts without destroying KV cache allocation
     if self.llm is not None:
       self.llm.reset_prefix_cache()
-      self.llm.collective_rpc("delete_kv_cache")  # will free hbm
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
-      self._driver.llm_engine.collective_rpc("delete_kv_cache")
 
     # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
     gc.collect()
@@ -230,41 +228,35 @@ class MaxTextVllmSampler(VllmSampler):
     else:
       state_dict = self.transformer_state
 
-    if getattr(self.config, "reshard_chunk_size", None) is not None:
-      src_flat = flatten_dict(vllm_state)
-      spec_flat = flatten_dict(state_dict)
+    chunk_size = getattr(self.config, "reshard_chunk_size", None) or 128
+    src_flat = flatten_dict(vllm_state)
+    spec_flat = flatten_dict(state_dict)
 
-      resharded_flat = _reshard_in_chunks(
-          src_flat,
-          spec_flat,
-          reshard.reshard_pytree,
-          getattr(self.config, "reshard_chunk_size", None),
-          getattr(self.config, "delete_dst_buffers", False),
-      )
-      resharded_weights = unflatten_dict(resharded_flat)
-    else:
-      resharded_weights = reshard.reshard_pytree(
-          source=vllm_state,
-          target=state_dict,
-      )
+    resharded_flat = _reshard_in_chunks(
+        src_flat,
+        spec_flat,
+        reshard.reshard_pytree,
+        chunk_size,
+        getattr(self.config, "delete_dst_buffers", False),
+    )
+    resharded_weights = unflatten_dict(resharded_flat)
 
     if isinstance(self.transformer_state, nnx.State):
       nnx.update(self.transformer_state, resharded_weights)
     elif hasattr(self.transformer_state, "update"):
       self.transformer_state.update(resharded_weights)
-    elif isinstance(self.transformer_state, dict):
-      self.transformer_state.update(resharded_weights)
-    else:
-      self._model_runner.state = resharded_weights
+    if hasattr(self._model_runner, "state_leaves"):
+      if isinstance(self._model_runner.state, nnx.State):
+        self._model_runner.state_leaves = tuple(
+            jax.tree_util.tree_leaves(self._model_runner.state)
+        )
+      else:
+        self._model_runner.state_leaves = self._model_runner.state
+
     jax.block_until_ready(self.transformer_state)
+    jax.effects_barrier()
     end_time = time.time()
     logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
-
-    # reinitialize kv_cache
-    if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
-    elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
 
     return None
 
@@ -366,7 +358,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         elif isinstance(maxtext_config.vllm_additional_config, dict):
             additional_config = maxtext_config.vllm_additional_config
 
-    self._sampler = VllmSampler(
+    self._sampler = MaxTextVllmSampler(
         tokenizer=tokenizer,
         config=VllmConfig(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
             mesh=mesh,

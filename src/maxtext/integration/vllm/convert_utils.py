@@ -56,11 +56,11 @@ def _reshard_in_chunks(
 ) -> Dict[tuple, Any]:
     """Batches resharding into chunks to prevent XLA contiguous memory fragmentation."""
     resharded_flat = {}
-    keys = list(spec_flat.keys())
+    keys = [k for k in src_flat.keys() if k in spec_flat]
     
     for i in range(0, len(keys), chunk_size):
         chunk_keys = keys[i : i + chunk_size]
-        src_chunk = {k: src_flat[k] for k in chunk_keys if k in src_flat}
+        src_chunk = {k: src_flat[k] for k in chunk_keys}
         spec_chunk = {k: spec_flat[k] for k in chunk_keys}
         
         if delete_dst_buffers:
