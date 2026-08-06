@@ -1142,6 +1142,59 @@ class DeepseekV4Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
 deepseek4_284b_config = DeepseekV4Config(**deepseek4_284b_dict)
 
 
+# Hy3 (Tencent Hunyuan V3, https://huggingface.co/tencent/Hy3)
+# transformers ships a native HYV3Config; fall back to a raw-dict PTConfig for
+# older pinned versions that predate it (same pattern as Gemma 4 above).
+try:
+  HYV3Config = transformers.HYV3Config  # pyrefly: ignore[missing-attribute]
+except AttributeError:
+
+  class HYV3Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
+    model_type = "hy_v3"
+
+    def __init__(self, **kwargs):
+      self.max_position_embeddings = kwargs.get("max_position_embeddings", 262144)
+      super().__init__(**kwargs)
+
+
+hy3_295b_config = HYV3Config(
+    architectures=["HYV3ForCausalLM"],
+    attention_bias=False,
+    attention_dropout=0.0,
+    bos_token_id=120000,
+    eos_token_id=120025,
+    pad_token_id=120002,
+    head_dim=128,
+    hidden_act="silu",
+    hidden_size=4096,
+    intermediate_size=13312,
+    initializer_range=0.006,
+    max_position_embeddings=262144,
+    model_type="hy_v3",
+    moe_intermediate_size=1536,
+    expert_hidden_dim=1536,
+    first_k_dense_replace=1,
+    moe_router_enable_expert_bias=True,
+    moe_router_use_sigmoid=True,
+    route_norm=True,
+    router_scaling_factor=2.826,
+    num_attention_heads=64,
+    num_key_value_heads=8,
+    num_experts=192,
+    num_experts_per_tok=8,
+    num_shared_experts=1,
+    num_hidden_layers=80,
+    num_nextn_predict_layers=1,
+    qk_norm=True,
+    rms_norm_eps=1e-05,
+    rope_parameters={"rope_theta": 11158840.0, "rope_type": "default"},
+    tie_word_embeddings=False,
+    torch_dtype="bfloat16",
+    use_cache=True,
+    vocab_size=120832,
+)
+
+
 # from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
 gpt_oss_20b_dict = {
@@ -1925,6 +1978,7 @@ HF_MODEL_CONFIGS = {
     "deepseek3-671b": deepseek3_671b_config,
     "deepseek3.2-671b": deepseek32_671b_config,
     "deepseek4-284b": deepseek4_284b_config,
+    "hy3-295b": hy3_295b_config,
     "gpt-oss-20b": gpt_oss_20b_config,
     "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,
