@@ -1774,8 +1774,10 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     if saving_to_hf:
       # JAX -> HF
       if "glm" in maxtext_config.model_name.lower():
-        if input_tensor.ndim == 4: # [q_lora_rank, L, num_heads, head_dim_sum]
-          return input_tensor.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * (qk_nope_head_dim + qk_rope_head_dim)).transpose(1, 2, 0)
+        if input_tensor.ndim == 4:  # [q_lora_rank, L, num_heads, head_dim_sum]
+          return input_tensor.reshape(
+              input_tensor.shape[0], input_tensor.shape[1], num_heads * (qk_nope_head_dim + qk_rope_head_dim)
+          ).transpose(1, 2, 0)
         return input_tensor.reshape(input_tensor.shape[0], num_heads * (qk_nope_head_dim + qk_rope_head_dim)).T
       q_nope, q_rope = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
       q_nope = q_nope.reshape(input_tensor.shape[0], num_heads * qk_nope_head_dim)
