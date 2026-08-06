@@ -54,11 +54,10 @@ python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DI
     max_prefill_predict_length=1024 \
     max_target_length=2048 \
     steps=5 \
-    scan_layers=true \
-    async_checkpointing=False \
-    attention=\'dot_product\' \
-    dataset_type=hf hf_path=parquet \
-    hf_train_files=gs://aireenmei-multipod/dataset/hf/chartqa/train-* \
+    scan_layers=false async_checkpointing=False \
+    attention=dot_product \
+    dataset_type=grain grain_file_type=parquet \
+    grain_train_files=gs://aireenmei-multipod/dataset/hf/chartqa/train-* \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/multimodal/sft \
     load_parameters_path=${MULTIMODAL_SCANNED_CKPT_PATH} \
     dtype=bfloat16 \
