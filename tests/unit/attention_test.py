@@ -45,9 +45,12 @@ from maxtext.layers.attention_mla import MLA
 from maxtext.layers import attention_op
 from maxtext.layers.attention_op import (
     AttentionOp,
+    BlockCausalMask,
     ChunkedCausalMask,
+    _generate_block_causal_attention_mask,
     _generate_chunk_attention_mask,
     _make_bidirectional_block_mask,
+    _resolve_attention_type,
 )
 from maxtext.layers.attentions import Attention
 from maxtext.layers import embeddings
@@ -331,6 +334,327 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+class BlockCausalMaskTest(unittest.TestCase):
+  """Tests the shared dense and Splash block-causal masks."""
+
+  def _make_op(self, sequence_length, *, attention_type=AttentionType.BLOCK_DIFFUSION):
+    """Builds a minimal dot-product attention operator."""
+    config = types.SimpleNamespace(
+        causal_block_size=4,
+        context_parallel_load_balance=False,
+        context_sharding="context",
+    )
+    mesh = types.SimpleNamespace(shape={})
+    kwargs = {}
+    if attention_type is not None:
+      kwargs["attention_type"] = attention_type
+    return AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=sequence_length,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        **kwargs,
+    )
+
+  def _make_flash_op(
+      self,
+      *,
+      attention_type=AttentionType.BLOCK_DIFFUSION,
+      context_parallel_size=1,
+      context_parallel_load_balance=False,
+  ):
+    """Builds a minimal flash-attention operator for dispatch tests."""
+    config = types.SimpleNamespace(
+        causal_block_size=4,
+        context_parallel_strategy="all_gather",
+        context_parallel_load_balance=context_parallel_load_balance,
+        context_sharding="context",
+        sa_block_q=4,
+        sa_block_kv=4,
+        sa_block_kv_compute=4,
+        sa_block_q_dkv=4,
+        sa_block_kv_dkv=4,
+        sa_block_kv_dkv_compute=4,
+        sa_block_q_dq=4,
+        sa_block_kv_dq=4,
+        sa_use_fused_bwd_kernel=True,
+        sa_q_layout="HEAD_DIM_MINOR",
+        sa_k_layout="HEAD_DIM_MINOR",
+        sa_v_layout="HEAD_DIM_MINOR",
+        use_splash_scheduler=False,
+        sa_fuse_reciprocal=False,
+        sa_use_base2_exp=False,
+        use_tokamax_splash=False,
+        use_jax_splash=False,
+    )
+    device = types.SimpleNamespace(platform="cpu")
+    mesh = types.SimpleNamespace(
+        devices=np.asarray([device], dtype=object),
+        shape={"context": context_parallel_size},
+    )
+    return AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=8,
+        mesh=mesh,
+        attention_kernel="flash",
+        attention_type=attention_type,
+    )
+
+  def test_dense_and_splash_masks_match(self):
+    sequence_length = 10
+    block_size = 4
+    query_positions = np.arange(sequence_length)[:, None]
+    key_positions = np.arange(sequence_length)[None, :]
+    expected = query_positions // block_size >= key_positions // block_size
+
+    splash_mask = BlockCausalMask((sequence_length, sequence_length), block_size)
+    dense_mask = _generate_block_causal_attention_mask((sequence_length, sequence_length), block_size)
+
+    np.testing.assert_array_equal(splash_mask[:, :], expected)
+    np.testing.assert_array_equal(dense_mask, expected)
+    self.assertTrue(expected[1, 3])
+    self.assertFalse(expected[3, 4])
+    self.assertTrue(expected[4, 3])
+    self.assertTrue(expected[8, 9])
+
+  def test_splash_mask_equality_and_hash(self):
+    mask = BlockCausalMask((8, 8), 4)
+    equivalent_mask = BlockCausalMask((8, 8), 4)
+
+    self.assertEqual(mask, equivalent_mask)
+    self.assertEqual(hash(mask), hash(equivalent_mask))
+    self.assertNotEqual(mask, object())
+
+  def test_rectangular_dense_mask_respects_query_offset(self):
+    dense_mask = _generate_block_causal_attention_mask(
+        mask_shape=(3, 8),
+        causal_block_size=4,
+        q_offset=2,
+    )
+    query_positions = np.arange(2, 5)[:, None]
+    key_positions = np.arange(8)[None, :]
+    expected = query_positions // 4 >= key_positions // 4
+
+    np.testing.assert_array_equal(dense_mask, expected)
+
+  def test_dot_product_mask_respects_segment_boundaries(self):
+    sequence_length = 12
+    query = jnp.zeros((1, sequence_length, 1, 8))
+    key = jnp.zeros((1, sequence_length, 1, 8))
+    segment_ids = jnp.asarray([[1] * 8 + [2] * 4], dtype=jnp.int32)
+
+    mask = self._make_op(sequence_length).generate_attention_mask(
+        query,
+        key,
+        segment_ids,
+        MODEL_MODE_TRAIN,
+    )
+
+    positions = np.arange(sequence_length)
+    expected = (positions[:, None] // 4 >= positions[None, :] // 4) & (
+        np.asarray(segment_ids[0])[:, None] == np.asarray(segment_ids[0])[None, :]
+    )
+    np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected)
+
+  def test_dot_product_mask_uses_original_load_balanced_positions(self):
+    sequence_length = 8
+    positions = jnp.asarray([[0, 1, 6, 7, 2, 3, 4, 5]], dtype=jnp.int32)
+    query = jnp.zeros((1, sequence_length, 1, 8))
+    key = jnp.zeros((1, sequence_length, 1, 8))
+    segment_ids = jnp.ones((1, sequence_length), dtype=jnp.int32)
+    config = types.SimpleNamespace(
+        causal_block_size=4,
+        context_parallel_load_balance=True,
+        context_sharding="context",
+    )
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=sequence_length,
+        mesh=types.SimpleNamespace(shape={"context": 2}),
+        attention_kernel="dot_product",
+        attention_type=AttentionType.BLOCK_DIFFUSION,
+    )
+
+    mask = op.generate_attention_mask(
+        query,
+        key,
+        segment_ids,
+        MODEL_MODE_TRAIN,
+        segment_positions=positions,
+    )
+
+    expected = np.asarray(positions[0])[:, None] // 4 >= np.asarray(positions[0])[None, :] // 4
+    np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected)
+
+  def test_autoregressive_mask_is_unchanged(self):
+    key_length = 8
+    query = jnp.zeros((1, 1, 1, 8))
+    key = jnp.zeros((1, key_length, 1, 8))
+    segment_ids = jnp.asarray([[1, 1, 0, 1, 0, 0, 1, 0]], dtype=jnp.int32)
+
+    default_mask = self._make_op(key_length, attention_type=None).generate_attention_mask(
+        query,
+        key,
+        segment_ids,
+        MODEL_MODE_AUTOREGRESSIVE,
+    )
+    block_diffusion_mask = self._make_op(key_length).generate_attention_mask(
+        query,
+        key,
+        segment_ids,
+        MODEL_MODE_AUTOREGRESSIVE,
+    )
+
+    np.testing.assert_array_equal(block_diffusion_mask, default_mask)
+    np.testing.assert_array_equal(
+        np.asarray(default_mask == 0.0)[0, 0, 0, 0],
+        np.asarray(segment_ids[0] == DECODING_ACTIVE_SEQUENCE_INDICATOR),
+    )
+
+  def test_invalid_block_size_raises(self):
+    with self.assertRaises(ValueError):
+      BlockCausalMask((4, 4), 0)
+    with self.assertRaises(ValueError):
+      _generate_block_causal_attention_mask((4, 4), -1)
+
+  def test_attention_op_rejects_invalid_block_diffusion_configuration(self):
+    kwargs = {
+        "num_query_heads": 1,
+        "num_kv_heads": 1,
+        "max_target_length": 8,
+        "mesh": types.SimpleNamespace(shape={}),
+        "attention_type": AttentionType.BLOCK_DIFFUSION,
+    }
+
+    with self.assertRaisesRegex(ValueError, "causal_block_size must be positive"):
+      AttentionOp(
+          config=types.SimpleNamespace(causal_block_size=0),
+          attention_kernel="dot_product",
+          **kwargs,
+      )
+    with self.assertRaisesRegex(ValueError, "supported only by dot_product attention"):
+      AttentionOp(
+          config=types.SimpleNamespace(causal_block_size=4),
+          attention_kernel="paged",
+          **kwargs,
+      )
+
+  def test_flash_attention_dispatch_on_non_tpu(self):
+    query = jnp.zeros((1, 8, 1, 8))
+    block_op = self._make_flash_op()
+
+    with self.assertRaisesRegex(ValueError, "supported only by TPU Splash"):
+      block_op.apply_attention(
+          query,
+          query,
+          query,
+          decoder_segment_ids=None,
+          segment_positions=None,
+          lengths=None,
+          model_mode=MODEL_MODE_TRAIN,
+          qk_product_einsum=jnp.einsum,
+          wv_product_einsum=jnp.einsum,
+      )
+
+    global_op = self._make_flash_op(attention_type=AttentionType.GLOBAL)
+    expected = (query, None, None)
+    with mock.patch.object(global_op, "apply_attention_dot", return_value=expected) as apply_dot:
+      actual = global_op.apply_attention(
+          query[:, :1],
+          query,
+          query,
+          decoder_segment_ids=None,
+          segment_positions=None,
+          lengths=None,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          qk_product_einsum=jnp.einsum,
+          wv_product_einsum=jnp.einsum,
+      )
+
+    self.assertIs(actual, expected)
+    apply_dot.assert_called_once()
+
+  def test_tpu_splash_selects_block_causal_masks(self):
+    query = jnp.zeros((1, 8, 1, 8))
+    cases = (
+        (AttentionType.BLOCK_DIFFUSION, 1, False, BlockCausalMask),
+        (AttentionType.BLOCK_DIFFUSION, 2, True, attention_op.LoadBalancedBlockCausalMask),
+        (AttentionType.GLOBAL, 2, True, attention_op.LoadBalancedCausalMask),
+    )
+
+    for attention_type, cp_size, load_balanced, expected_mask_type in cases:
+      with self.subTest(attention_type=attention_type, cp_size=cp_size):
+        op = self._make_flash_op(
+            attention_type=attention_type,
+            context_parallel_size=cp_size,
+            context_parallel_load_balance=load_balanced,
+        )
+        with (
+            mock.patch.object(AttentionOp, "_logical_to_mesh_axes", return_value=None),
+            mock.patch.object(
+                attention_op.splash_attention_mask,
+                "MultiHeadMask",
+                side_effect=RuntimeError("mask captured"),
+            ) as make_multi_head_mask,
+            self.assertRaisesRegex(RuntimeError, "mask captured"),
+        ):
+          op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+
+        selected_mask = make_multi_head_mask.call_args.kwargs["masks"][0]
+        self.assertIsInstance(selected_mask, expected_mask_type)
+
+
+class AttentionTypeResolutionTest(unittest.TestCase):
+
+  def test_config_selects_block_diffusion_without_model_dispatch(self):
+    config = types.SimpleNamespace(attention_type=AttentionType.BLOCK_DIFFUSION.value)
+
+    self.assertEqual(_resolve_attention_type(config, None), AttentionType.BLOCK_DIFFUSION)
+    self.assertEqual(_resolve_attention_type(config, AttentionType.GLOBAL), AttentionType.BLOCK_DIFFUSION)
+    self.assertEqual(_resolve_attention_type(config, AttentionType.FULL), AttentionType.FULL)
+    self.assertEqual(_resolve_attention_type(config, AttentionType.LOCAL_SLIDING), AttentionType.LOCAL_SLIDING)
+    self.assertEqual(
+        _resolve_attention_type(types.SimpleNamespace(attention_type=AttentionType.GLOBAL.value), AttentionType.FULL),
+        AttentionType.FULL,
+    )
+    self.assertEqual(_resolve_attention_type(types.SimpleNamespace(), None), AttentionType.GLOBAL)
+
+  def test_attention_op_honors_config_without_overriding_specialized_layers(self):
+    config = types.SimpleNamespace(
+        attention_type=AttentionType.BLOCK_DIFFUSION.value,
+        causal_block_size=4,
+    )
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=8,
+        mesh=types.SimpleNamespace(shape={}),
+        attention_kernel="dot_product",
+        attention_type=AttentionType.GLOBAL,
+    )
+
+    self.assertEqual(op.attention_type, AttentionType.BLOCK_DIFFUSION)
+
+    full_op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=8,
+        mesh=types.SimpleNamespace(shape={}),
+        attention_kernel="dot_product",
+        attention_type=AttentionType.FULL,
+    )
+
+    self.assertEqual(full_op.attention_type, AttentionType.FULL)
+
+
 class LoadBalancedMaskTest(unittest.TestCase):
   """Tests for load-balanced Splash masks."""
 
@@ -370,6 +694,20 @@ class LoadBalancedMaskTest(unittest.TestCase):
     )
 
     np.testing.assert_array_equal((causal_mask & chunk_mask)[:, :], expected_mask)
+
+  def test_load_balanced_block_causal_mask(self):
+    sequence_length = 8
+    block_size = 2
+    mask = attention_op.LoadBalancedBlockCausalMask(
+        shape=(sequence_length, sequence_length),
+        causal_block_size=block_size,
+        cp_size=2,
+    )
+    query_positions = mask.q_sequence[:, None]
+    key_positions = np.arange(sequence_length)[None, :]
+    expected = query_positions // block_size >= key_positions // block_size
+
+    np.testing.assert_array_equal(mask[:, :], expected)
 
   def test_dot_product_local_mask_uses_segment_positions(self):
     config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")

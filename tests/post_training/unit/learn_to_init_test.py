@@ -243,6 +243,7 @@ class ApplyLtiModificationTest(unittest.TestCase):
     mock_config.max_target_length = 32
     mock_config.max_prefill_predict_length = 32
     mock_config.attention = "dot_product"
+    mock_config.attention_type = "global"
     mock_config.dropout_rate = 0.0
     mock_config.float32_qk_product = False
     mock_config.float32_logits = False
