@@ -313,4 +313,58 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     return res_out + post_out, metadata
 
 
+class DeepSeek4HyperHead(nnx.Module):
+  """DeepSeek V4 Hyper Head for collapsing hyper-connection streams."""
 
+  def __init__(self, config: Config, rngs: nnx.Rngs):
+    self.config = config
+    self.hc_mult = config.mhc_expansion_rate
+    self.eps = getattr(config, "hc_eps", 1e-6)
+    self.dtype = config.dtype
+    self.weight_dtype = config.weight_dtype
+    self.matmul_precision = jax.lax.Precision(config.matmul_precision)
+
+    self.input_norm = RMSNorm(
+        num_features=self.hc_mult * config.emb_dim,
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        with_scale=False,
+        rngs=rngs,
+    )
+
+    scale_init = nd_dense_init(1.0, "fan_in", "normal")
+    self.hc_fn = nnx.Param(
+        scale_init(
+            rngs.params(),
+            (self.hc_mult * config.emb_dim, self.hc_mult),
+            self.weight_dtype,
+            in_axis=0,
+            out_axis=1,
+        ),
+        out_sharding=(None, None),
+    )
+
+    self.hc_base = nnx.Param(
+        default_bias_init(rngs.params(), (self.hc_mult,), self.weight_dtype),
+        out_sharding=(None,),
+    )
+    self.hc_scale = nnx.Param(
+        default_scalar_init(rngs.params(), (1,), self.weight_dtype),
+        out_sharding=(None,),
+    )
+
+  def __call__(self, x: Array) -> Array:
+    b, s, k, d = x.shape
+    flat = jnp.reshape(x, (b, s, k * d))
+    flat = self.input_norm(flat)
+
+    hc_fn = jnp.asarray(self.hc_fn[...], self.dtype)
+    hc_base = jnp.asarray(self.hc_base[...], self.dtype)
+    hc_scale = jnp.asarray(self.hc_scale[...], self.dtype)
+
+    mixes = jnp.einsum("bsm,mn -> bsn", flat, hc_fn, precision=self.matmul_precision)
+    pre = jax.nn.sigmoid(mixes * hc_scale + hc_base) + self.eps
+
+    return jnp.sum(jnp.expand_dims(pre, axis=-1) * x, axis=2).astype(self.dtype)
