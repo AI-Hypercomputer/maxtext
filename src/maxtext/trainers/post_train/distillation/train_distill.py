@@ -43,6 +43,7 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import re
 import os
@@ -789,7 +790,10 @@ def train_distill(
     # batches instead: one training step consumes gradient_accumulation_steps of them, and a
     # resumed run has already spent some.
     grad_accum = train_config.get_with_default("gradient_accumulation_steps", 1)
-    batch_budget = max(0, student_config.steps * grad_accum - trainer._iter_steps)  # pylint: disable=protected-access
+    iter_steps = getattr(trainer, "_iter_steps", 0)
+    if not isinstance(iter_steps, (int, float, np.integer)):
+      iter_steps = 0
+    batch_budget = max(0, student_config.steps * grad_accum - int(iter_steps))  # pylint: disable=protected-access
     max_logging.log(f"Distillation will run at most {batch_budget} more batches ({student_config.steps} steps).")
     train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter, max_batches=batch_budget)
 
