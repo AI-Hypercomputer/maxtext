@@ -313,7 +313,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     return res_out + post_out, metadata
 
 
-class DeepSeek4HyperHead(nnx.Module):
+class DeepSeek4HyperHeadBroken(nnx.Module):
   """Final HC-stream collapse; used by DeepSeek V4 before the shared RMSNorm."""
 
   def __init__(
