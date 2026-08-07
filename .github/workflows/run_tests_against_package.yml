@@ -217,11 +217,41 @@ jobs:
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split
-            if [ "${INPUTS_DEVICE_TYPE}" = "tpu" ]; then
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP}"
-            else
+            if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
               $PYTHON_EXE -m pip install --quiet pytest-xdist
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto --splitting-algorithm least_duration"
+            else
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} --splitting-algorithm least_duration"
+            fi
+            # Remove any existing .test_durations to ensure we don't use stale data
+            rm -f .test_durations per_test_baseline.json
+
+            CANDIDATE_URLS=(
+              "https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/dev/bench/per_test_baseline.json"
+            )
+            if [ "${{ github.repository }}" != "AI-Hypercomputer/maxtext" ]; then
+              CANDIDATE_URLS+=("https://raw.githubusercontent.com/AI-Hypercomputer/maxtext/gh-pages/dev/bench/per_test_baseline.json")
+            fi
+
+            DOWNLOADED=false
+            for URL in "${CANDIDATE_URLS[@]}"; do
+              echo "Attempting to download test durations from: ${URL}"
+              if curl -sSf "${URL}" -o per_test_baseline.json; then
+                echo "Successfully downloaded baseline durations from: ${URL}"
+                DOWNLOADED=true
+                break
+              fi
+            done
+
+            if [ "$DOWNLOADED" = true ]; then
+              if $PYTHON_EXE tools/dev/convert_durations.py per_test_baseline.json .test_durations --flavor "${{ inputs.flavor }}"; then
+                echo "Successfully converted durations to .test_durations"
+              else
+                echo "Warning: Failed to convert durations. Falling back to default split."
+              fi
+              rm -f per_test_baseline.json
+            else
+              echo "Warning: Historical test durations unavailable. Falling back to default split."
             fi
           else
             SPLIT_ARGS=""
