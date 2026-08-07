@@ -27,6 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from orbax import checkpoint
+import orbax.checkpoint as ocp
 
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
@@ -732,7 +733,7 @@ class MaxTextCheckpointManager(post_train_checkpointing.MaxTextLayoutCheckpointM
 
   def restore_iterator(self):
     """Restores the iterator using MaxText's logic."""
-    if self._checkpointer is None or self._iterator is None:
+    if self._checkpoint_manager is None or self._iterator is None:
       return None
 
     step = self.latest_step()
@@ -745,9 +746,11 @@ class MaxTextCheckpointManager(post_train_checkpointing.MaxTextLayoutCheckpointM
       data_iter = self._iterator
       local_iter = data_iter.local_iterator if hasattr(data_iter, "local_iterator") else data_iter
 
-      self._checkpointer.load_checkpointables(
+      self._checkpoint_manager.restore(
           step,
-          {"iter": grain_utility.GrainCheckpointable(restore_args=grain_utility.GrainCheckpointRestore(item=local_iter))},
+          args=ocp.args.Composite(
+              iter=grain_utility.GrainCheckpointRestore(item=local_iter),
+          ),
       )
       # Since Grain restores in-place via set_state(), we return the original object
       return self._iterator
