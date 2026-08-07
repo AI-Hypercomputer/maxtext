@@ -58,6 +58,59 @@ class MockConfig:
   use_iota_embed: bool = False
 
 
+class _FakeIterator:
+  """Minimal resettable iterator for reorder-view tests."""
+
+  def __init__(self, batches):
+    self._batches = batches
+    self._index = 0
+    self.reset_calls = 0
+
+  def __next__(self):
+    batch = self._batches[self._index]
+    self._index += 1
+    return batch
+
+  def reset(self):
+    self.reset_calls += 1
+    self._index = 0
+
+
+class TestReorderedDataIterator(unittest.TestCase):
+  """Tests for the load-balanced CP reorder view."""
+
+  # pylint: disable=protected-access
+
+  def test_reorders_batches_and_forwards_reset(self):
+    inner = _FakeIterator([1, 2])
+    wrapped = train_utils._ReorderedDataIterator(lambda batch: batch * 10, inner)
+
+    self.assertEqual(next(wrapped), 10)
+    self.assertEqual(next(wrapped), 20)
+    self.assertIs(iter(wrapped), wrapped)
+    wrapped.reset()
+    self.assertEqual(inner.reset_calls, 1)
+    self.assertEqual(next(wrapped), 10)
+
+  def test_loader_view_wraps_single_iterator(self):
+    inner = _FakeIterator([1])
+    view = train_utils._reorder_data_iterator_for_loader(lambda batch: batch * 10, inner)
+
+    self.assertIsInstance(view, train_utils._ReorderedDataIterator)
+    self.assertIs(view.data_iterator, inner)
+
+  def test_loader_view_wraps_each_list_element(self):
+    inners = [_FakeIterator([1]), _FakeIterator([2])]
+    view = train_utils._reorder_data_iterator_for_loader(lambda batch: batch * 10, inners)
+
+    self.assertIsInstance(view, list)
+    self.assertEqual(len(view), 2)
+    for wrapped, inner in zip(view, inners):
+      self.assertIsInstance(wrapped, train_utils._ReorderedDataIterator)
+      self.assertIs(wrapped.data_iterator, inner)
+    self.assertEqual(next(view[1]), 20)
+
+
 class TestValidateTrainConfig(unittest.TestCase):
   """Tests for validate_train_config."""
 
