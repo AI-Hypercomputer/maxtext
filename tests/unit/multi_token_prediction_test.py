@@ -946,6 +946,8 @@ class TestRollAndMaskBySegmentWithCp(unittest.TestCase):
     self.assertEqual(result.shape, (B, T, F))
     self.assertTrue(jnp.all(result[:, 7, :] == 0), "Boundary position should be all-zero")
     self.assertTrue(jnp.all(result[:, 15, :] == 0), "Last position should be all-zero")
+
+
 class CrossEntropyWithIntegerLabelsTest(unittest.TestCase):
   """Unit tests verifying _cross_entropy_with_integer_labels alignment."""
 
