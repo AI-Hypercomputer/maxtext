@@ -575,6 +575,7 @@ logical_axis_rules: [
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
                       # Dense Activations
+                      ['segment_ids_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_mlp', ['tensor', 'tensor_sequence']],
                       # Note activation batch and length also get used in vocab
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
