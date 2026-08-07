@@ -2,13 +2,13 @@
   "Activation Sharding Dump": [
     {
       "attentions/inputs_q: bfloat16[192,2048,2880]": {
-        "logic_axes": "('activation_batch_attn', 'activation_length_attn', 'activation_embed_attn')",
+        "logic_axes": "('activation_batch_attn', 'activation_input_length_attn', 'activation_embed_attn')",
         "PartitionSpec": "P('fsdp', None, None)"
       }
     },
     {
       "attentions/inputs_kv: bfloat16[192,2048,2880]": {
-        "logic_axes": "('activation_batch_attn', 'activation_length_attn', 'activation_embed_attn')",
+        "logic_axes": "('activation_batch_attn', 'activation_input_length_attn', 'activation_embed_attn')",
         "PartitionSpec": "P('fsdp', None, None)"
       }
     },
