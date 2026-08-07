@@ -331,7 +331,7 @@ def run_agent_workflow(context: dict, failure_log: str):
           tools=analyst_tools,
           temperature=0.2,
           response_mime_type="application/json",
-          automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=15),
+          automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=35),
       ),
   )
   analyst_response = _send_message_with_retry(analyst_chat, analyst_prompt)
@@ -384,7 +384,7 @@ def run_agent_workflow(context: dict, failure_log: str):
   except Exception as e:
     logger.warning(f"Overseer surveillance loop skipped ({e}). Proceeding with primary plan...")
 
-  max_agent_calls = int(os.environ.get("MAX_AGENT_CALLS", "15"))
+  max_agent_calls = int(os.environ.get("MAX_AGENT_CALLS", "35"))
 
   remediation_level = plan_json.get("remediation_level", "level_2_code")
   config_overrides = plan_json.get("config_overrides", {})
@@ -537,30 +537,4 @@ def run_agent_workflow(context: dict, failure_log: str):
 
 
 if __name__ == "__main__":
-    # print("Agent ready. To run as a Cloud Run Job, this should be invoked by the poller.")
-    
-    # Mock trigger for local testing
-    import os
-    print("Running agent locally with mock context...")
-    
-    mock_context = {
-        "remediation_key": "local-test-run-001",
-        "maxtext_branch": "main",
-        "maxtext_model_name": "gemma2-2b",
-        "airflow_dag_id": "dag_verify_forward_compile",
-        "maxtext_overrides": {"clip_logits_epsilon": "1e-8"}
-    }
-    
-    # Check if a mock failure log exists, otherwise use a default string
-    mock_log_path = "mock_failure_log.txt"
-    if os.path.exists(mock_log_path):
-        with open(mock_log_path, "r") as f:
-            log = f.read()
-    else:
-        log = "ValueError: Shape Mismatch in embedding layer. Expected (1024, 2048), got (1024, 4096)."
-        # Optionally write it out so the user can edit it later
-        with open(mock_log_path, "w") as f:
-            f.write(log)
-    
-    # Run the agent locally
-    run_agent_workflow(mock_context, log)
+  print("Agent ready. To run as a Cloud Run Job, this should be invoked by the poller.")
