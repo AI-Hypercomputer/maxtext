@@ -8,6 +8,8 @@ import os
 import subprocess
 import csv
 
+from maxtext.utils.globals import HF_IDS
+
 MODELS = [
     "llama3.1-8b",
     "gemma3-4b",
@@ -143,6 +145,12 @@ def run_matrix():
           cmd.extend(
               [f"tokenizer_path={hf_model_name}", "tokenizer_type=huggingface", f"vllm_hf_config_path={hf_model_name}"]
           )
+
+        if action == "dpo":
+          # DPO reads dataset_type=hf, whose pipeline tokenizes through AutoTokenizer. That cannot
+          # open MaxText's own tokenizer assets, so name the HF repo for the model instead.
+          cmd = [c for c in cmd if not c.startswith("tokenizer_path=") and not c.startswith("tokenizer_type=")]
+          cmd.extend([f"tokenizer_path={HF_IDS[model]}", "tokenizer_type=huggingface"])
 
         if load_path:
           cmd.append(f"load_parameters_path={load_path}")
