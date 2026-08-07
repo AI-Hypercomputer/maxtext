@@ -413,7 +413,10 @@ class MultiTokenPredictionBlock(nnx.Module):
     # Rolling variables move prediction window one token to the right per iteration.
     rolled_input_ids = input_ids
     rolled_target_ids = target_ids
-    rolled_target_mask = target_mask
+    # Packed datasets use positive integer segment IDs (1, 2, ...) in
+    # targets_segmentation. MTP consumes this value as a loss/metric mask, so
+    # normalize it to binary validity before rolling
+    rolled_target_mask = target_mask != 0
     rolled_position_id = position_ids
     # Track segment boundaries for segment-aware rolling.
     # decoder_segment_ids itself is NOT rolled when passed to each MTP layer --
