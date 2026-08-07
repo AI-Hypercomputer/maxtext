@@ -780,7 +780,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       # Reshape GDN output and apply gated norm + out projection.
       gdn_output = gdn_output.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
-      gdn_output = checkpoint_name(gdn_output, "context")
+      gdn_output = nn.with_logical_constraint(gdn_output, ("activation_batch", "activation_norm_length", "activation_heads", "activation_kv"))
+      gdn_output = checkpoint_name(gdn_output, "gdn_output")
       gated_output = self.norm(gdn_output, z)
       gated_output = gated_output.reshape(batch, seq_len, -1)
       output = self.out_proj(gated_output)
@@ -1079,7 +1080,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
 
-    core_attn_out = checkpoint_name(core_attn_out, "context")
+    core_attn_out = nn.with_logical_constraint(core_attn_out, ("activation_batch", "activation_norm_length", "activation_heads", "activation_kv"))
 
     # =========================================================================
     # STEP D: Final Output Stage
@@ -1093,9 +1094,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Reshape back to a single feature dimension for the final projection.
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
     gated_output = gated_output_reshaped.reshape(batch, seq_len, -1)
+    gated_output = nn.with_logical_constraint(gated_output, ("activation_batch", "activation_norm_length", "activation_embed"))
+    gated_output = checkpoint_name(gated_output.astype(gated_output.dtype), "context")
 
     # Final output shape: (B, S, E)
-    output = self.out_proj(gated_output)
+    output = checkpoint_name(self.out_proj(gated_output).astype(gated_output.dtype), "out_proj")
 
     return output, active_cache
 
@@ -1404,46 +1407,23 @@ class Qwen3NextScannableBlock(nnx.Module):
         remat=remat,
         remat_policy=self.remat_policy_fn if remat else None,
         prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config) if remat else True,
+        unroll=self.num_local,
     )
 
   def _scan_global_layer(self, y, layer_kwargs):
-    """Runs the single global-attention layer inside a length-1 ``jax.lax.scan``."""
-    cfg = self.config
-    graphdef_g, intermediate_g, other_g = nnx.split(self.global_layer, nnx.Intermediate, ...)
-    intermediate_xs = jax.tree.map(lambda x: x[None], intermediate_g)
-
-    def run_global_layer(carry, intermediate_slice):
-      hidden_states, other = carry
-      layer = nnx.merge(graphdef_g, intermediate_slice, other)
-      new_hidden_states = self._run_layer(layer, hidden_states, layer_kwargs)[0]
-      _, new_intermediate, new_other = nnx.split(layer, nnx.Intermediate, ...)
-      return (new_hidden_states, new_other), new_intermediate
-
-    global_remat_policy = self.remat_policy_fn
-    offload_names = maxtext_utils.get_save_and_offload_names(cfg)
-    if offload_names[0] or offload_names[1]:
-      save_names, offload_to_device = offload_names
-      global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
+    """Runs the single global-attention layer with rematerialization policy."""
+    def run_global_layer(layer, hidden_states):
+      return self._run_layer(layer, hidden_states, layer_kwargs)[0]
 
     if self._remat_enabled:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
       run_global_layer = jax.checkpoint(
           run_global_layer,
-          policy=global_remat_policy,
+          policy=self.remat_policy_fn,
           prevent_cse=prevent_cse,
       )
 
-    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
-      (y, final_other), stacked_intermediate = jax.lax.scan(
-          run_global_layer,
-          (y, other_g),
-          intermediate_xs,
-          length=1,
-      )
-
-    intermediate_state = jax.tree.map(lambda x: x[0], stacked_intermediate)
-    nnx.update(self.global_layer, final_other, intermediate_state)
-    return y
+    return run_global_layer(self.global_layer, y)
 
   def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs):
     """Runs the block with externally-supplied per-layer kv caches (vLLM PagedAttention / Mamba)."""
@@ -1494,7 +1474,6 @@ class Qwen3NextScannableBlock(nnx.Module):
   ) -> tuple[Array, None]:
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
-    inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     layer_kwargs = {
         "decoder_segment_ids": decoder_segment_ids,
@@ -1614,6 +1593,8 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
+
+    inputs = checkpoint_name(inputs.astype(inputs.dtype), "decoder_layer_input")
 
     if self.is_mhc_enabled:
       mhc_expand, mhc_reduce = mhc.get_functions(self.config.mhc_expansion_rate)
@@ -1807,7 +1788,7 @@ class AttentionWithNorm(nnx.Module):
   ):
     """Applies self-attention with pre and post-layer normalization."""
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
-    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    inputs = checkpoint_name(inputs.astype(inputs.dtype), "decoder_layer_input")
     # Pre attention norm
     lnx = self.pre_self_attention_layer_norm(inputs)
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
@@ -2086,9 +2067,9 @@ class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
       hidden = hidden_unmerged.reshape(batch_size, num_blocks, tokens_per_block * base_hidden_size)
 
     # MLP: Linear -> GELU -> Linear
-    hidden = self.mlp_0(hidden)
+    hidden = checkpoint_name(self.mlp_0(hidden).astype(hidden.dtype), "mlpwi")
     hidden = jax.nn.gelu(hidden)
-    hidden = self.mlp_2(hidden)
+    hidden = checkpoint_name(self.mlp_2(hidden).astype(hidden.dtype), "mlpwo")
 
     return hidden
 

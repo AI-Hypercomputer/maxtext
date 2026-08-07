@@ -2283,7 +2283,7 @@ class NNXDecoder(nnx.Module):
           *layer_args,
           length=scan_length,
           kv_caches_stacked=grouped_kv_caches,
-          skip_block_remat=True,
+          skip_block_remat=False,
           unroll=block_unroll,
           **layer_kwargs,
       )

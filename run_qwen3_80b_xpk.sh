@@ -2,31 +2,32 @@
 set -e
 
 # Activate Python virtual environment
-source /usr/local/google/home/chengnuojin/.venv/bin/activate
+source /usr/local/google/home/mohitkhatwani/max_venv/bin/activate
 
 # --- Environment Variables ---
 export PROJECT_ID="tpu-prod-env-one-vm"
 export CLUSTER_NAME="bodaborg-v6e-256-lcscld-c"
 export ZONE="southamerica-west1-a"
+export RESERVATION="cloudtpu-20260403233500-277635160"
 
 # --- Configuration & Automated Image Build ---
 TIMESTAMP=$(date +%m%d%H%M%S)
-export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:chengnuojin_${TIMESTAMP}"
-export WORKLOAD_NAME="chengnuojin-qn80b-${TIMESTAMP}"
+export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:mohitkhatwani_${TIMESTAMP}"
+export WORKLOAD_NAME="mohitkhatwani-qn80b-${TIMESTAMP}"
 export DEVICE_TYPE="v6e-256"
 export NUM_SLICES=1
 export PRIORITY="very-high"
 export NUM_STEPS=15
 export MODEL_NAME="qwen3-next-80b-a3b"
-export BASE_OUTPUT_DIR="gs://chengnuojin-maxtext-logs/qwen3-next-80b-profiles/run-${TIMESTAMP}"
+export BASE_OUTPUT_DIR="gs://chengnuojin-maxtext-logs/qwen3-next-80b-profiles/run-mohit-${TIMESTAMP}"
 
 echo "========================================================================"
-echo "Building and uploading Docker runner image from /usr/local/google/home/chengnuojin/maxtext"
+echo "Building and uploading Docker runner image from /usr/local/google/home/mohitkhatwani/maxtext_optoff"
 echo "Target Image: ${WORKLOAD_IMAGE}"
 echo "========================================================================"
 
 (
-  cd /usr/local/google/home/chengnuojin/maxtext && \
+  cd /usr/local/google/home/mohitkhatwani/maxtext_optoff && \
   if ! docker image inspect maxtext_base_image &> /dev/null; then
     echo "Local image 'maxtext_base_image' not found. Pulling gcr.io/tpu-prod-env-one-vm/param3_21jul:latest and tagging as maxtext_base_image..."
     docker pull gcr.io/tpu-prod-env-one-vm/param3_21jul:latest
@@ -74,13 +75,13 @@ XLA_FLAGS_ARRAY=(
   "--xla_tpu_enable_ilp_latency_hiding_scheduler=true"
   "--xla_tpu_enable_all_experimental_scheduler_features=true"
   "--xla_tpu_enable_scheduler_memory_pressure_tracking=true"
-  "--xla_tpu_host_transfer_overlap_limit=4"
+  "--xla_tpu_host_transfer_overlap_limit=1"
   "--xla_tpu_aggressive_opt_barrier_removal=ENABLED"
   "--xla_lhs_prioritize_async_depth_over_stall=ENABLED"
   "--xla_tpu_enable_ag_backward_pipelining=true"
   "--xla_should_allow_loop_variant_parameter_in_chain=ENABLED"
   "--xla_should_add_loop_invariant_op_in_chain=ENABLED"
-  "--xla_max_concurrent_host_send_recv=100"
+  "--xla_max_concurrent_host_send_recv=2"
   "--xla_tpu_scheduler_percent_shared_memory_limit=150"
 )
 export XLA_FLAGS="${XLA_FLAGS_ARRAY[*]}"
@@ -106,7 +107,8 @@ MAXTEXT_ARGS_ARRAY=(
   "ragged_buffer_factor=1.5"
   "remat_policy=custom"
   "reuse_example_batch=1"
-  "decoder_layer_input=device"
+  "decoder_layer_input=offload"
+  "context=offload"
   "ici_fsdp_parallelism=-1"
   "steps=20"
   "sa_block_q=1024"
@@ -160,7 +162,7 @@ MAXTEXT_ARGS_ARRAY=(
   "profiler_steps=2"
   "skip_first_n_steps_for_profiler=2"
   "enable_tpu_profiling_options=True"
-  "upload_all_profiler_results=False"
+  "upload_all_profiler_results=True"
 )
 MAXTEXT_ARGS="${MAXTEXT_ARGS_ARRAY[*]}"
 
@@ -176,10 +178,11 @@ python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml ${M
 # --- XPK Workload Creation ---
 echo "Creating XPK workload: ${WORKLOAD_NAME} on cluster: ${CLUSTER_NAME}"
 
-PYTHONPATH=/usr/local/google/home/chengnuojin/xpk/src python3 -m xpk.main workload create \
+PYTHONPATH=/usr/local/google/home/mohitkhatwani/xpk/src /usr/local/google/home/mohitkhatwani/max_venv/bin/python3 -m xpk.main workload create \
   --cluster="${CLUSTER_NAME}" \
   --project="${PROJECT_ID}" \
   --zone="${ZONE}" \
+  --reservation="${RESERVATION}" \
   --priority="${PRIORITY}" \
   --max-restarts="${MAX_RESTARTS}" \
   --device-type="${DEVICE_TYPE}" \

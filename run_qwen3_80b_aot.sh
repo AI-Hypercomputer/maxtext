@@ -1,8 +1,16 @@
 #!/bin/bash
 set -e
 
-# Activate Python virtual environment (~/.venv)
-source /usr/local/google/home/chengnuojin/.venv/bin/activate
+# Activate Python virtual environment
+if [ -z "${VIRTUAL_ENV}" ]; then
+  if [ -f "/usr/local/google/home/mohitkhatwani/max_venv/bin/activate" ]; then
+    source /usr/local/google/home/mohitkhatwani/max_venv/bin/activate
+  elif [ -f "/mnt/data/workspace/max_venv/bin/activate" ]; then
+    source /mnt/data/workspace/max_venv/bin/activate
+  elif [ -f "/home/mohitkhatwani_google_com/workspace/max_venv/bin/activate" ]; then
+    source /home/mohitkhatwani_google_com/workspace/max_venv/bin/activate
+  fi
+fi
 
 # Execute in a subshell to ensure environment recovery automatically
 (
@@ -24,7 +32,7 @@ source /usr/local/google/home/chengnuojin/.venv/bin/activate
   "--xla_tpu_offload_gather_to_sparsecore=true"
   "--xla_tpu_dvfs_p_state=7"
   "--xla_tpu_disable_sparse_core_collective_offload_remover=true"
-  "--xla_tpu_use_tc_device_shape_on_sc=true"
+  "--xla_tpu_use_tc_device_shape_on_sc=false"
   "--xla_sc_enable_instruction_fusion=false"
   "--xla_sc_disable_megacore_partitioning=true"
   "--xla_tpu_enable_async_collective_fusion=true"
@@ -41,13 +49,13 @@ source /usr/local/google/home/chengnuojin/.venv/bin/activate
   "--xla_tpu_enable_ilp_latency_hiding_scheduler=true"
   "--xla_tpu_enable_all_experimental_scheduler_features=true"
   "--xla_tpu_enable_scheduler_memory_pressure_tracking=true"
-  "--xla_tpu_host_transfer_overlap_limit=4"
-  "--xla_tpu_aggressive_opt_barrier_removal=ENABLED"
+  "--xla_tpu_host_transfer_overlap_limit=1"
+  "--xla_tpu_aggressive_opt_barrier_removal=DISABLED"
   "--xla_lhs_prioritize_async_depth_over_stall=ENABLED"
   "--xla_tpu_enable_ag_backward_pipelining=true"
   "--xla_should_allow_loop_variant_parameter_in_chain=ENABLED"
   "--xla_should_add_loop_invariant_op_in_chain=ENABLED"
-  "--xla_max_concurrent_host_send_recv=100"
+  "--xla_max_concurrent_host_send_recv=2"
   "--xla_tpu_scheduler_percent_shared_memory_limit=150"
 )
   export LIBTPU_INIT_ARGS="${XLA_FLAGS_ARRAY[*]}"
@@ -56,6 +64,7 @@ source /usr/local/google/home/chengnuojin/.venv/bin/activate
   export PYTHONPATH=$PWD/src:$PWD/src/maxtext/src:$PYTHONPATH
   export JAX_PLATFORMS='cpu'
   export ENABLE_PJRT_COMPATIBILITY='true'
+  export XLA_FLAGS="--xla_dump_to=/tmp/xla_dump --xla_dump_hlo_as_text=true --xla_dump_hlo_as_proto=false --xla_dump_hlo_module_re=.*"
 
   # --- 3. Configuration ---
   TIMESTAMP=$(date +%m%d%H%M%S)
@@ -89,7 +98,8 @@ source /usr/local/google/home/chengnuojin/.venv/bin/activate
     "ragged_buffer_factor=1.5"
     "remat_policy=custom"
     "reuse_example_batch=1"
-    "decoder_layer_input=device"
+    "decoder_layer_input=offload"
+    "context=device"
     "ici_fsdp_parallelism=-1"
     "steps=15"
     "sa_q_layout=SEQ_MINOR"
@@ -112,24 +122,6 @@ source /usr/local/google/home/chengnuojin/.venv/bin/activate
     "sa_use_fused_bwd_kernel=True"
     "sparse_matmul=True"
     "megablox=True"
-    "wi_tile_fwd_batch_seq=128"
-    "wi_tile_dlhs_batch_seq=128"
-    "wi_tile_drhs_batch_seq=128"
-    "wo_tile_fwd_batch_seq=128"
-    "wo_tile_dlhs_batch_seq=128"
-    "wo_tile_drhs_batch_seq=128"
-    "wi_tile_fwd_embed_dim=3072"
-    "wi_tile_fwd_mlp_dim=1536"
-    "wi_tile_dlhs_embed_dim=3072"
-    "wi_tile_dlhs_mlp_dim=1536"
-    "wi_tile_drhs_embed_dim=3072"
-    "wi_tile_drhs_mlp_dim=1536"
-    "wo_tile_fwd_embed_dim=3072"
-    "wo_tile_fwd_mlp_dim=1536"
-    "wo_tile_dlhs_embed_dim=3072"
-    "wo_tile_dlhs_mlp_dim=1536"
-    "wo_tile_drhs_embed_dim=3072"
-    "wo_tile_drhs_mlp_dim=1536"
     "use_tokamax_gmm=True"
     "use_gmm_v2=True"
     "optimizer_memory_host_offload=False"

@@ -118,15 +118,20 @@ def _run_tokamax_fused_fwd(
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
 ):
-    if jax.default_backend() != "tpu":
-        return pure_jax_fused_conv1d_gdn(
-            qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
-            num_k_heads=num_k_heads, num_v_heads=num_v_heads, head_k_dim=head_k_dim, head_v_dim=head_v_dim,
-            conv_kernel_size=conv_kernel_size, chunk_size=chunk_size, use_qk_norm_in_gdn=use_qk_norm_in_gdn, compute_dtype=compute_dtype,
-        )
+    try:
+      try:
+        from tokamax._src.ops.experimental.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+      except ImportError:
+        from tokamax._src.ops.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+    except Exception:
+      tokamax_gdn_wrapper = None
 
-    # When on TPU, invoke Tokamax GDN v3 fused_conv1d_gdn kernel
-    from tokamax._src.ops.experimental.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+    if tokamax_gdn_wrapper is None:
+      return pure_jax_fused_conv1d_gdn(
+          qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
+          num_k_heads=num_k_heads, num_v_heads=num_v_heads, head_k_dim=head_k_dim, head_v_dim=head_v_dim,
+          conv_kernel_size=conv_kernel_size, chunk_size=chunk_size, use_qk_norm_in_gdn=use_qk_norm_in_gdn, compute_dtype=compute_dtype,
+      )
     batch_size, seq_len, dim_size = qkv.shape
     num_seqs = batch_size
 
