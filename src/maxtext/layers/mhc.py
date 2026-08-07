@@ -313,4 +313,22 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     return res_out + post_out, metadata
 
 
+from maxtext.layers import linears
 
+
+class DeepSeek4HyperHead(linears.DenseGeneral):
+  """DeepSeek V4 HyperHead for projecting expanded hidden states."""
+
+  def __init__(self, config: Config, mesh: Mesh, rngs: nnx.Rngs):
+    super().__init__(
+        in_features_shape=config.mhc_expansion_rate * config.emb_dim,
+        out_features_shape=config.emb_dim,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("mlp", "embed"),
+        rngs=rngs,
+    )
+
+  def __call__(self, x):
+    b, l, k, d = x.shape
+    x = jnp.reshape(x, (b, l, k * d))
+    return super().__call__(x)
