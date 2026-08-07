@@ -1784,6 +1784,7 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
       mrope_section: tuple[int, int, int] | None = None,
+      partial_rotary_factor: float = 1.0,
       attention_scaling: float = 1.0,
       rngs: nnx.Rngs = None,
   ):
@@ -1792,19 +1793,30 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     Args:
       min_timescale: Start of the geometric index (typically 1).
       max_timescale: End of the geometric index (rope_theta, e.g., 1000000).
-      embedding_dims: Dimension of the embedding (head_dim).
+      embedding_dims: Dimension of the attention head.
       cast_as_fprop_dtype: Whether to cast output to fprop dtype.
       fprop_dtype: The dtype of the output.
       mrope_section: Tuple of (temporal_dim, height_dim, width_dim) for MRoPE.
                      Defaults to [24, 20, 20] if None.
+      partial_rotary_factor: Fraction of the head dimensions to rotate. The
+        remaining suffix is passed through unchanged.
       attention_scaling: Scaling factor applied to cos/sin embeddings. Defaults to 1.0.
       rngs: rng keys passed in by nnx.bridge.to_linen.
     """
+    if partial_rotary_factor is None or not 0.0 < partial_rotary_factor <= 1.0:
+      raise ValueError(f"partial_rotary_factor must be in (0, 1], got {partial_rotary_factor}.")
+
+    self.head_dim = embedding_dims
+    self.partial_rotary_factor = partial_rotary_factor
+    self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
+    if self.rotary_dim <= 0 or self.rotary_dim % 2:
+      raise ValueError("Rotary dim for rotary position embedding must be a positive multiple of 2.")
+
     super().__init__(
         min_timescale=min_timescale,
         max_timescale=max_timescale,
         mesh=None,
-        embedding_dims=embedding_dims,
+        embedding_dims=self.rotary_dim,
         cast_as_fprop_dtype=cast_as_fprop_dtype,
         fprop_dtype=fprop_dtype,
         rngs=rngs,
@@ -1812,8 +1824,11 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     self.mrope_section = mrope_section if mrope_section is not None else (24, 20, 20)
     self.attention_scaling = attention_scaling
 
-    if self.embedding_dims % 2:
-      raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
+    if sum(self.mrope_section) != self.rotary_dim // 2:
+      raise ValueError(
+          f"mrope_section must describe rotary_dim / 2 frequencies; got {self.mrope_section} "
+          f"for rotary_dim={self.rotary_dim}."
+      )
 
   def _apply_interleaved_mrope(self, freqs: jax.Array) -> jax.Array:
     """Apply interleaved MRoPE pattern to 3D rotary embeddings.
@@ -1822,16 +1837,16 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     interleaved [THTHWHTHW...], preserving frequency continuity.
 
     Args:
-      freqs: Shape (3, batch, seq_len, head_dim // 2)
+      freqs: Shape (3, batch, seq_len, rotary_dim // 2)
         Dimension 0: temporal frequencies
         Dimension 1: height frequencies
         Dimension 2: width frequencies
 
     Returns:
-      freqs_t: Shape (batch, seq_len, head_dim // 2) with interleaved pattern
+      freqs_t: Shape (batch, seq_len, rotary_dim // 2) with interleaved pattern
     """
     # Start with temporal frequencies (dimension 0)
-    freqs_t = freqs[0]  # (batch, seq_len, head_dim // 2)
+    freqs_t = freqs[0]  # (batch, seq_len, rotary_dim // 2)
 
     # Create interleaved pattern
     # For each spatial dimension (H, W), place frequencies at positions:
@@ -1854,7 +1869,9 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     """Generates rotary position embeddings for multimodal sequences.
 
     Args:
-      inputs: Input tensor of shape [batch, sequence, heads, head_dim].
+      inputs: Input tensor of shape [batch, sequence, heads, head_dim]. MRoPE
+        is applied to the first ``rotary_dim`` features and the rest are
+        returned unchanged.
       position: Position IDs with shape:
         - [batch, sequence] for text-only (2D)
         - [3, batch, sequence] for multimodal with vision (3D)
@@ -1865,9 +1882,9 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     """
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, head_dim].")
-    if self.embedding_dims != inputs.shape[3]:
+    if self.head_dim != inputs.shape[3]:
       raise ValueError(
-          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+          "The head dim of the rotary position embedding must match the hidden dimension of the inputs."
       )
 
     # Handle both 2D (text-only) and 3D (multimodal) position IDs
@@ -1877,25 +1894,27 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     elif position.ndim != 3 or position.shape[0] != 3:
       raise ValueError(f"Position IDs must be 2D (batch, seq) or 3D (3, batch, seq), got shape {position.shape}")
 
-    # Compute frequencies: (3, batch, seq, 1) @ (head_dim // 2, 1) -> (3, batch, seq, head_dim // 2)
-    inv_freq_expanded = (1.0 / self.timescale)[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]  # (1, 1, 1, head_dim//2)
+    # Compute frequencies over the rotated prefix only.
+    inv_freq_expanded = (1.0 / self.timescale)[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
     position_expanded = position[..., jnp.newaxis]  # (3, batch, seq, 1)
-    freqs = position_expanded * inv_freq_expanded  # (3, batch, seq, head_dim//2)
+    freqs = position_expanded * inv_freq_expanded  # (3, batch, seq, rotary_dim // 2)
 
     # Apply interleaved MRoPE pattern for 3D positions
-    freqs = self._apply_interleaved_mrope(freqs)  # (batch, seq, head_dim//2)
+    freqs = self._apply_interleaved_mrope(freqs)  # (batch, seq, rotary_dim // 2)
 
     # Compute sin and cos
-    # Concatenate to get full head_dim: (batch, seq, head_dim//2) -> (batch, seq, head_dim)
-    emb = jnp.concatenate([freqs, freqs], axis=-1)  # Duplicate for both halves
-    cos_emb = jnp.cos(emb) * self.attention_scaling  # (batch, seq, head_dim)
-    sin_emb = jnp.sin(emb) * self.attention_scaling  # (batch, seq, head_dim)
+    # Duplicate frequencies for the two halves of the rotated prefix.
+    emb = jnp.concatenate([freqs, freqs], axis=-1)
+    cos_emb = jnp.cos(emb) * self.attention_scaling
+    sin_emb = jnp.sin(emb) * self.attention_scaling
 
-    # Expand for heads dimension: (batch, seq, head_dim) -> (batch, seq, 1, head_dim)
+    # Expand for the heads dimension.
     cos_emb = cos_emb[:, :, jnp.newaxis, :]
     sin_emb = sin_emb[:, :, jnp.newaxis, :]
 
-    x_out = self.apply_rotary(inputs, cos_emb, sin_emb)
+    inputs_rotary, inputs_pass = jnp.split(inputs, [self.rotary_dim], axis=-1)
+    rotated = self.apply_rotary(inputs_rotary, cos_emb, sin_emb)
+    x_out = jnp.concatenate([rotated, inputs_pass], axis=-1)
 
     if self.cast_as_fprop_dtype:
       x_out = x_out.astype(self.fprop_dtype)
