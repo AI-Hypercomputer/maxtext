@@ -198,12 +198,30 @@ class MultiTokenPredictionLayer(nnx.Module):
         rngs=rngs,
     )
     # Use MODEL_MODE_TRAIN for initialization; runtime model_mode is passed dynamically.
-    self.transformer_layer = transformer_layer_module(
-        config=cfg,
-        mesh=mesh,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=rngs,
-    )
+    if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+      from maxtext.models import deepseek4  # pylint: disable=import-outside-toplevel
+      from maxtext.layers import mhc  # pylint: disable=import-outside-toplevel
+
+      self.transformer_layer = deepseek4.DeepSeek4LayerToLinen(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs=rngs,
+          compress_ratio=0,  # bypass compression, use sliding window
+          is_hash_routing=False,  # not a prefix layer
+      )
+      self.hc_head = mhc.DeepSeek4HyperHead(
+          config=cfg,
+          mesh=mesh,
+          rngs=rngs,
+      )
+    else:
+      self.transformer_layer = transformer_layer_module(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs=rngs,
+      )
 
   @property
   def embedding_norm(self):
@@ -277,6 +295,11 @@ class MultiTokenPredictionLayer(nnx.Module):
       hidden_state_pspec = jax.sharding.NamedSharding(self.mesh, jax.typeof(hidden_state_norm).sharding.spec)
       embedding_norm = jax.reshard(embedding_norm, hidden_state_pspec)
 
+    if self.config.decoder_block == DecoderBlockType.DEEPSEEK4 and self.config.mhc_expansion_rate > 1:
+      # e: (batch, seq, dim), x: (batch, seq, hc, dim)
+      # We need to broadcast e to (batch, seq, hc, dim) before concatenation
+      mhc = self.config.mhc_expansion_rate
+      embedding_norm = jnp.expand_dims(embedding_norm, axis=2).repeat(mhc, axis=2)
     concatenated_features = jnp.concatenate([embedding_norm, hidden_state_norm], axis=-1)
     projected_features = self.projection_layer(concatenated_features)
 
@@ -457,7 +480,12 @@ class MultiTokenPredictionBlock(nnx.Module):
           model_mode=self.decoder.model_mode,
       )
 
-      mtp_logits = self.decoder.apply_output_head(shared_embedding, mtp_hidden_state, deterministic, model_mode)
+      mtp_hidden_state_to_head = mtp_hidden_state
+      if cfg.mhc_expansion_rate > 1 and cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+        mtp_hidden_state_to_head = mtp_layer.hc_head(mtp_hidden_state)
+      mtp_logits = self.decoder.apply_output_head(
+          shared_embedding, mtp_hidden_state_to_head, deterministic, model_mode, reduce_mhc=False
+      )
 
       logits_logical_axes = (
           "activation_embed_and_logits_batch",
