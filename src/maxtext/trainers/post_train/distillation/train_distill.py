@@ -785,7 +785,13 @@ def train_distill(
     trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
 
     # 7. Create Iterator Wrappers (Use Utils)
-    train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
+    # The trainer is managed externally, so Tunix does not enforce max_steps for us. Bound the
+    # batches instead: one training step consumes gradient_accumulation_steps of them, and a
+    # resumed run has already spent some.
+    grad_accum = train_config.get_with_default("gradient_accumulation_steps", 1)
+    batch_budget = max(0, student_config.steps * grad_accum - trainer._iter_steps)  # pylint: disable=protected-access
+    max_logging.log(f"Distillation will run at most {batch_budget} more batches ({student_config.steps} steps).")
+    train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter, max_batches=batch_budget)
 
     eval_iter = None
     if raw_eval_iter is not None:

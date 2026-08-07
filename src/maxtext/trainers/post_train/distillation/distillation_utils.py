@@ -85,13 +85,19 @@ class MaxTextToTunixIterator:
   Tunix expects an object with specific attributes (input_tokens, etc.).
   """
 
-  def __init__(self, maxtext_iterator: Iterator):
+  def __init__(self, maxtext_iterator: Iterator, max_batches: int | None = None):
     """Initializes the adapter.
 
     Args:
       maxtext_iterator: The upstream iterator created by MaxText's input pipeline.
+      max_batches: Batches to yield before stopping, or None for as many as the upstream
+        iterator has. Distillation drives the training loop itself, which makes Tunix skip
+        its own `max_steps` check, so on an endless dataset the run only ends when the
+        batches do.
     """
     self._iterator = maxtext_iterator
+    self._max_batches = max_batches
+    self._batches = 0
 
   def __iter__(self):
     """Returns self as the iterator."""
@@ -104,9 +110,12 @@ class MaxTextToTunixIterator:
       A MaxTextTrainingInput object containing the batch data.
 
     Raises:
-      StopIteration: If the upstream iterator is exhausted.
+      StopIteration: If the upstream iterator is exhausted, or the batch budget is spent.
     """
+    if self._max_batches is not None and self._batches >= self._max_batches:
+      raise StopIteration
     batch = next(self._iterator)
+    self._batches += 1
 
     # Ensure segmentation exists, default to ones if missing (standard non-packed)
     if "inputs_segmentation" in batch:
