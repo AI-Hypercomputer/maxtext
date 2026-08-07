@@ -29,7 +29,12 @@ import optax
 
 import pathwaysutils  # pylint: disable=unused-import
 
-import tensorflow as tf
+try:
+  import tensorflow as tf
+
+  _TF_AVAILABLE = True
+except ImportError:
+  _TF_AVAILABLE = False
 
 import jax
 import jax.numpy as jnp
@@ -943,9 +948,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  # TF allocates extraneous GPU memory when using TFDS data
-  # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
-  tf.config.set_visible_devices([], "GPU")
+  if _TF_AVAILABLE:
+    # TF allocates extraneous GPU memory when using TFDS data
+    # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
+    tf.config.set_visible_devices([], "GPU")
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"

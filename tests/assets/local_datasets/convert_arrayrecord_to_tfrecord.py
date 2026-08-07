@@ -47,7 +47,10 @@ except ModuleNotFoundError:
   print("Error: array_record module not found. Install appropriate package before running.")
   sys.exit(1)
 
-import tensorflow as tf
+try:
+  import tensorflow as tf
+except ImportError:
+  sys.exit("Tensorflow is required. Run `pip install tensorflow`")
 
 
 def discover_shards(version_dir: str, split: str) -> List[str]:

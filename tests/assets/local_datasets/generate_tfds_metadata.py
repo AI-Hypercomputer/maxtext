@@ -28,9 +28,14 @@ After running, you can point TFDS to ``--root`` and load with
 """
 from __future__ import annotations
 import os
+import sys
 import json
 import argparse
-import tensorflow_datasets as tfds  # type: ignore
+
+try:
+  import tensorflow_datasets as tfds  # type: ignore
+except ImportError:
+  sys.exit("tensorflow_datasets is required. Run `pip install tensorflow-datasets`")
 
 
 def write_metadata(root: str, version_dir: str, dataset_version: str, force: bool = False) -> None:

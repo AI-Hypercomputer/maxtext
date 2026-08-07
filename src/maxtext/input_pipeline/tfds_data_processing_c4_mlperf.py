@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Input pipeline for gpt3 c4 mlperf dataset."""
+"""DEPRECATED: Input pipeline for c4 mlperf dataset."""
 
 import functools
 
@@ -20,8 +20,14 @@ import numpy as np
 
 import ml_collections
 
-import tensorflow as tf
-import tensorflow_datasets as tfds
+try:
+  import tensorflow as tf
+  import tensorflow_datasets as tfds
+except ImportError as error:
+  raise ImportError(
+      "TensorFlow and tensorflow-datasets are required. Run `pip install tensorflow tensorflow-datasets`"
+  ) from error
+
 
 import jax
 import jax.numpy as jnp
