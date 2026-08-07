@@ -14,6 +14,7 @@
 
 """Unit tests for post-training checkpointing in MaxText's on-disk layout."""
 
+import contextlib
 import os
 import tempfile
 from types import SimpleNamespace
@@ -445,11 +446,16 @@ class PostTrainCheckpointBaseManagerTest(unittest.TestCase):
         self.close_calls += 1
         super().close()
 
+    patches = [mock.patch.object(ocp, "CheckpointManager", _Tracking)]
+    if hasattr(ocp, "checkpoint_manager") and hasattr(ocp.checkpoint_manager, "CheckpointManager"):
+      patches.append(mock.patch.object(ocp.checkpoint_manager, "CheckpointManager", _Tracking))
+    if hasattr(tunix_checkpoint_manager, "ocp") and hasattr(tunix_checkpoint_manager.ocp, "CheckpointManager"):
+      patches.append(mock.patch.object(tunix_checkpoint_manager.ocp, "CheckpointManager", _Tracking))
+
     with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
-      with (
-          mock.patch.object(orbax.checkpoint.checkpoint_manager, "CheckpointManager", _Tracking),
-          mock.patch.object(ocp, "CheckpointManager", _Tracking),
-      ):
+      with contextlib.ExitStack() as stack:
+        for p in patches:
+          stack.enter_context(p)
         manager = post_train_checkpointing.MaxTextLayoutCheckpointManager(
             root_directory=d,
             options=ocp.CheckpointManagerOptions(save_interval_steps=1),
