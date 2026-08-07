@@ -331,8 +331,8 @@ class DeepSeek4HyperHead(nnx.Module):
     self.weight_dtype = config.weight_dtype
 
     # tid2eid layers
-    self.tid2eid = nnx.List(
-        [
+    self.tid2eid = nnx.Sequential(
+        *[
             linears.DenseGeneral(
                 in_features_shape=self.dim,
                 out_features_shape=self.dim,
@@ -350,7 +350,6 @@ class DeepSeek4HyperHead(nnx.Module):
     x = jnp.sum(x, axis=2, dtype=x.dtype)
 
     # Apply tid2eid layers
-    for layer in self.tid2eid:
-      x = layer(x)
+    x = self.tid2eid(x)
 
     return x
