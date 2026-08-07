@@ -216,6 +216,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         "weight_decay": config.muon_weight_decay,
         "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
         "consistent_rms": getattr(config, "muon_consistent_rms", None),
+        "nesterov_style": getattr(config, "muon_nesterov_style", "sgd"),
         "ns_coeffs": ns_coeffs,
         "ns_steps": ns_steps,
         # AdamW-specific parameters
