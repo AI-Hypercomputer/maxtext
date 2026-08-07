@@ -330,7 +330,7 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
 def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array | None:
   """Extracts the static LHS (activation) scale for the GMM v2 forward pass.
 
-  GMM v2 only supports lhs_scale from symmetric fixed range calibration 
+  GMM v2 only supports lhs_scale from symmetric fixed range calibration
   (Or if lhs_scale is None, calculate dynamic scale internally).
 
   Enforces a default (1, 1) shape for per-tensor quantization kernels.
@@ -365,10 +365,9 @@ def _fwd_run_tokamax_v2(
     group_offset: jnp.ndarray | None,
     partial_sum: jnp.ndarray | None,
     transpose_rhs: bool,
-    quantization_rule: qwix.QtRule,
+    quantization_rule: qwix.QtRule | None = None,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
-  # if transpose_rhs=False, rhs is [g, k, n], remain unchanged
   # if transpose_rhs=True, rhs [g, n, k], explicit transpose to [g, k, n]
   rhs_operand = rhs if not transpose_rhs else rhs.swapaxes(1, 2)
   rhs_scale = None
