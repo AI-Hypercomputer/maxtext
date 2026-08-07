@@ -26,7 +26,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from orbax import checkpoint
 import orbax.checkpoint as ocp
 
 from maxtext.utils import max_logging
@@ -669,7 +668,7 @@ class MaxTextCheckpointManager(post_train_checkpointing.MaxTextLayoutCheckpointM
       raw_iterator: Any | None,
       root_directory: str | None,
       student_config: Any,
-      options: checkpoint.CheckpointManagerOptions | None = None,
+      options: ocp.CheckpointManagerOptions | None = None,
   ):
     super().__init__(
         root_directory=root_directory,
