@@ -34,7 +34,7 @@ import numpy as np
 import pytest
 import torch
 import transformers
-# from datasets import Dataset
+from tests.utils.test_helpers import ensure_tokenizer_downloaded
 
 from trl import GRPOConfig, GRPOTrainer
 
@@ -79,11 +79,11 @@ class GRPOTest(unittest.TestCase):
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.cfg, False, self.rng)
       self.reference_model = None
       self.state, _ = maxtext_utils.setup_decode_state(self.cfg, mesh, None, init_state_fn)
+    tokenizer_path = ensure_tokenizer_downloaded("llama3.1-tokenizer", skip_test_on_failure=True)
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
-        "meta-llama/Llama-3.1-8B",
+        tokenizer_path,
         add_bos_token=False,
         add_eos_token=False,
-        token=self.cfg.hf_access_token,
     )
     self.input_str = "Hello world this is a test"
 

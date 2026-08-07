@@ -21,8 +21,8 @@ from maxtext.trainers.tokenizer import train_tokenizer
 from maxtext.common.gcloud_stub import is_decoupled
 
 import unittest
-import subprocess
 import os
+from tests.utils.test_helpers import ensure_tokenizer_downloaded
 
 
 @unittest.skipIf(is_decoupled(), "Bypassed in offline decoupled runs (no GCS/internet)")
@@ -100,15 +100,8 @@ class HFTokenizerTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    source = "gs://maxtext-gemma/huggingface/gemma2-2b"
-    destination = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers")
-    subprocess.run(
-        ["gcloud", "storage", "cp", "-R", source, destination],
-        check=True,
-    )
-    cls.hf_tokenizer = input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
-    )
+    gemma2_path = ensure_tokenizer_downloaded("gemma2-2b", skip_test_on_failure=False)
+    cls.hf_tokenizer = input_pipeline_utils.get_tokenizer(gemma2_path, "huggingface", add_bos=False, add_eos=False)
     cls.sp_tokenizer = input_pipeline_utils.get_tokenizer(
         os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
     )
