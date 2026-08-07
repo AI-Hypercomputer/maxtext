@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-# Activate Python virtual environment (~/.venv)
-source /usr/local/google/home/chengnuojin/.venv/bin/activate
+# Activate Python virtual environment (~/max_venv)
+source /usr/local/google/home/mohitkhatwani/max_venv/bin/activate
 
 # Execute in a subshell to ensure environment recovery automatically
 (
@@ -56,6 +56,7 @@ source /usr/local/google/home/chengnuojin/.venv/bin/activate
   export PYTHONPATH=$PWD/src:$PWD/src/maxtext/src:$PYTHONPATH
   export JAX_PLATFORMS='cpu'
   export ENABLE_PJRT_COMPATIBILITY='true'
+  export XLA_FLAGS="--xla_dump_to=/tmp/xla_dump --xla_dump_hlo_as_text=true --xla_dump_hlo_as_proto=false --xla_dump_hlo_module_re=.*"
 
   # --- 3. Configuration ---
   TIMESTAMP=$(date +%m%d%H%M%S)
@@ -89,7 +90,7 @@ source /usr/local/google/home/chengnuojin/.venv/bin/activate
     "ragged_buffer_factor=1.5"
     "remat_policy=custom"
     "reuse_example_batch=1"
-    "decoder_layer_input=device"
+    "decoder_layer_input=offload"
     "ici_fsdp_parallelism=-1"
     "steps=15"
     "sa_q_layout=SEQ_MINOR"
