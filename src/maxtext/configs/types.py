@@ -3590,7 +3590,7 @@ class MaxTextConfig(
     if self.use_sft and self.use_dpo:
       raise ValueError("Only one of `use_sft` or `use_dpo` can be True.")
     if self.shard_mode == ShardMode.EXPLICIT:
-      supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek"}
+      supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek", "gemma4"}
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
             f"Decoder '{self.decoder_block.value}' is not supported with 'explicit' sharding. "
