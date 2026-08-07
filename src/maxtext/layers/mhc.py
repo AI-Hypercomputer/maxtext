@@ -25,7 +25,6 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
-from maxtext.layers import linears
 from maxtext.layers.normalizations import RMSNorm
 
 
@@ -314,7 +313,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
 
 
 class DeepSeek4HyperHead(nnx.Module):
-  """DeepSeek V4 Hyper Head."""
+  """Implements DeepSeek4 HyperHead."""
 
   def __init__(
       self,
@@ -323,33 +322,44 @@ class DeepSeek4HyperHead(nnx.Module):
       rngs: nnx.Rngs,
   ):
     self.config = config
-    self.mesh = mesh
+    self.hc_mult = config.mhc_expansion_rate
     self.rngs = rngs
-    self.k = config.mhc_expansion_rate
-    self.dim = config.emb_dim
-    self.dtype = config.dtype
-    self.weight_dtype = config.weight_dtype
+    self.mesh = mesh
+    self.dtype = self.config.dtype
+    self.weight_dtype = self.config.weight_dtype
+    self.eps = 1e-6
 
-    # tid2eid layers
-    self.tid2eid = nnx.Sequential(
-        *[
-            linears.DenseGeneral(
-                in_features_shape=self.dim,
-                out_features_shape=self.dim,
-                dtype=self.dtype,
-                weight_dtype=self.weight_dtype,
-                rngs=self.rngs,
-            )
-            for _ in range(config.first_num_hash_layers)
-        ]
+    self.input_norm = RMSNorm(
+        num_features=self.hc_mult * config.emb_dim,
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=self.rngs,
+    )
+
+    self.hc_fn = nnx.Param(
+        default_scalar_init(self.rngs.params(), (self.hc_mult, self.hc_mult * config.emb_dim), self.weight_dtype),
+        out_sharding=(None, None),
+    )
+    self.hc_base = nnx.Param(
+        default_scalar_init(self.rngs.params(), (self.hc_mult,), self.weight_dtype),
+        out_sharding=(None,),
+    )
+    self.hc_scale = nnx.Param(
+        default_scalar_init(self.rngs.params(), (1,), self.weight_dtype),
+        out_sharding=(None,),
     )
 
   def __call__(self, x: Array) -> Array:
-    # x shape: [batch, seq, expansion_rate, emb]
-    # Reduce expansion_rate dimension
-    x = jnp.sum(x, axis=2, dtype=x.dtype)
+    b, s, k, d = x.shape
+    flat = jnp.reshape(x, (b, s, k * d))
+    flat = self.input_norm(flat)
 
-    # Apply tid2eid layers
-    x = self.tid2eid(x)
+    mixes = jnp.einsum("bsm,nm->bsn", flat, jnp.asarray(self.hc_fn[...], self.dtype))
+    pre = (
+        jax.nn.sigmoid(mixes * jnp.asarray(self.hc_scale[...], self.dtype) + jnp.asarray(self.hc_base[...], self.dtype))
+        + self.eps
+    )
 
-    return x
+    return jnp.sum(x * jnp.expand_dims(pre, axis=3), axis=2)
