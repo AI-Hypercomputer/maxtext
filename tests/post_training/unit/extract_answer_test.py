@@ -14,11 +14,12 @@
 
 """Unit tests for utils_rl.extract_answer (CPU-only).
 
-Covers the two-part contract of the boxed-extraction change:
+Covers the answer-extraction contract:
   1. `\\boxed{N}` is extracted (with/without <answer> tags, nested LaTeX,
      multiple boxed, whitespace, negatives, and answer-tag scoping).
   2. Legacy plain-text answers inside the solution tags still work, so
      existing recipes that do not emit `\\boxed` are unaffected.
+  3. Native thinking-model final prose is scoped after `</think>`.
 """
 
 import unittest
@@ -101,6 +102,67 @@ class ExtractAnswerTest(unittest.TestCase):
   def test_legacy_last_answer_wins(self):
     got = utils_rl.extract_answer("<answer>1</answer> ... <answer>5</answer>", self.config)
     self.assertEqual(got, "5")
+
+  @pytest.mark.cpu_only
+  def test_qwen_native_final_answer_without_custom_tags(self):
+    """Qwen's native post-thinking prose remains scoreable."""
+    config = SimpleNamespace(
+        reasoning_start_token="<think>",
+        reasoning_end_token="</think>",
+        reasoning_start_token_in_prompt=True,
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+    )
+    response = "We calculate 6 * 7.</think>\nThe final answer is 42. do do do"
+
+    self.assertEqual(utils_rl.extract_answer(response, config), "42")
+
+  @pytest.mark.cpu_only
+  def test_qwen_native_final_section_ignores_reasoning_box(self):
+    """An intermediate boxed value must not override the native final answer."""
+    config = SimpleNamespace(
+        reasoning_start_token="<think>",
+        reasoning_end_token="</think>",
+        reasoning_start_token_in_prompt=True,
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+    )
+    response = "Maybe \\boxed{41}, but recalculate.</think>\nThe answer is 42."
+
+    self.assertEqual(utils_rl.extract_answer(response, config), "42")
+
+  @pytest.mark.cpu_only
+  def test_native_final_fallback_does_not_read_reasoning_numbers(self):
+    """An unfinished thinking trace must not leak an intermediate value."""
+    config = SimpleNamespace(
+        reasoning_start_token="<think>",
+        reasoning_end_token="</think>",
+        reasoning_start_token_in_prompt=True,
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+    )
+
+    self.assertEqual(
+        utils_rl.extract_answer("Try 41, then 42", config),
+        utils_rl.FALLBACK_ANSWER,
+    )
+
+  @pytest.mark.cpu_only
+  def test_native_final_fallback_does_not_take_unrelated_trailing_number(self):
+    """Only an explicit conclusion is accepted from native final prose."""
+    config = SimpleNamespace(
+        reasoning_start_token="<think>",
+        reasoning_end_token="</think>",
+        reasoning_start_token_in_prompt=True,
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+    )
+    response = "Work</think>\nI considered 41 and 42, then wrote this in 2026."
+
+    self.assertEqual(
+        utils_rl.extract_answer(response, config),
+        utils_rl.FALLBACK_ANSWER,
+    )
 
   # ---- no answer ----
 

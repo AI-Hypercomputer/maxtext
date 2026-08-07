@@ -213,6 +213,7 @@ math_verify_num_procs: null
 # ====== Special tokens/templates for GSM8K reasoning ======
 reasoning_start_token: '<reasoning>'
 reasoning_end_token: '</reasoning>'
+reasoning_start_token_in_prompt: false
 solution_start_token: '<answer>'
 solution_end_token: '</answer>'
 data_template_path: 'maxtext/examples/chat_templates/gsm8k_rl.json'

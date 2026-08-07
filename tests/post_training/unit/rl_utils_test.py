@@ -128,6 +128,19 @@ class TestMatchFormatApproximatelyScores(unittest.TestCase):
     self.assertEqual(scores[0], 2.0)
     self.assertEqual(scores[1], -2.0)
 
+  @pytest.mark.cpu_only
+  def test_prefilled_reasoning_start_scores_native_completion(self):
+    self.config.reasoning_start_token = "<think>"
+    self.config.reasoning_end_token = "</think>"
+    self.config.reasoning_start_token_in_prompt = True
+    completion = "40 + 2 = 42</think>\n\n<answer>42</answer>"
+
+    self.assertEqual(self._score([completion])[0], 2.0)
+    self.assertEqual(
+        utils_rl.match_format_exactly(None, [completion], self.config)[0],
+        self.config.reward_exact_format_match,
+    )
+
 
 class TestCheckNumbers(unittest.TestCase):
   """Tests for utils_rl.check_numbers.

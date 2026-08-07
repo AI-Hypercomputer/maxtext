@@ -14,19 +14,21 @@
 
 """MaxText-specific VllmSampler and VllmRollout subclasses.
 
-These replace the Tunix built-in key-mapping path with model-specific
-MaxText to vLLM converters, which handle:
+These extend Tunix weight synchronization with both model-specific native-vLLM
+converters and scanned MaxText-to-MaxText state unrolling. The converters handle:
   - QKV fusion with GQA interleaving (attention)
   - MoE expert gate+up fusion (w13_weight chunk-interleaved for TP)
   - MoE gate / down transpose
   - Layer-norm and LM-head transposes
 """
 
-from typing import Any, Optional, Tuple
-
+import copy
 import gc
 import logging
+import re
 import time
+from typing import Any, Optional, Tuple
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -55,6 +57,57 @@ def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mes
   return None
 
 
+def uses_maxtext_vllm_adapter(config: Any) -> bool:
+  """Returns whether vLLM is configured to instantiate MaxTextForCausalLM."""
+  overrides = getattr(config, "vllm_hf_overrides", None)
+  if isinstance(overrides, str):
+    return "MaxTextForCausalLM" in overrides
+  if isinstance(overrides, dict):
+    architectures = overrides.get("architectures", ())
+    if isinstance(architectures, str):
+      architectures = (architectures,)
+    return "MaxTextForCausalLM" in architectures
+  return False
+
+
+def requires_maxtext_scanned_weight_unroll(config: Any) -> bool:
+  """Returns whether direct MaxText-to-MaxText sync needs a custom unroll."""
+  return bool(getattr(config, "scan_layers", False) and uses_maxtext_vllm_adapter(config))
+
+
+def prepare_direct_sync_additional_config(
+    additional_config: Optional[dict[str, Any]],
+    *,
+    direct_maxtext_sync: bool,
+    num_experts: int,
+    tensor_parallel_size: int,
+) -> Optional[dict[str, Any]]:
+  """Makes the direct MaxText MoE target use TPU-safe prefused weights.
+
+  TPU inference shards the fused gate/up dimension across tensor-parallel
+  devices. Each shard must therefore contain its local gate chunk followed by
+  its local up chunk. The unfused MaxText inference path concatenates the two
+  complete tensors globally, which gives incorrect local shards when TP > 1.
+  Tunix's direct-sync MoE fusion builds the required per-shard layout once at
+  weight-load time when the target exposes a prefused ``wi`` parameter.
+  """
+  if not direct_maxtext_sync or num_experts <= 1 or tensor_parallel_size <= 1:
+    return additional_config
+
+  prepared = copy.deepcopy(additional_config) if additional_config is not None else {}
+  maxtext_overrides = prepared.setdefault("maxtext_config", {})
+  if not isinstance(maxtext_overrides, dict):
+    raise ValueError("vLLM additional_config.maxtext_config must be a dictionary for direct MaxText sync.")
+
+  if not maxtext_overrides.get("prefuse_moe_weights", False):
+    logging.info(
+        "MaxTextVllmRollout: enabling prefuse_moe_weights for correct MoE gate/up layout with TP=%d.",
+        tensor_parallel_size,
+    )
+  maxtext_overrides["prefuse_moe_weights"] = True
+  return prepared
+
+
 def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_blocks", "layers_remainder")):
   """Returns (container_idx, container_name) if a scanned layer structure is found, else (-1, None)."""
   for name in container_names:
@@ -62,6 +115,155 @@ def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_block
       if key_tuple[i] == name and isinstance(key_tuple[i + 1], str) and key_tuple[i + 1].startswith("layers_"):
         return i, name
   return -1, None
+
+
+def _find_qwen_scanned_layer_idx(key_tuple):
+  """Finds a Qwen heterogeneous scanned block path like `layers.layer_0`."""
+  for i in range(len(key_tuple) - 1):
+    if key_tuple[i] != "layers" or not isinstance(key_tuple[i + 1], str):
+      continue
+    match = re.fullmatch(r"layer_(\d+)", key_tuple[i + 1])
+    if match:
+      return i, int(match.group(1))
+  return -1, -1
+
+
+def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Optional[int] = None):
+  """Unroll Qwen's heterogeneous scanned blocks for an unscanned MaxText target.
+
+  Qwen 3 Next/3.5 training stores a repeating layer cycle as
+  `decoder.layers.layer_{slot}`, with repetitions stacked on `scan_axis`.
+  The inference model stores every layer as a direct decoder attribute named
+  `layers_{global_index}`. Tunix's generic direct-sync mapper cannot bridge
+  these two structures and otherwise silently leaves all destination layers at
+  their random initialization.
+  """
+  if hasattr(weights, "filter") and hasattr(weights, "to_pure_dict"):
+    # NNX stacks non-parameter state (notably RNG state) on axis 0 even when
+    # parameters use param_scan_axis=1. Only parameters belong in weight sync.
+    pure_dict = weights.filter(nnx.Param).to_pure_dict()
+  elif hasattr(weights, "to_pure_dict"):
+    pure_dict = weights.to_pure_dict()
+  elif hasattr(weights, "to_dict"):
+    pure_dict = weights.to_dict()
+  elif isinstance(weights, dict):
+    pure_dict = weights
+  else:
+    return weights
+
+  flat_w = flatten_dict(pure_dict)
+  scanned_keys = []
+  slot_indices = set()
+  scan_lengths = set()
+  for key, value in flat_w.items():
+    container_idx, slot_idx = _find_qwen_scanned_layer_idx(key)
+    if container_idx == -1 or "dropout" in key or "rngs" in key:
+      continue
+    if not hasattr(value, "shape") or len(value.shape) <= scan_axis:
+      raise ValueError(f"Qwen scanned parameter {'.'.join(key)} has no scan axis {scan_axis}: {value!r}")
+    scanned_keys.append((key, value, container_idx, slot_idx))
+    slot_indices.add(slot_idx)
+    scan_lengths.add(value.shape[scan_axis])
+
+  if not scanned_keys:
+    return weights
+
+  if pattern_length is None:
+    expected_slots = set(range(max(slot_indices) + 1))
+    if slot_indices != expected_slots:
+      raise ValueError(
+          "Qwen scanned layer slots must be contiguous when pattern_length is omitted; "
+          f"found {sorted(slot_indices)}"
+      )
+    pattern_length = len(slot_indices)
+  elif pattern_length <= max(slot_indices):
+    raise ValueError(
+        f"Qwen scanned layer slot {max(slot_indices)} is outside configured pattern length {pattern_length}"
+    )
+  if len(scan_lengths) != 1:
+    raise ValueError(f"Qwen scanned parameters disagree on scan length: {sorted(scan_lengths)}")
+
+  scan_length = scan_lengths.pop()
+  scanned_key_paths = {key for key, _, _, _ in scanned_keys}
+  new_flat_w = {key: value for key, value in flat_w.items() if key not in scanned_key_paths}
+
+  for key, value, container_idx, slot_idx in scanned_keys:
+    prefix = key[:container_idx]
+    suffix = key[container_idx + 2 :]
+    for repetition in range(scan_length):
+      global_idx = repetition * pattern_length + slot_idx
+      new_key = prefix + (f"layers_{global_idx}",) + suffix
+      new_flat_w[new_key] = jnp.take(value, repetition, axis=scan_axis)
+
+  logging.info(
+      "MaxTextVllmSampler: unrolled %d Qwen tensor components across %d layers for direct MaxText weight sync.",
+      len(scanned_keys),
+      scan_length * pattern_length,
+  )
+  return unflatten_dict(new_flat_w)
+
+
+def validate_direct_sync_layer_coverage(source, target) -> int:
+  """Fail if an unrolled source would leave MaxText target layers untouched.
+
+  Tunix intentionally intersects direct-sync trees. For heterogeneous Qwen
+  scans, a schema error can therefore skip every transformer layer without an
+  exception. This check runs on the initial full-parameter load and requires
+  every unscanned target-layer parameter path to exist in the source.
+  """
+
+  def to_pure_params(state):
+    if hasattr(state, "filter") and hasattr(state, "to_pure_dict"):
+      return state.filter(nnx.Param).to_pure_dict()
+    if hasattr(state, "to_pure_dict"):
+      return state.to_pure_dict()
+    if hasattr(state, "to_dict"):
+      return state.to_dict()
+    return state
+
+  def unwrap(state, wrapper):
+    while isinstance(state, dict) and wrapper in state:
+      state = state[wrapper]
+    return state
+
+  source = unwrap(to_pure_params(source), "base")
+  target = unwrap(to_pure_params(target), "model")
+  if not isinstance(source, dict) or not isinstance(target, dict):
+    return 0
+
+  source_flat = flatten_dict(source)
+  target_flat = flatten_dict(target)
+
+  def is_unscanned_layer_path(path):
+    return any(isinstance(part, str) and re.fullmatch(r"layers_\d+", part) for part in path)
+
+  source_layer_keys = {key for key in source_flat if is_unscanned_layer_path(key)}
+  target_layer_keys = {key for key in target_flat if is_unscanned_layer_path(key)}
+
+  def source_covers(target_key):
+    if target_key in source_layer_keys:
+      return True
+    # Tunix fuses split training weights into the inference-only prefused
+    # parameter before transfer. Treat the pair as coverage for target `wi`.
+    if target_key and target_key[-1] == "wi":
+      prefix = target_key[:-1]
+      return prefix + ("wi_0",) in source_layer_keys and prefix + ("wi_1",) in source_layer_keys
+    return False
+
+  missing = {key for key in target_layer_keys if not source_covers(key)}
+  if not target_layer_keys or missing:
+    examples = [".".join(map(str, key)) for key in sorted(missing)[:5]]
+    raise ValueError(
+        "Direct MaxText weight sync would leave rollout transformer parameters at random initialization: "
+        f"matched {len(target_layer_keys) - len(missing)}/{len(target_layer_keys)} target layer parameters; "
+        f"missing examples: {examples}"
+    )
+
+  logging.info(
+      "MaxTextVllmSampler: verified direct-sync coverage for all %d rollout layer parameters.",
+      len(target_layer_keys),
+  )
+  return len(target_layer_keys)
 
 
 def unroll_gemma_scanned_weights(weights):
@@ -158,8 +360,8 @@ class MaxTextVllmSampler(VllmSampler):
 
   When a converter is supplied, update_params bypasses transfer_state_with_mappings
   entirely and instead runs converter.convert() followed by a direct device_put
-  into the vLLM model-runner state dict.  If no converter is supplied the base-class
-  behaviour is preserved, so this class is safe to use as a drop-in replacement.
+  into the vLLM model-runner state dict. If no converter is supplied the base-class
+  path is used after MaxText's heterogeneous scanned states are unrolled.
   """
 
   def __init__(
@@ -167,9 +369,15 @@ class MaxTextVllmSampler(VllmSampler):
       tokenizer: Any,
       config: VllmConfig,
       converter: Any = None,
+      direct_maxtext_sync: bool = False,
+      scan_axis: int = 1,
+      layer_pattern_length: Optional[int] = None,
   ):
     super().__init__(tokenizer=tokenizer, config=config)
     self._converter = converter
+    self._direct_maxtext_sync = direct_maxtext_sync
+    self._scan_axis = scan_axis
+    self._layer_pattern_length = layer_pattern_length
 
   def update_params(
       self,
@@ -178,7 +386,15 @@ class MaxTextVllmSampler(VllmSampler):
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
     if self._converter is None:
-      updated_weights = unroll_gemma_scanned_weights(updated_weights)
+      if self._direct_maxtext_sync:
+        updated_weights = unroll_qwen_scanned_weights(
+            updated_weights,
+            scan_axis=self._scan_axis,
+            pattern_length=self._layer_pattern_length,
+        )
+        updated_weights = unroll_gemma_scanned_weights(updated_weights)
+        if filter_types is None:
+          validate_direct_sync_layer_coverage(updated_weights, self.transformer_state)
       super().update_params(updated_weights, filter_types)
       return None
 
@@ -245,10 +461,10 @@ class MaxTextVllmSampler(VllmSampler):
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
-  """VllmRollout that uses MaxTextVllmSampler for weight synchronisation.
+  """VllmRollout that uses MaxTextVllmSampler for weight synchronization.
 
-  The extra `maxtext_config` argument is forwarded to the model-specific converter
-  together with `mesh`.  All other arguments mirror VllmRollout.__init__.
+  The extra `maxtext_config` selects either a native-vLLM converter or direct
+  MaxText adapter synchronization. All other arguments mirror VllmRollout.__init__.
 
   Usage (direct):
       rollout = MaxTextVllmRollout(
@@ -281,7 +497,15 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     if cache_config_or_size is None:
       cache_config_or_size = rollout_config.kv_cache_size
 
-    converter = _create_model_converter(maxtext_config.model_name, config=maxtext_config, mesh=mesh)
+    # Native vLLM models need explicit MaxText-to-HF conversion. The MaxText
+    # adapter instead has the same tensor layouts as the actor and uses direct
+    # structural sync after scanned layers are unrolled above.
+    direct_maxtext_sync = uses_maxtext_vllm_adapter(maxtext_config)
+    converter = (
+        None
+        if direct_maxtext_sync
+        else _create_model_converter(maxtext_config.model_name, config=maxtext_config, mesh=mesh)
+    )
 
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,
@@ -295,11 +519,23 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         # Async scheduling causes KeyError in dp_scheduler on slow models
         # (30B+) where inference latency exceeds the scheduler's window.
         "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
+        "max_num_batched_tokens": rollout_config.rollout_vllm_max_num_batched_tokens,
+        "max_num_seqs": rollout_config.rollout_vllm_max_num_seqs,
+        "hf_config_path": rollout_config.rollout_vllm_hf_config_path,
+        "max_logprobs": 1,
+        "logprobs_mode": rollout_config.rollout_vllm_logprobs_mode,
     }
 
     # Merge additional kwargs like dtype and hf_overrides provided by train_rl.py
     if hasattr(rollout_config, "rollout_vllm_kwargs") and rollout_config.rollout_vllm_kwargs:
       engine_kwargs.update(rollout_config.rollout_vllm_kwargs)
+
+    rollout_additional_config = prepare_direct_sync_additional_config(
+        getattr(rollout_config, "rollout_vllm_additional_config", None),
+        direct_maxtext_sync=direct_maxtext_sync,
+        num_experts=getattr(maxtext_config, "num_experts", 1),
+        tensor_parallel_size=rollout_config.tensor_parallel_size,
+    )
 
     self._sampler = MaxTextVllmSampler(
         tokenizer=tokenizer,
@@ -311,15 +547,25 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             mapping_config=mapping_config,
             lora_config=rollout_config.rollout_vllm_lora_config,
             server_mode=rollout_config.rollout_vllm_server_mode,
+            server_mode_submission_threshold=rollout_config.rollout_vllm_server_mode_submission_threshold,
+            server_mode_submission_timeout_s=rollout_config.rollout_vllm_server_mode_submission_timeout_s,
+            return_logprobs=rollout_config.return_logprobs,
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
+            expert_parallel_size=rollout_config.expert_parallel_size,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
+            delete_dst_buffers=rollout_config.rollout_vllm_delete_dst_buffers,
+            reshard_chunk_size=rollout_config.rollout_vllm_reshard_chunk_size,
             engine_kwargs=engine_kwargs,
-            additional_config=getattr(rollout_config, "rollout_vllm_additional_config", None),
+            additional_config=rollout_additional_config,
+            sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
         ),
         converter=converter,
+        direct_maxtext_sync=direct_maxtext_sync,
+        scan_axis=getattr(maxtext_config, "param_scan_axis", 1),
+        layer_pattern_length=getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", None),
     )
 
     # Initial weight sync: run the converter so vLLM starts with real weights.
-    state = nnx.state(rollout_actor)
+    state = nnx.state(rollout_actor, nnx.Param)
     self._sampler.load_checkpoint(state)

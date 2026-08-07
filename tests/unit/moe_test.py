@@ -14,6 +14,8 @@
 """Mixture of Experts (MoE) tests."""
 
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 from absl.testing import parameterized
 import pytest
 
@@ -24,7 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import Config, DType
 from maxtext.layers import linears
@@ -435,6 +437,68 @@ def get_moe_loop(
       metadata_fn=variable_to_logically_partitioned,
   )
   return module
+
+
+@pytest.mark.parametrize(
+    ("expert_parallelism", "batch_partition"),
+    (
+        (1, None),
+        (2, ("fsdp", "expert")),
+    ),
+)
+def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(expert_parallelism, batch_partition):
+  """Sparse MoE only replicates batches when expert routing remains local."""
+  fake_moe = SimpleNamespace(
+      config=SimpleNamespace(
+          shard_exp_on_fsdp=False,
+          use_2d_fsdp_sharding=False,
+          model_name="qwen3.5-35b-a3b",
+          check_vma=False,
+          moe_fsdp_use_two_stage_all_gather=False,
+      ),
+      mesh=SimpleNamespace(shape={"fsdp": 32, "expert": expert_parallelism}),
+      rngs=object(),
+      get_expert_parallelism_size=lambda: expert_parallelism,
+  )
+  original_batch_partition = "fsdp" if expert_parallelism == 1 else ("fsdp", "expert")
+  fake_moe._logical_to_mesh_axes = lambda logical_axes: P(
+      *(original_batch_partition if axis == "activation_batch" else None for axis in logical_axes)
+  )
+  fake_moe._maybe_shard_with_pspec = lambda value, _pspec: value
+
+  inputs = SimpleNamespace(shape=(4, 1024, 2048))
+  gate_logits = SimpleNamespace(shape=(4, 1024, 256))
+  w0 = SimpleNamespace(shape=(256, 2048, 512))
+  w1 = SimpleNamespace(shape=(256, 2048, 512))
+  wo = SimpleNamespace(shape=(256, 512, 2048))
+  captured = {}
+
+  def fake_shard_map(function, *, mesh, in_specs, out_specs, check_vma):
+    del function, mesh, check_vma
+    captured["in_specs"] = in_specs
+    captured["out_specs"] = out_specs
+    return lambda x, *_args: (x, None, None)
+
+  with mock.patch.object(jax, "shard_map", side_effect=fake_shard_map):
+    output, _, _ = moe.RoutedMoE.sparse_matmul(
+        fake_moe,
+        inputs,
+        gate_logits,
+        None,
+        w0,
+        w1,
+        wo,
+        None,
+        None,
+        None,
+    )
+
+  assert output is inputs
+  assert captured["in_specs"][0] == P(batch_partition, None, None)
+  assert captured["in_specs"][1] == P(batch_partition, None, None)
+  assert captured["in_specs"][2] is None
+  assert captured["in_specs"][9] is None
+  assert captured["out_specs"][0] == P(batch_partition, None, None)
 
 
 class RoutedMoeTest(parameterized.TestCase):
