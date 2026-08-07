@@ -1731,6 +1731,9 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     if saving_to_hf:
       # JAX -> HF
       if "glm" in maxtext_config.model_name.lower():
+        if input_tensor.ndim == 4:  # [kv_lora_rank, L, num_heads, head_dim]
+          transposed = input_tensor.transpose(1, 2, 3, 0)
+          return transposed.reshape(transposed.shape[0], num_heads * (qk_nope_head_dim + v_head_dim), transposed.shape[-1])
         return input_tensor.reshape(input_tensor.shape[0], num_heads * (qk_nope_head_dim + v_head_dim)).T
       # target_shape: [num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]
       # input_tensor: [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
@@ -1743,8 +1746,9 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       # HF -> JAX
       if "glm" in maxtext_config.model_name.lower():
         if input_tensor.ndim == 3:
-          t_tensor = input_tensor.transpose(0, 2, 1)
-          return t_tensor.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_nope_head_dim + v_head_dim)
+          # input_tensor: [L, Out, In] = [L, num_heads * head_dim, kv_lora_rank]
+          reshaped = input_tensor.reshape(input_tensor.shape[0], num_heads, qk_nope_head_dim + v_head_dim, input_tensor.shape[2])
+          return reshaped.transpose(3, 0, 1, 2)  # [In, L, num_heads, head_dim]
         return input_tensor.T.reshape(input_tensor.shape[1], num_heads, qk_nope_head_dim + v_head_dim)
       # input_tensor: [num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]
       # target_shape: [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
@@ -1775,9 +1779,8 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       # JAX -> HF
       if "glm" in maxtext_config.model_name.lower():
         if input_tensor.ndim == 4:  # [q_lora_rank, L, num_heads, head_dim_sum]
-          return input_tensor.reshape(
-              input_tensor.shape[0], input_tensor.shape[1], num_heads * (qk_nope_head_dim + qk_rope_head_dim)
-          ).transpose(1, 2, 0)
+          transposed = input_tensor.transpose(1, 2, 3, 0)
+          return transposed.reshape(transposed.shape[0], num_heads * (qk_nope_head_dim + qk_rope_head_dim), transposed.shape[-1])
         return input_tensor.reshape(input_tensor.shape[0], num_heads * (qk_nope_head_dim + qk_rope_head_dim)).T
       q_nope, q_rope = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
       q_nope = q_nope.reshape(input_tensor.shape[0], num_heads * qk_nope_head_dim)
@@ -1788,8 +1791,9 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       # HF -> JAX
       if "glm" in maxtext_config.model_name.lower():
         if input_tensor.ndim == 3:
-          t_tensor = input_tensor.transpose(0, 2, 1)
-          return t_tensor.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_nope_head_dim + qk_rope_head_dim)
+          # input_tensor: [L, Out, In] = [L, num_heads * head_dim, q_lora_rank]
+          reshaped = input_tensor.reshape(input_tensor.shape[0], num_heads, qk_nope_head_dim + qk_rope_head_dim, input_tensor.shape[2])
+          return reshaped.transpose(3, 0, 1, 2)  # [In, L, num_heads, head_dim]
         return input_tensor.T.reshape(input_tensor.shape[1], num_heads, qk_nope_head_dim + qk_rope_head_dim)
       t_tensor = input_tensor.transpose(0, 2, 1) if input_tensor.ndim == 3 else input_tensor.T
       split_idx = num_heads * qk_nope_head_dim
