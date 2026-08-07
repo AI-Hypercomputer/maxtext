@@ -170,7 +170,7 @@ def naive_jax_chunk_gated_delta_rule(
 
     return new_last_recurrent_state, core_attn_out_i
 
-  final_state, core_attn_out_stacked = jax.lax.scan(scan_body, last_recurrent_state, xs)
+  final_state, core_attn_out_stacked = jax.lax.scan(scan_body, last_recurrent_state, xs, unroll=0)
 
   core_attn_out = jnp.transpose(core_attn_out_stacked, (1, 2, 0, 3, 4))
   core_attn_out = core_attn_out.reshape(batch_size, num_heads, -1, v_head_dim)
@@ -180,6 +180,57 @@ def naive_jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
+@jax.custom_vjp
+def invert_unit_lower_triangular_log_depth(S):
+  """
+  Computes (I + S)^-1 for a strictly lower triangular matrix S
+  using log-depth Newton-Schulz iterations.
+
+  This is highly optimized for TPUs/GPUs and replaces
+  jax.scipy.linalg.solve_triangular for chunkwise linear attention.
+  """
+  chunk_size = S.shape[-1]
+
+  # Ensure S is strictly lower triangular (zero out diagonal and upper half)
+  # This guarantees mathematical correctness and stability
+  S_strict = jnp.tril(S, k=-1)
+
+  # Base identity matrix
+  identity = jnp.eye(chunk_size, dtype=S.dtype)
+
+  # Initial approximation and error term
+  A = identity - S_strict
+  E = jnp.tril(S_strict @ S_strict, k=-1)
+
+  # Log-depth Taylor series exact computation
+  steps = int(math.ceil(math.log2(chunk_size)))
+  for _ in range(steps - 1):
+    # Update inverse and error using batched matmuls
+    A = jnp.tril(A + A @ E)
+    E = jnp.tril(E @ E, k=-1)
+
+  return A
+
+
+@functools.partial(jax.named_call, name="invert_triangular_fwd")
+def _invert_unit_lower_triangular_log_depth_fwd(S):
+  A = invert_unit_lower_triangular_log_depth(S)
+  return A, A
+
+
+@functools.partial(jax.named_call, name="invert_triangular_bwd")
+def _invert_unit_lower_triangular_log_depth_bwd(res, g):
+  A = res
+  grad_S = jnp.tril(-(A.mT @ g @ A.mT), k=-1)
+  return (grad_S,)
+
+
+invert_unit_lower_triangular_log_depth.defvjp(
+    _invert_unit_lower_triangular_log_depth_fwd, _invert_unit_lower_triangular_log_depth_bwd
+)
+
+
+@functools.partial(jax.named_call, name="jax_chunked_delta_rule")
 def jax_chunk_gated_delta_rule(
     query: Array,
     key: Array,
@@ -264,11 +315,11 @@ def jax_chunk_gated_delta_rule(
   S = S * jnp.exp(g_diff)
   S = jnp.where(mask, S, 0.0)
 
-  # Inversion (A) - Strictly float32
-  identity = jnp.eye(chunk_size, dtype=jnp.float32)
-  identity_broadcasted = jnp.broadcast_to(identity, S.shape)
+  # Cast to float32 explicitly as you were doing before
+  S = S.astype(jnp.float32)
 
-  A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+  # Inversion (A) - Replaces solve_triangular entirely
+  A = invert_unit_lower_triangular_log_depth(S)
 
   # 5. WY Factors
   v_beta = v_c * beta_c[..., None]
