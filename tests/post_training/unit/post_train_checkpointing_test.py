@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import orbax.checkpoint as ocp
+import orbax.checkpoint.checkpoint_manager
 import pytest
 from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 
@@ -444,18 +445,11 @@ class PostTrainCheckpointBaseManagerTest(unittest.TestCase):
         self.close_calls += 1
         super().close()
 
-    import contextlib  # pylint: disable=import-outside-toplevel
-
-    patches = [mock.patch.object(ocp, "CheckpointManager", _Tracking)]
-    if hasattr(ocp, "checkpoint_manager") and hasattr(ocp.checkpoint_manager, "CheckpointManager"):
-      patches.append(mock.patch.object(ocp.checkpoint_manager, "CheckpointManager", _Tracking))
-    if hasattr(tunix_checkpoint_manager, "ocp") and hasattr(tunix_checkpoint_manager.ocp, "CheckpointManager"):
-      patches.append(mock.patch.object(tunix_checkpoint_manager.ocp, "CheckpointManager", _Tracking))
-
     with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
-      with contextlib.ExitStack() as stack:
-        for p in patches:
-          stack.enter_context(p)
+      with (
+          mock.patch.object(orbax.checkpoint.checkpoint_manager, "CheckpointManager", _Tracking),
+          mock.patch.object(ocp, "CheckpointManager", _Tracking),
+      ):
         manager = post_train_checkpointing.MaxTextLayoutCheckpointManager(
             root_directory=d,
             options=ocp.CheckpointManagerOptions(save_interval_steps=1),
