@@ -93,6 +93,7 @@ google-cloud-appengine-logging>=1.10.0
 google-cloud-audit-log>=0.6.0
 google-cloud-bigquery>=3.42.3
 google-cloud-core>=2.6.0
+google-cloud-logging>=3.16.0
 google-cloud-logging>=3.16.1
 google-cloud-mldiagnostics>=1.0.7
 google-cloud-monitoring>=2.31.0
