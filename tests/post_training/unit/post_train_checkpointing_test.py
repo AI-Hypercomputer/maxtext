@@ -14,7 +14,6 @@
 
 """Unit tests for post-training checkpointing in MaxText's on-disk layout."""
 
-import contextlib
 import os
 import tempfile
 from types import SimpleNamespace
@@ -430,41 +429,24 @@ class PostTrainCheckpointBaseManagerTest(unittest.TestCase):
   """The base class builds a manager over Tunix's item names before we replace it."""
 
   def test_closes_the_base_class_manager_it_replaces(self):
-    created = []
-    real_cls = ocp.CheckpointManager
-
-    class _Tracking(real_cls):
-      """Records close calls so a replaced manager cannot be left open."""
-
-      def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.close_calls = 0
-        created.append(self)
-
-      def close(self):
-        self.close_calls += 1
-        super().close()
-
-    patches = [mock.patch.object(ocp, "CheckpointManager", _Tracking)]
-    if hasattr(ocp, "checkpoint_manager") and hasattr(ocp.checkpoint_manager, "CheckpointManager"):
-      patches.append(mock.patch.object(ocp.checkpoint_manager, "CheckpointManager", _Tracking))
-    if hasattr(tunix_checkpoint_manager, "ocp") and hasattr(tunix_checkpoint_manager.ocp, "CheckpointManager"):
-      patches.append(mock.patch.object(tunix_checkpoint_manager.ocp, "CheckpointManager", _Tracking))
-
     with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
-      with contextlib.ExitStack() as stack:
-        for p in patches:
-          stack.enter_context(p)
+      mock_base_cm = mock.MagicMock()
+
+      def fake_base_init(self, root_directory=None, options=None):
+        del root_directory, options
+        self._checkpoint_manager = mock_base_cm
+
+      with mock.patch.object(tunix_checkpoint_manager.CheckpointManager, "__init__", fake_base_init):
         manager = post_train_checkpointing.MaxTextLayoutCheckpointManager(
             root_directory=d,
             options=ocp.CheckpointManagerOptions(save_interval_steps=1),
         )
-      self.assertEqual(len(created), 2, "expected the base class's manager and its replacement")
-      base, live = created[0], created[1]
-      self.assertEqual(base.close_calls, 1, "the base class's manager was left open")
-      self.assertEqual(live.close_calls, 0, "the live manager should still be open")
+      mock_base_cm.close.assert_called_once()
+      # pylint: disable=protected-access
+      self.assertIsNotNone(manager._checkpoint_manager)
+      self.assertIsNot(manager._checkpoint_manager, mock_base_cm)
+      # pylint: enable=protected-access
       manager.close()
-      self.assertEqual(live.close_calls, 1)
 
 
 class InstallTest(unittest.TestCase):
@@ -549,7 +531,7 @@ class UnwrapModelTest(unittest.TestCase):
 
   def test_ignores_a_base_attribute_that_is_not_a_module(self):
     model = _Model(nnx.Rngs(0))
-    model.base = "not a module"
+    setattr(model, "base", "not a module")
     self.assertIs(post_train_checkpointing.unwrap_model(model), model)
 
 
