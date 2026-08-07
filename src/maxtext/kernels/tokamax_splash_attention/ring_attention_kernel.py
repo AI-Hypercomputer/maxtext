@@ -780,7 +780,7 @@ def make_ring_attention(
         mask,
         (bq_dkv, bkv_dkv),
         is_dkv=True,
-        return_dynamic_grid=config.dq_reduction_steps == 3,
+        return_dynamic_grid=config.dq_reduction_steps == 3 and not config.bwd_dkv_megacore,
     )
     assert (mask_function_fwd is None) == (mask_function_dkv is None)
     dkv_mask_sparsity = _mask_sparsity(dkv_mask_info)
