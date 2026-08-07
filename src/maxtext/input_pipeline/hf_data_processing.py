@@ -180,19 +180,14 @@ def vision_sft_preprocessing_pipeline(
       fn_kwargs={"image_column": "images", "config": config},
   )
 
-  if config.tokenizer_type == "huggingface":
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        config.tokenizer_path,
-        add_bos_token=False,
-        add_eos_token=False,
-        legacy=False,
-        token=config.hf_access_token,
-        extra_special_tokens={},
-    )
-  else:
-    tokenizer = input_pipeline_utils.get_tokenizer(
-        config.tokenizer_path, config.tokenizer_type, False, False, config.hf_access_token
-    )
+  tokenizer = transformers.AutoTokenizer.from_pretrained(
+      config.tokenizer_path,
+      add_bos_token=False,
+      add_eos_token=False,
+      legacy=False,
+      token=config.hf_access_token,
+      extra_special_tokens={},
+  )
   pad_id = _get_pad_id(tokenizer)
 
   dataset = dataset.map(
@@ -335,23 +330,14 @@ def preprocessing_pipeline(
   elif num_epoch > 1:
     dataset = dataset.repeat(num_epoch)
 
-  if config.tokenizer_type == "huggingface":
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        tokenizer_path,
-        add_bos_token=add_bos if not use_sft else False,
-        add_eos_token=add_eos if not use_sft else False,
-        legacy=False,
-        token=hf_access_token,
-        extra_special_tokens={},
-    )
-  else:
-    tokenizer = input_pipeline_utils.get_tokenizer(
-        tokenizer_path,
-        config.tokenizer_type,
-        add_bos if not use_sft else False,
-        add_eos if not use_sft else False,
-        hf_access_token,
-    )
+  tokenizer = transformers.AutoTokenizer.from_pretrained(
+      tokenizer_path,
+      add_bos_token=add_bos if not use_sft else False,
+      add_eos_token=add_eos if not use_sft else False,
+      legacy=False,
+      token=hf_access_token,
+      extra_special_tokens={},
+  )
 
   dataset = dataset.select_columns(data_column_names)
 
