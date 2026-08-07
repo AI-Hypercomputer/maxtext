@@ -27,7 +27,6 @@ import qwix
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import Config, DType
-from maxtext.kernels.megablox import ops
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
@@ -2053,8 +2052,6 @@ class FusedMlpMoETest(unittest.TestCase):
         rtol=1e-2,
         atol=1e-2,
     )
-
-
 
 
 if __name__ == "__main__":

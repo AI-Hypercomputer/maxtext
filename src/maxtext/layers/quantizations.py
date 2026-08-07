@@ -930,7 +930,7 @@ def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> fl
   args = [float(a) for a in calibration_method.split(",")[1:]]
   if len(args) == 1:
     args = [-args[0], args[0]]
-  
+
   if args[0] + args[1] != 0:
     raise ValueError(f"Expected format: 'fixed,max' or 'fixed,-max,max'. Got: {calibration_method}")
 

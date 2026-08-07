@@ -30,6 +30,7 @@ from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
+from maxtext.kernels.megablox import ops
 from maxtext.kernels.megablox import gmm
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
@@ -37,6 +38,7 @@ from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
+import qwix
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
@@ -727,7 +729,7 @@ class StaticScaleTest(unittest.TestCase):
   def test_get_static_scale_invalid_format(self):
     with self.assertRaises(ValueError):
       quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,1,2,3")
-      
+
     with self.assertRaises(ValueError):
       quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,-200.0,224.0")
 
@@ -742,8 +744,7 @@ class LhsScaleTest(unittest.TestCase):
   """Tests for LHS scale extraction in GMM v2 forward."""
 
   def test_fwd_prepare_lhs_scale_fixed_symmetric(self):
-    from maxtext.kernels.megablox import ops
-    import qwix
+
     rule = qwix.QtRule(
         act_qtype=jnp.float8_e4m3fn,
         act_calibration_method="fixed,224.0",
@@ -755,8 +756,7 @@ class LhsScaleTest(unittest.TestCase):
     np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
 
   def test_fwd_prepare_lhs_scale_dynamic_returns_none(self):
-    from maxtext.kernels.megablox import ops
-    import qwix
+
     rule = qwix.QtRule(
         act_qtype=jnp.float8_e4m3fn,
         act_calibration_method="absmax",
@@ -765,15 +765,13 @@ class LhsScaleTest(unittest.TestCase):
     self.assertIsNone(scale)
 
   def test_fwd_prepare_lhs_scale_no_rule_returns_none(self):
-    from maxtext.kernels.megablox import ops
-    import qwix
+
     rule = qwix.QtRule(
         act_qtype=None,
         act_calibration_method=None,
     )
     scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
     self.assertIsNone(scale)
-
 
 
 if __name__ == "__main__":
