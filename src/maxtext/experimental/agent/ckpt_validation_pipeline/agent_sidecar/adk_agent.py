@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def _send_message_with_retry(chat, prompt, max_retries=3, sleep_seconds=30):
+def _send_message_with_retry(chat, prompt, max_retries=5, sleep_seconds=60):
   """Sends a message to Gemini with retry and a 30-second sleep on 429 rate-limit/quota errors."""
   for attempt in range(1, max_retries + 1):
     try:
