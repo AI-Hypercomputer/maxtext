@@ -46,6 +46,10 @@ on:
         required: false
         type: boolean
         default: true
+      fast_rebuild:
+        required: false
+        type: boolean
+        default: false
     outputs:
       build_result:
         description: 'The result of build_and_push job.'
@@ -168,6 +172,7 @@ jobs:
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
           tags: gcr.io/${{ vars.PROJECT_NAME }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
+          cache-to: type=gha,mode=max
           outputs: type=image,compression=zstd,force-compression=true
           build-args: |
             DEVICE=${{ inputs.device }}

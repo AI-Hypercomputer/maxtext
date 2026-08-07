@@ -125,8 +125,13 @@ FULL_BASE_IMAGE="${BASE_IMAGE_REPO}:${BASE_IMAGE_TAG}"
 echo "  Found latest compatible base image: ${FULL_BASE_IMAGE}"
 
 # --- Step 3: Build the Docker image using --build-arg ---
+CACHE_FLAG="--no-cache"
+if [[ "${FAST_REBUILD:-false}" == "true" || "${NO_CACHE:-true}" == "false" ]]; then
+  CACHE_FLAG=""
+  echo "Fast rebuild enabled: reusing Docker layer cache."
+fi
 echo "$(date): Running docker build with local tag '${LOCAL_IMAGE_NAME}' using ${TMP_DOCKERFILE}..."
-docker build --no-cache \
+docker build ${CACHE_FLAG} \
   -f ${DOCKERFILE_TEMPLATE} \
   --build-arg BASE_IMAGE="${FULL_BASE_IMAGE}" \
   -t "${LOCAL_IMAGE_NAME}" \
@@ -140,7 +145,11 @@ echo "$(date): Pushing '${IMAGE_LOCATION}'..."
 docker push "${IMAGE_LOCATION}"
 
 # --- Step 5: Cleanup ---
-echo "$(date): Cleaning up local tag '${LOCAL_IMAGE_NAME}'..."
-docker image rm "${LOCAL_IMAGE_NAME}"
+if [[ "${CLEANUP_IMAGE:-true}" == "true" ]]; then
+  echo "$(date): Cleaning up local tag '${LOCAL_IMAGE_NAME}'..."
+  docker image rm "${LOCAL_IMAGE_NAME}"
+else
+  echo "$(date): Preserving local tag '${LOCAL_IMAGE_NAME}' (CLEANUP_IMAGE=false)..."
+fi
 
 echo "$(date): Build and push complete for ${IMAGE_LOCATION}"

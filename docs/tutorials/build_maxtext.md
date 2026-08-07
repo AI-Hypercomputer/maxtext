@@ -146,6 +146,31 @@ If you get a `command not found: upload_maxtext_docker_image` error, it means yo
 **Note on Permissions:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to Artifact Registry. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
 ````
 
+## Re-Running Tests Without Rebuilding Images
+
+When MaxText tests fail or flake, users often want to re-run their tests with the same dependencies (or even the same code) without waiting to rebuild the Docker image from scratch.
+
+In an ideal setup, users can choose between three execution modes using `run_maxtext_docker_test` (or `bash src/dependencies/scripts/run_docker_test.sh`):
+
+1. **Re-run all steps including building image**:
+   ```bash
+   run_maxtext_docker_test --mode=build-all --command="python3 -m pytest -vv tests/unit/"
+   ```
+2. **Re-run just the tests, using the same image (including same code)**:
+   ```bash
+   run_maxtext_docker_test --mode=test-only --command="python3 -m pytest -vv tests/unit/"
+   ```
+3. **Rebuild the image using the same dependencies, only new code (fast rebuild)**:
+   ```bash
+   run_maxtext_docker_test --mode=fast-rebuild --command="python3 -m pytest -vv tests/unit/"
+   ```
+
+### XPK Workload Option
+
+When running benchmarks or tests on XPK using `benchmarks/maxtext_xpk_runner.py`:
+- Set `reuse_image = True` in `WorkloadConfig` to re-run tests using an existing `--docker-image` without rebuilding or deleting any intermediate images.
+- Set `fast_rebuild = True` in `WorkloadConfig` to fast-rebuild only the runner image over cached dependencies (`docker_upload_runner.sh FAST_REBUILD=true`).
+
 ## Troubleshooting
 
 1. If you see the following error while building or uploading your Docker image, try adding the listed file path to `.dockerignore`. Do not include the `./` prefix in the `.dockerignore` file:
