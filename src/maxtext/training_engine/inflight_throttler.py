@@ -26,15 +26,20 @@ from maxtext.training_engine import metrics as metrics_module
 class InflightThrottler:
   """Rate limits the number of inflight computations on TPU."""
 
-  def __init__(self, config: pyconfig.HyperParameters):
+  def __init__(
+      self,
+      config: pyconfig.HyperParameters,
+      metrics_logger: metrics_module.MetricsLogger,
+  ):
     """Initializes the inflight throttler.
 
     Args:
       config: The training configuration.
+      metrics_logger: The MetricsLogger instance to use.
     """
     max_inflight = getattr(config, "max_inflight_computations", 2)
     self._inflight_queue = queue.Queue[Any](maxsize=max_inflight)
-    self._metrics_logger = metrics_module.MetricsLogger(config=config)
+    self._metrics_logger = metrics_logger
 
   def add_computation(self, computation: Any, metrics: abstract_engine.MetricsBuffer | None) -> None:
     """Adds an active on-device computation to the queue."""
