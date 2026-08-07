@@ -26,7 +26,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from orbax import checkpoint
 import orbax.checkpoint as ocp
 
 from maxtext.utils import max_logging
