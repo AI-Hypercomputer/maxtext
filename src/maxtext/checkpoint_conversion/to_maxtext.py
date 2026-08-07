@@ -210,9 +210,18 @@ class LazyHFLoader:
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
     with self._ram_lock:
-      if shard_name not in self._open_files:
-        self._open_files[shard_name] = safe_open(local_path, framework="np", device="cpu")
-      return self._open_files[shard_name].get_tensor(key)
+      with safe_open(local_path, framework="np", device="cpu") as f:
+        tensor = f.get_tensor(key)
+      # Prune older downloaded shards if downloading remotely to prevent disk/RAM exhaustion
+      if not self.is_local and len(self._local_shard_paths) > 3:
+        oldest_shard = next(iter(self._local_shard_paths))
+        oldest_path = self._local_shard_paths.pop(oldest_shard)
+        if os.path.exists(oldest_path):
+          try:
+            os.remove(oldest_path)
+          except OSError:
+            pass
+      return tensor
 
 
 class LazyTensor:
