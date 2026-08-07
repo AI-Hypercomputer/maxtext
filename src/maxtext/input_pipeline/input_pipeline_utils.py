@@ -315,13 +315,25 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
 
 def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
   """Tokenize a HuggingFace dataset"""
+  is_hf = callable(hf_tokenizer)
   for column_name in column_names:
     if isinstance(example[column_name], list):
-      example[column_name] = [
-          hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
-      ]
+      if is_hf:
+        example[column_name] = [
+            hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
+        ]
+      else:
+        example[column_name] = [
+            hf_tokenizer.encode(x)[:max_length] if truncation else hf_tokenizer.encode(x) for x in example[column_name]
+        ]
     elif isinstance(example[column_name], str):
-      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
+      if is_hf:
+        example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)[
+            "input_ids"
+        ]
+      else:
+        ids = hf_tokenizer.encode(example[column_name])
+        example[column_name] = ids[:max_length] if truncation else ids
   return example
 
 

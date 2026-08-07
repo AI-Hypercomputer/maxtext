@@ -95,6 +95,49 @@ class TrainDistillTest(unittest.TestCase):
     expected_mask = dummy_batch["inputs_segmentation"] != 0
     np.testing.assert_array_equal(tunix_input.input_mask, expected_mask)
 
+  def test_maxtext_to_tunix_iterator_stops_at_the_batch_budget(self):
+    """The trainer is managed externally, so this bound is what ends an endless dataset."""
+
+    def endless():
+      while True:
+        yield {
+            "inputs": np.array([[10, 11]]),
+            "inputs_position": np.array([[0, 1]]),
+            "inputs_segmentation": np.array([[1, 1]]),
+            "targets": np.array([[11, 12]]),
+        }
+
+    adapter = distillation_utils.MaxTextToTunixIterator(endless(), max_batches=3)
+    self.assertEqual(len(list(adapter)), 3)
+
+  def test_maxtext_to_tunix_iterator_is_unbounded_without_a_budget(self):
+    """A finite upstream iterator still ends on its own."""
+    batches = [
+        {
+            "inputs": np.array([[10, 11]]),
+            "inputs_position": np.array([[0, 1]]),
+            "inputs_segmentation": np.array([[1, 1]]),
+            "targets": np.array([[11, 12]]),
+        }
+    ] * 4
+    adapter = distillation_utils.MaxTextToTunixIterator(iter(batches))
+    self.assertEqual(len(list(adapter)), 4)
+
+  def test_maxtext_to_tunix_iterator_spends_nothing_on_a_zero_budget(self):
+    """A resume that is already at its step count must not train further."""
+
+    def endless():
+      while True:
+        yield {
+            "inputs": np.array([[10, 11]]),
+            "inputs_position": np.array([[0, 1]]),
+            "inputs_segmentation": np.array([[1, 1]]),
+            "targets": np.array([[11, 12]]),
+        }
+
+    adapter = distillation_utils.MaxTextToTunixIterator(endless(), max_batches=0)
+    self.assertEqual(len(list(adapter)), 0)
+
   def test_maxtext_to_tunix_iterator_sft(self):
     """Verifies SFT-related fields are handled correctly."""
     # 1. Create a dummy batch with SFT fields
@@ -960,6 +1003,10 @@ class TrainDistillTest(unittest.TestCase):
     config.checkpoint_dir = self.test_dir
     config.dataset_type = "synthetic"
     config.lora_enabled = False
+    # The checkpoint manager reads these for the metadata it stamps, and a bare Mock puts a Mock
+    # where a bool belongs.
+    config.scan_layers = True
+    config.lora = None
 
     # pylint: disable=import-outside-toplevel
     from tunix.sft import peft_trainer
