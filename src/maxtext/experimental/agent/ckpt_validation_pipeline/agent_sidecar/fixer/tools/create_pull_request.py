@@ -32,20 +32,24 @@ def main():
   title = args.title or args.message or "Automated code fix by Overwatch Agent"
   body = args.body or args.message or title
   import time
+
   fork_branch = args.fix_branch or f"fix/agent-remediation-{int(time.time())}"
 
-  print(f"1. Forking new branch '{fork_branch}' from base branch '{args.base}'...")
-  subprocess.run(["git", "fetch", "origin", args.base], check=False)
-  subprocess.run(["git", "checkout", args.base], check=False)
-  subprocess.run(["git", "checkout", "-b", fork_branch], check=False)
+  print(f"1. Checking out fix branch '{fork_branch}'...")
+  subprocess.run(["git", "checkout", fork_branch], check=False)
 
   print("2. Staging and committing patched changes...")
   subprocess.run(["git", "add", "."], check=False)
   subprocess.run(["git", "commit", "-m", title], check=False)
 
   import os
+
   gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-  remote_url = f"https://x-access-token:{gh_token}@github.com/AI-Hypercomputer/maxtext.git" if gh_token else "https://github.com/AI-Hypercomputer/maxtext.git"
+  remote_url = (
+      f"https://x-access-token:{gh_token}@github.com/AI-Hypercomputer/maxtext.git"
+      if gh_token
+      else "https://github.com/AI-Hypercomputer/maxtext.git"
+  )
   print(f"Configuring git remote 'origin' ({'with GH_TOKEN' if gh_token else 'anonymous'})...")
   if subprocess.run(["git", "remote", "set-url", "origin", remote_url], capture_output=True).returncode != 0:
     subprocess.run(["git", "remote", "add", "origin", remote_url], check=False)
@@ -62,11 +66,27 @@ def main():
   if gh_token:
     env["GH_TOKEN"] = gh_token
     env["GITHUB_TOKEN"] = gh_token
-  cmd = ["gh", "pr", "create", "--title", title, "--body", body, "--base", args.base, "--head", fork_branch, "--repo", "AI-Hypercomputer/maxtext"]
+  cmd = [
+      "gh",
+      "pr",
+      "create",
+      "--title",
+      title,
+      "--body",
+      body,
+      "--base",
+      args.base,
+      "--head",
+      fork_branch,
+      "--repo",
+      "AI-Hypercomputer/maxtext",
+  ]
 
   try:
     pr_res = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
-    print(f"Successfully opened Pull Request targeting '{args.base}' from head '{fork_branch}'.\nSTDOUT: {pr_res.stdout}\nSTDERR: {pr_res.stderr}")
+    print(
+        f"Successfully opened Pull Request targeting '{args.base}' from head '{fork_branch}'.\nSTDOUT: {pr_res.stdout}\nSTDERR: {pr_res.stderr}"
+    )
   except subprocess.CalledProcessError as e:
     print(f"Note: gh pr create failed (code {e.returncode}):\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}")
     print(f"Successfully created forked branch '{fork_branch}' and committed fix locally.")

@@ -17,11 +17,15 @@ cd "$(git rev-parse --show-toplevel)"
 # Copy Dockerfile to root temporarily so Cloud Build finds it easily
 cp src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/Dockerfile ./Dockerfile
 
+# Create a temporary ignore file to allow .git folder upload, bypassing the root .dockerignore
+cp .dockerignore .gcloudignore.tmp || touch .gcloudignore.tmp
+sed -i 's/^.git/#.git/' .gcloudignore.tmp
+
 # Submit build to Google Cloud Build (bypasses need for local Docker)
-gcloud builds submit --tag $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:latest --project $PROJECT_ID .
+gcloud builds submit --tag $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:latest --project $PROJECT_ID --ignore-file=.gcloudignore.tmp .
 
 # Clean up
-rm ./Dockerfile
+rm ./Dockerfile .gcloudignore.tmp
 
 echo "3. Image built and pushed successfully by Cloud Build."
 
@@ -31,6 +35,9 @@ gcloud run jobs deploy $JOB_NAME \
   --image $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:latest \
   --region $REGION \
   --service-account=ml-auto-solutions@$PROJECT_ID.iam.gserviceaccount.com \
+  --memory=16Gi \
+  --cpu=4 \
+  --task-timeout=3h \
   --update-env-vars=PYTHONUNBUFFERED=1
 
 echo "Deployment Complete! The Overwatch Agent is now deployed as a Serverless Job and is triggered exclusively by Airflow on failure."

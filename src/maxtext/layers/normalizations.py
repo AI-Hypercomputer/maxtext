@@ -68,7 +68,7 @@ class RMSNorm(nnx.Module):
 
   def __call__(self, x: jnp.ndarray, out_sharding: NamedSharding | None = None) -> jnp.ndarray:
     """Applies layer normalization on the input."""
-    x = jnp.asarray(x, jnp.float32)
+    x = jnp.asarray(x, jnp.float32
     mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
     y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
 

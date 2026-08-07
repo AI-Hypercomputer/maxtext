@@ -10,21 +10,21 @@ RUN apt-get update && apt-get install -y git curl ca-certificates gpg && \
     apt-get update && apt-get install -y gh && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy entire repository first so requirement files and source code are available
-COPY . /app
+# Copy only requirements first to leverage Docker cache for heavy installations
+COPY src/dependencies/requirements/generated_requirements/tpu-requirements.txt /tmp/tpu-requirements.txt
+COPY pyproject.toml /app/pyproject.toml
 
 # Automatically install all MaxText TPU requirements and local package
 RUN pip install --no-cache-dir google-cloud-storage google-genai requests google-auth pyink pylint && \
-    pip install --no-cache-dir -r src/dependencies/requirements/generated_requirements/tpu-requirements.txt || true && \
-    pip install --no-cache-dir --no-deps -e . || true
+    pip install --no-cache-dir -r /tmp/tpu-requirements.txt || true
 
-# Set git global identity for commits and initialize local repo with origin
+# Now copy the full source code (any python code changes will invalidate this layer but skip the pip install)
+COPY . /app
+RUN pip install --no-cache-dir --no-deps -e . || true
+
+# Set git global identity for commits
 RUN git config --global user.email "overwatch-agent@google.com" && \
-    git config --global user.name "Overwatch Agent" && \
-    git init -q && \
-    git remote add origin https://github.com/AI-Hypercomputer/maxtext.git && \
-    git add . && \
-    git commit -q -m "initial container workspace"
+    git config --global user.name "Overwatch Agent"
 
 ENV PYTHONPATH="/app/src/maxtext/utils:/app/src:/app"
 

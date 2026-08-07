@@ -19,11 +19,8 @@
 **Action Required:**
 1. You will receive a strict JSON plan from the Meta-Agent. You MUST follow its `structured_plan` steps exactly. Do NOT attempt to rethink the architecture or inject auto-logging statements. Rely on pre-defined `nnx.sow()` breakpoints.
 2. Use your terminal/editing tools to patch the core `maxtext` codebase or the Airflow DAG configuration overrides as directed.
-3. Checkout the user's specific target branch, then create a new feature branch from it named exactly: `fix-val-{model_name}-{run_id}`.
-4. CRITICAL: Before committing, format and lint your changes using the MaxText standards:
-   - Format: `pyink --pyink-indentation=2 --line-length=122 <path/to/modified_file.py>`
-   - Lint: `pylint <path/to/modified_file.py>`
-   Fix any syntax or formatting errors caught by these tools before you commit.
+3. Checkout the user's specific target branch, then create a new feature branch from it named exactly: `fix-validation-pipeline-{model_name}-{run_id}`.
+4. CRITICAL: Before committing, format and lint your changes using the MaxText standards. You MUST use the `run_linters` tool provided to you and pass the path to the modified file. Fix any syntax or formatting errors caught by this tool before you commit.
 5. Commit your changes and push the branch. NEVER push directly to the `main` branch.
-6. Use the GitHub CLI (`gh pr create`) or standard Git workflows to open a Pull Request proposing a merge back into the user's original target branch.
+6. You MUST use the `create_pull_request` tool provided to you to open a Pull Request proposing a merge back into the user's original target branch.
 7. DO NOT delete any checkpoint files from Google Cloud Storage.

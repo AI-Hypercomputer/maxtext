@@ -27,6 +27,7 @@ def main():
   args, unknown = parser.parse_known_args()
 
   import os
+
   script_path = "/app/src/maxtext/checkpoint_conversion/inspect_checkpoint.py"
   if not os.path.exists(script_path):
     script_path = "src/maxtext/checkpoint_conversion/inspect_checkpoint.py"

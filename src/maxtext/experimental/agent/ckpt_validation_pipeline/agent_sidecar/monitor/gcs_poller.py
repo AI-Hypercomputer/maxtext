@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 GCS_BUCKET_NAME = "maxtext-validation-agent-reports"
 
 
-def check_for_failures():
+def check_for_failures(expected_run_name=None):
   """
   Polls GCS for pipeline failures.
   Reads JSON reports from gs://maxtext-validation-agent-reports/
@@ -34,20 +34,26 @@ def check_for_failures():
     client = storage.Client()
     bucket = client.bucket(GCS_BUCKET_NAME)
     blobs = list(bucket.list_blobs())
-    
-    # Filter for unhandled json reports
-    valid_blobs = [b for b in blobs if b.name.endswith(".json") and "handled" not in b.name]
-    
+
+    # Filter for unhandled json reports (we want the detailed validator reports, NOT airflow direct triggers)
+    valid_blobs = [b for b in blobs if b.name.endswith(".json") and "handled" not in b.name and not b.name.startswith("airflow_direct_failure_")]
+
     # Sort by creation time descending (newest first)
     valid_blobs.sort(key=lambda b: b.time_created, reverse=True)
-    
+
     for blob in valid_blobs:
       content = blob.download_as_string()
-      report_data = json.loads(content)
+      try:
+        report_data = json.loads(content)
+      except json.JSONDecodeError:
+        continue
+        
+      if expected_run_name and report_data.get("run_name") != expected_run_name:
+        continue
+
       # Check for "failed" (shape check), "FAILURE" (mock tensor), or success == False (forward pass / decode)
       if report_data and (
-          report_data.get("status") in ("failed", "FAILED", "FAILURE")
-          or report_data.get("success") is False
+          report_data.get("status") in ("failed", "FAILED", "FAILURE") or report_data.get("success") is False
       ):
         logger.info("Detected failure report: %s", blob.name)
         return report_data, blob.name
@@ -56,6 +62,31 @@ def check_for_failures():
     logger.error("Error checking GCS for failures: %s", e)
 
   return None, None
+
+
+def check_for_direct_airflow_failures():
+  """Checks GCS for direct Airflow on_failure_callback trigger blobs (airflow_direct_failure_*.json)."""
+  logger.info("Checking for direct Airflow failure triggers in gs://%s/", GCS_BUCKET_NAME)
+  try:
+    client = storage.Client()
+    bucket = client.bucket(GCS_BUCKET_NAME)
+    blobs = list(bucket.list_blobs(prefix="airflow_direct_failure_"))
+    valid_blobs = [b for b in blobs if b.name.endswith(".json")]
+    valid_blobs.sort(key=lambda b: b.time_created, reverse=True)
+
+    for blob in valid_blobs:
+      content = blob.download_as_string()
+      data = json.loads(content)
+      logger.info("Detected direct Airflow failure trigger blob: %s", blob.name)
+      try:
+        bucket.rename_blob(blob, "handled_" + blob.name, if_source_generation_match=blob.generation)
+        return data
+      except Exception as e:
+        logger.info("Another container likely claimed %s (Error: %s), skipping to next...", blob.name, e)
+        continue
+  except Exception as e:
+    logger.error("Error checking GCS for direct Airflow failure triggers: %s", e)
+  return None
 
 
 def mark_handled(blob_name):
