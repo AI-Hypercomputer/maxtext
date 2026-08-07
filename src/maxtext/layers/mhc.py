@@ -24,8 +24,8 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
-from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init, variable_to_logically_partitioned
-from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
+from maxtext.layers import linears
 from maxtext.layers.normalizations import RMSNorm
 
 
@@ -313,4 +313,44 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     return res_out + post_out, metadata
 
 
+class DeepSeek4HyperHead(nnx.Module):
+  """DeepSeek V4 Hyper Head."""
 
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.rngs = rngs
+    self.k = config.mhc_expansion_rate
+    self.dim = config.emb_dim
+    self.dtype = config.dtype
+    self.weight_dtype = config.weight_dtype
+
+    # tid2eid layers
+    self.tid2eid = nnx.List(
+        [
+            linears.DenseGeneral(
+                in_features_shape=self.dim,
+                out_features_shape=self.dim,
+                dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
+                rngs=self.rngs,
+            )
+            for _ in range(config.first_num_hash_layers)
+        ]
+    )
+
+  def __call__(self, x: Array) -> Array:
+    # x shape: [batch, seq, expansion_rate, emb]
+    # Reduce expansion_rate dimension
+    x = jnp.sum(x, axis=2, dtype=x.dtype)
+
+    # Apply tid2eid layers
+    for layer in self.tid2eid:
+      x = layer(x)
+
+    return x
