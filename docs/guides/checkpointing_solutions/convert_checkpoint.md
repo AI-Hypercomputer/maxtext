@@ -39,7 +39,7 @@ The following models are supported:
 
 Use the `to_maxtext.py` script to convert a Hugging Face model checkpoint into a MaxText checkpoint. The script will automatically download the specified model from the Hugging Face Hub, perform conversion, and save converted checkpoints to the given output directory.
 
-> **Note:** For more information, checkout [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/4b/test_qwen3_to_mt.sh) and [gemma3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma3/4b/test_gemma3_to_mt.sh).
+> **Note:** For more information, check out [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/4b/test_qwen3_to_mt.sh) and [gemma3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma3/4b/test_gemma3_to_mt.sh).
 
 > **Note (Gemma 4 E2B / E4B):** The `gemma4-e2b` and `gemma4-e4b` variants use the `gemma4_small` decoder block, which has per-layer KV sharing and is **incompatible with `nn.scan`**. Conversion must therefore be run with `scan_layers=False` (unscanned), and any downstream training/inference run must also use `scan_layers=False`. Additionally, if you want to convert the **base** (pretrained) model rather than the instruction-tuned default, pass `--hf_model_path=google/gemma-4-E4B` (or `google/gemma-4-E2B`) explicitly — `HF_IDS` defaults to the `-it` repository. See [convert_gemma4_base.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma4/e4b/convert_gemma4_base.sh) for a full example.
 
@@ -98,7 +98,7 @@ You can find your converted checkpoint files under `${BASE_OUTPUT_DIRECTORY}/0/i
 
 Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugging Face format. This is useful for sharing your models or integrating them with the Hugging Face ecosystem.
 
-> **Note:** For more information, checkout [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/4b/test_qwen3_to_hf.sh).
+> **Note:** For more information, check out [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/4b/test_qwen3_to_hf.sh).
 
 > **Note (Gemma 4 E2B / E4B):** The `gemma4-e2b` and `gemma4-e4b` variants use the `gemma4_small` decoder block and must be converted with `scan_layers=False`. If your MaxText checkpoint was fine-tuned from the base model, also pass `--hf_model_path=google/gemma-4-E4B` (or `google/gemma-4-E2B`) so the exported checkpoint bundles the base tokenizer — otherwise `to_huggingface` sources the tokenizer from `HF_IDS[gemma4-e4b]` = `google/gemma-4-E4B-it`.
 
@@ -254,7 +254,7 @@ ______________________________________________________________________
 
 ### Inspection Tools
 
-We provide a unified inspection tool In [`inspect_checkpoint.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/inspect_checkpoint.py) to help you view model structures. This is highly useful for both development and troubleshooting.
+We provide a unified inspection tool in [`inspect_checkpoint.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/inspect_checkpoint.py) to help you view model structures. This is highly useful for both development and troubleshooting.
 
 - **Lightweight & low-overhead:** Operates on either CPU or TPU, with a near-zero memory footprint (RAM/HBM) and negligible compute costs.
 - **Detailed outputs:** Prints tensor keys and shapes. Optionally appends data types with `--check_dtype=True` flag.
@@ -286,13 +286,13 @@ To extend conversion support to a new model architecture, you must define its sp
 
 - As the first step, we inspect the checkpoint structures. To see the HuggingFace checkpoint structure, use **Tool 1 (HF Inspector)**. To see the MaxText model structure, use **Tool 2 (MaxText Inspector)**.
 
-- In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/param_mapping.py), add the parameter name mappings(`def {MODEL}_MAXTEXT_TO_HF_PARAM_MAPPING`). This is the 1-to-1 mappings of parameters names per layer.
+- In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/param_mapping.py), add the parameter name mappings (`def {MODEL}_MAXTEXT_TO_HF_PARAM_MAPPING`). This is the 1-to-1 mappings of parameter names per layer.
 
 - In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/param_mapping.py), add the `hook_fn` logic (`def {MODEL}_MAXTEXT_TO_HF_PARAM_HOOK_FN`). This is the transformation needed per layer.
 
-2. **Add Hugging Face weights Shape**: In [`utils/globals.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/hf_shape.py), define the tensor shape of Hugging Face format (`def {MODEL}_HF_WEIGHTS_TO_SHAPE`). This is used to ensure the tensor shape is matched after to_huggingface conversion.
+2. **Add Hugging Face weights shape**: In [`utils/hf_shape.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/hf_shape.py), define the tensor shape of Hugging Face format (`def {MODEL}_HF_WEIGHTS_TO_SHAPE`). This is used to ensure the tensor shape is matched after to_huggingface conversion.
 
-3. **Register model key**: In [`utils/utils.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py), add the new model key in `HF_IDS`.
+3. **Register model key**: In [`utils/globals.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/utils/globals.py), add the new model key in `HF_IDS`.
 
 4. **Add transformer config**: In [`utils/hf_model_configs.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/hf_model_configs.py), add the `transformers.Config` object, describing the Hugging Face model configuration (defined in [`src/maxtext/configs/models`](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/models)). This configuration must precisely match the MaxText model's architecture.
 
