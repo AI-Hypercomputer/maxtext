@@ -364,7 +364,7 @@ class GateLogit(nnx.Module):
       output = linears._convert_to_activation_function(self.score_func)(output)
 
     # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(("deepseek3", "deepseek4")):
+    if self.model_name.startswith(("deepseek3", "deepseek4", "glm5")):
       pre_bias_logits = output
 
     if self.use_bias:
@@ -717,7 +717,7 @@ class RoutedMoE(nnx.Module):
       top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     # NOTE: deepseek2 has a different pattern
-    elif self.config.model_name.startswith(("deepseek3", "deepseek4")):
+    elif self.config.model_name.startswith(("deepseek3", "deepseek4", "glm5")):
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
     elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
       router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
@@ -1583,7 +1583,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(("deepseek3", "deepseek4")):
+      if self.config.model_name.startswith(("deepseek3", "deepseek4", "glm5")):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -2345,7 +2345,7 @@ class RoutedMoE(nnx.Module):
 
     gate_logits_axes = (batch_logical_axis, "activation_norm_length", None)
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4")):
+    if self.config.model_name.startswith(("deepseek3", "deepseek4", "glm5")):
       pre_bias_logits_axes = (batch_logical_axis, "activation_norm_length", None)
     else:
       pre_bias_logits_axes = None
@@ -2644,7 +2644,7 @@ class RoutedMoE(nnx.Module):
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4")):
+    if self.config.model_name.startswith(("deepseek3", "deepseek4", "glm5")):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
