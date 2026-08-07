@@ -30,7 +30,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import logical_to_mesh_axes, create_sharding
+from maxtext.utils.sharding import logical_to_mesh_axes, create_sharding, truncate_out_sharding
 
 _MAX_WAVELENGTH = 10_000
 
@@ -173,6 +173,8 @@ class Embed(nnx.Module):
     out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh, rules=getattr(self.config, "logical_axis_rules", None))
 
     out_sharding = NamedSharding(self.mesh, out_pspec) if self.config.shard_mode == ShardMode.EXPLICIT else None
+    if out_sharding is not None:
+      out_sharding = truncate_out_sharding(out_sharding, inputs.ndim + 1)
 
     if cfg.use_iota_embed:
       iota = lax.iota(jnp.int32, self.num_embeddings)
@@ -227,6 +229,8 @@ def attend_on_embedding(
   # out_sharding must be None under auto shard_mode
   if config.shard_mode != ShardMode.EXPLICIT:
     out_sharding = None
+  if out_sharding is not None:
+    out_sharding = truncate_out_sharding(out_sharding, query.ndim)
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
   return jnp.dot(
       query,

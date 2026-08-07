@@ -41,6 +41,7 @@ from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
+from maxtext.utils.sharding import truncate_out_sharding
 
 
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
@@ -101,6 +102,10 @@ def _compute_dot_general_nnx(
     if initializing:
       quant_dot_general.lazy_init(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
     return quant_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None, mutable=["aqt"])
+
+  if out_sharding is not None:
+    out_ndim = (inputs.ndim - len(axis)) + (kernel.ndim - len(contract_ind))
+    out_sharding = truncate_out_sharding(out_sharding, out_ndim)
 
   return dot_general(
       inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision, out_sharding=out_sharding
