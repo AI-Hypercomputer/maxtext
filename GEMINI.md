@@ -9,9 +9,13 @@ Unless I told you to edit the code, always avoid directly modifying the code bef
 
 **IMPORTANT**: For every data you present to me, tell me the exact data path. For every experiment, record core data to local workspace under MyStuff/Data/ and tell me in the chat the command you ran and the Pantheon log path.
 
-Always squash or amend to keep exactly 1 commit on branches.
+**IMPORTANT**: When solving bugs:
+You must corroborate hypothesis with evidence from bugreport. If you can't find any evidence from bugreport, your hypothesis must be rooted against prior knowledge, such as similar buganizer tickets, source code or documentation. When your hypothesis is rooted in prior knowledge, you must still prove similarity with evidence. Surface looking similarities without corroborating evidence is not valid. Any hypothesis without associated evidence is a guess, not investigation.
+
 Always ask before pushing code.
-Always ask before testing code.
+Always ask before testing code unless I told you OK in the session.
+
+When doing multiple rounds of testing, output the failure traceback and reasons for each round to keep me updated in the chat session.
 
 > [!CAUTION]
 > **Running Modified Code on remote TPU VM:**
@@ -64,3 +68,6 @@ Always store output files and images to the local working directory (e.g., MyStu
 ## The focus
 
 The focus of my job is about diloco. @src/maxtext/trainers/diloco. 
+
+GDoc Agent:
+/google/bin/releases/gemini-agents-gdocs/gdocs

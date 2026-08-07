@@ -32,9 +32,10 @@ import jax.numpy as jnp
 import optax
 
 from maxtext.configs import pyconfig
-from maxtext.trainers.diloco.threaded_diloco import make_learner_config, make_step_fns, _normalize_to_null_layout
+from maxtext.trainers.diloco.threaded_diloco import make_learner_config, make_step_fns
 from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager
 from maxtext.trainers.diloco.fragmenter import FragmentedTreeManipulator
+from maxtext.utils.mesh_utils import stack_across_meshes_pytree
 
 class ThreadedDilocoUnitTest(unittest.TestCase):
 
@@ -182,23 +183,6 @@ class SyncerComputeTest(unittest.TestCase):
     )
 
   # ------------------------------------------------------------------
-  # _normalize_to_null_layout
-  # ------------------------------------------------------------------
-
-  def test_normalize_preserves_values(self):
-    params = _build_fake_params(self.mesh, value=3.14)
-    normalized = _normalize_to_null_layout(params)
-    for a, b in zip(jax.tree_util.tree_leaves(params), jax.tree_util.tree_leaves(normalized)):
-      np.testing.assert_allclose(np.array(a), np.array(b))
-
-  def test_normalize_is_idempotent(self):
-    params = _build_fake_params(self.mesh, value=2.71)
-    once = _normalize_to_null_layout(params)
-    twice = _normalize_to_null_layout(once)
-    for a, b in zip(jax.tree_util.tree_leaves(once), jax.tree_util.tree_leaves(twice)):
-      np.testing.assert_allclose(np.array(a), np.array(b))
-
-  # ------------------------------------------------------------------
   # FragmentedTreeManipulator round-trip
   # ------------------------------------------------------------------
 
@@ -266,16 +250,15 @@ class SyncerComputeTest(unittest.TestCase):
     fps = _flat_params_shardings(params)
     lr = 1.0
     outer_optimizer = optax.sgd(learning_rate=lr, momentum=0.0, nesterov=False)
-
     frag_idx = 1
     outer_frag = manipulator.get_flat_fragment(params, frag_idx)
-    outer_frag = _normalize_to_null_layout(outer_frag)
-    opt_state = _normalize_to_null_layout(outer_optimizer.init(outer_frag))
+    with jax.set_mesh(self.mesh):
+      opt_state = jax.jit(outer_optimizer.init)(outer_frag)
     trace_dict = {k: jax.ShapeDtypeStruct(v.shape, v.dtype) for k, v in outer_frag.items()}
     _, apply_outer_step = make_step_fns(self.mesh, fps, outer_frag, trace_dict, outer_optimizer)
 
     # grad of 0.1 → new_params should be 1.0 - 0.1 = 0.9
-    grad = {k: jnp.full_like(v, 0.1) for k, v in outer_frag.items()}
+    grad = {k: jax.device_put(jnp.full_like(v, 0.1), v.sharding) for k, v in outer_frag.items()}
     new_frag, _ = apply_outer_step(grad, opt_state, outer_frag)
     for v in jax.tree_util.tree_leaves(new_frag):
       np.testing.assert_allclose(np.array(v), 0.9, atol=1e-5)
@@ -293,10 +276,8 @@ class SyncerComputeTest(unittest.TestCase):
     manipulator = _build_manipulator(params, num_layers, num_frags)
     fps = _flat_params_shardings(params)
     outer_optimizer = optax.sgd(learning_rate=0.1, momentum=0.9, nesterov=True)
-    outer_opt_state = outer_optimizer.init(params)
-
-    params = _normalize_to_null_layout(params)
-    outer_opt_state = _normalize_to_null_layout(outer_opt_state)
+    with jax.set_mesh(self.mesh):
+      outer_opt_state = jax.jit(outer_optimizer.init)(params)
 
     # Precompute stacked learner fragment for each fragment index.
     # Learner 0: params = 2.0, learner 1: params = 1.8
@@ -316,45 +297,29 @@ class SyncerComputeTest(unittest.TestCase):
     step_fns = {}
     with jax.set_mesh(self.mesh):
       for f_idx in range(manipulator.num_fragments):
-        if f_idx == 0:
-          frag_dict = manipulator.get_flat_fragment(params, f_idx)
-          trace_dict = manipulator.get_flat_fragment(outer_opt_state[0].trace, f_idx)
-        else:
-          indices = manipulator.fragment_to_layer_indices[f_idx]
-          frag_dict = {}
-          trace_dict = {}
-          for kpath, v in jax.tree_util.tree_flatten_with_path(params)[0]:
-            ks = jax.tree_util.keystr(kpath)
-            if manipulator.keypath_to_is_scanned.get(ks, False):
-              frag_shape = (len(indices),) + v.shape[1:]
-              frag_dict[ks] = jax.ShapeDtypeStruct(frag_shape, v.dtype)
-              trace_dict[ks] = jax.ShapeDtypeStruct(frag_shape, v.dtype)
+        frag_dict = manipulator.get_flat_fragment(params, f_idx)
+        trace_dict = manipulator.get_flat_fragment(outer_opt_state[0].trace, f_idx)
         step_fns[f_idx] = make_step_fns(self.mesh, fps, frag_dict, trace_dict, outer_optimizer)
 
     # One full period: process all fragments
     with jax.set_mesh(self.mesh):
       for frag_idx in range(manipulator.num_fragments):
-        outer_frag = _normalize_to_null_layout(manipulator.get_flat_fragment(params, frag_idx))
-        trace_frag = _normalize_to_null_layout(
-            manipulator.get_flat_fragment(outer_opt_state[0].trace, frag_idx)
-        )
+        outer_frag = manipulator.get_flat_fragment(params, frag_idx)
+        trace_frag = manipulator.get_flat_fragment(outer_opt_state[0].trace, frag_idx)
         opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
 
         stacked_inner = make_stacked(outer_frag)
-        stacked_inner = _normalize_to_null_layout(stacked_inner)
 
         compute_grad, apply_outer_step = step_fns[frag_idx]
-        pseudo_grad = _normalize_to_null_layout(compute_grad(outer_frag, stacked_inner))
+        pseudo_grad = compute_grad(outer_frag, stacked_inner)
         new_frag, new_opt_state_frag = apply_outer_step(pseudo_grad, opt_state_frag, outer_frag)
-        new_frag = _normalize_to_null_layout(new_frag)
-        new_trace = _normalize_to_null_layout(new_opt_state_frag[0].trace)
 
         params = manipulator.apply_flat_fragment(params, frag_idx, new_frag)
-        params = _normalize_to_null_layout(jax.device_put(params, params_full_sharding))
+        params = jax.device_put(params, params_full_sharding)
         new_trace_full = manipulator.apply_flat_fragment(
-            outer_opt_state[0].trace, frag_idx, new_trace
+            outer_opt_state[0].trace, frag_idx, new_opt_state_frag[0].trace
         )
-        new_trace_full = _normalize_to_null_layout(jax.device_put(new_trace_full, params_full_sharding))
+        new_trace_full = jax.device_put(new_trace_full, params_full_sharding)
         outer_opt_state = (optax.TraceState(trace=new_trace_full), outer_opt_state[1])
 
     # After the full period params must have decreased (outer step moved them)
@@ -411,53 +376,31 @@ class SyncerPathwaysBugReproTest(unittest.TestCase):
     return self._real_take(*args, **kwargs)
 
   def test_bare_take_on_scanned_fragment_fails_eagerly(self):
-    """get_flat_fragment without use_null_layout_jit calls jnp.take eagerly on real
-    arrays, which Pathways rejects.  This is the exact call made in _run_syncer_loop."""
+    """Whole-fragment JIT extraction in get_flat_fragment avoids eager jnp.take on Pathways."""
     params = _build_fake_params(self.mesh)
     manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
 
     with mock.patch("maxtext.trainers.diloco.fragmenter.jnp.take", self._pathways_take):
-      # Fragment 0: non-scanned, no jnp.take — safe on Pathways.
+      # Fragment 0: non-scanned
       frag0 = manipulator.get_flat_fragment(params, fragment_idx=0)
       self.assertIn("['embed']", frag0)
 
-      # Fragment 1: scanned, eager jnp.take — crashes on Pathways.
-      with self.assertRaises(NotImplementedError):
-        manipulator.get_flat_fragment(params, fragment_idx=1)
-
-  def test_null_layout_jit_path_avoids_eager_take(self):
-    """With use_null_layout_jit=True the call goes through _make_take_jit_null which
-    wraps jnp.take in a @jax.jit.  The take is only traced (Tracer input), not executed
-    eagerly, so the Pathways restriction does not fire."""
-    params = _build_fake_params(self.mesh)
-    manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
-
-    with mock.patch("maxtext.trainers.diloco.fragmenter.jnp.take", self._pathways_take):
-      with jax.set_mesh(self.mesh):
-        frag1 = manipulator.get_flat_fragment(params, fragment_idx=1, use_null_layout_jit=True)
+      # Fragment 1: scanned — extracted inside JIT graph without eager jnp.take error
+      frag1 = manipulator.get_flat_fragment(params, fragment_idx=1)
       self.assertIn("['layers']['w']", frag1)
 
-  def test_syncer_loop_body_crashes_on_scanned_fragments(self):
-    """Reproduces the pre-fix code path that _run_syncer_loop used to run (calling
-    get_flat_fragment without use_null_layout_jit):
-        outer_params_frag = _normalize_to_null_layout(
-            manipulator.get_flat_fragment(syncer_state.params, frag_idx)
-        )
-    Fragment 0 (non-scanned) is safe; any fragment > 0 (scanned layers) crashes on
-    Pathways. _run_syncer_loop now always passes use_null_layout_jit=True for scanned
-    fragments (see test_null_layout_jit_path_avoids_eager_take above), so this test only
-    documents/guards against the bug rather than describing current behavior."""
+  def test_all_scanned_fragments_extract_inside_jit(self):
+    """Verifies that all scanned fragments are successfully extracted inside JIT graphs."""
     params = _build_fake_params(self.mesh)
     manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
 
     with mock.patch("maxtext.trainers.diloco.fragmenter.jnp.take", self._pathways_take):
-      # Fragment 0: no jnp.take — safe.
-      _normalize_to_null_layout(manipulator.get_flat_fragment(params, 0))
+      frag0 = manipulator.get_flat_fragment(params, 0)
+      self.assertIsNotNone(frag0)
 
-      # All scanned fragments crash — this is the bug.
       for frag_idx in range(1, manipulator.num_fragments):
-        with self.assertRaises(NotImplementedError, msg=f"frag_idx={frag_idx} should crash"):
-          _normalize_to_null_layout(manipulator.get_flat_fragment(params, frag_idx))
+        res = manipulator.get_flat_fragment(params, frag_idx)
+        self.assertIsNotNone(res)
 
 
 if __name__ == "__main__":

@@ -88,7 +88,7 @@ class DataLoader:
   def load_next_batch(self, *args, **kwargs):
     """Loads the next batch with sharding hint."""
     example_batch = self.load_next_batch_pre_sharding()
-    if self.config.enable_diloco:
+    if self.config.enable_diloco and not self.config.enable_single_controller:
       example_batch = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
     return jax.device_put(example_batch, self.input_data_shardings)
 
@@ -170,7 +170,7 @@ class RampUpDataLoader(DataLoader):
       self.buffer_start = slice_end
       output = jax.tree.map(_slice, self.batch_buffer)
     self.rampup_active = rampup_manager.update()
-    if self.config.enable_diloco:
+    if self.config.enable_diloco and not self.config.enable_single_controller:
       output = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, output)
     return jax.device_put(output, self.input_data_shardings)
 

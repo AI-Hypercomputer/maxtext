@@ -683,6 +683,8 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       - updated_state_mesh_shardings: State mesh shardings with updated params field
         (unchanged if shard_optimizer_over_data is False)
   """
+  if config.enable_diloco:
+    return state_mesh_shardings.params, state_mesh_shardings
   if config.pure_nnx:
     return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
   prev_params_shardings = state_mesh_shardings.params

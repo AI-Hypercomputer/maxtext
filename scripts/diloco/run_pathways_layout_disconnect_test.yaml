@@ -1,0 +1,33 @@
+apiVersion: pathways-job.pathways.domain/v1
+kind: PathwaysJob
+metadata:
+  name: pw-layout-bug-01
+  namespace: default
+  annotations:
+    xpk.google.com/cluster: "pathways-integ-test"
+    xpk.google.com/project: "cloud-tpu-multipod-dev"
+    xpk.google.com/zone: "us-central2"
+spec:
+  maxRestarts: 0
+  pathwaysDir: "gs://chriszuo-maxtext-logs/pw-layout-disconnect-test"
+  controller:
+    deploymentMode: "default"
+    mainContainerName: "maxtext-runner"
+    template:
+      spec:
+        containers:
+        - name: maxtext-runner
+          image: gcr.io/cloud-tpu-multipod-dev/pw-layout-disconnect-test:latest
+          imagePullPolicy: Always
+          command:
+          - /bin/bash
+          - -c
+          - |
+            export PYTHONPATH=/app/src:$PYTHONPATH && \
+            export RUN_PATHWAYS_REPRO=1 && \
+            cd /app/ && \
+            python3 -m pytest tests/unit/pathways_colocated_cpu_layout_disconnect_test.py -v -s
+  workers:
+  - numSlices: 1
+    type: ct4p-hightpu-4t
+    topology: 2x2x1

@@ -81,10 +81,11 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 
 def get_first_step(model, state):
-  if isinstance(model, nn.Module):
-    return int(state.step)
-  if hasattr(state, "inner_state"):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
-    return int(state.step.get_value())
+  if hasattr(state, "step"):
+    step_val = state.step
+    if hasattr(step_val, "get_value"):
+      return int(step_val.get_value())
+    return int(step_val)
   return int(state.optimizer.step.get_value())
 
 
@@ -839,7 +840,7 @@ def train_loop(config, recorder, state=None):
   start_step = get_first_step(model, state)  # this is the start_step for training
   train_utils.validate_completed_steps(start_step, config.steps)
 
-  if isinstance(model, nn.Module):
+  if isinstance(model, nn.Module) or config.enable_diloco:
     jit_model = model
   elif config.enable_diloco:
     # state is the DiLoCoTrainState; `model` is already the TrainStateNNX graphdef the inner step needs.
@@ -875,7 +876,6 @@ def train_loop(config, recorder, state=None):
       # NNX: reshard state so params match the data-sharded in_shardings (Zero-1 layout)
       state = jax.device_put(state, state_mesh_shardings)
     if isinstance(model, nn.Module) or config.enable_diloco:
-      # The DiLoCo train step takes (state, batch, rng), like the Linen step.
       lower_args = (state, shaped_batch, init_rng)
     else:
       lower_args = (state, shaped_batch)
@@ -889,7 +889,7 @@ def train_loop(config, recorder, state=None):
   metric_logger_instance = metric_logger.MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  if isinstance(model, nn.Module):
+  if isinstance(model, nn.Module) or config.enable_diloco:
     setup_params = state.params
   elif config.enable_diloco:
     setup_params = state.params  # DiLoCoTrainState.params: the outer (global) params
