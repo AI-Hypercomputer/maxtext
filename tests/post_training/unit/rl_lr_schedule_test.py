@@ -108,7 +108,6 @@ def _effective_lr_at_step(opt, step):
 class RLLearningRateScheduleTest(unittest.TestCase):
   """Schedule-shape guards for utils_rl.get_optimizer built on a real config."""
 
-  @pytest.mark.cpu_only
   def test_default_rl_config_warms_up_within_run(self):
     """REGRESSION GUARD (FAILS on PR #4029, passes once fixed).
 
@@ -143,7 +142,6 @@ class RLLearningRateScheduleTest(unittest.TestCase):
         ),
     )
 
-  @pytest.mark.cpu_only
   def test_explicit_schedule_steps_decouples_from_run_length(self):
     """FEATURE GUARD (passes before and after the fix).
 
@@ -173,7 +171,6 @@ class RLLearningRateScheduleTest(unittest.TestCase):
     self.assertLessEqual(_effective_lr_at_step(opt, 20), 0.4 * peak)
     self.assertGreaterEqual(_effective_lr_at_step(opt, int(0.1 * schedule_len) + 5), 0.9 * peak)
 
-  @pytest.mark.cpu_only
   def test_validator_overwrites_minus_one_sentinel(self):
     """ROOT-CAUSE characterization (effective-value assertion).
 

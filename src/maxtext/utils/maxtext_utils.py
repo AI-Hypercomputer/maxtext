@@ -166,7 +166,10 @@ def get_shaped_batch(config, batch_sharding=None):
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
-    shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
+    # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
+    # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
+    if "llama4" in config.model_name:
+      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)
@@ -1600,7 +1603,7 @@ def get_abstract_param(model, config):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32)
+      encoder_images=np.ones(image_shape, dtype=jnp.int32)  # pyrefly: ignore[no-matching-overload]
       if config.use_multimodal
       else None,  # pyrefly: ignore[no-matching-overload]
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,

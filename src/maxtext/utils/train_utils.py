@@ -93,9 +93,6 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_continuous_checkpointing,
         config.max_num_checkpoints_to_keep,
         config.checkpoint_storage_concurrent_gb,
-        config.enable_single_controller,
-        config.colocated_python_checkpointing,
-        config.enable_single_replica_ckpt_restoring,
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
@@ -267,11 +264,6 @@ def setup_train_loop(config, recorder, devices=None):
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()
     if context_parallel_size > 1 and config.packing:
-      if config.dataset_type == "synthetic":
-        raise ValueError(
-            "Context parallelism with sequence packing is not supported with synthetic data. "
-            "Please disable sequence packing (set packing=False)."
-        )
       if context_parallel_strategy not in ("all_gather", "ring"):
         raise ValueError(
             "Context parallelism with sequence packing supports context_parallel_strategy='all_gather' or 'ring'."
@@ -322,6 +314,7 @@ def setup_train_loop(config, recorder, devices=None):
             if (isinstance(state, (nnx.State, dict)) and "model" in state)
             else getattr(state, "model", state)
         )
+        # pyrefly: ignore[bad-argument-type]
         lora_utils.restore_lora_from_path(target_model_state, config)
         _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
       with nn_partitioning.axis_rules(config.logical_axis_rules):

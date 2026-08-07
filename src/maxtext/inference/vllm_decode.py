@@ -93,6 +93,7 @@ def decode_with_vllm(config: Config) -> None:
       "additional_config": {
           "maxtext_config": {
               "model_name": config.model_name,
+              "use_multimodal": config.use_multimodal,
               "weight_dtype": config.weight_dtype.name,
               "allow_split_physical_axes": True,
               "debug_sharding": config.debug_sharding,

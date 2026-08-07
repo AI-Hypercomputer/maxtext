@@ -221,7 +221,7 @@ def _apply_mask_and_soft_cap(
       # on the fly unless explicit original K/V positions are provided.
 
       if k_in_lanes:
-        assert q_sequence_ref.shape == (bq, NUM_LANES)
+        assert q_sequence_ref.shape == (bq, NUM_LANES)  # pyrefly: ignore[missing-attribute]
 
         if kv_sequence_ref is None:
           k_sequence = k_offset + jax.lax.broadcasted_iota(jnp.int32, (bq, k_slice.size), 1)
@@ -230,9 +230,13 @@ def _apply_mask_and_soft_cap(
 
         repeats, rem = divmod(k_slice.size, NUM_LANES)
         assert rem == 0
-        q_sequence = jnp.tile(q_sequence_ref[...], (1, repeats))  # [bq, k_slice.size]
+        q_sequence = jnp.tile(
+            # pyrefly: ignore[unsupported-operation]
+            q_sequence_ref[...],
+            (1, repeats),
+        )  # [bq, k_slice.size]  # pyrefly: ignore[unsupported-operation]
       else:
-        assert q_sequence_ref.shape == (NUM_SUBLANES, bq)
+        assert q_sequence_ref.shape == (NUM_SUBLANES, bq)  # pyrefly: ignore[missing-attribute]
 
         if kv_sequence_ref is None:
           k_sequence = k_offset + jax.lax.broadcasted_iota(jnp.int32, (k_slice.size, bq), 0)
@@ -241,7 +245,7 @@ def _apply_mask_and_soft_cap(
           if rem:
             raise NotImplementedError(f"block_q must be a multiple of {NUM_LANES}")
           k_sequence = jnp.tile(kv_sequence_ref[k_slice, :], (1, repeats))
-        q_sequence = q_sequence_ref[:1, :]  # [1, bq]
+        q_sequence = q_sequence_ref[:1, :]  # [1, bq]  # pyrefly: ignore[unsupported-operation]
         q_sequence = jnp.broadcast_to(q_sequence, (k_slice.size, bq))
 
       assert q_sequence.shape == k_sequence.shape
@@ -374,12 +378,17 @@ def flash_attention_kernel(
       m_scratch_ref[...] = jnp.full_like(m_scratch_ref, max_logit_estimate)
       l_scratch_ref[...] = jnp.zeros_like(l_scratch_ref)
     elif sinks_ref is not None and max_logit_estimate is None:
-      m_scratch_ref[...] = jnp.full_like(m_scratch_ref, sink)
+      m_scratch_ref[...] = jnp.full_like(m_scratch_ref, sink)  # pyrefly: ignore[bad-argument-type]
       l_scratch_ref[...] = jnp.ones_like(l_scratch_ref)
     else:  # sinks_ref is not None and max_logit_estimate is not None
       exp = jnp.exp2 if config.use_base2_exp else jnp.exp
-      m_scratch_ref[...] = jnp.full_like(m_scratch_ref, max_logit_estimate)
-      l_scratch_ref[...] = exp(sink - jnp.full_like(l_scratch_ref, max_logit_estimate))
+      m_scratch_ref[...] = jnp.full_like(m_scratch_ref, max_logit_estimate)  # pyrefly: ignore[bad-argument-type]
+      l_scratch_ref[...] = exp(
+          # pyrefly: ignore[bad-argument-type, unsupported-operation]
+          sink
+          # pyrefly: ignore[bad-argument-type]
+          - jnp.full_like(l_scratch_ref, max_logit_estimate)
+      )  # pyrefly: ignore[bad-argument-type, unsupported-operation]
 
   def body(kv_compute_index, _, has_partial_mask=False):
     slice_k = pl.ds(kv_compute_index * bkv_compute, bkv_compute)
@@ -432,7 +441,7 @@ def flash_attention_kernel(
 
     exp = jnp.exp2 if config.use_base2_exp else jnp.exp
     if max_logit_estimate is None:
-      s_curr = exp(qk - jnp.tile(m_next, (1, bkv_repeats)))
+      s_curr = exp(qk - jnp.tile(m_next, (1, bkv_repeats)))  # pyrefly: ignore[bad-argument-type]
     else:
       s_curr = exp(qk - max_logit_estimate)
     if mask is not None:
@@ -458,7 +467,7 @@ def flash_attention_kernel(
     o_curr = lax.dot_general(s_curr, v, sv_dims)
 
     if max_logit_estimate is None:
-      alpha_o = jnp.tile(alpha, (1, head_dim_v_repeats))
+      alpha_o = jnp.tile(alpha, (1, head_dim_v_repeats))  # pyrefly: ignore[bad-argument-type]
       alpha_o = alpha_o[..., : o_scratch_ref.shape[-1]]
       o_scratch_ref[...] = alpha_o * o_scratch_ref[...] + o_curr
     else:
@@ -539,7 +548,7 @@ def _splash_attention_forward(
   bq, bkv = config.block_q, config.block_kv
   bkv_compute = config.block_kv_compute
   fuse_reciprocal = config.fuse_reciprocal or not save_residuals
-  bounds_start, bounds_end = mask_info_lib.find_bounds(mask_info.active_rows)
+  bounds_start, bounds_end = mask_info_lib.find_bounds(mask_info.active_rows)  # pyrefly: ignore[bad-argument-type]
 
   if is_mqa:
     expected_kv_rank = 2
@@ -563,9 +572,9 @@ def _splash_attention_forward(
   if k.shape[:-1] != v.shape[:-1]:
     raise ValueError(f"Expected 'key' {k.shape} and 'value' {v.shape} to have the same " "leading dimensions.")
 
-  if bkv % bkv_compute:
+  if bkv % bkv_compute:  # pyrefly: ignore[unsupported-operation]
     raise ValueError(f"{bkv=} must be a multiple of {bkv_compute=}.")
-  if bkv_compute % NUM_LANES:
+  if bkv_compute % NUM_LANES:  # pyrefly: ignore[unsupported-operation]
     raise ValueError(f"{bkv_compute=} must be a multiple of {NUM_LANES}.")
 
   kv_seq_len = k.shape[-2]
@@ -621,7 +630,7 @@ def _splash_attention_forward(
 
   def mask_index_map(h, grid_idx, rows_ref, cols_ref, mask_next_ref=None, *_):
     del h, rows_ref, cols_ref  # Unused.
-    next_m = to_i32(mask_next_ref[grid_idx])
+    next_m = to_i32(mask_next_ref[grid_idx])  # pyrefly: ignore[unsupported-operation]
     return next_m, 0, 0
 
   q_segment_ids_index_map = unravel(lambda h, i, j: (i, 0))
@@ -647,8 +656,18 @@ def _splash_attention_forward(
         pl.BlockSpec((bq, NUM_LANES), q_segment_ids_index_map),
         pl.BlockSpec((NUM_SUBLANES, bkv), kv_segment_ids_index_map),
     ]
-    q_segment_ids = jax.lax.broadcast_in_dim(segment_ids.q, (q_seq_len, NUM_LANES), (0,))
-    kv_segment_ids = jax.lax.broadcast_in_dim(segment_ids.kv, (NUM_SUBLANES, kv_seq_len), (1,))
+    q_segment_ids = jax.lax.broadcast_in_dim(
+        # pyrefly: ignore[bad-argument-type]
+        segment_ids.q,
+        (q_seq_len, NUM_LANES),
+        (0,),
+    )
+    kv_segment_ids = jax.lax.broadcast_in_dim(
+        # pyrefly: ignore[bad-argument-type]
+        segment_ids.kv,
+        (NUM_SUBLANES, kv_seq_len),
+        (1,),
+    )
   else:
     in_specs += [None, None]
     q_segment_ids = kv_segment_ids = None
@@ -670,7 +689,7 @@ def _splash_attention_forward(
   if mask_info.partial_mask_blocks is not None:
     in_specs.append(pl.BlockSpec((None, bq, bkv), mask_index_map))
   else:
-    in_specs.append(None)
+    in_specs.append(None)  # pyrefly: ignore[bad-argument-type]
 
   assert mask_info.partial_mask_blocks is None or mask_info.q_sequence is None
 
@@ -679,14 +698,14 @@ def _splash_attention_forward(
     in_specs.append(pl.BlockSpec((bq, NUM_LANES), q_segment_ids_index_map))
   else:
     q_sequence = None
-    in_specs.append(None)
+    in_specs.append(None)  # pyrefly: ignore[bad-argument-type]
 
   if mask_info.kv_sequence is not None:
     kv_sequence = jax.lax.broadcast_in_dim(mask_info.kv_sequence, (NUM_SUBLANES, kv_seq_len), (1,))
     in_specs.append(pl.BlockSpec((NUM_SUBLANES, bkv), kv_segment_ids_index_map))
   else:
     kv_sequence = None
-    in_specs.append(None)
+    in_specs.append(None)  # pyrefly: ignore[bad-argument-type]
 
   if max_logit_value is not None:
     # reshape to allow sublane selection for vmap-ping and shard_map-ping
@@ -702,7 +721,7 @@ def _splash_attention_forward(
         )
     ]
   else:
-    in_specs.append(None)
+    in_specs.append(None)  # pyrefly: ignore[bad-argument-type]
 
   out_shapes = [
       jax.ShapeDtypeStruct((num_q_heads, q_seq_len, head_dim_v), q.dtype),
@@ -777,10 +796,17 @@ def _splash_attention_forward(
       kv_segment_ids,
       mask_info.partial_mask_blocks,
   ]
-  cost_estimate = config.fwd_cost_estimate or _fwd_cost_estimate(*vmem_inputs, out_shapes, fwd_mask_sparsity)
+  # pyrefly: ignore[bad-argument-count]
+  cost_estimate = config.fwd_cost_estimate or _fwd_cost_estimate(
+      # pyrefly: ignore[bad-argument-type]
+      *vmem_inputs,
+      # pyrefly: ignore[bad-argument-count]
+      out_shapes,
+      fwd_mask_sparsity,
+  )
 
   if dynamic_grid:
-    num_active_blocks = mask_info.num_active_blocks[0]
+    num_active_blocks = mask_info.num_active_blocks[0]  # pyrefly: ignore[unsupported-operation]
     grid = (num_q_heads, num_active_blocks)
     is_empty_attention_block = num_active_blocks == 0
   else:
@@ -992,9 +1018,9 @@ def _splash_attention_fwd(
     stats = _base2_stats_to_natural_base(stats, mask_value)
   residuals = q, k, v, segment_ids, sinks, out, logsumexp, dkv_mask_info
   if save_residuals:
-    return (out, stats), residuals
+    return (out, stats), residuals  # pyrefly: ignore[bad-return]
   else:
-    return out, residuals
+    return out, residuals  # pyrefly: ignore[bad-return]
 
 
 def _flash_attention_dq_kernel(
@@ -1074,7 +1100,7 @@ def _flash_attention_dq_kernel(
         q_segment_ids_ref,
         kv_segment_ids_ref,
         attn_logits_soft_cap=attn_logits_soft_cap,
-        k_slice=pl.ds(0, bkv),
+        k_slice=pl.ds(0, bkv),  # pyrefly: ignore[bad-argument-type]
         k_offset=kv_index * bkv,
         bq=bq,
         mask_function=mask_function,
@@ -1239,7 +1265,7 @@ def _flash_attention_dkv_kernel(
         q_segment_ids_ref,
         kv_segment_ids_ref,
         attn_logits_soft_cap=attn_logits_soft_cap,
-        k_slice=slice_k,
+        k_slice=slice_k,  # pyrefly: ignore[bad-argument-type]
         k_offset=kv_index * bkv + i * bkv_compute,
         bq=bq,
         k_in_lanes=False,
@@ -1359,7 +1385,7 @@ def _splash_attention_bwd_dkv(
   num_kv_heads = 1 if is_mqa else k.shape[0]
   dynamic_grid = mask_info.active_rows is not None
 
-  bounds_start, bounds_end = mask_info_lib.find_bounds(mask_info.active_rows)
+  bounds_start, bounds_end = mask_info_lib.find_bounds(mask_info.active_rows)  # pyrefly: ignore[bad-argument-type]
   if bq > q_seq_len:
     raise ValueError(f"{bq=} should not be greater than {q_seq_len=}")
   if bkv > kv_seq_len:
@@ -1392,12 +1418,12 @@ def _splash_attention_bwd_dkv(
 
       return index_map
 
-    grid_size = mask_info.num_active_blocks[0]
+    grid_size = mask_info.num_active_blocks[0]  # pyrefly: ignore[unsupported-operation]
     grid = (num_q_heads, grid_size)
 
     def mask_index_map(h, grid_idx, rows_ref, cols_ref, mask_next_ref=None, *_):
       del h, rows_ref, cols_ref  # Unused.
-      next_m = to_i32(mask_next_ref[grid_idx])
+      next_m = to_i32(mask_next_ref[grid_idx])  # pyrefly: ignore[unsupported-operation]
       return next_m, 0, 0
 
   else:
@@ -1407,7 +1433,7 @@ def _splash_attention_bwd_dkv(
     def mask_index_map(j, h, i, rows_ref, cols_ref, mask_next_ref=None, *_):
       del h, rows_ref, cols_ref  # Unused.
       grid_idx = j * q_steps + i
-      next_m = to_i32(mask_next_ref[grid_idx])
+      next_m = to_i32(mask_next_ref[grid_idx])  # pyrefly: ignore[unsupported-operation]
       return next_m, 0, 0
 
   q_index_map = unravel(lambda h, i, j: from_head_minor((h, i, 0), config.q_layout))
@@ -1481,12 +1507,12 @@ def _splash_attention_bwd_dkv(
   logsumexp_shape = (num_q_heads, NUM_SUBLANES, q_seq_len)
   logsumexp = jnp.broadcast_to(jnp.expand_dims(logsumexp, -2), logsumexp_shape)
   logsumexp_spec = pl.BlockSpec((None, NUM_SUBLANES, bq), logsumexp_index_map)
-  assert logsumexp.ndim == len(logsumexp_spec.block_shape)
+  assert logsumexp.ndim == len(logsumexp_spec.block_shape)  # pyrefly: ignore[bad-argument-type]
 
   # TODO: Remove the sublane expansion once Mosaic has all retilings
   di = jnp.broadcast_to(jnp.expand_dims(di, -2), logsumexp_shape)
   di_spec = pl.BlockSpec((None, NUM_SUBLANES, bq), logsumexp_index_map)
-  assert di.ndim == len(di_spec.block_shape)
+  assert di.ndim == len(di_spec.block_shape)  # pyrefly: ignore[bad-argument-type]
 
   in_specs = [
       q_spec,
@@ -1699,7 +1725,7 @@ def _splash_attention_bwd_dkv(
       logsumexp,
       do,
       di,
-      mask_info.partial_mask_blocks,
+      mask_info.partial_mask_blocks,  # pyrefly: ignore[bad-argument-type]
       q_sequence,
       kv_sequence,
       out_shapes,
@@ -1790,11 +1816,11 @@ def _splash_attention_bwd(
       logsumexp,
       do,
       di,
-      bq=bq_dkv,
-      bkv=bkv_dkv_memory,
-      bkv_compute=bkv_dkv_compute,
+      bq=bq_dkv,  # pyrefly: ignore[bad-argument-type]
+      bkv=bkv_dkv_memory,  # pyrefly: ignore[bad-argument-type]
+      bkv_compute=bkv_dkv_compute,  # pyrefly: ignore[bad-argument-type]
       is_mqa=is_mqa,
-      mask_info=dkv_mask_info,
+      mask_info=dkv_mask_info,  # pyrefly: ignore[bad-argument-type]
       mask_value=mask_value,
       mask_function=mask_function,
       config=config,
@@ -1807,7 +1833,7 @@ def _splash_attention_bwd(
   if sinks is not None:
     logsumexp_ = (logsumexp / LOG2E) if config.use_base2_exp else logsumexp
     sinks_exp = -jnp.exp(sinks[..., None, None].astype(jnp.float32) - logsumexp_[..., None].astype(jnp.float32))
-    dsinks = jnp.sum(sinks_exp.astype(o.dtype) * o * do, axis=(-1, -2))
+    dsinks = jnp.sum(sinks_exp.astype(o.dtype) * o * do, axis=(-1, -2))  # pyrefly: ignore[bad-argument-type]
   # Match the signature of the fwd function.
   assert dq is not None
   return (
@@ -1913,16 +1939,21 @@ class SplashAttentionKernel:
       if mask_info is None:
         return None
       return MaskInfo(  # pytype: disable=wrong-arg-types
-          mask_next=_resolve_spec(mask_info.mask_next),
-          active_rows=_resolve_spec(mask_info.active_rows),
-          active_cols=_resolve_spec(mask_info.active_cols),
-          num_active_blocks=_resolve_spec(mask_info.num_active_blocks),
-          block_mask=_resolve_spec(mask_info.block_mask),
-          partial_mask_blocks=jax.sharding.PartitionSpec()  # replicated
+          mask_next=_resolve_spec(mask_info.mask_next),  # pyrefly: ignore[bad-argument-type]
+          active_rows=_resolve_spec(mask_info.active_rows),  # pyrefly: ignore[bad-argument-type]
+          active_cols=_resolve_spec(mask_info.active_cols),  # pyrefly: ignore[bad-argument-type]
+          num_active_blocks=_resolve_spec(mask_info.num_active_blocks),  # pyrefly: ignore[bad-argument-type]
+          block_mask=_resolve_spec(mask_info.block_mask),  # pyrefly: ignore[bad-argument-type]
+          partial_mask_blocks=jax.sharding.PartitionSpec()  # replicated  # pyrefly: ignore[bad-argument-type]
           if mask_info.partial_mask_blocks is not None
           else None,
-          q_sequence=_resolve_spec(mask_info.q_sequence),
-          kv_sequence=(jax.sharding.PartitionSpec() if mask_info.kv_sequence is not None else None),
+          q_sequence=_resolve_spec(mask_info.q_sequence),  # pyrefly: ignore[bad-argument-type]
+          kv_sequence=(
+              # pyrefly: ignore[bad-argument-type]
+              jax.sharding.PartitionSpec()
+              if mask_info.kv_sequence is not None
+              else None
+          ),
       )
 
     return SplashAttentionKernel(
@@ -2065,12 +2096,12 @@ def _make_dynamic_splash_attention(
     return kernel
 
   mask_info_specs = MaskInfo(  # pytype: disable=wrong-arg-types
-      mask_next=mask_spec,
+      mask_next=mask_spec,  # pyrefly: ignore[bad-argument-type]
       active_rows=None,
       active_cols=None,
       num_active_blocks=None,
-      block_mask=mask_spec,
-      partial_mask_blocks=mask_spec,
+      block_mask=mask_spec,  # pyrefly: ignore[bad-argument-type]
+      partial_mask_blocks=mask_spec,  # pyrefly: ignore[bad-argument-type]
       q_sequence=None,
       kv_sequence=None,
   )

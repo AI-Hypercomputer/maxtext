@@ -343,7 +343,6 @@ class DiLoCoTest(unittest.TestCase):
       # synchronization).
       chex.assert_trees_all_equal(diloco_test_state.params, step_three_outer_params)
 
-  @pytest.mark.cpu_only
   @pytest.mark.tpu_backend
   def test_diloco_qwen3_moe_two_slices(self):
     temp_dir = gettempdir()
@@ -369,7 +368,6 @@ class DiLoCoTest(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   @pytest.mark.tpu_backend
   def test_diloco_two_slices(self):
     temp_dir = gettempdir()

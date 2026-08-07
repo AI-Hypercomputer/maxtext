@@ -2093,6 +2093,108 @@ class MLATest(attention_test_util.MLATestBase):
       self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
       self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=2e-02, atol=2e-02, equal_nan=False))
 
+  def test_sliced_mla_projections(self):
+    config_arguments = self.config_arguments.copy()
+
+    # Enable sliced projections for one config
+    config_arguments_sliced = config_arguments.copy()
+    config_arguments_sliced["use_sliced_mla_proj"] = True
+
+    cfg_normal, mla_normal = self.init_mla(config_arguments, rope_type="default")
+    _, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")
+
+    # Sync weights
+    nnx.update(mla_sliced, nnx.state(mla_normal))
+
+    # Test TRAIN mode with gradient comparison
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_normal, cfg_normal.dtype)
+
+    def loss_fn(model, x):
+      out, _ = model(
+          x,
+          x,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(out.astype(jnp.float32) ** 2), out
+
+    (loss_normal, out_normal_train), (grad_model_normal, grad_x_normal) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1), has_aux=True
+    )(mla_normal, lnx)
+
+    (loss_sliced, out_sliced_train), (grad_model_sliced, grad_x_sliced) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1), has_aux=True
+    )(mla_sliced, lnx)
+
+    self.assertTrue(jnp.allclose(loss_normal, loss_sliced, rtol=1e-05, atol=1e-05, equal_nan=False))
+    self.assertTrue(jnp.allclose(out_normal_train, out_sliced_train, rtol=1e-05, atol=1e-05, equal_nan=False))
+    self.assertTrue(jnp.allclose(grad_x_normal, grad_x_sliced, rtol=1e-05, atol=1e-05, equal_nan=False))
+
+    grad_model_close = jax.tree_util.tree_map(
+        lambda x, y: jnp.allclose(x, y, rtol=1e-05, atol=1e-05, equal_nan=False),
+        grad_model_normal,
+        grad_model_sliced,
+    )
+    self.assertTrue(jax.tree_util.tree_all(grad_model_close))
+
+    # Test PREFILL mode followed by AUTOREGRESSIVE mode to test caching
+    prefill_length = cfg_normal.max_prefill_predict_length
+    decode_total_length = cfg_normal.max_target_length
+
+    # Re-initialize to ensure clean cache
+    cfg_normal, mla_normal = self.init_mla(config_arguments, rope_type="default")
+    _, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")
+    nnx.update(mla_sliced, nnx.state(mla_normal))
+
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    out_normal_prefill, _ = mla_normal(
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+
+    out_sliced_prefill, _ = mla_sliced(
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+
+    self.assertTrue(jnp.allclose(out_normal_prefill, out_sliced_prefill, rtol=1e-05, atol=1e-05, equal_nan=False))
+
+    # Run autoregressive steps
+    for idx in range(prefill_length, decode_total_length):
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+
+      out_normal_idx, _ = mla_normal(
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+      out_sliced_idx, _ = mla_sliced(
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+      self.assertTrue(jnp.allclose(out_normal_idx, out_sliced_idx, rtol=1e-05, atol=1e-05, equal_nan=False))
+
   def test_projection_initialization(self):
     """Tests that MLA and Attention layers initialize the correct projection weights."""
     # 1. Initialize a standard Attention layer for comparison
@@ -2306,6 +2408,219 @@ class MLATest(attention_test_util.MLATestBase):
         msg="MLA Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
         f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
         f" ici_expert_parallelism={ici_expert_parallelism}.",
+    )
+
+  @parameterized.named_parameters(
+      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
+      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
+  )
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_ring_context_parallel(self, context_parallel_load_balance):
+    """Test equivalence between dot_product and flash attention + ring context parallelism"""
+
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "max_target_length": 512,
+        "sa_block_q": 128,
+        "sa_block_kv": 128,
+        "sa_block_kv_compute": 128,
+        "sa_block_q_dkv": 128,
+        "sa_block_kv_dkv": 128,
+        "sa_block_kv_dkv_compute": 128,
+        "attention_type": AttentionType.MLA.value,
+        "q_lora_rank": 4,
+        "kv_lora_rank": 4,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "dtype": "float32",
+    }
+
+    cfg, mla = self.init_mla(config_arguments, rope_type="default")
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
+    mla_generic_output, _ = mla(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    generic_state = nnx.state(mla)
+
+    cfg_cp = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **config_arguments,
+        attention="flash",
+        rope_type=cfg.rope_type,
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=context_parallel_load_balance,
+        ici_context_parallelism=2,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        packing=False,
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      attention_as_mla_flash_cp = MLA(
+          config=cfg_cp,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          mesh=mesh_cp,
+          attention_kernel="flash",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          attention_type=AttentionType(cfg_cp.attention_type),
+          q_lora_rank=cfg_cp.q_lora_rank,
+          kv_lora_rank=cfg_cp.kv_lora_rank,
+          qk_nope_head_dim=cfg_cp.qk_nope_head_dim,
+          qk_rope_head_dim=cfg_cp.qk_rope_head_dim,
+          v_head_dim=cfg_cp.v_head_dim,
+          model_mode=MODEL_MODE_PREFILL,
+          rngs=self.nnx_rng,
+      )
+    nnx.update(attention_as_mla_flash_cp, generic_state)
+
+    mla_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
+        cfg_cp,
+        mesh_cp,
+        attention_as_mla_flash_cp,
+        lnx,
+        decoder_segment_ids,
+        decoder_positions,
+    )
+
+    mla_generic_output = jax.device_get(mla_generic_output)
+    mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
+
+    self.assertTrue(
+        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        msg="MLA logits from generic dot product and flash attention + ring context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}.",
+    )
+
+  @parameterized.named_parameters(
+      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
+      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
+  )
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_ring_context_parallel_grad(self, context_parallel_load_balance):
+    """Test gradient equivalence between dot_product and flash attention + ring context parallelism"""
+
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "max_target_length": 512,
+        "sa_block_q": 128,
+        "sa_block_kv": 128,
+        "sa_block_kv_compute": 128,
+        "sa_block_q_dkv": 128,
+        "sa_block_kv_dkv": 128,
+        "sa_block_kv_dkv_compute": 128,
+        "attention_type": AttentionType.MLA.value,
+        "q_lora_rank": 4,
+        "kv_lora_rank": 4,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "dtype": "float32",
+    }
+
+    cfg, mla = self.init_mla(config_arguments, rope_type="default")
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
+
+    cfg_cp = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **config_arguments,
+        attention="flash",
+        rope_type=cfg.rope_type,
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=context_parallel_load_balance,
+        ici_context_parallelism=2,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        packing=False,
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      attention_as_mla_flash_cp = MLA(
+          config=cfg_cp,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          mesh=mesh_cp,
+          attention_kernel="flash",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          attention_type=AttentionType(cfg_cp.attention_type),
+          q_lora_rank=cfg_cp.q_lora_rank,
+          kv_lora_rank=cfg_cp.kv_lora_rank,
+          qk_nope_head_dim=cfg_cp.qk_nope_head_dim,
+          qk_rope_head_dim=cfg_cp.qk_rope_head_dim,
+          v_head_dim=cfg_cp.v_head_dim,
+          model_mode=MODEL_MODE_PREFILL,
+          rngs=self.nnx_rng,
+      )
+    nnx.update(attention_as_mla_flash_cp, nnx.state(mla))
+    generic_graphdef, generic_state = nnx.split(mla)
+    ring_graphdef, ring_state = nnx.split(attention_as_mla_flash_cp)
+
+    def generic_loss(lnx):
+      mla_merged = nnx.merge(generic_graphdef, generic_state)
+      output, _ = mla_merged(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    def ring_loss(lnx):
+      if context_parallel_load_balance:
+        context_parallel_size = cfg_cp.ici_context_parallelism
+        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
+        ring_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
+        ring_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+      else:
+        ring_decoder_segment_ids = decoder_segment_ids
+        ring_decoder_positions = decoder_positions
+      ring_merged = nnx.merge(ring_graphdef, ring_state)
+      output, _ = ring_merged(
+          lnx,
+          lnx,
+          decoder_segment_ids=ring_decoder_segment_ids,
+          inputs_positions=ring_decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    generic_grad = jax.grad(generic_loss)(lnx)
+    with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      ring_grad = jax.grad(ring_loss)(lnx)
+    generic_grad = jax.device_get(generic_grad)
+    ring_grad = jax.device_get(ring_grad)
+
+    self.assertTrue(
+        jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-06, equal_nan=False),
+        msg="MLA input gradients from generic dot product and flash attention + ring context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}.",
     )
 
   def get_indexer_test_data(self, batch_size, q_len, kv_len, num_heads, head_dim):
@@ -2971,6 +3286,75 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     np.testing.assert_allclose(mask_np[:, s_len], DEFAULT_MASK_VALUE)
     np.testing.assert_allclose(mask_np[:, s_len + 1], 0.0)
     print("Mask logic for uncompressed & compressed attention passed perfectly.")
+
+  def test_generate_attention_mask_compressed_all_modes(self):
+    """Verifies AttentionType.COMPRESSED across train, prefill, and autoregressive modes."""
+    batch_size = 2
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=3,
+    )
+
+    # 1. Training mode (batch_size=2, 4D compressed_mask)
+    q_train = jnp.zeros((batch_size, s_len, 1, 128))
+    k_train = jnp.zeros((batch_size, kv_len, 1, 128))
+    c_mask_4d = jnp.zeros((batch_size, 1, s_len, c_len), dtype=jnp.float32)
+    mask_train = op.generate_attention_mask(
+        query=q_train,
+        key=k_train,
+        decoder_segment_ids=None,
+        model_mode="train",
+        compressed_mask=c_mask_4d,
+    )
+    self.assertEqual(mask_train.shape, (batch_size, 1, s_len, kv_len))
+
+    # 2. Prefill mode (batch_size=2, 5D compressed_mask with segment_positions)
+    c_mask_5d = jnp.zeros((batch_size, 1, 1, s_len, c_len), dtype=jnp.float32)
+    seg_pos = jnp.arange(s_len)[None, :].repeat(batch_size, axis=0)
+    mask_prefill = op.generate_attention_mask(
+        query=q_train,
+        key=k_train,
+        decoder_segment_ids=None,
+        model_mode="prefill",
+        compressed_mask=c_mask_5d,
+        segment_positions=seg_pos,
+    )
+    self.assertEqual(mask_prefill.shape, (batch_size, 1, 1, s_len, kv_len))
+
+    # 3. Autoregressive mode (q_seq_len=1, batch_size=2, decoder_segment_ids)
+    q_ar = jnp.zeros((batch_size, 1, 1, 128))
+    k_ar = jnp.zeros((batch_size, kv_len, 1, 128))
+    c_mask_ar = jnp.zeros((batch_size, 1, 1, c_len), dtype=jnp.float32)
+    seg_ids = jnp.ones((batch_size, 16), dtype=jnp.int32)
+    mask_ar = op.generate_attention_mask(
+        query=q_ar,
+        key=k_ar,
+        decoder_segment_ids=seg_ids,
+        model_mode="autoregressive",
+        compressed_mask=c_mask_ar,
+    )
+    self.assertEqual(mask_ar.shape, (batch_size, 1, 1, 1, kv_len))
+
+    # 4. Compressed mask is None (fallback to uncompressed mask shape)
+    mask_none = op.generate_attention_mask(
+        query=q_train,
+        key=k_train,
+        decoder_segment_ids=None,
+        model_mode="train",
+        compressed_mask=None,
+    )
+    self.assertEqual(mask_none.ndim, 4)
+    self.assertEqual(mask_none.shape[-1], kv_len)
 
 
 if __name__ == "__main__":

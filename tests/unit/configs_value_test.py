@@ -145,6 +145,29 @@ class ConfigTest(absltest.TestCase):
 
     self.assertTrue(config.context_parallel_load_balance)
 
+  def test_tpu_tokamax_ring_config_validation_accepts_mla(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.attention_type, "mla")
+
   def test_tpu_tokamax_ring_config_validation_accepts_packing(self):
     argv = [
         "",
@@ -213,7 +236,12 @@ class ConfigTest(absltest.TestCase):
         (["attention=dot_product"], ["attention=flash"], "attention=flash"),
         (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
         (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),
-        (["attention_type=full"], [], "global causal"),
+        (["attention_type=full"], [], "attention_type"),
+        (["attention_type=local_sliding", "sliding_window_size=128"], [], "attention_type"),
+        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "attention_type"),
+        (["attention_type=compressed"], [], "attention_type"),
+        (["attention_type=mla", "packing=True"], ["packing=False"], "packing"),
+        (["attention_type=mla", "use_batch_split_schedule=True"], [], "batch-split"),
         (
             [
                 "context_parallel_load_balance=True",
@@ -311,40 +339,6 @@ class ConfigTest(absltest.TestCase):
           ]
       )
 
-  def test_gmm_v2_quantization_disallowed(self):
-    """Tests that use_gmm_v2=True with quantization enabled is disallowed."""
-    argv = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "use_gmm_v2=true",
-        "quantization=fp8_full",
-    ]
-    with self.assertRaises(pydantic.ValidationError):
-      pyconfig.initialize(argv)
-
-    argv_qwix = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "use_gmm_v2=true",
-        "use_qwix_quantization=true",
-    ]
-    with self.assertRaises(pydantic.ValidationError):
-      pyconfig.initialize(argv_qwix)
-
-  def test_gmm_v2_requires_tokamax_gmm(self):
-    """Tests that use_gmm_v2=True requires use_tokamax_gmm=True."""
-    argv = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "use_gmm_v2=true",
-        "use_tokamax_gmm=false",
-    ]
-    with self.assertRaises(pydantic.ValidationError):
-      pyconfig.initialize(argv)
-
   def test_safetensors_dynamic_disallows_single_controller(self):
     """Tests that source_checkpoint_layout=safetensors_dynamic disallows enable_single_controller=True."""
     argv = [
@@ -364,6 +358,58 @@ class ConfigTest(absltest.TestCase):
         _BASE_CONFIG_PATH,
         "run_name=test",
         "elastic_backup_kind=invalid_backup_kind",
+    ]
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv)
+  def test_indexer_cutoff_threshold_remat_policy(self):
+    """Tests custom remat policy and validation for indexer_cutoff_threshold."""
+    # 1. Verify custom remat policy puts indexer_cutoff_threshold on device
+    argv_device = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_indexer=true",
+        "q_lora_rank=1536",
+        "attention=dot_product",
+        "remat_policy=custom",
+        "indexer_cutoff_threshold=device",
+    ]
+    config_device = pyconfig.initialize(argv_device)
+    self.assertIn("indexer_cutoff_threshold", config_device.tensors_on_device)
+
+    # 2. Verify custom remat policy puts indexer_cutoff_threshold on offload
+    argv_offload = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_indexer=true",
+        "q_lora_rank=1536",
+        "attention=dot_product",
+        "remat_policy=custom",
+        "indexer_cutoff_threshold=offload",
+    ]
+    config_offload = pyconfig.initialize(argv_offload)
+    self.assertIn("indexer_cutoff_threshold", config_offload.tensors_to_offload)
+
+    # 3. Verify validation error when use_indexer=False and indexer_cutoff_threshold != 'remat'
+    argv_invalid = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_indexer=false",
+        "indexer_cutoff_threshold=device",
+    ]
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(argv_invalid)
+
+  def test_sliced_mla_proj_disallows_quantization(self):
+    """Tests that use_sliced_mla_proj=True is incompatible with quantization."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_sliced_mla_proj=true",
+        "quantization=int8",
     ]
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)

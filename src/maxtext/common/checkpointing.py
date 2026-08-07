@@ -107,6 +107,22 @@ def _expected_and_restored_params(abstract_nnx_state, restored_linen):
   return want, have
 
 
+def _is_custom_projector_problem(path: str, want: dict) -> bool:
+  """Returns True if a weight mismatch belongs to a newly attached custom vision projector."""
+  parts = [p for p in path.replace(".", "/").split("/") if p and p != "params"]
+  if len(parts) >= 2 and parts[0] == "vision_encoder":
+    proj_name = parts[1]
+    proj_dict = want.get("vision_encoder", {}).get(proj_name, {})
+    if isinstance(proj_dict, dict) and any("custom_linear" in k for k in proj_dict.keys()):
+      max_logging.warning(
+          f"===Warning: weight mismatch found in custom vision projector: {proj_name}.\n"
+          f"Path: {path}\n"
+          "This custom vision projector will be initialized with random weights.==="
+      )
+      return True
+  return False
+
+
 def _raise_on_weight_mismatch(want, have, config=None):
   """Raises if the restored weights (`have`) don't match what the model expects (`want`).
 
@@ -120,6 +136,8 @@ def _raise_on_weight_mismatch(want, have, config=None):
     want = _filter_lora_trainable_state(want)
 
   problems = _weight_mismatches(want, have)
+  # Ignore the weight mismatches in the custom projector so it can stay randomly initialized
+  problems = [(p, why) for p, why in problems if not _is_custom_projector_problem(p, want)]
   if not problems:
     return
   lines = "\n".join(f"  - '{p}': {why}" for p, why in problems)
@@ -346,9 +364,6 @@ def create_orbax_checkpoint_manager(
     enable_continuous_checkpointing: bool = False,
     max_num_checkpoints_to_keep: int = 10,
     checkpoint_storage_concurrent_gb: int = 96,
-    enable_single_controller: bool = False,
-    colocated_python_checkpointing: bool = False,
-    enable_single_replica_ckpt_restoring: bool = False,
     enable_autocheckpoint: bool = False,
     todelete_subdir: str | None = None,
     todelete_full_path: str | None = None,
@@ -752,6 +767,9 @@ def _should_save_checkpoint_at_step(checkpoint_manager, step, config, force):
   """Returns whether MaxText should build and dispatch checkpoint args."""
   if force:
     return True
+  if step == 0 and not config.save_checkpoint_on_start:
+    # if step = 0, `step % config.checkpoint_period == 0` is always true, force skip
+    return False
   if config.enable_continuous_checkpointing:
     base_checkpoint_due = bool(checkpoint_manager.should_save(step))
   else:
@@ -946,14 +964,14 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   ):
     if isinstance(data_iterator, RemoteIteratorWrapper):
       # Pass the wrapper directly; GrainCheckpointHandler will call save_state with the step
-      save_args_composite["iter"] = grain_utility.GrainCheckpointSave(
+      save_args_composite["iter"] = grain_utility.GrainCheckpointSave(  # pyrefly: ignore[bad-assignment]
           item=data_iterator
       )  # pyrefly: ignore[bad-assignment]
     elif not isinstance(data_iterator, list) and isinstance(
-        data_iterator.local_iterator, ElasticIterator
+        data_iterator.local_iterator, ElasticIterator  # pyrefly: ignore[missing-attribute]
     ):  # pyrefly: ignore[missing-attribute]
       # ElasticIterator checkpoints a single global scalar shared by all shards.
-      save_args_composite["iter"] = grain_utility.GrainCheckpointSave(
+      save_args_composite["iter"] = grain_utility.GrainCheckpointSave(  # pyrefly: ignore[bad-assignment]
           item=data_iterator.local_iterator
       )  # pyrefly: ignore[bad-assignment]
     else:
@@ -966,9 +984,9 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       for i, data_iter in enumerate(data_iterator):
         process_index = jax.process_index() + i * jax.process_count()
         grain_iters_to_save.append(
-            (data_iter.local_iterator, process_index, process_count_total)
+            (data_iter.local_iterator, process_index, process_count_total)  # pyrefly: ignore[missing-attribute]
         )  # pyrefly: ignore[missing-attribute]
-      save_args_composite["iter"] = grain_utility.GrainCheckpointSave(
+      save_args_composite["iter"] = grain_utility.GrainCheckpointSave(  # pyrefly: ignore[bad-assignment]
           item=grain_iters_to_save
       )  # pyrefly: ignore[bad-assignment]
 

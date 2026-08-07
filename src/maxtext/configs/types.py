@@ -265,6 +265,7 @@ ModelName = Literal[
     "qwen3-480b-a35b",
     "qwen3-vl-2b",
     "qwen3-vl-4b",
+    "qwen3-vl-30b-a3b",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
@@ -281,6 +282,10 @@ ModelName = Literal[
     "olmo3-7b",
     "olmo3-7b-pt",
     "olmo3-32b",
+    "envy-test",
+    "envy-switch-base",
+    "envy-switch-large",
+    "envy-switch-xxl",
 ]
 
 
@@ -361,6 +366,7 @@ class Checkpointing(BaseModel):
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
   )
+  save_checkpoint_on_start: bool = Field(True, description="If True, saves an initial checkpoint upon training start.")
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
   )
@@ -453,7 +459,7 @@ class Quantization(BaseModel):
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
       False,
-      description="Whether to use manual quantization for batch split. Only used if use_batch_split_schedule is True.",
+      description="Whether to use manual quantization for batch split. Only used if `use_batch_split_schedule=True`.",
   )
   weight_quantization_calibration_method: str = Field(
       "absmax",
@@ -629,20 +635,6 @@ class Attention(BaseModel):
   use_post_attn_norm: bool = Field(False, description="Apply LayerNorm after the attention block.")
   use_post_ffw_norm: bool = Field(False, description="Apply LayerNorm after the feed-forward block.")
   use_ragged_attention: bool = Field(False, description="Whether to use ragged attention kernels.")
-  use_tokamax_gmm: bool = Field(
-      False,
-      description="Whether to use the Tokamax library for GMM kernel implementation.",
-  )
-  use_gmm_v2: bool = Field(
-      False,
-      description=(
-          "Whether to use GMM v2 (with bf16 activations and weights) for MoE."
-          " Requires use_tokamax_gmm: true. Currently incompatible with quantization."
-      ),
-  )
-  num_moe_emb_chunks: int = Field(
-      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
-  )
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for Transformer Engine padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
@@ -677,6 +669,13 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+  use_sliced_mla_proj: bool = Field(
+      False,
+      description=(
+          "Whether to slice projection kernel weights before contraction in MLA"
+          " instead of running full projection + jnp.split."
+      ),
+  )
 
 
 class CompressedAttention(BaseModel):
@@ -1001,6 +1000,21 @@ class MoEKernels(BaseModel):
 
   merge_gating_gmm: bool = Field(False, description="whether to merge the two gating gmm kernels into one.")
 
+  num_moe_emb_chunks: int = Field(
+      0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
+  )
+
+  # tokamax gmm
+  use_tokamax_gmm: bool = Field(
+      False,
+      description="Whether to use the Tokamax library for GMM kernel implementation.",
+  )
+
+  use_gmm_v2: bool = Field(
+      False,
+      description="Whether to use Tokamax GMM v2 for MoE kernel.",
+  )
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -1241,6 +1255,9 @@ class RematAndOffload(BaseModel):
   remat_policy_for_vit: str = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
   decoder_layer_input: RematLocation = Field(
       RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
+  )
+  indexer_cutoff_threshold: RematLocation = Field(
+      RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
   )
   context: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the attention context.")
   mlpwi: RematLocation = Field(
@@ -2196,6 +2213,16 @@ class VisionProjector(BaseModel):
   projector_output_dim_for_vit: int = Field(4096, description="Output dimension for the vision projector.")
   pixel_shuffle_ratio_for_vit: float = Field(0.5, description="Pixel shuffle ratio for the Vision Transformer.")
   projector_dropout_for_vit: float = Field(0.0, description="Dropout rate for the vision projector.")
+  vision_projector_type: str = Field(
+      "default", description="Type of the vision projector to use. Supported: 'default', 'customized_vision_projector'."
+  )
+  vision_connector_num_layers: int = Field(2, description="Number of layers in custom vision projector.")
+  vision_connector_hidden_size: int = Field(
+      0,
+      description=("Hidden size for custom vision projector intermediate layers. 0 defaults to LLM hidden size."),
+  )
+  vision_connector_activation: str = Field("gelu", description="Activation function for custom vision projector.")
+  vision_connector_use_bias: bool = Field(True, description="Whether to use bias in custom vision projector.")
 
 
 class AudioEncoder(BaseModel):
@@ -3219,6 +3246,7 @@ class MaxTextConfig(
     if self.remat_policy == "custom":
       tensors = [
           "decoder_layer_input",
+          "indexer_cutoff_threshold",
           "context",
           "mlpwi",
           "moe_mlpwi_0",
@@ -3462,6 +3490,11 @@ class MaxTextConfig(
             "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
             "short-circuits to select all tokens and no indexer loss is produced."
         )
+    if not self.use_indexer and self.indexer_cutoff_threshold != RematLocation.REMAT:
+      raise ValueError(
+          f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
+          "`use_indexer=True` (DeepSeek Sparse Attention / MLA Indexer)."
+      )
     if self.attention_type == AttentionType.CHUNK.value and (
         not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
     ):
@@ -3536,6 +3569,7 @@ class MaxTextConfig(
           "qwen3-omni-30b-a3b",
           "qwen3-vl-2b",
           "qwen3-vl-4b",
+          "qwen3-vl-30b-a3b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
       )
@@ -3603,8 +3637,13 @@ class MaxTextConfig(
         raise ValueError("TPU ring context parallelism requires use_tokamax_splash=True.")
       if self.use_jax_splash:
         raise ValueError("TPU ring context parallelism requires use_jax_splash=False.")
-      if self.attention_type != "global":
-        raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
+      if self.attention_type not in ("global", "mla"):
+        raise ValueError("TPU Tokamax ring attention supports only attention_type='global' or 'mla'.")
+      if self.attention_type == "mla":
+        if self.packing:
+          raise ValueError("TPU Tokamax ring attention with MLA does not support packing yet.")
+        if self.use_batch_split_schedule:
+          raise ValueError("TPU Tokamax ring attention with MLA does not support the DeepSeek batch-split schedule.")
       if self.context_parallel_load_balance:
         if context_parallel_size % 2 != 0:
           raise ValueError("TPU Tokamax ring load balancing requires an even context_parallel_size.")
@@ -3674,6 +3713,12 @@ class MaxTextConfig(
             f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
             f"({self.interleave_moe_layer_step})"
         )
+    if self.decoder_block == DecoderBlockType.ENVY:
+      if self.base_num_decoder_layers % self.interleave_moe_layer_step != 0:
+        raise ValueError(
+            f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
+            f"({self.interleave_moe_layer_step})"
+        )
     if self.decoder_block in (
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
@@ -3706,10 +3751,15 @@ class MaxTextConfig(
       if self.grain_worker_count > 1:
         raise ValueError("Only supports <= 1 for now, more workers results in duplicated data")
     elif self.dataset_type == DatasetType.GRAIN:
-      if not self.grain_train_files and not self.grain_train_mixture_config_path:
-        raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
-      if self.eval_interval > 0 and not self.grain_eval_files:
-        raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
+      use_hf_parquet = self.hf_path and self.grain_file_type == "parquet"
+
+      if not self.grain_train_files and not self.grain_train_mixture_config_path and not use_hf_parquet:
+        raise ValueError(
+            "When dataset_type=grain, set grain_train_files, "
+            "grain_train_mixture_config_path, or use hf_path with grain_file_type=parquet."
+        )
+      if self.eval_interval > 0 and not self.grain_eval_files and not use_hf_parquet:
+        raise ValueError("Please specify grain_eval_files (or hf_path with parquet) or set eval_interval to <=0.")
     elif self.dataset_type == DatasetType.TFDS:
       logger.warning(
           "tfds pipeline is deprecated. Use dataset_type=grain, grain_file_type=tfrecord, and provide grain_train_files."
@@ -3774,11 +3824,18 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
+    if self.use_sliced_mla_proj and (self.quantization or self.use_qwix_quantization):
+      raise ValueError("`use_sliced_mla_proj` is not supported with quantization.")
 
-    if self.use_gmm_v2 and (self.quantization or self.use_qwix_quantization):
-      raise ValueError("Quantization with GMM v2 is not supported yet.")
-    if self.use_gmm_v2 and not self.use_tokamax_gmm:
-      raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
+    if self.use_manual_quantization and not self.use_batch_split_schedule:
+      raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
+
+    # Validation for GMM v2
+    if self.use_gmm_v2:
+      if not self.use_tokamax_gmm:
+        raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
+      if self.use_batch_split_schedule:
+        raise ValueError("GMM v2 is not supported with a batch split schedule.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:
@@ -3897,6 +3954,7 @@ class MaxTextConfig(
 class RLConfig(
     LogitsAndLoss,
     Engram,
+    ManifoldConstrainedHyperConnections,
     RematAndOffload,
     Attention,
     Llama4Attention,
@@ -3926,6 +3984,15 @@ class RLConfig(
     AdamW,
     Optimizer,
     Quantization,
+    MultimodalGeneral,
+    VisionTower,
+    VisionProjector,
+    AudioEncoder,
+    MlaAttention,
+    CompressedAttention,
+    AttentionIndexer,
+    SplashAttention,
+    Qwen3Next,
     # Debugging and Profiling
     DevelopmentAndDebugging,
     Profiling,
@@ -4139,6 +4206,7 @@ class RLConfig(
     if self.remat_policy == "custom":
       tensors = [
           "decoder_layer_input",
+          "indexer_cutoff_threshold",
           "context",
           "mlpwi",
           "moe_mlpwi_0",

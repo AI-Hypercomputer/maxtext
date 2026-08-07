@@ -51,6 +51,7 @@ load_full_state_path: ""
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: true
+save_checkpoint_on_start: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
 checkpoint_period: 10_000
@@ -141,7 +142,7 @@ kv_quant_dtype: "int8"
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
 # saves params quantized on fly at following path
 save_quantized_params_path: ""
-#used to configure the mode in which model is called
+# used to configure the mode in which model is called
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
@@ -267,6 +268,11 @@ wo_tile_drhs_mlp_dim: 1024
 
 merge_gating_gmm: false
 
+# Use tokamax library for gmm kernel implementation
+use_tokamax_gmm: false
+# Whether to use Tokamax GMM v2 for MoE kernel. Requires use_tokamax_gmm=true.
+use_gmm_v2: false
+
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
@@ -351,6 +357,7 @@ remat_policy: 'full'
 # If "custom" remat_policy is chosen, you can select tensors from the following list to offload on host memory, rematerialize or save on device memory.
 # Pick one of these options for following tensors: ['remat','device','offload']
 decoder_layer_input: 'device' # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
+indexer_cutoff_threshold: 'remat' # Remat policy for indexer cutoff threshold (can be set to 'remat', 'offload', or 'device')
 context: 'remat' # From https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py#L581-L583
 mlpwi: 'remat'
 mlpwi_0: 'remat'
@@ -438,6 +445,7 @@ kv_lora_rank: 512
 qk_nope_head_dim: 128
 qk_rope_head_dim: 64
 v_head_dim: 128
+use_sliced_mla_proj: false # Whether to slice projection kernel weights before contraction in MLA instead of running full projection + jnp.split.
 
 # Compressed Attention parameters
 o_lora_rank: 0 # Output LoRA rank for Compressed Attention.
@@ -1269,11 +1277,6 @@ use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
 
-# Use tokamax library for gmm kernel implementation
-use_tokamax_gmm: false
-# Whether to use GMM v2 for MoE.
-# Requires use_tokamax_gmm: true. Currently incompatible with quantization.
-use_gmm_v2: false
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
 use_jax_splash: false

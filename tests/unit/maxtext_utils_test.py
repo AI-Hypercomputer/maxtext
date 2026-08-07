@@ -483,7 +483,6 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     with self.assertRaises(AssertionError):
       assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
 
-  @pytest.mark.skip(reason="This test is skipped due to a sharding issue. b/542212958")
   def test_mixed_sharding_fails(self):
     """Tests that a mix of sharded and unsharded parameters fails when the unsharded
 
@@ -536,7 +535,6 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
     with self.assertRaises(AssertionError):
       assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
 
-  @pytest.mark.skip(reason="This test is skipped due to a sharding issue. b/542212958")
   def test_multi_axis_mixed_sharding_fails(self):
     """Tests that a mix of sharded (correctly) and unsharded tensors on a complex mesh fails."""
     devices = np.array(jax.devices()).reshape((jax.device_count(), 1, 1, 1, 1))
@@ -1150,17 +1148,18 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
     self.assertEqual(len(in_shardings), 3)
 
 
-@pytest.mark.cpu_only
 class TestGetShapedBatch(unittest.TestCase):
   """Tests for get_shaped_batch."""
 
-  def _make_cfg(self, *, enable_diloco=False, use_multimodal=False, use_audio=False):
+  def _make_cfg(self, *, enable_diloco=False, use_multimodal=False, use_audio=False, model_name="llama3.1-8b"):
+    """Build a minimal config mock for get_shaped_batch tests."""
     cfg = MagicMock()
     cfg.enable_diloco = enable_diloco
     cfg.global_batch_size_to_load = 4
     cfg.max_target_length = 16
     cfg.use_multimodal = use_multimodal
     cfg.use_audio = use_audio
+    cfg.model_name = model_name
     if enable_diloco:
       cfg.num_diloco_replicas = 2
     return cfg
@@ -1200,6 +1199,20 @@ class TestGetShapedBatch(unittest.TestCase):
   def test_no_audio_key_without_audio(self):
     batch = maxtext_utils.get_shaped_batch(self._make_cfg(use_audio=False))
     self.assertNotIn("audios", batch)
+
+  def test_llama4_includes_image_masks(self):
+    """Llama4 uses tile masks shaped as image_shape[:2] = (B*N, num_tiles)."""
+    batch = maxtext_utils.get_shaped_batch(self._make_cfg(use_multimodal=True, model_name="llama4-17b-16e"))
+    self.assertIn("images", batch)
+    self.assertIn("image_masks", batch)
+    self.assertEqual(batch["image_masks"].shape, batch["images"].shape[:2])
+
+  def test_qwen_and_gemma_omit_image_masks(self):
+    """Non-tiled VLMs must not treat image_shape[:2] (e.g. channels) as masks."""
+    for model_name in ("qwen3-vl-2b", "gemma3-4b", "gemma4-e2b"):
+      batch = maxtext_utils.get_shaped_batch(self._make_cfg(use_multimodal=True, model_name=model_name))
+      self.assertIn("images", batch)
+      self.assertNotIn("image_masks", batch, msg=f"{model_name} should omit image_masks")
 
   def test_all_values_are_shape_dtype_struct(self):
     batch = maxtext_utils.get_shaped_batch(self._make_cfg())
@@ -1745,7 +1758,6 @@ class TestKVCacheScanHelpers(unittest.TestCase):
       maxtext_utils.update_kv_caches_after_scan(kv_caches_tuple, returned_kv_cache, scan_length=1, block_len=2)
 
 
-@pytest.mark.cpu_only
 class TestGetSaveAndOffloadNames(unittest.TestCase):
   """Tests for maxtext_utils.get_save_and_offload_names (pure config logic, no device needed)."""
 

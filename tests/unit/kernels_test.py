@@ -109,7 +109,6 @@ class RaggedAttentionTest(unittest.TestCase):
     )
 
 
-@pytest.mark.cpu_only
 class RaggedAttentionCpuTest(unittest.TestCase):
   """Tests for ragged attention kernel on CPU (interpret mode)."""
 

@@ -760,7 +760,7 @@ def ragged_gather_reduce(
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
       ),
-      scratch_types=(
+      scratch_types=(  # pyrefly: ignore[bad-argument-type]
           _Scratch(
               num_rows_per_row_partition_vmem=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               prev_iter_last_row_vmem=pltpu.VMEM((col_size // col_chunk_size, col_chunk_size), jnp.float32),

@@ -70,7 +70,6 @@ class TunixAdapterSegmentIdsTest(unittest.TestCase):
 
     self.base = _CallableStubBase()
 
-  @pytest.mark.cpu_only
   def test_synthesizes_segment_ids_when_pad_id_set_and_seg_ids_none(self):
     """pad_id is set + caller passes decoder_segment_ids=None -> adapter
     synthesizes segment_ids = (input_tokens != pad_id)."""
@@ -91,7 +90,6 @@ class TunixAdapterSegmentIdsTest(unittest.TestCase):
     np.testing.assert_array_equal(np.asarray(seg), np.asarray(expected))
     self.assertEqual(seg.dtype, jnp.int32)
 
-  @pytest.mark.cpu_only
   def test_does_not_synthesize_when_pad_id_is_none(self):
     """pad_id omitted -> adapter forwards decoder_segment_ids=None unchanged
     (backward-compatibility for callers that don't set pad_id)."""
@@ -104,7 +102,6 @@ class TunixAdapterSegmentIdsTest(unittest.TestCase):
 
     self.assertIsNone(self.base.captured["decoder_segment_ids"])
 
-  @pytest.mark.cpu_only
   def test_passes_through_explicit_segment_ids_unchanged(self):
     """Caller-provided decoder_segment_ids should pass through verbatim
     regardless of pad_id."""
@@ -118,7 +115,6 @@ class TunixAdapterSegmentIdsTest(unittest.TestCase):
 
     np.testing.assert_array_equal(np.asarray(self.base.captured["decoder_segment_ids"]), np.asarray(explicit_seg))
 
-  @pytest.mark.cpu_only
   def test_returns_logits_and_none_tuple(self):
     """Adapter's __call__ contract: return (logits, None) to match Tunix's
     expected interface."""

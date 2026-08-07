@@ -86,6 +86,8 @@ def maybe_shard_with_name(
   """
   if inputs is None:
     return None
+  if hasattr(inputs, "ndim"):
+    named_sharding = truncate_out_sharding(named_sharding, inputs.ndim)
   if (
       isinstance(named_sharding, NamedSharding)
       and hasattr(inputs, "shape")
@@ -278,6 +280,7 @@ def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Vari
       if 0 < orig_len < len(pspec):
         pspec = P(*pspec[:orig_len])
 
+  # pyrefly: ignore[bad-argument-type]
   return v.replace(NamedSharding(mesh, pspec))
 
 
@@ -345,6 +348,25 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
 def create_sharding(mesh, logical_names, rules=None):
   """Create NamedSharding with given logical names."""
   return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
+
+
+def truncate_out_sharding(out_sharding, out_ndim: int):
+  """Truncates out_sharding if tensor ndim is less than out_sharding pspec length."""
+  if out_sharding is None:
+    return None
+  if isinstance(out_sharding, NamedSharding):
+    if len(out_sharding.spec) > out_ndim:
+      return NamedSharding(
+          out_sharding.mesh,
+          P(*out_sharding.spec[:out_ndim]),
+      )
+  elif isinstance(out_sharding, P):
+    if len(out_sharding) > out_ndim:
+      return P(*out_sharding[:out_ndim])
+  elif isinstance(out_sharding, (tuple, list)):
+    if len(out_sharding) > out_ndim:
+      return tuple(out_sharding[:out_ndim])
+  return out_sharding
 
 
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
@@ -437,14 +459,14 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
   for path, p_leaf in all_params_leaves:  # Iterate over each parameter leaf
     param_name_str = jax.tree_util.keystr(path)  # Convert the tree path to a readable string
 
-    # Unwrap nnx.Variable / nnx.LoRAParam objects to access the underlying jax.Array
-    if hasattr(p_leaf, "value") and not isinstance(p_leaf, jax.Array):
+    # Default unannotated LoRA parameters to PartitionSpec P() while leaving standard parameters as None for strict assertions.
+    is_lora_param = isinstance(p_leaf, getattr(nnx, "LoRAParam", ()))
+    is_lora = is_lora_param or "lora" in param_name_str.lower()
+    if isinstance(p_leaf, nnx.Variable):
       p_leaf = p_leaf.value
 
-    # Extract sharding spec, defaulting to PartitionSpec P() if sharding is unset or single-device
-    sharding = getattr(p_leaf, "sharding", None)
-    spec = getattr(sharding, "spec", None)
-    if spec is None:
+    spec = getattr(getattr(p_leaf, "sharding", None), "spec", None)
+    if spec is None and is_lora:
       spec = P()
     assert isinstance(spec, P), f"Expected '.sharding.spec' for parameter '{param_name_str}' to be a PartitionSpec."
 
@@ -633,12 +655,12 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
     else:
       raise NotImplementedError(f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}")
-    if "params" not in sharded_fp32_params.keys():
+    if "params" not in sharded_fp32_params.keys():  # pyrefly: ignore[missing-attribute]
       # When quantization=fp8 is enabled the sharded_fp32_params
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
     state_mesh_shardings = state_mesh_shardings.replace(
-        params=dict(prev_params_shardings, **sharded_fp32_params)
+        params=dict(prev_params_shardings, **sharded_fp32_params)  # pyrefly: ignore[bad-unpacking]
     )  # pyrefly: ignore[bad-unpacking]
   return prev_params_shardings, state_mesh_shardings
 

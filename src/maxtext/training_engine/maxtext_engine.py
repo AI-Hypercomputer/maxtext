@@ -267,12 +267,34 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._throttler.wait_for_all()
 
     step = kwargs.get("step", self.train_step)
-    # TODO: b/540072773 - Also save self._accumulated_grads and _micro_step_count.
+    force_ckpt_save = kwargs.get("force", False)
+
+    custom_metadata = {}
+    if self._micro_step_count > 0:
+      logging.info(
+          "Saving intra-step checkpoint at step %d (micro_step_count=%d).",
+          step,
+          self._micro_step_count,
+      )
+      force_ckpt_save = True
+      custom_metadata["micro_step_count"] = self._micro_step_count
+    else:
+      logging.info("Saving checkpoint at step %d.", step)
+
+    if metadata:
+      # Metadata from Orchestrator
+      custom_metadata["additional_metadata"] = metadata
+
     ckpt_saved = self._checkpoint_manager.save_checkpoint(
         step=step,
-        model=self.model,
-        optimizer=self.optimizer,
-        custom_metadata=metadata,
+        checkpoint_state=checkpointing.CheckpointState(
+            model=self.model,
+            optimizer=self.optimizer,
+            accumulated_metrics=self.get_metrics(clear_cache=False),
+            accumulated_grads=self._accumulated_grads,
+        ),
+        custom_metadata=custom_metadata,
+        force_ckpt_save=force_ckpt_save,
     )
     if ckpt_saved:
       logging.info("Checkpoint saved at step %d.", step)
@@ -287,15 +309,53 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       The metadata PyTree of the restored checkpoint.
     """
     step = kwargs.get("step", None)
-    restored_step, restored_metadata = self._checkpoint_manager.restore_checkpoint(
+    checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
         optimizer=self.optimizer,
+        accumulated_grads=self._accumulated_grads,
+    )
+
+    restored_step, restored_checkpoint_state, restored_metadata = self._checkpoint_manager.restore_checkpoint(
+        checkpoint_state=checkpoint_state,
         step=step,
     )
-    if restored_step:
-      logging.info("Checkpoint restored from step %d.", restored_step)
-      self.train_step = restored_step
-    return restored_metadata
+    if not restored_step:
+      return None
+
+    logging.info("Checkpoint restored from step %d.", restored_step)
+    self.train_step = restored_step
+
+    if restored_checkpoint_state.accumulated_metrics:
+      # pylint: disable-next=protected-access
+      self._metrics_recorder._metrics_buffer = restored_checkpoint_state.accumulated_metrics
+
+    restored_additional_metadata = None
+    if restored_metadata:
+      self._micro_step_count = restored_metadata.get("micro_step_count", 0)
+      restored_additional_metadata = restored_metadata.get("additional_metadata", None)
+
+    # Restore intra-step state if it exists.
+    if restored_checkpoint_state.accumulated_grads:
+      self._accumulated_grads = restored_checkpoint_state.accumulated_grads
+
+      if self._micro_step_count > 0 and self._metrics_recorder._metrics_buffer:  # pylint: disable=protected-access
+        active_buf = self._metrics_recorder.get_step_metrics(restored_step)
+        if active_buf and "loss" in active_buf.weighted_metrics:
+          wm = active_buf.weighted_metrics["loss"]
+          if wm.unreduced_sum.ndim > 0:
+            self._cached_losses = [
+                abstract_engine.WeightedMetric(
+                    unreduced_sum=wm.unreduced_sum[i],
+                    denominator=wm.denominator[i],
+                    eps=wm.eps,
+                    min_denom=wm.min_denom,
+                )
+                for i in range(wm.unreduced_sum.shape[0])
+            ]
+          else:
+            self._cached_losses = [wm]
+
+    return restored_additional_metadata
 
   def record_metrics(
       self,
