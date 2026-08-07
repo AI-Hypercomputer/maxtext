@@ -21,6 +21,7 @@ the MaxRL AbstractTrainer interface without running an outer loop.
 from __future__ import annotations
 
 from collections.abc import Callable
+import datetime
 from typing import Any
 
 from absl import logging
@@ -28,12 +29,21 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from maxtext.common import common_types
+from maxtext.common import profiler
+from maxtext.common.goodput import (
+    create_goodput_recorder,
+    GoodputEvent,
+    maybe_record_goodput,
+    record_goodput,
+)
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
 from maxtext.training_engine import inflight_throttler
 from maxtext.training_engine import metrics as metrics_module
+from maxtext.utils import elastic_utils
+from maxtext.utils import gcs_utils
 from maxtext.utils import gradient_accumulation
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -48,12 +58,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self,
       training_config: pyconfig.HyperParameters,
       mesh: jax.sharding.Mesh | None = None,
+      goodput_recorder: Any = None,
   ) -> None:
     """Initializes the MaxText trainer state and sharded model.
 
     Args:
       training_config: MaxText HyperParameters configuration instance.
       mesh: Optional SPMD device mesh.
+      goodput_recorder: Optional GoodputRecorder instance.
 
     Raises:
       TypeError: If training_config is not a pyconfig.HyperParameters instance.
@@ -65,23 +77,30 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
     self._config = training_config
     self._mesh = mesh
+    if goodput_recorder is not None:
+      self._goodput_recorder = goodput_recorder
+    elif getattr(training_config, "enable_goodput_recording", False):
+      self._goodput_recorder = create_goodput_recorder(training_config)
+    else:
+      self._goodput_recorder = None
     self._init_rng = jax.random.PRNGKey(getattr(training_config, "init_weights_seed", 0))
     self._loss_fn: Callable[..., Any] | None = None
     self._gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = None
     self._compiled = False
     if not getattr(training_config, "model_name", None):
       raise ValueError("training_config.model_name must be specified")
-    self._model = model_creation_utils.from_pretrained(
-        config=self._config,
-        mesh=self._mesh,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rng_key=self._init_rng,
-    )
-    self._state: Any = None
-    self._accumulated_grads: Any = None
-    self._micro_step_count = 0
-    self._cached_losses: list[jax.Array] = []
-    self._learning_rate_schedule, self._optimizer = train_utils.create_training_optimizer(self._config, self._model)
+    with maybe_record_goodput(self._goodput_recorder, GoodputEvent.TPU_INIT):
+      self._model = model_creation_utils.from_pretrained(
+          config=self._config,
+          mesh=self._mesh,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          rng_key=self._init_rng,
+      )
+      self._state: Any = None
+      self._accumulated_grads: Any = None
+      self._micro_step_count = 0
+      self._cached_losses: list[jax.Array] = []
+      self._learning_rate_schedule, self._optimizer = train_utils.create_training_optimizer(self._config, self._model)
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(
@@ -89,7 +108,21 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         config=self._config,
     )
     self._metrics_recorder = metrics_module.MetricsRecorder()
-    self._throttler = inflight_throttler.InflightThrottler(config=self._config)
+    self._metrics_logger = metrics_module.MetricsLogger(config=self._config)
+    self._throttler = inflight_throttler.InflightThrottler(
+        config=self._config,
+        metrics_logger=self._metrics_logger,
+    )
+
+    self._profiler = profiler.Profiler(self._config, offset_step=0)
+    self._last_step_completion: datetime.datetime = datetime.datetime.now()
+    self._per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(self._config)
+
+    if isinstance(self._model, nnx.Module):
+      _, setup_params, _ = nnx.split(self._model, nnx.Param, ...)
+    else:
+      setup_params = getattr(self._model, "params", None)
+    self._metrics_logger.write_setup_info_to_tensorboard(setup_params)
 
   @property
   def model(self) -> Any:
@@ -142,6 +175,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       dummy_data: Sample TrainerPayload providing representative tensor shapes.
     """
     self._compiled = True
+    self._maybe_upload_hlo_dump(self.train_step)
 
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
@@ -149,6 +183,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Args:
       payload: Packed micro-batch training input.
     """
+    if self._micro_step_count == 0:
+      record_goodput(self._goodput_recorder, "record_step_start_time", self.train_step)
+      self._maybe_activate_profiler(self.train_step)
     if self._gen_model_input_fn is not None:
       batch = self._gen_model_input_fn(payload)
     else:
@@ -180,10 +217,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if isinstance(loss, abstract_engine.WeightedMetric):
       self.record_metrics("loss", loss)
 
-    # Record auxiliary metrics.
+    # Record auxiliary scalar/weighted metrics from aux. We filter by type and dimension
+    # (ndim <= 1) to ignore non-metric multi-dimensional tensors (e.g. intermediate_outputs
+    # or moe_bias_updates) that would fail when written as scalar TensorBoard summaries.
+    # TODO(sjsurbhi): Ensure that Tunix loss_fn is supported as well.
     if isinstance(aux, dict):
       for key, value in aux.items():
-        self.record_metrics(key, value)
+        if isinstance(value, (abstract_engine.WeightedMetric, int, float)) or (
+            hasattr(value, "dtype") and hasattr(value, "ndim") and value.ndim <= 1
+        ):
+          self.record_metrics(key, value)
 
     self._cached_losses.append(loss)
     if self._accumulated_grads is None:
@@ -201,11 +244,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return
 
     if self._learning_rate_schedule is not None:
-      try:
-        lr = self._learning_rate_schedule(self.train_step)
-        self.record_metrics("learning_rate", lr)
-      except Exception:  # pylint: disable=broad-except
-        pass
+      lr = self._learning_rate_schedule(self.train_step)
+      self.record_metrics("learning_rate", lr)
 
     # Wait for previous computations to finish before dispatching the update step to TPU.
     self._throttler.wait_for_next()
@@ -246,7 +286,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._cached_losses.clear()
     self._accumulated_grads = None
     self._micro_step_count = 0
+
+    now = datetime.datetime.now()
+    step_time_seconds = (now - self._last_step_completion).total_seconds()
+    self._last_step_completion = now
+    self.record_metrics("step_time", step_time_seconds)
+    if step_time_seconds > 0 and self._per_device_tflops > 0:
+      self.record_metrics("tflops", self._per_device_tflops / step_time_seconds)
+
+    self._maybe_deactivate_profiler(self.train_step)
+    record_goodput(self._goodput_recorder, "record_step_end_time", self.train_step)
     self._train_step += 1
+    self._maybe_upload_hlo_dump(self.train_step)
 
   def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     """Executes an evaluation step on the given payload.
@@ -298,6 +349,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     )
     if ckpt_saved:
       logging.info("Checkpoint saved at step %d.", step)
+      if self._config.elastic_enabled:
+        self._checkpoint_manager.wait_until_finished()
+        raw_mgr = getattr(self._checkpoint_manager, "_checkpoint_manager", None) or self._checkpoint_manager
+        elastic_utils.maybe_elastic_scale_up(self._config, raw_mgr)
 
   def restore_checkpoint(self, **kwargs: Any) -> Any:
     """Restores the latest Multi-Tier Checkpoint and returns its metadata.
@@ -399,8 +454,57 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     return {}
 
+  def _block_until_ready(self) -> None:
+    """Blocks until all pending computations and parameters are ready."""
+    self._throttler.wait_for_all()
+    if self._state is not None:
+      jax.block_until_ready(self._state)
+    elif self.model is not None:
+      jax.block_until_ready(self.model)
+
+  def _maybe_activate_profiler(self, step: int) -> None:
+    """Conditionally activates the profiler based on the current step."""
+    if self._profiler is not None:
+      model_or_state = self._state or self.model
+      self._profiler.maybe_activate_profiler(step, model_or_state)
+
+  def _maybe_deactivate_profiler(self, step: int) -> None:
+    """Conditionally deactivates the profiler based on the current step."""
+    if self._profiler is not None:
+      model_or_state = self._state or self.model
+      self._profiler.maybe_deactivate_profiler(step, model_or_state)
+
+  def _deactivate_profiler(self) -> None:
+    """Deactivates the profiler."""
+    if self._profiler is not None:
+      self._profiler.deactivate()
+
+  def _maybe_upload_hlo_dump(self, step: int) -> None:
+    """Conditionally uploads HLO dumps to GCS if configured for the step."""
+    if not getattr(self._config, "dump_hlo", False):
+      return
+    dump_target = getattr(self._config, "dump_step", -1)
+    if dump_target < 0:
+      dump_target = 1
+    if step == dump_target:
+      self._block_until_ready()
+      gcs_utils.upload_dump(
+          self._config.dump_hlo_local_dir,
+          self._config.dump_hlo_gcs_dir,
+          module_name=self._config.dump_hlo_module_name,
+          delete_local_after=self._config.dump_hlo_delete_local_after,
+          all_host_upload=self._config.dump_hlo_upload_all,
+      )
+
+  def _wait_until_checkpoints_finished(self) -> None:
+    """Blocks until any ongoing background checkpoint saves finish."""
+    if self._checkpoint_manager is not None:
+      self._checkpoint_manager.wait_until_finished()
+
   def close(self) -> None:
     """Closes the trainer and its associated resources."""
+    self._deactivate_profiler()
+    self._wait_until_checkpoints_finished()
     self._throttler.cleanup()
     self._metrics_recorder.cleanup()
     self._checkpoint_manager.close()

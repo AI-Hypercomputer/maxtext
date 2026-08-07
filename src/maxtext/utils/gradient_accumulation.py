@@ -69,12 +69,17 @@ def gradient_accumulation_loss_and_grad(
     return maybe_shard_with_name(inputs, sharding_names, config.shard_mode, debug_sharding=config.debug_sharding)
 
   is_nnx = isinstance(model, nnx.Module)
+  if is_nnx and params_shardings is None:
+    _, params, _ = nnx.split(model, nnx.Param, ...)
+    params_shardings = jax.tree.map(lambda x: getattr(x, "sharding", None), params)
 
-  # For ZeRO-1 + GA, read the resolved "data" axis size from the mesh rather than
-  # config.ici_data_parallelism, which may be -1 (auto-fill) and resolves to 1 when
-  # FSDP already consumes every device — in which case data parallelism is not active.
-  param_mesh = jax.tree.leaves(params_shardings)[0].mesh
-  data_parallel_active = config.shard_mode == ShardMode.EXPLICIT and param_mesh.shape.get("data", 1) > 1
+  first_sharding = (
+      jax.tree.leaves(params_shardings)[0] if params_shardings is not None and jax.tree.leaves(params_shardings) else None
+  )
+  param_mesh = getattr(first_sharding, "mesh", None)
+  data_parallel_active = (
+      config.shard_mode == ShardMode.EXPLICIT and param_mesh is not None and param_mesh.shape.get("data", 1) > 1
+  )
   if data_parallel_active:
     # reduced/unreduced PartitionSpecs are rejected inside a jax.lax.scan carry: scan
     # traces its body against an AbstractMesh whose axis types are all Auto, and the
