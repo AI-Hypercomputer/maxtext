@@ -851,6 +851,9 @@ class Attention(nnx.Module):
           cast_as_fprop_dtype=True,
           fprop_dtype=self.dtype,
           mrope_section=self.mrope_section,
+          partial_rotary_factor=(
+              self.partial_rotary_factor if self.partial_rotary_factor is not None else self.config.partial_rotary_factor
+          ),
           rngs=self.rngs,
       )
 
