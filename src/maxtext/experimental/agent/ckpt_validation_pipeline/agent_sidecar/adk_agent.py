@@ -17,11 +17,12 @@ def _send_message_with_retry(chat, prompt, max_retries=3, sleep_seconds=30):
     try:
       return chat.send_message(prompt)
     except Exception as e:
-      err_str = str(e)
-      if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+      err_str = str(e).lower()
+      retry_keywords = ["429", "resource_exhausted", "quota", "503", "unavailable", "500", "internal server error", "502", "bad gateway", "504", "gateway timeout"]
+      if any(k in err_str for k in retry_keywords):
         if attempt < max_retries:
           logger.warning(
-              f"Received 429 rate-limit error (attempt {attempt}/{max_retries}). Sleeping {sleep_seconds}s before retry..."
+              f"Received API rate-limit/server error (attempt {attempt}/{max_retries}). Sleeping {sleep_seconds}s before retry..."
           )
           time.sleep(sleep_seconds)
           continue
