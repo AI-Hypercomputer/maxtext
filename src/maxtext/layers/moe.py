@@ -421,21 +421,22 @@ class RoutedMoE(nnx.Module):
     self.is_hash_routing = is_hash_routing
 
     # DeepSeek V4 Hash Routing
+    # DeepSeek V4 Hash Routing
     if self.is_hash_routing:
       # Token-ID to Expert-ID lookup table for static routing
       # Must be stored as float32 because MaxText passes the entire variable tree
       # through jax.value_and_grad, which strictly requires all leaves to be inexact types
       # (even if they receive no gradients). We cast to int32 dynamically during routing.
+      vocab_size = getattr(self.config, "original_vocab_size", self.config.vocab_size)
       self.tid2eid = Tid2EidVar(
           jnp.zeros(
-              (self.config.vocab_size, self.num_experts_per_tok),
+              (vocab_size, self.num_experts_per_tok),
               dtype=jnp.float32,
           ),
           out_sharding=None,  # Replicated across shards for local lookup
       )
     else:
       self.tid2eid = None
-
     self.moe_expert_input_dim = (
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
     )
