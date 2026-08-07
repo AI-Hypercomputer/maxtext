@@ -445,7 +445,11 @@ class PostTrainCheckpointBaseManagerTest(unittest.TestCase):
         super().close()
 
     with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
-      with mock.patch.object(ocp, "CheckpointManager", _Tracking):
+      with (
+          mock.patch.object(ocp, "CheckpointManager", _Tracking),
+          mock.patch.object(ocp.checkpoint_manager, "CheckpointManager", _Tracking),
+          mock.patch.object(tunix_checkpoint_manager.ocp, "CheckpointManager", _Tracking),
+      ):
         manager = post_train_checkpointing.MaxTextLayoutCheckpointManager(
             root_directory=d,
             options=ocp.CheckpointManagerOptions(save_interval_steps=1),
