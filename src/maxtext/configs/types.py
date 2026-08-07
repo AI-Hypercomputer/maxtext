@@ -271,6 +271,7 @@ ModelName = Literal[
     "qwen3-custom-30b-a3b",
     "qwen3.5-35b-a3b",
     "qwen3.5-397b-a17b",
+    "qwen3.5-tiny",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -1064,6 +1065,10 @@ class Qwen3Next(BaseModel):
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+  use_gdn_kernel: bool = Field(
+    False,
+    description="Flag whether to use the pallas kernel for Gated Delta Rule in maxtext/kernels/attention",
+  )
 
 
 class HardwareAndMesh(BaseModel):

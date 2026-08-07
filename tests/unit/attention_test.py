@@ -57,6 +57,8 @@ from maxtext.layers import embeddings
 from maxtext.kernels.attention import jax_flash_attention
 from maxtext.configs import pyconfig
 from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
+from maxtext.models.qwen3 import jax_chunk_gated_delta_rule
+from maxtext.kernels.attention.gated_delta_rule_attention import pallas_chunk_gated_delta_rule
 import numpy as np
 import pytest
 
@@ -3693,6 +3695,155 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     )
     self.assertEqual(mask_none.ndim, 4)
     self.assertEqual(mask_none.shape[-1], kv_len)
+
+
+class GdnPallasKernelTest(unittest.TestCase):
+  """Tests for the Pallas-accelerated Gated Delta Net Kernel."""
+
+  def setUp(self):
+    self.config_arguments = {"run_name": "test", "hardware": "tpu"}
+
+  def get_gdn_data(self, batch_size, seq_len, num_heads, k_dim, v_dim, dtype):
+    """Helper to generate dummy data for the GDN inputs."""
+    key = jax.random.PRNGKey(0)
+    k_q, k_k, k_v, k_g, k_b = jax.random.split(key, 5)
+    
+    # Scale down inputs slightly to prevent massive matmul accumulations
+    scale = jnp.sqrt(k_dim)
+    query = jax.random.normal(k_q, (batch_size, seq_len, num_heads, k_dim), dtype=dtype) / scale
+    key = jax.random.normal(k_k, (batch_size, seq_len, num_heads, k_dim), dtype=dtype) / scale
+    value = jax.random.normal(k_v, (batch_size, seq_len, num_heads, v_dim), dtype=dtype) / scale
+    
+    # `g` MUST be strictly negative to act as a decay factor (preventing exp() overflow)
+    # This perfectly mimics `g = -exp(A_log) * softplus(...)` from the real model
+    g = -jax.random.uniform(k_g, (batch_size, seq_len, num_heads), dtype=dtype)
+    
+    # `beta` is a sigmoid output in the real model, so it is strictly between 0 and 1
+    beta = jax.random.uniform(k_b, (batch_size, seq_len, num_heads), dtype=dtype)
+    
+    return query, key, value, g, beta
+
+  @pytest.mark.tpu_only
+  def test_tpu_gdn_pallas_forward(self):
+    """Test forward equivalence between JAX ref and Pallas GDN kernel."""
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()], 
+        **self.config_arguments,
+        dtype="bfloat16" 
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    
+    batch_size = cfg.global_batch_size_to_train_on
+    seq_len, num_heads = 128, 4
+    k_dim, v_dim, chunk_size = 32, 32, 64
+    
+    query, key, value, g, beta = self.get_gdn_data(
+        batch_size, seq_len, num_heads, k_dim, v_dim, cfg.dtype
+    )
+
+    jax_out, _ = jax_chunk_gated_delta_rule(
+        query=query, key=key, value=value, g=g, beta=beta,
+        chunk_size=chunk_size, 
+        initial_state=None,
+        compute_dtype=cfg.dtype
+    )
+
+    with jax.set_mesh(mesh):
+        pallas_out, _ = pallas_chunk_gated_delta_rule(
+            query=query, key=key, value=value, g=g, beta=beta,
+            chunk_size=chunk_size, 
+            initial_state=None,
+            compute_dtype=cfg.dtype, 
+            mesh=mesh
+        )
+
+    jax_out = jax.device_get(jax_out)
+    pallas_out = jax.device_get(pallas_out)
+    
+    diff = jnp.abs(jax_out - pallas_out)
+      
+    max_diff = float(jnp.max(diff))
+    mean_diff = float(jnp.mean(diff))
+    max_jax = float(jnp.max(jnp.abs(jax_out)))
+    max_pallas = float(jnp.max(jnp.abs(pallas_out)))
+    
+    print(f"\n[Forward | {cfg.dtype}] Max difference: {max_diff:.6f}")
+    print(f"[Forward | {cfg.dtype}] Mean difference: {mean_diff:.6f}")
+    print(f"[Forward | {cfg.dtype}] Max JAX: {max_jax:.6f} | Max Pallas: {max_pallas:.6f}")
+    
+    # Use np.testing, safely casting to float32 to avoid numpy bfloat16 bugs
+    import numpy as np
+    np.testing.assert_allclose(
+        np.asarray(jax_out, dtype=np.float32),
+        np.asarray(pallas_out, dtype=np.float32),
+        rtol=5e-02,
+        atol=5e-02,
+        err_msg=f"Forward output from pure JAX and Pallas GDN kernel are not close for {cfg.dtype}."
+    )
+
+  @pytest.mark.tpu_only
+  def test_tpu_gdn_pallas_backward(self):
+    """Test gradient equivalence between JAX ref and Pallas GDN kernel."""
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()], 
+        **self.config_arguments,
+        dtype="bfloat16"
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    batch_size = cfg.global_batch_size_to_train_on
+    seq_len, num_heads = 128, 4
+    k_dim, v_dim, chunk_size = 32, 32, 64
+    
+    query, key, value, g, beta = self.get_gdn_data(
+        batch_size, seq_len, num_heads, k_dim, v_dim, cfg.dtype
+    )
+
+    def jax_loss(q, k, v, g_val, b):
+        out, _ = jax_chunk_gated_delta_rule(
+            query=q, key=k, value=v, g=g_val, beta=b, 
+            chunk_size=chunk_size, compute_dtype=cfg.dtype
+        )
+        return jnp.mean(out.astype(jnp.float32) ** 2)
+
+    def pallas_loss(q, k, v, g_val, b):
+        out, _ = pallas_chunk_gated_delta_rule(
+            query=q, key=k, value=v, g=g_val, beta=b, 
+            chunk_size=chunk_size, compute_dtype=cfg.dtype, mesh=mesh
+        )
+        return jnp.mean(out.astype(jnp.float32) ** 2)
+
+    jax_grad_fn = jax.grad(jax_loss, argnums=(0, 1, 2, 3, 4))
+    jax_grads = jax_grad_fn(query, key, value, g, beta)
+
+    pallas_grad_fn = jax.grad(pallas_loss, argnums=(0, 1, 2, 3, 4))
+    with jax.set_mesh(mesh):
+        pallas_grads = pallas_grad_fn(query, key, value, g, beta)
+
+    jax_grads = jax.device_get(jax_grads)
+    pallas_grads = jax.device_get(pallas_grads)
+
+    import numpy as np
+    grad_names = ["query", "key", "value", "g", "beta"]
+    for jg, pg, name in zip(jax_grads, pallas_grads, grad_names):
+      # Calculate diffs natively in JAX
+      diff = jnp.abs(jg - pg)
+      
+      max_diff = float(jnp.max(diff))
+      mean_diff = float(jnp.mean(diff))
+      
+      print(f"\n[Backward - {name} | {cfg.dtype}] Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}")
+      
+      # Safely cast to float32 for the numpy assertion
+      np.testing.assert_allclose(
+          np.asarray(jg, dtype=np.float32), 
+          np.asarray(pg, dtype=np.float32), 
+          rtol=5e-02, 
+          atol=5e-02, 
+          err_msg=f"Gradients for `{name}` from pure JAX and Pallas GDN kernel are not close for {cfg.dtype}."
+      )
 
 
 if __name__ == "__main__":
