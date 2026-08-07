@@ -67,6 +67,12 @@
       }
     },
     {
+      "attention_op/decoder_segment_ids: int32[192,2048]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P('fsdp', None)"
+      }
+    },
+    {
       "attentions/out: bfloat16[192,2048,64,64]": {
         "logic_axes": "('activation_batch_attn', 'activation_length_attn', 'activation_heads', 'activation_kv')",
         "PartitionSpec": "P('fsdp', None, None, None)"
