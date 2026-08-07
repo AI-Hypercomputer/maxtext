@@ -21,6 +21,13 @@
    - For Level 2 (Python Code Patch): Call the `wrapped_clear_failed_airflow_task` tool, providing only the `dag_id` and `task_id`. The branch and run configuration will be injected automatically.
 2. Call `wait_for_airflow_run` using the captured or original `dag_id` and `dag_run_id`. A started run is not a successful verification.
 3. If the pipeline run **fails**, report the failure back to the Meta-Agent so it can restart the cycle.
+   - HOWEVER, if you have exhausted all your allowed retries (or are told you are on your final attempt), you MUST generate a **Failure Remediation Report** instead of restarting.
+   - Write this report to a markdown file in the root of the project: `failure_remediation_report_{run_id}.md`
+   - The report MUST contain:
+     - A summary of the original failure.
+     - A detailed list of all attempted auto-remediations that failed.
+     - Hints or suggestions for the on-call engineer on what to investigate next.
+   - Use `send_alert_email` to send this failure report to the engineering team.
 4. Only if `wait_for_airflow_run` returns terminal state `success`, you must generate the final **Remediation Report (Victory Lap)**. 
    - Write this report to a markdown file in the root of the project: `remediation_report_{run_id}.md`
    - The report MUST contain:

@@ -320,6 +320,7 @@ def run_agent_workflow(context: dict, failure_log: str):
 
   # --- PHASE 2.5: OVERSEER SURVEILLANCE LOOP (meta_agent.txt) ---
   overseer_instruction = ""
+  run_state = {}
   try:
     from monitor.state_manager import get_run_state
     run_state = get_run_state(run_id)
@@ -441,6 +442,7 @@ def run_agent_workflow(context: dict, failure_log: str):
       "EXPLICIT META-AGENT VERIFICATION INSTRUCTIONS:\n"
       f"1. Target branch: '{new_branch}'.\n"
       f"Original DAG: '{airflow_dag_id}'; task: '{airflow_task_id}'; run: '{airflow_run_id}'.\n"
+      f"Attempt Information: You are on attempt {run_state.get('retries', 0) + 1} out of {int(os.environ.get('MAX_RETRIES', '25'))}.\n"
       f"Original overrides: {json.dumps(maxtext_overrides)}\n"
       f"Identified config_overrides: {json.dumps(config_overrides)}\n"
       f"Fixer result: {fixer_response_text[:4000]}\n"
@@ -492,5 +494,30 @@ def run_agent_workflow(context: dict, failure_log: str):
 
 
 if __name__ == "__main__":
-  # Mock trigger for local testing
-  print("Agent ready. To run as a Cloud Run Job, this should be invoked by the poller.")
+    # print("Agent ready. To run as a Cloud Run Job, this should be invoked by the poller.")
+    
+    # Mock trigger for local testing
+    import os
+    print("Running agent locally with mock context...")
+    
+    mock_context = {
+        "remediation_key": "local-test-run-001",
+        "maxtext_branch": "main",
+        "maxtext_model_name": "gemma2-2b",
+        "airflow_dag_id": "dag_verify_forward_compile",
+        "maxtext_overrides": {"clip_logits_epsilon": "1e-8"}
+    }
+    
+    # Check if a mock failure log exists, otherwise use a default string
+    mock_log_path = "mock_failure_log.txt"
+    if os.path.exists(mock_log_path):
+        with open(mock_log_path, "r") as f:
+            log = f.read()
+    else:
+        log = "ValueError: Shape Mismatch in embedding layer. Expected (1024, 2048), got (1024, 4096)."
+        # Optionally write it out so the user can edit it later
+        with open(mock_log_path, "w") as f:
+            f.write(log)
+    
+    # Run the agent locally
+    run_agent_workflow(mock_context, log)
