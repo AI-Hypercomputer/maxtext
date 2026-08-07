@@ -1779,6 +1779,164 @@ def DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN():
   return {}
 
 
+def HY3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates a parameter mapping from MaxText to HuggingFace Hy3 weight paths.
+
+  Structurally this follows DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING's dense/MoE
+  two-stack loop (Hy3 also has a `first_k_dense_replace`-driven dense/MoE
+  split and a DeepSeek-V3-style sigmoid+bias router with a shared expert),
+  but the attention block is plain GQA + QK-Norm (no MLA), matching
+  QWEN_MAXTEXT_TO_HF_PARAM_MAPPING's attention keys instead. HF key names
+  (`mlp.router.gate.weight`, `mlp.expert_bias`, `mlp.shared_mlp.*`) were
+  confirmed against the real `tencent/Hy3` `model.safetensors.index.json`,
+  not assumed from DeepSeek/Qwen naming conventions.
+
+  Note: layer `num_hidden_layers` (the MTP layer) is intentionally not
+  mapped here -- MTP weights are left randomly initialized on conversion.
+
+  Returns:
+    dict: A mapping where keys are `atomic_mt_key` (single MaxText parameter names).
+      Values are Hugging Face parameter names in one of four forms: unscanned (string),
+      scanned (list of strings), unscanned with expert stacking (list of strings),
+      or scanned with expert stacking (nested list of strings).
+  """
+  num_main_layers = config["num_hidden_layers"]
+  first_num_dense_layers = config["first_k_dense_replace"]
+  num_experts = config.get("num_experts", 0)
+
+  mapping = {
+      "params-token_embedder-embedding": "model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+  # Attention keys are shared by both dense and MoE layers: plain GQA + QK-Norm, no bias.
+  attention_keys = {
+      "pre_self_attention_layer_norm-scale": "input_layernorm.weight",
+      "post_self_attention_layer_norm-scale": "post_attention_layernorm.weight",
+      "self_attention-query-kernel": "self_attn.q_proj.weight",
+      "self_attention-key-kernel": "self_attn.k_proj.weight",
+      "self_attention-value-kernel": "self_attn.v_proj.weight",
+      "self_attention-out-kernel": "self_attn.o_proj.weight",
+      "self_attention-query_norm-scale": "self_attn.q_norm.weight",
+      "self_attention-key_norm-scale": "self_attn.k_norm.weight",
+  }
+  # Dense layers (layer 0, per first_k_dense_replace=1)
+  dense_layer_keys = attention_keys | {
+      "mlp-wi_0-kernel": "mlp.gate_proj.weight",
+      "mlp-wi_1-kernel": "mlp.up_proj.weight",
+      "mlp-wo-kernel": "mlp.down_proj.weight",
+  }
+  # MoE layers
+  moe_layer_keys = attention_keys | {
+      "Hy3MoeBlock_0-shared_experts-wi_0-kernel": "mlp.shared_mlp.gate_proj.weight",
+      "Hy3MoeBlock_0-shared_experts-wi_1-kernel": "mlp.shared_mlp.up_proj.weight",
+      "Hy3MoeBlock_0-shared_experts-wo-kernel": "mlp.shared_mlp.down_proj.weight",
+      "Hy3MoeBlock_0-MoeBlock_0-gate-kernel": "mlp.router.gate.weight",
+      "Hy3MoeBlock_0-MoeBlock_0-gate-bias": "mlp.expert_bias",
+  }
+  # MoE Experts (nested list mapping: [[e0_l0, e0_l1..], [e1_l0, e1_l1..]..])
+  moe_expert_keys = {
+      "Hy3MoeBlock_0-MoeBlock_0-wi_0": "gate_proj.weight",
+      "Hy3MoeBlock_0-MoeBlock_0-wi_1": "up_proj.weight",
+      "Hy3MoeBlock_0-MoeBlock_0-wo": "down_proj.weight",
+  }
+
+  # scan
+  if scan_layers:
+    for maxtext_key, hf_key in dense_layer_keys.items():
+      mapping[f"params-decoder-dense_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
+          f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers)
+      ]
+
+    for maxtext_key, hf_key in moe_layer_keys.items():
+      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
+          f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)
+      ]
+
+    for maxtext_key, hf_key in moe_expert_keys.items():
+      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
+          [f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)]
+          for e in range(num_experts)
+      ]
+  # unscan
+  else:
+    for i in range(first_num_dense_layers):
+      for maxtext_key, hf_key in dense_layer_keys.items():
+        mapping[f"params-decoder-dense_layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+
+    for i in range(first_num_dense_layers, num_main_layers):
+      moe_layer_idx = i - first_num_dense_layers
+
+      for maxtext_key, hf_key in moe_layer_keys.items():
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+
+      for maxtext_key, hf_key in moe_expert_keys.items():
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
+            f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
+        ]
+  return mapping
+
+
+def HY3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Hy3."""
+
+  def reshape_kernel(input_tensor, target_shape):
+    """Reshapes and transposes kernel weights between MaxText and HF."""
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  num_main_layers = config["num_hidden_layers"]
+  first_num_dense_layers = config["first_k_dense_replace"]
+
+  mapping = {
+      "params-decoder-logits_dense-kernel": reshape_kernel,
+  }
+
+  attention_need_reshape = {
+      "self_attention-query-kernel",
+      "self_attention-key-kernel",
+      "self_attention-value-kernel",
+      "self_attention-out-kernel",
+  }
+
+  dense_need_reshape = attention_need_reshape | {
+      "mlp-wi_0-kernel",
+      "mlp-wi_1-kernel",
+      "mlp-wo-kernel",
+  }
+
+  moe_need_reshape = attention_need_reshape | {
+      "Hy3MoeBlock_0-shared_experts-wi_0-kernel",
+      "Hy3MoeBlock_0-shared_experts-wi_1-kernel",
+      "Hy3MoeBlock_0-shared_experts-wo-kernel",
+      "Hy3MoeBlock_0-MoeBlock_0-gate-kernel",
+      "Hy3MoeBlock_0-MoeBlock_0-wi_0",
+      "Hy3MoeBlock_0-MoeBlock_0-wi_1",
+      "Hy3MoeBlock_0-MoeBlock_0-wo",
+  }
+
+  # scan
+  if scan_layers:
+    for key in dense_need_reshape:
+      mapping[f"params-decoder-dense_layers-{key}"] = reshape_kernel
+    for key in moe_need_reshape:
+      mapping[f"params-decoder-moe_layers-{key}"] = reshape_kernel
+  # unscan
+  else:
+    for i in range(first_num_dense_layers):
+      for key in dense_need_reshape:
+        mapping[f"params-decoder-dense_layers_{i}-{key}"] = reshape_kernel
+    for i in range(first_num_dense_layers, num_main_layers):
+      moe_layer_idx = i - first_num_dense_layers
+      for key in moe_need_reshape:
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{key}"] = reshape_kernel
+
+  return mapping
+
+
 def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Generates mapping from MaxText gpt-oss to Hugging Face weight paths.
 
@@ -4241,6 +4399,7 @@ PARAM_MAPPING = {
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-284b": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "hy3-295b": HY3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4296,6 +4455,7 @@ HOOK_FNS = {
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-tiny": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-284b": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "hy3-295b": HY3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
