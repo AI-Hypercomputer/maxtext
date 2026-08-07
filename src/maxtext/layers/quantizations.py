@@ -28,6 +28,7 @@ from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
 import qwix
+from qwix._src.core import numerics
 from qwix._src.core import dot_general_qt
 from qwix._src.core import sparsity
 
@@ -905,13 +906,6 @@ def _make_scale_tensor(scale, arr):
   return _cast_reduced_from(scale_tensor, arr)
 
 
-def _get_max_min(target_dtype):
-  if target_dtype in (jnp.int4, jnp.int8):
-    return jnp.iinfo(target_dtype).max, jnp.iinfo(target_dtype).min
-  else:
-    return jnp.finfo(target_dtype).max.astype(jnp.bfloat16), jnp.finfo(target_dtype).min.astype(jnp.bfloat16)
-
-
 def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> float:
   """Extracts the static scale.
   Currently, only symmetric fixed range calibration is supported.
@@ -934,7 +928,7 @@ def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> fl
   if len(args) != 2 or args[0] + args[1] != 0 or args[1] <= 0:
     raise ValueError(f"Expected format: 'fixed,max' or 'fixed,-max,max'. Got: {calibration_method}")
 
-  qmax, _ = _get_max_min(qtype)
+  qmax = numerics.get_symmetric_bound(qtype)
   scale_val = args[1] / qmax
 
   # Prevent scale from being 0
@@ -961,7 +955,8 @@ def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_
     ValueError: If calibration_method is None or has an unexpected format.
   """
   scale = get_static_scale(dtype, calibration_method)
-  dtype_max, dtype_min = _get_max_min(dtype)
+  dtype_max = numerics.get_symmetric_bound(dtype)
+  dtype_min = -dtype_max
   # scale must be converted to a tensor because grad has reduced axes.
   scale_tensor = _make_scale_tensor(scale, tensor)
   min_bound = _make_scale_tensor(dtype_min, tensor)

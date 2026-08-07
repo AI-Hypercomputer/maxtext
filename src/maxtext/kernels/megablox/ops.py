@@ -327,8 +327,11 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
   return jnp.broadcast_to(rhs_scale, (G, num_quant_blocks, 1, N))
 
 
-def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule) -> jax.Array | None:
-  """Extracts the static LHS (activation) scale for the GMM V2 forward pass.
+def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array | None:
+  """Extracts the static LHS (activation) scale for the GMM v2 forward pass.
+
+  GMM v2 only supports lhs_scale from symmetric fixed range calibration 
+  (Or if lhs_scale is None, calculate dynamic scale internally).
 
   Enforces a default (1, 1) shape for per-tensor quantization kernels.
 
@@ -338,10 +341,13 @@ def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule) -> jax.Array | None:
   Returns:
     The extracted static scale array, or None if not using purely fixed calibration.
   """
-  method = getattr(quantization_rule, "act_calibration_method", None)
-  qtype = getattr(quantization_rule, "act_qtype", None)
+  if quantization_rule is None:
+    return None
 
-  # Use dynamic quantization or no quantization
+  method = quantization_rule.act_calibration_method
+  qtype = quantization_rule.act_qtype
+
+  # Use dynamic quantization, gmm_v2 calculates dynamic scale internally
   if method is None or qtype is None or not method.lower().startswith("fixed"):
     return None
 

@@ -734,7 +734,7 @@ class StaticScaleTest(unittest.TestCase):
       quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,-200.0,224.0")
 
     with self.assertRaises(ValueError):
-      quantizations.get_static_scale(jnp.float8_e4m3fn, "absmax")
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed")
 
     with self.assertRaises(ValueError):
       quantizations.get_static_scale(jnp.float8_e4m3fn, "absmax")
