@@ -194,6 +194,11 @@ jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 
 - **`rl_llama3_demo.ipynb`** → GRPO/GSPO training on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k). We recommend running this on a v5p-8 TPU VM using [Method 2](#method-2-visual-studio-code-with-tpu-recommended) or [Method 3](#method-3-local-jupyter-lab-with-tpu-recommended).
 
+### Parameter-Efficient Fine-Tuning (PEFT/LoRA)
+
+- **`qwen3_native_lora_demo.ipynb`** → Qwen3-0.6B PEFT training and evaluation with native LoRA and QLoRA. Includes both SFT training on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k) and pre-training. Runs successfully on free-tier Google Colab TPUs.
+- **`gemma4_native_lora_demo.ipynb`** → Gemma4-e2b PEFT training and evaluation with native LoRA and QLoRA, demonstrating multi-query attention (MQA) support under Flax NNX. We recommend running this on a v5p-8 TPU VM using [Method 2](#method-2-visual-studio-code-with-tpu-recommended) or [Method 3](#method-3-local-jupyter-lab-with-tpu-recommended).
+
 ## Common Pitfalls & Debugging
 
 | Issue                          | Solution                                                     |
