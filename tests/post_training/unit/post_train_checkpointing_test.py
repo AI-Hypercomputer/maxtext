@@ -27,7 +27,6 @@ import jax
 import jax.numpy as jnp
 import optax
 import orbax.checkpoint as ocp
-import orbax.checkpoint.checkpoint_manager
 import pytest
 from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 
