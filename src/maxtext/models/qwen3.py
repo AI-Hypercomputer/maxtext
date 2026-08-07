@@ -1506,6 +1506,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
         rngs=rngs,
     )
 
@@ -1535,6 +1536,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
         rngs=rngs,
     )
 

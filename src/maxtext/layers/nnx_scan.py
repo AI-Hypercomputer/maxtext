@@ -21,6 +21,8 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 
+from maxtext.utils import max_utils
+
 
 def create_scanned_layers(
     layer_factory: Callable[[nnx.Rngs], nnx.Module],
@@ -126,8 +128,18 @@ def apply_scanned_layers(
   if param_scan_axis != 0:
     params = jax.tree.map(lambda x: jnp.moveaxis(x, param_scan_axis, 0), params)
 
+  def _device_put_leaf(x):
+    val = x.value if isinstance(x, nnx.Variable) else x
+    new_val = jax.device_put(val, max_utils.device_space())
+    if isinstance(x, nnx.Variable):
+      return type(x)(new_val)
+    return new_val
+
+  params = jax.tree.map(_device_put_leaf, params)
+
   def scan_body(current_carry, scanned_state):
     current_params, current_state = scanned_state
+    current_params = jax.tree.map(_device_put_leaf, current_params)
     current_layer = nnx.merge(layer_graphdef, current_params, current_state)
     next_carry = apply_fn(current_layer, current_carry)
     return next_carry, nnx.state(current_layer)

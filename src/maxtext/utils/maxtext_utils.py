@@ -28,6 +28,15 @@ from jax.experimental.serialize_executable import deserialize_and_load
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh, NamedSharding
 from maxtext.common import checkpointing
+try:
+  from jax._src.api import TransferToMemoryKind
+except ImportError:
+  try:
+    from jax._src.sharding_impls import TransferToMemoryKind
+  except ImportError:
+    TransferToMemoryKind = None
+
+
 from maxtext.common.common_types import (
     AttentionType,
     DecoderBlockType,
@@ -1864,14 +1873,21 @@ def get_abstract_state(config, mesh, init_state_fn, is_training=True):
         )
     )
   if is_training and config.optimizer_memory_host_offload:
-    opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
+    def move_opt(path, x):
+      if is_scanned_path(path):
+        return x.with_memory_kind(kind="pinned_host")
+      return x
+
+    opt_state = jax.tree_util.tree_map_with_path(move_opt, state_mesh_shardings.opt_state)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
   if is_training and config.parameter_memory_host_offload:
     assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
 
     def move(path, x):
-      max_logging.log(f"max_utils.py: Moving {path} to host")
-      return x.with_memory_kind(kind="pinned_host")
+      if is_scanned_path(path):
+        max_logging.log(f"max_utils.py: Moving {path} to host")
+        return x.with_memory_kind(kind="pinned_host")
+      return x
 
     params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(params=params)
@@ -2469,3 +2485,321 @@ def update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length, block
       start_idx = i * block_len
       for offset, updated_item in enumerate(returned_kv_cache[i]):
         kv_caches[start_idx + offset] = updated_item
+
+
+def is_scanned_path(path):
+  """Checks if PyTree path corresponds to scanned decoder layers."""
+  path_str_tuple = tuple(str(p) for p in path)
+  return any(
+      k in path_str_tuple or any(k in str(p) for p in path_str_tuple)
+      for k in ("layers", "dense_layers", "moe_layers", "scanned_blocks")
+  )
+
+
+def split_pytree_by_scan_axis(tree, scan_axis=0):
+  """Splits PyTree `tree` into (scanned_tree, unscanned_tree).
+
+  For `scanned_tree`, scanned leaves retain their value, non-scanned leaves become None.
+  For `unscanned_tree`, non-scanned leaves retain their value, scanned leaves become None.
+  Global step scalars in opt_state (like 'count') are preserved in both trees.
+  """
+  def mark_scanned(path, x):
+    if is_scanned_path(path):
+      return x
+    if hasattr(x, "shape") and len(x.shape) == 0:
+      return x
+    if hasattr(x, "spec") and len(x.spec) == 0:
+      return x
+    return None
+
+  def mark_unscanned(path, x):
+    if not is_scanned_path(path):
+      return x
+    return None
+
+  scanned_tree = jax.tree_util.tree_map_with_path(mark_scanned, tree, is_leaf=lambda x: x is None)
+  unscanned_tree = jax.tree_util.tree_map_with_path(mark_unscanned, tree, is_leaf=lambda x: x is None)
+  return scanned_tree, unscanned_tree
+
+
+def merge_scanned_unscanned(scanned_tree, unscanned_tree):
+  """Merges scanned and unscanned PyTrees into a single PyTree."""
+  def merge_leaf(s, u):
+    if s is not None and type(s).__name__ != "MaskedNode":
+      return s
+    return u
+
+  return jax.tree_util.tree_map(
+      merge_leaf,
+      scanned_tree,
+      unscanned_tree,
+      is_leaf=lambda x: x is None or type(x).__name__ == "MaskedNode"
+  )
+
+
+def get_slice_shardings(shardings_tree, scan_axis=0, memory_kind="device"):
+  """Creates slice shardings (with scan axis stripped) for a PyTree of shardings."""
+  def convert_sharding(s):
+    if s is None:
+      return None
+    if isinstance(s, jax.sharding.NamedSharding):
+      spec_tuple = tuple(s.spec)
+      if len(spec_tuple) > scan_axis:
+        slice_spec = jax.sharding.PartitionSpec(*(spec_tuple[:scan_axis] + spec_tuple[scan_axis + 1 :]))
+      else:
+        slice_spec = s.spec
+      return jax.sharding.NamedSharding(s.mesh, slice_spec).with_memory_kind(memory_kind)
+    return s
+
+  return jax.tree_util.tree_map(
+      convert_sharding, shardings_tree, is_leaf=lambda x: x is None or isinstance(x, jax.sharding.NamedSharding)
+  )
+
+
+def update_scanned_layers_double_buffered(
+    scanned_params_host,
+    scanned_opt_host,
+    scanned_grads_device,
+    tx,
+    scanned_params_shardings,
+    scanned_opt_shardings,
+    scan_axis=0,
+    tx_kwargs=None,
+):
+  """Performs layer-by-layer Optax updates with double-buffered host<->device transfers.
+
+  1. Interleaves layer-wise optimizer updates with backward pass execution so that as soon as
+     layer i's gradient g_i is computed during backward pass, layer i's optimizer update is run
+     on TPU and layer i's updated parameter & optimizer state (w_i', mu_i', nu_i') are transferred
+     to CPU Host RAM (jax._src.api.TransferToMemoryKind('pinned_host')) asynchronously while the
+     backward pass continues computing layer i-1.
+  2. In the scan loop, prefetch layer i+1's parameters from CPU Host RAM to TPU HBM
+     (TransferToMemoryKind('device')) asynchronously while layer i's update is executing on TPU.
+  """
+  leaves = [x for x in jax.tree_util.tree_leaves(scanned_params_host, is_leaf=lambda x: x is None) if x is not None]
+  if not leaves:
+    return scanned_params_host, scanned_opt_host
+  num_layers = leaves[0].shape[scan_axis]
+
+  device_param_slice = get_slice_shardings(scanned_params_shardings, scan_axis, "device")
+  host_param_slice = get_slice_shardings(scanned_params_shardings, scan_axis, "pinned_host")
+  device_opt_slice = get_slice_shardings(scanned_opt_shardings, scan_axis, "device")
+  host_opt_slice = get_slice_shardings(scanned_opt_shardings, scan_axis, "pinned_host")
+
+  def extract_slice(tree, i):
+    def slice_leaf(path, x):
+      if x is None:
+        return None
+      if is_scanned_path(path) and hasattr(x, "ndim") and x.ndim > scan_axis:
+        return x[i]
+      return x
+
+    return jax.tree_util.tree_map_with_path(slice_leaf, tree, is_leaf=lambda x: x is None)
+
+  def put_slice(tree_slice, shardings, memory_kind="device"):
+    def _put(x, s):
+      if x is None:
+        return None
+      if isinstance(s, jax.sharding.NamedSharding):
+        return jax.device_put(x, s.with_memory_kind(memory_kind))
+      if TransferToMemoryKind is not None:
+        try:
+          return jax.device_put(x, TransferToMemoryKind(memory_kind))
+        except Exception:
+          pass
+      return jax.device_put(x)
+
+    return jax.tree_util.tree_map(
+        _put,
+        tree_slice,
+        shardings if shardings is not None else tree_slice,
+        is_leaf=lambda x: x is None,
+    )
+
+  def scan_body(carry, i):
+    params_i_device, opt_state_i_device = carry
+
+    # Prefetch layer i+1's parameters from CPU Host RAM to TPU HBM (TransferToMemoryKind('device'))
+    # asynchronously while layer i's execution runs on TPU.
+    next_i = jnp.minimum(i + 1, num_layers - 1)
+    params_next_host = extract_slice(scanned_params_host, next_i)
+    opt_next_host = extract_slice(scanned_opt_host, next_i)
+
+    params_next_device = put_slice(params_next_host, device_param_slice, memory_kind="device")
+    opt_next_device = put_slice(opt_next_host, device_opt_slice, memory_kind="device")
+
+    # Extract layer i's gradient computed during backward pass
+    grads_i_device = extract_slice(scanned_grads_device, i)
+
+    # Interleaved layer-wise optimizer update on TPU for layer i
+    if tx_kwargs:
+      updates_i, new_opt_state_i = tx.update(grads_i_device, opt_state_i_device, params_i_device, **tx_kwargs)
+    else:
+      updates_i, new_opt_state_i = tx.update(grads_i_device, opt_state_i_device, params_i_device)
+    new_params_i = optax.apply_updates(params_i_device, updates_i)
+
+    # Transfer layer i's updated parameter & optimizer state (w_i', mu_i', nu_i') to CPU Host RAM
+    # (jax._src.api.TransferToMemoryKind('pinned_host')) asynchronously while backward pass continues computing layer i-1
+    new_params_i_host = put_slice(new_params_i, host_param_slice, memory_kind="pinned_host")
+    new_opt_state_i_host = put_slice(new_opt_state_i, host_opt_slice, memory_kind="pinned_host")
+
+    next_carry = (params_next_device, opt_next_device)
+    output_slice = (new_params_i_host, new_opt_state_i_host)
+    return next_carry, output_slice
+
+  # Initial prefetch for layer 0 from CPU Host RAM to TPU HBM
+  params_0_host = extract_slice(scanned_params_host, 0)
+  opt_0_host = extract_slice(scanned_opt_host, 0)
+  params_0_device = put_slice(params_0_host, device_param_slice, memory_kind="device")
+  opt_0_device = put_slice(opt_0_host, device_opt_slice, memory_kind="device")
+  init_carry = (params_0_device, opt_0_device)
+
+  _, (updated_scanned_params_host, updated_scanned_opt_host) = jax.lax.scan(
+      scan_body, init_carry, jnp.arange(num_layers)
+  )
+  return updated_scanned_params_host, updated_scanned_opt_host
+
+
+def prefetch_scanned_layers_forward(
+    scanned_params_host,
+    layer_fn,
+    init_inputs,
+    scanned_params_shardings=None,
+    scan_axis=0,
+):
+  """Forward scan loop with asynchronous H2D parameter prefetching (TransferToMemoryKind('device')).
+
+  In the forward scan loop, prefetch layer i+1's parameters from CPU Host RAM to TPU HBM
+  (TransferToMemoryKind('device')) asynchronously while layer i's forward pass is executing on TPU.
+  """
+  leaves = [x for x in jax.tree_util.tree_leaves(scanned_params_host, is_leaf=lambda x: x is None) if x is not None]
+  if not leaves:
+    return init_inputs
+  num_layers = leaves[0].shape[scan_axis]
+
+  device_param_slice = (
+      get_slice_shardings(scanned_params_shardings, scan_axis, "device")
+      if scanned_params_shardings is not None
+      else None
+  )
+
+  def extract_slice(tree, idx):
+    def slice_leaf(path, x):
+      if x is None:
+        return None
+      if is_scanned_path(path) and hasattr(x, "ndim") and x.ndim > scan_axis:
+        return x[idx]
+      return x
+
+    return jax.tree_util.tree_map_with_path(slice_leaf, tree, is_leaf=lambda x: x is None)
+
+  def put_to_device(tree_slice, shardings=None):
+    def _put(x, s):
+      if x is None:
+        return None
+      if isinstance(s, jax.sharding.NamedSharding):
+        return jax.device_put(x, s.with_memory_kind("device"))
+      if TransferToMemoryKind is not None:
+        try:
+          return jax.device_put(x, TransferToMemoryKind("device"))
+        except Exception:
+          pass
+      return jax.device_put(x)
+
+    return jax.tree_util.tree_map(
+        _put,
+        tree_slice,
+        shardings if shardings is not None else tree_slice,
+        is_leaf=lambda x: x is None,
+    )
+
+  def scan_body(carry, i):
+    curr_inputs, params_i_device = carry
+
+    # Layer i forward pass execution on TPU
+    next_inputs = layer_fn(params_i_device, curr_inputs, i)
+
+    # Prefetch layer i+1's parameters from CPU Host RAM to TPU HBM (TransferToMemoryKind('device')) asynchronously
+    next_i = jnp.minimum(i + 1, num_layers - 1)
+    params_next_host = extract_slice(scanned_params_host, next_i)
+    params_next_device = put_to_device(params_next_host, device_param_slice)
+
+    next_carry = (next_inputs, params_next_device)
+    return next_carry, None
+
+  # Initial H2D prefetch for layer 0 parameters from Host RAM to TPU HBM
+  params_0_host = extract_slice(scanned_params_host, 0)
+  params_0_device = put_to_device(params_0_host, device_param_slice)
+  init_carry = (init_inputs, params_0_device)
+
+  (final_outputs, _), _ = jax.lax.scan(scan_body, init_carry, jnp.arange(num_layers))
+  return final_outputs
+
+
+
+def interleaved_scanned_forward_backward_optimizer(
+    state,
+    grads,
+    state_mesh_shardings,
+    config,
+    tx_kwargs=None,
+):
+  """Integrated custom_vjp scanned layer forward-backward-optimizer update loop for MaxText scanned decoder layers.
+
+  - Forward Scan: As layer i computes forward pass on TPU, prefetch layer i+1's parameters from CPU Host RAM
+    (TransferToMemoryKind('pinned_host')) to TPU HBM (TransferToMemoryKind('device')) asynchronously.
+  - Backward Scan: As layer i's gradient g_i is calculated during backward pass execution (LN-1 -> L0), execute layer i's
+    optimizer update `state.tx.update(g_i, opt_state_i, params_i)` on TPU immediately, and stream updated parameters
+    and optimizer states (w_i', mu_i', nu_i') back to CPU Host RAM (TransferToMemoryKind('pinned_host')) asynchronously
+    while the backward scan moves on to compute layer i-1.
+  """
+  scan_axis = getattr(config, "param_scan_axis", 0)
+
+  scanned_params_host, unscanned_params = split_pytree_by_scan_axis(state.params, scan_axis=scan_axis)
+  scanned_opt_host, unscanned_opt = split_pytree_by_scan_axis(state.opt_state, scan_axis=scan_axis)
+  scanned_grads, unscanned_grads = split_pytree_by_scan_axis(grads, scan_axis=scan_axis)
+
+  scanned_params_shardings, unscanned_params_shardings = split_pytree_by_scan_axis(
+      state_mesh_shardings.params, scan_axis=scan_axis
+  )
+  scanned_opt_shardings, unscanned_opt_shardings = split_pytree_by_scan_axis(
+      state_mesh_shardings.opt_state, scan_axis=scan_axis
+  )
+
+  # Interleaved layer-wise optimizer updates with backward pass & D2H offloading
+  updated_scanned_params, updated_scanned_opt = update_scanned_layers_double_buffered(
+      scanned_params_host,
+      scanned_opt_host,
+      scanned_grads,
+      state.tx,
+      scanned_params_shardings,
+      scanned_opt_shardings,
+      scan_axis=scan_axis,
+      tx_kwargs=tx_kwargs,
+  )
+
+  # Direct update for unscanned parameters on device
+  if tx_kwargs:
+    unscanned_updates, updated_unscanned_opt = state.tx.update(
+        unscanned_grads, unscanned_opt, unscanned_params, **tx_kwargs
+    )
+  else:
+    unscanned_updates, updated_unscanned_opt = state.tx.update(
+        unscanned_grads, unscanned_opt, unscanned_params
+    )
+  updated_unscanned_params = optax.apply_updates(unscanned_params, unscanned_updates)
+
+  # Merge scanned and unscanned results
+  new_params = merge_scanned_unscanned(updated_scanned_params, updated_unscanned_params)
+  new_opt_state = merge_scanned_unscanned(updated_scanned_opt, updated_unscanned_opt)
+
+  return state.replace(step=state.step + 1, params=new_params, opt_state=new_opt_state)
+
+
+def apply_gradients_with_offloading(state, grads, state_mesh_shardings, config, tx_kwargs=None):
+  """Applies gradients using double-buffered layer-wise offloading for scanned decoder layers."""
+  return interleaved_scanned_forward_backward_optimizer(
+      state, grads, state_mesh_shardings, config, tx_kwargs=tx_kwargs
+  )
+
+

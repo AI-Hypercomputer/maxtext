@@ -314,6 +314,28 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @pytest.mark.cpu_only
+  def test_llama3_1_70b_param_and_opt_offload(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_llama3_1_70b_param_and_opt_offload.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "compile_topology_num_slices=1",
+            "model_name=llama3.1-70b",
+            "per_device_batch_size=1",
+            "parameter_memory_host_offload=true",
+            "optimizer_memory_host_offload=true",
+            "scan_layers=true",
+            "param_scan_axis=0",
+            "gradient_clipping_threshold=0",
+            "max_target_length=1024",
+        )
+    )
+
   def test_custom_32x8_mesh(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_custom_32x8_mesh.pickle")
@@ -799,6 +821,37 @@ class TrainCompile(parameterized.TestCase):
             "model_name=qwen3-next-80b-a3b",
             "per_device_batch_size=1",
             "max_target_length=1024",
+        )
+    )
+
+  def test_qwen3_next_v6e256_muon_host_offload(self):
+    """AOT test for qwen3-next on v6e-256 with Muon optimizer and scanned layers host offload."""
+    compiled_trainstep_file = "/tmp/test_qwen3_next_v6e256_muon_host_offload"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "opt_type=muon",
+            "optimizer_memory_host_offload=True",
+            "parameter_memory_host_offload=True",
+            "scan_layers=True",
+            "param_scan_axis=0",
+            "mhc_expansion_rate=4",
+            "use_ring_of_experts=True",
+            "use_ragged_sort=True",
+            "use_random_routing=True",
+            "ici_fsdp_parallelism=16",
+            "ici_expert_parallelism=16",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "remat_policy=full",
+            "global_parameter_scale=128",
         )
     )
 

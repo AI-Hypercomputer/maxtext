@@ -20,6 +20,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+import optax
 
 from maxtext.utils import max_logging
 from maxtext.configs import pyconfig
@@ -60,18 +61,23 @@ def nnx_extract_named_sharding(abstract_state: nnx.State) -> nnx.State:
       nnx.get_abstract_model.
 
   Returns:
-    A tree of raw NamedSharding objects (stripping out any nnx.Variable / Param
-    wrappers). This clean structure is expected by JAX compiler APIs (like JIT
-    out_shardings). Contrast with sharding.nnx_construct_named_sharding, which
-    retains wrappers for abstract tree zipping compatibility.
+    A tree of NamedSharding objects preserving Variable/OptVariable/OptArray wrappers.
   """
-  # Don't use nnx.get_named_sharding() because it constructs new shardings. Instead, we
-  # get the existing sharding from the abstract_state.
-  # The state leaf is of type jax.ShapeDtypeStruct(shape, dtype, sharding)
+  def _extract_sharding_or_leaf(var):
+    val = var.get_value() if hasattr(var, "get_value") else getattr(var, "value", var)
+    new_val = jax.tree.map(
+        lambda x: x.sharding if hasattr(x, "sharding") else x,
+        val,
+        is_leaf=lambda x: isinstance(x, (jax.ShapeDtypeStruct, optax.MaskedNode)),
+    )
+    if isinstance(var, nnx.Variable):
+      return var.replace(value=new_val)
+    return new_val
+
   return jax.tree.map(
-      lambda x: x.sharding,
+      _extract_sharding_or_leaf,
       abstract_state,
-      is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
   )
 
 
@@ -84,11 +90,21 @@ def get_partition_spec_nnx(named_sharding: nnx.State) -> nnx.State:
   Returns:
     mesh partition spec
   """
-  # The leaf is of type NamedSharding.
+  def _extract_spec(var):
+    val = var.get_value() if hasattr(var, "get_value") else getattr(var, "value", var)
+    new_val = jax.tree.map(
+        lambda x: x.spec if hasattr(x, "spec") else x,
+        val,
+        is_leaf=lambda x: isinstance(x, (NamedSharding, optax.MaskedNode)),
+    )
+    if isinstance(var, nnx.Variable):
+      return var.replace(value=new_val)
+    return new_val
+
   return jax.tree.map(
-      lambda x: x.spec,
+      _extract_spec,
       named_sharding,
-      is_leaf=lambda x: isinstance(x, NamedSharding),
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
   )
 
 
@@ -102,7 +118,27 @@ def set_named_sharding_nnx(abstract_state: nnx.State, named_sharding: nnx.State)
   Returns:
     updated abstract_state
   """
-  return jax.tree.map(lambda x, y: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=y), abstract_state, named_sharding)
+  def _set_sharding(var, s_var):
+    val = var.get_value() if hasattr(var, "get_value") else getattr(var, "value", var)
+    s_val = s_var.get_value() if hasattr(s_var, "get_value") else getattr(s_var, "value", s_var)
+    new_val = jax.tree.map(
+        lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s)
+        if hasattr(a, "shape") and hasattr(a, "dtype")
+        else a,
+        val,
+        s_val,
+        is_leaf=lambda x: isinstance(x, (jax.Array, jax.ShapeDtypeStruct, optax.MaskedNode)),
+    )
+    if isinstance(var, nnx.Variable):
+      return var.replace(value=new_val)
+    return new_val
+
+  return jax.tree.map(
+      _set_sharding,
+      abstract_state,
+      named_sharding,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
+  )
 
 
 def move_memory_to_host(path: tuple[str, ...], x: NamedSharding) -> NamedSharding:

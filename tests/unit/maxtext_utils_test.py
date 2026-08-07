@@ -1808,5 +1808,191 @@ class TestGetSaveAndOffloadNames(unittest.TestCase):
       self.assertEqual(maxtext_utils.get_save_and_offload_names(self._cfg(policy)), ([], []))
 
 
+class TestOptimizerOffloading(unittest.TestCase):
+  """Tests for double-buffered layer-wise parameter & optimizer state offloading."""
+
+  def test_is_scanned_path(self):
+    self.assertTrue(maxtext_utils.is_scanned_path(("decoder", "layers", "mlp", "wi")))
+    self.assertTrue(maxtext_utils.is_scanned_path(("decoder", "dense_layers", "attn", "q")))
+    self.assertTrue(maxtext_utils.is_scanned_path(("decoder", "moe_layers", "gate")))
+    self.assertTrue(maxtext_utils.is_scanned_path(("decoder", "scanned_blocks", "attn", "q")))
+    self.assertFalse(maxtext_utils.is_scanned_path(("token_embedder", "embedding")))
+    self.assertFalse(maxtext_utils.is_scanned_path(("decoder", "decoder_norm", "scale")))
+
+  def test_split_and_merge_pytree(self):
+    tree = {
+        "decoder": {"layers": {"w": jnp.ones((4, 8, 8))}},
+        "head": {"w": jnp.ones((8, 8))},
+    }
+    scanned, unscanned = maxtext_utils.split_pytree_by_scan_axis(tree)
+    self.assertIsNotNone(scanned["decoder"]["layers"]["w"])
+    self.assertIsNone(scanned["head"]["w"])
+    self.assertIsNone(unscanned["decoder"]["layers"]["w"])
+    self.assertIsNotNone(unscanned["head"]["w"])
+
+    merged = maxtext_utils.merge_scanned_unscanned(scanned, unscanned)
+    diff = jax.tree_util.tree_map(lambda a, b: np.max(np.abs(np.asarray(a) - np.asarray(b))), tree, merged)
+    self.assertEqual(diff["decoder"]["layers"]["w"], 0.0)
+    self.assertEqual(diff["head"]["w"], 0.0)
+
+  def test_merge_scanned_unscanned_masked_node(self):
+    scanned = {
+        "decoder": {"layers": {"w": jnp.ones((4, 8, 8))}},
+        "head": {"w": optax.MaskedNode()},
+    }
+    unscanned = {
+        "decoder": {"layers": {"w": optax.MaskedNode()}},
+        "head": {"w": jnp.ones((8, 8))},
+    }
+    merged = maxtext_utils.merge_scanned_unscanned(scanned, unscanned)
+    self.assertTrue(jnp.array_equal(merged["decoder"]["layers"]["w"], jnp.ones((4, 8, 8))))
+    self.assertTrue(jnp.array_equal(merged["head"]["w"], jnp.ones((8, 8))))
+
+  def test_apply_gradients_with_offloading_equivalence(self):
+    num_layers = 4
+    hidden_dim = 8
+
+    mesh = Mesh(np.array(jax.local_devices()[:1]).reshape(1,), ("data",))
+    host_sharding_3d = NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "data")).with_memory_kind("pinned_host")
+    device_sharding_2d = NamedSharding(mesh, jax.sharding.PartitionSpec(None, "data")).with_memory_kind("device")
+    host_sharding_0d = NamedSharding(mesh, jax.sharding.PartitionSpec()).with_memory_kind("pinned_host")
+
+    params = {
+        "decoder": {"layers": {"w": jnp.ones((num_layers, hidden_dim, hidden_dim))}},
+        "head": {"w": jnp.ones((hidden_dim, hidden_dim)) * 2.0},
+    }
+    tx = optax.adam(1e-3)
+    state = maxtext_utils.TrainState.create(apply_fn=lambda p, x: x, params=params, tx=tx)
+
+    grads = {
+        "decoder": {"layers": {"w": jnp.full((num_layers, hidden_dim, hidden_dim), 0.1)}},
+        "head": {"w": jnp.full((hidden_dim, hidden_dim), 0.2)},
+    }
+
+    # Baseline standard apply_gradients on device
+    state_standard = state.apply_gradients(grads=grads)
+
+    # Offloaded setup
+    opt_shardings = jax.tree_util.tree_map(
+        lambda x: host_sharding_3d if getattr(x, "ndim", 0) == 3 else host_sharding_0d,
+        state.opt_state,
+    )
+    state_mesh_shardings = maxtext_utils.TrainState(
+        step=host_sharding_0d,
+        apply_fn=state.apply_fn,
+        tx=state.tx,
+        params={"decoder": {"layers": {"w": host_sharding_3d}}, "head": {"w": device_sharding_2d}},
+        opt_state=opt_shardings,
+    )
+
+    class DummyConfig:
+      param_scan_axis = 0
+
+    state_offloaded = maxtext_utils.apply_gradients_with_offloading(
+        state, grads, state_mesh_shardings, DummyConfig()
+    )
+
+    # Assert numerical equivalence
+    diff_params = jax.tree_util.tree_map(
+        lambda a, b: float(np.max(np.abs(np.asarray(a) - np.asarray(b)))), state_standard.params, state_offloaded.params
+    )
+    diff_opt = jax.tree_util.tree_map(
+        lambda a, b: float(np.max(np.abs(np.asarray(a) - np.asarray(b))))
+        if (a is not None and b is not None and hasattr(a, "shape"))
+        else 0.0,
+        state_standard.opt_state,
+        state_offloaded.opt_state,
+    )
+
+    self.assertEqual(diff_params["decoder"]["layers"]["w"], 0.0)
+    self.assertEqual(diff_params["head"]["w"], 0.0)
+    self.assertEqual(diff_opt[0].mu["decoder"]["layers"]["w"], 0.0)
+    self.assertEqual(diff_opt[0].mu["head"]["w"], 0.0)
+    self.assertEqual(state_offloaded.params["decoder"]["layers"]["w"].sharding.memory_kind, "pinned_host")
+
+  def test_prefetch_scanned_layers_forward(self):
+    num_layers = 4
+    hidden_dim = 8
+    scanned_params = {
+        "decoder": {"layers": {"w": jnp.ones((num_layers, hidden_dim, hidden_dim))}},
+    }
+    x_in = jnp.ones((hidden_dim, hidden_dim))
+
+    def dummy_layer_fn(p_i, x, i):
+      return x + p_i["decoder"]["layers"]["w"]
+
+    out = maxtext_utils.prefetch_scanned_layers_forward(
+        scanned_params_host=scanned_params,
+        layer_fn=dummy_layer_fn,
+        init_inputs=x_in,
+        scan_axis=0,
+    )
+    self.assertEqual(out.shape, (hidden_dim, hidden_dim))
+    self.assertTrue(np.allclose(np.asarray(out), np.ones((hidden_dim, hidden_dim)) * (1.0 + num_layers)))
+
+  def test_interleaved_scanned_forward_backward_optimizer(self):
+    num_layers = 4
+    hidden_dim = 8
+
+    mesh = Mesh(np.array(jax.local_devices()[:1]).reshape(1,), ("data",))
+    host_sharding_3d = NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "data")).with_memory_kind("pinned_host")
+    device_sharding_2d = NamedSharding(mesh, jax.sharding.PartitionSpec(None, "data")).with_memory_kind("device")
+    host_sharding_0d = NamedSharding(mesh, jax.sharding.PartitionSpec()).with_memory_kind("pinned_host")
+
+    params = {
+        "decoder": {"layers": {"w": jnp.ones((num_layers, hidden_dim, hidden_dim))}},
+        "head": {"w": jnp.ones((hidden_dim, hidden_dim)) * 2.0},
+    }
+    tx = optax.adam(1e-3)
+    state = maxtext_utils.TrainState.create(apply_fn=lambda p, x: x, params=params, tx=tx)
+
+    grads = {
+        "decoder": {"layers": {"w": jnp.full((num_layers, hidden_dim, hidden_dim), 0.1)}},
+        "head": {"w": jnp.full((hidden_dim, hidden_dim), 0.2)},
+    }
+
+    state_standard = state.apply_gradients(grads=grads)
+
+    opt_shardings = jax.tree_util.tree_map(
+        lambda x: host_sharding_3d if getattr(x, "ndim", 0) == 3 else host_sharding_0d,
+        state.opt_state,
+    )
+    state_mesh_shardings = maxtext_utils.TrainState(
+        step=host_sharding_0d,
+        apply_fn=state.apply_fn,
+        tx=state.tx,
+        params={"decoder": {"layers": {"w": host_sharding_3d}}, "head": {"w": device_sharding_2d}},
+        opt_state=opt_shardings,
+    )
+
+    class DummyConfig:
+      param_scan_axis = 0
+
+    state_interleaved = maxtext_utils.interleaved_scanned_forward_backward_optimizer(
+        state, grads, state_mesh_shardings, DummyConfig()
+    )
+
+    diff_params = jax.tree_util.tree_map(
+        lambda a, b: float(np.max(np.abs(np.asarray(a) - np.asarray(b)))), state_standard.params, state_interleaved.params
+    )
+    diff_opt = jax.tree_util.tree_map(
+        lambda a, b: float(np.max(np.abs(np.asarray(a) - np.asarray(b))))
+        if (a is not None and b is not None and hasattr(a, "shape"))
+        else 0.0,
+        state_standard.opt_state,
+        state_interleaved.opt_state,
+    )
+
+    self.assertEqual(diff_params["decoder"]["layers"]["w"], 0.0)
+    self.assertEqual(diff_params["head"]["w"], 0.0)
+    self.assertEqual(diff_opt[0].mu["decoder"]["layers"]["w"], 0.0)
+    self.assertEqual(diff_opt[0].mu["head"]["w"], 0.0)
+    self.assertEqual(state_interleaved.params["decoder"]["layers"]["w"].sharding.memory_kind, "pinned_host")
+    self.assertEqual(state_interleaved.step, state.step + 1)
+
+
 if __name__ == "__main__":
   unittest.main()
+
+
+

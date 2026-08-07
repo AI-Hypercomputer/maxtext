@@ -26,7 +26,7 @@ numbers for a specific model. Example:
 
 import os
 import sys
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import flax.linen as nn
 from flax import nnx
@@ -78,6 +78,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   # "bias": scalar, common module
   # "hc_base": scalar, in mhc head
   # "post_beta", "pre_beta", "res_beta": scalar, in mhc
+  # "post_alpha", "pre_alpha", "res_alpha": static constant non-trainable tensors in mhc
   if any(
       any(
           x in segment
@@ -88,6 +89,12 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
               "post_beta",
               "pre_beta",
               "res_beta",
+              "post_alpha",
+              "pre_alpha",
+              "res_alpha",
+              "post_alpha_scale",
+              "pre_alpha_scale",
+              "res_alpha_scale",
               "hc_base",
               "sinks",
               "tid2eid",
@@ -106,7 +113,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
   # 2 Special weights
   # 2.1 Special weights: MoE, [0, L, -2, -1]
   # L (optional) stands for layer when scan_layers=True
-  if _is_path_contain_any(("MoeBlock_0", "routed_experts"), path):
+  if _is_path_contain_any(("MoeBlock_0", "routed_experts", "shared_experts"), path):
     # exclude gate
     if _is_path_contain_any(("wi_0", "wi_1", "wo"), path):
       return mdn((-2,), (-1,))
@@ -125,11 +132,9 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
       return mdn((0,), (-2, -1))
 
   # 2.3 Special weights: Gated Delta Net (GDN)
-  elif "gdn" in path:
-    if "out_proj" in path:
-      return mdn((0, -2), (-1,))
-    elif _is_path_contain_any(("in_proj_qkvz", "in_proj_ba"), path):
-      return mdn((0,), (-2, -1))
+  elif _is_path_contain_any(("gdn", "attention"), path):
+    if _is_path_contain_any(("out_proj", "in_proj_qkvz", "in_proj_ba"), path):
+      return mdn((-2,), (-1,))
 
   # 3 Standard weights, [0, L, -1]
   return mdn((0,), (-1,))
@@ -149,9 +154,12 @@ def get_muon_weight_dimension_numbers(model, config, verbose=False):
   if isinstance(model, nnx.Module):
     _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
 
-    def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], leaf):
-      # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
-      path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
+    def apply_transform_nnx(path: Tuple[Any, ...], leaf):
+      # Extract string keys from all KeyEntry types (DictKey, SequenceKey, etc.)
+      path_strings = tuple(
+          str(p.key if hasattr(p, "key") else (p.idx if hasattr(p, "idx") else p))
+          for p in path
+      )
       return transform_logic(path_strings)
 
     # NNX abstract_param is an nnx.State (not Linen's dict of LogicallyPartitioned leaves);

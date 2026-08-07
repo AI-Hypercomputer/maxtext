@@ -27,6 +27,7 @@ from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.utils import max_utils
 
 
 def get_permutation_matrices(k: int) -> Array:
@@ -110,6 +111,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         weight_dtype=self.weight_dtype,
         kernel_axes=("norm",),
         epsilon=self.config.normalization_layer_epsilon,
+        parameter_memory_host_offload=self.config.parameter_memory_host_offload,
         rngs=self.rngs,
     )
 
@@ -188,11 +190,17 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         out_sharding=(None,),
     )
 
+  def _get_param(self, param):
+    val = param.value if isinstance(param, nnx.Variable) else param
+    val = val[...] if hasattr(val, "__getitem__") and not isinstance(val, (jnp.ndarray, jax.Array)) else val
+    val = jax.device_put(val, max_utils.device_space())
+    return jnp.asarray(val, self.dtype)
+
   def res_mapping(self, h_res: Array):
     """Helper function for residual mapping after matmul."""
     # In MaxText, we match weight precision to activations before Matmul
-    res_beta = jnp.asarray(self.res_beta[...], self.dtype)
-    res_alpha_scale = jnp.asarray(self.res_alpha_scale[...], self.dtype)
+    res_beta = self._get_param(self.res_beta)
+    res_alpha_scale = self._get_param(self.res_alpha_scale)
 
     if self.config.enable_mhc_lite:
       intermediate = res_alpha_scale * h_res + res_beta[None, None, :]
@@ -217,8 +225,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
   def mapping(self, h: Array, alpha_scale: Array, beta: Array, scale: float, eps: float = 0.0):
     """Helper function for both pre and post mappings after matmul."""
     # In MaxText, we match weight precision to activations before Matmul
-    beta = jnp.asarray(beta, self.dtype)
-    alpha_scale = jnp.asarray(alpha_scale, self.dtype)
+    beta = self._get_param(beta)
+    alpha_scale = self._get_param(alpha_scale)
     intermediate = alpha_scale * h + beta[None, None, :]
     output = scale * jax.nn.sigmoid(intermediate) + eps
     return output
@@ -251,9 +259,9 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
 
     # Fused Projections
-    pre_alpha = jnp.asarray(self.pre_alpha[...], self.dtype)
-    post_alpha = jnp.asarray(self.post_alpha[...], self.dtype)
-    res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
+    pre_alpha = self._get_param(self.pre_alpha)
+    post_alpha = self._get_param(self.post_alpha)
+    res_alpha = self._get_param(self.res_alpha)
 
     alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
 
@@ -267,8 +275,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # 2. Pre mapping
     pre_mapping = self.mapping(
         h_pre,
-        self.pre_alpha_scale[...],
-        self.pre_beta[...],
+        self._get_param(self.pre_alpha_scale),
+        self._get_param(self.pre_beta),
         1.0,
         eps=1e-6,
     )
@@ -296,8 +304,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # 5. Post mapping
     post_mapping = self.mapping(
         h_post,
-        self.post_alpha_scale[...],
-        self.post_beta[...],
+        self._get_param(self.post_alpha_scale),
+        self._get_param(self.post_beta),
         2.0,
     )
     # Moving away from einsum seems to allow XLA to perform better fusions

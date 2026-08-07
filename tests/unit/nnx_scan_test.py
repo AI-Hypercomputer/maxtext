@@ -119,6 +119,43 @@ class TestApplyScannedLayers(unittest.TestCase):
     checkpoint.assert_called_once()
     self.assertIsNone(checkpoint.call_args.kwargs["policy"])
 
+  def test_pinned_host_parameters_transferred_to_device(self):
+    """Parameters on pinned_host are transferred to device before scan."""
+    length = 2
+    layers = nnx_scan.create_scanned_layers(
+        _LinearLayer,
+        length=length,
+        param_scan_axis=0,
+        metadata_axis_name="layers",
+        rngs=nnx.Rngs(0),
+    )
+
+    mesh = jax.sharding.Mesh(jax.devices()[:1], ("data",))
+    sharding_host = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()).with_memory_kind("pinned_host")
+
+    layers.kernel.value = jax.device_put(layers.kernel.value, sharding_host)
+
+    observed_memory_spaces = []
+
+    def apply_fn(layer, carry):
+      ms = getattr(jax.typeof(layer.kernel.value), "memory_space", None)
+      observed_memory_spaces.append(str(ms))
+      return layer(carry)
+
+    actual = nnx_scan.apply_scanned_layers(
+        layers,
+        jnp.array([1.0, -1.0]),
+        length=length,
+        param_scan_axis=0,
+        apply_fn=apply_fn,
+    )
+
+    self.assertTrue(len(observed_memory_spaces) >= 1)
+    for ms in observed_memory_spaces:
+      self.assertNotIn("host", ms.lower())
+    self.assertIsNotNone(actual)
+
 
 if __name__ == "__main__":
   unittest.main()
+

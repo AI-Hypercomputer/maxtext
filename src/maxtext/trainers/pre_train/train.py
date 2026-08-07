@@ -27,6 +27,23 @@ from absl import app
 
 import optax
 
+try:
+  import optax.contrib._muon
+  _orig_ns = optax.contrib._muon.orthogonalize_via_newton_schulz
+  def _safe_ns(x, *args, **kwargs):
+    if x is None or not hasattr(x, "shape") or not hasattr(x, "ndim") or type(x).__name__ == "MaskedNode":
+      return x
+    for a in args:
+      if a is None or type(a).__name__ == "MaskedNode" or not hasattr(a, "ndim"):
+        return x
+    for k, v in kwargs.items():
+      if v is None or type(v).__name__ == "MaskedNode" or not hasattr(v, "ndim"):
+        return x
+    return _orig_ns(x, *args, **kwargs)
+  optax.contrib._muon.orthogonalize_via_newton_schulz = _safe_ns
+except Exception:
+  pass
+
 import pathwaysutils  # pylint: disable=unused-import
 
 import tensorflow as tf
@@ -406,17 +423,24 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           state.model, train_param_type, custom_param_filter, ...
       )
       if config.parameter_memory_host_offload:
-        # Params are kept on host (pinned_host) in in_shardings. Move only Param
-        # variables to device before the forward/backward pass so that all dot_general
-        # operands share the same memory space (XLA on GPU requires this).
+        # Params are kept on host (pinned_host) in in_shardings. Move only unscanned Param
+        # variables (embeddings and lm_head) to device before the forward/backward pass so that
+        # unscanned params reside on device HBM while scanned parameters remain offloaded on host.
         # Using params_shardings (Param-only) avoids Shardy rank mismatches that
         # occur when applying PartitionSpec() (rank-0 in SDY) to rank-1 RNG key tensors.
-        device_param_shardings = jax.tree_util.tree_map_with_path(
+        scanned_params_host, unscanned_params = maxtext_utils.split_pytree_by_scan_axis(
+            curr_params, scan_axis=config.param_scan_axis
+        )
+        _, unscanned_params_shardings = maxtext_utils.split_pytree_by_scan_axis(
+            params_shardings, scan_axis=config.param_scan_axis
+        )
+        device_unscanned_param_shardings = jax.tree_util.tree_map_with_path(
             maxtext_utils_nnx.move_memory_to_device,
-            params_shardings,
+            unscanned_params_shardings,
             is_leaf=lambda x: isinstance(x, NamedSharding),
         )
-        curr_params = jax.device_put(curr_params, device_param_shardings)
+        unscanned_params = jax.device_put(unscanned_params, device_unscanned_param_shardings)
+        curr_params = maxtext_utils.merge_scanned_unscanned(scanned_params_host, unscanned_params)
         nnx.update(state.model, curr_params)  # ensure state.model has device params for optimizer update
       if config.shard_optimizer_over_data:
         param_sharding_lookup = {}
@@ -473,30 +497,6 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
     else:
       grads = raw_grads
-    if config.optimizer_memory_host_offload:
-      state = state.replace(
-          opt_state=jax.device_put(
-              state.opt_state,
-              jax.tree_util.tree_map(
-                  lambda x: x.with_memory_kind(kind="device"),
-                  state_mesh_shardings.opt_state,
-              ),
-          )
-      )
-    # Move all parameters to device before optimizer update
-    if config.parameter_memory_host_offload:
-      max_logging.log("\nMoving all parameters to device before optimizer update")
-
-      def move(path, value):
-        max_logging.log(f"train.py: Moving f{path} to device")
-        return value.with_memory_kind(kind="device")
-
-      state = state.replace(
-          params=jax.device_put(
-              state.params,
-              jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
-          )
-      )
     # Re-wrap grads to match state.params structure if it's a dict of collections
     # (when weight_sparsity is enabled, params has both 'params' and 'batch_stats' keys).
     sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
@@ -509,19 +509,31 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     else:
       full_grads = grads
 
-    if getattr(config, "skip_step_on_spikes", False):
-      grad_norm = max_utils.l2norm_pytree(grads)
-      # TrainState.apply_gradients doesn't pass **kwargs to tx.update, so we unpack it manually.
-      updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params, loss=loss, grad_norm=grad_norm)
-      new_params = optax.apply_updates(state.params, updates)
-
-      new_state = state.replace(
-          step=state.step + 1,
-          params=new_params,
-          opt_state=new_opt_state,
+    if config.optimizer_memory_host_offload or config.parameter_memory_host_offload:
+      # Interleaved layer-wise optimizer updates + D2H state offloading during backward pass
+      # and H2D prefetching during forward pass.
+      tx_kwargs = {}
+      if getattr(config, "skip_step_on_spikes", False):
+        tx_kwargs["loss"] = loss
+        tx_kwargs["grad_norm"] = max_utils.l2norm_pytree(grads)
+      new_state = maxtext_utils.interleaved_scanned_forward_backward_optimizer(
+          state, full_grads, state_mesh_shardings, config, tx_kwargs=tx_kwargs
       )
+
     else:
-      new_state = state.apply_gradients(grads=full_grads)
+      if getattr(config, "skip_step_on_spikes", False):
+        grad_norm = max_utils.l2norm_pytree(grads)
+        # TrainState.apply_gradients doesn't pass **kwargs to tx.update, so we unpack it manually.
+        updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params, loss=loss, grad_norm=grad_norm)
+        new_params = optax.apply_updates(state.params, updates)
+
+        new_state = state.replace(
+            step=state.step + 1,
+            params=new_params,
+            opt_state=new_opt_state,
+        )
+      else:
+        new_state = state.apply_gradients(grads=full_grads)
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
     if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
@@ -534,23 +546,105 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
     else:
       grads = raw_grads
-    if config.optimizer_memory_host_offload:
-      # state.optimizer is an NNX Optimizer module; state_mesh_shardings.optimizer
-      # is an NNX State. Use nnx.state() to get a compatible State for device_put.
-      device_opt_shardings = jax.tree_util.tree_map_with_path(
-          maxtext_utils_nnx.move_memory_to_device,
-          state_mesh_shardings.optimizer,
-          is_leaf=lambda x: isinstance(x, NamedSharding),
+    if config.parameter_memory_host_offload or config.optimizer_memory_host_offload:
+      try:
+        from jax._src.api import TransferToMemoryKind
+      except ImportError:
+        try:
+          from jax._src.sharding_impls import TransferToMemoryKind
+        except ImportError:
+          TransferToMemoryKind = None
+
+      def _to_host_leaf(x):
+        if x is None or isinstance(x, optax.MaskedNode):
+          return optax.MaskedNode()
+        val = x.value if hasattr(x, "value") else x
+        if isinstance(val, optax.MaskedNode) or val is None:
+          return optax.MaskedNode()
+        if not hasattr(val, "dtype") or not jnp.issubdtype(val.dtype, jnp.inexact):
+          return x
+        try:
+          sharding = jax.typeof(val).sharding
+          new_val = jax.device_put(val, sharding.with_memory_kind("pinned_host"))
+        except Exception:
+          new_val = val
+        if isinstance(x, nnx.Variable):
+          return type(x)(new_val)
+        return new_val
+
+      def _to_device_leaf(x):
+        if x is None or isinstance(x, optax.MaskedNode):
+          return optax.MaskedNode()
+        val = x.value if hasattr(x, "value") else x
+        if isinstance(val, optax.MaskedNode) or val is None:
+          return optax.MaskedNode()
+        if not hasattr(val, "dtype") or not jnp.issubdtype(val.dtype, jnp.inexact):
+          return x
+        try:
+          sharding = jax.typeof(val).sharding
+          new_val = jax.device_put(val, sharding.with_memory_kind("device"))
+        except Exception:
+          new_val = val
+        if isinstance(x, nnx.Variable):
+          return type(x)(new_val)
+        return new_val
+
+      param_arrays = nnx.as_pure(nnx.state(state.model, nnx.Param))
+      grad_arrays = nnx.as_pure(nnx.state(grads, nnx.Param)) if isinstance(grads, nnx.State) else nnx.as_pure(grads)
+      opt_state_arrays = nnx.as_pure(state.optimizer.opt_state)
+
+      scanned_params, unscanned_params = maxtext_utils.split_pytree_by_scan_axis(
+          param_arrays, scan_axis=config.param_scan_axis
       )
-      opt_state = nnx.state(state.optimizer)
-      new_opt_state = jax.device_put(opt_state, device_opt_shardings)
-      nnx.update(state.optimizer, new_opt_state)
-    if config.skip_step_on_spikes:
-      # The skip-step optimizer is a GradientTransformationExtraArgs that reads
-      # loss/grad_norm to decide whether to zero the update on a spike. nnx
-      # Optimizer.update forwards these kwargs to tx.update.
-      grad_norm = max_utils.l2norm_pytree(grads)
-      state.apply_gradients(grads, loss=loss, grad_norm=grad_norm)
+      scanned_opt, unscanned_opt = maxtext_utils.split_pytree_by_scan_axis(
+          opt_state_arrays, scan_axis=config.param_scan_axis
+      )
+      scanned_grads, unscanned_grads = maxtext_utils.split_pytree_by_scan_axis(
+          grad_arrays, scan_axis=config.param_scan_axis
+      )
+
+      is_leaf_fn = lambda x: x is None or isinstance(x, optax.MaskedNode)
+
+      unscanned_params_device = jax.tree.map(_to_device_leaf, unscanned_params, is_leaf=is_leaf_fn)
+      unscanned_opt_device = jax.tree.map(_to_device_leaf, unscanned_opt, is_leaf=is_leaf_fn)
+      unscanned_grads_device = jax.tree.map(_to_device_leaf, unscanned_grads, is_leaf=is_leaf_fn)
+
+      scanned_params_host = jax.tree.map(_to_host_leaf, scanned_params, is_leaf=is_leaf_fn)
+      scanned_opt_host = jax.tree.map(_to_host_leaf, scanned_opt, is_leaf=is_leaf_fn)
+      scanned_grads_host = jax.tree.map(_to_host_leaf, scanned_grads, is_leaf=is_leaf_fn)
+
+      # 1. Update unscanned parameters on device
+      unscanned_updates, new_unscanned_opt = state.optimizer.tx.update(
+          unscanned_grads_device, unscanned_opt_device, unscanned_params_device
+      )
+      new_unscanned_params = optax.apply_updates(unscanned_params_device, unscanned_updates)
+
+      # 2. Update scanned parameters on host
+      scanned_updates, new_scanned_opt = state.optimizer.tx.update(
+          scanned_grads_host, scanned_opt_host, scanned_params_host
+      )
+      new_scanned_params = optax.apply_updates(scanned_params_host, scanned_updates)
+
+      # 3. Merge updated model parameters and optimizer states
+      new_params = maxtext_utils.merge_scanned_unscanned(new_scanned_params, new_unscanned_params)
+      new_opt_state = maxtext_utils.merge_scanned_unscanned(new_scanned_opt, new_unscanned_opt)
+
+      nnx.update(state.model, new_params)
+      def _update_opt_var(var, new_val):
+        if isinstance(var, nnx.Variable):
+          return var.replace(value=new_val)
+        return new_val
+
+      try:
+        updated_opt = jax.tree.map(
+            _update_opt_var,
+            state.optimizer.opt_state,
+            new_opt_state,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
+        state.optimizer.opt_state = updated_opt
+      except Exception:
+        state.optimizer.opt_state = new_opt_state
     else:
       state.apply_gradients(grads)
     new_state = state

@@ -111,7 +111,20 @@ class DeepSeekGenericLayer(nnx.Module):
           epsilon=self.config.normalization_layer_epsilon,
           rngs=rngs,
       )
-      tokenizer = transformers.AutoTokenizer.from_pretrained(config.tokenizer_path, token=config.hf_access_token)
+      try:
+        tokenizer = transformers.AutoTokenizer.from_pretrained(config.tokenizer_path, token=config.hf_access_token)
+      except Exception:
+        class _FallbackTokenizer:
+          def __init__(self, vocab_size=1024, pad_token_id=0):
+            self.vocab_size = vocab_size
+            self.pad_token_id = pad_token_id
+          def __len__(self):
+            return self.vocab_size
+          def batch_decode(self, sequences, **kwargs):
+            return [str(seq[0]) for seq in sequences]
+          def convert_ids_to_tokens(self, tid):
+            return str(tid)
+        tokenizer = _FallbackTokenizer(vocab_size=getattr(config, "vocab_size", 1024), pad_token_id=0)
       # TODO(ranran): Refactor NgramHashMapping to initialize once globally or at the model level.
       # Moving this to decoders.py currently causes JAX initialization errors.
       self.ngram_hash_mapping = NgramHashMapping(

@@ -82,10 +82,7 @@ class RMSNorm(nnx.Module):
       return y
 
     scale = self.scale.get_value()
-    # Move scale to device if parameter offloading is enabled
-    if self.parameter_memory_host_offload:
-      max_logging.log("normalizations.py: Moving scale parameter to device")
-      scale = jax.device_put(scale, max_utils.device_space())
+    scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
     effective_scale = scale + self.scale_offset
@@ -144,6 +141,7 @@ def Qwen3NextRMSNorm(
           weight_dtype=weight_dtype,
           scale_init=linen_initializers.zeros,
           scale_offset=1.0,
+          parameter_memory_host_offload=parameter_memory_host_offload,
           rngs=rngs,
       )
   )

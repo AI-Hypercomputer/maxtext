@@ -215,7 +215,6 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         "beta": config.muon_beta,
         "weight_decay": config.muon_weight_decay,
         "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
-        "consistent_rms": config.muon_consistent_rms,
         "ns_coeffs": ns_coeffs,
         "ns_steps": ns_steps,
         # AdamW-specific parameters
@@ -224,6 +223,9 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         "adam_eps_root": config.adam_eps_root,
         "adam_weight_decay": config.adam_weight_decay,
     }
+    import inspect
+    if hasattr(config, "muon_consistent_rms") and "consistent_rms" in inspect.signature(muon).parameters:
+      muon_kwargs["consistent_rms"] = config.muon_consistent_rms
     base_opt = muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")

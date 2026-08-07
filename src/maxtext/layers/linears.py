@@ -275,10 +275,7 @@ class DenseGeneral(nnx.Module):
       kernel = getattr(self.kernel, "value", self.kernel)
       if hasattr(kernel, "value"):
         kernel = kernel.value
-      # Move logit_dense kernel to device if parameter offloading is enabled
-      if self.parameter_memory_host_offload:
-        max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, max_utils.device_space())
+      kernel = jax.device_put(kernel, max_utils.device_space())
       kernel = jnp.asarray(kernel, self.dtype)
 
     kernel = self._maybe_two_stage_all_gather(kernel)
@@ -724,9 +721,7 @@ class DeepSeekV4GroupedLinear(nnx.Module):
     inputs = jnp.asarray(inputs, self.dtype)
 
     kernel = self.kernel[...]
-    if self.parameter_memory_host_offload:
-      max_logging.log("linear.py: Moving parameter grouped_linear kernel to device")
-      kernel = jax.device_put(kernel, max_utils.device_space())
+    kernel = jax.device_put(kernel, max_utils.device_space())
     kernel = jnp.asarray(kernel, self.dtype)
 
     # Perform a batched matrix multiplication using einsum with explicit precision.

@@ -20,8 +20,16 @@ require external integrations or specific hardware (for example `tpu_only`)
 are not marked.
 """
 
-import pytest
 import sys
+import os
+
+_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+if _SRC_PATH not in sys.path:
+  sys.path.insert(0, _SRC_PATH)
+
+os.environ["ALLOW_MULTIPLE_LIBTPU_LOAD"] = "true"
+
+import pytest
 import warnings
 
 warnings.filterwarnings(
