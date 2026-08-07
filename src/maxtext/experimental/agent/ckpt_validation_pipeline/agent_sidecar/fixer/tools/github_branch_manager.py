@@ -27,22 +27,28 @@ def main():
   args = parser.parse_args()
 
   try:
-    subprocess.run(["git", "fetch", "origin"], check=False)
+    import os
+    repo_dir = "/tmp/maxtext_repo"
+    base_branch = os.environ.get("MAXTEXT_BRANCH", "main")
+    
+    if not os.path.exists(repo_dir):
+      print(f"Cloning {base_branch} into {repo_dir}...")
+      subprocess.run(["git", "clone", "-b", base_branch, "https://github.com/AI-Hypercomputer/maxtext.git", repo_dir], check=True)
+      
+    subprocess.run(["git", "fetch", "origin"], cwd=repo_dir, check=False)
     if args.action == "create":
-      import os
-      base_branch = os.environ.get("MAXTEXT_BRANCH", "main")
       # Check out the base branch first so we branch off the correct code
-      res = subprocess.run(["git", "checkout", base_branch], check=False)
+      res = subprocess.run(["git", "checkout", base_branch], cwd=repo_dir, check=False)
       if res.returncode != 0:
-        subprocess.run(["git", "checkout", "-b", base_branch, f"origin/{base_branch}"], check=True)
-      subprocess.run(["git", "checkout", "-b", args.branch], check=True)
+        subprocess.run(["git", "checkout", "-b", base_branch, f"origin/{base_branch}"], cwd=repo_dir, check=True)
+      subprocess.run(["git", "checkout", "-b", args.branch], cwd=repo_dir, check=True)
     elif args.action == "checkout":
       # Checkout local branch or track remote branch
-      res = subprocess.run(["git", "checkout", args.branch], check=False)
+      res = subprocess.run(["git", "checkout", args.branch], cwd=repo_dir, check=False)
       if res.returncode != 0:
-        subprocess.run(["git", "checkout", "-b", args.branch, f"origin/{args.branch}"], check=True)
+        subprocess.run(["git", "checkout", "-b", args.branch, f"origin/{args.branch}"], cwd=repo_dir, check=True)
     elif args.action == "delete":
-      subprocess.run(["git", "branch", "-D", args.branch], check=True)
+      subprocess.run(["git", "branch", "-D", args.branch], cwd=repo_dir, check=True)
     print(f"Successfully executed {args.action} for branch {args.branch}")
   except subprocess.CalledProcessError as e:
     print(f"Failed to execute git command. Error: {e}")

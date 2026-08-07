@@ -32,15 +32,20 @@ def main():
   title = args.title or args.message or "Automated code fix by Overwatch Agent"
   body = args.body or args.message or title
   import time
+  import os
 
+  repo_dir = "/tmp/maxtext_repo"
   fork_branch = args.fix_branch or f"fix/agent-remediation-{int(time.time())}"
 
   print(f"1. Checking out fix branch '{fork_branch}'...")
-  subprocess.run(["git", "checkout", fork_branch], check=False)
+  subprocess.run(["git", "checkout", fork_branch], cwd=repo_dir, check=False)
+  
+  print("Syncing modified files to git repository...")
+  subprocess.run(["cp", "-a", "/app/src/maxtext", f"{repo_dir}/src/"], check=False)
+  
+  subprocess.run(["git", "add", "."], cwd=repo_dir, check=False)
+  subprocess.run(["git", "commit", "-am", title], cwd=repo_dir, check=False)
 
-  subprocess.run(["git", "commit", "-am", title], check=False)
-
-  import os
 
   gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
   remote_url = (
@@ -49,11 +54,11 @@ def main():
       else "https://github.com/AI-Hypercomputer/maxtext.git"
   )
   print(f"Configuring git remote 'origin' ({'with GH_TOKEN' if gh_token else 'anonymous'})...")
-  if subprocess.run(["git", "remote", "set-url", "origin", remote_url], capture_output=True).returncode != 0:
-    subprocess.run(["git", "remote", "add", "origin", remote_url], check=False)
+  if subprocess.run(["git", "remote", "set-url", "origin", remote_url], cwd=repo_dir, capture_output=True).returncode != 0:
+    subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=repo_dir, check=False)
 
   print(f"3. Pushing forked branch '{fork_branch}' to origin...")
-  push_res = subprocess.run(["git", "push", "-uf", "origin", fork_branch], capture_output=True, text=True, check=False)
+  push_res = subprocess.run(["git", "push", "-uf", "origin", fork_branch], cwd=repo_dir, capture_output=True, text=True, check=False)
   if push_res.returncode != 0:
     print(f"git push failed (code {push_res.returncode}):\nSTDOUT: {push_res.stdout}\nSTDERR: {push_res.stderr}")
   else:
