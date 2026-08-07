@@ -124,7 +124,7 @@ def _slice_global_mesh_to_submesh(
             s = shard.data
             while s.ndim > len(target_shape) and s.shape[0] == 1:
               s = s.squeeze(0)
-            s_t = np.ascontiguousarray(np.transpose(s, (1, 0, 2)))
+            s_t = jnp.swapaxes(s, 0, 1)
             tpu_shards.append(jax.device_put(s_t, tpu_devices[shard_idx]))
           shape_t = (target_shape[1], target_shape[0], target_shape[2])
           spec = target_named_sharding.spec
@@ -143,7 +143,7 @@ def _slice_global_mesh_to_submesh(
             s = shard.data
             while s.ndim > len(target_shape) and s.shape[0] == 1:
               s = s.squeeze(0)
-            s_t = np.ascontiguousarray(np.transpose(s, (1, 0)))
+            s_t = jnp.swapaxes(s, 0, 1)
             tpu_shards.append(jax.device_put(s_t, tpu_devices[shard_idx]))
           shape_t = (target_shape[1], target_shape[0])
           spec = target_named_sharding.spec
@@ -531,17 +531,39 @@ def syncer_loop(
     raise e
 
 
+@jax.jit
+def _compute_grad_jit(o_frag, stacked_i_frag):
+  averaged_i_frag = jax.tree_util.tree_map(
+      lambda x, o: jnp.broadcast_to(
+          jnp.mean(x, axis=0, keepdims=(x.ndim == o.ndim)),
+          x.shape if x.ndim == o.ndim else o.shape,
+      ),
+      stacked_i_frag,
+      o_frag,
+  )
+  return jax.tree_util.tree_map(lambda x, y: x - y, o_frag, averaged_i_frag)
+
+
+_APPLY_OUTER_STEP_CACHE = {}
+
+
+def _get_apply_outer_step_jit(outer_optimizer):
+  opt_key = id(outer_optimizer)
+  if opt_key not in _APPLY_OUTER_STEP_CACHE:
+
+    @functools.partial(jax.jit, donate_argnums=(1, 2))
+    def _apply_outer_step_jit(g_frag, o_state_frag, p_frag):
+      updates_frag, new_o_state_frag = outer_optimizer.update(g_frag, o_state_frag, params=p_frag)
+      new_p_frag = optax.apply_updates(p_frag, updates_frag)
+      return new_p_frag, new_o_state_frag
+
+    _APPLY_OUTER_STEP_CACHE[opt_key] = _apply_outer_step_jit
+  return _APPLY_OUTER_STEP_CACHE[opt_key]
+
+
 # pylint: disable=too-many-positional-arguments,too-many-arguments,unused-argument
 def make_step_fns(global_mesh, flat_params_shardings, frag_keys, trace_keys, outer_optimizer):
   """Creates JIT functions for computing gradients and applying outer steps."""
-
-  @jax.jit
-  def _compute_grad_jit(o_frag, stacked_i_frag):
-    averaged_i_frag = jax.tree_util.tree_map(
-        lambda x, o: jnp.broadcast_to(jnp.mean(x, axis=0, keepdims=(x.ndim == o.ndim)), x.shape if x.ndim == o.ndim else o.shape),
-        stacked_i_frag, o_frag
-    )
-    return jax.tree_util.tree_map(lambda x, y: x - y, o_frag, averaged_i_frag)
 
   def compute_grad(o_frag, stacked_i_frag):
     mesh = _get_tree_mesh(o_frag)
@@ -550,18 +572,14 @@ def make_step_fns(global_mesh, flat_params_shardings, frag_keys, trace_keys, out
         return _compute_grad_jit(o_frag, stacked_i_frag)
     return _compute_grad_jit(o_frag, stacked_i_frag)
 
-  @functools.partial(jax.jit, donate_argnums=(1, 2))
-  def _apply_outer_step_jit(g_frag, o_state_frag, p_frag):
-    updates_frag, new_o_state_frag = outer_optimizer.update(g_frag, o_state_frag, params=p_frag)
-    new_p_frag = optax.apply_updates(p_frag, updates_frag)
-    return new_p_frag, new_o_state_frag
+  _apply_fn = _get_apply_outer_step_jit(outer_optimizer)
 
   def apply_outer_step(g_frag, o_state_frag, p_frag):
     mesh = _get_tree_mesh(p_frag)
     if mesh is not None:
       with jax.set_mesh(mesh):
-        return _apply_outer_step_jit(g_frag, o_state_frag, p_frag)
-    return _apply_outer_step_jit(g_frag, o_state_frag, p_frag)
+        return _apply_fn(g_frag, o_state_frag, p_frag)
+    return _apply_fn(g_frag, o_state_frag, p_frag)
 
   return compute_grad, apply_outer_step
 
@@ -701,7 +719,9 @@ def _run_syncer_loop(
       lambda s: jax.sharding.NamedSharding(global_mesh, s.spec), params_shardings
   )
 
-  step_fns_by_frag = {}
+  compute_grad, apply_outer_step = make_step_fns(
+      global_mesh, flat_params_shardings, None, None, outer_optimizer
+  )
 
   # Start main syncer loop
   for step in sync_steps:  # e.g. 50, 100, 150... if sync_period=50
@@ -729,12 +749,6 @@ def _run_syncer_loop(
       outer_params_frag = manipulator.get_flat_fragment(syncer_state.params, frag_idx, has_replica_dim=True)
       trace_frag = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, has_replica_dim=True)
       opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
-
-      if frag_idx not in step_fns_by_frag:
-        step_fns_by_frag[frag_idx] = make_step_fns(
-            global_mesh, flat_params_shardings, outer_params_frag, trace_frag, outer_optimizer
-        )
-      compute_grad, apply_outer_step = step_fns_by_frag[frag_idx]
 
       pseudo_grad_frag = compute_grad(outer_params_frag, stacked_inner_frag)
       new_outer_params_frag, new_opt_state_frag = apply_outer_step(pseudo_grad_frag, opt_state_frag, outer_params_frag)
