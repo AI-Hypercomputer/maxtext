@@ -36,7 +36,7 @@ from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import maxtext_utils, model_creation_utils
-from optax.contrib._muon import MuonDimensionNumbers as mdn
+from maxtext.optimizers.muon.muon import MuonDimensionNumbers as mdn
 
 
 def _is_path_contain_any(tuples, path):

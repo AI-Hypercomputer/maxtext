@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 import optax
-from optax.contrib._muon import muon
+from maxtext.optimizers.muon.muon import muon
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
 
@@ -215,7 +215,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         "beta": config.muon_beta,
         "weight_decay": config.muon_weight_decay,
         "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
-        "consistent_rms": config.muon_consistent_rms,
+        "consistent_rms": getattr(config, "muon_consistent_rms", None),
         "ns_coeffs": ns_coeffs,
         "ns_steps": ns_steps,
         # AdamW-specific parameters
