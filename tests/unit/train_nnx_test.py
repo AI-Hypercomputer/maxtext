@@ -160,6 +160,15 @@ class TestLossFnNNX(unittest.TestCase):
     # eval truncated batch to 1 → total_weights = seq_len * 1
     self.assertEqual(int(aux["total_weights"]), data["targets_segmentation"].shape[1])
 
+  def test_multimodal_model_accepts_text_only_batch(self):
+    cfg, ts = _build_state()
+    cfg.use_multimodal = True
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    loss, _ = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+
+    self.assertTrue(jnp.isfinite(loss))
+
   def test_indexer_dense_warmup_skips_xent(self):
     cfg, ts = _build_state()
     cfg.use_indexer = True
