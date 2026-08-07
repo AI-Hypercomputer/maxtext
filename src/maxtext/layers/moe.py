@@ -2722,10 +2722,7 @@ class RoutedMoE(nnx.Module):
         mlp_down_einsum = "EBCH,EHM -> EBCM"
         output_einsum = "EBCM,BSEC -> BSM"
       else:
-        # TODO(b/425930507): Try replacing `softmax_probs` with padded weights
-        # and verify with decode acc tests.
-        softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
-        dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
+        dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, weights)
         if self.get_context_autoregressive_parallelism_size() > 0 and cp == 1:
           mask_axes = (
               "activation_norm_length_moe",

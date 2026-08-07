@@ -734,7 +734,7 @@ class MLA(Attention):
       # MLA applies yarn with interleave layout.
       # Indexer applies yarn with concatenate layout.
       indexer_rope = copy.copy(self.rotary_embedding)
-      indexer_rope.interleave = False
+      indexer_rope.interleave = getattr(config, "indexer_rope_interleave", config.rope_interleave)
       self.indexer = Indexer(
           config,
           rngs=rngs,
