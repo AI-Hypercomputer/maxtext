@@ -317,11 +317,9 @@ def get_maxtext_model_info(config):
   quant = quantizations.configure_quantization(config)
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
-  # Get abstract model structure (name, shape) without materializing the weights to save memory.
-  # Extract the 'params' collection from the abstract model state. This focuses checkpoint
-  # conversion on trainable model parameters; variables outside the 'params' collection
-  # (such as non-trainable state or optimizer buffers) are not included.
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  # Get abstract model structure (name, shape) without materializing the weights to save memory
+  # Keeps all collections (e.g. 'params', 'Tid2EidVar') in the tree structure
+  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
       abstract_params_tree,
@@ -333,7 +331,7 @@ def get_maxtext_model_info(config):
   # preprocess state
   maxtext_abstract_dict = {}
   for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
-    mt_param_key = "params-" + "-".join(param_key_parts_from_path(path_tuple))
+    mt_param_key = "-".join(param_key_parts_from_path(path_tuple))
     if isinstance(abstract_leaf_value, nn.LogicallyPartitioned):
       mt_target_shape = abstract_leaf_value.value.shape
     else:
@@ -517,12 +515,9 @@ def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict)
 
   The index is the parameter's order in `maxtext_abstract_dict.keys()`.
   This function handles two forms of MaxText keys:
-  - `atomic_mt_key`: A single string representing one MaxText parameter that maps to HF parameter(s).
-    Example: "params-decoder-layers_0-self_attention-query-kernel" -> returns a single index and shape tuple.
+  - `atomic_mt_key`: A single string representing one MaxText parameter that map to HF parameter(s).
   - `composite_mt_key`: A tuple of strings representing multiple MaxText parameters derived from
     a single/bundled HF parameter source (e.g., HF gate_up_proj splitting into MT wi_0 and wi_1).
-    Example: ("params-decoder-layers_0-mlp-wi_0-kernel", "params-decoder-layers_0-mlp-wi_1-kernel") ->
-    returns lists of indices and shapes for each composite component.
   """
   is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
   # atomic_mt_key
@@ -1041,9 +1036,9 @@ def main(
       if not lazy_load_tensors:
         max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
-      if mt_param_key_or_keys not in param_map_mt_to_hf:
-        raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
       hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
+      if hf_source_keys_or_key is None:
+        raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
       hook_fn = hook_fn_map_mt.get(mt_param_key_or_keys)
 
       # Step 1: Resolves MaxText key(s) to target indices and shapes
@@ -1080,9 +1075,11 @@ def main(
     max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
     print_ram_usage("Before creating full JAX tree")
 
-    # Create final MaxText parameters tree
+    # Create final MaxText parameters tree containing all collections
     jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
     del final_mt_weights, abstract_params_treedef
+
+    state_params = jax_weights
 
   print_ram_usage("Before saving")
   if lazy_load_tensors and not is_adapter_only:
@@ -1095,7 +1092,7 @@ def main(
   # and sharded across virtual devices.
   save_weights_to_checkpoint(
       output_directory,
-      jax_weights,
+      state_params,
       simulated_cpu_devices_count,
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,

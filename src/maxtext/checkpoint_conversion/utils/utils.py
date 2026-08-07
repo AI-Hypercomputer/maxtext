@@ -998,8 +998,9 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
 def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   """Extract weights from Linen checkpoint structure.
 
-  Linen checkpoints have structure: {'params': {'decoder': {'decoder_norm': {'scale': array}}}}
-  This function flattens it to: {'params-decoder-decoder_norm-scale': array}
+  Handles multi-collection structures like:
+  {'params': {'decoder': ...}, 'Tid2EidVar': {'decoder': ...}}
+  as well as single collection trees: {'decoder': ...}
 
   Args:
     weights_dict: Linen checkpoint weights dictionary
@@ -1011,7 +1012,10 @@ def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
   for path_tuple, leaf_value in leaves_with_paths:
     path_keys = param_key_parts_from_path(path_tuple)
-    maxtext_param_key = "params-" + "-".join(path_keys)
+    if path_keys and (path_keys[0] == "params" or path_keys[0] == "Tid2EidVar" or path_keys[0].endswith("Var")):
+      maxtext_param_key = "-".join(path_keys)
+    else:
+      maxtext_param_key = "params-" + "-".join(path_keys)
     if not isinstance(leaf_value, (jax.Array, np.ndarray)):
       raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
     result[maxtext_param_key] = leaf_value
@@ -1051,13 +1055,13 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
       max_logging.log("Detected NNX-SFT checkpoint structure")
       return extract_nnx_weights(checkpoint_dict)
   else:
-    # Linen checkpoint: check if there's a nested 'params' key
+    # Linen checkpoint: pass multi-collection dictionary or single collection tree
     if isinstance(actual_weights_dict, dict) and "params" in actual_weights_dict:
-      actual_weights_dict = actual_weights_dict["params"]
-      max_logging.log("Detected Linen checkpoint structure")
+      max_logging.log("Detected Linen checkpoint structure (multi-collection)")
+      return extract_linen_weights(actual_weights_dict)
     else:
       max_logging.log("Detected Linen checkpoint structure (single params layer)")
-    return extract_linen_weights(actual_weights_dict)
+      return extract_linen_weights(actual_weights_dict)
 
 
 def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | None = None, dtype: str = "auto"):
@@ -1257,7 +1261,7 @@ def save_weights_to_checkpoint(
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
 
   state_new = train_state.TrainState(
-      step=step_number_to_save_new_ckpt, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+      step=step_number_to_save_new_ckpt, apply_fn=None, params=jax_weights if ("params" in jax_weights.keys() if isinstance(jax_weights, dict) else False) else {"params": jax_weights}, tx=None, opt_state={}  # type: ignore
   )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
