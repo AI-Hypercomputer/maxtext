@@ -25,6 +25,7 @@ set -e
 # - Pathways only: Run Pathways tests only
 # - Post-training only: Run post-training tests and notebooks only
 # - General inference only: Run pretrain TPU/CPU suites only
+# - Tests only: Run test suites only (no notebooks)
 # - Default fallback: Run all suites (fail-open for core/shared code)
 
 # Helper to output a key-value flag to GITHUB_OUTPUT (if set) and stdout
@@ -134,6 +135,13 @@ fi
 if matches_only_domain 'src/maxtext/inference/|tests/inference/'; then
   echo "Only inference files changed, enabling pretrain unit/integration tests only."
   enable_flags run_tests run_pretrain_tests
+  exit 0
+fi
+
+# Tests and test-tooling only changes (skips notebooks as tutorials are unaffected)
+if matches_only_domain '(^tests/|^\.github/scripts/|^pytest\.ini$|^\.coveragerc$)'; then
+  echo "Only test files and test configurations changed, enabling test suites (skipping notebooks)."
+  enable_flags run_tests run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests
   exit 0
 fi
 
