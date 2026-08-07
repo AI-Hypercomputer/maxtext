@@ -44,12 +44,33 @@ def _run_script(script_name: str, args: list[str]) -> str:
 
 # --- ANALYST TOOLS ---
 
+def _resolve_path(filepath: str) -> str:
+  """Helper to resolve paths either absolutely or relative to the repo root."""
+  path = Path(filepath)
+  if path.is_absolute() or path.exists():
+    return str(path)
+  
+  # Check relative to repo root (6 levels up: src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar)
+  repo_root = Path(__file__).resolve().parents[6]
+  
+  # Sometimes the agent provides 'maxtext/layers/...' and sometimes 'src/maxtext/layers/...'
+  # We can check a few combinations if it doesn't exist directly.
+  root_path = repo_root / path
+  if root_path.exists():
+    return str(root_path)
+  if (repo_root / "src" / path).exists():
+    return str(repo_root / "src" / path)
+  
+  return str(root_path)
+
 
 def read_local_file(filepath: str) -> str:
-  """Reads a Python file from the local MaxText repository to inspect the architecture."""
+  """Reads a Python file from the local MaxText repository. Output includes line numbers so you can use edit_file_lines."""
+  filepath = _resolve_path(filepath)
   try:
     with open(filepath, "r", encoding="utf-8") as f:
-      return f.read()
+      lines = f.readlines()
+      return "".join(f"{i+1}: {line}" for i, line in enumerate(lines))
   except Exception as e:
     return f"Error reading file {filepath}: {e}"
 
@@ -74,26 +95,45 @@ def run_shape_analysis(model_name: str, run_id: str) -> str:
 # --- FIXER TOOLS ---
 
 
-def patch_file(filepath: str, old_text: str, new_text: str) -> str:
-  """Replaces specific lines of code in a file. Must provide the exact old text to replace."""
+def edit_file_lines(filepath: str, start_line: int, end_line: int, new_content: str) -> str:
+  """Replaces lines from start_line to end_line (1-indexed, inclusive) with new_content.
+  If the file does not exist, it will be created.
+  To append to the end of the file, use a start_line greater than the total number of lines.
+  To insert without deleting, use start_line = end_line + 1.
+  """
+  filepath = _resolve_path(filepath)
   try:
-    with open(filepath, "r", encoding="utf-8") as f:
-      content = f.read()
-
-    if old_text not in content:
-      return f"Error: old_text not found in {filepath}. Ensure exact match including whitespace."
-
-    content = content.replace(old_text, new_text)
-
+    import os
+    if os.path.exists(filepath):
+      with open(filepath, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    else:
+      lines = []
+      os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
+    start_idx = max(0, start_line - 1)
+    end_idx = max(0, end_line)
+    
+    if new_content and not new_content.endswith('\n'):
+      new_content += '\n'
+      
+    new_lines = [line + '\n' if not line.endswith('\n') else line for line in new_content.splitlines()]
+    
+    if start_idx >= len(lines):
+      lines.extend(new_lines)
+    else:
+      lines[start_idx:end_idx] = new_lines
+      
     with open(filepath, "w", encoding="utf-8") as f:
-      f.write(content)
-    return f"Successfully patched {filepath}."
+      f.writelines(lines)
+    return f"Successfully edited {filepath}."
   except Exception as e:
-    return f"Error patching file {filepath}: {e}"
+    return f"Error editing file {filepath}: {e}"
 
 
 def run_linters(filepath: str) -> str:
   """Runs pyink (indentation=2, length=122) and pylint on the modified file to enforce standards."""
+  filepath = _resolve_path(filepath)
   return _run_script("run_linters.py", ["--file", filepath])
 
 
@@ -344,7 +384,7 @@ def run_agent_workflow(context: dict, failure_log: str):
   except Exception as e:
     logger.warning(f"Overseer surveillance loop skipped ({e}). Proceeding with primary plan...")
 
-  max_agent_calls = int(os.environ.get("MAX_AGENT_CALLS", "35"))
+  max_agent_calls = int(os.environ.get("MAX_AGENT_CALLS", "15"))
 
   remediation_level = plan_json.get("remediation_level", "level_2_code")
   config_overrides = plan_json.get("config_overrides", {})
@@ -372,7 +412,7 @@ def run_agent_workflow(context: dict, failure_log: str):
         read_local_file,
         fetch_reference_code,
         run_shape_analysis,
-        patch_file,
+        edit_file_lines,
         run_linters,
         manage_github_branch,
         create_pull_request,
@@ -465,17 +505,20 @@ def run_agent_workflow(context: dict, failure_log: str):
       write_remediation_report,
       send_alert_email,
   ]
-  from monitor.state_manager import record_attempt
-  record_attempt(
-      run_id,
-      status="verification_started",
-      branch=new_branch,
-      diagnosis=plan_json.get("diagnosis", ""),
-      remediation_level=plan_json.get("remediation_level", "unknown"),
-      airflow_dag_id=airflow_dag_id,
-      airflow_task_id=airflow_task_id,
-      airflow_run_id=airflow_run_id,
-  )
+  try:
+    from monitor.state_manager import record_attempt
+    record_attempt(
+        run_id,
+        status="verification_started",
+        branch=new_branch,
+        diagnosis=plan_json.get("diagnosis", ""),
+        remediation_level=plan_json.get("remediation_level", "unknown"),
+        airflow_dag_id=airflow_dag_id,
+        airflow_task_id=airflow_task_id,
+        airflow_run_id=airflow_run_id,
+    )
+  except ModuleNotFoundError:
+    logger.warning("record_attempt skipped (No module named 'monitor.state_manager')")
 
   verifier_chat = client.chats.create(
       model=model_id,

@@ -38,9 +38,7 @@ def main():
   print(f"1. Checking out fix branch '{fork_branch}'...")
   subprocess.run(["git", "checkout", fork_branch], check=False)
 
-  print("2. Staging and committing patched changes...")
-  subprocess.run(["git", "add", "."], check=False)
-  subprocess.run(["git", "commit", "-m", title], check=False)
+  subprocess.run(["git", "commit", "-am", title], check=False)
 
   import os
 
@@ -55,7 +53,7 @@ def main():
     subprocess.run(["git", "remote", "add", "origin", remote_url], check=False)
 
   print(f"3. Pushing forked branch '{fork_branch}' to origin...")
-  push_res = subprocess.run(["git", "push", "-u", "origin", fork_branch], capture_output=True, text=True, check=False)
+  push_res = subprocess.run(["git", "push", "-uf", "origin", fork_branch], capture_output=True, text=True, check=False)
   if push_res.returncode != 0:
     print(f"git push failed (code {push_res.returncode}):\nSTDOUT: {push_res.stdout}\nSTDERR: {push_res.stderr}")
   else:
