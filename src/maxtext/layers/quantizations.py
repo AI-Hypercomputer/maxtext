@@ -931,18 +931,16 @@ def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> fl
   if len(args) == 1:
     args = [-args[0], args[0]]
 
-  if args[0] + args[1] != 0:
+  if len(args) != 2 or args[0] + args[1] != 0 or args[1] <= 0:
     raise ValueError(f"Expected format: 'fixed,max' or 'fixed,-max,max'. Got: {calibration_method}")
-
-  if args[0] > 0 or args[1] < 0 or args[0] >= args[1]:
-    raise ValueError(f"The range must contain 0 and be non-empty, got: {calibration_method}")
 
   qmax, _ = _get_max_min(qtype)
   scale_val = args[1] / qmax
 
   # Prevent scale from being 0
-  tiny_sqrt = jnp.sqrt(jnp.finfo(jnp.float32).tiny)
-  scale_val = jnp.where(scale_val < tiny_sqrt, jnp.ones_like(scale_val), scale_val)
+  tiny_sqrt = jnp.finfo(jnp.float32).tiny ** 0.5
+  if scale_val < tiny_sqrt:
+    scale_val = 1.0
 
   return scale_val
 
