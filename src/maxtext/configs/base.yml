@@ -1118,6 +1118,7 @@ sa_block_kv_dkv_compute: 512
 sa_block_q_dq: 512
 sa_block_kv_dq: 512
 sa_use_fused_bwd_kernel: false
+sa_bwd_dkv_megacore: false  # megacore-parallel kv-head groups in the static dkv grid
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
