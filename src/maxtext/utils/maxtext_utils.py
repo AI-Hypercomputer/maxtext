@@ -166,10 +166,29 @@ def get_shaped_batch(config, batch_sharding=None):
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
-    # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
-    # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
-    if "llama4" in config.model_name:
-      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
+    is_video = getattr(config, "video_max_grid_t", None) is not None
+    if is_video:
+      max_t = config.video_max_grid_t
+      max_h = config.video_max_grid_h
+      max_w = config.video_max_grid_w
+      tps = config.temporal_patch_size_for_vit
+      patch = config.patch_size_for_vit
+      channels = config.num_channels_for_vit
+      batch_size = config.micro_batch_size_to_train_on
+      video_shape = (batch_size, channels, max_t * tps, max_h * patch, max_w * patch)
+      video_mask_shape = (batch_size, 1, max_t * tps, max_h * patch, max_w * patch)
+      shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
+      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
+      shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
+    else:
+      image_shape = mm_processor.get_dummy_image_shape_for_init(
+          config.model_name, batch_size=config.micro_batch_size_to_train_on
+      )
+      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
+      # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
+      # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
+      if "llama4" in config.model_name:
+        shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)

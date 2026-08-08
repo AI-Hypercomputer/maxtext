@@ -1160,6 +1160,9 @@ class TestGetShapedBatch(unittest.TestCase):
     cfg.use_multimodal = use_multimodal
     cfg.use_audio = use_audio
     cfg.model_name = model_name
+    cfg.video_max_grid_t = None
+    cfg.video_max_grid_h = None
+    cfg.video_max_grid_w = None
     if enable_diloco:
       cfg.num_diloco_replicas = 2
     return cfg

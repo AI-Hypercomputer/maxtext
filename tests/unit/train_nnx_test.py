@@ -92,9 +92,10 @@ class _TinyDecoder(nnx.Module):
       enable_dropout=False,
       decoder_target_tokens=None,
       decoder_target_mask=None,
+      **kwargs,
   ):
     del decoder_positions, decoder_segment_ids, encoder_images, encoder_image_masks
-    del enable_dropout, decoder_target_tokens, decoder_target_mask
+    del enable_dropout, decoder_target_tokens, decoder_target_mask, kwargs
     h = self.embed(decoder_input_tokens)
     return self.proj(h)
 
