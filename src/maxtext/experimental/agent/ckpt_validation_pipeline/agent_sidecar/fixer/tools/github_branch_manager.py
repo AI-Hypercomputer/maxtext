@@ -29,7 +29,7 @@ def main():
   try:
     import os
     repo_dir = "/tmp/maxtext_repo"
-    base_branch = "main"
+    base_branch = os.environ.get("MAXTEXT_BRANCH", "main")
     
     if not os.path.exists(repo_dir):
       print(f"Cloning {base_branch} into {repo_dir}...")
