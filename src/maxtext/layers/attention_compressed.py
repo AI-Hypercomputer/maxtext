@@ -584,10 +584,15 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       return compressed_kv, compressed_mask
 
     # --- PREFILL CHUNKING & PRIMING ---
-    # Truncate sequence to the nearest multiple of the compression rate
-    usable = (seq_len // self.compress_rate) * self.compress_rate
-    chunk_kv = kv[:, :usable]
-    chunk_gate = gate[:, :usable]
+    # Ceil-pad sequence to nearest multiple of compression rate so all tokens are included
+    remainder = seq_len % self.compress_rate
+    if remainder > 0:
+      pad_len = self.compress_rate - remainder
+      chunk_kv = jnp.pad(kv, ((0, 0), (0, pad_len), (0, 0)))
+      chunk_gate = jnp.pad(gate, ((0, 0), (0, pad_len), (0, 0)), constant_values=-1e9)
+    else:
+      chunk_kv = kv
+      chunk_gate = gate
     first_window_position = position_ids[:, 0:1]
 
     # Process overlapping windows if there is enough sequence length
@@ -1534,9 +1539,53 @@ class CompressedAttention(Attention):
           compressed_segment_mask[:, :, : compressed_mask.shape[-1]], axis=1
       )
 
-    # Note: Unlike standard pre-attention concatenation (extending local KV tensors with compressed blocks),
-    # compressed_kv is passed separately to attention_op to support custom kernels and decoding caching.
+    # Note: compressed_kv is passed separately to attention_op to support custom kernels and decoding caching.
+    decoder_segment_ids_kv = decoder_segment_ids
+    compressed_segment_ids = None
+    if compressed_kv is not None and decoder_segment_ids is not None:
+      padding_len = compressed_kv.shape[1]
+      compress_rate = self.compress_ratio
+      usable = padding_len * compress_rate
+      if decoder_segment_ids.shape[1] < usable:
+        pad_seg = usable - decoder_segment_ids.shape[1]
+        last_seg = decoder_segment_ids[:, -1:]
+        pad_block = jnp.repeat(last_seg, pad_seg, axis=1)
+        padded_seg_ids = jnp.concatenate([decoder_segment_ids, pad_block], axis=1)
+      else:
+        padded_seg_ids = decoder_segment_ids[:, :usable]
+      chunked_segment_ids = padded_seg_ids.reshape((decoder_segment_ids.shape[0], padding_len, compress_rate))
+      min_seg = jnp.min(chunked_segment_ids, axis=-1)
+      max_seg = jnp.max(chunked_segment_ids, axis=-1)
+      # Windows containing boundary tokens across different documents are assigned -1 (invalidated)
+      compressed_segment_ids = jnp.where(min_seg == max_seg, max_seg, -1)
+      decoder_segment_ids_kv = jnp.concatenate([decoder_segment_ids, compressed_segment_ids], axis=1)
+
     kv = checkpoint_name(kv, "kv_proj")
+
+    pad_kv_total = 0
+    unpadded_kv = jnp.concatenate([kv, compressed_kv], axis=1) if compressed_kv is not None else kv
+
+    # Pad total KV length to tile size multiple (config.sa_block_kv) for SPMD sequence divisibility and
+    # Tokamax dynamic splash tile boundary alignment. Note: Tokamax kernel inside AttentionOp additionally
+    # sets inner block size as min(block_kv, key_len) during kernel invocation.
+    if self.attention_kernel == "flash":
+      total_kv_len = kv.shape[1] + (compressed_kv.shape[1] if compressed_kv is not None else 0)
+      block_size = self.config.sa_block_kv
+      pad_kv_total = (block_size - (total_kv_len % block_size)) % block_size
+
+      if pad_kv_total > 0:
+        if compressed_kv is not None:
+          # Prepend padding to the compressed blocks so they remain at the end of the sequence
+          compressed_kv = jnp.pad(compressed_kv, ((0, 0), (pad_kv_total, 0), (0, 0), (0, 0)))
+
+          if decoder_segment_ids is not None and compressed_segment_ids is not None:
+            comp_seg_padded = jnp.pad(compressed_segment_ids, ((0, 0), (pad_kv_total, 0)), constant_values=-1)
+            decoder_segment_ids_kv = jnp.concatenate([decoder_segment_ids, comp_seg_padded], axis=1)
+        else:
+          # Fallback: Pad at the end if no compressed blocks exist
+          kv = jnp.pad(kv, ((0, 0), (0, pad_kv_total), (0, 0), (0, 0)))
+          if decoder_segment_ids_kv is not None:
+            decoder_segment_ids_kv = jnp.pad(decoder_segment_ids_kv, ((0, 0), (0, pad_kv_total)), constant_values=-1)
 
     # Prepare the mask shape for the underlying AttentionOp
     if compressed_mask is not None:
@@ -1546,7 +1595,24 @@ class CompressedAttention(Attention):
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
       q = q * self.query_pre_attn_scalar
 
-    # Compute Attention (Now safely passing kv_cache so the kernel doesn't assert!)
+    # Build indexer mask explicitly for tokamax splash kernel
+    indexer_mask = None
+    if self.attention_kernel == "flash" and compressed_mask is not None:
+      indexer_mask = self.attention_op.generate_attention_mask(
+          q,
+          unpadded_kv,
+          decoder_segment_ids,
+          model_mode,
+          compressed_mask=compressed_mask,
+          pad_kv_total=pad_kv_total,
+      )
+
+      if indexer_mask is not None:
+        # Extract single KV head and Query-per-KV head group axes [batch, 1, 1, Q, KV] -> [batch, Q, KV]
+        indexer_mask = indexer_mask[:, 0, 0, :, :]
+
+    # Compute Attention
+    # -> [batch, q_length, num_query_heads, head_dim]
     attn_out = self.attention_op(
         q,
         kv,
@@ -1558,6 +1624,8 @@ class CompressedAttention(Attention):
         compressed_mask=compressed_mask,
         compressed_kv=compressed_kv,
         cached_values=current_kv_cache,
+        indexer_mask=indexer_mask,
+        decoder_segment_ids_kv=decoder_segment_ids_kv,
     )
 
     # Reverse RoPE on Values
