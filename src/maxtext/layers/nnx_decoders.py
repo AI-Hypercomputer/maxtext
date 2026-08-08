@@ -439,17 +439,12 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
-      self.hc_head = mhc.ManifoldConstrainedHyperConnections(
-          config=config,
-          dim=config.emb_dim,
-          mesh=self.mesh,
+      self.hc_head = linears.DenseGeneral(
+          in_features_shape=(config.mhc_expansion_rate, config.emb_dim),
+          out_features_shape=config.emb_dim,
+          axis=(-2, -1),
           rngs=self.rngs,
       )
-
-    self._init_decoder_layers(decoder_block_classes, rngs, mesh)
-
-  def _init_decoder_layers(self, decoder_block_classes, rngs, mesh):
-    """Routes layer construction through three main paths: pipeline, scanned non-pipeline, sequential."""
     config = self.config
 
     if self.is_gemma4_small:
