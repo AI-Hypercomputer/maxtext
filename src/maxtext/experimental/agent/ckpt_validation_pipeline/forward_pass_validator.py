@@ -53,6 +53,7 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
       "activations_in_float32=true",
       "matmul_precision=high",
       "override_model_config=True",
+      "remat_policy=none",
   ]
 
   # append additional maxtext configs from unknown args
