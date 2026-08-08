@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "train.py", line 42, in <module>
+    import maxtext
+  File "/usr/local/google/home/fiyinbenstowe/Desktop/Project/maxtext/src/maxtext/layers/normalizations.py", line 72
+    mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
+          ^
+SyntaxError: invalid syntax
