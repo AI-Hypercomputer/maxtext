@@ -271,6 +271,7 @@ def get_data(golden_data_point, config):
   model_prefix = config.model_name.split("-")[0]
 
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
+  model_prefix = config.model_name.split("-")[0]
   if config.use_multimodal:
     assert "pixel_values" in golden_data_point, "no image found in golden data while use_multimodal=True"
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)
@@ -632,6 +633,12 @@ def main(config, test_args):  # pylint: disable=W0621
     hf_model = model_class.from_pretrained(
         test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
     )
+    if config.base_num_decoder_layers < hf_model.config.num_hidden_layers:
+      max_logging.log(
+          f"Truncating HF model from {hf_model.config.num_hidden_layers} to {config.base_num_decoder_layers} layers "
+          f"to match MaxText base_num_decoder_layers."
+      )
+      hf_model.model.layers = hf_model.model.layers[: config.base_num_decoder_layers]
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
       max_logging.log(f"Loading HF PEFT LoRA adapter from {hf_lora_path}")
