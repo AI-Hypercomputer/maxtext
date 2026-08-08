@@ -1617,8 +1617,8 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       or scanned with expert stacking (nested list of strings).
   """
   # Extract hf configuration parameters, without mtp
-  num_main_layers = config["num_hidden_layers"]
-  first_num_dense_layers = config["first_k_dense_replace"]
+  num_main_layers = min(config["num_hidden_layers"], maxtext_config.base_num_decoder_layers)
+  first_num_dense_layers = min(config["first_k_dense_replace"], maxtext_config.first_num_dense_layers, num_main_layers)
   num_experts = config.get("n_routed_experts", 0)
 
   # Mapping for non-layer-specific weights
@@ -1712,10 +1712,21 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   def reshape_kernel(input_tensor, target_shape):
     """Reshapes and transposes kernel weights between MaxText and HF."""
     if saving_to_hf:
-      flipped_target_shape = np.flip(np.array(target_shape))
-      return input_tensor.reshape(flipped_target_shape).T
+      if input_tensor.ndim == 4:
+        return input_tensor.transpose(0, 1, 3, 2)
+      elif input_tensor.ndim == 3:
+        return input_tensor.transpose(1, 2, 0)
+      elif input_tensor.ndim == 2:
+        return input_tensor.T
+      return input_tensor
     else:
-      return input_tensor.T.reshape(target_shape)
+      if input_tensor.ndim == 4:
+        return input_tensor.transpose(0, 1, 3, 2)
+      elif input_tensor.ndim == 3:
+        return input_tensor.transpose(2, 0, 1)
+      elif input_tensor.ndim == 2:
+        return input_tensor.T
+      return input_tensor
 
   def reshape_wkv_b_kernel(input_tensor, target_shape):
     """Reshapes and transposes wkv_b kernel weights between MaxText and HF.
@@ -1896,6 +1907,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       "DeepSeekMoeBlock_0-shared_experts-wi_1-kernel",  # transpose
       "DeepSeekMoeBlock_0-shared_experts-wo-kernel",  # transpose
       "DeepSeekMoeBlock_0-MoeBlock_0-gate-kernel",  # transpose
+      "DeepSeekMoeBlock_0-MoeBlock_0-gate-bias",  # transpose
       "DeepSeekMoeBlock_0-MoeBlock_0-wi_0",  # transpose
       "DeepSeekMoeBlock_0-MoeBlock_0-wi_1",  # transpose
       "DeepSeekMoeBlock_0-MoeBlock_0-wo",  # transpose
