@@ -743,6 +743,7 @@ def yarn_rotary_embedding_as_linen(
     interleave: bool = True,
     truncate: bool = True,
     attention_scaling: bool = False,
+    pairwise: bool = False,
     shard_mode: ShardMode = ShardMode.AUTO,
 ):
   """Initializes the YarnRotaryEmbedding module and returns it as a Linen module.
@@ -776,6 +777,7 @@ def yarn_rotary_embedding_as_linen(
       interleave=interleave,
       truncate=truncate,
       attention_scaling=attention_scaling,
+      pairwise=pairwise,
       shard_mode=shard_mode,
   )
 
@@ -834,6 +836,7 @@ class YarnRotaryEmbedding(nnx.Module):
       interleave=True,
       truncate=True,
       attention_scaling=False,
+      pairwise=False,
       # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
       rngs: nnx.Rngs = None,
@@ -853,6 +856,10 @@ class YarnRotaryEmbedding(nnx.Module):
     self.mesh = mesh
     self.shard_mode = shard_mode
     self.attention_scaling = attention_scaling
+    self.pairwise = pairwise
+
+    if self.pairwise and not self.interleave:
+      raise ValueError("rope_pairwise=True requires rope_interleave=True.")
 
     self.freqs_sharding = (
         create_sharding(mesh, ("activation_batch", "activation_length", "q_heads"))
@@ -966,32 +973,49 @@ class YarnRotaryEmbedding(nnx.Module):
     freqs = self.freqs_cis.at[position].get(out_sharding=self.freqs_sharding)  # shape: [B, S, half_dim]
     freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
 
-    if self.interleave:
-      # Inputs with interleaved format [real1, img1, real2, img2, ...] at last dimension
-      # Convert the last dimension into a complex representation.
-      # First reshape so that each pair of numbers represents the real and imaginary parts.
-      B, S, N, H = inputs.shape
-      half_dim = H // 2
-      inputs_reshaped = inputs.reshape(B, S, N, half_dim, 2)
-      first_half, second_half = inputs_reshaped[..., 0], inputs_reshaped[..., 1]
+    if self.interleave and self.pairwise:
+      with jax.named_scope("rope_pairwise"):
+        b, s, n, h = inputs.shape
+        half_dim = h // 2
+        pairs = inputs.reshape(b, s, n, half_dim, 2)
+        pairs = pairs.astype(jnp.float32)
+        cos = jnp.real(freqs)[..., jnp.newaxis]
+        sin = jnp.imag(freqs)[..., jnp.newaxis]
+        if self.shard_mode == ShardMode.EXPLICIT:
+          rotated_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", None, None, None))
+          cos = jnp.broadcast_to(cos, pairs.shape, out_sharding=rotated_sharding)
+          sin = jnp.broadcast_to(sin, pairs.shape, out_sharding=rotated_sharding)
+        swapped = jnp.flip(pairs, axis=-1)
+        sign = jnp.asarray([-1.0, 1.0], dtype=jnp.float32)
+        rotated_pairs = pairs * cos + swapped * sin * sign
+        output = rotated_pairs.reshape(b, s, n, h)
     else:
-      # Inputs with concatenated format [real1, real2, ..., img1, img2, ...] at last dimension
-      first_half, second_half = jnp.split(inputs, 2, axis=-1)
+      if self.interleave:
+        # Inputs with interleaved format [real1, img1, real2, img2, ...] at last dimension
+        # Convert the last dimension into a complex representation.
+        # First reshape so that each pair of numbers represents the real and imaginary parts.
+        b, s, n, h = inputs.shape
+        half_dim = h // 2
+        inputs_reshaped = inputs.reshape(b, s, n, half_dim, 2)
+        first_half, second_half = inputs_reshaped[..., 0], inputs_reshaped[..., 1]
+      else:
+        # Inputs with concatenated format [real1, real2, ..., img1, img2, ...] at last dimension
+        first_half, second_half = jnp.split(inputs, 2, axis=-1)
 
-    inputs_complex = first_half + 1j * second_half  # shape: [B, S, N, half_dim]
-    # Apply the rotary transformation via complex multiplication.
-    rotated_sharding = (
-        create_sharding(self.mesh, ("activation_batch", "activation_length", None, None))
-        if self.shard_mode == ShardMode.EXPLICIT
-        else None
-    )
-    freqs = jnp.broadcast_to(freqs, inputs_complex.shape, out_sharding=rotated_sharding)
-    rotated = jnp.multiply(inputs_complex, freqs)  # shape: [B, S, N, half_dim]
+      inputs_complex = first_half + 1j * second_half  # shape: [b, s, n, half_dim]
+      # Apply the rotary transformation via complex multiplication.
+      rotated_sharding = (
+          create_sharding(self.mesh, ("activation_batch", "activation_length", None, None))
+          if self.shard_mode == ShardMode.EXPLICIT
+          else None
+      )
+      freqs = jnp.broadcast_to(freqs, inputs_complex.shape, out_sharding=rotated_sharding)
+      rotated = jnp.multiply(inputs_complex, freqs)  # shape: [b, s, n, half_dim]
 
-    # Convert the complex result back to a real tensor.
-    # Split the complex number into its real and imaginary parts.
-    # [real1, real2, ..., img1, img2, ...]
-    output = jnp.concatenate([jnp.real(rotated), jnp.imag(rotated)], axis=-1)
+      # Convert the complex result back to a real tensor.
+      # Split the complex number into its real and imaginary parts.
+      # [real1, real2, ..., img1, img2, ...]
+      output = jnp.concatenate([jnp.real(rotated), jnp.imag(rotated)], axis=-1)
 
     if self.attention_scaling:
       attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * math.log(self.rope_factor) + 1.0)
