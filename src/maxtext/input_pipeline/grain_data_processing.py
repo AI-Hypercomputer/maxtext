@@ -23,6 +23,8 @@ from concurrent import futures
 import json
 
 import jax
+from jax.experimental import multihost_utils
+from etils import epath
 
 import grain.python as grain
 from grain.experimental import ElasticIterator
@@ -35,6 +37,21 @@ from maxtext.input_pipeline import multihost_dataloading
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
+def get_expanded_file_paths(data_file_pattern: str | epath.Path) -> list[str]:
+  """Expands GCS file globs on host 0 only and broadcasts to all TPU hosts."""
+  # Safe for both SPMD JAX and Pathways (single-client or multi-client)
+  if jax.process_index() == 0:
+    path = epath.Path(data_file_pattern)
+    if "*" in path.name or "?" in path.name:
+      files = sorted([str(p) for p in path.parent.glob(path.name)])
+    elif path.is_dir():
+      files = sorted([str(p) for p in path.glob("*")])
+    else:
+      files = [str(path)]
+  else:
+    files = None
+  # Broadcasts across processes (or no-op if process_count == 1)
+  return multihost_utils.broadcast_one_to_all(files)
 
 def find_data_files(data_file_pattern):
   """Find data files matching the pattern."""
