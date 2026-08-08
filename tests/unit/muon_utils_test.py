@@ -19,13 +19,14 @@
 import io
 import contextlib
 import unittest
+import pytest
 from unittest import mock
 
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
-from optax.contrib._muon import MuonDimensionNumbers as mdn
+from maxtext.optimizers.muon.muon import MuonDimensionNumbers as mdn
 
 from maxtext.utils import muon_utils
 
@@ -118,6 +119,27 @@ class TestTransformLogic(unittest.TestCase):
     # o_a_proj projects with reduction on in_features_per_group (-2)
     # and output on out_features_per_group (-1)
     self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "o_a_proj")), mdn((-2,), (-1,)))
+
+  # --- 5. Qwen3-Next Specific ---
+  @pytest.mark.tpu_only
+  def test_qwen3_next_moe_routed_experts(self):
+    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_0")), mdn((-2,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_1")), mdn((-2,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wo")), mdn((-2,), (-1,)))
+
+  @pytest.mark.tpu_only
+  def test_qwen3_next_gdn_projections(self):
+    self.assertEqual(muon_utils.transform_logic(("decoder", "gdn", "in_proj_qkvz")), mdn((0,), (-2, -1)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "gdn", "in_proj_ba")), mdn((0,), (-2, -1)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "gdn", "out_proj")), mdn((0, -2), (-1,)))
+
+  @pytest.mark.tpu_only
+  def test_qwen3_next_exclusions(self):
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "gdn", "A_log")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "gdn", "dt_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "gdn", "conv1d")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "gate")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "mlp", "shared_expert_gate")))
 
 
 class TestGetTransformTree(unittest.TestCase):

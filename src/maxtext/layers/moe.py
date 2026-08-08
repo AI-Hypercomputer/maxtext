@@ -1555,11 +1555,7 @@ class RoutedMoE(nnx.Module):
       return input_activation.shape[0] > 1
 
     def explicitly_weight_ag(shard_exp_on_fsdp):
-      if shard_exp_on_fsdp:
-        quantization_rule = qpl.get_current_rule("gmm")
-        if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
-          return True
-      return False
+      return bool(shard_exp_on_fsdp)
 
     def maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec):
       if isinstance(w0_kernel, aqt.QTensor):
@@ -1597,17 +1593,9 @@ class RoutedMoE(nnx.Module):
       # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
       # mlp_no_fsdp axis
       if self.config.shard_exp_on_fsdp:
-        quantization_rule = qpl.get_current_rule("gmm")
-        if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
-          # special sharding when using static scaling for weights in quantization with shard_exp_on_fsdp
-          w0_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
-          w1_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
-          wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)
-        else:
-          # special sharding for dsv3 to remove overhead between gmm/AG
-          w0_pspec = self._logical_to_mesh_axes((None, None, "mlp_no_fsdp"))
-          w1_pspec = self._logical_to_mesh_axes((None, None, "mlp_no_fsdp"))
-          wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
+        w0_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
+        w1_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
+        wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)
       elif self.config.use_2d_fsdp_sharding:
         w0_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         w1_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))

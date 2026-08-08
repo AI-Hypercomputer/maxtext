@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 import optax
-from optax.contrib._muon import muon
+from maxtext.optimizers.muon.muon import muon
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
 
@@ -215,9 +215,23 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         "beta": config.muon_beta,
         "weight_decay": config.muon_weight_decay,
         "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
-        "consistent_rms": config.muon_consistent_rms,
+        "consistent_rms": getattr(config, "muon_consistent_rms", None),
+        "nesterov_style": getattr(config, "muon_nesterov_style", "sgd"),
         "ns_coeffs": ns_coeffs,
         "ns_steps": ns_steps,
+        # Keeps the Newton-Schulz matmul batch sharded on "fsdp" (the physical
+        # axis shard_exp_on_fsdp uses for the expert dimension, see
+        # exp_with_fsdp in base.yml) instead of falling back to full
+        # replication, which is what blows up HBM for MoE expert weights.
+        "replicate_ns_matrix_axes": True,
+        "replicate_ns_batch_axis": "fsdp",
+        # muon()'s own default (16) doesn't divide the fsdp axis size on this
+        # mesh, so the auto-cap logic (which only runs when this is None)
+        # never fires and it silently falls back to full replication.
+        "batch_update_size": None,
+        # Halves the replicated NS working set vs the fp32 default; model
+        # already trains in bfloat16.
+        "ns_dtype": jnp.bfloat16,
         # AdamW-specific parameters
         "adam_b1": config.adam_b1,
         "adam_b2": config.adam_b2,

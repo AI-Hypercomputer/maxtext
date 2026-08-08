@@ -1067,6 +1067,14 @@ class Qwen3Next(BaseModel):
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
+  use_gdn_kernel: bool = Field(
+      False,
+      description="Whether to use GDN Pallas kernel.",
+  )
+  use_hybrid_gdn: bool = Field(
+      False,
+      description="Whether to use hybrid GDN v3 Tokamax forward + Custom VJP backward.",
+  )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
 
 
@@ -3806,6 +3814,10 @@ class MaxTextConfig(
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_5,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
     ]:
