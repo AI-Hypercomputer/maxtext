@@ -45,6 +45,7 @@ from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from PIL import Image
 import transformers
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
@@ -56,7 +57,17 @@ from vllm import LLM
 from vllm.config import ModelConfig
 from vllm.sampling_params import SamplingParams
 
-ModelConfig.uses_mrope = property(lambda _: False)
+_USE_MROPE = False
+original_uses_mrope_getter = ModelConfig.uses_mrope.fget
+
+
+def custom_uses_mrope(self):
+  if _USE_MROPE:
+    return original_uses_mrope_getter(self)
+  return False
+
+
+ModelConfig.uses_mrope = property(custom_uses_mrope)
 
 # --- DEFINE FLAGS GLOBALLY ---
 FLAGS = flags.FLAGS
@@ -65,12 +76,22 @@ flags.DEFINE_bool("use_tunix", False, "Whether to use Tunix for vLLM decoding.")
 flags.DEFINE_integer("seed", 42, "Random seed for sampling.")
 
 
-def build_chat_messages(config: Config) -> list[dict[str, str]]:
+def build_chat_messages(config: Config) -> list[dict[str, Any]]:
   """Builds the chat message list, prepending a system prompt when set."""
   messages = []
   if config.system_prompt:
     messages.append({"role": "system", "content": config.system_prompt})
-  messages.append({"role": "user", "content": config.prompt})
+
+  if config.use_multimodal:
+    content = []
+    if config.image_path:
+      image_paths = config.image_path.split(",")
+      for _ in image_paths:
+        content.append({"type": "image"})
+    content.append({"type": "text", "text": config.prompt})
+    messages.append({"role": "user", "content": content})
+  else:
+    messages.append({"role": "user", "content": config.prompt})
   return messages
 
 
@@ -125,6 +146,9 @@ def decode_with_vllm(config: Config) -> None:
   if config.max_num_seqs is not None:
     vllm_args["max_num_seqs"] = config.max_num_seqs
 
+  global _USE_MROPE
+  _USE_MROPE = config.use_multimodal and config.use_mrope
+
   max_logging.log(
       f"Initializing LLM with DP={config.ici_data_parallelism}, TP={config.ici_tensor_parallelism} "
       f"and EP={config.ici_expert_parallelism if enable_expert_parallel else 1}..."
@@ -136,6 +160,15 @@ def decode_with_vllm(config: Config) -> None:
 
   with nn_partitioning.axis_rules(vllm_config.logical_axis_rules):
     llm = LLM(**vllm_args)
+
+  max_logging.log(f"Jetski: model_config.is_multimodal_model = {llm.model_config.is_multimodal_model}")
+  architecture = getattr(llm.model_config, "_architecture", None)
+  model_info = getattr(llm.model_config, "_model_info", None)
+  max_logging.log(f"Jetski: model_config._architecture = {architecture}")
+  max_logging.log(f"Jetski: model_config._model_info = {model_info}")
+  max_logging.log(
+      f"Jetski: model_config._model_info.supports_multimodal = {getattr(model_info, 'supports_multimodal', None)}"
+  )
 
   max_logging.log("Generating output...")
   tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -154,7 +187,27 @@ def decode_with_vllm(config: Config) -> None:
     )
     prompts = [input_with_chat_template]
 
-  max_prompt_length = max(len(tokenizer.encode(p)) for p in prompts)
+  if config.use_multimodal:
+    if not config.image_path:
+      raise ValueError("image_path must be provided when use_multimodal is True")
+    image_paths = config.image_path.split(",")
+    images = [Image.open(p) for p in image_paths]
+    if len(images) == 1:
+      multimodal_data = {"image": images[0]}
+    else:
+      multimodal_data = {"image": images}
+    prompts = [
+        {
+            "prompt": p,
+            "multi_modal_data": multimodal_data,
+        }
+        for p in prompts
+    ]
+
+  def get_prompt_str(p):
+    return p["prompt"] if isinstance(p, dict) else p
+
+  max_prompt_length = max(len(tokenizer.encode(get_prompt_str(p))) for p in prompts)
   max_tokens_to_generate = config.max_target_length - max_prompt_length
   if max_tokens_to_generate <= 0:
     raise ValueError(
@@ -299,7 +352,8 @@ def decode_with_tunix(
 def main(argv: Sequence[str]) -> None:
   # Keep these in main(): registering the adapter and setting engine env flags
   # at import time would leak into any process that merely imports this module.
-  adapter.register()
+  config = pyconfig.initialize(argv)
+  adapter.register(config)
   os.environ["SKIP_JAX_PRECOMPILE"] = "1"
   os.environ["NEW_MODEL_DESIGN"] = "1"
 
@@ -309,8 +363,6 @@ def main(argv: Sequence[str]) -> None:
     os.environ["LIBTPU_INIT_ARGS"] = (
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
-
-  config = pyconfig.initialize(argv)
 
   if FLAGS.use_tunix:
     maxtext_model, mesh = model_creation_utils.from_pretrained(config)

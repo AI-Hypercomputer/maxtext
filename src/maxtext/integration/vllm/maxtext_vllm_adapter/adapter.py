@@ -21,12 +21,34 @@ import jax
 from jax import numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh
+import torch
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.layers.embeddings import Embed
+
+# Class-level patch for Embed to support dynamic inputs_embeds override
+original_embed_call = Embed.__call__
+
+
+def patched_embed_call(self, x, model_mode=None):
+  """Uses active input embeddings when the vLLM multimodal path enables them."""
+  if hasattr(self, "use_inputs_embeds") and x.ndim == 2:
+
+    def true_fn():
+      return jnp.broadcast_to(self.active_inputs_embeds[...], (x.shape[0], 1, self.active_inputs_embeds.shape[-1]))
+
+    def false_fn():
+      return original_embed_call(self, x, model_mode=model_mode)
+
+    return jax.lax.cond(self.use_inputs_embeds[...], true_fn, false_fn)
+  return original_embed_call(self, x, model_mode=model_mode)
+
+
+Embed.__call__ = patched_embed_call
 
 
 try:
@@ -35,6 +57,12 @@ except ImportError:
   # Mock for documentation build or environments without tpu_inference
   class AttentionMetadata:
     input_positions: jax.Array
+
+
+try:
+  from tpu_inference.models.jax.utils.multi_modal_utils import merge_multimodal_embeddings
+except ImportError:
+  merge_multimodal_embeddings = None
 
 
 from vllm.config import VllmConfig
@@ -173,6 +201,7 @@ class MaxTextForCausalLM(nnx.Module):
   # JIT-sharded initialization (via create_nnx_model with out_shardings).
   # When True, model_loader skips wrapping __init__ in an outer bare @jax.jit,
   _self_manages_sharding: bool = True
+  supports_multimodal: bool = False
 
   def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
     """Initializes the MaxTextForCausalLM model.
@@ -256,8 +285,32 @@ class MaxTextForCausalLM(nnx.Module):
         attention_metadata_picked = next(iter(attention_metadata.values()))
       attention_metadata = attention_metadata_picked
 
-    # Ensure inputs are at least 2D with a batch dimension
-    input_ids = jnp.expand_dims(input_ids, axis=1)
+    # Extract inputs_embeds if passed as positional arg (index 3 in model_fn, so args[0] here)
+    inputs_embeds = args[0] if len(args) > 0 else None
+
+    # Handle dummy inputs for multimodal path when inputs_embeds is provided
+    if input_ids is None and inputs_embeds is not None:
+      num_tokens = inputs_embeds.shape[0]
+      # Construct dummy input_ids of shape (num_tokens, 1)
+      input_ids = jnp.zeros((num_tokens, 1), dtype=jnp.int32)
+
+      # Reshape inputs_embeds to (num_tokens, 1, dim) and cast to model dtype
+      inputs_embeds_3d = jnp.expand_dims(inputs_embeds, axis=1).astype(self.maxtext_config.dtype)
+
+      if hasattr(self.model, "token_embedder"):
+        # Recreate the variable to change its shape dynamically
+        self.model.token_embedder.active_inputs_embeds = nnx.Variable(inputs_embeds_3d)
+        self.model.token_embedder.use_inputs_embeds[...] = True
+    else:
+      # Ensure inputs are at least 2D with a batch dimension
+      input_ids = jnp.expand_dims(input_ids, axis=1)
+      if hasattr(self.model, "token_embedder") and hasattr(self.model.token_embedder, "use_inputs_embeds"):
+        self.model.token_embedder.use_inputs_embeds[...] = False
+        # Reset shape to (1, 1, dim) to avoid broadcasting errors in JIT tracing of unused branch
+        self.model.token_embedder.active_inputs_embeds = nnx.Variable(
+            jnp.zeros((1, 1, self.maxtext_config.emb_dim), dtype=self.maxtext_config.dtype)
+        )
+
     input_positions = jnp.expand_dims(attention_metadata.input_positions, axis=-1)
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
@@ -301,20 +354,91 @@ class MaxTextForCausalLM(nnx.Module):
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       return self.model.token_embedder.embedding
 
-  def embed_input_ids(self, input_ids: jax.Array) -> jax.Array:
-    """Embeds the input token IDs using the model's token embedder.
+  def embed_multimodal(self, **kwargs) -> list[jax.Array]:
+    """Computes embeddings for multimodal inputs (images)."""
+    if not isinstance(self.model, nnx.Module):
+      raise ValueError("Model is not initialized.")
 
-    Args:
-      input_ids: A JAX array of input token IDs.
+    pixel_values = kwargs.get("pixel_values", None)
+    image_grid_thw = kwargs.get("image_grid_thw", None)
 
-    Returns:
-      A JAX array of embedded input tokens.
-    """
+    if pixel_values is None or image_grid_thw is None:
+      return []
+
+    if isinstance(pixel_values, torch.Tensor):
+      if pixel_values.dtype == torch.bfloat16:
+        pixel_values = pixel_values.to(torch.float32).numpy().astype(jnp.bfloat16)
+      else:
+        pixel_values = pixel_values.numpy()
+      pixel_values = jnp.asarray(pixel_values)
+
+    if isinstance(image_grid_thw, torch.Tensor):
+      image_grid_thw = jnp.asarray(image_grid_thw.numpy())
+
+    image_grid_thw = image_grid_thw.reshape(-1, 3)
+
+    multimodal_embeddings = []
+    current_idx = 0
+
+    patch_size = self.maxtext_config.patch_size_for_vit
+    temp_patch = self.maxtext_config.temporal_patch_size_for_vit
+    channel = self.maxtext_config.num_channels_for_vit
+
+    for image_thw in image_grid_thw:
+      grid_t, grid_h, grid_w = image_thw
+      image_size = grid_t * grid_h * grid_w
+      end_idx = current_idx + image_size
+
+      single_pixel_values = pixel_values[current_idx:end_idx, :]
+
+      # Reconstruct 5D shape: (1, channel, T, H, W) using direct reshape matching MaxText preprocessor
+      x_5d = single_pixel_values.reshape(1, channel, grid_t * temp_patch, grid_h * patch_size, grid_w * patch_size)
+
+      with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+        img_embeds, _ = self.model.vision_encoder(input_images=x_5d, deterministic=True)
+        img_embeds = img_embeds.squeeze(0)
+        multimodal_embeddings.append(img_embeds)
+
+      current_idx = end_idx
+
+    return multimodal_embeddings
+
+  def embed_input_ids(
+      self,
+      input_ids: jax.Array,
+      multimodal_embeddings: jax.Array | None = None,
+      is_multimodal: jax.Array | None = None,
+  ) -> jax.Array:
+    """Embeds the input token IDs and merges multimodal embeddings if present."""
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model is not initialized.")
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
-      return self.model.token_embedder(input_ids)
+      inputs_embeds = self.model.token_embedder(input_ids)
+
+      if multimodal_embeddings is not None:
+        if merge_multimodal_embeddings is None:
+          raise ImportError("tpu_inference multimodal utilities are required to merge multimodal embeddings.")
+
+        placeholder_ids = []
+        if hasattr(self.cfg.hf_config, "image_token_id"):
+          placeholder_ids.append(self.cfg.hf_config.image_token_id)
+        if hasattr(self.cfg.hf_config, "video_token_id"):
+          placeholder_ids.append(self.cfg.hf_config.video_token_id)
+
+        if not placeholder_ids:
+          max_logging.log(
+              "Warning: No image_token_id or video_token_id found in hf_config. Cannot merge multimodal embeddings."
+          )
+          return inputs_embeds
+
+        inputs_embeds = merge_multimodal_embeddings(
+            input_ids,
+            inputs_embeds,
+            multimodal_embeddings,
+            placeholder_ids,
+        )
+      return inputs_embeds
 
   def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
     """Computes the logits from the hidden states using the underlying decoder model.
@@ -356,6 +480,11 @@ class MaxTextForCausalLM(nnx.Module):
         if self.maxtext_config.lora.lora_restore_path:
           lora_utils.restore_lora_from_path(model, self.maxtext_config)
       self.model = nnx.data(model)
+      if hasattr(self.model, "token_embedder"):
+        self.model.token_embedder.active_inputs_embeds = nnx.Variable(
+            jnp.zeros((1, 1, self.maxtext_config.emb_dim), dtype=self.maxtext_config.dtype)
+        )
+        self.model.token_embedder.use_inputs_embeds = nnx.Variable(jnp.array(False))
 
   def get_mrope_input_positions(
       self,
@@ -377,7 +506,6 @@ def patch_kv_cache_manager():
   try:
     from tpu_inference.runner.kv_cache_manager import KVCacheManager
     from vllm.v1.kv_cache_interface import MambaSpec
-    import torch
     import numpy as np
   except ImportError as e:
     # Gracefully handle missing imports in standard JAX environments (e.g. unit tests on CPU)
