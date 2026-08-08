@@ -106,13 +106,21 @@ class VisionEncoder(nnx.Module):
 
     return encoder_name, projector_name
 
-  def __call__(self, input_images, input_masks=None, video_grid_thw=None, deterministic=False):
+  def __call__(self, input_images, input_masks=None, video_grid_thw=None, deterministic=False,
+               image_position_ids=None):
     # vision encoder output, frozen params in many cases
     encoder = getattr(self, self.encoder_name)
+    vision_image_masks = None
     if self.vision_encoder_block.value.startswith("qwen3") and input_masks is not None:
       encoder_output = encoder(
           input_images, video_mask=input_masks, video_grid_thw=video_grid_thw, deterministic=deterministic
       )
+    elif self.vision_encoder_block == VisionEncoderBlockType.GEMMA4 and image_position_ids is not None:
+      # Gemma-4 padded-patch path: pre-patchified patches + per-patch positions (-1 = pad). The
+      # encoder returns (embeddings, image_masks); the mask marks the valid pooled tokens.
+      encoder_output = encoder(input_images, deterministic=deterministic, image_position_ids=image_position_ids)
+      embeddings, vision_image_masks = encoder_output
+      encoder_output = embeddings
     else:
       encoder_output = encoder(input_images, deterministic=deterministic)
     deep_feats = None
@@ -131,7 +139,7 @@ class VisionEncoder(nnx.Module):
     projector = getattr(self, self.projector_name)
     embeddings = projector(embeddings)
 
-    return embeddings, deep_feats
+    return embeddings, deep_feats, vision_image_masks
 
 
 class MultimodalMLPProjector(nnx.Module):

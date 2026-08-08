@@ -2231,10 +2231,31 @@ class NNXDecoder(nnx.Module):
     """Apply Gemma 4 small (E2B/E4B) decoder layers (pure-NNX)."""
     cfg = self.config
     bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+    # Gemma-4 E2B/E4B image spans are causal (text_config.use_bidirectional_attention is unset), unlike
+    # the bidirectional-image Gemma-3 / 26B / 31B models. Suppress the bidirectional attention carve-out
+    # unless explicitly enabled via config (gate on a flag, not the model name).
+    if not bool(getattr(cfg, "use_bidirectional_image_attn", False)):
+      bidirectional_mask_value = None
 
     per_layer_inputs = None
     if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
-      per_layer_inputs = self.per_layer_embedder(decoder_input_tokens, y)
+      ple_tokens = decoder_input_tokens
+      ple_context = y
+      # Gemma-4 E2B/E4B build the per-layer inputs from llm_input_ids with the image placeholder
+      # tokens mapped to pad_token_id (HF modeling_gemma4.py), rather than feeding the image
+      # placeholder id / merged image features into the PLE path. Without this substitution the
+      # per-layer embeddings at the image placeholder positions diverge from the reference, which
+      # corrupts the image-span and post-image logits. Gated on ple_pad_substitute_image_rows
+      # (default False preserves the native PLE for other models).
+      if bool(getattr(cfg, "ple_pad_substitute_image_rows", False)) and multimodal_input is not None:
+        _img_id = int(getattr(cfg, "image_placeholder_token_id", 258880))
+        _pad_id = int(getattr(cfg, "ple_pad_token_id", 0))
+        _img_row = decoder_input_tokens.astype(jnp.int32) == _img_id
+        ple_tokens = jnp.where(_img_row, _pad_id, decoder_input_tokens.astype(jnp.int32))
+        if str(getattr(cfg, "ple_pad_mode", "identity")) == "both" and hasattr(self, "shared_embedding"):
+          _pad_vec = self.shared_embedding(jnp.full_like(decoder_input_tokens, _pad_id).astype(jnp.int32))
+          ple_context = jnp.where(_img_row[..., None], _pad_vec, y)
+      per_layer_inputs = self.per_layer_embedder(ple_tokens, ple_context)
 
     layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
     num_kv_shared = cfg.num_kv_shared_layers
