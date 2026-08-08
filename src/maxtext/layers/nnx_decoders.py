@@ -437,8 +437,10 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
+    self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
 
-    self._init_decoder_layers(decoder_block_classes, rngs, mesh)
+    if getattr(config, "mhc_expansion_rate", 1) > 1:
+      _, self.mhc_reduce = mhc.get_functions(config.mhc_expansion_rate)
 
   def _init_decoder_layers(self, decoder_block_classes, rngs, mesh):
     """Routes layer construction through three main paths: pipeline, scanned non-pipeline, sequential."""
@@ -1970,7 +1972,7 @@ class NNXDecoder(nnx.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     if getattr(cfg, "mhc_expansion_rate", 1) > 1:
       # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
-      hidden_state = mhc_reduce(y)
+      hidden_state = self.mhc_reduce(y)
     else:
       hidden_state = y
 
