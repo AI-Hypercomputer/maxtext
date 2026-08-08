@@ -421,13 +421,15 @@ class RoutedMoE(nnx.Module):
     self.is_hash_routing = is_hash_routing
 
     # DeepSeek V4 Hash Routing
-    # DeepSeek V4 Hash Routing
     if self.is_hash_routing:
       # Token-ID to Expert-ID lookup table for static routing
+      # Must be stored as float32 because MaxText passes the entire variable tree
+      # through jax.value_and_grad, which strictly requires all leaves to be inexact types
+      # (even if they receive no gradients). We cast to int32 dynamically during routing.
       self.tid2eid = Tid2EidVar(
           jnp.zeros(
               (self.config.vocab_size, self.num_experts_per_tok),
-              dtype=jnp.int32,
+              dtype=jnp.float32,
           ),
           out_sharding=None,  # Replicated across shards for local lookup
       )
@@ -709,6 +711,8 @@ class RoutedMoE(nnx.Module):
         raise ValueError("input_ids cannot be None when is_hash_routing is True")
       # Access the static routing table
       tid2eid_int = self.tid2eid.value
+      # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
+      tid2eid_int = tid2eid_int.astype(jnp.int32)
       # Cast input_ids to int32 to safely index the hash routing table
       top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
