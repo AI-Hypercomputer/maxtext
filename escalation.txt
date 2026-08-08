@@ -1,0 +1,2 @@
+Escalation: XPK command failed with code 1. Infrastructure issue.
+Please investigate the XPK command failure. Check the XPK logs in the GCP console or Airflow task logs for more detailed error messages.
