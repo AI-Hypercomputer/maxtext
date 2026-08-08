@@ -21,6 +21,7 @@ the MaxRL AbstractTrainer interface without running an outer loop.
 from __future__ import annotations
 
 from collections.abc import Callable
+import dataclasses
 from typing import Any
 
 from absl import logging
@@ -28,16 +29,17 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from maxtext.common import common_types
+from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
 from maxtext.training_engine import inflight_throttler
 from maxtext.training_engine import metrics as metrics_module
-from maxtext.utils import gradient_accumulation
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from maxtext.utils import sharding
 from maxtext.utils import train_utils
 
 
@@ -85,7 +87,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(
-        checkpoint_dir=getattr(self._config, "checkpoint_directory", ""),
+        checkpoint_dir=getattr(self._config, "checkpoint_dir", getattr(self._config, "checkpoint_directory", "")),
         config=self._config,
     )
     self._metrics_recorder = metrics_module.MetricsRecorder()
@@ -100,6 +102,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def model(self, new_model: Any) -> None:
     """Sets the NNX model instance."""
     self._model = new_model
+    self._compiled = False
+    self._compiled_fwd_bwd = None
+    self._compiled_update = None
+    self._model_graphdef = None
 
   @property
   def optimizer(self) -> Any:
@@ -110,6 +116,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def optimizer(self, new_optimizer: Any) -> None:
     """Sets the NNX optimizer instance."""
     self._optimizer = new_optimizer
+    self._compiled = False
+    self._compiled_fwd_bwd = None
+    self._compiled_update = None
+    self._state_graphdef = None
 
   @property
   def train_step(self) -> int:
@@ -120,6 +130,32 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def train_step(self, step: int) -> None:
     """Sets the current step integer."""
     self._train_step = step
+
+  @property
+  def state(self) -> Any:
+    """Returns the current train state, initializing it if necessary."""
+    if self._state is None and self._model is not None and self._optimizer is not None:
+      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+    return self._state
+
+  @state.setter
+  def state(self, new_state: Any) -> None:
+    """Sets the current train state."""
+    self._state = new_state
+    self._compiled = False
+    self._compiled_fwd_bwd = None
+    self._compiled_update = None
+    self._state_graphdef = None
+
+  @property
+  def micro_step_count(self) -> int:
+    """Returns the current micro-batch count in gradient accumulation."""
+    return self._micro_step_count
+
+  @property
+  def has_accumulated_grads(self) -> bool:
+    """Returns True if accumulated gradients are present."""
+    return self._accumulated_grads is not None
 
   def with_loss_fn(self, customized_fn: Callable[..., Any]) -> None:
     """Overrides the default autoregressive loss function with a custom RL loss.
@@ -135,12 +171,124 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._gen_model_input_fn = gen_model_input_fn
     return self
 
+  def _fwd_bwd_kernel(self, params, rest, batch):
+    """Executes a single forward and backward pass to compute gradients."""
+    loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
+
+    def diff_wrapper(p, r, b):
+      mdl = nnx.merge(self._model_graphdef, p, r, copy=True)
+      loss, aux = loss_callable(mdl, self._config, b, None, None, is_train=True)
+      _, _, new_r = nnx.split(mdl, nnx.Param, ...)
+      return loss, (aux, new_r)
+
+    grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
+    (loss, (aux, new_rest)), micro_grads = grad_func(params, rest, batch)
+    micro_grads = jax.tree.map(
+        lambda x: (
+            x.astype(getattr(self._config, "grad_dtype", jnp.float32))
+            if hasattr(x, "dtype") and x.dtype == jnp.float32
+            else x
+        ),
+        micro_grads,
+    )
+    return loss, aux, new_rest, micro_grads
+
+  def _update_kernel(self, state_pure, accumulated_grads, micro_step_count, mean_loss):
+    """Applies accumulated gradients to update the NNX model state."""
+    grad_norm = None
+    is_skipped_val = None
+    if state_pure is not None:
+      if micro_step_count <= 1:
+        grads = accumulated_grads
+      else:
+        grads = jax.tree.map(
+            lambda g: g / micro_step_count,
+            accumulated_grads,
+        )
+      if getattr(self._config, "gradient_clipping_threshold", 0.0) > 0:
+        grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
+      local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
+      if hasattr(local_state, "apply_gradients"):
+        if getattr(self._config, "skip_step_on_spikes", False):
+          grad_norm = max_utils.l2norm_pytree(grads)
+          local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
+          opt_obj = getattr(local_state, "optimizer", self._optimizer)
+          if opt_obj is not None:
+            opt_state = nnx.to_pure_dict(nnx.state(opt_obj)).get("opt_state", {})
+            is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
+            if is_skipped is not None:
+              is_skipped_val = is_skipped.astype(jnp.float32)
+        else:
+          local_state.apply_gradients(grads)
+      _, new_state_pure = nnx.split(local_state)
+      return new_state_pure, grad_norm, is_skipped_val
+    return state_pure, grad_norm, is_skipped_val
+
   def compile(self, dummy_data: abstract_engine.TrainerPayload) -> None:
-    """Triggers SPMD JIT compilation of fwd_bwd, update, and eval steps.
+    """Triggers SPMD JIT compilation of fwd_bwd and update steps.
 
     Args:
       dummy_data: Sample TrainerPayload providing representative tensor shapes.
     """
+    if self._compiled:
+      return
+
+    if self._state is None:
+      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+
+    self._state_graphdef, state_pure = nnx.split(self._state)
+    self._model_graphdef, params_pure, rest_pure = nnx.split(self._model, nnx.Param, ...)
+
+    if self._mesh is not None:
+      data_sharding = sharding.get_input_data_sharding(self._config, self._mesh)
+      state_mesh_shardings = jax.tree.map(
+          lambda x: getattr(
+              x,
+              "sharding",
+              jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec()),
+          ),
+          state_pure,
+      )
+      params_shardings = jax.tree.map(
+          lambda x: getattr(
+              x,
+              "sharding",
+              jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec()),
+          ),
+          params_pure,
+      )
+      rest_shardings = jax.tree.map(
+          lambda x: getattr(
+              x,
+              "sharding",
+              jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec()),
+          ),
+          rest_pure,
+      )
+      fwd_bwd_in_shardings = (params_shardings, rest_shardings, data_sharding)
+      fwd_bwd_out_shardings = (None, None, rest_shardings, params_shardings)
+      update_in_shardings = (state_mesh_shardings, params_shardings, None)
+      update_out_shardings = (state_mesh_shardings, None, None)
+    else:
+      fwd_bwd_in_shardings = None
+      fwd_bwd_out_shardings = None
+      update_in_shardings = None
+      update_out_shardings = None
+
+    # 1. JIT Compile Micro FWD/BWD Pass
+    self._compiled_fwd_bwd = jax.jit(
+        self._fwd_bwd_kernel,
+        in_shardings=fwd_bwd_in_shardings,
+        out_shardings=fwd_bwd_out_shardings,
+    )
+
+    # 2. JIT Compile Optimizer Update Pass
+    self._compiled_update = jax.jit(
+        self._update_kernel,
+        in_shardings=update_in_shardings,
+        out_shardings=update_out_shardings,
+        static_argnums=(2,),
+    )
     self._compiled = True
 
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> None:
@@ -151,9 +299,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if self._gen_model_input_fn is not None:
       batch = self._gen_model_input_fn(payload)
+    elif dataclasses.is_dataclass(payload):
+      batch = {k: getattr(payload, k) for k in payload.__dataclass_fields__ if getattr(payload, k) is not None}
     else:
       batch = payload
-    loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
 
     model = getattr(self._state, "model", None) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
@@ -162,28 +311,31 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Wait for previous computations to finish before dispatching the next one to TPU.
     self._throttler.wait_for_next()
 
-    # TODO(mazumdera): This function call should be pre-compiled.
-    loss, aux, micro_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
-        loss_callable,
-        self._config,
-        model,
-        None,
-        None,
-        batch,
-        None,
-    )
+    if self._state is None:
+      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+    model = getattr(self._state, "model", self._model)
+    self._model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+    if self._compiled and hasattr(self, "_compiled_fwd_bwd"):
+      loss, aux, new_rest, micro_grads = self._compiled_fwd_bwd(params, rest, batch)
+    else:
+      loss, aux, new_rest, micro_grads = self._fwd_bwd_kernel(params, rest, batch)
+    nnx.update(model, new_rest)
 
     # Don't add metrics to the throttler queue because metrics are logged after
     # the update step.
     self._throttler.add_computation(computation=loss, metrics=None)
 
-    if isinstance(loss, abstract_engine.WeightedMetric):
+    if loss is not None:
+      # TODO(mazumdera): This needs to be modified to become
+      # if isinstance(loss, abstract_engine.WeightedMetric):
       self.record_metrics("loss", loss)
 
     # Record auxiliary metrics.
     if isinstance(aux, dict):
       for key, value in aux.items():
-        self.record_metrics(key, value)
+        if value is not None:
+          self.record_metrics(key, value)
 
     self._cached_losses.append(loss)
     if self._accumulated_grads is None:
@@ -201,40 +353,32 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return
 
     if self._learning_rate_schedule is not None:
-      try:
-        lr = self._learning_rate_schedule(self.train_step)
-        self.record_metrics("learning_rate", lr)
-      except Exception:  # pylint: disable=broad-except
-        pass
+      lr = self._learning_rate_schedule(self.train_step)
+      self.record_metrics("learning_rate", lr)
 
     # Wait for previous computations to finish before dispatching the update step to TPU.
     self._throttler.wait_for_next()
 
     # TODO(mazumdera): The logic below should be pre-compiled.
-    if self._state is not None:
-      # TODO(mazumdera): Figure out how exactly we should normalize the losses
-      # (if at all). Given that inputs are varying in size, it not correct to
-      # simply divide by the number of micro-steps.
-      grads = jax.tree.map(
-          lambda g: g / max(self._micro_step_count, 1),
-          self._accumulated_grads,
+    if self._state is None:
+      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+    self._state_graphdef, state_pure = nnx.split(self._state)
+
+    mean_loss = jnp.mean(jnp.array(self._cached_losses)) if self._cached_losses else jnp.array(0.0)
+    if self._compiled and hasattr(self, "_compiled_update"):
+      new_state_pure, grad_norm, is_skipped = self._compiled_update(
+          state_pure, self._accumulated_grads, self._micro_step_count, mean_loss
       )
-      if getattr(self._config, "gradient_clipping_threshold", 0.0) > 0:
-        grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
-      if hasattr(self._state, "apply_gradients"):
-        if getattr(self._config, "skip_step_on_spikes", False):
-          grad_norm = max_utils.l2norm_pytree(grads)
-          self.record_metrics("gradient_norm", grad_norm)
-          mean_loss = jnp.mean(jnp.array(self._cached_losses)) if self._cached_losses else jnp.array(0.0)
-          self._state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
-          opt_obj = getattr(self._state, "optimizer", self._optimizer)
-          if opt_obj is not None:
-            opt_state = nnx.to_pure_dict(nnx.state(opt_obj)).get("opt_state", {})
-            is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
-            if is_skipped is not None:
-              self.record_metrics("step_skipped", is_skipped.astype(jnp.float32))
-        else:
-          self._state.apply_gradients(grads)
+    else:
+      new_state_pure, grad_norm, is_skipped = self._update_kernel(
+          state_pure, self._accumulated_grads, self._micro_step_count, mean_loss
+      )
+    nnx.update(self._state, new_state_pure)
+
+    if grad_norm is not None:
+      self.record_metrics("gradient_norm", grad_norm)
+    if is_skipped is not None:
+      self.record_metrics("step_skipped", is_skipped)
 
     # Add the state to the throttler queue so jax.block_until_ready() waits
     # for the optimizer update to complete before logging the metrics.
@@ -319,15 +463,35 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         checkpoint_state=checkpoint_state,
         step=step,
     )
-    if not restored_step:
+    if restored_step is None:
       return None
 
     logging.info("Checkpoint restored from step %d.", restored_step)
     self.train_step = restored_step
 
     if restored_checkpoint_state.accumulated_metrics:
+      buffers = []
+      for b in restored_checkpoint_state.accumulated_metrics:
+        if isinstance(b, dict):
+          wms = {}
+          for k, wm in b.get("weighted_metrics", {}).items():
+            if isinstance(wm, dict):
+              wms[k] = abstract_engine.WeightedMetric(**wm)
+            else:
+              wms[k] = wm
+          buffers.append(
+              abstract_engine.MetricsBuffer(
+                  id=b.get("id", 0),
+                  mode=b.get("mode", "train"),
+                  weighted_metrics=wms,
+                  scalar_metrics=b.get("scalar_metrics", {}),
+                  aggregation_fns=b.get("aggregation_fns", {}),
+              )
+          )
+        else:
+          buffers.append(b)
       # pylint: disable-next=protected-access
-      self._metrics_recorder._metrics_buffer = restored_checkpoint_state.accumulated_metrics
+      self._metrics_recorder._metrics_buffer = buffers
 
     restored_additional_metadata = None
     if restored_metadata:
@@ -360,7 +524,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def record_metrics(
       self,
       name: str,
-      metric: abstract_engine.WeightedMetric | jax.Array | float | int,
+      metric: abstract_engine.WeightedMetric | jax.Array | float | int | dict[str, Any],
       aggregation_fn: Callable[[jax.Array], Any] | None = None,
   ) -> None:
     """Records a metric into the buffer, appending to JAX arrays.
@@ -370,12 +534,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       metric: The metric to record.
       aggregation_fn: The aggregation function to apply to the metric.
     """
-    self._metrics_recorder.buffer_metrics(
-        train_step=self.train_step,
-        name=name,
-        metric=metric,
-        aggregation_fn=aggregation_fn,
-    )
+    if metric is None:
+      return
+    if isinstance(metric, dict):
+      for sub_k, sub_v in metric.items():
+        if sub_v is not None:
+          self.record_metrics(
+              f"{name}/{sub_k}" if name else sub_k,
+              sub_v,
+              aggregation_fn=aggregation_fn,
+          )
+    else:
+      self._metrics_recorder.buffer_metrics(
+          train_step=self.train_step,
+          name=name,
+          metric=metric,
+          aggregation_fn=aggregation_fn,
+      )
 
   def get_metrics(self, clear_cache: bool = True) -> abstract_engine.MetricsBuffer:
     """Returns accumulated step metrics as an on-device MetricsBuffer.
