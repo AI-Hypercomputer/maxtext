@@ -1561,6 +1561,7 @@ class AttentionOp(nnx.Module):
               ring_axis=self.config.context_sharding,
               attn_logits_soft_cap=attn_logits_soft_cap,
               maybe_shard_with_pspec=self._maybe_shard_with_pspec,
+              mask=None,
           )
       )
     else:
@@ -1745,6 +1746,7 @@ class AttentionOp(nnx.Module):
             decoder_segment_ids_q,
             decoder_segment_ids_kv,
             splash_kernel,
+            indexer_mask=indexer_mask,
         )
         return attention_output, None
 
