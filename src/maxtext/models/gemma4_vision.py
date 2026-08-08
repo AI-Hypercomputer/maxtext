@@ -748,11 +748,29 @@ class Gemma4EncoderBlock(nnx.Module):
         **mlp_kwargs,
     )
 
-  def __call__(self, x: jax.Array, positions: jax.Array | None = None, deterministic: bool = False) -> jax.Array:
-    """Applies the encoder block (MHSA + MLP) to the inputs."""
+  def __call__(
+      self,
+      x: jax.Array,
+      positions: jax.Array | None = None,
+      deterministic: bool = False,
+      decoder_segment_ids: jax.Array | None = None,
+  ) -> jax.Array:
+    """Applies the encoder block (MHSA + MLP) to the inputs.
+
+    When ``decoder_segment_ids`` is provided, patches carrying distinct segment
+    ids cannot attend to each other. This is used by the padded-patch path
+    (valid patches = segment 1, padded/sentinel patches = segment 2) so that the
+    phantom pad patches are masked out of vision self-attention.
+    """
     x_normed = self.pre_attention_norm(x)
-    # Pass positions to attention for RoPE
-    x_attn, _ = self.attention(x_normed, x_normed, inputs_positions=positions, deterministic=deterministic)
+    # Pass positions to attention for RoPE (+ optional segment mask for padded patches).
+    x_attn, _ = self.attention(
+        x_normed,
+        x_normed,
+        inputs_positions=positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=deterministic,
+    )
     x_attn = self.post_attention_norm(x_attn)
     x_after_attn = x_attn + x
 
@@ -803,34 +821,106 @@ class Gemma4VisionEncoderLayer(nnx.Module):
         nnx.initializers.ones(self.rngs.params(), (config.hidden_size_for_vit,), config.weight_dtype), sharding=(None,)
     )
 
-  def __call__(self, inputs: jax.Array, deterministic: bool = False) -> jax.Array:
-    """Applies the vision encoder layer."""
-    if inputs.ndim == 4:
-      inputs = jnp.expand_dims(inputs, 1)
-    b, n, h, w, c = inputs.shape
-    inputs_flat = jnp.reshape(inputs, (b * n, h, w, c))
+  def __call__(
+      self,
+      inputs: jax.Array,
+      deterministic: bool = False,
+      image_position_ids: jax.Array | None = None,
+  ):
+    """Applies the vision encoder layer.
 
-    x, positions_xy = self.vision_entry(inputs_flat)
+    Two contracts:
+
+    (A) Legacy all-valid (``image_position_ids is None``): ``inputs`` are raw images
+        [B, N, H, W, C] (or [B, H, W, C]); patchify -> full unmasked attention -> pool by the
+        derived positions -> return embeddings only (4D array [B, N, K, D]).
+
+    (B) Padded-patch dynamic-N (``image_position_ids is not None``): ``inputs`` are ALREADY
+        patchified pixel_values with shape [B, L, P*P*C] (or [B, N, L, P*P*C]) and
+        ``image_position_ids`` is [B, L, 2] (or [B, N, L, 2]) with -1 sentinel rows marking padded
+        patches. The pre-patchified patches + REAL positions are fed to VisionEntry, per-patch
+        ``decoder_segment_ids`` (valid=1, pad=2) mask the phantom pad patches out of self-attention,
+        pooling uses the real positions (``avg_pool_by_positions`` maps a -1 patch to a zero-weight
+        bucket), and the VisionExit validity mask is returned. Returns a 2-tuple
+        ``(embeddings[B, N, K, D], image_masks[B*N, K])`` where ``image_masks.sum()`` is the number
+        of valid pooled tokens, threaded to ``merge_mm_embeddings.token_masks`` so exactly the valid
+        pooled tokens land in the image placeholders.
+    """
+    if image_position_ids is None:
+      # ---- Legacy path: raw images -> patchify -> full (unmasked) attention ----
+      if inputs.ndim == 4:
+        inputs = jnp.expand_dims(inputs, 1)
+      b, n, h, w, c = inputs.shape
+      inputs_flat = jnp.reshape(inputs, (b * n, h, w, c))
+
+      x, positions_xy = self.vision_entry(inputs_flat)
+
+      for i in range(self.config.num_hidden_layers_for_vit):
+        layer = getattr(self, f"layer_{i}")
+        x = layer(x, positions=positions_xy, deterministic=deterministic)
+
+      vision_exit_results = self.vision_exit(x, positions_xy=positions_xy)
+      (embeddings, _) = vision_exit_results[0]
+
+      embeddings = (embeddings - self.std_bias.value.astype(embeddings.dtype)) * self.std_scale.value.astype(
+          embeddings.dtype
+      )
+
+      # Unflatten batch and num_images
+      final_x = jnp.reshape(embeddings, (b, n, embeddings.shape[1], embeddings.shape[2]))
+      return final_x
+
+    # ---- Padded-patch dynamic-N path: pre-patchified patches + sentinel positions ----
+    # inputs: [B, L, P*P*C] pre-patchified pixel_values. Support an optional per-image N dim
+    # [B, N, L, F] -> flatten to [B*N, L, F] to match positions.
+    if inputs.ndim == 4:
+      b, n, l, f = inputs.shape
+      patches = jnp.reshape(inputs, (b * n, l, f))
+      pos = jnp.reshape(image_position_ids, (b * n, l, 2))
+    else:
+      assert inputs.ndim == 3, f"padded-patch path expects pre-patchified [B, L, F] patches, got {inputs.shape}"
+      b, l, f = inputs.shape
+      n = 1
+      patches = inputs
+      pos = image_position_ids
+      if pos.ndim == 2:
+        pos = jnp.broadcast_to(pos, (b, l, 2))
+
+    pos = pos.astype(jnp.int32)
+
+    # VisionEntry consumes pre-patchified patches + REAL positions (incl -1 sentinels).
+    x, positions_xy = self.vision_entry(patches, positions_xy=pos)
+
+    # Segment ids: valid patch (any coord != -1) -> 1, padded sentinel patch -> 2. Distinct segments
+    # cannot attend to each other, masking the phantom pad patches out of self-attention.
+    is_pad = (positions_xy == -1).all(axis=-1)  # [B*N, L]
+    decoder_segment_ids = jnp.where(is_pad, 2, 1).astype(jnp.int32)
 
     for i in range(self.config.num_hidden_layers_for_vit):
       layer = getattr(self, f"layer_{i}")
-      x = layer(x, positions=positions_xy, deterministic=deterministic)
+      x = layer(
+          x,
+          positions=positions_xy,
+          deterministic=deterministic,
+          decoder_segment_ids=decoder_segment_ids,
+      )
 
+    # Pool with REAL positions; avg_pool_by_positions returns (embeddings, validity_mask).
     vision_exit_results = self.vision_exit(x, positions_xy=positions_xy)
-
-    # Return embeddings from VisionExit tuple
-    # vision_exit_results is a tuple of (embeddings, mask) tuples, one for each output length.
-    # We take the first result.
-    (embeddings, _) = vision_exit_results[0]
+    (embeddings, image_masks) = vision_exit_results[0]  # embeddings [B*N, K, D], mask [B*N, K]
 
     embeddings = (embeddings - self.std_bias.value.astype(embeddings.dtype)) * self.std_scale.value.astype(
         embeddings.dtype
     )
 
-    # Unflatten batch and num_images
     final_x = jnp.reshape(embeddings, (b, n, embeddings.shape[1], embeddings.shape[2]))
+    if image_masks is None:
+      image_masks = jnp.ones((b * n, embeddings.shape[1]), dtype=jnp.int32)
+    else:
+      # merge_mm_embeddings does argsort(-token_mask); use int32 so negation/sort is well-defined.
+      image_masks = image_masks.astype(jnp.int32)
 
-    return final_x
+    return final_x, image_masks
 
 
 class Gemma4VisionProjector(nnx.Module):

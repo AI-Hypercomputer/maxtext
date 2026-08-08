@@ -2146,6 +2146,34 @@ class MultimodalGeneral(BaseModel):
           "on its own sufficient); no-op for other encoders."
       ),
   )
+  use_bidirectional_image_attn: bool = Field(
+      False,
+      description=(
+          "Whether image placeholder tokens attend bidirectionally in the text decoder. Gemma-4 E2B/E4B "
+          "use causal image spans (False); bidirectional-image models (Gemma-3, gemma4-26b/31b) use True."
+      ),
+  )
+  ple_pad_substitute_image_rows: bool = Field(
+      False,
+      description=(
+          "Gemma-4 E2B/E4B per-layer-embedding (PLE) path: substitute ple_pad_token_id for image placeholder "
+          "rows before the per-layer embedder, matching HF modeling_gemma4 (llm_input_ids pad substitution). "
+          "Default False preserves the native PLE for other models."
+      ),
+  )
+  ple_pad_mode: str = Field(
+      "identity",
+      description=(
+          "PLE pad-substitution scope when ple_pad_substitute_image_rows=True: 'identity' (token-id path only) "
+          "or 'both' (also substitute the pad embedding in the context path)."
+      ),
+  )
+  image_placeholder_token_id: int = Field(
+      258880, description="Gemma-4 image placeholder token id (GEMMA4_TOKEN_PLACEHOLDER)."
+  )
+  ple_pad_token_id: int = Field(
+      0, description="Pad token id used for PLE image-row substitution (Gemma-4 E2B text_config.pad_token_id=0)."
+  )
   vision_encoder_block: VisionEncoderBlockType = Field(
       VisionEncoderBlockType.NONE,
       description="The style of VisionEncoderBlock to use (e.g., 'gemma3', 'llama4').",
@@ -3581,16 +3609,22 @@ class MaxTextConfig(
           f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
       )
     if self.use_multimodal:
-      # Gemma 4 small (E2B / E4B) only supports text for now; multimodal
-      # support is pending clipped-linears in the vision encoder.
-      if self.model_name in ("gemma4-e2b", "gemma4-e4b"):
-        raise ValueError(f"Multimodal is not yet supported for {self.model_name}; only text inputs are supported.")
+      # Gemma 4 small (E2B / E4B) multimodal requires the vision-encoder clipped-linears AND the
+      # padded-patch masking / position-threading path; gate on the clipped-linears flag.
+      if self.model_name in ("gemma4-e2b", "gemma4-e4b") and not self.use_clipped_linears_for_vit:
+        raise ValueError(
+            f"Multimodal for {self.model_name} requires use_clipped_linears_for_vit=True "
+            "(the vision encoder ships per-projection activation clip bounds; without them the "
+            "image span diverges). Set use_clipped_linears_for_vit=True to enable image inputs."
+        )
       valid_mm_models = (
           "gemma3-4b",
           "gemma3-12b",
           "gemma3-27b",
           "gemma4-26b",
           "gemma4-31b",
+          "gemma4-e2b",
+          "gemma4-e4b",
           "llama4-17b-16e",
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
