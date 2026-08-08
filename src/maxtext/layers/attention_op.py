@@ -67,8 +67,6 @@ from maxtext.kernels.attention import jax_flash_attention
 from maxtext.kernels.attention import tokamax_ring_attention
 from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha
-from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -77,11 +75,23 @@ from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec,
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
 from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
 
 dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
+
+
+def _resolve_attention_type(config: Config, attention_type: AttentionType | str | None) -> AttentionType:
+  configured_attention_type = AttentionType(getattr(config, "attention_type", AttentionType.GLOBAL.value))
+  if attention_type is None:
+    return configured_attention_type
+  resolved_attention_type = AttentionType(attention_type)
+  if configured_attention_type == AttentionType.BLOCK_DIFFUSION and resolved_attention_type == AttentionType.GLOBAL:
+    return configured_attention_type
+  return resolved_attention_type
 
 
 def validate_compute_axis_order(s: AxisIdxes) -> None:
@@ -204,6 +214,50 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
     )
 
 
+class BlockCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access,abstract-method
+  """Lazy mask with bidirectional attention within causal blocks."""
+
+  causal_block_size: int
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      causal_block_size: int,
+      shard_count: int = 1,
+  ):
+    if causal_block_size <= 0:
+      raise ValueError("causal_block_size must be positive")
+    self.causal_block_size = causal_block_size
+
+    def block_causal_mask_function(q_ids, kv_ids):
+      return (q_ids // self.causal_block_size) >= (kv_ids // self.causal_block_size)
+
+    super().__init__(
+        shape=shape,
+        mask_function=block_causal_mask_function,
+        shard_count=shard_count,
+    )
+
+  def __eq__(self, other: object):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+    return (
+        self.shape == other.shape
+        and self.causal_block_size == other.causal_block_size
+        and np.array_equal(self.q_sequence, other.q_sequence)
+    )
+
+  def __hash__(self):
+    return hash(
+        (
+            type(self),
+            self.shape,
+            self.causal_block_size,
+            self.q_sequence.tobytes() if self.q_sequence is not None else None,
+        )
+    )
+
+
 def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
   """Generates an explicit boolean mask for chunked causal attention.
 
@@ -232,6 +286,32 @@ def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int,
   same_chunk = (row_ids // chunk_size) == (col_ids // chunk_size)
   chunk_mask = same_chunk & (row_ids >= col_ids)
   return chunk_mask
+
+
+def _generate_block_causal_attention_mask(
+    mask_shape: tuple[int, int], causal_block_size: int, q_offset: int = 0
+) -> jax.Array:
+  """Generates a block-causal mask for Block Diffusion Language Models (BD3LMs).
+
+  Implements the block-causal attention pattern (M_BC) described in Arriola et
+  al., "Block Diffusion: Interpolating Between Autoregressive and Diffusion
+  Language Models" (https://arxiv.org/abs/2503.09573).
+
+  For block size B = causal_block_size, query index q, and key index k:
+
+  * Within block i (floor(q/B) == floor(k/B)), tokens attend bidirectionally.
+  * Across blocks (floor(q/B) > floor(k/B)), block i attends causally to every
+    preceding block, but not to future blocks.
+
+  B = 1 reduces to standard causal attention, while B equal to the sequence
+  length reduces to full bidirectional attention.
+  """
+  if causal_block_size <= 0:
+    raise ValueError("causal_block_size must be positive")
+
+  row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0) + q_offset
+  col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+  return (row_ids // causal_block_size) >= (col_ids // causal_block_size)
 
 
 def _make_block_mask_indices(bidirectional_mask):
@@ -479,7 +559,13 @@ class AttentionOp(nnx.Module):
     self.dtype = dtype
     self.quant = quant
     self.kv_quant = kv_quant
-    self.attention_type = attention_type
+    self.attention_type = _resolve_attention_type(self.config, attention_type)
+    self.causal_block_size = getattr(self.config, "causal_block_size", None)
+    if self.attention_type == AttentionType.BLOCK_DIFFUSION:
+      if self.causal_block_size is None or self.causal_block_size <= 0:
+        raise ValueError("causal_block_size must be positive for block-diffusion attention")
+      if self.attention_kernel not in ("autoselected", "dot_product", "flash"):
+        raise ValueError("Block-diffusion attention is supported only by dot_product attention and TPU Splash attention.")
     # Block sizes are only used by TPU splash attention kernels. Exclude non-splash kernels
     if self.attention_kernel not in (
         "dot_product",
@@ -534,10 +620,13 @@ class AttentionOp(nnx.Module):
           raise ValueError("TPU Tokamax ring attention requires use_tokamax_splash=True.")
         if self.config.use_jax_splash:
           raise ValueError("TPU Tokamax ring attention requires use_jax_splash=False.")
-        if self.config.packing:
-          raise ValueError("TPU Tokamax ring attention does not support packing yet.")
-        if self.attention_type != AttentionType.GLOBAL:
-          raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
+        if self.attention_type not in (AttentionType.GLOBAL, AttentionType.MLA):
+          raise ValueError("TPU Tokamax ring attention supports only attention_type='global' or 'mla'.")
+        if self.attention_type == AttentionType.MLA:
+          if self.config.packing:
+            raise ValueError("TPU Tokamax ring attention with MLA does not support packing yet.")
+          if self.config.use_batch_split_schedule:
+            raise ValueError("TPU Tokamax ring attention with MLA does not support the DeepSeek batch-split schedule.")
 
         context_axis = self.config.context_sharding
         axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
@@ -769,7 +858,7 @@ class AttentionOp(nnx.Module):
     use_segment_positions = (
         segment_positions is not None
         and self.config.context_parallel_load_balance
-        and self.mesh.shape.get(self.config.context_sharding, 1) > 1
+        and (self.mesh is not None and self.mesh.shape.get(self.config.context_sharding, 1) > 1)
         and previous_chunk is None
         and model_mode != MODEL_MODE_AUTOREGRESSIVE
     )
@@ -781,6 +870,7 @@ class AttentionOp(nnx.Module):
     if model_mode != MODEL_MODE_AUTOREGRESSIVE and self.attention_type not in (
         AttentionType.FULL,
         AttentionType.COMPRESSED,
+        AttentionType.BLOCK_DIFFUSION,
     ):
       if use_segment_positions:
         causal_mask = (position_col_ids <= position_row_ids)[:, None, None, :, :]
@@ -819,32 +909,74 @@ class AttentionOp(nnx.Module):
         sliding_mask = sliding_mask[:, None, None, :, :]
       output_mask = sliding_mask * output_mask
     elif self.attention_type == AttentionType.COMPRESSED:
-      if compressed_mask is None:
-        raise ValueError("compressed_mask must be provided for COMPRESSED attention type")
-      c_len = compressed_mask.shape[-1]
+      c_len = compressed_mask.shape[-1] if compressed_mask is not None else 0
       s_len = kv_seq_len - c_len
 
-      # Build causal and sliding window mask for the uncompressed sequence
-      # -> [q_seq_len, s_len]
-      row_ids = jax.lax.broadcasted_iota(jnp.int32, (q_seq_len, s_len), 0) + next_pos
-      # -> [1, s_len]
-      col_ids = jax.lax.broadcasted_iota(jnp.int32, (1, s_len), 1)
-      uncompressed_mask = col_ids <= row_ids
-      if self.sliding_window_size is not None:
-        uncompressed_mask = uncompressed_mask & (col_ids > (row_ids - self.sliding_window_size))
+      def get_sliding_mask(s_len):
+        # Safely use segment_positions, or fall back to next_pos if None
+        if segment_positions is not None:
+          abs_q = segment_positions[:, :, None]
+        else:
+          local_next = next_pos[:, None] if isinstance(next_pos, jax.Array) else next_pos
+          abs_q = jnp.arange(q_seq_len)[None, :, None] + local_next
 
-      # Broadcast uncompressed_mask to match compressed_mask's layout
+        if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+          if decoder_segment_ids is not None:
+            is_valid = decoder_segment_ids[:, :s_len] == DECODING_ACTIVE_SEQUENCE_INDICATOR
+            valid_indices = jnp.where(is_valid, jnp.arange(s_len)[None, :], -1)
+            max_valid = jnp.max(valid_indices, axis=-1, keepdims=True)  # [batch, 1]
+
+            # Let each sequence in the batch independently determine its AR vs prefill position
+            is_ar_cache = max_valid[:, :, None] >= 0  # [batch, 1, 1]
+
+            i = jnp.arange(s_len)[None, None, :]
+            abs_k_ar = abs_q - max_valid[:, :, None] + i
+            abs_k_prefill = jnp.broadcast_to(i, abs_k_ar.shape)
+
+            abs_k = jnp.where(is_ar_cache, abs_k_ar, abs_k_prefill)
+            distance = abs_q - abs_k
+            in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
+            return in_window & (distance >= 0)
+
+        # For prefill and training phases (q_seq_len > 1)
+        abs_k = jnp.arange(s_len)[None, None, :]
+        distance = abs_q - abs_k
+        in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
+        return in_window & (distance >= 0)
+
+      uncompressed_mask = get_sliding_mask(s_len)
+
+      max_ndim = max(
+          uncompressed_mask.ndim,
+          compressed_mask.ndim if compressed_mask is not None else 0,
+          output_mask.ndim if output_mask is not None else 0,
+          4,
+      )
+
+      def _align_mask(m, target_ndim):
+        if m is None or m.ndim >= target_ndim:
+          return m
+        return m.reshape(m.shape[:1] + (1,) * (target_ndim - m.ndim) + m.shape[1:])
+
+      expanded_uncompressed_mask = _align_mask(uncompressed_mask, max_ndim)
+
+      if compressed_mask is None:
+        if output_mask is not None:
+          output_mask = _align_mask(output_mask, max_ndim)
+          output_mask = expanded_uncompressed_mask * output_mask
+        else:
+          output_mask = expanded_uncompressed_mask
+        return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE)
+
+      compressed_mask = _align_mask(compressed_mask, max_ndim)
       target_shape = compressed_mask.shape[:-1] + (s_len,)
-      padded_shape = (1,) * (len(target_shape) - 2) + uncompressed_mask.shape
-      uncompressed_mask = jnp.broadcast_to(uncompressed_mask.reshape(padded_shape), target_shape)
+      expanded_uncompressed_mask = jnp.broadcast_to(expanded_uncompressed_mask, target_shape)
 
-      # Apply document-packing mask if it exists
       if output_mask is not None:
-        uncompressed_mask = uncompressed_mask & output_mask[..., :s_len]
+        output_mask_aligned = _align_mask(output_mask, max_ndim)
+        expanded_uncompressed_mask = expanded_uncompressed_mask & output_mask_aligned[..., :s_len]
 
-      uncompressed_mask = jnp.where(uncompressed_mask, 0.0, DEFAULT_MASK_VALUE)
-
-      if pad_kv_total > 0:
+      if pad_kv_total > 0 and compressed_mask is not None:
         pad_width = [(0, 0)] * (compressed_mask.ndim - 1) + [(pad_kv_total, 0)]
         compressed_mask = jnp.pad(
             compressed_mask,
@@ -852,7 +984,10 @@ class AttentionOp(nnx.Module):
             constant_values=DEFAULT_MASK_VALUE,
         )
 
-      return jnp.concatenate([uncompressed_mask, compressed_mask], axis=-1)
+      expanded_uncompressed_mask = jnp.where(expanded_uncompressed_mask, 0.0, DEFAULT_MASK_VALUE).astype(
+          compressed_mask.dtype
+      )
+      return jnp.concatenate([expanded_uncompressed_mask, compressed_mask], axis=-1)
 
     elif self.attention_type == AttentionType.CHUNK and output_mask is not None:
       if use_segment_positions:
@@ -867,6 +1002,22 @@ class AttentionOp(nnx.Module):
             q_offset=next_pos,
         )
       output_mask = chunk_mask * output_mask
+
+    # For standard token-by-token autoregressive decoding, keep the existing
+    # causal mask path unchanged. BD3LM generation instead uses block-level
+    # parallel sampling.
+    elif self.attention_type == AttentionType.BLOCK_DIFFUSION and model_mode != MODEL_MODE_AUTOREGRESSIVE:
+      if use_segment_positions:
+        block_mask = ((position_row_ids // self.causal_block_size) >= (position_col_ids // self.causal_block_size))[
+            :, None, None, :, :
+        ]
+      else:
+        block_mask = _generate_block_causal_attention_mask(
+            mask_shape=(q_seq_len, kv_seq_len),
+            causal_block_size=self.causal_block_size,
+            q_offset=next_pos,
+        )[None, None, None, :, :]
+      output_mask = block_mask if output_mask is None else jnp.logical_and(output_mask, block_mask)
 
     if bidirectional_mask is not None:
       image_mask = _make_bidirectional_block_mask(bidirectional_mask)
@@ -1083,6 +1234,7 @@ class AttentionOp(nnx.Module):
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
+        or (self.attention_kernel == "autoselected" and target_hardware == "cpu")
         or (self.attention_kernel == "paged")
         or (self.attention_kernel in ("vllm_rpa", "vllm_batched_rpa"))
     ):
@@ -1135,6 +1287,11 @@ class AttentionOp(nnx.Module):
         return out, None, None
 
       else:
+        if self.attention_type == AttentionType.BLOCK_DIFFUSION:
+          raise ValueError(
+              "Block-diffusion flash attention is supported only by TPU Splash; "
+              "use attention='dot_product' on other hardware."
+          )
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
           return self.apply_attention_dot(
@@ -1432,13 +1589,24 @@ class AttentionOp(nnx.Module):
         mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
 
       mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
+      use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
+      elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
+        mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
+        mask_kwargs = {"cp_size": cp_size} if use_load_balanced_cp else {}
+        mask = mask_type(
+            shape=mask_shape,
+            causal_block_size=self.causal_block_size,
+            **mask_kwargs,
+        )
       else:
         mask = mask_module.CausalMask(shape=mask_shape)
 
-      use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
-      if use_load_balanced_cp and self.attention_type != AttentionType.FULL:
+      if use_load_balanced_cp and self.attention_type not in (
+          AttentionType.FULL,
+          AttentionType.BLOCK_DIFFUSION,
+      ):
         mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
 
       # Apply local masking if local sliding attention is enabled.
@@ -1529,7 +1697,7 @@ class AttentionOp(nnx.Module):
         )
         return splash_kernel
 
-      head_physical_axes = logical_to_mesh_axes((HEAD,), self.mesh)[0]
+      head_physical_axes = self._logical_to_mesh_axes((HEAD,))[0]
       head_physical_axes = (head_physical_axes,) if isinstance(head_physical_axes, str) else (head_physical_axes or ())
       shard_head_size = math.prod(self.mesh.shape.get(ax, 1) for ax in head_physical_axes)
       splash_kernel = wrap_jax_splash_kernel(multi_head_mask, shard_head_size)
@@ -2285,6 +2453,7 @@ class AttentionOp(nnx.Module):
       sinks=None,
       indexer_mask: Optional[Array] = None,
       compressed_mask: Optional[Array] = None,
+      compressed_kv: Optional[Array] = None,
       slot: Optional[int] = None,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
@@ -2296,19 +2465,25 @@ class AttentionOp(nnx.Module):
     if model_mode != MODEL_MODE_TRAIN:
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
+    pass_comp_to_prefill = (compressed_kv is not None) and (ar_kv_cache is None)
+    k_prefill = key
+    v_prefill = value
+    if pass_comp_to_prefill:
+      k_prefill = jnp.concatenate([k_prefill, compressed_kv], axis=1)
+      v_prefill = jnp.concatenate([v_prefill, compressed_kv], axis=1)
 
     indexer_mask_prefill = None
     indexer_mask_ar = None
     if indexer_mask is not None:
-      prefill_len = key.shape[1]
+      prefill_len = key.shape[1]  # Use original key shape before concat
       indexer_mask_prefill = indexer_mask[:, :, :prefill_len]
       if ar_kv_cache is not None:
         indexer_mask_ar = indexer_mask[:, :, prefill_len:]
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
-        key=key,
-        value=value,
+        key=k_prefill,
+        value=v_prefill,
         decoder_segment_ids=decoder_segment_ids,
         segment_positions=inputs_positions,
         lengths=None,
@@ -2318,32 +2493,36 @@ class AttentionOp(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
         indexer_mask=indexer_mask_prefill,
-        compressed_mask=compressed_mask,
+        compressed_mask=compressed_mask if pass_comp_to_prefill else None,
         record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
     )
 
-    # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:
       if prefill_exponentials_sum is not None:
         return prefill_unnormalized_output / prefill_exponentials_sum
       return prefill_unnormalized_output
 
-    key, value, decoder_segment_ids, lengths = ar_kv_cache
+    key_ar, value_ar, decoder_segment_ids_ar, lengths = ar_kv_cache
+
+    if compressed_kv is not None:
+      key_ar = jnp.concatenate([key_ar, compressed_kv], axis=1)
+      value_ar = jnp.concatenate([value_ar, compressed_kv], axis=1)
 
     ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
         query=query,
-        key=key,
-        value=value,
-        decoder_segment_ids=decoder_segment_ids,
+        key=key_ar,
+        value=value_ar,
+        decoder_segment_ids=decoder_segment_ids_ar,
         segment_positions=inputs_positions,
         lengths=lengths,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
         bidirectional_mask=bidirectional_mask,
         indexer_mask=indexer_mask_ar,
+        compressed_mask=compressed_mask,
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
     )
@@ -2463,6 +2642,24 @@ class LoadBalancedChunkedCausalMask(ChunkedCausalMask):
     super().__init__(
         shape=shape,
         chunk_size=chunk_size,
+        shard_count=shard_count,
+    )
+    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)
+
+
+class LoadBalancedBlockCausalMask(BlockCausalMask):  # pylint: disable=abstract-method
+  """Lazy block-causal mask with load-balanced query positions."""
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      causal_block_size: int,
+      cp_size: int,
+      shard_count: int = 1,
+  ):
+    super().__init__(
+        shape=shape,
+        causal_block_size=causal_block_size,
         shard_count=shard_count,
     )
     self.q_sequence = _load_balanced_q_sequence(shape, cp_size)

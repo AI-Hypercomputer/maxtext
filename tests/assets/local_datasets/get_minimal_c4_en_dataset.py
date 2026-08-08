@@ -31,7 +31,11 @@ from minio.error import S3Error
 
 # ArrayRecord Python bindings
 from array_record.python.array_record_module import ArrayRecordWriter, ArrayRecordReader
-import tensorflow as tf
+
+try:
+  import tensorflow as tf
+except ImportError:
+  sys.exit("Tensorflow is required. Run `pip install tensorflow`")
 
 
 # -----------------------

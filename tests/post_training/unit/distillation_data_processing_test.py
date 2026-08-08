@@ -16,10 +16,11 @@
 
 import pytest
 
-pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
+pytestmark = [pytest.mark.post_training]
 
 import argparse
 import os
+import filelock
 import subprocess
 import unittest
 
@@ -80,8 +81,11 @@ class DistillationDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    exit_code = subprocess.call(
-        [
+    tokenizer_dir = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
+    lock_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer.lock")
+    with filelock.FileLock(lock_path):
+      if not os.path.exists(tokenizer_dir):
+        command = [
             "gcloud",
             "storage",
             "cp",
@@ -89,9 +93,9 @@ class DistillationDataProcessingTest(unittest.TestCase):
             "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
             os.path.join(MAXTEXT_ASSETS_ROOT, ""),
         ]
-    )
-    if exit_code != 0:
-      raise ValueError(f"Download tokenizer with gcloud storage cp failed with exit code: {exit_code}")
+        exit_code = subprocess.call(command)
+        if exit_code != 0:
+          raise ValueError(f"Download tokenizer failed ({exit_code})")
 
   def setUp(self):
     super().setUp()

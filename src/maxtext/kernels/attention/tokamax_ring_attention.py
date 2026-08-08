@@ -252,6 +252,9 @@ def build_splash_config(
         "TPU Tokamax ring attention with context_parallel_load_balance=True requires "
         f"sa_block_q_dkv ({block_q_dkv}) to be a multiple of {tokamax_splash_kernel.NUM_LANES} after clamping."
     )
+  # Ring uses the dynamic-grid dKV path, so mirror Splash's small-kv_steps guard here.
+  if dq_reduction_steps == 3 and kv_seq_len_per_shard // block_kv_dkv <= 3:
+    dq_reduction_steps = 0
   return tokamax_splash_kernel.SplashConfig(
       block_q=block_q,
       block_kv=block_kv,
@@ -274,6 +277,8 @@ def build_splash_config(
       else None,
       dq_reduction_steps=dq_reduction_steps if dq_reduction_steps > 0 else None,
       use_experimental_scheduler=config.use_splash_scheduler,
+      ring_scan_unroll=config.ring_scan_unroll,
+      bwd_dkv_megacore=config.sa_bwd_dkv_megacore,
   )
 
 

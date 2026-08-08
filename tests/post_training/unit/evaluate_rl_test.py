@@ -53,7 +53,6 @@ class TestScoreResponses(unittest.TestCase):
     self.config = _make_config(eval_mode="pass")
     self.maj_config = _make_config(eval_mode="maj")
 
-  @pytest.mark.cpu_only
   def test_nested_tags(self):
     """Response with nested reasoning tags still extracts the correct answer."""
     is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
@@ -69,7 +68,6 @@ class TestScoreResponses(unittest.TestCase):
     self.assertTrue(is_partially_correct)
     self.assertTrue(has_correct_format)
 
-  @pytest.mark.cpu_only
   def test_with_extra_ending_tags(self):
     """Answer with extra ending tags such as <end_of_turn>."""
     is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
@@ -91,7 +89,6 @@ class TestScoreResponses(unittest.TestCase):
     self.assertTrue(is_partially_correct)
     self.assertTrue(has_correct_format)
 
-  @pytest.mark.cpu_only
   def test_with_incomplete_reasoning_tags(self):
     """(1) Incomplete reasoning tags still extracts the correct answer."""
     """(2) Currency symbols works with math_verify."""
@@ -105,7 +102,6 @@ class TestScoreResponses(unittest.TestCase):
     self.assertTrue(is_partially_correct)
     self.assertFalse(has_correct_format)
 
-  @pytest.mark.cpu_only
   def test_for_mcq_value(self):
     """Test for MCQ, where model responds with a math value."""
     is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
@@ -122,7 +118,6 @@ class TestScoreResponses(unittest.TestCase):
     self.assertTrue(is_partially_correct)
     self.assertFalse(has_correct_format)
 
-  @pytest.mark.cpu_only
   def test_for_mcq_option(self):
     """Test for MCQ, where model responds with an option."""
     is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
@@ -139,7 +134,6 @@ class TestScoreResponses(unittest.TestCase):
     self.assertTrue(is_partially_correct)
     self.assertFalse(has_correct_format)
 
-  @pytest.mark.cpu_only
   def test_majority_eval_mode(self):
     is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
         tmvp_config=self.maj_config,
@@ -155,7 +149,6 @@ class TestScoreResponses(unittest.TestCase):
     self.assertTrue(is_partially_correct)
     self.assertTrue(has_correct_format)
 
-  @pytest.mark.cpu_only
   def test_pass_at_1_eval_mode(self):
     """pass@1 returns fraction of correct samples, not a boolean."""
     config = _make_config(eval_mode="pass_at_1")
@@ -175,7 +168,6 @@ class TestScoreResponses(unittest.TestCase):
     self.assertAlmostEqual(is_partially_correct, 0.75)
     self.assertAlmostEqual(has_correct_format, 1.0)
 
-  @pytest.mark.cpu_only
   def test_pass_at_1_all_wrong(self):
     """pass@1 with all wrong samples returns 0.0."""
     config = _make_config(eval_mode="pass_at_1")
@@ -192,7 +184,6 @@ class TestScoreResponses(unittest.TestCase):
     self.assertAlmostEqual(is_partially_correct, 0.0)
     self.assertAlmostEqual(has_correct_format, 1.0)
 
-  @pytest.mark.cpu_only
   def test_pass_at_1_all_correct(self):
     """pass@1 with all correct samples returns 1.0."""
     config = _make_config(eval_mode="pass_at_1")
@@ -228,7 +219,6 @@ class TestComputeRowReward(unittest.TestCase):
 
     return [fn1, fn2]
 
-  @pytest.mark.cpu_only
   def test_single_response_single_fn(self):
     def fn(prompts, completions, answer, question):  # pylint: disable=unused-argument
       return [2.5 for _ in completions]
@@ -244,7 +234,6 @@ class TestComputeRowReward(unittest.TestCase):
     self.assertAlmostEqual(score_sum, 2.5)
     self.assertEqual(count, 1)
 
-  @pytest.mark.cpu_only
   def test_sums_across_reward_fns_for_single_response(self):
     score_sum, count = evaluate_rl._compute_row_reward(
         reward_fns=self._two_fns(),
@@ -258,7 +247,6 @@ class TestComputeRowReward(unittest.TestCase):
     self.assertAlmostEqual(score_sum, 5.0)
     self.assertEqual(count, 1)
 
-  @pytest.mark.cpu_only
   def test_sums_across_passes_for_multiple_responses(self):
     """Multi-pass: helper must aggregate across ALL sampled responses, not just [0]."""
     score_sum, count = evaluate_rl._compute_row_reward(
@@ -274,7 +262,6 @@ class TestComputeRowReward(unittest.TestCase):
     self.assertAlmostEqual(score_sum, 9.0)
     self.assertEqual(count, 3)
 
-  @pytest.mark.cpu_only
   def test_empty_responses_returns_zero_and_zero_count(self):
     """An empty responses list must contribute nothing to the running mean."""
     score_sum, count = evaluate_rl._compute_row_reward(
@@ -288,7 +275,6 @@ class TestComputeRowReward(unittest.TestCase):
     self.assertEqual(score_sum, 0.0)
     self.assertEqual(count, 0)
 
-  @pytest.mark.cpu_only
   def test_exception_in_reward_fn_swallowed_and_returns_zero_count(self):
     """A raising reward_fn must not propagate and must not corrupt the mean denominator."""
 
@@ -306,7 +292,6 @@ class TestComputeRowReward(unittest.TestCase):
     self.assertEqual(score_sum, 0.0)
     self.assertEqual(count, 0)  # zero count so the caller's mean isn't biased
 
-  @pytest.mark.cpu_only
   def test_question_is_forwarded_to_reward_fn(self):
     """Regression: helper must pass `question` through to reward fns.
 
@@ -330,7 +315,6 @@ class TestComputeRowReward(unittest.TestCase):
     )
     self.assertEqual(received["question"], "What is 2+2?")
 
-  @pytest.mark.cpu_only
   def test_integrates_with_real_check_numbers_reward(self):
     """End-to-end: real `check_numbers` from utils_rl must not raise on the
     eval-time kwargs the helper passes (regression for the original

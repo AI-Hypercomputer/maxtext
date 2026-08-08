@@ -86,6 +86,17 @@ def maybe_shard_with_name(
   """
   if inputs is None:
     return None
+  if hasattr(inputs, "ndim"):
+    named_sharding = truncate_out_sharding(named_sharding, inputs.ndim)
+  if (
+      isinstance(named_sharding, NamedSharding)
+      and hasattr(inputs, "shape")
+      and getattr(named_sharding, "mesh", None) is not None
+      and (isinstance(inputs, nnx.Variable) or hasattr(inputs, "value"))
+  ):
+    adj_spec = adjust_pspec_for_indivisible_shapes(named_sharding.spec, inputs.shape, named_sharding.mesh)
+    if adj_spec != named_sharding.spec:
+      named_sharding = NamedSharding(named_sharding.mesh, adj_spec)
   if (
       debug_sharding and isinstance(inputs, Tracer) and isinstance(named_sharding, NamedSharding)
   ):  # only print pspec for JitTracer
@@ -181,14 +192,48 @@ def remove_size_one_mesh_axis(spec, mesh):
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 
+def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -> P:
+  """Removes physical mesh axes from spec where array dimension is not divisible by the mesh axis size."""
+  if spec is None or mesh is None or not shape:
+    return spec
+  new_spec = []
+  for i, s in enumerate(spec):
+    if i >= len(shape) or s is None or s == P.UNCONSTRAINED:
+      new_spec.append(s)
+    else:
+      dim_len = shape[i]
+      if isinstance(s, tuple):
+        valid_axes = []
+        cum_product = 1
+        for axis_name in s:
+          axis_size = mesh.shape.get(axis_name, 1) if hasattr(mesh, "shape") else 1
+          if dim_len % (cum_product * axis_size) == 0:
+            valid_axes.append(axis_name)
+            cum_product *= axis_size
+        new_spec.append(tuple(valid_axes) if valid_axes else None)
+      else:
+        axis_size = mesh.shape.get(s, 1) if hasattr(mesh, "shape") else 1
+        if dim_len % axis_size == 0:
+          new_spec.append(s)
+        else:
+          new_spec.append(None)
+  return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
+
+
 def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Variable:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
   val = v.get_value()
   if not hasattr(val, "shape"):
     # `val` is either truly leafless (e.g. optax MaskedNode) or a composite
-    # pytree of tensors (e.g. AQT QTensor on serve-mode quantized variables).
-    # Replicated sharding is a safe default.
+    # pytree of tensors (e.g. Qwix QArray or AQT QTensor).
     if jax.tree_util.tree_leaves(val):
+      first_leaf = jax.tree_util.tree_leaves(val)[0]
+      if hasattr(first_leaf, "shape"):
+        leaf_var = get_nnx_var_named_sharding_with_scan_axis(v.replace(value=first_leaf), mesh)
+        leaf_sharding = leaf_var.get_value()
+        if not isinstance(leaf_sharding, NamedSharding):
+          leaf_sharding = NamedSharding(mesh, P())
+        return v.replace(jax.tree.map(lambda _: leaf_sharding, val))
       replicated = NamedSharding(mesh, P())
       return v.replace(jax.tree.map(lambda _: replicated, val))
     return v
@@ -196,15 +241,22 @@ def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Vari
   out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
   if not out_sharding:
     pspec = P()
+  elif isinstance(out_sharding, jax.sharding.NamedSharding):
+    return v.replace(out_sharding)
+  elif isinstance(out_sharding, jax.sharding.PartitionSpec):
+    pspec = out_sharding
   else:
+    out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
     # Insert the scan axis for parameters created by _create_scanned_layers.
-    if nnx.PARTITION_NAME in metadata:
+    if "param_scan_axis" in metadata and nnx.PARTITION_NAME in metadata:
       partition_name = metadata[nnx.PARTITION_NAME]
       scan_axis = metadata.get("param_scan_axis", 0)
-      out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
       if partition_name not in out_sharding:
         out_sharding.insert(scan_axis, partition_name)
-      out_sharding = tuple(out_sharding)
+    elif len(val.shape) > len(out_sharding):
+      diff = len(val.shape) - len(out_sharding)
+      out_sharding = list(out_sharding) + [None] * diff
+    out_sharding = tuple(out_sharding)
     # Convert logical axis names to physical mesh axes using current context rules.
     context_rules = get_logical_axis_rules()
     local_rules = metadata.get("sharding_rules", ())
@@ -217,6 +269,18 @@ def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Vari
       pspec = P(*out_sharding)
       if mesh is not None:
         pspec = remove_size_one_mesh_axis(pspec, mesh)
+    if pspec is not None and nnx.PARTITION_NAME not in metadata:
+      orig_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
+      if isinstance(orig_sharding, str):
+        orig_len = 1
+      elif isinstance(orig_sharding, (list, tuple)):
+        orig_len = len(orig_sharding)
+      else:
+        orig_len = 0
+      if 0 < orig_len < len(pspec):
+        pspec = P(*pspec[:orig_len])
+
+  # pyrefly: ignore[bad-argument-type]
   return v.replace(NamedSharding(mesh, pspec))
 
 
@@ -284,6 +348,25 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
 def create_sharding(mesh, logical_names, rules=None):
   """Create NamedSharding with given logical names."""
   return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
+
+
+def truncate_out_sharding(out_sharding, out_ndim: int):
+  """Truncates out_sharding if tensor ndim is less than out_sharding pspec length."""
+  if out_sharding is None:
+    return None
+  if isinstance(out_sharding, NamedSharding):
+    if len(out_sharding.spec) > out_ndim:
+      return NamedSharding(
+          out_sharding.mesh,
+          P(*out_sharding.spec[:out_ndim]),
+      )
+  elif isinstance(out_sharding, P):
+    if len(out_sharding) > out_ndim:
+      return P(*out_sharding[:out_ndim])
+  elif isinstance(out_sharding, (tuple, list)):
+    if len(out_sharding) > out_ndim:
+      return tuple(out_sharding[:out_ndim])
+  return out_sharding
 
 
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
@@ -376,15 +459,18 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
   for path, p_leaf in all_params_leaves:  # Iterate over each parameter leaf
     param_name_str = jax.tree_util.keystr(path)  # Convert the tree path to a readable string
 
-    # Check that sharding and spec exist and are valid
-    sharding = getattr(p_leaf, "sharding", None)
-    spec = getattr(sharding, "spec", None)
-    assert sharding is not None and spec is not None and isinstance(spec, P), (
-        f"Parameter '{param_name_str}' is missing a valid '.sharding.spec'."
-        "Expected 'p_leaf.sharding.spec' to be a non-null 'partitionspec'."
-    )
+    # Default unannotated LoRA parameters to PartitionSpec P() while leaving standard parameters as None for strict assertions.
+    is_lora_param = isinstance(p_leaf, getattr(nnx, "LoRAParam", ()))
+    is_lora = is_lora_param or "lora" in param_name_str.lower()
+    if isinstance(p_leaf, nnx.Variable):
+      p_leaf = p_leaf.value
 
-    current_sharding_spec = p_leaf.sharding.spec  # Extract the current tensor's sharding spec
+    spec = getattr(getattr(p_leaf, "sharding", None), "spec", None)
+    if spec is None and is_lora:
+      spec = P()
+    assert isinstance(spec, P), f"Expected '.sharding.spec' for parameter '{param_name_str}' to be a PartitionSpec."
+
+    current_sharding_spec = spec  # Extract the current tensor's sharding spec
     # Identify axes used for sharding
     mesh_axes_used = get_mesh_axes_used_by_tensor_spec(current_sharding_spec)
     # Check if the parameter is sharded on all the valid target axes.
@@ -433,7 +519,7 @@ def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
   # Calculate the percentage of unsharded parameters.
   unsharded_param_perc = unsharded_size / total_size
 
-  # If the percentage is over the tolerance, prepare and raise an error.
+  # If the percentage is over or equal to the tolerance, prepare and raise an error.
   if unsharded_param_perc > tolerance:
     # Sort the problematic tensors by size to show the largest ones first.
     problematic_tensors_details.sort(key=lambda x: x["size"], reverse=True)
@@ -569,12 +655,12 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
     else:
       raise NotImplementedError(f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}")
-    if "params" not in sharded_fp32_params.keys():
+    if "params" not in sharded_fp32_params.keys():  # pyrefly: ignore[missing-attribute]
       # When quantization=fp8 is enabled the sharded_fp32_params
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
     state_mesh_shardings = state_mesh_shardings.replace(
-        params=dict(prev_params_shardings, **sharded_fp32_params)
+        params=dict(prev_params_shardings, **sharded_fp32_params)  # pyrefly: ignore[bad-unpacking]
     )  # pyrefly: ignore[bad-unpacking]
   return prev_params_shardings, state_mesh_shardings
 
@@ -620,6 +706,8 @@ def maybe_update_params_sharding_with_opt_nnx(
         sub = _extract_param_only(v)
         if sub:
           result[k] = sub
+      else:
+        result[k] = v
     return result
 
   # prev_params_shardings must match the pytree structure of ga_params from

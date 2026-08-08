@@ -133,7 +133,8 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
     trainer_instance = maxtext_engine.MaxTextTrainingEngine(mock_config)
     trainer_instance._checkpoint_manager.restore_checkpoint.return_value = (  # pylint: disable=protected-access
         None,
-        {},
+        None,
+        None,
     )
 
     trainer_instance.with_loss_fn(

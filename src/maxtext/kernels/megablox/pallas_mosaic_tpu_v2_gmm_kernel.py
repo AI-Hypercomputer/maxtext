@@ -13,8 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Forked from:
-# https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/
-# tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_gmm_kernel.py
+# https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_gmm_kernel.py
 """GMM kernel implemented using Pallas."""
 
 from abc import ABC, abstractmethod
@@ -910,7 +909,9 @@ def calculate_tiling(
 
   def _is_tile_k_quant_block_compatible(tk: int) -> bool:
     if (
-        tk % rhs_cfgs.quant_block_size != 0 and rhs_cfgs.quant_block_size % tk != 0
+        # pyrefly: ignore[unsupported-operation]
+        tk % rhs_cfgs.quant_block_size != 0
+        and rhs_cfgs.quant_block_size % tk != 0  # pyrefly: ignore[unsupported-operation]
     ):  # pyrefly: ignore[unsupported-operation]
       return False
     return True

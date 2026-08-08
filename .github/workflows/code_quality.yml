@@ -29,13 +29,14 @@ jobs:
     name: "Static code-quality checkers"
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
         ref: ${{ inputs.maxtext_sha || github.sha }}
+        persist-credentials: false
 
     - name: Install uv and set the Python version
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       with:
         python-version: '3.12'
         enable-cache: true
@@ -47,19 +48,24 @@ jobs:
       run: . "$GITHUB_WORKSPACE"/venv/bin/activate && uv pip install pre-commit
 
     - name: Cache pre-commit environments
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
          path: ~/.cache/pre-commit
          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
 
-    - name: Run pre-commit checks on just the files that have changed
+    - name: Run code quality checks
       run: |
         . "$GITHUB_WORKSPACE"/venv/bin/activate
         if [ "${{ github.event_name }}" == "pull_request" ]; then
-          git fetch origin "$GITHUB_BASE_REF":"$GITHUB_BASE_REF"
-          git branch "$GITHUB_HEAD_REF"
-          pre-commit run --from-ref "$GITHUB_BASE_REF" --to-ref "$GITHUB_HEAD_REF" --show-diff-on-failure
+          git fetch origin "$GITHUB_BASE_REF"
+          MERGE_BASE=$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)
+          # Run fast formatting check across all files (<1s)
+          pre-commit run pyink --all-files --show-diff-on-failure
+          # Run full suite (including pylint) on changed files only
+          pre-commit run --from-ref "$MERGE_BASE" --to-ref HEAD --show-diff-on-failure
         else
           echo "Not a pull request event (${{ github.event_name }}), checking all files."
           pre-commit run --all-files --show-diff-on-failure
         fi
+
+

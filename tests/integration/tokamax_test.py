@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Test for tokamax gmm and splash."""
+"""Test for tokamax gmm."""
 
 import os
 import tempfile
@@ -28,35 +27,43 @@ gettempdir = tempfile.gettempdir
 
 @pytest.mark.integration_test
 class Train(parameterized.TestCase):
-  """Test for tokamax gmm and splash."""
+  """Smoke test for tokamax gmm.
+
+  Similar to `train_using_ragged_dot_smoke_train.py`
+  """
 
   @parameterized.named_parameters(
       {
-          "testcase_name": "gmm bf16",
-          "quantization": "",
-          "use_gmm_v2": False,
-      },
-      {
-          "testcase_name": "gmm fp8",
-          "quantization": "fp8_full",
-          "use_gmm_v2": False,
-      },
-      {
-          "testcase_name": "gmm v2 bf16",
-          "quantization": "",
-          "use_gmm_v2": True,
-      },
+          "testcase_name": f"{base_name}_ep{ici_expert_parallelism}",
+          "quantization": quantization,
+          "use_gmm_v2": use_gmm_v2,
+          "ici_expert_parallelism": ici_expert_parallelism,
+      }
+      for base_name, quantization, use_gmm_v2, ici_expert_parallelism in [
+          ("tokamax_v1_bf16", "", False, 1),
+          ("tokamax_v1_fp8", "fp8_full", False, 1),
+          ("tokamax_v2_bf16", "", True, 1),
+          ("tokamax_v2_fp8", "fp8_full", True, 1),
+          ("tokamax_v2_bf16", "", True, 2),
+          ("tokamax_v2_fp8", "fp8_full", True, 2),
+      ]
   )
   @pytest.mark.tpu_only
-  def test_different_configs(self, quantization: str, use_gmm_v2: bool):
+  def test_smoke_train(
+      self,
+      quantization: str,
+      use_gmm_v2: bool,
+      ici_expert_parallelism: int,
+  ):
     """Smoke train with small config."""
+    sharding_tolerance = 0.22 if ici_expert_parallelism > 1 else 2e-2
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
         None,
         get_test_config_path(),
         f"base_output_directory={test_tmpdir}",
-        "run_name=tokamax_test",
+        "run_name=test_smoke_train",
         # model
         "base_emb_dim=256",
         "base_num_query_heads=1",
@@ -69,6 +76,8 @@ class Train(parameterized.TestCase):
         "attention_type=mla",
         "num_experts=2",
         "shared_experts=1",
+        f"ici_expert_parallelism={ici_expert_parallelism}",
+        f"sharding_tolerance={sharding_tolerance}",
         # tokamax gmm
         "sparse_matmul=True",
         "megablox=False",
@@ -96,16 +105,17 @@ class Train(parameterized.TestCase):
         # tokamax splash
         "max_target_length=128",
         "attention=flash",
-        "use_tokamax_splash=True",
+        "use_tokamax_splash=False",
         # quantization
         f"quantization={quantization}",
-        f"use_qwix_quantization={quantization == 'fp8_full'}",
+        "use_qwix_quantization=True",
         "weight_quantization_calibration_method=fixed,-224,224",
         "act_quantization_calibration_method=fixed,-224,224",
+        "bwd_quantization_calibration_method=absmax",
         # train
         "per_device_batch_size=1",
         "dataset_type=synthetic",
-        "steps=3",
+        "steps=2",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "enable_checkpoint_cloud_logger=False",

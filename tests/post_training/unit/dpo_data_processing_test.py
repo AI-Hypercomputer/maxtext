@@ -31,7 +31,7 @@ from maxtext.input_pipeline import grain_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 
-pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
+pytestmark = [pytest.mark.post_training]
 
 
 class TestDPODataFormatting(unittest.TestCase):

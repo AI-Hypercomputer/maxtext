@@ -28,6 +28,47 @@ from maxtext.configs import pyconfig
 from maxtext.utils import sharding
 
 
+def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq: int) -> jnp.ndarray:
+  """Creates synthetic segment IDs simulating packed sequences.
+
+  Splits each sequence into a random number (2..max_segments_per_seq) of
+  varying-length segments, assigning each a sequential integer segment ID
+  starting from 1 via a fully vectorized JAX implementation.
+
+  Args:
+    batch_size: Number of sequences.
+    seq_len: Total sequence length.
+    max_segments_per_seq: Maximum number of segments per sequence (>= 2).
+
+  Returns:
+    Integer array [batch_size, seq_len] with sequential segment IDs starting at 1.
+  """
+  if max_segments_per_seq < 2 or seq_len < 2:
+    return jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+  max_segs = min(max_segments_per_seq, seq_len)
+  key = jax.random.PRNGKey(42)
+  k1, k2 = jax.random.split(key, 2)
+
+  # Sample random number of segments per row in [2, max_segs].
+  n_segs = jax.random.randint(k1, shape=(batch_size, 1), minval=2, maxval=max_segs + 1)
+  num_splits = n_segs - 1
+
+  # Assign random uniform scores to positions 1..seq_len-1 and rank them.
+  scores = jax.random.uniform(k2, shape=(batch_size, seq_len - 1))
+  ranks = jnp.argsort(jnp.argsort(scores, axis=-1), axis=-1)
+
+  # A position is a split boundary if its rank < num_splits for that row.
+  split_mask = ranks < num_splits
+
+  # Position 0 is always the start of segment 1.
+  first_pos = jnp.ones((batch_size, 1), dtype=jnp.bool_)
+  is_boundary = jnp.concatenate([first_pos, split_mask], axis=-1)
+
+  # Cumulative sum across sequence length gives sequential segment IDs: 1, 2, ...
+  return jnp.cumsum(is_boundary, axis=-1, dtype=jnp.int32)
+
+
 class SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
 
@@ -53,7 +94,14 @@ class SyntheticDataIterator:
     batch_positions = jnp.broadcast_to(
         sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1)
     )
-    segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
+    if config.packing:
+      segmentation = _make_packed_segment_ids(
+          config.global_batch_size_to_load,
+          config.max_target_length,
+          config.max_segments_per_seq,
+      )
+    else:
+      segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
     self.data = (tokens, batch_positions, segmentation)
 
   def reset(self):

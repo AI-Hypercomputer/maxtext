@@ -231,7 +231,9 @@ class Indexer(nnx.Module):
     Returns:
         mask: [b, t, s] - `0.0` for top-k selected elements, `DEFAULT_MASK_VALUE` elsewhere.
     """
-    cutoff_threshold = topk_values[..., -1:]
+    indexer_cutoff_threshold = topk_values[..., -1]
+    indexer_cutoff_threshold = checkpoint_name(indexer_cutoff_threshold, "indexer_cutoff_threshold")
+    indexer_cutoff_threshold = indexer_cutoff_threshold[..., None]
 
     val_true = jnp.array(0.0, dtype=self.dtype)
     val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=self.dtype)
@@ -239,8 +241,8 @@ class Indexer(nnx.Module):
     if self.config.indexer_mask_exact_topk:
       # Prune ties by keeping only the first k unmasked tokens along sequence dimension
       k = topk_values.shape[-1]
-      is_strictly_greater = indexer_score > cutoff_threshold
-      is_equal = indexer_score == cutoff_threshold
+      is_strictly_greater = indexer_score > indexer_cutoff_threshold
+      is_equal = indexer_score == indexer_cutoff_threshold
 
       # Use cumsum to rank both strictly greater and equal tokens (XLA fuses these scans)
       sg_rank = jnp.cumsum(is_strictly_greater.astype(jnp.int32), axis=-1)
@@ -258,7 +260,7 @@ class Indexer(nnx.Module):
       return jnp.where(selected, val_true, val_false)
     else:
       # Raw threshold cutoff masking (optional: enables speedups, but may unmask > k tokens under indexer scores ties)
-      raw_mask = indexer_score >= cutoff_threshold
+      raw_mask = indexer_score >= indexer_cutoff_threshold
       return jnp.where(raw_mask, val_true, val_false)
 
   def __call__(
@@ -917,17 +919,30 @@ class MLA(Attention):
 
     if self.q_lora_rank == 0:
       q = self.query(inputs_q, out_sharding=query_sharding)
+      q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     else:
       # LoRA path
       low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
       low_rank_q = checkpoint_name(low_rank_q, "query_wa_proj")
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
       low_rank_q = checkpoint_name(low_rank_q, "mla_q")
-      q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads, qk_head_dim]
+      if self.config.use_sliced_mla_proj and self.wq_b.quant is None:
+        q_nope = self.wq_b(
+            low_rank_q,
+            out_sharding=query_sharding,
+            slice_bounds=(0, self.qk_nope_head_dim),
+        )  # [B, L, n_heads, qk_nope_head_dim]
+        q_pe = self.wq_b(
+            low_rank_q,
+            out_sharding=query_sharding,
+            slice_bounds=(self.qk_nope_head_dim, self.qk_head_dim),
+        )  # [B, L, n_heads, qk_rope_head_dim]
+      else:
+        q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads, qk_head_dim]
+        q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
 
     # Partial RoPE: Split into non-positional and rotary parts.
     # last dimension: qk_nope_head_dim, qk_rope_head_dim
-    q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name)
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
     q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name)
@@ -951,10 +966,24 @@ class MLA(Attention):
       value_logical_name = self.value_axis_names
 
     wkva_out_sharding = create_sharding(self.mesh, key_logical_name)
-    kv_out = self.wkv_b(low_rank_main, out_sharding=wkva_out_sharding)
-
-    # Split kv_out into key_nope and value parts.
-    key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
+    if self.config.use_sliced_mla_proj and self.wkv_b.quant is None:
+      key_nope = self.wkv_b(
+          low_rank_main,
+          out_sharding=wkva_out_sharding,
+          slice_bounds=(0, self.qk_nope_head_dim),
+      )  # [B, L, n_heads, qk_nope_head_dim]
+      value = self.wkv_b(
+          low_rank_main,
+          out_sharding=wkva_out_sharding,
+          slice_bounds=(
+              self.qk_nope_head_dim,
+              self.qk_nope_head_dim + self.v_head_dim,
+          ),
+      )  # [B, L, n_heads, v_head_dim]
+    else:
+      kv_out = self.wkv_b(low_rank_main, out_sharding=wkva_out_sharding)
+      # Split kv_out into key_nope and value parts.
+      key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
     key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
     key_nope = self._maybe_shard_with_logical(key_nope, key_logical_name)
     key_rope = self._maybe_shard_with_logical(key_rope, key_logical_name)

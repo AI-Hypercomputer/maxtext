@@ -88,7 +88,7 @@ jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.base_image }}
+      image: gcr.io/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
@@ -105,13 +105,14 @@ jobs:
     steps:
       - name: Checkout MaxText
         if: ${{ !inputs.maxtext_installed }}
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.maxtext_sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Download the maxtext wheel
         if: ${{ !inputs.maxtext_installed }}
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
       - name: Install the maxtext wheel
@@ -124,6 +125,15 @@ jobs:
           echo "Installing ${maxtext_wheel} for ${MAXTEXT_PACKAGE_EXTRA}..."
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
+            if command -v apt-get &> /dev/null; then
+              echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
+              if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
+                echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
+                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || true
+              else
+                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || true
+              fi
+            fi
             install_tpu_post_train_extra_deps
           else
             install_tpu_pre_train_extra_deps
@@ -142,6 +152,17 @@ jobs:
       - name: Run Tests
         shell: bash
         run: |
+          # Cleanly release TPU device locks upon SIGTERM / PR cancellation
+          cleanup_tpu_locks() {
+            echo "Received cancellation signal; cleaning up /dev/accel* locks and /tmp/libtpu_lockfile..."
+            kill -9 "${PYTEST_PID:-}" 2>/dev/null || true
+            rm -f /tmp/libtpu_lockfile
+            fuser -k -9 /dev/accel* 2>/dev/null || true
+            sleep 0.5
+            exit 143
+          }
+          trap cleanup_tpu_locks TERM INT
+
           # Determine environment and entry directory
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.
@@ -217,7 +238,9 @@ jobs:
               --junitxml=test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}.xml \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
-              ${INPUTS_PYTEST_EXTRA_ARGS}
+              ${INPUTS_PYTEST_EXTRA_ARGS} &
+            PYTEST_PID=$!
+            wait $PYTEST_PID
           fi
 
         env:
@@ -231,16 +254,67 @@ jobs:
           INPUTS_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
           INPUTS_MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
           INPUTS_IS_UPDATE_HLO: ${{ inputs.is_update_hlo }}
+      # DECOUPLE_GCLOUD=TRUE only exercises the offline code paths when the Google Cloud packages
+      # are actually missing, so this runs in its own venv built from the decoupled requirements
+      # rather than the venv the other tests use. The suite is small and unsharded, so it runs in
+      # the first worker group only.
+      - name: Run Targeted Decoupled Tests
+        if: ${{ !inputs.maxtext_installed && inputs.flavor == 'cpu-unit' && inputs.worker_group == 1 }}
+        shell: bash
+        run: |
+          python3 -m uv venv --seed .venv_decoupled
+          source .venv_decoupled/bin/activate
+          uv pip install --resolution=lowest \
+            -r src/dependencies/requirements/generated_requirements/decoupled-requirements.txt
+          # --no-deps: the maxtext wheel requires the Google Cloud packages this environment must not have.
+          uv pip install --no-deps "$(ls maxtext-*-py3-none-any.whl)"
+          python3 - <<'PY'
+          import importlib.util
+          import sys
+
+          def importable(module):
+            try:
+              return importlib.util.find_spec(module) is not None
+            except ModuleNotFoundError:
+              return False
+
+          # google.cloud itself resolves through googleapis-common-protos, so check the clients.
+          modules = (
+              "cloud_accelerator_diagnostics",
+              "gcsfs",
+              "google.api_core",
+              "google.auth",
+              "google.cloud.monitoring_v3",
+              "google.cloud.storage",
+              "google_cloud_mldiagnostics",
+              "jetstream",
+              "ml_goodput_measurement",
+          )
+          coupled = [module for module in modules if importable(module)]
+          if coupled:
+            sys.exit(f"::error::{coupled} importable in the decoupled environment; decoupled mode is not being tested.")
+          PY
+          export DECOUPLE_GCLOUD=TRUE
+          export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
+          export MAXTEXT_REPO_ROOT=$(pwd)
+          export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
+          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
+          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
+          python3 -m pytest -v \
+            -m "decoupled_target" \
+            --durations=0 \
+            --ignore=tests/post_training \
+            --junitxml=test-results-decoupled-targeted.xml
       - name: Upload Reference HLO
         if: ${{ inputs.is_update_hlo }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: reference-hlo
           path: tests/utils/reference_hlo_*.txt
           if-no-files-found: ignore
       - name: Upload results to Codecov
         if: ${{ !inputs.maxtext_installed }} # Skip code coverage upload for maxtext image testing
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -250,7 +324,7 @@ jobs:
           verbose: true
       - name: Upload Test Results XML
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: test-results-${{ inputs.flavor }}-${{ inputs.worker_group }}-${{ github.run_id }}
           path: test-results-*.xml

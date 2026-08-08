@@ -16,14 +16,10 @@
 
 import textwrap
 
-import pytest
-
 from tests.utils.newly_added_detection import _build_diff_commands
 from tests.utils.newly_added_detection import _is_test_file
 from tests.utils.newly_added_detection import parse_changed_line_map
 from tests.utils.newly_added_detection import touched_test_names
-
-pytestmark = pytest.mark.cpu_only
 
 
 # --- _is_test_file -----------------------------------------------------------

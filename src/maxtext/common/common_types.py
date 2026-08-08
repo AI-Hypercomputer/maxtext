@@ -114,6 +114,7 @@ class DecoderBlockType(enum.Enum):
   LLAMA4 = "llama4"
   OLMO3 = "olmo3"
   DEEPSEEK4 = "deepseek4"
+  ENVY = "envy"
 
 
 class VisionEncoderBlockType(enum.Enum):
@@ -135,6 +136,7 @@ class AttentionType(enum.Enum):
   MLA = "mla"
   COMPRESSED = "compressed"
   FULL = "full"
+  BLOCK_DIFFUSION = "block_diffusion"
 
 
 class ShardMode(enum.Enum):

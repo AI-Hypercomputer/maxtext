@@ -24,7 +24,7 @@ Training & Evaluation:
     model_name=${MODEL_NAME?} load_parameters_path=${CHECKPOINT_PATH?} \
     hf_access_token=${HF_ACCESS_TOKEN?} tokenizer_path=${TOKENIZER_PATH?} \
     per_device_batch_size=1 max_target_length=1024 \
-    eval_interval=2 eval_steps=2 steps=10 profiler=xplane weight_dtype=bfloat16
+    eval_interval=2 eval_steps=2 steps=10 profiler=xplane
 
 Training:
   python3 -m maxtext.trainers.post_train.sft.train_sft src/maxtext/configs/post_train/sft.yml \
@@ -32,7 +32,7 @@ Training:
     model_name=${MODEL_NAME?} load_parameters_path=${CHECKPOINT_PATH?} \
     hf_access_token=${HF_ACCESS_TOKEN?} tokenizer_path=${TOKENIZER_PATH?} \
     per_device_batch_size=1 max_target_length=1024 \
-    eval_interval=-1 steps=10 profiler=xplane weight_dtype=bfloat16
+    eval_interval=-1 steps=10 profiler=xplane
 """
 
 import inspect
@@ -45,6 +45,7 @@ import optax
 import pathwaysutils
 
 from flax import nnx
+from flax.nnx import tracers
 from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
@@ -104,18 +105,36 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
 
     # Capture the graphdef once outside of JIT so that split/merge inside
     # jax.value_and_grad can use a stable (non-traced) structural descriptor.
+    nnx.pop(self.model, nnx.Intermediate)
     graphdef, _, _ = nnx.split(self.model, wrt, ...)
 
-    def train_step(model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any):
+    def train_step(
+        model: nnx.Module,
+        optimizer: nnx.Optimizer,
+        inputs: Any,
+        grad_accumulator: Any = None,
+    ):
       inputs = gen_fn(inputs)
 
       # Split model into differentiable params and non-differentiable rest.
       # Using jax.value_and_grad (not nnx.value_and_grad) avoids nesting NNX
       # transforms inside nnx.jit, which would corrupt outer_index tracking.
+      nnx.pop(model, nnx.Intermediate)
       _, diff_params, rest = nnx.split(model, wrt, ...)
 
       def loss_wrapper(diff_params, rest, **inputs_kw):
-        local_model = nnx.merge(graphdef, diff_params, rest, copy=True)
+        local_model = nnx.merge(graphdef, diff_params, rest)
+
+        # JAX AD tracing ignores non-differentiable variables (like RngCount ints).
+        # They get instantiated with the base/JIT trace instead of the active
+        # LinearizeTrace, causing flax.errors.TraceContextError when mutated later.
+        # We manually update their trace_state to the current AD trace context.
+
+        for _, v in nnx.iter_graph(local_model):
+          if isinstance(v, nnx.Variable) and hasattr(v, "_trace_state"):
+            if not v._trace_state.is_valid():  # pylint: disable=protected-access
+              object.__setattr__(v, "_trace_state", tracers.TraceState())  # pylint: disable=protected-access
+
         out = loss_fn_ref(local_model, **inputs_kw)
         # Capture updated non-param state (e.g. RNG counters) from local_model.
         _, _, new_rest = nnx.split(local_model, wrt, ...)
@@ -129,6 +148,13 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
       (out_val, (aux, new_rest)), grads = grad_fn(diff_params, rest, **inputs)
 
       # Propagate updated non-param state (RNG counters, etc.) back to model.
+      # Fix flax.errors.TraceContextError when returning from jax.value_and_grad
+
+      for _, v in nnx.iter_graph(model):
+        if isinstance(v, nnx.Variable) and hasattr(v, "_trace_state"):
+          if not v._trace_state.is_valid():  # pylint: disable=protected-access
+            object.__setattr__(v, "_trace_state", tracers.TraceState())  # pylint: disable=protected-access
+
       nnx.update(model, new_rest)
 
       # Apply optimizer update. grads has the same nnx.State(wrt) structure
@@ -179,7 +205,9 @@ def get_tunix_config(mt_config):
   return peft_trainer.TrainingConfig(
       eval_every_n_steps=mt_config.eval_interval,
       max_steps=mt_config.steps,
-      gradient_accumulation_steps=mt_config.gradient_accumulation_steps,
+      gradient_accumulation_steps=(
+          mt_config.gradient_accumulation_steps if mt_config.gradient_accumulation_steps > 1 else None
+      ),
       checkpoint_root_directory=mt_config.checkpoint_dir,
       checkpointing_options=checkpointing_options,
       metrics_logging_options=metrics_logging_options,
@@ -240,8 +268,9 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
-
     model, mesh = model_creation_utils.from_pretrained(mt_config)
+
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
     if mt_config.lora.enable_lora:
       model = lora_utils.apply_lora_to_model(model, mesh, mt_config)
 
@@ -255,15 +284,14 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
           optimizer,
       )
 
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
-    training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
-    data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
+    with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
+      training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
+      data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
-    # Provide rules context so 'norm' is translated to mesh axes during maybe_restore
-    with nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+      nnx.pop(model, nnx.Intermediate)
+      if mt_config.lora.lora_restore_path:
+        lora_utils.restore_lora_from_path(model, mt_config)
       trainer = MaxTextPeftTrainer(model, optimizer, tunix_config)
-      if mt_config.lora.lora_restore_path and trainer.train_steps == 0:
-        lora_utils.restore_lora_from_path(trainer.model, mt_config)
       trainer.with_training_hooks(training_hooks)
       trainer.with_data_hooks(data_hooks)
       trainer = use_maxtext_loss_function(trainer, mt_config)

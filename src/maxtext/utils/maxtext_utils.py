@@ -19,7 +19,7 @@ import functools
 import os
 from typing import Sequence
 
-from flax import linen as nn, nnx
+from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.training.train_state import TrainState
 import jax
@@ -166,7 +166,10 @@ def get_shaped_batch(config, batch_sharding=None):
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
-    shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
+    # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
+    # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
+    if "llama4" in config.model_name:
+      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)
@@ -1600,7 +1603,7 @@ def get_abstract_param(model, config):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32)
+      encoder_images=np.ones(image_shape, dtype=jnp.int32)  # pyrefly: ignore[no-matching-overload]
       if config.use_multimodal
       else None,  # pyrefly: ignore[no-matching-overload]
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
@@ -1721,6 +1724,43 @@ def setup_initial_state(
           in_shardings=None,
           out_shardings=state_mesh_shardings,
       )()
+      if raw_params:
+        # Params-only load (base model weights): overlay restored weights, keep init for everything else.
+        target_model = (
+            state["model"]
+            if (isinstance(state, (nnx.State, dict)) and "model" in state)
+            else getattr(state, "model", state)
+        )
+        raw_model_params = (
+            raw_params["model"] if (isinstance(raw_params, (nnx.State, dict)) and "model" in raw_params) else raw_params
+        )
+        if hasattr(raw_model_params, "to_pure_dict"):
+          raw_model_params = raw_model_params.to_pure_dict()
+        if isinstance(raw_model_params, dict) and "params" in raw_model_params:
+          raw_model_params = raw_model_params["params"]
+        target_pure = target_model.to_pure_dict() if hasattr(target_model, "to_pure_dict") else target_model
+
+        def _reshard_aligned(target, raw):
+          """Aligns raw arrays with target device shardings using Flax's native flatten_dict utilities."""
+          target_flat = traverse_util.flatten_dict(target)
+          raw_flat = traverse_util.flatten_dict(raw)
+
+          res_flat = {}
+          for k, target_val in target_flat.items():
+            if k in raw_flat and not isinstance(raw_flat[k], jax.ShapeDtypeStruct):
+              raw_val = raw_flat[k]
+              if hasattr(target_val, "sharding") and target_val.sharding is not None:
+                res_flat[k] = jax.device_put(raw_val, target_val.sharding)
+              else:
+                res_flat[k] = raw_val
+            else:
+              res_flat[k] = target_val
+
+          return traverse_util.unflatten_dict(res_flat)
+
+        sharded_aligned = _reshard_aligned(target_pure, raw_model_params)
+        nnx.update(target_model, sharded_aligned)
+
       if restored:
         is_emergency = isinstance(
             checkpoint_manager,
@@ -1729,21 +1769,29 @@ def setup_initial_state(
                 emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
             ),
         )
-        # data_iterator state is updated in place during restore.
-        # The restore already overlaid the checkpoint onto a copy of the abstract, so a leaf it
-        # didn't carry is still an unmaterialized placeholder. Fill those from the fresh init: a
-        # present leaf comes from the checkpoint, an absent one keeps its init value.
         overlay = restored if is_emergency else restored["items"]
-        merged = jax.tree.map(
-            lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
-            overlay.to_pure_dict(),
-            state.to_pure_dict(),
-            is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
-        )
+        overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
+
+        def _has_shape_dtype_struct(tree):
+          return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
+
+        def _merge_restored_overlay(ckpt_node, init_node):
+          """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
+          if _has_shape_dtype_struct(ckpt_node):
+            if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
+              res = {}
+              for k in init_node:
+                if k in ckpt_node:
+                  res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
+                else:
+                  res[k] = init_node[k]
+              return res
+            else:
+              return init_node
+          return ckpt_node
+
+        merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
         nnx.replace_by_pure_dict(state, merged)
-      elif raw_params:
-        # params-only load: overlay the restored weights, keep init for everything else.
-        nnx.update(state.model, raw_params)
     else:
       if restored:
         if isinstance(
@@ -1883,10 +1931,48 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
     named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
+
+    def _to_abstract_var(a_var, s_var):
+      a_val = a_var.get_value()
+      s_val = getattr(s_var, "sharding", None) if isinstance(s_var, nnx.Variable) else s_var
+      if s_val is None and isinstance(s_var, nnx.Variable):
+        s_val = s_var.get_value()
+
+      def _extract_primary_sharding(s):
+        if isinstance(s, (jax.sharding.Sharding, jax.sharding.PartitionSpec)):
+          return s
+        if hasattr(s, "qvalue"):
+          return _extract_primary_sharding(s.qvalue)
+        leaves = jax.tree.leaves(s)
+        return leaves[0] if leaves else s
+
+      def _make_abstract_leaf(leaf_a, leaf_s):
+        leaf_s = _extract_primary_sharding(leaf_s)
+        if hasattr(leaf_s, "spec") and len(leaf_a.shape) != len(leaf_s.spec):
+          leaf_s = jax.sharding.NamedSharding(leaf_s.mesh, jax.sharding.PartitionSpec(*leaf_s.spec[: len(leaf_a.shape)]))
+        return jax.ShapeDtypeStruct(leaf_a.shape, leaf_a.dtype, sharding=leaf_s)
+
+      if type(a_val) in (jax.Array, jax.ShapeDtypeStruct) or (hasattr(a_val, "shape") and not hasattr(a_val, "qvalue")):
+        new_val = _make_abstract_leaf(a_val, s_val)
+      else:
+        s_tree = (
+            jax.tree.map(lambda _: s_val, a_val)
+            if isinstance(s_val, (jax.sharding.Sharding, jax.sharding.PartitionSpec))
+            else s_val
+        )
+        new_val = jax.tree.map(
+            _make_abstract_leaf,
+            a_val,
+            s_tree,
+            is_leaf=lambda x: hasattr(x, "shape") and hasattr(x, "dtype"),
+        )
+      return a_var.replace(value=new_val)
+
     abstract_state = jax.tree.map(
-        lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
+        _to_abstract_var,
         abs_var_state,
         named_sharding_state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
   state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(abstract_state)

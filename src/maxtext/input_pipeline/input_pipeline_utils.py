@@ -173,8 +173,11 @@ def is_conversational(features, data_columns):
     messages = features[column]
     if isinstance(messages, datasets.Sequence):
       if (
-          isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature
-      ):  # pyrefly: ignore[missing-attribute]
+          # pyrefly: ignore[missing-attribute]
+          isinstance(messages.feature, dict)
+          and "role" in messages.feature
+          and "content" in messages.feature  # pyrefly: ignore[missing-attribute]
+      ):
         return True
 
   return False
@@ -496,6 +499,15 @@ def make_tfrecord_iter_dataset(path: str):
   if path.startswith("gs://"):
     return GCSTFRecordIterDataset(path)
   return TFRecordIterDataset(path)
+
+
+def make_parquet_iter_dataset(path: str, hf_access_token: str | None = None):
+  """Returns the appropriate ParquetIterDataset for local or HF paths."""
+  if path.startswith("hf://"):
+    from huggingface_hub import HfFileSystem  # pylint: disable=import-outside-toplevel
+
+    return grain.experimental.ParquetIterDataset(path, filesystem=HfFileSystem(token=hf_access_token))
+  return grain.experimental.ParquetIterDataset(path)
 
 
 def compute_file_sharding(file_count, host_index, host_count):
@@ -843,17 +855,20 @@ class PadOrTrimToMaxLength(grain.MapTransform):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
         element[f"{data_column}_segmentation"] = (
-            element[data_column] != self.pad_id
+            element[data_column] != self.pad_id  # pyrefly: ignore[unsupported-operation]
         )  # pyrefly: ignore[unsupported-operation]
-        element[f"{data_column}_segmentation"] = element[f"{data_column}_segmentation"].astype(
+        # pyrefly: ignore[missing-attribute]
+        element[f"{data_column}_segmentation"] = element[
+            f"{data_column}_segmentation"
+        ].astype(  # pyrefly: ignore[missing-attribute]
             np.int32
-        )  # pyrefly: ignore[missing-attribute]
+        )
         element[f"{data_column}_position"] = np.arange(
-            element[data_column].shape[0], dtype=np.int32
+            element[data_column].shape[0], dtype=np.int32  # pyrefly: ignore[missing-attribute]
         )  # pyrefly: ignore[missing-attribute]
         if self.add_true_length:
           element[f"{data_column}_true_length"] = np.array(
-              [element[data_column].shape[0]], dtype=np.int32
+              [element[data_column].shape[0]], dtype=np.int32  # pyrefly: ignore[missing-attribute]
           )  # pyrefly: ignore[missing-attribute]
 
     for key, _ in element.items():
