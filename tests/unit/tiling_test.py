@@ -967,3 +967,35 @@ class VocabTilingNNXTest(unittest.TestCase):
           loss, base_loss, rtol=self.rtol, atol=self.atol
       ), f"num_vocab_tiling={n}: loss diverges from n=2 baseline ({loss} vs {base_loss})"
       self._assert_pytrees_close(base_grads, grads, f"num_vocab_tiling={n}: grads diverge from n=2 baseline.")
+
+  @pytest.mark.tpu_only
+  def test_nnx_vocab_tiling_grad_applies_loss_cotangent(self):
+    """A non-unit incoming cotangent must reach the hidden_states gradient, not only the
+    head params. The shared loss closures return the unnormalized total_loss, so every
+    other test seeds the cotangent at exactly 1.0 and cannot observe a missing multiply."""
+    cfg, model = self._build_cfg_and_model(num_vocab_tiling=4)
+    hidden_states, labels, segmentation = self._make_inputs(cfg)
+    graphdef, params, rest = self._split_and_axes(cfg, model)
+    data = {"targets": labels, "targets_segmentation": segmentation}
+    # train.py divides xent_sum by total_weights, which is what makes the cotangent != 1.0.
+    scale = 1.0 / jnp.sum(segmentation != 0)
+
+    def _ref(p, h):
+      local_model = nnx.merge(graphdef, p, rest, copy=True)
+      logits = local_model.logits_from_hidden_states_for_vocab_tiling(h, True, "train")
+      one_hot = jax.nn.one_hot(labels, cfg.vocab_size)
+      xent_ref, _ = max_utils.cross_entropy_with_logits(logits, one_hot, z_loss=cfg.z_loss_multiplier)
+      return jnp.sum(xent_ref * (segmentation != 0)) * scale
+
+    def _tile(p, h):
+      local_model = nnx.merge(graphdef, p, rest, copy=True)
+      total_loss, _ = vocab_tiling_nnx_loss(local_model, h, data, cfg, is_train=True)
+      return total_loss * scale
+
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      ref_grad_h = self._g(_ref, argnums=1)(params, hidden_states)
+      tile_grad_h = self._g(_tile, argnums=1)(params, hidden_states)
+
+    assert jnp.allclose(
+        ref_grad_h, tile_grad_h, rtol=self.rtol, atol=self.atol
+    ), "grad_hidden_states ignored the incoming loss cotangent"
