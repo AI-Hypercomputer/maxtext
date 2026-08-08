@@ -1104,7 +1104,7 @@ class HardwareAndMesh(BaseModel):
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
   context_parallel_strategy: str = Field(
       "all_gather",
-      description="Strategy for context parallelism ('all_gather' or 'ring').",
+      description="Strategy for context parallelism ('all_gather', 'ring', or 'ulysses').",
   )
   context_parallel_reorder_strategy: ReorderStrategy = Field(
       ReorderStrategy.AUTO,
@@ -3628,6 +3628,9 @@ class MaxTextConfig(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
     context_parallel_strategy = self.context_parallel_strategy.lower()
+    if context_parallel_strategy not in ("all_gather", "ring", "ulysses"):
+      raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', or 'ulysses'.")
+    self.context_parallel_strategy = context_parallel_strategy
     if (
         context_parallel_strategy == "ring"
         and "gpu" not in self.hardware
@@ -3688,6 +3691,67 @@ class MaxTextConfig(
           f"ring_scan_unroll={self.ring_scan_unroll} was specified, but is only supported when "
           "context_parallel_strategy='ring'."
       )
+    if context_parallel_strategy == "ulysses":
+      if self.hardware != "tpu":
+        raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
+      if self.context_sharding != "context":
+        raise ValueError("TPU Ulysses attention requires context_sharding='context'.")
+      ici_context_parallel_size = self.ici_context_parallelism
+      dcn_context_parallel_size = self.dcn_context_parallelism
+      if ici_context_parallel_size <= 0 or dcn_context_parallel_size <= 0:
+        raise ValueError(
+            "TPU Ulysses attention requires explicit positive ici/dcn context parallelism values; "
+            "inferred (-1) sizes are not supported."
+        )
+      if context_parallel_size <= 1:
+        raise ValueError("TPU Ulysses attention requires context_parallel_size > 1.")
+      if dcn_context_parallel_size != 1:
+        raise ValueError("TPU Ulysses attention does not support dcn context parallelism yet.")
+      if self.attention != "flash":
+        raise ValueError("TPU Ulysses attention requires attention=flash.")
+      if not self.use_tokamax_splash:
+        raise ValueError("TPU Ulysses attention requires use_tokamax_splash=True.")
+      if self.use_jax_splash:
+        raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
+      if self.attention_type != "global":
+        raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
+      if self.packing:
+        raise ValueError("TPU Ulysses attention does not support packing yet.")
+      if self.context_parallel_load_balance:
+        raise ValueError("TPU Ulysses attention does not support context_parallel_load_balance=True.")
+      if self.use_ragged_attention:
+        raise ValueError("TPU Ulysses attention does not support ragged attention.")
+      if self.attention_sink:
+        raise ValueError("TPU Ulysses attention does not support attention sinks.")
+      if self.use_indexer:
+        raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
+      if self.use_chunked_prefill:
+        raise ValueError("TPU Ulysses attention does not support chunked prefill yet.")
+      if self.use_multimodal:
+        raise ValueError("TPU Ulysses attention does not support multimodal attention.")
+      if self.enable_dropout and self.dropout_rate > 0.0:
+        raise ValueError("TPU Ulysses attention does not support dropout yet.")
+      if self.dq_reduction_steps not in (0, 3):
+        raise ValueError("TPU Ulysses attention requires dq_reduction_steps to be 0 or 3.")
+      if self.use_qk_clip:
+        raise ValueError("TPU Ulysses attention does not support QK-Clip statistics yet.")
+      if self.max_target_length % context_parallel_size != 0:
+        raise ValueError(
+            "TPU Ulysses attention requires max_target_length "
+            f"({self.max_target_length}) to be divisible by context_parallel_size ({context_parallel_size})."
+        )
+      if self.num_query_heads % context_parallel_size != 0:
+        raise ValueError(
+            "TPU Ulysses attention requires num_query_heads "
+            f"({self.num_query_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+        )
+      if self.num_kv_heads == 1:
+        raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
+      if self.num_kv_heads % context_parallel_size != 0:
+        raise ValueError(
+            "TPU Ulysses attention requires num_kv_heads "
+            f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+        )
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.

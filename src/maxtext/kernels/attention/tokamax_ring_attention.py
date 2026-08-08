@@ -28,6 +28,7 @@ from jax.experimental import pallas as pl
 import numpy as np
 
 from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.kernels.attention import context_parallel_utils
 from maxtext.kernels.tokamax_splash_attention import ring_attention_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
@@ -39,42 +40,19 @@ def is_context_parallel_ring_requested(config: Any) -> bool:
   return config.context_parallel_strategy.lower() == "ring"
 
 
-def _mesh_axes_for_dim(axis_names: Any) -> tuple[Any, ...]:
-  if axis_names is None:
-    return ()
-  if isinstance(axis_names, str):
-    return (axis_names,)
-  return tuple(axis for axis in axis_names if axis is not None)
-
-
-def _mesh_axes_size(mesh: Any, axes: tuple[Any, ...]) -> int:
-  size = 1
-  for axis in axes:
-    if axis not in mesh.shape:
-      raise ValueError(f"TPU Tokamax ring attention requires mesh axis {axis!r} to exist.")
-    size *= mesh.shape[axis]
-  return size
-
-
 def with_sequence_axis(axis_names: Any, ring_axis: str, sequence_dim: int) -> Any:
   """Returns axis names with the sequence dimension set to the ring axis."""
   if axis_names is None:
     return None
   if len(axis_names) <= sequence_dim:
     raise ValueError("TPU Tokamax ring attention expects a sequence sharding dimension.")
-  axes = list(axis_names)
-  existing_sequence_axes = _mesh_axes_for_dim(axes[sequence_dim])
+  existing_sequence_axes = context_parallel_utils.mesh_axes_for_dim(axis_names[sequence_dim])
   if existing_sequence_axes and existing_sequence_axes != (ring_axis,):
     raise ValueError(
         "TPU Tokamax ring attention expects the existing sequence sharding to be "
         f"unsharded or exactly {(ring_axis,)}, got {existing_sequence_axes}."
     )
-  axes[sequence_dim] = ring_axis
-  if isinstance(axis_names, jax.sharding.PartitionSpec):
-    return jax.sharding.PartitionSpec(*axes, unreduced=axis_names.unreduced, reduced=axis_names.reduced)
-  if isinstance(axis_names, tuple):
-    return tuple(axes)
-  return axes
+  return context_parallel_utils.with_axis_on_dim(axis_names, ring_axis, sequence_dim)
 
 
 def _validate_ring_axis_only_on_sequence(
@@ -88,7 +66,7 @@ def _validate_ring_axis_only_on_sequence(
   for dim, axis_name in enumerate(axis_names):
     if dim == sequence_dim:
       continue
-    dim_axes = _mesh_axes_for_dim(axis_name)
+    dim_axes = context_parallel_utils.mesh_axes_for_dim(axis_name)
     if ring_axis in dim_axes:
       raise ValueError(
           "TPU Tokamax ring attention requires the context axis to appear only "
@@ -104,8 +82,8 @@ def validate_dkv_sharding(
     dkv_dim_kv: int,
 ) -> None:
   """Validates that the head-dim/D_KV dimension stays local for ring attention."""
-  q_dkv_axes = _mesh_axes_for_dim(axis_names_q[dkv_dim_q])
-  kv_dkv_axes = _mesh_axes_for_dim(axis_names_kv[dkv_dim_kv])
+  q_dkv_axes = context_parallel_utils.mesh_axes_for_dim(axis_names_q[dkv_dim_q])
+  kv_dkv_axes = context_parallel_utils.mesh_axes_for_dim(axis_names_kv[dkv_dim_kv])
   if q_dkv_axes or kv_dkv_axes:
     raise ValueError(
         "TPU Tokamax ring attention does not support sharding the D_KV/head-dim "
@@ -168,8 +146,8 @@ def validate_ring_mesh_axis(
       ring_axis=ring_axis,
   )
   expected_axes = (ring_axis,)
-  q_sequence_axes = _mesh_axes_for_dim(axis_names_q[sequence_dim_q])
-  key_value_sequence_axes = _mesh_axes_for_dim(axis_names_kv[sequence_dim_kv])
+  q_sequence_axes = context_parallel_utils.mesh_axes_for_dim(axis_names_q[sequence_dim_q])
+  key_value_sequence_axes = context_parallel_utils.mesh_axes_for_dim(axis_names_kv[sequence_dim_kv])
   if q_sequence_axes != expected_axes:
     raise ValueError(
         "TPU Tokamax ring attention requires Q sequence sharding to be exactly "
@@ -193,10 +171,10 @@ def validate_head_sharding(
     head_dim_kv: int,
 ) -> None:
   """Validates that local head layout preserves GQA/MQA head mapping."""
-  q_head_axes = _mesh_axes_for_dim(axis_names_q[head_dim_q])
-  kv_head_axes = _mesh_axes_for_dim(axis_names_kv[head_dim_kv])
-  q_head_shards = _mesh_axes_size(mesh, q_head_axes)
-  kv_head_shards = _mesh_axes_size(mesh, kv_head_axes)
+  q_head_axes = context_parallel_utils.mesh_axes_for_dim(axis_names_q[head_dim_q])
+  kv_head_axes = context_parallel_utils.mesh_axes_for_dim(axis_names_kv[head_dim_kv])
+  q_head_shards = context_parallel_utils.mesh_axes_size(mesh, q_head_axes, label="TPU Tokamax ring attention")
+  kv_head_shards = context_parallel_utils.mesh_axes_size(mesh, kv_head_axes, label="TPU Tokamax ring attention")
   if num_query_heads % q_head_shards != 0:
     raise ValueError(
         "TPU Tokamax ring attention requires num_query_heads "

@@ -1151,7 +1151,7 @@ cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: true
-context_parallel_strategy: "all_gather" # "all_gather" or "ring"
+context_parallel_strategy: "all_gather" # "all_gather", "ring", or "ulysses"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
 
