@@ -368,6 +368,7 @@ def _fwd_run_tokamax_v2(
     quantization_rule: qwix.QtRule | None = None,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
+  # if transpose_rhs=False, rhs is [g, k, n], remain unchanged
   # if transpose_rhs=True, rhs [g, n, k], explicit transpose to [g, k, n]
   rhs_operand = rhs if not transpose_rhs else rhs.swapaxes(1, 2)
   rhs_scale = None
