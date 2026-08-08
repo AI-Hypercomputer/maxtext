@@ -1063,6 +1063,14 @@ class Qwen3Next(BaseModel):
       64,
       description="Chunk size for the parallel scan algorithm in the Gated Delta Net.",
   )
+  gdn_matmul_precision: MatmulPrecision = Field(
+      MatmulPrecision.HIGHEST,
+      description=(
+          "Precision for the matmuls inside the Gated Delta Rule kernels. These matmuls are deliberately "
+          "computed on float32 operands, and 'highest' is what makes that upcast meaningful on TPU, so this "
+          "defaults to 'highest' to preserve the kernel's original behavior."
+      ),
+  )
   use_qk_norm_in_gdn: bool = Field(
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
