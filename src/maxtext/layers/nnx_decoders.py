@@ -438,6 +438,13 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
 
+    if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
+      self.hc_head = mhc.DeepSeek4HyperHead(
+          config=config,
+          mesh=self.mesh,
+          rngs=self.rngs,
+      )
+
     self._init_decoder_layers(decoder_block_classes, rngs, mesh)
 
   def _init_decoder_layers(self, decoder_block_classes, rngs, mesh):
@@ -1969,8 +1976,11 @@ class NNXDecoder(nnx.Module):
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     if getattr(cfg, "mhc_expansion_rate", 1) > 1:
-      # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
-      hidden_state = mhc_reduce(y)
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+        hidden_state = self.hc_head(y)
+      else:
+        # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+        hidden_state = mhc_reduce(y)
     else:
       hidden_state = y
 

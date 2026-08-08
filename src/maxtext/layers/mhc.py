@@ -313,4 +313,98 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     return res_out + post_out, metadata
 
 
+class DeepSeek4HyperHead(nnx.Module):
+  """Implements DeepSeek4 Hyper Head.
 
+  Args:
+      config: Configuration object containing hyperparameters.
+      dim: The feature dimensionality.
+      mesh: The hardware mesh for sharding.
+      rngs: Random number generation in NNX.
+  """
+
+  def __init__(
+      self,
+      config: Config,
+      dim: int,
+      mesh: Mesh,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.dim = dim
+    self.rngs = rngs
+    self.mesh = mesh
+    self.dtype = self.config.dtype
+    self.weight_dtype = self.config.weight_dtype
+    self.matmul_precision = jax.lax.Precision(self.config.matmul_precision)
+    self.hc_mult = self.config.mhc_expansion_rate
+
+    # Norm layer
+    self.input_norm = RMSNorm(
+        num_features=self.hc_mult * self.dim,
+        dtype=self.config.dtype,
+        weight_dtype=self.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=self.config.normalization_layer_epsilon,
+        rngs=self.rngs,
+    )
+
+    # Weight matrices
+    scale_init = nd_dense_init(1.0, "fan_in", "normal")
+    in_axis = 0
+    out_axis = 1
+    weight_sharding_axis_name = ("activation_embed", None)
+
+    self.hc_fn = nnx.Param(
+        scale_init(
+            self.rngs.params(),
+            (self.hc_mult * self.dim, self.hc_mult),
+            self.weight_dtype,
+            in_axis=in_axis,
+            out_axis=out_axis,
+        ),
+        out_sharding=weight_sharding_axis_name,
+    )
+
+    # Scalars
+    self.hc_base = nnx.Param(
+        default_scalar_init(self.rngs.params(), (self.hc_mult,), self.weight_dtype),
+        out_sharding=(None,),
+    )
+    self.hc_scale = nnx.Param(
+        default_scalar_init(self.rngs.params(), (1,), self.weight_dtype),
+        out_sharding=(None,),
+    )
+
+  def __call__(self, x: Array) -> Array:
+    """Applying manifold-constrained hyper connection based on callable function.
+
+    Args:
+        x: Input tensor of shape `(batch..., expansion_rate, dim)`.
+
+    Returns:
+        The processed tensor, maintaining the shape of `x`.
+    """
+    b, s, k, d = x.shape
+
+    with jax.named_scope("mhc_norm"):
+      # 1. Flatten the tensor, and RMS normalization
+      norm_x = self.input_norm(jnp.reshape(x, (b, s, k * d)))
+
+    # Fused Projections
+    hc_fn = jnp.asarray(self.hc_fn[...], self.dtype)
+    hc_base = jnp.asarray(self.hc_base[...], self.dtype)
+    hc_scale = jnp.asarray(self.hc_scale[...], self.dtype)
+
+    # MatMul on normalized input
+    h = jnp.einsum("bsm,mn -> bsn", norm_x, hc_fn, precision=self.matmul_precision)
+
+    # 2. Pre mapping
+    intermediate = hc_scale * h + hc_base[None, None, :]
+    mapping = jax.nn.sigmoid(intermediate)
+
+    # Moving away from einsum seems to allow XLA to perform better fusions
+    # bskd, bsk -> bsd
+    layer_input = jnp.sum(x * jnp.expand_dims(mapping, axis=3), axis=2)
+
+    return layer_input
