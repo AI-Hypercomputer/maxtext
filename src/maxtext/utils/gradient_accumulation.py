@@ -176,7 +176,12 @@ def gradient_accumulation_loss_and_grad(
     unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
-  raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
+  divisor = (
+      config.gradient_accumulation_steps
+      if getattr(config, "use_tunix_gradient_accumulation", False)
+      else grad_and_loss["total_weights"]
+  )
+  raw_grads = jax.tree_util.tree_map(lambda arr: arr / divisor, raw_grads)
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
 
   if is_nnx:
