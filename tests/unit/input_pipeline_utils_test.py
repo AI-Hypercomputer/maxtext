@@ -14,8 +14,10 @@
 
 """Unit tests for input_pipeline_utils."""
 
+import numpy as np
 import unittest
 
+from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline.input_pipeline_utils import compute_file_sharding
 
 
@@ -105,6 +107,89 @@ class ComputeFileShardingUndersizedCaseTest(unittest.TestCase):
     # 2 files, 3 hosts: file 1 has only one reader (host 1) → no row split needed
     _, _, row_shard = compute_file_sharding(2, host_index=1, host_count=3)
     self.assertIsNone(row_shard)
+
+
+class GenerateDocSegmentIdsTest(unittest.TestCase):
+  """Direct tests for mmap EOD-aware segmentation."""
+
+  def test_reset_attention_mask_keeps_eod_in_previous_segment(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(eod_id=99, reset_attention_mask=True)
+    result = transform.map({"inputs": np.array([10, 99, 20, 21, 99, 30], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 2, 2, 2, 3], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 0, 1, 2, 0], dtype=np.int32))
+
+  def test_no_attention_reset_can_mask_eod_loss(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(
+        eod_id=99,
+        reset_attention_mask=False,
+        eod_mask_loss=True,
+    )
+    result = transform.map({"targets": np.array([10, 99, 20, 99], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["targets_segmentation"], np.array([1, 0, 1, 0], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets_position"], np.array([0, 1, 2, 3], dtype=np.int32))
+
+  def test_short_eod_segments_are_merged(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(
+        eod_id=99,
+        reset_attention_mask=True,
+        min_segment_length=3,
+    )
+    result = transform.map({"inputs": np.array([10, 99, 20, 99, 30, 31, 32], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 1, 1, 2, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2, 3, 0, 1, 2], dtype=np.int32))
+
+  def test_empty_columns_get_empty_annotations(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(eod_id=99)
+    result = transform.map({"inputs": np.array([], dtype=np.int32)})
+
+    self.assertEqual(result["inputs_segmentation"].shape, (0,))
+    self.assertEqual(result["inputs_position"].shape, (0,))
+
+
+class MegatronSplitInputsTargetsTest(unittest.TestCase):
+  """Direct tests for mmap_npy L+1 sample splitting."""
+
+  def test_split_preserves_final_real_target_and_positions(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(eod_id=99)
+    result = transform.map({"text": np.array([10, 99, 20, 21, 99, 30], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs"], np.array([10, 99, 20, 21, 99], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets"], np.array([99, 20, 21, 99, 30], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 2, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets_segmentation"], np.ones(5, dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 0, 1, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets_position"], result["inputs_position"])
+
+  def test_eod_mask_loss_masks_by_input_token(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(eod_id=99, eod_mask_loss=True)
+    result = transform.map({"text": np.array([10, 99, 20, 99, 30], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["targets_segmentation"], np.array([1, 0, 1, 0], dtype=np.int32))
+
+  def test_no_attnmask_dataset_id_disables_reset_for_that_sample(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(
+        eod_id=99,
+        reset_attention_mask=True,
+        no_attnmask_dataset_ids={7},
+    )
+    result = transform.map({"text": np.array([10, 99, 20, 30], dtype=np.int32), "dataset_id": np.int32(7)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.ones(3, dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2], dtype=np.int32))
+
+  def test_short_segments_are_merged_after_split(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(
+        eod_id=99,
+        reset_attention_mask=True,
+        min_segment_length=3,
+    )
+    result = transform.map({"text": np.array([10, 99, 20, 99, 30, 31, 32, 40], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 1, 1, 2, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2, 3, 0, 1, 2], dtype=np.int32))
 
 
 if __name__ == "__main__":
