@@ -1188,6 +1188,12 @@ freeze_vision_encoder_params: true
 freeze_audio_encoder_params: true
 dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
+# Gemma-4 vision only: apply the per-projection activation clip bounds carried in the
+# reference checkpoint (self_attn.{q,k,v,o}_proj and mlp.{gate,up,down}_proj each have
+# scalar {input,output}_{min,max}). A prerequisite for Gemma-4 E2B/E4B image parity
+# (necessary but not on its own sufficient); no-op for other vision encoders. Bounds are
+# checkpoint-resident, non-trainable scalars.
+use_clipped_linears_for_vit: false
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding, can be multiple paths separated by comma, exp "/path/image1.jpg,/path/image2.jpg"
 video_path: "" # Local video path used for decoding, can be multiple paths separated by comma, exp "/path/video1.mp4,/path/video2.mp4"

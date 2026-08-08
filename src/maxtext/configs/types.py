@@ -2137,6 +2137,15 @@ class MultimodalGeneral(BaseModel):
 
   use_multimodal: bool = Field(False, description="Enable multimodal capabilities.")
   attention_for_vit: str = Field("dot_product", description="The attention algorithm to use for vision encoder.")
+  use_clipped_linears_for_vit: bool = Field(
+      False,
+      description=(
+          "Gemma-4 vision only: apply the per-projection activation clip bounds carried in the reference "
+          "checkpoint (self_attn.{q,k,v,o}_proj and mlp.{gate,up,down}_proj each have scalar "
+          "{input,output}_{min,max}). A prerequisite for Gemma-4 E2B/E4B image parity (necessary but not "
+          "on its own sufficient); no-op for other encoders."
+      ),
+  )
   vision_encoder_block: VisionEncoderBlockType = Field(
       VisionEncoderBlockType.NONE,
       description="The style of VisionEncoderBlock to use (e.g., 'gemma3', 'llama4').",
