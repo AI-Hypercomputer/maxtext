@@ -388,15 +388,12 @@ param_scan_axis: 1
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla, full, compressed, block_diffusion
+attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
 share_kv_projections: false # Note: Not compatible with attention_type='mla'
 attention_bias: false # If true, adds a learnable bias to the query, key, and value projections
 attention_sink: false
 sliding_window_size: 0
 chunk_attn_window_size: 0
-# Token block size B for block-causal attention in Block Diffusion (arXiv:2503.09573).
-# Tokens attend bidirectionally within a block and causally across blocks.
-causal_block_size: 32
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 z_loss_multiplier: 0.0
@@ -1119,7 +1116,6 @@ sa_block_kv_dkv_compute: 512
 sa_block_q_dq: 512
 sa_block_kv_dq: 512
 sa_use_fused_bwd_kernel: false
-sa_bwd_dkv_megacore: false  # megacore-parallel kv-head groups in the static dkv grid
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
@@ -1353,4 +1349,5 @@ elastic_backup_kind: "snapshot"
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
+
 
