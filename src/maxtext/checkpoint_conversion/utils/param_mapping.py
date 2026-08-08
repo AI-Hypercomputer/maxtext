@@ -3123,7 +3123,9 @@ def GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers
           }
       )
 
-  # TODO: gemma4-small multimodal not yet supported — vision-encoder mappings below are dead.
+  # Gemma-4 E2B/E4B vision-encoder param mapping. Active when use_multimodal is set;
+  # the clipped-linears activation clip bounds are additionally mapped when
+  # use_clipped_linears_for_vit is enabled (required for image parity on E2B/E4B).
   if maxtext_config.use_multimodal and vcfg:
     nvis = vcfg.get("num_hidden_layers", 0)
     mapping.update(
@@ -3179,6 +3181,23 @@ def GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers
               f"{prefix}-mlp-wo-kernel": f"{hf_prefix}.mlp.down_proj.linear.weight",
           }
       )
+      # Gemma-4 vision clipped-linears: per-projection activation clip bounds
+      # (scalar {input,output}_{min,max}) carried in the reference checkpoint.
+      # Only mapped when the clipped-linears path is enabled; the nnx leaves live
+      # at <proj>_clip.{input,output}_{min,max} under attention/mlp.
+      if getattr(maxtext_config, "use_clipped_linears_for_vit", False):
+        _clip_proj = {
+            "attention-q_clip": f"{hf_prefix}.self_attn.q_proj",
+            "attention-k_clip": f"{hf_prefix}.self_attn.k_proj",
+            "attention-v_clip": f"{hf_prefix}.self_attn.v_proj",
+            "attention-o_clip": f"{hf_prefix}.self_attn.o_proj",
+            "mlp-gate_clip": f"{hf_prefix}.mlp.gate_proj",
+            "mlp-up_clip": f"{hf_prefix}.mlp.up_proj",
+            "mlp-down_clip": f"{hf_prefix}.mlp.down_proj",
+        }
+        for mt_sub, hf_proj in _clip_proj.items():
+          for bound in ("input_min", "input_max", "output_min", "output_max"):
+            mapping[f"{prefix}-{mt_sub}-{bound}"] = f"{hf_proj}.{bound}"
 
   return {k: v for k, v in mapping.items() if v is not None}
 
