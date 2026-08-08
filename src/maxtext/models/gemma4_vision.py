@@ -16,6 +16,8 @@
 """Vision transformer implementation for Gemma4."""
 
 from typing import cast
+import functools
+import operator
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -28,6 +30,108 @@ from maxtext.layers import initializers
 from maxtext.layers import linears
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import normalizations
+
+
+# =============================================================================
+# Gemma-4 vision clipped-linears (Navi upstream contribution)
+# -----------------------------------------------------------------------------
+# The Gemma-4 E2B/E4B vision tower ships per-projection activation clip bounds in
+# the reference (HF) checkpoint: for each of the 7 vision projections
+# (self_attn.{q,k,v,o}_proj and mlp.{gate,up,down}_proj) in each of the 16 encoder
+# blocks, a scalar {input_min,input_max,output_min,output_max} = 16*7*4 = 448
+# checkpoint tensors. The reference forward clamps each projection's input by
+# [input_min,input_max] and its output by [output_min,output_max]. Omitting the
+# clamps produces large activation drift in the image span (empirically KL 4-17
+# on a 340-token teacher-forced parity harness), because a handful of vision
+# activations blow up without the trained saturation. Upstream MaxText marks
+# E2B/E4B multimodal "not yet supported" and does not model these bounds.
+#
+# This module adds them as OPT-IN, checkpoint-resident, NON-TRAINABLE scalars,
+# gated on ``config.use_clipped_linears_for_vit`` (exact no-op when False).
+# Design: plain ``nnx.Param`` bounds (so they map to the canonical ``params``
+# collection and round-trip through the nnx->linen->orbax checkpoint path), plus
+# a leaf-PATH optimizer-freeze mask so the 448 bounds are excluded from optimizer
+# updates and weight decay without a custom nnx.Variable subclass (subclasses are
+# renamed by the linen bridge and silently dropped from the saved checkpoint).
+# A NaN sentinel + ``validate_clip_bounds`` hard-fails on a missing/non-finite
+# bound rather than silently degrading to an identity clamp.
+
+# Leaf-name tokens that identify a clip-bound scalar in a flattened params tree.
+_CLIP_LEAF_TOKENS = ("q_clip", "k_clip", "v_clip", "o_clip", "gate_clip", "up_clip", "down_clip")
+_CLIP_BOUND_NAMES = ("input_min", "input_max", "output_min", "output_max")
+
+
+def _mk_clip_bound(init_val=jnp.nan):
+  """A checkpoint-resident scalar clip bound as a plain ``nnx.Param`` (maps to the
+  canonical ``params`` collection; NaN sentinel marks an unloaded bound)."""
+  return nnx.Param(jnp.asarray(init_val, dtype=jnp.float32))
+
+
+def _is_clip_bound_path(path) -> bool:
+  """True iff a flattened-params key path addresses a clip-bound scalar."""
+  s = "/".join(str(getattr(p, "key", p)) for p in path) if not isinstance(path, str) else path
+  return any(tok in s for tok in _CLIP_LEAF_TOKENS) and any(b in s for b in _CLIP_BOUND_NAMES)
+
+
+def clip_optimizer_freeze_mask(params_tree):
+  """Bool pytree (same structure as ``params_tree``): True for TRAINABLE leaves,
+  False for the immutable clip bounds. Feed to ``optax.masked``/``multi_transform``
+  so the bounds get ``set_to_zero()`` updates. Path-based, so it survives the
+  nnx->linen->orbax round-trip regardless of leaf type erasure."""
+  flat = jax.tree_util.tree_flatten_with_path(params_tree)[0]
+  leaves_mask = [not _is_clip_bound_path(path) for path, _ in flat]
+  treedef = jax.tree_util.tree_structure(params_tree)
+  return jax.tree_util.tree_unflatten(treedef, leaves_mask)
+
+
+def _clip_in(x, cb):
+  """clamp(x, input_min, input_max) in x's dtype; no-op if ``cb`` is None."""
+  if cb is None:
+    return x
+  xd = x.dtype
+  return jnp.clip(x, cb.input_min.value.astype(xd), cb.input_max.value.astype(xd))
+
+
+def _clip_out(y, cb):
+  """clamp(y, output_min, output_max) in y's dtype; no-op if ``cb`` is None."""
+  if cb is None:
+    return y
+  yd = y.dtype
+  return jnp.clip(y, cb.output_min.value.astype(yd), cb.output_max.value.astype(yd))
+
+
+class _ClipBounds(nnx.Module):
+  """Holds the four checkpoint-resident scalar clip bounds as ``nnx.Param`` leaves."""
+
+  def __init__(self):
+    self.input_min = _mk_clip_bound()
+    self.input_max = _mk_clip_bound()
+    self.output_min = _mk_clip_bound()
+    self.output_max = _mk_clip_bound()
+
+
+def _make_clip_state():
+  """Four NaN-sentinel scalar bounds (checkpoint-resident, non-trainable)."""
+  return _ClipBounds()
+
+
+def validate_clip_bounds(cb, where=""):
+  """Hard-fail: every bound finite + scalar. Raises ValueError otherwise. No-op if ``cb`` is None."""
+  if cb is None:
+    return
+  for nm in ("input_min", "input_max", "output_min", "output_max"):
+    v = getattr(cb, nm).value
+    if getattr(v, "shape", ()) not in ((), (1,)):
+      raise ValueError(f"Gemma4 vision clip bound '{nm}'{(' @ '+where) if where else ''} has non-scalar "
+                       f"shape {v.shape}; expected scalar.")
+    fv = float(jnp.reshape(v, (-1,))[0])
+    if not bool(jnp.isfinite(jnp.asarray(fv))):
+      raise ValueError(f"Gemma4 vision clip bound '{nm}'{(' @ '+where) if where else ''} = {fv} is non-finite "
+                       f"(missing/NaN/Inf). use_clipped_linears_for_vit=True declares a FINITE clipped model; "
+                       f"refusing to fall back to an identity clamp.")
+
+
+
 
 
 def factorized_posemb(posemb: jax.Array, positions_xy: jax.Array, precision) -> jax.Array:
@@ -409,7 +513,15 @@ class Gemma4VisionRotaryEmbedding(nnx.Module):
 
 
 class Gemma4Attention(attentions.Attention):
-  """Gemma 4 specific Attention module."""
+  """Gemma 4 specific Attention module.
+
+  When ``use_clipped_linears`` is enabled, the q/k/v/o projections apply the
+  per-projection activation clip bounds carried in the Gemma-4 vision checkpoint
+  (input clamp before the matmul, output clamp after). The clamps are wired by
+  overriding the base ``Attention`` projection methods, so the underlying
+  ``DenseGeneral`` weights and their checkpoint key paths are unchanged. When the
+  flag is off, every override is an exact delegate to the base implementation.
+  """
 
   def init_rotary_embedding(self) -> Gemma4VisionRotaryEmbedding:
     """Initializes the rotary position embedding module for Gemma 4 vision."""
@@ -417,6 +529,116 @@ class Gemma4Attention(attentions.Attention):
         base_frequency=self.config.rope_theta_for_vit if hasattr(self.config, "rope_theta_for_vit") else 100,
         rotary_fraction=None,  # Or assume it from config if available
     )
+
+  def enable_vision_clip_bounds(self):
+    """Attach the four checkpoint-resident clip-bound scalars for each of q/k/v/o.
+
+    Called once by ``Gemma4EncoderBlock`` after construction when
+    ``config.use_clipped_linears_for_vit`` is set. Idempotent.
+    """
+    if getattr(self, "_use_clipped_linears", False):
+      return
+    self._use_clipped_linears = True
+    self.q_clip = _make_clip_state()
+    self.k_clip = _make_clip_state()
+    self.v_clip = _make_clip_state()
+    self.o_clip = _make_clip_state()
+
+  def validate_clip_bounds(self):
+    if not getattr(self, "_use_clipped_linears", False):
+      return
+    validate_clip_bounds(self.q_clip, "q_proj")
+    validate_clip_bounds(self.k_clip, "k_proj")
+    validate_clip_bounds(self.v_clip, "v_proj")
+    validate_clip_bounds(self.o_clip, "o_proj")
+
+  # --- projection overrides: clamp(input) -> DenseGeneral -> clamp(output) ---
+  def query_projection(self, inputs_q, out_sharding=None):
+    if not getattr(self, "_use_clipped_linears", False):
+      return super().query_projection(inputs_q, out_sharding=out_sharding)
+    x = _clip_in(inputs_q, self.q_clip)
+    y = self.query(x, out_sharding=out_sharding)
+    return _clip_out(y, self.q_clip)
+
+  def kv_projection(self, inputs_kv, proj_name, out_sharding=None):
+    if not getattr(self, "_use_clipped_linears", False):
+      return super().kv_projection(inputs_kv, proj_name=proj_name, out_sharding=out_sharding)
+    if proj_name == "key":
+      cb, module = self.k_clip, self.key
+    elif proj_name == "value":
+      cb, module = self.v_clip, self.value
+    else:
+      raise ValueError(f"proj_name must be 'key' or 'value', but got {proj_name}")
+    x = _clip_in(inputs_kv, cb)
+    y = module(x, out_sharding=out_sharding)
+    return _clip_out(y, cb)
+
+  def out_projection(self, out, out_sharding=None):
+    if not getattr(self, "_use_clipped_linears", False):
+      return super().out_projection(out, out_sharding=out_sharding)
+    x = _clip_in(out, self.o_clip)
+    y = self.out(x, out_sharding=out_sharding)
+    return _clip_out(y, self.o_clip)
+
+
+class Gemma4ClippedMlpBlock(linears.MlpBlock):
+  """MlpBlock that applies the Gemma-4 vision per-projection activation clip bounds
+  to the gate (wi_0), up (wi_1) and down (wo) projections.
+
+  Only the non-fused activation path is supported (E2B/E4B use
+  ``activations=("gelu", "linear")`` with ``fused_mlp=False``), because gate and up
+  carry distinct clip bounds. When ``use_clipped_linears`` is off, this delegates to
+  the base ``MlpBlock`` unchanged.
+  """
+
+  def __init__(self, *args, use_clipped_linears=False, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._use_clipped_linears = bool(use_clipped_linears)
+    if self._use_clipped_linears:
+      self.gate_clip = _make_clip_state()  # wi_0
+      self.up_clip = _make_clip_state()    # wi_1
+      self.down_clip = _make_clip_state()  # wo
+
+  def validate_clip_bounds(self):
+    if not self._use_clipped_linears:
+      return
+    validate_clip_bounds(self.gate_clip, "gate_proj")
+    validate_clip_bounds(self.up_clip, "up_proj")
+    validate_clip_bounds(self.down_clip, "down_proj")
+
+  def __call__(self, inputs, decode=False, deterministic=False,
+               intermediate_sharding=None, out_sharding=None):
+    if not self._use_clipped_linears:
+      return super().__call__(inputs, decode=decode, deterministic=deterministic,
+                              intermediate_sharding=intermediate_sharding, out_sharding=out_sharding)
+    cfg = self.config
+    if getattr(cfg, "fused_mlp", False):
+      # Clipped vision MLP requires the unfused path so gate/up get their own output clamps.
+      raise ValueError("Gemma4ClippedMlpBlock requires fused_mlp=False (per-projection clip bounds).")
+    if self.mlp_layer_norm is not None:
+      inputs = self.mlp_layer_norm(inputs)
+    clips = [self.gate_clip, self.up_clip]  # order matches activations ("gelu", "linear") == (gate, up)
+    activations = []
+    for idx, act_fn in enumerate(self.activations):
+      dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+      module = getattr(self, dense_name)
+      x = _clip_in(inputs, clips[idx])
+      x = module(x, out_sharding=intermediate_sharding)
+      x = _clip_out(x, clips[idx])
+      x = linears.checkpoint_name(x, "mlp" + dense_name)
+      if cfg.activations_in_float32:
+        x = x.astype(jnp.float32)
+      x = linears._convert_to_activation_function(act_fn)(x)
+      activations.append(x)
+    x = functools.reduce(operator.mul, activations).astype(self.dtype)
+    x = self.dropout(x, deterministic=deterministic)
+    x = self._maybe_shard_with_logical(x, self.intermediate_logical)
+    x = _clip_in(x, self.down_clip)
+    output = self.wo(x, out_sharding=out_sharding)
+    output = _clip_out(output, self.down_clip)
+    output = linears.checkpoint_name(output, "mlpwo")
+    return output
+
 
 
 class Gemma4EncoderBlock(nnx.Module):
@@ -487,6 +709,11 @@ class Gemma4EncoderBlock(nnx.Module):
         is_vision=True,
         rngs=self.rngs,
     )
+    # Opt-in Gemma-4 vision clipped-linears: attach the q/k/v/o checkpoint-resident
+    # clip bounds and route the projections through the clamp-in/clamp-out overrides.
+    self._use_clipped_linears = bool(getattr(config, "use_clipped_linears_for_vit", False))
+    if self._use_clipped_linears:
+      self.attention.enable_vision_clip_bounds()
 
     self.pre_ffw_norm = normalizations.RMSNorm(
         num_features=config.hidden_size_for_vit,
@@ -506,7 +733,9 @@ class Gemma4EncoderBlock(nnx.Module):
         rngs=self.rngs,
     )
 
-    self.mlp = linears.MlpBlock(
+    mlp_cls = Gemma4ClippedMlpBlock if self._use_clipped_linears else linears.MlpBlock
+    mlp_kwargs = {"use_clipped_linears": True} if self._use_clipped_linears else {}
+    self.mlp = mlp_cls(
         config=config,
         mesh=mesh,
         in_features=config.hidden_size_for_vit,
@@ -516,6 +745,7 @@ class Gemma4EncoderBlock(nnx.Module):
         weight_dtype=config.weight_dtype,
         intermediate_dropout_rate=config.dropout_rate,
         rngs=self.rngs,
+        **mlp_kwargs,
     )
 
   def __call__(self, x: jax.Array, positions: jax.Array | None = None, deterministic: bool = False) -> jax.Array:
