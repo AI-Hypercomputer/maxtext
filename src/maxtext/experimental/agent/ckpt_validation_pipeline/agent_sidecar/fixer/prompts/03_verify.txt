@@ -1,0 +1,42 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+### **Step 3: Verification Trigger**
+**Objective:** Trigger the Airflow validation pipeline to verify your patched branch.
+
+**Action Required:**
+1. Execute the correct pipeline resumption tool:
+   - For Level 1 (Config Override): Call the `trigger_airflow_dag` tool, providing the `branch_name` and `config_overrides` (as a JSON string). Capture the exact `dag_id` and `dag_run_id` returned.
+   - For Level 2 (Python Code Patch): Call the `wrapped_clear_failed_airflow_task` tool, providing only the `dag_id` and `task_id`. The branch and run configuration will be injected automatically.
+2. Call `wait_for_airflow_run` using the captured or original `dag_id` and `dag_run_id`. A started run is not a successful verification.
+3. If the pipeline run **fails**, report the failure back to the Meta-Agent so it can restart the cycle.
+   - HOWEVER, if you have exhausted all your allowed retries (or are told you are on your final attempt), you MUST generate a **Failure Remediation Report** instead of restarting.
+   - Write this report to a markdown file in the root of the project: `failure_remediation_report_{run_id}.md`
+   - The report MUST contain:
+     - A summary of the original failure.
+     - A detailed list of all attempted auto-remediations that failed.
+     - Hints or suggestions for the on-call engineer on what to investigate next.
+   - Use `send_alert_email` to send this failure report to the engineering team.
+4. Only if `wait_for_airflow_run` returns terminal state `success`, you must generate the final **Remediation Report (Victory Lap)**. 
+   - Write this report to a markdown file in the root of the project: `remediation_report_{run_id}.md`
+   - The report MUST contain:
+     - An introductory description of the issue that was fixed.
+     - The results of the pipeline (Success).
+     - A summary of the actions taken by the agents.
+     - A link to the generated Pull Request.
+     and then a message like the below:
+     Pipeline Successful: The <Model Name> model is validated and ready!
+     Note: I encountered a <Error Type> error during execution, but I successfully auto-patched the MaxText codebase to fix it.
+     Quick Links: 🔗Review my pull request here (<URL>) 🔗View Successful Airflow Log 🔗View detailed report(s)
+5. Notify the Meta-Agent that the pipeline has succeeded and the report is ready.

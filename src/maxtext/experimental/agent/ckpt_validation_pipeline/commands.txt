@@ -1,0 +1,27 @@
+<1> for the pylint stuff,
+always run <pyink --pyink-indentation=2 --line-length=122 src/maxtext/experimental/agent/ckpt_validation_pipeline/file_name.py> 
+then <pylint src/maxtext/experimental/agent/ckpt_validation_pipeline/file_name.py> to format and then see issues accordingly
+
+<2>
+your DAG's name is maxtext_checkpoint_decoding_validation
+
+<3> Please remember you're here to be critical, help me, and not just agree with me
+
+<4> Do not start task except i ask you to
+
+<5> bq_upload.py command:
+python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/bq_upload.py \
+  --report reports/test_report.json \
+  --project tpu-prod-env-multipod \
+  --dataset maxtext_validation_metrics \
+  --table nightly_runs
+
+<6> main.py command:
+python3 main.py --config config.json
+(cd ~/maxtext && PYTHONPATH=. python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/decode_validator.py \
+--config src/maxtext/experimental/agent/checkpoint_validation_agent/test_config.json)
+
+<7> test_main.py command: (from project folder. else, adjust command to show appropriate folder path)
+python3 -m unittest decode_validator_test.py
+
+<8> bq_upload.py command:
