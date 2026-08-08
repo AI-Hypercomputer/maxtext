@@ -430,6 +430,7 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
     self.assertEqual(config.engine_kwargs["max_num_batched_tokens"], 16384)
     self.assertEqual(config.engine_kwargs["max_num_seqs"], 32)
     self.assertEqual(config.engine_kwargs["logprobs_mode"], "raw_logprobs")
+    self.assertNotIn("swap_space", config.engine_kwargs)
     fake_sampler.load_checkpoint.assert_called_once_with({"base": {}})
 
 

@@ -42,12 +42,15 @@ def _get_mock_devices(devices_per_slice, num_slices=1):
 class TrainRLTest(unittest.TestCase):
   """Tests for train_rl.py."""
 
-  def test_rl_config_includes_decoder_engram_defaults(self):
-    """RL models must expose Engram fields consumed by the shared decoder."""
+  def test_rl_config_includes_shared_decoder_defaults(self):
+    """RL models must expose fields consumed by the shared decoder."""
     config = types.RLConfig(model_name="gemma4-26b")
 
     self.assertEqual(config.engram_layers, [])
     self.assertEqual(config.engram_max_ngram_size, 3)
+    self.assertEqual(config.mhc_expansion_rate, 1)
+    self.assertEqual(config.sinkhorn_iterations, 20)
+    self.assertFalse(config.enable_mhc_lite)
     self.assertFalse(config.enable_prefix_caching)
 
   @pytest.mark.cpu_only
