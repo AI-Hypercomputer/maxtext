@@ -3710,6 +3710,17 @@ class MaxTextConfig(
               f"{self.model_name} multimodal clipped-linears require fused_mlp=False "
               "(distinct gate/up/down activation clip bounds must be applied per-projection)."
           )
+        # (e) Sequence packing is not supported for Gemma-4 E2B/E4B multimodal in ANY training mode. The stock
+        #     data pipeline does not pack image spans, and packing image-bearing examples together would risk
+        #     cross-document image attention and PLE image-row substitution bleeding across segment boundaries.
+        #     MaxText already forbids packing for multimodal SFT; extend that to every mode for these models
+        #     (fail closed rather than silently produce cross-doc image attention).
+        if bool(getattr(self, "packing", False)):
+          raise ValueError(
+              f"{self.model_name} multimodal does not support sequence packing (packing=True). The stock data "
+              "pipeline does not pack image spans; packing image-bearing examples risks cross-document image "
+              "attention and PLE image-row substitution across segment boundaries. Set packing=False."
+          )
       valid_mm_models = (
           "gemma3-4b",
           "gemma3-12b",
