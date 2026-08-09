@@ -78,6 +78,11 @@ class Gemma4MmContractGateTest(unittest.TestCase):
     with self.assertRaises(Exception):
       _init(["use_clipped_linears_for_vit=false"])
 
+  def test_packing_hard_fails(self):
+    # Packed multimodal is unsupported for E2B/E4B in any mode (cross-doc image attention risk).
+    with self.assertRaises(Exception):
+      _init(["use_clipped_linears_for_vit=true", "packing=true"])
+
 
 if __name__ == "__main__":
   unittest.main()
