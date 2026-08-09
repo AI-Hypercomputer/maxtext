@@ -191,7 +191,69 @@ def validate_all_vision_clip_bounds(model, *, expected_projections=EXPECTED_CLIP
   return n_proj, n_bounds
 
 
+# Sentinel value marking a padded (phantom) patch position in the Option-S padded-patch contract.
+POSITIONS_PAD_VALUE = -1
 
+
+def option_s_position_sentinel_ok(positions_xy):
+  """Return (all_rows_valid_or_full_sentinel, n_bad_rows) for an Option-S position tensor.
+
+  The padded-patch contract requires every per-patch position row to be EXACTLY one of:
+    * [x, y] with both coordinates >= 0 (a valid patch), or
+    * [POSITIONS_PAD_VALUE, POSITIONS_PAD_VALUE] (a fully-padded sentinel).
+  A MIXED row such as [-1, y] or [x, -1] is malformed: it would be classified as "valid" by the
+  ``(pos == -1).all(axis=-1)`` pad test (silently attended-to as a real patch) yet carry a negative
+  coordinate into pooling. This helper flags such rows so callers can fail closed rather than
+  silently mis-handle them. Pure (numpy/jax-eager friendly); does not allocate on-device state.
+
+  Args:
+    positions_xy: int array [..., 2] of per-patch (x, y) positions.
+  Returns:
+    (ok: bool, n_bad: int) where ok is True iff no malformed (mixed-sentinel) row exists.
+  """
+  import numpy as _np  # local import: this is called eagerly (host) for validation, not in the JIT forward
+  p = _np.asarray(positions_xy)
+  if p.shape[-1] != 2:
+    raise ValueError(f"option_s positions must have last dim 2 (x,y); got shape {p.shape}")
+  is_neg = p == POSITIONS_PAD_VALUE
+  any_neg = is_neg.any(axis=-1)
+  all_neg = is_neg.all(axis=-1)
+  # A row is malformed iff it has SOME sentinel coord but is not FULLY sentinel.
+  bad = _np.logical_and(any_neg, _np.logical_not(all_neg))
+  # Also reject any negative coordinate other than the exact sentinel (e.g. -2), which is never valid.
+  other_neg = _np.logical_and(p < 0, p != POSITIONS_PAD_VALUE).any(axis=-1)
+  bad = _np.logical_or(bad, other_neg)
+  n_bad = int(bad.sum())
+  return (n_bad == 0), n_bad
+
+
+def validate_option_s_positions(positions_xy, where=""):
+  """Hard-fail if any Option-S position row is a malformed mixed sentinel. No-op if positions is None."""
+  if positions_xy is None:
+    return
+  ok, n_bad = option_s_position_sentinel_ok(positions_xy)
+  if not ok:
+    raise ValueError(
+        f"Gemma-4 Option-S position sentinel integrity{(' @ '+where) if where else ''}: found {n_bad} malformed "
+        f"row(s). Every patch position must be [x,y] with both coords >= 0, or [-1,-1] (full sentinel). Mixed "
+        f"rows like [-1, y] / [x, -1] (or other negatives) would be silently treated as valid patches and "
+        f"corrupt pooling; refusing to run."
+    )
+
+
+def option_s_pooled_matches_placeholder(image_mask, n_placeholder):
+  """Return (ok, n_valid_pooled) checking the count of valid pooled image tokens == n_placeholder.
+
+  ``image_mask`` is the [..., K] validity mask returned by the vision pooler (True where a pooled slot
+  received at least one real patch). ``n_placeholder`` is the number of image placeholder positions in the
+  decoder sequence for the SAME sample. The Option-S contract requires these to be equal so that the pooled
+  image tokens scatter 1:1 onto the placeholder rows; a mismatch means the merge would drop or duplicate
+  image tokens regardless of padded-embedding ordering.
+  """
+  import numpy as _np
+  m = _np.asarray(image_mask)
+  n_valid = int(_np.asarray(m).astype(bool).sum())
+  return (n_valid == int(n_placeholder)), n_valid
 
 
 def factorized_posemb(posemb: jax.Array, positions_xy: jax.Array, precision) -> jax.Array:
