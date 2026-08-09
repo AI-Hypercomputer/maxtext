@@ -379,6 +379,7 @@ def create_orbax_checkpoint_manager(
           async_options=async_options,
           todelete_subdir=todelete_subdir,
           todelete_full_path=todelete_full_path,
+          enable_background_delete=True,
       ),
       logger=orbax_logger,
   )
