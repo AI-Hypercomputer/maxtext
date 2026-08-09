@@ -848,6 +848,17 @@ class Gemma4VisionEncoderLayer(nnx.Module):
     """
     if image_position_ids is None:
       # ---- Legacy path: raw images -> patchify -> full (unmasked) attention ----
+      # Fail-closed contract guard: the legacy path requires FULL images ([B,N,H,W,C] or [B,H,W,C]).
+      # Pre-patchified inputs ([B,L,F] or [B,N,L,F]) only make sense with per-patch image_position_ids
+      # (the padded-patch path). Refuse to silently mis-handle pre-patchified input as a full image, which
+      # would either crash cryptically or produce wrong pooling.
+      if inputs.ndim not in (4, 5):
+        raise ValueError(
+            "Gemma4 vision legacy path expects full images with shape [B, H, W, C] or [B, N, H, W, C]; "
+            f"got inputs.ndim={inputs.ndim} (shape {tuple(inputs.shape)}). Pre-patchified pixel_values must be "
+            "accompanied by image_position_ids (the padded-patch path). Refusing to silently take the legacy "
+            "all-valid vision path."
+        )
       if inputs.ndim == 4:
         inputs = jnp.expand_dims(inputs, 1)
       b, n, h, w, c = inputs.shape
