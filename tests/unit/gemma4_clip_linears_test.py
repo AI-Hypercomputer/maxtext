@@ -143,3 +143,40 @@ class SymbolsTest(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class OptionSInvariantsTest(unittest.TestCase):
+  """M7: Option-S sentinel integrity + placeholder==pooled count invariants (pure validators)."""
+
+  def test_valid_positions_pass(self):
+    pos = np.array([[[0, 0], [1, 0], [-1, -1], [-1, -1]]], dtype=np.int32)  # 2 valid + 2 full-sentinel
+    ok, n_bad = gv.option_s_position_sentinel_ok(pos)
+    self.assertTrue(ok)
+    self.assertEqual(n_bad, 0)
+    gv.validate_option_s_positions(pos)  # must not raise
+
+  def test_mixed_sentinel_row_fails(self):
+    for bad_row in ([-1, 5], [5, -1]):
+      pos = np.array([[[0, 0], bad_row, [-1, -1]]], dtype=np.int32)
+      ok, n_bad = gv.option_s_position_sentinel_ok(pos)
+      self.assertFalse(ok, f"mixed row {bad_row} should be flagged")
+      self.assertEqual(n_bad, 1)
+      with self.assertRaises(ValueError):
+        gv.validate_option_s_positions(pos, where="test")
+
+  def test_other_negative_coord_fails(self):
+    pos = np.array([[[0, 0], [-2, -2], [-1, -1]]], dtype=np.int32)  # -2 is not the sentinel
+    ok, n_bad = gv.option_s_position_sentinel_ok(pos)
+    self.assertFalse(ok)
+
+  def test_pooled_matches_placeholder(self):
+    mask = np.array([True, True, True, False, False])  # 3 valid pooled tokens
+    ok, n_valid = gv.option_s_pooled_matches_placeholder(mask, 3)
+    self.assertTrue(ok)
+    self.assertEqual(n_valid, 3)
+
+  def test_pooled_placeholder_mismatch_detected(self):
+    mask = np.array([True, True, True, False, False])  # 3 valid
+    ok, n_valid = gv.option_s_pooled_matches_placeholder(mask, 4)  # placeholder count 4 != 3
+    self.assertFalse(ok)
+    self.assertEqual(n_valid, 3)
