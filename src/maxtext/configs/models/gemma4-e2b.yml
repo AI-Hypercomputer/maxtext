@@ -66,3 +66,4 @@ ple_pad_substitute_image_rows: True
 ple_pad_mode: "identity"
 image_placeholder_token_id: 258880
 ple_pad_token_id: 0
+packing: false  # Gemma-4 E2B/E4B multimodal does not support packed image spans (see configs/types.py gate)
