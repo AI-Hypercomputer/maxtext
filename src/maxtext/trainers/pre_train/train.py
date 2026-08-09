@@ -144,6 +144,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # parameters in the model and checkpoints. Only pass image inputs when present.
   encoder_images = data.get("images") if config.use_multimodal else None
   encoder_image_masks = data.get("image_masks") if config.use_multimodal else None
+  # Gemma-4 padded-patch (Option-S) contract: when the data pipeline produces per-patch image position ids
+  # (native-resolution / pan-and-scan processors), thread them to the vision encoder so pad patches are
+  # masked and pooled by real coordinates. The stock fixed-grid Gemma-4 processor produces all-valid patches
+  # and does NOT emit this key, so the legacy all-valid path is used (correct for its contract). See
+  # gemma4_vision.Gemma4VisionEncoderLayer for the fail-closed guard.
+  encoder_image_position_ids = data.get("image_position_ids") if config.use_multimodal else None
   mutable_collections = ["intermediates"]
   if config.mtp_num_layers > 0 and is_train:
     # The single model.apply call now triggers the entire chain if MTP is enabled:
@@ -181,6 +187,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=encoder_images,
         encoder_image_masks=encoder_image_masks,
+        encoder_image_position_ids=encoder_image_position_ids,
         enable_dropout=config.enable_dropout if is_train else False,
         rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
         mutable=mutable_collections,
@@ -240,6 +247,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=encoder_images,
         encoder_image_masks=encoder_image_masks,
+        encoder_image_position_ids=encoder_image_position_ids,
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
