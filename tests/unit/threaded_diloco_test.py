@@ -389,19 +389,59 @@ class SyncerPathwaysBugReproTest(unittest.TestCase):
       frag1 = manipulator.get_flat_fragment(params, fragment_idx=1)
       self.assertIn("['layers']['w']", frag1)
 
-  def test_all_scanned_fragments_extract_inside_jit(self):
-    """Verifies that all scanned fragments are successfully extracted inside JIT graphs."""
-    params = _build_fake_params(self.mesh)
+  def test_make_step_fns_aot_precompilation(self):
+    """Verifies that make_step_fns pre-compiles outer optimization AOT with abstract state."""
+    params = _build_fake_params(self.mesh, num_layers=self.NUM_LAYERS, hidden=self.HIDDEN, value=2.0)
     manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
+    fps = _flat_params_shardings(params)
+    outer_optimizer = optax.sgd(learning_rate=0.1, momentum=0.9, nesterov=True)
+    with jax.set_mesh(self.mesh):
+      outer_opt_state = jax.jit(outer_optimizer.init)(params)
 
-    with mock.patch("maxtext.trainers.diloco.fragmenter.jnp.take", self._pathways_take):
-      frag0 = manipulator.get_flat_fragment(params, 0)
-      self.assertIsNotNone(frag0)
+    # Convert to abstract state structs
+    abstract_params = jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), params)
+    abstract_opt_state = (
+        optax.TraceState(
+            trace=jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), outer_opt_state[0].trace)
+        ),
+        outer_opt_state[1],
+    )
 
-      for frag_idx in range(1, manipulator.num_fragments):
-        res = manipulator.get_flat_fragment(params, frag_idx)
-        self.assertIsNotNone(res)
+    compute_grad, apply_outer_step = make_step_fns(
+        self.mesh,
+        fps,
+        None,
+        None,
+        outer_optimizer,
+        abstract_params=abstract_params,
+        abstract_opt_state=abstract_opt_state,
+        manipulator=manipulator,
+        num_learners=2,
+    )
+
+    # Test executing on fragment 0 (embed) and fragment 1 (layer)
+    for f_idx in range(manipulator.num_fragments):
+      outer_frag = manipulator.get_flat_fragment(params, f_idx)
+      trace_frag = manipulator.get_flat_fragment(outer_opt_state[0].trace, f_idx)
+      stacked_outer_frag = {
+          k: jax.device_put(jnp.stack([v, v], axis=0), jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec("diloco", *fps[k].spec)))
+          for k, v in outer_frag.items()
+      }
+      stacked_trace_frag = {
+          k: jax.device_put(jnp.stack([v, v], axis=0), jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec("diloco", *fps[k].spec)))
+          for k, v in trace_frag.items()
+      }
+      opt_state_frag = (optax.TraceState(trace=stacked_trace_frag), optax.EmptyState())
+      stacked_inner_frag = {
+          k: jax.device_put(jnp.stack([v, v * 0.9], axis=0), jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec("diloco", *fps[k].spec)))
+          for k, v in outer_frag.items()
+      }
+      grad = compute_grad(stacked_outer_frag, stacked_inner_frag, frag_idx=f_idx)
+      new_p, new_o = apply_outer_step(grad, opt_state_frag, stacked_outer_frag, frag_idx=f_idx)
+      self.assertIsNotNone(new_p)
+      self.assertIsNotNone(new_o)
 
 
 if __name__ == "__main__":
   unittest.main()
+

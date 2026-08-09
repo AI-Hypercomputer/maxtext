@@ -210,18 +210,23 @@ def _extract_scalar_metrics(tree):
   """Extracts Python scalar numbers from a JAX metric PyTree safely while inside mesh context."""
 
   def _leaf_to_scalar(x):
-    if isinstance(x, jax.Array):
-      if hasattr(x, "addressable_shards") and len(x.addressable_shards) > 0:
-        s = x.addressable_shards[0].data
-        val = jax.device_get(s)
-      else:
-        val = jax.device_get(x)
-      if isinstance(val, np.ndarray):
-        return float(val.mean())
-      return float(val)
-    elif isinstance(x, (np.ndarray, np.generic)):
-      return float(x.mean())
-    return x
+    try:
+      if isinstance(x, jax.Array):
+        if hasattr(x, "is_deleted") and x.is_deleted():
+          return 0.0
+        if hasattr(x, "addressable_shards") and len(x.addressable_shards) > 0:
+          s = x.addressable_shards[0].data
+          val = jax.device_get(s)
+        else:
+          val = jax.device_get(x)
+        if isinstance(val, np.ndarray):
+          return float(val.mean())
+        return float(val)
+      elif isinstance(x, (np.ndarray, np.generic)):
+        return float(x.mean())
+      return x
+    except Exception:
+      return 0.0
 
   return jax.tree_util.tree_map(_leaf_to_scalar, tree)
 
@@ -374,7 +379,9 @@ def _run_learner_loop(
         params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else raw_state.params
         max_logging.log(f"Learner {learner_idx}: sending init params")
         transport.send_to_syncer(step=0, fragment_id=-1, data=params)
-        max_logging.log(f"Learner {learner_idx}: sent init params")
+        max_logging.log(f"Learner {learner_idx}: sent init params, waiting for syncer ack")
+        transport.recv_from_syncer(step=0, fragment_id=-1)
+        max_logging.log(f"Learner {learner_idx}: received syncer ack, starting training")
       else:
         global_params = transport.recv_from_syncer(step=start_step, fragment_id=-1)
         if learner_config.pure_nnx:
@@ -399,6 +406,8 @@ def _run_learner_loop(
     steps_between_syncs_plus_1 = max(1, steps_between_syncs_plus_1)
     period = num_fragments * steps_between_syncs_plus_1
 
+    if learner_idx > 0:
+      learner_config._flat_config["profiler"] = ""
     prof = profiler.Profiler(learner_config, offset_step=start_step)
     metric_logger_instance = metric_logger.MetricLogger(
         config=learner_config, learning_rate_schedule=learning_rate_schedule
@@ -414,7 +423,10 @@ def _run_learner_loop(
       last_step_completion = datetime.datetime.now()
       for step in range(start_step, learner_config.steps):
         max_logging.log(f"Learner {learner_idx}: Step {step} starting")
-        prof.maybe_activate_profiler(step, state)
+        try:
+          prof.maybe_activate_profiler(step, None)
+        except Exception:
+          pass
 
         with jax.profiler.StepTraceAnnotation(f"train_learner_{learner_idx}", step_num=step):
           example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
@@ -488,7 +500,10 @@ def _run_learner_loop(
               )
               eval_step_count += 1
 
-          prof.maybe_deactivate_profiler(step, state)
+          try:
+            prof.maybe_deactivate_profiler(step, None)
+          except Exception:
+            pass
           last_step_completion = datetime.datetime.now()
 
       if checkpoint_manager is not None:
@@ -531,55 +546,148 @@ def syncer_loop(
     raise e
 
 
-@jax.jit
-def _compute_grad_jit(o_frag, stacked_i_frag):
-  averaged_i_frag = jax.tree_util.tree_map(
-      lambda x, o: jnp.broadcast_to(
+def _compute_grad_flat(o_leaves, stacked_i_leaves):
+  averaged_i = tuple(
+      jnp.broadcast_to(
           jnp.mean(x, axis=0, keepdims=(x.ndim == o.ndim)),
           x.shape if x.ndim == o.ndim else o.shape,
-      ),
-      stacked_i_frag,
-      o_frag,
+      )
+      for x, o in zip(stacked_i_leaves, o_leaves)
   )
-  return jax.tree_util.tree_map(lambda x, y: x - y, o_frag, averaged_i_frag)
+  return tuple(o - avg for o, avg in zip(o_leaves, averaged_i))
 
 
-_APPLY_OUTER_STEP_CACHE = {}
+_FLAT_GRAD_JIT = jax.jit(_compute_grad_flat)
+_FLAT_STEP_JIT_CACHE = {}
 
 
-def _get_apply_outer_step_jit(outer_optimizer):
+def _get_apply_outer_step_flat_jit(outer_optimizer):
   opt_key = id(outer_optimizer)
-  if opt_key not in _APPLY_OUTER_STEP_CACHE:
+  if opt_key not in _FLAT_STEP_JIT_CACHE:
 
     @functools.partial(jax.jit, donate_argnums=(1, 2))
-    def _apply_outer_step_jit(g_frag, o_state_frag, p_frag):
-      updates_frag, new_o_state_frag = outer_optimizer.update(g_frag, o_state_frag, params=p_frag)
-      new_p_frag = optax.apply_updates(p_frag, updates_frag)
-      return new_p_frag, new_o_state_frag
+    def _apply_outer_step_flat_jit(g_leaves, trace_leaves, p_leaves):
+      o_state = (optax.TraceState(trace=trace_leaves), optax.EmptyState())
+      updates, new_o_state = outer_optimizer.update(g_leaves, o_state, params=p_leaves)
+      new_p_leaves = optax.apply_updates(p_leaves, updates)
+      return new_p_leaves, new_o_state[0].trace
 
-    _APPLY_OUTER_STEP_CACHE[opt_key] = _apply_outer_step_jit
-  return _APPLY_OUTER_STEP_CACHE[opt_key]
+    _FLAT_STEP_JIT_CACHE[opt_key] = _apply_outer_step_flat_jit
+  return _FLAT_STEP_JIT_CACHE[opt_key]
 
 
 # pylint: disable=too-many-positional-arguments,too-many-arguments,unused-argument
-def make_step_fns(global_mesh, flat_params_shardings, frag_keys, trace_keys, outer_optimizer):
-  """Creates JIT functions for computing gradients and applying outer steps."""
+def make_step_fns(
+    global_mesh,
+    flat_params_shardings,
+    frag_keys,
+    trace_keys,
+    outer_optimizer,
+    abstract_params=None,
+    abstract_opt_state=None,
+    manipulator=None,
+    num_learners=2,
+):
+  """Creates AOT-compiled / flat-tuple JIT functions for outer optimization."""
+  jit_apply_fn = _get_apply_outer_step_flat_jit(outer_optimizer)
+  jit_grad_fn = _FLAT_GRAD_JIT
 
-  def compute_grad(o_frag, stacked_i_frag):
-    mesh = _get_tree_mesh(o_frag)
-    if mesh is not None:
-      with jax.set_mesh(mesh):
-        return _compute_grad_jit(o_frag, stacked_i_frag)
-    return _compute_grad_jit(o_frag, stacked_i_frag)
+  aot_grad_executables = {}
+  aot_step_executables = {}
 
-  _apply_fn = _get_apply_outer_step_jit(outer_optimizer)
+  if abstract_params is not None and manipulator is not None and abstract_opt_state is not None:
+    with jax.set_mesh(global_mesh):
+      num_frags = getattr(manipulator, "num_fragments", 2)
+      frag_indices = [0, 1] if num_frags > 1 else [0]
+      has_replica = any(
+          hasattr(l, "shape") and len(l.shape) > 0 and l.shape[0] == num_learners
+          for l in jax.tree_util.tree_leaves(abstract_params)
+      )
+      for f_idx in frag_indices:
+        try:
+          p_frag = manipulator.get_flat_fragment(abstract_params, f_idx, has_replica_dim=has_replica)
+          t_frag = manipulator.get_flat_fragment(abstract_opt_state[0].trace, f_idx, has_replica_dim=has_replica)
+          raw_p_leaves, _ = jax.tree_util.tree_flatten(p_frag)
+          raw_t_leaves, _ = jax.tree_util.tree_flatten(t_frag)
+          if has_replica:
+            p_leaves = [
+                jax.ShapeDtypeStruct(l.shape, l.dtype, sharding=getattr(l, "sharding", None)) for l in raw_p_leaves
+            ]
+            t_leaves = [
+                jax.ShapeDtypeStruct(l.shape, l.dtype, sharding=getattr(l, "sharding", None)) for l in raw_t_leaves
+            ]
+          else:
+            p_leaves = [
+                jax.ShapeDtypeStruct(
+                    (num_learners, *l.shape),
+                    l.dtype,
+                    sharding=jax.sharding.NamedSharding(
+                        global_mesh,
+                        jax.sharding.PartitionSpec(
+                            "diloco",
+                            *(l.sharding.spec if hasattr(l, "sharding") and l.sharding is not None else ()),
+                        ),
+                    ),
+                )
+                for l in raw_p_leaves
+            ]
+            t_leaves = [
+                jax.ShapeDtypeStruct(
+                    (num_learners, *l.shape),
+                    l.dtype,
+                    sharding=jax.sharding.NamedSharding(
+                        global_mesh,
+                        jax.sharding.PartitionSpec(
+                            "diloco",
+                            *(l.sharding.spec if hasattr(l, "sharding") and l.sharding is not None else ()),
+                        ),
+                    ),
+                )
+                for l in raw_t_leaves
+            ]
+          i_leaves = list(p_leaves)
+          aot_grad_executables[f_idx] = jit_grad_fn.lower(tuple(p_leaves), tuple(i_leaves)).compile()
+          aot_step_executables[f_idx] = jit_apply_fn.lower(tuple(p_leaves), tuple(t_leaves), tuple(p_leaves)).compile()
+          max_logging.log(f"Syncer: AOT pre-compiled outer optimization executable for fragment type {f_idx}")
+        except Exception as e:
+          max_logging.log(f"Syncer: AOT compilation for fragment {f_idx} deferred to JIT: {e}")
 
-  def apply_outer_step(g_frag, o_state_frag, p_frag):
-    mesh = _get_tree_mesh(p_frag)
-    if mesh is not None:
-      with jax.set_mesh(mesh):
-        return _apply_fn(g_frag, o_state_frag, p_frag)
-    return _apply_fn(g_frag, o_state_frag, p_frag)
+  def compute_grad(o_frag, stacked_i_frag, frag_idx=None):
+    o_leaves, treedef_o = jax.tree_util.tree_flatten(o_frag)
+    i_leaves, _ = jax.tree_util.tree_flatten(stacked_i_frag)
+
+    exec_key = 0 if frag_idx == 0 else 1
+    if exec_key in aot_grad_executables:
+      g_leaves = aot_grad_executables[exec_key](tuple(o_leaves), tuple(i_leaves))
+    else:
+      mesh = _get_tree_mesh(o_frag)
+      if mesh is not None:
+        with jax.set_mesh(mesh):
+          g_leaves = jit_grad_fn(tuple(o_leaves), tuple(i_leaves))
+      else:
+        g_leaves = jit_grad_fn(tuple(o_leaves), tuple(i_leaves))
+    return jax.tree_util.tree_unflatten(treedef_o, g_leaves)
+
+  def apply_outer_step(g_frag, o_state_frag, p_frag, frag_idx=None):
+    g_leaves, _ = jax.tree_util.tree_flatten(g_frag)
+    t_leaves, treedef_t = jax.tree_util.tree_flatten(o_state_frag[0].trace)
+    p_leaves, treedef_p = jax.tree_util.tree_flatten(p_frag)
+
+    exec_key = 0 if frag_idx == 0 else 1
+    if exec_key in aot_step_executables:
+      new_p_leaves, new_t_leaves = aot_step_executables[exec_key](tuple(g_leaves), tuple(t_leaves), tuple(p_leaves))
+    else:
+      mesh = _get_tree_mesh(p_frag)
+      if mesh is not None:
+        with jax.set_mesh(mesh):
+          new_p_leaves, new_t_leaves = jit_apply_fn(tuple(g_leaves), tuple(t_leaves), tuple(p_leaves))
+      else:
+        new_p_leaves, new_t_leaves = jit_apply_fn(tuple(g_leaves), tuple(t_leaves), tuple(p_leaves))
+
+    new_p_frag = jax.tree_util.tree_unflatten(treedef_p, new_p_leaves)
+    new_t_frag = jax.tree_util.tree_unflatten(treedef_t, new_t_leaves)
+    new_o_state_frag = (optax.TraceState(trace=new_t_frag), o_state_frag[1])
+    return new_p_frag, new_o_state_frag
 
   return compute_grad, apply_outer_step
 
@@ -665,6 +773,8 @@ def _run_syncer_loop(
     ]
     max_logging.log("Syncer: received init params from all learners, stacking across meshes")
     global_params = stack_across_meshes_pytree(initial_learner_params, global_mesh, "diloco")
+    for i in range(num_learners):
+      transport.send_to_learner(learner_idx=i, step=0, fragment_id=-1, data=True)
     with jax.set_mesh(global_mesh):
       outer_optimizer = optax.sgd(
           learning_rate=config.diloco_outer_lr,
@@ -702,6 +812,15 @@ def _run_syncer_loop(
   manipulator = FragmentedTreeManipulator.create(syncer_state.params, config)
   num_fragments = manipulator.num_fragments
 
+  # AOT pre-warm extraction and application for all fragments
+  with jax.set_mesh(global_mesh):
+    for f in range(num_fragments):
+      ext_fn = manipulator._get_extract_jit_fn(f, has_replica_dim=True)
+      frag = ext_fn(syncer_state.params)
+      app_fn = manipulator._get_apply_jit_fn(f, has_replica_dim=True)
+      _ = app_fn(syncer_state.params, frag)
+  max_logging.log(f"Syncer: AOT pre-compiled extract and apply kernels for all {num_fragments} fragments")
+
   steps_between_syncs_plus_1 = int(round(config.diloco_sync_period / num_fragments))
   steps_between_syncs_plus_1 = max(1, steps_between_syncs_plus_1)
   period = num_fragments * steps_between_syncs_plus_1
@@ -720,7 +839,15 @@ def _run_syncer_loop(
   )
 
   compute_grad, apply_outer_step = make_step_fns(
-      global_mesh, flat_params_shardings, None, None, outer_optimizer
+      global_mesh,
+      flat_params_shardings,
+      None,
+      None,
+      outer_optimizer,
+      abstract_params=syncer_state.params,
+      abstract_opt_state=syncer_state.opt_state,
+      manipulator=manipulator,
+      num_learners=num_learners,
   )
 
   # Start main syncer loop
@@ -750,8 +877,10 @@ def _run_syncer_loop(
       trace_frag = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, has_replica_dim=True)
       opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
 
-      pseudo_grad_frag = compute_grad(outer_params_frag, stacked_inner_frag)
-      new_outer_params_frag, new_opt_state_frag = apply_outer_step(pseudo_grad_frag, opt_state_frag, outer_params_frag)
+      pseudo_grad_frag = compute_grad(outer_params_frag, stacked_inner_frag, frag_idx=frag_idx)
+      new_outer_params_frag, new_opt_state_frag = apply_outer_step(
+          pseudo_grad_frag, opt_state_frag, outer_params_frag, frag_idx=frag_idx
+      )
       new_opt_state_trace = new_opt_state_frag[0].trace
 
       new_params = manipulator.apply_flat_fragment(

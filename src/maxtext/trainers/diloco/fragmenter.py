@@ -70,6 +70,7 @@ class FragmentedTreeManipulator:
         static_indices = ()
         is_contiguous = False
 
+      @jax.jit
       def extract_fn(t):
         kvs, _ = jax.tree_util.tree_flatten_with_path(t)
         flat_frag = {}
@@ -81,8 +82,13 @@ class FragmentedTreeManipulator:
               flat_frag[keystr] = v
           else:
             if is_scanned:
-              axis = self.param_scan_axis + 1 if static_has_replica else self.param_scan_axis
-              if is_contiguous:
+              axis = self.param_scan_axis + 1 if static_has_replica and v.ndim > self.param_scan_axis + 1 else self.param_scan_axis
+              if isinstance(v, jax.ShapeDtypeStruct):
+                new_shape = list(v.shape)
+                new_shape[axis] = len(static_indices)
+                shd = getattr(v, "sharding", None)
+                flat_frag[keystr] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=shd)
+              elif is_contiguous:
                 slc = [slice(None)] * v.ndim
                 slc[axis] = slice(static_indices[0], static_indices[-1] + 1)
                 flat_frag[keystr] = v[tuple(slc)]
@@ -106,6 +112,7 @@ class FragmentedTreeManipulator:
         static_indices = ()
         is_contiguous = False
 
+      @jax.jit
       def apply_fn(t, flat_fragment):
         kvs, treedef = jax.tree_util.tree_flatten_with_path(t)
         new_kvs = []
