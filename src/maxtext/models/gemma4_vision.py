@@ -84,20 +84,27 @@ def clip_optimizer_freeze_mask(params_tree):
   return jax.tree_util.tree_unflatten(treedef, leaves_mask)
 
 
+def _clip_bound_value(bound, dtype):
+  """Read a clip-bound scalar as a constant: stop_gradient defends the bounds from receiving
+  gradient at the clamp use-site (defense in depth alongside the optimizer freeze mask), so clip-bound
+  gradients can never contaminate gradient statistics even if the freeze mask were misconfigured."""
+  return jax.lax.stop_gradient(bound.value).astype(dtype)
+
+
 def _clip_in(x, cb):
-  """clamp(x, input_min, input_max) in x's dtype; no-op if ``cb`` is None."""
+  """clamp(x, input_min, input_max) in x's dtype; no-op if ``cb`` is None. Bounds are stop_gradient'd."""
   if cb is None:
     return x
   xd = x.dtype
-  return jnp.clip(x, cb.input_min.value.astype(xd), cb.input_max.value.astype(xd))
+  return jnp.clip(x, _clip_bound_value(cb.input_min, xd), _clip_bound_value(cb.input_max, xd))
 
 
 def _clip_out(y, cb):
-  """clamp(y, output_min, output_max) in y's dtype; no-op if ``cb`` is None."""
+  """clamp(y, output_min, output_max) in y's dtype; no-op if ``cb`` is None. Bounds are stop_gradient'd."""
   if cb is None:
     return y
   yd = y.dtype
-  return jnp.clip(y, cb.output_min.value.astype(yd), cb.output_max.value.astype(yd))
+  return jnp.clip(y, _clip_bound_value(cb.output_min, yd), _clip_bound_value(cb.output_max, yd))
 
 
 class _ClipBounds(nnx.Module):
