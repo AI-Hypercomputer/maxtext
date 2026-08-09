@@ -123,9 +123,11 @@ def _make_clip_state():
 
 
 def validate_clip_bounds(cb, where=""):
-  """Hard-fail: every bound finite + scalar. Raises ValueError otherwise. No-op if ``cb`` is None."""
+  """Hard-fail: every bound finite + scalar, and input_min<=input_max, output_min<=output_max.
+  Raises ValueError otherwise. No-op if ``cb`` is None."""
   if cb is None:
     return
+  vals = {}
   for nm in ("input_min", "input_max", "output_min", "output_max"):
     v = getattr(cb, nm).value
     if getattr(v, "shape", ()) not in ((), (1,)):
@@ -136,6 +138,57 @@ def validate_clip_bounds(cb, where=""):
       raise ValueError(f"Gemma4 vision clip bound '{nm}'{(' @ '+where) if where else ''} = {fv} is non-finite "
                        f"(missing/NaN/Inf). use_clipped_linears_for_vit=True declares a FINITE clipped model; "
                        f"refusing to fall back to an identity clamp.")
+    vals[nm] = fv
+  if vals["input_min"] > vals["input_max"]:
+    raise ValueError(f"Gemma4 vision clip bound{(' @ '+where) if where else ''}: input_min={vals['input_min']} "
+                     f"> input_max={vals['input_max']} (a clamp with min>max would empty the interval).")
+  if vals["output_min"] > vals["output_max"]:
+    raise ValueError(f"Gemma4 vision clip bound{(' @ '+where) if where else ''}: output_min={vals['output_min']} "
+                     f"> output_max={vals['output_max']} (a clamp with min>max would empty the interval).")
+
+
+# Expected clipped-module accounting for a Gemma-4 vision tower: 16 encoder blocks x 7 projections
+# (attention q/k/v/o = 4 modules holding q/k/v/o clip states + mlp gate/up/down = 3) -> but the clip
+# STATE lives on 2 modules per block (the Gemma4Attention holding q/k/v/o_clip, and the
+# Gemma4ClippedMlpBlock holding gate/up/down_clip). The scalar bound count is the invariant that matters:
+# 16 blocks x 7 projections x 4 bounds = 448. We validate the projection-level clip states (16x7 = 112).
+EXPECTED_CLIP_PROJECTIONS = 112   # 16 blocks x 7 projections (q,k,v,o,gate,up,down)
+EXPECTED_CLIP_BOUNDS = 448        # 112 projections x 4 scalar bounds
+
+
+def validate_all_vision_clip_bounds(model, *, expected_projections=EXPECTED_CLIP_PROJECTIONS,
+                                    expected_bounds=EXPECTED_CLIP_BOUNDS):
+  """Post-checkpoint-load, pre-first-JIT validation of ALL Gemma-4 vision clip bounds. Fail-closed.
+
+  Walks the model graph, collects every ``_ClipBounds`` module (each carries the 4 scalars for one
+  projection), validates each (finite, scalar, min<=max), and asserts EXACT counts:
+  ``expected_projections`` clip-state modules and ``expected_bounds`` scalar leaves. Raises ValueError on
+  any deficiency. The exact-count check is what prevents a traversal that accidentally finds zero modules
+  from silently "passing".
+  """
+  from flax import nnx  # pylint: disable=import-outside-toplevel
+  n_proj = 0
+  n_bounds = 0
+  for path, mod in nnx.iter_graph(model):
+    # A clip-state module has exactly the four bound leaves.
+    if (hasattr(mod, "input_min") and hasattr(mod, "input_max")
+        and hasattr(mod, "output_min") and hasattr(mod, "output_max")
+        and not isinstance(mod, (int, float))):
+      where = "/".join(str(getattr(p, "key", p)) for p in path) if isinstance(path, (list, tuple)) else str(path)
+      validate_clip_bounds(mod, where)
+      n_proj += 1
+      n_bounds += 4
+  if n_proj != expected_projections:
+    raise ValueError(
+        f"Gemma-4 vision clip validation found {n_proj} clip-state modules, expected exactly "
+        f"{expected_projections} (16 blocks x 7 projections). A mismatch means the clip bounds were not "
+        f"loaded/mapped correctly; refusing to run with a partially-clipped vision tower."
+    )
+  if n_bounds != expected_bounds:
+    raise ValueError(
+        f"Gemma-4 vision clip validation found {n_bounds} clip-bound scalars, expected exactly {expected_bounds}."
+    )
+  return n_proj, n_bounds
 
 
 
@@ -545,6 +598,14 @@ class Gemma4Attention(attentions.Attention):
     """
     if getattr(self, "_use_clipped_linears", False):
       return
+    # Fail-closed: the clipped path clamps q/k/v independently, which requires SEPARATE q/k/v projections.
+    # A fused QKV projection would apply a single clamp and silently bypass the per-projection clip semantics.
+    if bool(getattr(self.config, "fused_qkv", False)):
+      raise ValueError(
+          "Gemma-4 vision clipped-linears require fused_qkv=False: the checkpoint carries distinct "
+          "q/k/v activation clip bounds that must be applied per-projection. Refusing to silently clip a "
+          "fused QKV projection."
+      )
     self._use_clipped_linears = True
     self.q_clip = _make_clip_state()
     self.k_clip = _make_clip_state()
