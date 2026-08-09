@@ -2193,8 +2193,12 @@ class MultimodalGeneral(BaseModel):
   ple_pad_mode: str = Field(
       "identity",
       description=(
-          "PLE pad-substitution scope when ple_pad_substitute_image_rows=True: 'identity' (token-id path only) "
-          "or 'both' (also substitute the pad embedding in the context path)."
+          "PLE pad-substitution scope when ple_pad_substitute_image_rows=True. 'identity' (DEFAULT, "
+          "HF-faithful): map image placeholder rows -> pad in the token-identity PLE path only; the context/"
+          "projection path keeps the merged image features (matches HF Transformers 5.9.0 "
+          "Gemma4ForConditionalGeneration, where get_per_layer_inputs ignores inputs_embeds when input_ids is "
+          "provided). 'both': additionally overwrite the context path with the pad embedding — this is "
+          "HF-DIVERGENT and provided only for ablation. Validated as an enum; unknown values hard-fail."
       ),
   )
   image_placeholder_token_id: int = Field(
@@ -3655,6 +3659,57 @@ class MaxTextConfig(
             "(the vision encoder ships per-projection activation clip bounds; without them the "
             "image span diverges). Set use_clipped_linears_for_vit=True to enable image inputs."
         )
+      # ---- Gemma-4 E2B/E4B multimodal STATIC contract gate (fail-closed) ----
+      # These invariants encode the semantics validated against pinned HF Transformers 5.9.0
+      # (Gemma4ForConditionalGeneration). Any deviation silently corrupts image/post-image logits, so we
+      # refuse to build the model rather than degrade to a wrong-but-runnable path.
+      if self.model_name in ("gemma4-e2b", "gemma4-e4b"):
+        # (a) PLE pad-substitution mode must be a known value. HF maps image placeholder tokens -> pad in the
+        #     token-identity PLE path only (the context path keeps the merged image features); that is
+        #     "identity". "both" additionally overwrites the context path, which is HF-DIVERGENT. We keep the
+        #     knob for experimentation but hard-fail unknown/typo values instead of silently defaulting.
+        _valid_ple_modes = ("identity", "both")
+        if str(self.ple_pad_mode) not in _valid_ple_modes:
+          raise ValueError(
+              f"ple_pad_mode='{self.ple_pad_mode}' is not one of {_valid_ple_modes}. "
+              f"For Gemma-4 E2B/E4B the HF-faithful contract is 'identity' (token-identity PLE path maps "
+              f"image rows -> pad; context path keeps merged image features). 'both' is HF-divergent and "
+              f"provided only for ablation. Refusing to run with an unrecognized PLE mode."
+          )
+        # (b) The image placeholder id and PLE pad id are semantic constants tied to the tokenizer/model. We
+        #     require them to be set explicitly (single source of truth: the model yml derived from HF config)
+        #     so a silent hidden default cannot mask a tokenizer mismatch.
+        if self.ple_pad_substitute_image_rows:
+          if int(self.image_placeholder_token_id) < 0:
+            raise ValueError(
+                "image_placeholder_token_id must be a valid non-negative token id when "
+                "ple_pad_substitute_image_rows=True (derive it from the model/tokenizer config)."
+            )
+          if int(self.ple_pad_token_id) < 0:
+            raise ValueError(
+                "ple_pad_token_id must be a valid non-negative token id when "
+                "ple_pad_substitute_image_rows=True (Gemma-4 E2B text_config.pad_token_id=0)."
+            )
+        # (c) Gemma-4 E2B/E4B image spans are CAUSAL. Bidirectional image attention is a Gemma-3 / 26B / 31B
+        #     feature and would change the attention pattern for E2B/E4B.
+        if bool(getattr(self, "use_bidirectional_image_attn", False)):
+          raise ValueError(
+              f"{self.model_name} uses CAUSAL image spans; use_bidirectional_image_attn must be False. "
+              "Bidirectional image attention is for Gemma-3 / gemma4-26b / gemma4-31b."
+          )
+        # (d) The clipped path clamps q/k/v and gate/up/down per-projection; a fused QKV or fused MLP would
+        #     apply a single clamp and silently bypass the per-projection clip semantics. Fail closed here
+        #     (defense in depth alongside the runtime guards in gemma4_vision).
+        if bool(getattr(self, "fused_qkv", False)):
+          raise ValueError(
+              f"{self.model_name} multimodal clipped-linears require fused_qkv=False "
+              "(distinct q/k/v activation clip bounds must be applied per-projection)."
+          )
+        if bool(getattr(self, "fused_mlp", False)):
+          raise ValueError(
+              f"{self.model_name} multimodal clipped-linears require fused_mlp=False "
+              "(distinct gate/up/down activation clip bounds must be applied per-projection)."
+          )
       valid_mm_models = (
           "gemma3-4b",
           "gemma3-12b",

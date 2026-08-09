@@ -149,6 +149,14 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
         encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
+        # Gemma-4 padded-patch (Option-S) contract: when the data pipeline produces per-patch image
+        # position ids (native-resolution / pan-and-scan processors), thread them to the vision encoder
+        # so pad patches are masked and pooled by real coordinates. The stock fixed-grid Gemma-4 processor
+        # produces all-valid patches and does NOT emit this key, so the legacy all-valid path is used
+        # (correct for its contract). See gemma4_vision.Gemma4VisionEncoderLayer for the fail-closed guard.
+        encoder_image_position_ids=(
+            data["image_position_ids"] if config.use_multimodal and "image_position_ids" in data else None
+        ),
         enable_dropout=config.enable_dropout if is_train else False,
         rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
         mutable=mutable_collections,
@@ -198,6 +206,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
         encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
+        # See the Linen branch above: thread per-patch image position ids when the data pipeline emits
+        # them (Gemma-4 Option-S padded-patch contract); None for the stock fixed-grid all-valid processor.
+        encoder_image_position_ids=(
+            data["image_position_ids"] if config.use_multimodal and "image_position_ids" in data else None
+        ),
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],

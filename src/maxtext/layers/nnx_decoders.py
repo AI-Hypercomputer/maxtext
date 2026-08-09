@@ -1759,6 +1759,7 @@ class NNXDecoder(nnx.Module):
             attention_metadata=attention_metadata,
             previous_chunk=previous_chunk,
             slot=slot,
+            shared_embedding=shared_embedding,
         )
       elif cfg.scan_layers:
         if self.is_deepseek:
@@ -2233,6 +2234,7 @@ class NNXDecoder(nnx.Module):
       attention_metadata=None,
       previous_chunk=None,
       slot=None,
+      shared_embedding=None,
   ):
     """Apply Gemma 4 small (E2B/E4B) decoder layers (pure-NNX)."""
     cfg = self.config
@@ -2258,8 +2260,19 @@ class NNXDecoder(nnx.Module):
         _pad_id = int(getattr(cfg, "ple_pad_token_id", 0))
         _img_row = decoder_input_tokens.astype(jnp.int32) == _img_id
         ple_tokens = jnp.where(_img_row, _pad_id, decoder_input_tokens.astype(jnp.int32))
-        if str(getattr(cfg, "ple_pad_mode", "identity")) == "both" and hasattr(self, "shared_embedding"):
-          _pad_vec = self.shared_embedding(jnp.full_like(decoder_input_tokens, _pad_id).astype(jnp.int32))
+        # ple_pad_mode: 'identity' (HF-faithful default) substitutes ONLY the token-identity path (above),
+        # leaving the context/projection path reading the merged image features — this matches HF
+        # Transformers 5.9.0 (get_per_layer_inputs ignores inputs_embeds when input_ids is given). The
+        # 'both' mode additionally overwrites the context path with the pad embedding; this is HF-DIVERGENT
+        # and provided only for ablation (see M9 ablation matrix). Enum-validated in configs/types.py.
+        if str(getattr(cfg, "ple_pad_mode", "identity")) == "both":
+          if shared_embedding is None:
+            raise ValueError(
+                "ple_pad_mode='both' requires the shared token embedding to compute the pad context "
+                "vector, but shared_embedding was not threaded into the Gemma-4-small PLE path. This is "
+                "an HF-divergent ablation mode; use the default 'identity' for HF-faithful behavior."
+            )
+          _pad_vec = shared_embedding(jnp.full_like(decoder_input_tokens, _pad_id).astype(jnp.int32), model_mode=model_mode)
           ple_context = jnp.where(_img_row[..., None], _pad_vec, y)
       per_layer_inputs = self.per_layer_embedder(ple_tokens, ple_context)
 
