@@ -1617,8 +1617,8 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       or scanned with expert stacking (nested list of strings).
   """
   # Extract hf configuration parameters, without mtp
-  num_main_layers = min(config["num_hidden_layers"], maxtext_config.base_num_decoder_layers)
-  first_num_dense_layers = min(config["first_k_dense_replace"], maxtext_config.first_num_dense_layers, num_main_layers)
+  num_main_layers = config["num_hidden_layers"]
+  first_num_dense_layers = config["first_k_dense_replace"]
   num_experts = config.get("n_routed_experts", 0)
 
   # Mapping for non-layer-specific weights
@@ -1886,7 +1886,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
         return transposed[:, 0, :, :]
       return transposed
 
-  num_main_layers = min(config["num_hidden_layers"], maxtext_config.base_num_decoder_layers)
+  num_main_layers = config["num_hidden_layers"]
   first_num_dense_layers = config["first_k_dense_replace"]
 
   mapping = {
