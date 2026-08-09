@@ -239,14 +239,32 @@ def get_optimizer(config, learning_rate_schedule, model=None):
   # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
   trainable_patterns = getattr(config, "trainable_parameters_mask", None)
   freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
-  if freeze_mask_fn is not None:
-    # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
-    # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
-    # massive states (momentum, variance) for the entire model before zeroing the updates.
-    # By using multi_transform, only the trainable parameters get states allocated.
+
+  # Gemma-4 vision clipped-linears: the 448 clip bounds are checkpoint-resident, immutable state and must
+  # NEVER receive optimizer updates, weight decay, or momentum/variance slots. Freeze them via a leaf-PATH
+  # mask (robust to the nnx->linen bridge's type erasure). This composes with any trainable_parameters_mask:
+  # a parameter is "trainable" only if it is trainable under the whitelist AND is not a clip bound.
+  freeze_clip_bounds = bool(getattr(config, "use_clipped_linears_for_vit", False))
+
+  if freeze_mask_fn is not None or freeze_clip_bounds:
+    def _partition(params):
+      # trainable_mask: True where trainable under the whitelist (all-True if no whitelist).
+      if freeze_mask_fn is not None:
+        trainable_mask = freeze_mask_fn(params)
+      else:
+        trainable_mask = jax.tree_util.tree_map(lambda _: True, params)
+      if freeze_clip_bounds:
+        # clip_optimizer_freeze_mask returns True for trainable leaves, False for clip bounds.
+        from maxtext.models import gemma4_vision  # pylint: disable=import-outside-toplevel
+        clip_trainable = gemma4_vision.clip_optimizer_freeze_mask(params)
+        trainable_mask = jax.tree_util.tree_map(lambda a, b: bool(a) and bool(b), trainable_mask, clip_trainable)
+      return jax.tree_util.tree_map(lambda x: "trainable" if x else "frozen", trainable_mask)
+
+    # Use optax.multi_transform so frozen (and clip-bound) params map to a stateless set_to_zero() optimizer
+    # and never allocate momentum/variance slots.
     return optax.multi_transform(
         {"trainable": base_opt, "frozen": optax.set_to_zero()},
-        lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
+        _partition,
     )
 
   return base_opt
