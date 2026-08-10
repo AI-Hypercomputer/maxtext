@@ -385,6 +385,8 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
     logger.info(f"Command STDOUT:\n{stdout_str}")
     logger.error(f"Command STDERR:\n{stderr_str}")
     raise ValueError("ERROR: Forward pass logit verification failed! See logs for details.")
+  else:
+    logger.info(f"Command STDOUT:\n{stdout_str}")
 
   logger.info("Forward pass validation successful!")
 

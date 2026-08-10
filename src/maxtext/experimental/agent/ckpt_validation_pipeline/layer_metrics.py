@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Layer-by-layer activation similarity and diagnostic utilities for validation agent."""
+"""Layer-by-layer activation similarity and diagnostic utilities for validation agent.
+
+Note: This module implements core diagnostic utilities for calculating activation similarities.
+It is intended to be used in future phases of the pipeline by the automated Airflow agent sidecar
+to perform deep inspection of layer divergence during forward-pass execution failures.
+"""
 
 from typing import Any, Dict, List, Optional
 import numpy as np
