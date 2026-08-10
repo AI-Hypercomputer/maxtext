@@ -580,7 +580,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
@@ -627,6 +627,10 @@ class Attention(BaseModel):
   )
   sliding_window_size: NonNegativeInt = Field(0, description="The size of the sliding window for local attention.")
   chunk_attn_window_size: NonNegativeInt = Field(0, description="The window size for chunked attention.")
+  causal_block_size: PositiveInt = Field(
+      32,
+      description="The number of token positions in each bidirectional block for block-causal attention.",
+  )
   attn_logits_soft_cap: None | NonNegativeFloat = Field(
       None, description="Soft-cap value for attention logits. None means no cap."
   )
@@ -667,6 +671,13 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+  use_sliced_mla_proj: bool = Field(
+      False,
+      description=(
+          "Whether to slice projection kernel weights before contraction in MLA"
+          " instead of running full projection + jnp.split."
+      ),
+  )
 
 
 class CompressedAttention(BaseModel):
@@ -734,6 +745,10 @@ class SplashAttention(BaseModel):
   sa_block_q_dq: int = Field(512, description="Block size for Q_dq in splash attention.")
   sa_block_kv_dq: int = Field(512, description="Block size for KV_dq in splash attention.")
   sa_use_fused_bwd_kernel: bool = Field(False, description="Use fused backward kernel in splash attention.")
+  sa_bwd_dkv_megacore: bool = Field(
+      False,
+      description="Megacore-parallel kv-head groups in the static dkv grid. Needs >1 KV head; useful at local batch 1.",
+  )
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
@@ -1016,6 +1031,7 @@ class DeepSeekMoE(BaseModel):
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
   routed_bias_update_rate: float = Field(0.0, description="Update rate applied to the router bias term.")
+  log_moe_bias_norms: bool = Field(False, description="Whether to log the norms of MoE router biases.")
   mlp_bias: bool = Field(
       False,
       description="Whether to add a learnable bias for MLP matmul, "
@@ -3494,6 +3510,19 @@ class MaxTextConfig(
         not isinstance(self.sliding_window_size, int) or self.sliding_window_size <= 0
     ):
       raise ValueError("`sliding_window_size` must be an integer > 0 for 'local_sliding' attention.")
+    if self.attention_type == AttentionType.BLOCK_DIFFUSION.value:
+      if self.packing:
+        # Document-local block origins inside a packed sequence are not tracked
+        # in attention metadata; packing without realignment would cause
+        # cross-document block-attention leakage.
+        raise ValueError("Block-diffusion attention does not support packing; set `packing=False`.")
+      if self.attention not in ("autoselected", "dot_product", "flash"):
+        raise ValueError("Block-diffusion attention is supported only by dot_product attention and TPU Splash attention.")
+      if self.attention in ("autoselected", "flash") and self.hardware != "tpu":
+        raise ValueError(
+            "Block-diffusion attention with attention='autoselected' or attention='flash' requires hardware='tpu'; "
+            "use attention='dot_product' on other hardware."
+        )
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
     if (
@@ -3532,8 +3561,17 @@ class MaxTextConfig(
           )
       if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
-      if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
+      if (
+          self.routed_bias
+          and self.routed_bias_update_rate > 0.0
+          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
+      ):
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
+        raise ValueError(
+            "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
+            "Please set pure_nnx=True or disable routed_bias."
+        )
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
@@ -3815,6 +3853,8 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
+    if self.use_sliced_mla_proj and (self.quantization or self.use_qwix_quantization):
+      raise ValueError("`use_sliced_mla_proj` is not supported with quantization.")
 
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
@@ -3943,6 +3983,7 @@ class MaxTextConfig(
 class RLConfig(
     LogitsAndLoss,
     Engram,
+    ManifoldConstrainedHyperConnections,
     RematAndOffload,
     Attention,
     Llama4Attention,
@@ -3952,9 +3993,32 @@ class RLConfig(
     Decoding,
     IciParallelism,
     DcnParallelism,
+    PipelineParallelism,
+    DilocoParams,
     HardwareAndMesh,
     ModelArchitecture,
+    MTP,
     MoBa,
+    # Advanced Architectures, Tuning, and Optimizers
+    Muon,
+    FineTuning,
+    Distillation,
+    # Datasets and Loading Compatibility
+    DatasetGeneral,
+    TfdsDataset,
+    HfDataset,
+    GrainDataset,
+    OlmoGrainDataset,
+    # Inference, Checkpointing, and Monitoring
+    EmergencyCheckpointing,
+    ElasticTraining,
+    InferenceServer,
+    InferenceBenchmark,
+    PrefixCaching,
+    HloDump,
+    Goodput,
+    GcpMonitoring,
+    ManagedMLDiagnostics,
     # Positional Embeddings
     PositionalEmbedding,
     Rope,
@@ -3981,9 +4045,12 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
-    # Debugging and Profiling
+    # Debugging, Profiling, and Telemetry
+    AOT,
     DevelopmentAndDebugging,
     Profiling,
+    Metrics,
+    Tensorboard,
     # For compatibility with trainer in post_train/rl
     RL,
     RLCluster,
@@ -3992,6 +4059,8 @@ class RLConfig(
     RLReward,
     RLSpecialTokens,
     VLLM,
+    TrainingLoop,
+    DerivedValues,
 ):
   """
   Configuration for Reinforcement Learning in MaxText.
@@ -4177,19 +4246,20 @@ class RLConfig(
 
     # Dynamically inject model dimensions.
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(self.global_parameter_scale)
-    object.__setattr__(self, "emb_dim", int((2**emb_scale) * self.base_emb_dim))
-    object.__setattr__(self, "num_query_heads", int((2**num_head_scale) * self.base_num_query_heads))
-    object.__setattr__(self, "num_kv_heads", int((2**num_head_scale) * self.base_num_kv_heads))
-    object.__setattr__(self, "mlp_dim", int((2**mlp_dim_scale) * self.base_mlp_dim))
-    object.__setattr__(self, "moe_mlp_dim", int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0)))
-    object.__setattr__(self, "num_decoder_layers", int((2**layer_scale) * self.base_num_decoder_layers))
+    self.emb_dim = int((2**emb_scale) * self.base_emb_dim)
+    self.num_query_heads = int((2**num_head_scale) * self.base_num_query_heads)
+    self.num_kv_heads = int((2**num_head_scale) * self.base_num_kv_heads)
+    self.mlp_dim = int((2**mlp_dim_scale) * self.base_mlp_dim)
+    self.moe_mlp_dim = int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0))
+    self.num_decoder_layers = int((2**layer_scale) * self.base_num_decoder_layers)
 
     # Mirror into internal MaxText fields for backward compatibility.
     train_micro_batch_size = getattr(self.dataset, "train_micro_batch_size", -1)
     batch_size = getattr(self.dataset, "batch_size", 1)
     if train_micro_batch_size <= 0:
       train_micro_batch_size = batch_size
-    object.__setattr__(self, "micro_batch_size_to_train_on", train_micro_batch_size)
+    self.micro_batch_size_to_train_on = train_micro_batch_size
+    self.steps = getattr(self, "train_steps", getattr(self, "num_batches", 10))
 
     if self.remat_policy == "custom":
       tensors = [
@@ -4214,7 +4284,7 @@ class RLConfig(
           "attention_out",
           "out_proj",
       ]
-      object.__setattr__(self, "tensors_on_device", [t for t in tensors if getattr(self, t) == "device"])
-      object.__setattr__(self, "tensors_to_offload", [t for t in tensors if getattr(self, t) == "offload"])
+      self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
+      self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
     return self

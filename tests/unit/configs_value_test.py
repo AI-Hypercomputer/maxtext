@@ -242,6 +242,7 @@ class ConfigTest(absltest.TestCase):
         (["attention_type=compressed"], [], "attention_type"),
         (["attention_type=mla", "packing=True"], ["packing=False"], "packing"),
         (["attention_type=mla", "use_batch_split_schedule=True"], [], "batch-split"),
+        (["attention_type=block_diffusion"], [], "attention_type"),
         (
             [
                 "context_parallel_load_balance=True",
@@ -298,6 +299,59 @@ class ConfigTest(absltest.TestCase):
 
     self.assertEqual(config.attention_type, "chunk")
     self.assertTrue(config.context_parallel_load_balance)
+
+  def test_block_diffusion_attention_config(self):
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "attention=dot_product",
+            "attention_type=block_diffusion",
+            "causal_block_size=7",
+            "vocab_size=256",
+            "max_target_length=2048",
+            "hardware=cpu",
+            "packing=False",
+            "skip_jax_distributed_system=True",
+        ]
+    )
+
+    self.assertEqual(config.attention_type, "block_diffusion")
+    self.assertEqual(config.causal_block_size, 7)
+    self.assertNotEqual(config.max_target_length % config.causal_block_size, 0)
+
+  def test_block_diffusion_attention_rejects_unsupported_configs(self):
+    base_overrides = {
+        "run_name": "test",
+        "steps": 1,
+        "attention": "dot_product",
+        "attention_type": "block_diffusion",
+        "causal_block_size": 32,
+        "vocab_size": 256,
+        "max_target_length": 2048,
+        "hardware": "cpu",
+        "packing": False,
+        "skip_jax_distributed_system": True,
+    }
+    cases = (
+        {"causal_block_size": 0},
+        {"packing": True},
+        {"attention": "cudnn_flash_te"},
+        {"attention": "flash", "hardware": "gpu"},
+    )
+    for overrides in cases:
+      with self.subTest(overrides=overrides):
+        values = base_overrides | overrides
+        argv = ["", _BASE_CONFIG_PATH, *(f"{key}={value}" for key, value in values.items())]
+        with self.assertRaises((ValueError, pydantic.ValidationError)):
+          pyconfig.initialize(argv)
+
+  def test_default_attention_remains_global(self):
+    config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "steps=1"])
+
+    self.assertEqual(config.attention_type, "global")
 
   @unittest.mock.patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_env_override(self):
@@ -402,6 +456,18 @@ class ConfigTest(absltest.TestCase):
     ]
     with self.assertRaises(ValueError):
       pyconfig.initialize(argv_invalid)
+
+  def test_sliced_mla_proj_disallows_quantization(self):
+    """Tests that use_sliced_mla_proj=True is incompatible with quantization."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_sliced_mla_proj=true",
+        "quantization=int8",
+    ]
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv)
 
 
 if __name__ == "__main__":

@@ -350,8 +350,8 @@ def _fwd_run_tokamax_v2(
   )
 
   return gmm_v2.gmm_v2(
-      lhs=lhs,
-      rhs=rhs_operand,
+      lhs=lhs,  # pyrefly: ignore[bad-argument-type]
+      rhs=rhs_operand,  # pyrefly: ignore[bad-argument-type]
       group_sizes=group_sizes,
       rhs_scale=rhs_scale,
       tile_info=custom_fwd_tiling,
@@ -683,7 +683,7 @@ def _dlhs_run_tokamax_v2(
       # rhs scale is already applied to dlhs_lhs
       rhs_scale=None,
       tile_info=custom_dlhs_tiling,
-      preferred_element_type=lhs_dtype,
+      preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
   )
 
@@ -828,7 +828,7 @@ def _drhs_run_tokamax_v2(
       num_actual_groups=num_actual_groups,
       rhs_scale=rhs_scale,
       precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=rhs_dtype,
+      preferred_element_type=rhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
       tile_info=custom_drhs_tiling,
   )

@@ -948,7 +948,10 @@ class NNXDecoder(nnx.Module):
         e.g. per-layer) remat internally, to avoid double rematerialization.
       unroll: Number of scan iterations to unroll into straight-line code
         (forwarded to jax.lax.scan). unroll >= length fully unrolls the loop.
-      metadata_axis_name: Logical axis name for the scanned stack in partition specs.
+      metadata_axis_name: The name of the scan axis used during layer initialization.
+        This must perfectly match the string passed to `_create_scanned_layers`
+        (e.g., "layers", "scanned_blocks") to prevent strict JAX `pjit` PyTree
+        metadata mismatch errors when using custom `nnx.Variable` types (like `MoEBiasVar`).
       **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
 
     Returns:
@@ -2055,6 +2058,7 @@ class NNXDecoder(nnx.Module):
           deterministic,
           model_mode,
           length=num_full_blocks,
+          metadata_axis_name="scanned_blocks",
           **layer_call_kwargs,
       )
 

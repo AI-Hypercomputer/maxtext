@@ -16,6 +16,7 @@
 
 import sys
 import unittest
+from unittest.mock import MagicMock
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
@@ -102,6 +103,82 @@ class DenseGeneralTest(unittest.TestCase):
 
     self.assertEqual(outputs.shape, (batch_size, out_features))
     self.assertIsNotNone(layer.bias)
+
+  def test_slice_bounds(self):
+    batch_size = 2
+    in_features = 4
+    n_heads = 2
+    head_dim = 8
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=(n_heads, head_dim),
+        use_bias=True,
+        rngs=self.rngs,
+    )
+
+    inputs = jax.random.normal(jax.random.PRNGKey(0), (batch_size, in_features))
+    full_output = layer(inputs)
+
+    slice1 = layer(inputs, slice_bounds=(0, 3))
+    slice2 = layer(inputs, slice_bounds=(3, head_dim))
+
+    self.assertEqual(slice1.shape, (batch_size, n_heads, 3))
+    self.assertEqual(slice2.shape, (batch_size, n_heads, head_dim - 3))
+
+    np.testing.assert_allclose(slice1, full_output[..., :3], rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(slice2, full_output[..., 3:], rtol=1e-5, atol=1e-5)
+
+  def test_slice_bounds_with_quantization(self):
+    batch_size = 2
+    in_features = 4
+    n_heads = 2
+    head_dim = 8
+
+    mock_quant = MagicMock()
+    mock_quant.quant_mode = None
+    # Configure mock for ToNNX initialization
+    mock_cls = mock_quant.dot_general_cls.return_value
+    mock_instance = mock_cls.return_value
+    mock_instance.init_with_output.return_value = (MagicMock(), {})
+    mock_instance.apply.return_value = (MagicMock(), {})
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=(n_heads, head_dim),
+        use_bias=True,
+        quant=mock_quant,
+        rngs=self.rngs,
+    )
+
+    inputs = jax.random.normal(jax.random.PRNGKey(0), (batch_size, in_features))
+
+    with self.assertRaisesRegex(ValueError, "sliced contraction is only supported when quant is None"):
+      layer(inputs, slice_bounds=(0, 3))
+
+  def test_slice_bounds_invalid(self):
+    batch_size = 2
+    in_features = 4
+    n_heads = 2
+    head_dim = 8
+
+    layer = linears.DenseGeneral(
+        in_features_shape=in_features,
+        out_features_shape=(n_heads, head_dim),
+        use_bias=True,
+        rngs=self.rngs,
+    )
+
+    inputs = jax.random.normal(jax.random.PRNGKey(0), (batch_size, in_features))
+
+    with self.assertRaisesRegex(ValueError, "slice_bounds .* must be valid and within"):
+      layer(inputs, slice_bounds=(3, 2))
+
+    with self.assertRaisesRegex(ValueError, "slice_bounds .* must be valid and within"):
+      layer(inputs, slice_bounds=(-1, 4))
+
+    with self.assertRaisesRegex(ValueError, "slice_bounds .* must be valid and within"):
+      layer(inputs, slice_bounds=(0, 100))
 
   def _run_dense_test(self, axis, in_feat_shape, expected_shape):
     batch_size = 2

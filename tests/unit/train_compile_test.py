@@ -852,6 +852,8 @@ class TrainCompile(parameterized.TestCase):
             f"enable_nnx={enable_nnx}",
             f"pure_nnx={enable_nnx}",
             f"pure_nnx_decoder={enable_nnx}",
+            "routed_bias=False",
+            "override_model_config=True",
         )
     )
 

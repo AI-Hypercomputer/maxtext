@@ -278,6 +278,7 @@ def build_splash_config(
       dq_reduction_steps=dq_reduction_steps if dq_reduction_steps > 0 else None,
       use_experimental_scheduler=config.use_splash_scheduler,
       ring_scan_unroll=config.ring_scan_unroll,
+      bwd_dkv_megacore=config.sa_bwd_dkv_megacore,
   )
 
 

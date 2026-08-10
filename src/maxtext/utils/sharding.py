@@ -86,6 +86,8 @@ def maybe_shard_with_name(
   """
   if inputs is None:
     return None
+  if hasattr(inputs, "ndim"):
+    named_sharding = truncate_out_sharding(named_sharding, inputs.ndim)
   if (
       isinstance(named_sharding, NamedSharding)
       and hasattr(inputs, "shape")
@@ -346,6 +348,25 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
 def create_sharding(mesh, logical_names, rules=None):
   """Create NamedSharding with given logical names."""
   return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
+
+
+def truncate_out_sharding(out_sharding, out_ndim: int):
+  """Truncates out_sharding if tensor ndim is less than out_sharding pspec length."""
+  if out_sharding is None:
+    return None
+  if isinstance(out_sharding, NamedSharding):
+    if len(out_sharding.spec) > out_ndim:
+      return NamedSharding(
+          out_sharding.mesh,
+          P(*out_sharding.spec[:out_ndim]),
+      )
+  elif isinstance(out_sharding, P):
+    if len(out_sharding) > out_ndim:
+      return P(*out_sharding[:out_ndim])
+  elif isinstance(out_sharding, (tuple, list)):
+    if len(out_sharding) > out_ndim:
+      return tuple(out_sharding[:out_ndim])
+  return out_sharding
 
 
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):

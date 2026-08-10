@@ -53,14 +53,20 @@ jobs:
          path: ~/.cache/pre-commit
          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
 
-    - name: Run pre-commit checks on just the files that have changed
+    - name: Run code quality checks
       run: |
         . "$GITHUB_WORKSPACE"/venv/bin/activate
         if [ "${{ github.event_name }}" == "pull_request" ]; then
-          git fetch origin "$GITHUB_BASE_REF":"$GITHUB_BASE_REF"
-          git branch "$GITHUB_HEAD_REF"
-          pre-commit run --from-ref "$GITHUB_BASE_REF" --to-ref "$GITHUB_HEAD_REF" --show-diff-on-failure
+          git fetch origin "$GITHUB_BASE_REF"
+          MERGE_BASE=$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)
+          # Run fast formatting check across all files (<1s each)
+          pre-commit run pyink --all-files --show-diff-on-failure
+          pre-commit run mdformat --all-files --show-diff-on-failure
+          # Run full suite (including pylint) on changed files only
+          pre-commit run --from-ref "$MERGE_BASE" --to-ref HEAD --show-diff-on-failure
         else
           echo "Not a pull request event (${{ github.event_name }}), checking all files."
           pre-commit run --all-files --show-diff-on-failure
         fi
+
+

@@ -96,6 +96,40 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
+# Passage repeated to build the long regression prompt below. The content is
+# arbitrary; only its length matters.
+_LONG_PROMPT_PASSAGE = (
+    "The city of Lyon sits at the confluence of the Rhone and Saone rivers in eastern France. "
+    "Founded as a Roman colony in 43 BC, it served for centuries as the capital of the Gauls. "
+    "Its silk industry flourished in the sixteenth century, drawing weavers from across Europe. "
+    "The old town preserves narrow covered passageways known as traboules, built so that silk "
+    "merchants could carry bolts of fabric between workshops without exposing them to rain. "
+)
+
+
+def build_long_prompt(repeats=5):
+  """Builds a ~500 token prompt for position-dependent regression coverage.
+
+  Short prompts cannot detect bugs in position-dependent code such as RoPE. The
+  rotation applied at position 0 is the identity and is near-identity for the
+  next few positions, so an implementation that rotates the wrong number of head
+  dimensions still produces correct-looking logits on a 3-4 token prompt.
+
+  Measured on Qwen3.5-35B-A3B for identifying partial-RoPE bugs, e.g. where the
+  full 256-dim head was rotated instead of
+  `head_dim * partial_rotary_factor = 64`. Compared against HuggingFace golden
+  logits with `--max_kl_div=0.1`, such a bug is undetected by the short prompts
+  above but is caught by this one.
+
+  Args:
+    repeats: Number of times to repeat the base passage. 5 yields ~493 tokens.
+
+  Returns:
+    A long prompt string ending in a question that depends on the passage.
+  """
+  question = "\n\nBased on the passage above, the traboules of Lyon were originally built so that"
+  return _LONG_PROMPT_PASSAGE * repeats + question
+
 
 def upload_blob(bucket_name, source_file_name, destination_blob_name):
   """Uploads a file to the bucket."""
@@ -389,8 +423,18 @@ def main(config, test_args):  # pylint: disable=W0621
 
       with jsonlines.open(input_golden_data_path, "r") as f:
         golden_data = list(f)
+    elif input_golden_data_path.suffix in (".pickle", ".pkl"):
+      # generate_hf_golden_logits.py can emit --output-format=pickle, which keeps
+      # full float32 precision at a fraction of the size: JSON re-encodes every
+      # logit as decimal text, so a golden file storing seq_len x vocab_size
+      # floats is several times larger than the equivalent pickle.
+      max_logging.log("loading hf goldens from pickle file")
+      import pickle  # pylint: disable=import-outside-toplevel
+
+      with open(input_golden_data_path, "rb") as f:
+        golden_data = pickle.load(f)
     else:
-      raise ValueError("golden_logits_path must end with .jsonl")
+      raise ValueError("golden_logits_path must end with .jsonl, .pickle, or .pkl")
     max_logging.log(f"loaded {len(golden_data)} golden data points")
     all_data_to_save = []
     for golden_data_index, golden_data_point in enumerate(golden_data):
@@ -615,10 +659,12 @@ def main(config, test_args):  # pylint: disable=W0621
       else:
         maxtext_state, _ = model_creation_utils.setup_decode_state_from_nnx(maxtext_model, config, rng1, mesh)
 
-    prompts = ["I love to", "Today is a", "What is the"]
+    # The long prompt is required to catch position-dependent regressions (e.g. RoPE);
+    # the short prompts above cannot detect them. See build_long_prompt().
+    prompts = ["I love to", "Today is a", "What is the", build_long_prompt()]
     all_data_to_save = []
     for input_text in prompts:
-      max_logging.log(f"\n--- Prompt: {input_text} ---")
+      max_logging.log(f"\n--- Prompt: {input_text[:80]}{'...' if len(input_text) > 80 else ''} ---")
 
       # Tokenize for HF
       inputs = tokenizer(

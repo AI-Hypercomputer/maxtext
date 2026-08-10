@@ -1266,7 +1266,7 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.cfg = _make_config(scan_layers=True)
+    self.cfg = _make_config(scan_layers=True, param_scan_axis=0)
     self.mesh = _make_mesh(self.cfg)
     self.rng = jax.random.PRNGKey(0)
 
@@ -1299,3 +1299,50 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
       self.assertEqual(y.shape, x.shape)
       self.assertIsNotNone(updated_layers)
 
+  def test_custom_metadata_axis_name_passed_to_scan_axis_sync(self):
+    from maxtext.utils import maxtext_utils_nnx
+
+    cfg = _make_config(param_scan_axis=0)
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0)
+
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=rngs,
+    )
+
+    class DummyLayer(nnx.Module):
+
+      def __init__(self, rngs):
+        self.p = nnx.Param(jax.numpy.zeros((2,)))
+
+      def __call__(self, x, **kwargs):
+        return x + self.p.value, None
+
+    stacked_layers = nnx.vmap(lambda: DummyLayer(rngs=rngs), in_axes=(), out_axes=0, axis_size=2)()
+    x_in = jax.numpy.zeros((2,))
+
+    original_add_scan_axis = maxtext_utils_nnx.nnx_add_and_sync_scan_axis
+    mock_add_scan_axis = MagicMock(side_effect=original_add_scan_axis)
+    maxtext_utils_nnx.nnx_add_and_sync_scan_axis = mock_add_scan_axis
+
+    try:
+      custom_axis_name = "custom_scanned_blocks"
+      out, layers, _ = decoder._apply_layers_sequentially(
+          layers=stacked_layers, x_in=x_in, length=2, metadata_axis_name=custom_axis_name
+      )
+      found_custom_name = False
+      for call_args in mock_add_scan_axis.call_args_list:
+        if len(call_args[0]) > 1 and call_args[0][1] == custom_axis_name:
+          found_custom_name = True
+          break
+
+      self.assertTrue(found_custom_name, "The custom metadata_axis_name was not passed to nnx_add_and_sync_scan_axis!")
+    finally:
+      maxtext_utils_nnx.nnx_add_and_sync_scan_axis = original_add_scan_axis
+
+
+if __name__ == "__main__":
+  unittest.main()
