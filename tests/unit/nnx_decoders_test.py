@@ -1259,3 +1259,43 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
               model_mode=MODEL_MODE_TRAIN,
               kv_caches=kv_caches,
           )
+
+
+class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
+  """Tests metadata_axis_name parameterization in NNXDecoder._apply_layers_sequentially."""
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = _make_config(scan_layers=True)
+    self.mesh = _make_mesh(self.cfg)
+    self.rng = jax.random.PRNGKey(0)
+
+  def test_metadata_axis_name_parameterization(self):
+    # Test that _apply_layers_sequentially accepts and respects metadata_axis_name
+    decoder = NNXDecoder(
+        config=self.cfg,
+        mesh=self.mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=nnx.Rngs(params=0, dropout=1),
+    )
+    layers = getattr(decoder, "layers", None)
+    if layers is not None:
+      batch = self.cfg.global_batch_size_to_train_on
+      seq_len = self.cfg.max_target_length
+      x = jnp.zeros((batch, seq_len, self.cfg.emb_dim), dtype=self.cfg.dtype)
+      positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+      segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+
+      y, updated_layers, _ = decoder._apply_layers_sequentially(
+          layers,
+          x,
+          length=self.cfg.num_decoder_layers,
+          metadata_axis_name="dense_layers",
+          decoder_positions=positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      self.assertEqual(y.shape, x.shape)
+      self.assertIsNotNone(updated_layers)
+

@@ -925,6 +925,7 @@ class NNXDecoder(nnx.Module):
       kv_caches_stacked=None,
       skip_block_remat: bool = False,
       unroll: int = 1,
+      metadata_axis_name: str = "layers",
       **kwargs,
   ):
     """Runs the layer stack using nnx.scan.
@@ -947,6 +948,7 @@ class NNXDecoder(nnx.Module):
         e.g. per-layer) remat internally, to avoid double rematerialization.
       unroll: Number of scan iterations to unroll into straight-line code
         (forwarded to jax.lax.scan). unroll >= length fully unrolls the loop.
+      metadata_axis_name: Logical axis name for the scanned stack in partition specs.
       **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
 
     Returns:
@@ -985,7 +987,7 @@ class NNXDecoder(nnx.Module):
 
     def layer_fn(carry, scanned_vars):
       # Ensure metadata rank matches the sliced values
-      scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, "layers")
+      scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, metadata_axis_name)
 
       # Unpack the sliced variables for THIS layer
       if use_kv:
@@ -1074,7 +1076,7 @@ class NNXDecoder(nnx.Module):
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
       # in the sharding metadata. jax.lax.scan emits it at position 0.
-      scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, "layers")
+      scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, metadata_axis_name)
 
       returned_kv_stacked = None
 
