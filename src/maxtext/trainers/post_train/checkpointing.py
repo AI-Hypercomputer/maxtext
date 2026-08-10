@@ -20,7 +20,7 @@ run without Tunix installed.
 """
 
 import os
-from typing import Any
+from typing import Any, Sequence
 
 from flax import nnx
 import jax
@@ -204,6 +204,22 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     if getattr(self, "_checkpoint_manager", None) is not None:
       self._checkpoint_manager.close()
 
+  def latest_step(self) -> int | None:
+    """Returns the latest step saved, reloading from storage if not cached."""
+    if getattr(self, "_checkpoint_manager", None) is None:
+      return None
+    step = self._checkpoint_manager.latest_step()
+    if step is None:
+      steps = self.all_steps(read=True)
+      return steps[-1] if steps else None
+    return step
+
+  def all_steps(self, read: bool = False) -> Sequence[int]:
+    """Returns all steps tracked by the manager."""
+    if getattr(self, "_checkpoint_manager", None) is None:
+      return []
+    return self._checkpoint_manager.all_steps(read=read)
+
   def model_to_checkpoint(self, model: nnx.Module) -> nnx.Module:
     """Returns the module whose weights belong in the checkpoint.
 
@@ -291,7 +307,7 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     metadata = checkpointing.checkpoint_custom_metadata(self._config)
     metadata.update(custom_metadata or {})
 
-    if not force and step in self._checkpoint_manager.all_steps(read=True):
+    if not force and step in self.all_steps():
       max_logging.log(f"Step {step} already exists in MaxText layout. Skipping save.")
       return False
 
