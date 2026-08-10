@@ -47,7 +47,6 @@ class TestCheckpointValidationAgent(unittest.TestCase):
     mock_proc.returncode = 0
     mock_proc.stdout = []
     mock_popen.return_value.__enter__.return_value = mock_proc
-    mock_subprocess = mock_popen
 
     validate_checkpoint(
         "",
@@ -80,7 +79,6 @@ class TestCheckpointValidationAgent(unittest.TestCase):
     mock_proc.returncode = 0
     mock_proc.stdout = []
     mock_popen.return_value.__enter__.return_value = mock_proc
-    mock_subprocess = mock_popen
 
     validate_checkpoint(
         "gs://my-bucket/reports",

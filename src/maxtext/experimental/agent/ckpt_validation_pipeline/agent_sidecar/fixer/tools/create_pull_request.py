@@ -43,6 +43,7 @@ def main():
   print("Syncing modified files to git repository...")
   print("Syncing modified files to git repository...")
   import shutil
+
   for root, _, files in os.walk("/app/src/maxtext"):
     for file in files:
       src_file = os.path.join(root, file)

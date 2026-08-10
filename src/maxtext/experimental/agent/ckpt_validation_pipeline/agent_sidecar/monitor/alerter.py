@@ -57,11 +57,7 @@ def dispatch_email_alert(run_id, model_name, recipient="", state_entry=None):
       iteration_history.append(
           {
               "iter": idx + 1,
-              "metrics": (
-                  f"Diagnosis: {diag}\n"
-                  f"Hypothesis: {hypothesis}\n"
-                  f"Config applied: {config}"
-              ),
+              "metrics": (f"Diagnosis: {diag}\n" f"Hypothesis: {hypothesis}\n" f"Config applied: {config}"),
           }
       )
 

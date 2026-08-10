@@ -87,18 +87,19 @@ def run_mock_forward(checkpoint_gcs_path, maxtext_model_name, *overrides):
     out_shape = jax.eval_shape(forward, abstract_model, mock_input, mock_positions, mock_segment_ids)
   else:
     from maxtext.layers import quantizations
+
     quant = quantizations.configure_quantization(config)
     model = transformer_as_linen(config, mesh=dummy_mesh, quant=quant)
 
     logger.info("Initializing Linen abstract model parameters...")
     rng = jax.random.PRNGKey(0)
     abstract_variables = jax.eval_shape(
-        model.init, 
-        {"params": rng, "aqt": rng, "dropout": rng}, 
-        mock_input, 
-        mock_positions, 
+        model.init,
+        {"params": rng, "aqt": rng, "dropout": rng},
+        mock_input,
+        mock_positions,
         mock_segment_ids,
-        enable_dropout=False
+        enable_dropout=False,
     )
 
     logger.info("Tracing forward pass graph with Linen...")
@@ -118,7 +119,9 @@ def run_mock_forward(checkpoint_gcs_path, maxtext_model_name, *overrides):
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Mock tensor validation")
   parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS directory for reports")
-  parser.add_argument("--checkpoint_gcs_path", type=str, default="", help="GCS directory containing the converted checkpoint")
+  parser.add_argument(
+      "--checkpoint_gcs_path", type=str, default="", help="GCS directory containing the converted checkpoint"
+  )
   parser.add_argument("--maxtext_model_name", type=str, default="", help="MaxText model configuration name")
 
   args, _overrides = parser.parse_known_args()

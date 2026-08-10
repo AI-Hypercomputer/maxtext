@@ -28,6 +28,7 @@ absl.logging.set_verbosity(absl.logging.INFO)
 def load_shapes(filepath):
   """Parses a file to extract key-shape pairs."""
   import os
+
   if not os.path.exists(filepath):
     raise FileNotFoundError(
         f"Required shape file '{filepath}' does not exist. "
