@@ -638,6 +638,7 @@ class Decoder(nn.Module):
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.GLM5,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -907,8 +908,8 @@ class Decoder(nn.Module):
           if cfg.pipeline_fsdp_ag_once or cfg.pipeline_fsdp_ag_per_repeat
           else None
       )
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-        assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
+      if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5):
+        assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek/glm."
         dense_layer = RemattedBlockLayers[0]
         moe_layer = RemattedBlockLayers[1]
         num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
@@ -953,8 +954,8 @@ class Decoder(nn.Module):
             )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
+        if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5):
+          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek/glm."
           layer_call_kwargs = {
               "previous_chunk": previous_chunk,
               "slot": slot,
@@ -1159,8 +1160,8 @@ class Decoder(nn.Module):
                 **layer_kwargs,
             )(y, *current_broadcast_args)
       else:
-        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
+        if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5):
+          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek/glm."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
 
