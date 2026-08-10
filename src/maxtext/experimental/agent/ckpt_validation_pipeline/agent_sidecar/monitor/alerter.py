@@ -42,19 +42,70 @@ def dispatch_email_alert(run_id, model_name, recipient="", state_entry=None):
   subject = f"Pipeline Halted: {model_name} (Run: {run_id})"
 
   if state_entry and isinstance(state_entry, dict) and state_entry.get("attempts"):
-    last_attempt = state_entry["attempts"][-1]
+    attempts = state_entry["attempts"]
+    last_attempt = attempts[-1]
     branch = last_attempt.get("branch", "unknown-branch")
-    diagnosis = last_attempt.get("diagnosis", "No analysis recorded.")
-    hypothesis = last_attempt.get("hypothesis", "No hypothesis recorded.")
+    
+    # Format the deep history to match the requested structured iteration report
+    iteration_history = []
+    for idx, attempt in enumerate(attempts):
+        config = attempt.get("overrides", "{}")
+        diag = attempt.get("diagnosis", "No diagnosis recorded.")
+        hypothesis = attempt.get("hypothesis", "No hypothesis recorded.")
+        
+        iteration_history.append({
+            "iter": idx + 1,
+            "metrics": f"Diagnosis: {diag}
+Hypothesis: {hypothesis}
+Config applied: {config}"
+        })
+        
+        # If there's a result, we can append it as a mock metrics entry (like in the paste)
+        result = attempt.get("result", "FAILED or pending")
+        iteration_history.append({
+            "iter": idx + 1,
+            "metrics": f"Result: {result}"
+        })
+
+    import json
+    history_json = json.dumps(iteration_history, indent=2)
+
+    # Compile the final Markdown body with Github & Airflow links
+    pr_url = state_entry.get("pr_url", "https://github.com/AI-Hypercomputer/maxtext/pulls")
+    log_url = f"https://console.cloud.google.com/run/jobs/executions/list?project=tpu-prod-env-multipod"
+    report_url = f"https://console.cloud.google.com/storage/browser/maxtext-validation-agent-reports"
+    
     body = (
-        f"Pipeline Halted: I attempted to auto-fix {model_name} 25 times but was unsuccessful.\n\n"
-        f"Here is my analysis of the divergence:\n{diagnosis}\n\n"
-        f"The code I tried to patch is on branch `{branch}`.\n\n"
-        f"My hypothesis for how a human engineer can fix it:\n{hypothesis}"
+        f"### Pipeline Halted: Optimization Limit Reached
+
+"
+        f"I attempted to auto-fix and optimize {model_name} across {len(attempts)} iterations but hit an unresolvable hardware/system constraint.
+
+"
+        f"#### Quick References
+"
+        f"- **GitHub PR/Branch:** {pr_url} (Branch: `{branch}`)
+"
+        f"- **Airflow/Cloud Run Logs:** {log_url}
+"
+        f"- **GCS Artifacts & Reports:** {report_url}
+
+"
+        f"#### Detailed Iteration History
+"
+        f"```json
+{history_json}
+```
+"
     )
   else:
     body = (
-        f"Pipeline Halted: I attempted to auto-fix {model_name} 25 times but was unsuccessful.\n\n"
+        f"### Pipeline Halted: Optimization Limit Reached
+
+"
+        f"I attempted to auto-fix {model_name} but was unsuccessful.
+
+"
         f"Please check Airflow logs and GCS reports for run_id `{run_id}`."
     )
 
@@ -63,6 +114,7 @@ def dispatch_email_alert(run_id, model_name, recipient="", state_entry=None):
     logger.info("Distress Signal email dispatched to %s", recipient)
   except Exception as e:
     logger.error("Failed to send distress signal email: %s", e)
+
 
 
 def dispatch_victory_lap_alert(
