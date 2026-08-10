@@ -562,6 +562,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     new_state = state
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
+    # pylint: disable=too-many-nested-blocks
     if config.routed_bias and config.routed_bias_update_rate > 0.0:
       if config.model_name.startswith("deepseek4"):
         max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
