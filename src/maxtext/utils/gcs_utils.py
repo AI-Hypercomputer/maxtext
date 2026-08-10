@@ -202,9 +202,15 @@ def gcs_glob_pattern(pattern):
   """
   Globs GCS files and returns a list of full GCS paths.
   """
+  if not _gcs_guard("gcs_glob_pattern"):
+    return []
   storage_client = storage.Client()
   bucket_name, glob_pattern = parse_gcs_bucket_and_prefix(pattern)
-  blobs = storage_client.list_blobs(bucket_name, match_glob=glob_pattern)
+  prefix = glob_pattern
+  for char in ["*", "?", "["]:
+    if char in prefix:
+      prefix = prefix.split(char, 1)[0]
+  blobs = storage_client.list_blobs(bucket_name, prefix=prefix, match_glob=glob_pattern)
   data_files = [f"gs://{bucket_name}/{blob.name}" for blob in blobs]
   return data_files
 
