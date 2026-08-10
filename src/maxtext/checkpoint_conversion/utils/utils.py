@@ -544,7 +544,7 @@ def save_weight_files(
     index,
     local_dir_to_save_to: str,
     output_dir_final: str,
-    parallel_threads=8,
+    parallel_threads=4,
     remove_local_copy_after_upload: bool = False,
 ):
   """Saves weight files and index if needed.
@@ -603,7 +603,7 @@ def save_model_files(
     tokenizer: None | Any,  # transformers.PreTrainedTokenizerBase
     processor,
     output_dir: str,
-    parallel_threads=8,
+    parallel_threads=4,
 ):
   """
   Saves model files (config and weights) to the specified directory.
