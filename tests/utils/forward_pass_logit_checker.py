@@ -690,7 +690,14 @@ def main(config, test_args):  # pylint: disable=W0621
 
       # --- HF Forward Pass ---
       with torch.no_grad():
-        hf_logits_torch = hf_model(**inputs).logits
+        hf_outputs = hf_model(**inputs, output_hidden_states=True)
+        hf_logits_torch = hf_outputs.logits
+        if hasattr(hf_outputs, "hidden_states") and hf_outputs.hidden_states is not None:
+          max_logging.log("--- DUMPING HF INTERMEDIATE ACTIVATIONS ---")
+          max_logging.log(f"Number of layers extracted: {len(hf_outputs.hidden_states)}")
+          for i, layer_tensor in enumerate(hf_outputs.hidden_states):
+            max_logging.log(f"HF Layer {i} Shape: {layer_tensor.shape}, Norm: {torch.norm(layer_tensor, p=2).item():.4f}")
+          max_logging.log("-------------------------------------------")
 
       # --- MaxText Forward Pass ---
       if maxtext_state is None:

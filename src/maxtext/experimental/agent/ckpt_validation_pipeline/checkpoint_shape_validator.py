@@ -86,10 +86,17 @@ if __name__ == "__main__":
   )
   args = parser.parse_args()
 
-  ideal_shapes = load_shapes(args.ideal_shapes_path)
-  actual_shapes = load_shapes(args.actual_shapes_path)
+  _has_mismatch = False
+  _mismatched_layers = []
+  error_message = None
 
-  _has_mismatch, _mismatched_layers = check_mismatches(ideal_shapes, actual_shapes)
+  try:
+    ideal_shapes = load_shapes(args.ideal_shapes_path)
+    actual_shapes = load_shapes(args.actual_shapes_path)
+    _has_mismatch, _mismatched_layers = check_mismatches(ideal_shapes, actual_shapes)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    _has_mismatch = True
+    error_message = str(e) if str(e) else type(e).__name__
 
   report = {
       "run_name": args.run_name,
@@ -99,6 +106,8 @@ if __name__ == "__main__":
       "mismatches_found": _has_mismatch,
       "mismatched_layers": _mismatched_layers,
   }
+  if error_message:
+    report["error_message"] = error_message
 
   if args.report_gcs_dir:
     report_name = f"shape_validation_report_run_name_{args.run_name}_{int(time.time())}.json"
@@ -114,6 +123,8 @@ if __name__ == "__main__":
       logger.error(f"Failed to write or upload shape validation report to GCS: {e}")
 
   if _has_mismatch:
+    if error_message:
+      raise RuntimeError(error_message)
     raise ValueError(f"ERROR: Structural mismatches found in {len(_mismatched_layers)} layers: {_mismatched_layers}")
 
   logger.info("\nSUCCESS: All parameters match perfectly.")
