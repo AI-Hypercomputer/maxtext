@@ -216,6 +216,21 @@ class TrainTests(unittest.TestCase):
     train_main(TrainTests.CONFIGS["synthetic"] + ["use_tokamax_splash=true"])
 
   @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_tpu_ulysses_context_parallelism(self):
+    train_main(
+        TrainTests.CONFIGS["synthetic"]
+        + [
+            "attention=flash",
+            "use_tokamax_splash=true",
+            "ici_context_parallelism=4",
+            "context_parallel_strategy=ulysses",
+            "context_parallel_load_balance=false",
+            "packing=false",
+        ]
+    )
+
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_base(self):
     train_main(TrainTests.CONFIGS["base"] + ["attention=dot_product"])
