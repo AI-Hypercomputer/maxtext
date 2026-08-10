@@ -43,6 +43,18 @@ def loader_exception_guard(config):
     yield
   except Exception as e:  # pylint: disable=broad-except
     elastic_utils.maybe_bubble_elastic_exception(config, e)
+    if (
+        isinstance(
+            e,
+            (
+                jax.errors.JaxRuntimeError,
+                elastic_utils.manager.ScaleUpSignalError,
+            ),
+        )
+        or type(e).__name__ == "PathwaysPlacementDataLossError"
+    ):
+      raise e
+
     if isinstance(e, StopIteration):
       raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)}" f" exception: ({e})")
     else:
