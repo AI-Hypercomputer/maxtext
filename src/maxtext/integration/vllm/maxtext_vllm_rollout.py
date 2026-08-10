@@ -54,6 +54,20 @@ import vllm.config.utils as vllm_config_utils
 _orig_is_init_field = vllm_config_utils.is_init_field
 
 
+def _engine_args_accepts(name):
+  """Whether the installed vLLM's EngineArgs still takes `name`.
+
+  Fields come and go between vLLM releases, and passing one that has been
+  removed is a TypeError rather than something vLLM ignores.
+  """
+  # pylint: disable=import-outside-toplevel
+  import dataclasses
+
+  from vllm.engine.arg_utils import EngineArgs
+
+  return any(field.name == name for field in dataclasses.fields(EngineArgs))
+
+
 def _patched_is_init_field(cls, name):
   try:
     return _orig_is_init_field(cls, name)
@@ -578,6 +592,10 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         "max_logprobs": 1,
         "logprobs_mode": rollout_config.rollout_vllm_logprobs_mode,
     }
+    if _engine_args_accepts("swap_space"):
+      engine_kwargs["swap_space"] = getattr(
+          rollout_config, "rollout_vllm_swap_space_size_gb", maxtext_config.swap_space_vllm_gb
+      )
 
     # Merge additional kwargs like dtype and hf_overrides provided by train_rl.py
     if hasattr(rollout_config, "rollout_vllm_kwargs") and rollout_config.rollout_vllm_kwargs:
