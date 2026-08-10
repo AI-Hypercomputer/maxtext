@@ -59,8 +59,9 @@ jobs:
         if [ "${{ github.event_name }}" == "pull_request" ]; then
           git fetch origin "$GITHUB_BASE_REF"
           MERGE_BASE=$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)
-          # Run fast formatting check across all files (<1s)
+          # Run fast formatting check across all files (<1s each)
           pre-commit run pyink --all-files --show-diff-on-failure
+          pre-commit run mdformat --all-files --show-diff-on-failure
           # Run full suite (including pylint) on changed files only
           pre-commit run --from-ref "$MERGE_BASE" --to-ref HEAD --show-diff-on-failure
         else
