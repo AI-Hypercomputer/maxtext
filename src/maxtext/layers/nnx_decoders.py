@@ -755,9 +755,10 @@ class NNXDecoder(nnx.Module):
     config = self.config
     dense_cls, moe_cls = decoder_block_classes
     for i in range(config.first_num_dense_layers):
-      self._create_and_register_layer(dense_cls, rngs, "dense_layers", i)
+      self._create_and_register_layer(dense_cls, rngs, "dense_layers", i, layer_idx=i)
     for i in range(config.num_decoder_layers - config.first_num_dense_layers):
-      self._create_and_register_layer(moe_cls, rngs, "moe_layers", i)
+      global_idx = config.first_num_dense_layers + i
+      self._create_and_register_layer(moe_cls, rngs, "moe_layers", i, layer_idx=global_idx)
 
   def _init_sequential_generic(self, decoder_block_classes, rngs):
     """Initializes sequential generic decoder layers with per-architecture layer_kwargs."""
@@ -1893,17 +1894,27 @@ class NNXDecoder(nnx.Module):
                 state_in,
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
-          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
+          out = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
+          if getattr(cfg, "use_index_share", False):
+            out_y, out_kv, out_indexer_cache = out
+          else:
+            out_y, out_kv = out
+            out_indexer_cache = None
           state_out = nnx.state(merged_layer)
 
           if dynamic_graph_init:
             new_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
+            if getattr(cfg, "use_index_share", False):
+              return out_y, out_kv, out_indexer_cache, state_out, new_graphdef
             return out_y, out_kv, state_out, new_graphdef
           else:
+            if getattr(cfg, "use_index_share", False):
+              return out_y, out_kv, out_indexer_cache, state_out, graphdef_in
             return out_y, out_kv, state_out, graphdef_in
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
+        cached_indexer_state = None
         for lyr in range(cfg.num_decoder_layers):
           if self.is_deepseek:
             if lyr < cfg.first_num_dense_layers:
@@ -1942,11 +1953,18 @@ class NNXDecoder(nnx.Module):
           )
           if input_tokens is not None:
             layer_kwargs["decoder_input_tokens"] = input_tokens
+          if getattr(cfg, "use_index_share", False):
+            layer_kwargs["cached_indexer_state"] = cached_indexer_state
 
           if cfg.remat_policy != "none":
-            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache)
+            res = checkpointed_fn(graphdef, state, y, kv_cache)
           else:
-            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache)
+            res = pure_layer_fn(graphdef, state, y, kv_cache)
+
+          if getattr(cfg, "use_index_share", False):
+            y, kv_cache, cached_indexer_state, new_state, new_graphdef = res
+          else:
+            y, kv_cache, new_state, new_graphdef = res
 
           if dynamic_graph_init:
             new_layer = nnx.merge(new_graphdef, new_state)

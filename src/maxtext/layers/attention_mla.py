@@ -512,6 +512,8 @@ def mla_as_linen(
     mscale: float = 1.0,  # scaling factor for softmax
     rope_factor: float = 40.0,  # rotary embedding factor
     name: str | None = None,
+    is_shared_layer: bool = False,
+    served_group_size: int = 1,
 ):
   """A factory function to create an MLA as a Linen module.
 
@@ -578,6 +580,8 @@ def mla_as_linen(
       mscale=mscale,
       rope_factor=rope_factor,
       name=name,
+      is_shared_layer=is_shared_layer,
+      served_group_size=served_group_size,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
   )
@@ -650,6 +654,8 @@ class MLA(Attention):
       mscale: float = 1.0,  # scaling factor for softmax
       rope_factor: float = 40.0,  # rotary embedding factor
       name: str | None = None,
+      is_shared_layer: bool = False,
+      served_group_size: int = 1,
       rngs: Optional[nnx.Rngs] = None,
   ):
     """Initializes the MLA module.
@@ -729,7 +735,14 @@ class MLA(Attention):
 
     # Initialize Indexer
     self.use_indexer = config.use_indexer
-    if self.use_indexer:
+    self.is_shared_layer = is_shared_layer
+    self.served_group_size = served_group_size
+    is_pruned = (
+        getattr(config, "use_index_share", False)
+        and getattr(config, "prune_shared_indexers", True)
+        and self.is_shared_layer
+    )
+    if self.use_indexer and not is_pruned:
       # Need two versions of rope.
       # MLA applies yarn with interleave layout.
       # Indexer applies yarn with concatenate layout.
@@ -1240,7 +1253,8 @@ class MLA(Attention):
       rope_kwargs: dict | None = None,
       kv_cache: Optional[Array] = None,
       attention_metadata: Optional[dict[str, Any]] = None,
-  ) -> tuple[Array, Optional[Array]]:
+      cached_indexer_state: Optional[Any] = None,
+  ) -> tuple[Array, Optional[Array]] | tuple[Array, Optional[Array], Optional[Any]]:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 
     Args:
@@ -1255,10 +1269,10 @@ class MLA(Attention):
       bidirectional_mask: A mask for bidirectional attention, used in multimodal models.
       kv_cache: Optional key-value cache used when serving models with vLLM.
       attention_metadata: Optional attention-related metadata used when serving models with vLLM.
+      cached_indexer_state: Optional tuple (indexer_mask, topk_indices, indexer_score) from donor F-layer.
 
     Returns:
-      A tensor of shape [batch, length, embed_dim] containing the
-      MLA-attended outputs.
+      A tensor of shape [batch, length, embed_dim] containing the MLA-attended outputs.
     """
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = self._maybe_shard_with_logical(inputs_q, self.prefill_input_axis_names)
@@ -1284,6 +1298,7 @@ class MLA(Attention):
 
     # Indexer Logic
     indexer_mask = None
+    new_indexer_state = None
     if self.use_indexer:
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
       attention_mask = self.attention_op.generate_attention_mask(
@@ -1291,20 +1306,34 @@ class MLA(Attention):
       )
       if attention_mask is not None:
         attention_mask = attention_mask.squeeze(axis=(1, 2))
-      # apply indexer, indexer_mask [b, q_len, kv_len]
-      indexer_mask, _, indexer_score = self.indexer(
-          inputs_q=inputs_q,
-          low_rank_q=low_rank_q,
-          inputs_kv=inputs_kv,
-          inputs_positions=inputs_positions,
-          attention_mask=attention_mask,
-          decoder_segment_ids=decoder_segment_ids,
-          previous_chunk=previous_chunk,
-          kv_cache=self.IndexerKVCache_0,
-          model_mode=model_mode,
-      )
 
-      if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0:
+      is_shared = getattr(self.config, "use_index_share", False) and self.is_shared_layer
+      if self.indexer is not None and not is_shared:
+        # Full (F) layer: run indexer forward pass
+        indexer_mask, topk_indices, indexer_score = self.indexer(
+            inputs_q=inputs_q,
+            low_rank_q=low_rank_q,
+            inputs_kv=inputs_kv,
+            inputs_positions=inputs_positions,
+            attention_mask=attention_mask,
+            decoder_segment_ids=decoder_segment_ids,
+            previous_chunk=previous_chunk,
+            kv_cache=self.IndexerKVCache_0,
+            model_mode=model_mode,
+        )
+        new_indexer_state = (indexer_mask, topk_indices, indexer_score)
+      elif cached_indexer_state is not None:
+        # Shared (S) layer: inherit cached indexer state from donor F layer
+        indexer_mask, topk_indices, indexer_score = cached_indexer_state
+        new_indexer_state = cached_indexer_state
+      else:
+        indexer_mask, topk_indices, indexer_score = None, None, None
+
+      if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0 and indexer_score is not None:
+        loss_scale = self.config.indexer_loss_scaling_factor
+        if getattr(self.config, "use_index_share", False) and self.served_group_size > 1:
+          loss_scale = loss_scale / float(self.served_group_size)
+
         indexer_loss = self.calculate_indexer_loss(
             indexer_score=indexer_score,
             query=query,
@@ -1312,7 +1341,7 @@ class MLA(Attention):
             attention_mask=attention_mask,
             indexer_mask=indexer_mask,
             sparse_loss=self.config.indexer_sparse_training,
-            scaling_factor=self.config.indexer_loss_scaling_factor,
+            scaling_factor=loss_scale,
         )
         self.indexer_loss = nnx.Intermediate(indexer_loss)
 
@@ -1337,4 +1366,6 @@ class MLA(Attention):
     out_sharding = create_sharding(self.mesh, out_logical_name)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
+    if getattr(self.config, "use_index_share", False):
+      return out, kv_cache, new_indexer_state
     return out, kv_cache

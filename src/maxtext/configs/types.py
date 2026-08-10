@@ -718,6 +718,17 @@ class AttentionIndexer(BaseModel):
           " during ties."
       ),
   )
+  use_index_share: bool = Field(
+      False, description="Whether to enable cross-layer index cache sharing (GLM-5.2 IndexShare)."
+  )
+  index_share_pattern: str = Field(
+      "FSSS",
+      description="Cross-layer pattern string for IndexShare (e.g. 'FSSS', 'F,S,S,S', 'FSFSS...').",
+  )
+  prune_shared_indexers: bool = Field(
+      True,
+      description="Whether to prune indexer parameters on Shared (S) layers when use_index_share is enabled.",
+  )
 
 
 class Llama4Attention(BaseModel):
@@ -3497,6 +3508,8 @@ class MaxTextConfig(
             "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
             "short-circuits to select all tokens and no indexer loss is produced."
         )
+    if not self.use_indexer and self.use_index_share:
+      raise ValueError("`use_index_share=True` requires `use_indexer=True`.")
     if not self.use_indexer and self.indexer_cutoff_threshold != RematLocation.REMAT:
       raise ValueError(
           f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
