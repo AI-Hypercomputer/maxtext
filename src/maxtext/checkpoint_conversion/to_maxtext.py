@@ -463,7 +463,25 @@ def _build_single_axis_stacked_tensor(
     if isinstance(hf_key_single, (list, tuple)):
       hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
     else:
-      hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      try:
+        hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      except (ValueError, KeyError) as e:
+        if getattr(config, "use_index_share", False) and "indexer" in str(hf_key_single):
+          import re
+          from maxtext.utils import index_share_utils
+
+          m = re.match(r"model\.layers\.(\d+)\.(.+)", str(hf_key_single))
+          if m:
+            layer_idx = int(m.group(1))
+            rest = m.group(2)
+            pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
+            donor_idx = index_share_utils.get_donor_layer_idx(layer_idx, pattern)
+            donor_key = f"model.layers.{donor_idx}.{rest}"
+            hf_tensor_numpy = tensor_getter_fn(donor_key)
+          else:
+            raise e
+        else:
+          raise e
     processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
     tensors_to_stack.append(processed_hf_tensor)
 
@@ -999,6 +1017,19 @@ def main(
 
       def _eager_getter(key):
         if key not in hf_state_dict_numpy:
+          if getattr(config, "use_index_share", False) and "indexer" in key:
+            import re
+            from maxtext.utils import index_share_utils
+
+            m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
+            if m:
+              layer_idx = int(m.group(1))
+              rest = m.group(2)
+              pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
+              donor_idx = index_share_utils.get_donor_layer_idx(layer_idx, pattern)
+              donor_key = f"model.layers.{donor_idx}.{rest}"
+              if donor_key in hf_state_dict_numpy:
+                return _eager_getter(donor_key)
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
         v = hf_state_dict_numpy[key]
         # target dtype is "float32"
@@ -1016,6 +1047,29 @@ def main(
         raise NotImplementedError(f"Save dtype {save_dtype} is not currently implemented.")
 
       tensor_getter = _eager_getter
+
+    if getattr(config, "use_index_share", False):
+      orig_tensor_getter = tensor_getter
+
+      def _index_share_tensor_getter(key):
+        try:
+          return orig_tensor_getter(key)
+        except (ValueError, KeyError) as e:
+          if "indexer" in key:
+            import re
+            from maxtext.utils import index_share_utils
+
+            m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
+            if m:
+              layer_idx = int(m.group(1))
+              rest = m.group(2)
+              pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
+              donor_idx = index_share_utils.get_donor_layer_idx(layer_idx, pattern)
+              donor_key = f"model.layers.{donor_idx}.{rest}"
+              return orig_tensor_getter(donor_key)
+          raise e
+
+      tensor_getter = _index_share_tensor_getter
 
     if is_merge_mode:
       tensor_getter = _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revision)
