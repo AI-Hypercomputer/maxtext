@@ -21,7 +21,7 @@ cp src/maxtext/experimental/agent/ckpt_validation_pipeline/agent_sidecar/Dockerf
 
 # Create a temporary ignore file to allow .git folder upload, bypassing the root .dockerignore
 cp .dockerignore .gcloudignore.tmp || touch .gcloudignore.tmp
-sed -i 's/^.git/#.git/' .gcloudignore.tmp
+sed 's/^.git/#.git/' .gcloudignore.tmp > .gcloudignore.tmp.new && mv .gcloudignore.tmp.new .gcloudignore.tmp
 
 # Submit build to Google Cloud Build (bypasses need for local Docker)
 gcloud builds submit --tag $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:latest --project $PROJECT_ID --ignore-file=.gcloudignore.tmp .

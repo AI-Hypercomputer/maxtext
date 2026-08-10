@@ -38,6 +38,10 @@ from maxtext.utils import max_utils
 from maxtext.utils import max_logging
 
 logger = logging.getLogger(__name__)
+try:
+  logger.setLevel(os.environ.get("LOGLEVEL", "INFO").upper())
+except ValueError:
+  logger.setLevel(logging.INFO)
 
 _BASE_CONFIG_ATTR = "base_config"
 _MAX_PREFIX = "M_"
@@ -272,7 +276,23 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
 
     new_value = value
     if isinstance(new_value, str) and new_value.lower() == "none":
-      new_value = None
+      field_info = valid_fields.get(key)
+      if field_info:
+        ann = field_info.annotation
+        import typing
+        import types as python_types
+        def _allows_none(annotation) -> bool:
+          if annotation is None or annotation is type(None) or annotation is typing.Any:
+            return True
+          origin = typing.get_origin(annotation)
+          if origin in (typing.Union, getattr(python_types, "UnionType", None)):
+            return any(arg is type(None) or arg is None or arg is typing.Any for arg in typing.get_args(annotation))
+          return False
+
+        if _allows_none(ann):
+          new_value = None
+      else:
+        new_value = None
 
     # Pydantic validates enums from their values, so string is fine.
     # It also handles type coercion for simple types.
