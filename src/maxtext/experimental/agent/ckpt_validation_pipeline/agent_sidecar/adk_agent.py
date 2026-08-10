@@ -1,3 +1,4 @@
+# pylint: disable=missing-module-docstring,missing-function-docstring,line-too-long,logging-fstring-interpolation,broad-exception-caught,import-outside-toplevel,redefined-outer-name,reimported
 import os
 import time
 import subprocess
