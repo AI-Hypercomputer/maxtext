@@ -188,7 +188,6 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
       }
       self._checkpoint_manager = ocp.CheckpointManager(
           root_directory,
-          item_names=tuple(handlers),
           item_handlers=handlers,
           options=options,
       )
