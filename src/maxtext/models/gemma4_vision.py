@@ -85,6 +85,17 @@ def patchify(images: jax.Array, patch_size: int) -> tuple[jax.Array, jax.Array]:
   return patches, jnp.broadcast_to(positions_xy, tuple(b) + positions_xy.shape)
 
 
+class VisionStdVar(nnx.Variable):
+  """Checkpoint-resident, NON-trainable vision standardization state (std_bias / std_scale).
+
+  Mirrors HF `modeling_gemma4`, which registers `std_bias`/`std_scale` via `register_buffer`
+  (non-trainable) and only when `vision_config.standardize=True` (Gemma-4 26B/31B). As a plain
+  `nnx.Variable` (not `nnx.Param`), it is naturally excluded from the optimizer/weight-decay/grad
+  filter — which key on `nnx.Param` — while still being saved and restored by Orbax as part of the
+  model state. This is the same idiom MaxText uses for other non-trainable buffers (e.g. `MoEBiasVar`).
+  """
+
+
 class VisionEntry(nnx.Module):
   """The vision entry layer."""
 
@@ -566,12 +577,22 @@ class Gemma4VisionEncoderLayer(nnx.Module):
         rngs=self.rngs,
         precision=config.matmul_precision,
     )
-    self.std_bias = nnx.Param(
-        nnx.initializers.zeros(self.rngs.params(), (config.hidden_size_for_vit,), config.weight_dtype), sharding=(None,)
-    )
-    self.std_scale = nnx.Param(
-        nnx.initializers.ones(self.rngs.params(), (config.hidden_size_for_vit,), config.weight_dtype), sharding=(None,)
-    )
+    # Vision standardization (std_bias/std_scale) is CHECKPOINT-RESIDENT state that exists ONLY when the
+    # checkpoint ships std tensors, i.e. HF vision_config.standardize=True (Gemma-4 26B/31B). HF registers them
+    # via register_buffer (NON-trainable). Gemma-4 E2B/E4B have standardize=False and DO NOT store std_scale/
+    # std_bias in their safetensors; when disabled the standardize op is an EXACT identity, so we construct NO std
+    # state at all (fabricating trainable identity nnx.Param leaves wrongly enters checkpoint-restored committed
+    # arrays into the nnx.Param gradient filter). When enabled, we construct them as VisionStdVar (a plain
+    # nnx.Variable): checkpoint-resident and restored by Orbax, but NON-trainable — excluded from the optimizer /
+    # weight-decay / gradient filter (which key on nnx.Param), matching HF's register_buffer semantics.
+    self._standardize_for_vit = bool(config.standardize_for_vit)
+    if self._standardize_for_vit:
+      self.std_bias = VisionStdVar(
+          nnx.initializers.zeros(self.rngs.params(), (config.hidden_size_for_vit,), config.weight_dtype)
+      )
+      self.std_scale = VisionStdVar(
+          nnx.initializers.ones(self.rngs.params(), (config.hidden_size_for_vit,), config.weight_dtype)
+      )
 
   def __call__(self, inputs: jax.Array, deterministic: bool = False) -> jax.Array:
     """Applies the vision encoder layer."""
@@ -593,9 +614,10 @@ class Gemma4VisionEncoderLayer(nnx.Module):
     # We take the first result.
     (embeddings, _) = vision_exit_results[0]
 
-    embeddings = (embeddings - self.std_bias.value.astype(embeddings.dtype)) * self.std_scale.value.astype(
-        embeddings.dtype
-    )
+    if self._standardize_for_vit:
+      embeddings = (embeddings - self.std_bias.value.astype(embeddings.dtype)) * self.std_scale.value.astype(
+          embeddings.dtype
+      )
 
     # Unflatten batch and num_images
     final_x = jnp.reshape(embeddings, (b, n, embeddings.shape[1], embeddings.shape[2]))
