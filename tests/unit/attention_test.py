@@ -3731,6 +3731,118 @@ class CompressedAttentionTest(parameterized.TestCase):
     out_flash = self._run_compressed_attention(compress_ratio, "flash")
     np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
 
+  @parameterized.named_parameters(
+      {"testcase_name": "csa_dot_product", "compress_ratio": 4, "attention_kernel": "dot_product"},
+      {"testcase_name": "csa_flash", "compress_ratio": 4, "attention_kernel": "flash"},
+      {"testcase_name": "hca_dot_product", "compress_ratio": 128, "attention_kernel": "dot_product"},
+      {"testcase_name": "hca_flash", "compress_ratio": 128, "attention_kernel": "flash"},
+  )
+  @pytest.mark.tpu_only
+  def test_compressed_attention_document_packing_equivalence(self, compress_ratio, attention_kernel):
+    """Verifies packed sequence forward pass matches independent document passes."""
+    doc_len = 256
+    total_len = 2 * doc_len
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test_packing_equivalence",
+        "enable_checkpointing": False,
+        "max_target_length": total_len,
+        "max_prefill_predict_length": total_len,
+        "attention_type": AttentionType.COMPRESSED.value,
+        "head_dim": 128,
+        "q_lora_rank": 256,
+        "kv_lora_rank": 256,
+        "dtype": "float32",
+        "use_tokamax_splash": True,
+        "o_groups": 2,
+        "o_lora_rank": 256,
+        "compressed_rope_max_timescale": 160000,
+        "rope_max_timescale": 10000,
+        "qk_rope_head_dim": 64,
+        "base_num_kv_heads": 1,
+        "base_num_query_heads": 16,
+    }
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **config_arguments,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    batch_size = 1
+    embed_dim = cfg.base_emb_dim
+
+    # Distinct inputs for Doc 1 and Doc 2
+    x1 = jax.random.normal(jax.random.PRNGKey(10), shape=(batch_size, doc_len, embed_dim), dtype=jnp.float32)
+    x2 = jax.random.normal(jax.random.PRNGKey(20), shape=(batch_size, doc_len, embed_dim), dtype=jnp.float32)
+
+    pos1 = jnp.arange(doc_len, dtype=jnp.int32)[None, :]
+    pos2 = jnp.arange(doc_len, dtype=jnp.int32)[None, :]
+
+    attn = CompressedAttention(
+        config=cfg,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        head_dim=cfg.head_dim,
+        inputs_q_shape=(batch_size, total_len, embed_dim),
+        inputs_kv_shape=(batch_size, total_len, embed_dim),
+        max_target_length=total_len,
+        max_prefill_predict_length=total_len,
+        mesh=mesh,
+        attention_kernel=attention_kernel,
+        dtype=cfg.dtype,
+        dropout_rate=cfg.dropout_rate,
+        attention_type=AttentionType(cfg.attention_type),
+        q_lora_rank=cfg.q_lora_rank,
+        compress_ratio=compress_ratio,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+
+    # 1. Independent runs (padded to total_len with segment_id=0)
+    pad_len = total_len - doc_len
+    x1_padded = jnp.pad(x1, ((0, 0), (0, pad_len), (0, 0)))
+    pos1_padded = jnp.pad(pos1, ((0, 0), (0, pad_len)))
+    seg1 = jnp.pad(jnp.ones_like(pos1), ((0, 0), (0, pad_len)), constant_values=0)
+
+    x2_padded = jnp.pad(x2, ((0, 0), (0, pad_len), (0, 0)))
+    pos2_padded = jnp.pad(pos2, ((0, 0), (0, pad_len)))
+    seg2 = jnp.pad(jnp.ones_like(pos2), ((0, 0), (0, pad_len)), constant_values=0)
+
+    out1, _ = attn(
+        x1_padded,
+        x1_padded,
+        decoder_segment_ids=seg1,
+        inputs_positions=pos1_padded,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    out2, _ = attn(
+        x2_padded,
+        x2_padded,
+        decoder_segment_ids=seg2,
+        inputs_positions=pos2_padded,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    expected = jnp.concatenate([out1[:, :doc_len, :], out2[:, :doc_len, :]], axis=1)
+
+    # 2. Packed run (Doc 1 + Doc 2 concatenated with segment IDs [1..1, 2..2])
+    x_packed = jnp.concatenate([x1, x2], axis=1)
+    pos_packed = jnp.concatenate([pos1, pos2], axis=1)
+    seg_packed = jnp.concatenate([jnp.ones_like(pos1), 2 * jnp.ones_like(pos2)], axis=1)
+
+    actual, _ = attn(
+        x_packed,
+        x_packed,
+        decoder_segment_ids=seg_packed,
+        inputs_positions=pos_packed,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    np.testing.assert_allclose(np.array(actual), np.array(expected), rtol=1e-2, atol=1e-2)
+
   def _run_compressed_attention(self, compress_ratio, attention_kernel):
     """Runs CompressedAttention forward pass with specified compression ratio and kernel."""
     # Setup test config
