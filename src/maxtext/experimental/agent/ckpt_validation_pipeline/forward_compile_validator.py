@@ -92,7 +92,14 @@ def run_mock_forward(checkpoint_gcs_path, maxtext_model_name, *overrides):
 
     logger.info("Initializing Linen abstract model parameters...")
     rng = jax.random.PRNGKey(0)
-    abstract_variables = jax.eval_shape(model.init, rng, mock_input, mock_positions, mock_segment_ids)
+    abstract_variables = jax.eval_shape(
+        model.init, 
+        {"params": rng, "aqt": rng, "dropout": rng}, 
+        mock_input, 
+        mock_positions, 
+        mock_segment_ids,
+        enable_dropout=False
+    )
 
     logger.info("Tracing forward pass graph with Linen...")
     out_shape = jax.eval_shape(
@@ -101,6 +108,7 @@ def run_mock_forward(checkpoint_gcs_path, maxtext_model_name, *overrides):
         mock_input,
         mock_positions,
         mock_segment_ids,
+        enable_dropout=False,
     )
 
   logger.info(f"SUCCESS: Model architecture is stable. Output shape: {out_shape}")
