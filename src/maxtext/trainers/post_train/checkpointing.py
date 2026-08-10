@@ -20,7 +20,7 @@ run without Tunix installed.
 """
 
 import os
-from typing import Any
+from typing import Any, Sequence
 
 from flax import nnx
 import jax
@@ -175,8 +175,20 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
       # Pathways only supports the persistence APIs, so drop ocdbt/zarr3 there as Tunix does.
       pathways = "proxy" in os.getenv("JAX_PLATFORMS", "")
 
+      # Orbax otherwise materialises the whole tree on the host at once (its default concurrency
+      # is ~89GiB), which OOMKills the container the trainer runs in. MaxText already has a knob
+      # for this, checkpoint_storage_concurrent_gb, but it was never plumbed into this path.
+      concurrent_gb = getattr(config, "checkpoint_storage_concurrent_gb", None) if config is not None else None
+
       def pytree_handler():
-        return ocp.PyTreeCheckpointHandler(use_ocdbt=not pathways, use_zarr3=not pathways)
+        kwargs = {"use_ocdbt": not pathways, "use_zarr3": not pathways}
+        if concurrent_gb:
+          # Only the device-to-host budget: that is the one that decides how much of the tree is
+          # resident in host memory at once. Capping save_concurrent_gb/restore_concurrent_gb as
+          # well breaks reads of any single array larger than the cap, e.g. llama3.1-8b's
+          # mlp.wi_0.kernel at 3.75GiB ("Requested more bytes than we reserved space for").
+          kwargs["save_device_host_concurrent_gb"] = concurrent_gb
+        return ocp.PyTreeCheckpointHandler(**kwargs)
 
       handlers = {
           _ITEM_NAME: pytree_handler(),
@@ -203,6 +215,22 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     """Closes the checkpoint manager."""
     if getattr(self, "_checkpoint_manager", None) is not None:
       self._checkpoint_manager.close()
+
+  def latest_step(self) -> int | None:
+    """Returns the latest step saved, reloading from storage if not cached."""
+    if getattr(self, "_checkpoint_manager", None) is None:
+      return None
+    step = self._checkpoint_manager.latest_step()
+    if step is None:
+      steps = self.all_steps(read=True)
+      return steps[-1] if steps else None
+    return step
+
+  def all_steps(self, read: bool = False) -> Sequence[int]:
+    """Returns all steps tracked by the manager."""
+    if getattr(self, "_checkpoint_manager", None) is None:
+      return []
+    return self._checkpoint_manager.all_steps(read=read)
 
   def model_to_checkpoint(self, model: nnx.Module) -> nnx.Module:
     """Returns the module whose weights belong in the checkpoint.
@@ -291,7 +319,7 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     metadata = checkpointing.checkpoint_custom_metadata(self._config)
     metadata.update(custom_metadata or {})
 
-    if not force and step in self._checkpoint_manager.all_steps(read=True):
+    if not force and step in self.all_steps():
       max_logging.log(f"Step {step} already exists in MaxText layout. Skipping save.")
       return False
 
@@ -387,6 +415,21 @@ def install(trainer, checkpoint_dir: str, config=None) -> None:
     checkpoint_dir: Directory to read and write checkpoints in.
     config: The run's config, read for the metadata the checkpoint stores.
   """
+  # enable_checkpointing is a documented MaxText flag, and until now this path ignored it: the
+  # manager was installed regardless, so Tunix saved at the end of training no matter what the
+  # config said. That save is not free -- an 8B SFT writes 44.9 GiB and the transfer to host
+  # OOMKills the container -- so being able to turn it off is the difference between a smoke test
+  # that reports whether the trainer runs and one that cannot get past its first save.
+  # post_train_skip_checkpointing exists because neither existing flag can say this:
+  # enable_checkpointing is validated as required whenever load_parameters_path is set, and
+  # checkpoint_period=0 makes the shared checkpointing path raise ZeroDivisionError on
+  # `step % config.checkpoint_period`.
+  if config is not None and (
+      not getattr(config, "enable_checkpointing", True) or getattr(config, "post_train_skip_checkpointing", False)
+  ):
+    max_logging.log("Checkpoint saving disabled: skipping post-train checkpoint manager install.")
+    return
+
   if trainer.checkpoint_manager is not None:
     trainer.checkpoint_manager.close()
 
