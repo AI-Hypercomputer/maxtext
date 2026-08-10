@@ -50,9 +50,11 @@ def setUpModule():
 
 
 def tearDownModule():
-  global _ORIG_MATMUL_PRECISION
   if _ORIG_MATMUL_PRECISION is not None:
     jax.config.update("jax_default_matmul_precision", _ORIG_MATMUL_PRECISION)
+
+
+from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4RotaryEmbedding as DeepseekV4RotaryEmbedding_PT,
