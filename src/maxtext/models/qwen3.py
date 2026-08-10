@@ -1228,7 +1228,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     else:
       self.shared_expert_gate = None
 
-  def __call__(self, hidden_states: Array, deterministic: bool) -> tuple[Array, Array | None]:
+  def __call__(self, hidden_states: Array, deterministic: bool) -> tuple[Array, Array | None, Array | None]:
     """
     Applies the sparse MoE block to the input hidden states.
 
@@ -1240,9 +1240,10 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       A tuple containing:
         - The output array of the MoE block.
         - The load balancing loss from the routed experts, if applicable during training.
+        - The aux-loss-free expert-bias updates from the routed experts, if applicable.
     """
     # 1. Apply the routed experts block.
-    routed_output, load_balance_loss, _ = self.routed_experts(hidden_states)
+    routed_output, load_balance_loss, moe_bias_updates = self.routed_experts(hidden_states)
 
     # 2. Apply the shared expert.
     shared_expert_output = self.shared_expert(hidden_states, deterministic=deterministic)
@@ -1254,7 +1255,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     else:
       final_output = routed_output + shared_expert_output
 
-    return final_output, load_balance_loss
+    return final_output, load_balance_loss, moe_bias_updates
 
 
 class Qwen3NextScannableBlock(nnx.Module):
@@ -1636,9 +1637,14 @@ class Qwen3NextDecoderLayer(nnx.Module):
       )
 
       def mlp_branch(inputs):
-        mlp_output, load_balance_loss = self.mlp(inputs, deterministic=deterministic)
-        if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-          self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
+        if self.is_dense_layer:
+          mlp_output = self.mlp(inputs, deterministic=deterministic)
+        else:
+          mlp_output, load_balance_loss, moe_bias_updates = self.mlp(inputs, deterministic=deterministic)
+          if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+            self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
+          if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+            self.moe_bias_updates = nnx.Intermediate(moe_bias_updates)
         return mlp_output
 
       layer_output, _ = self.mhc_mlp(
@@ -1696,11 +1702,13 @@ class Qwen3NextDecoderLayer(nnx.Module):
     if self.is_dense_layer:
       mlp_output = self.mlp(hidden_states, deterministic=deterministic)
     else:
-      mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
+      mlp_output, load_balance_loss, moe_bias_updates = self.mlp(hidden_states, deterministic=deterministic)
       # We sow the load balancing loss so it can be collected and added to the total loss
       # during training.
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
         self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
+      if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+        self.moe_bias_updates = nnx.Intermediate(moe_bias_updates)
 
     # Final residual connection (after the MoE block)
     layer_output = residual + mlp_output

@@ -303,20 +303,25 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
     else:
       # NNX intermediates are model-rooted (no "intermediates" prefix), so match by
-      # suffix instead. Unlike collect_intermediates_by_suffix we must not ravel:
-      # the update is a 2-D matrix that's transposed at the apply site below.
-      moe_bias_updates = next(
-          (
-              val
-              for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs)
-              if tuple(k.key for k in path if hasattr(k, "key"))[-1:] == ("moe_bias_updates",)
-          ),
-          None,
-      )
-      if moe_bias_updates is not None:
-        # The Linen path returns the sow tuple and indexes [0] downstream; tree_leaves
-        # already descended that tuple, so wrap it back so the apply site is uniform.
-        moe_bias_updates = (moe_bias_updates,)
+      # suffix instead. A decoder block may sow more than one moe_bias_updates leaf
+      # (e.g. Qwen3-Next sows one per layer position inside each scanned block, since
+      # its MoE gates aren't a single homogeneous scanned collection like DeepSeek's),
+      # so collect every match keyed by its path, joined into a single string -- the
+      # path is used downstream (maxtext_utils_nnx.apply_moe_bias_updates) to locate
+      # the matching gate.bias parameter generically. This must be a dict (path string
+      # -> array), not a list of (path, array) pairs: this aux value flows through
+      # jax.lax.scan under gradient accumulation (gradient_accumulation.py), which
+      # requires every leaf to be a valid JAX array -- a plain string leaf (as part of
+      # a path tuple) would break that, whereas dict keys are pytree structure, not
+      # leaves, so they pass through untouched. Unlike collect_intermediates_by_suffix
+      # we must not ravel: each update is a 2-D matrix transposed at the apply site.
+      moe_bias_updates = {
+          "/".join(tuple(k.key for k in path if hasattr(k, "key"))): val
+          for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs)
+          if tuple(k.key for k in path if hasattr(k, "key"))[-1:] == ("moe_bias_updates",)
+      }
+      if not moe_bias_updates:
+        moe_bias_updates = None
 
   # Add the model's primary output to the intermediates dict so it can be used
   # by the acceptance rate calculation in eval_step.
@@ -555,10 +560,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       state.apply_gradients(grads)
     new_state = state
 
-    # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
+    # Apply updates for Auxiliary-Loss-Free load balancing.
     if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
-      target_bias = new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
-      target_bias.value = target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
+      maxtext_utils_nnx.apply_moe_bias_updates(new_state.model, moe_bias_updates)
 
   lm_loss = xent_sum / (total_weights + EPS)
   scalar_metrics = {

@@ -284,3 +284,44 @@ def nnx_add_and_sync_scan_axis(tree, name="layers", pos=0):
     return nnx_update_sharding_meta(x, add_fn)
 
   return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
+def apply_moe_bias_updates(model: nnx.Module, moe_bias_updates: dict[str, jax.Array]) -> None:
+  """Applies aux-loss-free load-balancing bias updates to each MoE gate's bias, in place.
+
+  Different decoder blocks sow `moe_bias_updates` intermediates at different depths: DeepSeek
+  sows once per homogeneous scanned `moe_layers` collection, while Qwen3-Next sows once per
+  layer position inside each scanned block (its MoE gates aren't a single uniform scanned
+  collection). Rather than hardcoding an absolute attribute path for one decoder block, this
+  locates each target `gate.bias` parameter generically: it's the unique `Param` leaf whose
+  path ends in `("gate", "bias")` and lives under the same parent module that produced the
+  corresponding sow, found by matching path prefixes against the live parameter tree.
+
+  Args:
+    model: The NNX model whose gate-bias parameters will be updated in place.
+    moe_bias_updates: A dict mapping each sow path (its components joined with "/") to its
+      update array, as collected in `train.py`'s `train_step` from the model's sown
+      `moe_bias_updates` intermediates. A dict (rather than a list of (path, array) pairs)
+      because this value flows through `jax.lax.scan` under gradient accumulation, which
+      requires every leaf to be an array -- dict keys are pytree structure, not leaves, so
+      the string paths survive that unscathed.
+  """
+  param_paths = [
+      tuple(k.key for k in path if hasattr(k, "key"))
+      for path, _ in jax.tree_util.tree_leaves_with_path(nnx.state(model, nnx.Param).to_pure_dict())
+  ]
+  gate_bias_paths = [p for p in param_paths if p[-2:] == ("gate", "bias")]
+
+  for sow_path_str, update in moe_bias_updates.items():
+    sow_path = tuple(sow_path_str.split("/"))
+    parent_path = sow_path[:-1]
+    matches = [p for p in gate_bias_paths if p[: len(parent_path)] == parent_path]
+    if len(matches) != 1:
+      raise ValueError(
+          f"Expected exactly one gate.bias parameter under {parent_path} for the "
+          f"moe_bias_updates sown at {sow_path}, found {len(matches)}: {matches}"
+      )
+    target_bias = model
+    for key in matches[0]:
+      target_bias = getattr(target_bias, key)
+    target_bias.value = target_bias.value + jnp.array(update).transpose()
+
