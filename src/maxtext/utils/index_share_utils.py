@@ -81,6 +81,11 @@ def get_donor_layer_indices(pattern_tuple: tuple[str, ...]) -> tuple[int, ...]:
   return tuple(donor_indices)
 
 
+def get_donor_layer_idx(layer_idx: int, pattern_tuple: tuple[str, ...]) -> int:
+  """Returns the donor Full (F) layer index for a specific layer."""
+  return get_donor_layer_indices(pattern_tuple)[layer_idx]
+
+
 def get_served_group_sizes(pattern_tuple: tuple[str, ...]) -> tuple[int, ...]:
   """For each layer, returns the group size |Served(f(l))| of its donor F-layer.
 
