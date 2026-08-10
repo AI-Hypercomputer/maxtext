@@ -784,12 +784,32 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
     self._run_e2e_test("compressed_sparse_attention", attention_kernel=attention_kernel, check_norm=check_norm)
 
   @parameterized.named_parameters(
-      {"testcase_name": "dot_product", "attention_kernel": "dot_product"},
-      {"testcase_name": "flash", "attention_kernel": "flash", "check_norm": True},
+      {
+          "testcase_name": "hca_dot_product",
+          "layer_type": "heavily_compressed_attention",
+          "attention_kernel": "dot_product",
+      },
+      {
+          "testcase_name": "hca_flash",
+          "layer_type": "heavily_compressed_attention",
+          "attention_kernel": "flash",
+          "check_norm": True,
+      },
+      {
+          "testcase_name": "csa_dot_product",
+          "layer_type": "compressed_sparse_attention",
+          "attention_kernel": "dot_product",
+      },
+      {
+          "testcase_name": "csa_flash",
+          "layer_type": "compressed_sparse_attention",
+          "attention_kernel": "flash",
+          "check_norm": True,
+      },
   )
-  def test_document_packing_masking(self, attention_kernel, check_norm=False):
+  def test_document_packing_masking(self, layer_type, attention_kernel, check_norm=False):
     self._run_e2e_test(
-        "heavily_compressed_attention",
+        layer_type,
         is_packed=True,
         attention_kernel=attention_kernel,
         check_norm=check_norm,

@@ -1547,11 +1547,18 @@ class CompressedAttention(Attention):
         padded_seg_ids = jnp.concatenate([decoder_segment_ids, pad_block], axis=1)
       else:
         padded_seg_ids = decoder_segment_ids[:, :usable]
+      # Assign segment IDs to compressed blocks. Windows straddling document boundaries
+      # are assigned segment_id = -1 (invalidated) to prevent cross-document attention leakage.
       chunked_segment_ids = padded_seg_ids.reshape((decoder_segment_ids.shape[0], padding_len, compress_rate))
       min_seg = jnp.min(chunked_segment_ids, axis=-1)
       max_seg = jnp.max(chunked_segment_ids, axis=-1)
-      # Windows containing boundary tokens across different documents are assigned -1 (invalidated)
-      compressed_segment_ids = jnp.where(min_seg == max_seg, max_seg, -1)
+      is_valid_window = min_seg == max_seg
+
+      if compress_rate == 4:  # CSA overlapping pooling (stride=4, window=8)
+        min_prior = jnp.pad(min_seg[:, :-1], ((0, 0), (1, 0)), constant_values=min_seg[:, 0:1])
+        is_valid_window = is_valid_window & (min_seg == min_prior)
+
+      compressed_segment_ids = jnp.where(is_valid_window, min_seg, -1)
       decoder_segment_ids_kv = jnp.concatenate([decoder_segment_ids, compressed_segment_ids], axis=1)
 
     kv = checkpoint_name(kv, "kv_proj")
