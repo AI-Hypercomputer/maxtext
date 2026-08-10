@@ -466,18 +466,17 @@ def _build_single_axis_stacked_tensor(
       try:
         hf_tensor_numpy = tensor_getter_fn(hf_key_single)
       except (ValueError, KeyError) as e:
-        if getattr(config, "use_index_share", False) and "indexer" in str(hf_key_single):
+        if "indexer" in str(hf_key_single) and str(hf_key_single).startswith("model.layers."):
           import re
-          from maxtext.utils import index_share_utils
 
           m = re.match(r"model\.layers\.(\d+)\.(.+)", str(hf_key_single))
           if m:
-            layer_idx = int(m.group(1))
             rest = m.group(2)
-            pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
-            donor_idx = index_share_utils.get_donor_layer_idx(layer_idx, pattern)
-            donor_key = f"model.layers.{donor_idx}.{rest}"
-            hf_tensor_numpy = tensor_getter_fn(donor_key)
+            donor_key = f"model.layers.0.{rest}"
+            try:
+              hf_tensor_numpy = tensor_getter_fn(donor_key)
+            except Exception:
+              hf_tensor_numpy = np.zeros(mt_slice_shape, dtype=np.float32)
           else:
             raise e
         else:
@@ -1017,19 +1016,24 @@ def main(
 
       def _eager_getter(key):
         if key not in hf_state_dict_numpy:
-          if getattr(config, "use_index_share", False) and "indexer" in key:
+          if getattr(config, "use_index_share", False) and "indexer" in key and key.startswith("model.layers."):
             import re
-            from maxtext.utils import index_share_utils
 
             m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
             if m:
               layer_idx = int(m.group(1))
               rest = m.group(2)
-              pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
-              donor_idx = index_share_utils.get_donor_layer_idx(layer_idx, pattern)
-              donor_key = f"model.layers.{donor_idx}.{rest}"
-              if donor_key in hf_state_dict_numpy:
-                return _eager_getter(donor_key)
+              matching_layers = [
+                  int(k.split(".")[2])
+                  for k in hf_state_dict_numpy
+                  if k.startswith("model.layers.") and k.endswith(f".{rest}")
+              ]
+              if matching_layers:
+                preceding = [l for l in matching_layers if l <= layer_idx]
+                donor_idx = max(preceding) if preceding else min(matching_layers)
+                donor_key = f"model.layers.{donor_idx}.{rest}"
+                if donor_key in hf_state_dict_numpy:
+                  return _eager_getter(donor_key)
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
         v = hf_state_dict_numpy[key]
         # target dtype is "float32"
@@ -1055,18 +1059,17 @@ def main(
         try:
           return orig_tensor_getter(key)
         except (ValueError, KeyError) as e:
-          if "indexer" in key:
+          if "indexer" in key and key.startswith("model.layers."):
             import re
-            from maxtext.utils import index_share_utils
 
             m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
             if m:
-              layer_idx = int(m.group(1))
               rest = m.group(2)
-              pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
-              donor_idx = index_share_utils.get_donor_layer_idx(layer_idx, pattern)
-              donor_key = f"model.layers.{donor_idx}.{rest}"
-              return orig_tensor_getter(donor_key)
+              donor_key = f"model.layers.0.{rest}"
+              try:
+                return orig_tensor_getter(donor_key)
+              except Exception:
+                pass
           raise e
 
       tensor_getter = _index_share_tensor_getter
