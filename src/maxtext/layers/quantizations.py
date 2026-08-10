@@ -28,6 +28,7 @@ from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
 import qwix
+from qwix._src.core import numerics
 from qwix._src.core import dot_general_qt
 from qwix._src.core import sparsity
 
@@ -905,11 +906,37 @@ def _make_scale_tensor(scale, arr):
   return _cast_reduced_from(scale_tensor, arr)
 
 
-def _get_max_min(target_dtype):
-  if target_dtype in (jnp.int4, jnp.int8):
-    return jnp.iinfo(target_dtype).max, jnp.iinfo(target_dtype).min
-  else:
-    return jnp.finfo(target_dtype).max.astype(jnp.bfloat16), jnp.finfo(target_dtype).min.astype(jnp.bfloat16)
+def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> float:
+  """Extracts the static scale.
+  Currently, only symmetric fixed range calibration is supported.
+  For symmetric calibration, the calibration_method must be in the format 'fixed,-max,max' or 'fixed,max'.
+
+  Args:
+    qtype: The dtype to quantize to.
+    calibration_method: A string specifying the calibration method.
+
+  Returns:
+    The extracted static scale value.
+  """
+  if calibration_method is None or not calibration_method.lower().startswith("fixed"):
+    raise ValueError(f"Only static scale quantization is supported, got {calibration_method}")
+
+  args = [float(a) for a in calibration_method.split(",")[1:]]
+  if len(args) == 1:
+    args = [-args[0], args[0]]
+
+  if len(args) != 2 or args[0] + args[1] != 0 or args[1] <= 0:
+    raise ValueError(f"Expected format: 'fixed,max' or 'fixed,-max,max'. Got: {calibration_method}")
+
+  qmax = numerics.get_symmetric_bound(qtype)
+  scale_val = args[1] / qmax
+
+  # Prevent scale from being 0
+  tiny_sqrt = jnp.finfo(jnp.float32).tiny ** 0.5
+  if scale_val < tiny_sqrt:
+    scale_val = 1.0
+
+  return scale_val
 
 
 def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_method: str) -> qwix.QArray:
@@ -927,24 +954,9 @@ def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_
   Raises:
     ValueError: If calibration_method is None or has an unexpected format.
   """
-  # validate calibration method and parse
-  calib_method = calibration_method
-  if calib_method is None:
-    raise ValueError("calibration_method cannot be None for manual quantization")
-  if not calib_method.startswith("fixed"):
-    # we can use static scale for weight/activation, but grad usually needs dynamic
-    raise ValueError(f"Only static scale quantization is supported, but got {calib_method}")
-  parts = calib_method.split(",")
-  if len(parts) != 3:
-    raise ValueError(f"Unexpected format for calibration method: {calib_method}")
-
-  dtype_max, dtype_min = _get_max_min(dtype)
-  min_val, max_val = float(parts[1]), float(parts[2])
-  if max_val <= 0 or min_val != -max_val:
-    raise ValueError(f"Unexpected format for calibration method: {calib_method}")
-
-  scale = max_val / dtype_max
-  scale = jnp.where(scale == 0, 1.0, scale)
+  scale = get_static_scale(dtype, calibration_method)
+  dtype_max = numerics.get_symmetric_bound(dtype)
+  dtype_min = -dtype_max
   # scale must be converted to a tensor because grad has reduced axes.
   scale_tensor = _make_scale_tensor(scale, tensor)
   min_bound = _make_scale_tensor(dtype_min, tensor)
