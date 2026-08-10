@@ -1014,7 +1014,12 @@ class TrainDistillTest(unittest.TestCase):
     train_config = peft_trainer.TrainingConfig(
         max_steps=2,
         eval_every_n_steps=0,
-        checkpointing_options=ocp.CheckpointManagerOptions(save_interval_steps=1, max_to_keep=2, create=True),
+        checkpointing_options=ocp.CheckpointManagerOptions(
+            save_interval_steps=1,
+            max_to_keep=2,
+            create=True,
+            enable_async_checkpointing=False,
+        ),
         gradient_accumulation_steps=1,
     )
 
