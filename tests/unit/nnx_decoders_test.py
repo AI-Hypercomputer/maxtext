@@ -54,7 +54,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import gemma4, gemma4_small
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
-from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils, maxtext_utils_nnx
 from tests.utils.test_helpers import get_test_config_path
 
 # ---------------------------------------------------------------------------
@@ -1272,6 +1272,7 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
 
   def test_metadata_axis_name_parameterization(self):
     # Test that _apply_layers_sequentially accepts and respects metadata_axis_name
+    # pylint: disable=protected-access
     decoder = NNXDecoder(
         config=self.cfg,
         mesh=self.mesh,
@@ -1300,8 +1301,7 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
       self.assertIsNotNone(updated_layers)
 
   def test_custom_metadata_axis_name_passed_to_scan_axis_sync(self):
-    from maxtext.utils import maxtext_utils_nnx
-
+    # pylint: disable=protected-access
     cfg = _make_config(param_scan_axis=0)
     mesh = _make_mesh(cfg)
     rngs = nnx.Rngs(params=0)
@@ -1330,7 +1330,7 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
 
     try:
       custom_axis_name = "custom_scanned_blocks"
-      out, layers, _ = decoder._apply_layers_sequentially(
+      _, _, _ = decoder._apply_layers_sequentially(
           layers=stacked_layers, x_in=x_in, length=2, metadata_axis_name=custom_axis_name
       )
       found_custom_name = False
