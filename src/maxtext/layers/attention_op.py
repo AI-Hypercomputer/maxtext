@@ -1797,7 +1797,7 @@ class AttentionOp(nnx.Module):
 
       if self.config.use_tokamax_splash:
         if indexer_mask is not None:
-          # Convert additive mask: 0.0 is ALLOW (attendable -> True), non-zero is DENY (masked out -> False)
+          indexer_mask = indexer_mask == 0.0
           indexer_mask = jnp.isclose(indexer_mask, 0.0)
           pad_q = mask_shape[0] - indexer_mask.shape[-2]
           pad_kv = mask_shape[1] - indexer_mask.shape[-1]
