@@ -83,7 +83,7 @@ source /usr/local/google/home/chengnuojin/.venv/bin/activate
     "use_ragged_sort=True"
     "use_random_routing=True"
     "num_moe_token_chunks=2"
-    "per_device_batch_size=8"
+    "per_device_batch_size=10"
     "opt_type=adamw"
     "max_target_length=2048"
     "ragged_buffer_factor=1.5"

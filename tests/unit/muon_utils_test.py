@@ -70,9 +70,9 @@ class TestTransformLogic(unittest.TestCase):
   def test_moe_wo_uses_last_two_axes(self):
     self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "wo")), mdn((-2,), (-1,)))
 
-  def test_moe_gate_falls_through_to_standard(self):
-    # 'gate' is inside MoeBlock_0 but not one of (wi_0, wi_1, wo) → standard.
-    self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel")), mdn((0,), (-1,)))
+  def test_moe_gate_is_excluded(self):
+    # 'gate' is excluded from Muon optimization.
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel")))
 
   # --- 2.2 Self-attention ---
   def test_self_attention_out_projection(self):

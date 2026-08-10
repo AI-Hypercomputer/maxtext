@@ -3768,8 +3768,9 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   mapping = {}
 
   n_layers_text = config["text_config"]["num_hidden_layers"]
+  num_experts_text = config["text_config"].get("num_local_experts", 0)
   text_mapping = QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(
-      config={"num_hidden_layers": n_layers_text},
+      config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text},
       maxtext_config=maxtext_config,
       scan_layers=scan_layers,
   )
@@ -3783,6 +3784,22 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
 
   for key, value in text_mapping.items():
     mapping[key] = replace_prefix(value)
+
+  # For correct layer replication vs scanning.
+  if num_experts_text > 0 and not scan_layers:
+    for i in range(n_layers_text):
+      key0 = f"params-decoder-layers_{i}-moe_block-wi_0"
+      key1 = f"params-decoder-layers_{i}-moe_block-wi_1"
+      key_wo = f"params-decoder-layers_{i}-moe_block-wo"
+
+      if key0 in mapping:
+        del mapping[key0]
+      if key1 in mapping:
+        del mapping[key1]
+
+      composite_key = (key0, key1)
+      mapping[composite_key] = f"model.language_model.layers.{i}.mlp.experts.gate_up_proj"
+      mapping[key_wo] = f"model.language_model.layers.{i}.mlp.experts.down_proj"
 
   vision_config = config["vision_config"]
   n_vision_layers = vision_config["depth"]
@@ -3852,13 +3869,35 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   mapping = {}
 
   n_layers_text = config["text_config"]["num_hidden_layers"]
+  num_experts_text = config["text_config"].get("num_local_experts", 0)
   text_hooks = QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(
-      config={"num_hidden_layers": n_layers_text},
+      config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text},
       maxtext_config=maxtext_config,
       scan_layers=scan_layers,
       saving_to_hf=saving_to_hf,
   )
+
+  def process_wi_0_wi_1_fused(input_tensor, target_shape=None):
+    if saving_to_hf:
+      wi_0, wi_1 = input_tensor
+      gate_up = np.concatenate([wi_0, wi_1], axis=-1)
+      return gate_up
+    else:
+      gate, up = np.split(input_tensor, 2, axis=-1)
+      return np.stack([gate, up], axis=-1)
+
   mapping.update(text_hooks)
+
+  # Special case for Qwen3-VL: MaxText model has separate wi_0 and wi_1 weights
+  # for the MoE block, but the HF model expects a single fused weight.
+  if num_experts_text > 0 and not scan_layers:
+    for i in range(n_layers_text):
+      composite_key = (
+          f"params-decoder-layers_{i}-moe_block-wi_0",
+          f"params-decoder-layers_{i}-moe_block-wi_1",
+      )
+      mapping[composite_key] = process_wi_0_wi_1_fused
+      mapping[f"params-decoder-layers_{i}-moe_block-wo"] = None
 
   vision_config = config["vision_config"]
   n_vision_layers = vision_config["depth"]
