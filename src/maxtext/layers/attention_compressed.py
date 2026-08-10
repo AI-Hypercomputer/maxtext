@@ -584,6 +584,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       return compressed_kv, compressed_mask
 
     # --- PREFILL CHUNKING & PRIMING ---
+    usable = (seq_len // self.compress_rate) * self.compress_rate
     # Ceil-pad sequence to nearest multiple of compression rate so all tokens are included
     remainder = seq_len % self.compress_rate
     if remainder > 0:
