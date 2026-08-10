@@ -40,9 +40,19 @@ import torch
 transformers_repo_path = os.environ.get("TRANSFORMERS_REPO_PATH", "")
 sys.path.insert(0, os.path.join(transformers_repo_path, "src"))
 
-jax.config.update("jax_default_matmul_precision", "highest")
+_ORIG_MATMUL_PRECISION = None
 
-from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
+
+def setUpModule():
+  global _ORIG_MATMUL_PRECISION
+  _ORIG_MATMUL_PRECISION = jax.config.jax_default_matmul_precision
+  jax.config.update("jax_default_matmul_precision", "highest")
+
+
+def tearDownModule():
+  global _ORIG_MATMUL_PRECISION
+  if _ORIG_MATMUL_PRECISION is not None:
+    jax.config.update("jax_default_matmul_precision", _ORIG_MATMUL_PRECISION)
 
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4RotaryEmbedding as DeepseekV4RotaryEmbedding_PT,
