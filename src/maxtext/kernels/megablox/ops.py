@@ -61,7 +61,7 @@ def gmm(
     ),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
-    transpose_rhs: bool = False,
+    
     interpret: bool | None = None,
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
@@ -116,7 +116,6 @@ def gmm(
       tiling,
       group_offset,
       existing_out,
-      transpose_rhs,
       interpret,
       quantization_rule,
       use_tokamax_backend,
@@ -152,7 +151,7 @@ def _gmm_fwd(
     ),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
-    transpose_rhs: bool = False,
+    
     interpret: bool = False,
     quantization_rule: qwix.QtRule | None = None,
     use_tokamax_backend: bool = False,
@@ -182,7 +181,7 @@ def _gmm_fwd(
   if quantization_rule:
     # pyrefly: ignore[bad-assignment]
     lhs, rhs = _fwd_quantize_activation_and_weight(
-        lhs, rhs, quantization_rule, use_gmm_v2, use_manual_quantization, transpose_rhs
+        lhs, rhs, quantization_rule, use_gmm_v2, use_manual_quantization
     )
 
   # Quantization All-Gather (QAG) for weight: only supported for following conditions
@@ -199,7 +198,7 @@ def _gmm_fwd(
 
   # Backend Execution Routing
   if use_tokamax_backend and not use_gmm_v2:
-    out = _fwd_run_tokamax_v1(lhs, rhs, group_sizes, preferred_element_type, transpose_rhs, use_manual_quantization)
+    out = _fwd_run_tokamax_v1(lhs, rhs, group_sizes, preferred_element_type, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
     out = _fwd_run_tokamax_v2(
         lhs,
@@ -209,7 +208,6 @@ def _gmm_fwd(
         tiling,
         group_offset,
         partial_sum,
-        transpose_rhs,
         quantization_rule,
     )
   else:
@@ -221,7 +219,6 @@ def _gmm_fwd(
         tiling,
         group_offset,
         existing_out,
-        transpose_rhs,
         interpret,
         lhs_vma_axes,
     )
@@ -235,7 +232,7 @@ def _fwd_quantize_activation_and_weight(
     quantization_rule: qwix.QtRule,
     use_gmm_v2: bool,
     use_manual_quantization: bool,
-    transpose_rhs: bool,
+    
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
   if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2:
@@ -255,7 +252,7 @@ def _fwd_quantize_activation_and_weight(
           # If only considering the fwd pass, we could also enable channelwise
           # axes for the group axis, i.e., [0, 1 or 2]. However, this makes the
           # bwd pass unable to reuse the scale easily.
-          channelwise_axes=([] if quantization_rule.disable_channelwise_axes else ([1] if transpose_rhs else [2])),
+          channelwise_axes=([] if quantization_rule.disable_channelwise_axes else [2]),
           calibration_method=quantization_rule.weight_calibration_method,
       )
     else:
@@ -281,7 +278,7 @@ def _fwd_run_tokamax_v1(
     rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype,
-    transpose_rhs: bool,
+    
     use_manual_quantization: bool,
 ) -> jnp.ndarray:
   """Executes the standard Tokamax GMM V1 for forward pass."""
@@ -291,8 +288,6 @@ def _fwd_run_tokamax_v1(
     # used in batchsplit
     out_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
 
-  if transpose_rhs:
-    rhs = rhs.swapaxes(1, 2)
 
   return tokamax.ragged_dot(
       lhs=lhs,
@@ -307,17 +302,11 @@ def _fwd_run_tokamax_v1(
   )
 
 
-def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.ndarray:
+def _fwd_prepare_rhs_scale(rhs: qpl.QArray) -> jnp.ndarray:
   """Formats and broadcasts rhs scale for the V2 GMM forward kernel."""
   # Target shape: (size_group, num_quant_blocks, 1, size_n)
-  if transpose_rhs:
-    G, N, _ = rhs.qvalue.shape
-    scale = rhs.scale
-    if scale.ndim == 3:
-      scale = scale.swapaxes(1, 2)
-  else:
-    G, _, N = rhs.qvalue.shape
-    scale = rhs.scale
+  G, _, N = rhs.qvalue.shape
+  scale = rhs.scale
 
   if scale.ndim == 2:  # Per-Channel quantization
     rhs_scale = jnp.expand_dims(scale, axis=(1, 2))
@@ -368,19 +357,18 @@ def _fwd_run_tokamax_v2(
     tiling: tuple,
     group_offset: jnp.ndarray | None,
     partial_sum: jnp.ndarray | None,
-    transpose_rhs: bool,
     quantization_rule: qwix.QtRule | None = None,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
   # if transpose_rhs=False, rhs is [g, k, n], remain unchanged
   # if transpose_rhs=True, rhs [g, n, k], explicit transpose to [g, k, n]
-  rhs_operand = rhs if not transpose_rhs else rhs.swapaxes(1, 2)
+  rhs_operand = rhs
   rhs_scale = None
 
   if isinstance(rhs, qpl.QArray):
     # pyrefly: ignore[missing-attribute]
     rhs_operand = rhs_operand.qvalue
-    rhs_scale = _fwd_prepare_rhs_scale(rhs, transpose_rhs=transpose_rhs)
+    rhs_scale = _fwd_prepare_rhs_scale(rhs)
 
   custom_fwd_tiling = gmm_v2.TileSizes(
       tile_m=tiling[0],
@@ -409,7 +397,7 @@ def _fwd_run_megablox(
     tiling: tuple,
     group_offset: jnp.ndarray | None,
     existing_out: jnp.ndarray | None,
-    transpose_rhs: bool,
+    
     interpret: bool,
     lhs_vma_axes: tuple,
 ) -> jnp.ndarray:
@@ -422,7 +410,7 @@ def _fwd_run_megablox(
       tiling[:3],
       group_offset,
       existing_out,
-      transpose_rhs=transpose_rhs,
+      
       interpret=interpret,
   )
   for axis in lhs_vma_axes:
@@ -440,7 +428,6 @@ def _gmm_bwd(
     rhs_dtype: jax.typing.DTypeLike,
     preferred_element_type: jnp.dtype,
     tiling: tuple[int, int, int, int, int, int, int, int, int],
-    transpose_rhs: bool,
     interpret: bool,
     quantization_rule: qwix.QtRule | None,
     use_tokamax_backend: bool,
@@ -474,7 +461,7 @@ def _gmm_bwd(
 
   # 1. Scale Application & QArray Unwrapping
   dlhs_dout, drhs_dout, lhs, rhs = _bwd_prepare_inputs(
-      grad, lhs, rhs, group_sizes, use_gmm_v2, transpose_rhs, quantization_rule
+      grad, lhs, rhs, group_sizes, use_gmm_v2, quantization_rule
   )
 
   # 2. Backward Pass Quantization
@@ -489,7 +476,6 @@ def _gmm_bwd(
       group_offset,
       lhs_dtype,
       tiling,
-      transpose_rhs,
       use_tokamax_backend,
       use_gmm_v2,
       use_manual_quantization,
@@ -520,7 +506,6 @@ def _gmm_bwd(
   # return the transpose of the rhs gradient that we calculated above.
   #
   # TODO(tgale, enriqueps, apaske): Fuse this transposition into the tgmm.
-  drhs = drhs.swapaxes(1, 2) if transpose_rhs else drhs
   dpartial_sum = grad if partial_sum_fwd is not None else None
   d_existing_out = None if use_tokamax_backend else grad
 
@@ -533,7 +518,6 @@ def _bwd_prepare_inputs(
     rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
     use_gmm_v2: bool,
-    transpose_rhs: bool,
     quantization_rule: qwix.QtRule | None,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray, jnp.ndarray, jnp.ndarray]:
   """Prepares backward operands."""
@@ -555,7 +539,7 @@ def _bwd_prepare_inputs(
       # NOTE: rhs.scale is for the contracting dimension (N) in DLHS, but gmm_v2
       # only supports scaling the output dimension. Thus, we must scale dlhs_dout
       # beforehand.
-      dlhs_dout = _dlhs_scale_grad_by_rhs_scale(dlhs_dout, rhs, group_sizes, transpose_rhs)
+      dlhs_dout = _dlhs_scale_grad_by_rhs_scale(dlhs_dout, rhs, group_sizes)
       rhs = rhs.qvalue
 
   # GMM2 FWD performs lhs quantization inside kernel, lhs is stored as unquantized dtype
@@ -616,7 +600,6 @@ def _compute_dlhs(
     group_offset: jnp.ndarray | None,
     lhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
-    transpose_rhs: bool,
     use_tokamax_backend: bool,
     use_gmm_v2: bool,
     use_manual_quantization: bool,
@@ -630,14 +613,13 @@ def _compute_dlhs(
         rhs,
         group_sizes,
         lhs_dtype,
-        transpose_rhs,
         use_manual_quantization,
     )
   elif use_tokamax_backend and use_gmm_v2:
-    return _dlhs_run_tokamax_v2(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs)
+    return _dlhs_run_tokamax_v2(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling)
   else:
     return _dlhs_run_megablox(
-        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs, interpret, lhs_vma_axes
+        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, interpret, lhs_vma_axes
     )
 
 
@@ -646,7 +628,6 @@ def _dlhs_run_tokamax_v1(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     lhs_dtype: jax.typing.DTypeLike,
-    transpose_rhs: bool,
     use_manual_quantization: bool,
 ) -> jnp.ndarray:
   """Executes DLHS using GMM 1"""
@@ -654,10 +635,9 @@ def _dlhs_run_tokamax_v1(
   if use_manual_quantization:
     dlhs_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
 
-  dlhs_rhs = rhs.swapaxes(1, 2) if transpose_rhs else rhs
   return tokamax.ragged_dot_general(
       lhs=dlhs_dout,
-      rhs=dlhs_rhs,
+      rhs=rhs,
       group_sizes=group_sizes,
       ragged_dot_dimension_numbers=DLHS_RAGGED_DOT_DIM_NUMS,
       precision=jax.lax.Precision.DEFAULT,
@@ -673,7 +653,6 @@ def _dlhs_scale_grad_by_rhs_scale(
     grad: jnp.ndarray,
     rhs: qpl.QArray,
     group_sizes: jnp.ndarray,
-    transpose_rhs: bool = False,
 ) -> jnp.ndarray:
   """Squeezes the rhs scale and multiplies it with the incoming gradient.
 
@@ -683,7 +662,7 @@ def _dlhs_scale_grad_by_rhs_scale(
 
   # 1. Squeeze the scale to 2D [g, n] based on transpose_rhs
   if rhs_scale.ndim == 3:
-    squeeze_axis = 2 if transpose_rhs else 1
+    squeeze_axis = 1
     if rhs_scale.shape[squeeze_axis] == 1:
       rhs_scale = rhs_scale.squeeze(axis=squeeze_axis)
 
@@ -707,11 +686,10 @@ def _dlhs_run_tokamax_v2(
     group_offset: jnp.ndarray | None,
     lhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
-    transpose_rhs: bool,
 ) -> jnp.ndarray:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
   # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs support.
-  dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
+  dlhs_rhs = rhs.swapaxes(1, 2)
   dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
 
   custom_dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
@@ -740,7 +718,6 @@ def _dlhs_run_megablox(
     group_offset: jnp.ndarray | None,
     lhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
-    transpose_rhs: bool,
     interpret: bool,
     lhs_vma_axes: tuple,
 ) -> jnp.ndarray:
@@ -752,7 +729,7 @@ def _dlhs_run_megablox(
       lhs_dtype,
       tiling[3:6],
       group_offset,
-      transpose_rhs=not transpose_rhs,
+      transpose_rhs=True,
       interpret=interpret,
       varying_axes=lhs_vma_axes,
   )
