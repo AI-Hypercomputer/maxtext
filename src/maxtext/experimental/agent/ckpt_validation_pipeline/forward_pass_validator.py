@@ -257,6 +257,7 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
     returncode = 1
   finally:
     ocp.Checkpointer.restore = _original_restore
+    model_creation_utils._fix_restore_args_for_shape_mismatch = _original_fix_restore  # pylint: disable=protected-access
     transformers.AutoTokenizer.from_pretrained = _orig_from_pretrained
 
     # Restore logging handlers

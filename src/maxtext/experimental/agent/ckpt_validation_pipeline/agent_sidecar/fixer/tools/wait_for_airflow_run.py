@@ -44,6 +44,8 @@ def wait_for_run(dag_id: str, dag_run_id: str, timeout_seconds: int, poll_second
       )
       if response.status_code != 200:
         if response.status_code in {502, 503, 504}:
+          import time
+
           time.sleep(poll_seconds)
           continue
         raise RuntimeError(f"Airflow status failed ({response.status_code}): {response.text}")

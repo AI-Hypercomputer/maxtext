@@ -281,6 +281,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
         ann = field_info.annotation
         import typing
         import types as python_types
+
         def _allows_none(annotation) -> bool:
           if annotation is None or annotation is type(None) or annotation is typing.Any:
             return True

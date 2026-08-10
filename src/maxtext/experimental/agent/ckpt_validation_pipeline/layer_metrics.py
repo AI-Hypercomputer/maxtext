@@ -136,8 +136,7 @@ def analyze_layer_divergence(
       status = "DIVERGED"
 
     table_lines.append(
-        f"| {label:<11} | {hf_mean_str} | {hf_std_str} | {mt_mean_str} | {mt_std_str} | {cossim_str} |"
-        f" {status:<12} |"
+        f"| {label:<11} | {hf_mean_str} | {hf_std_str} | {mt_mean_str} | {mt_std_str} | {cossim_str} |" f" {status:<12} |"
     )
 
   summary_table = "\n".join(table_lines)

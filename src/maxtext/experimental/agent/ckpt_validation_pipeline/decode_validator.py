@@ -80,16 +80,16 @@ def validate_checkpoint(report_gcs_dir, maxtext_args):
     ) as proc:
       stdout_lines = []
       import threading
-      
+
       def reader():
         for line in proc.stdout:
           logger.info(line.rstrip())
           stdout_lines.append(line)
-          
+
       reader_thread = threading.Thread(target=reader)
       reader_thread.daemon = True
       reader_thread.start()
-      
+
       try:
         proc.wait(timeout=1800)  # 30 minutes timeout
       except subprocess.TimeoutExpired:
@@ -162,7 +162,7 @@ if __name__ == "__main__":
       run_name = overrides_dict.get("run_name", "default_run")
       internal_model_name = overrides_dict.get("model_name", "unknown")
       checkpoint_path = overrides_dict.get("load_parameters_path", "unknown")
-      
+
       report = {
           "run_name": run_name,
           "model": internal_model_name,
@@ -172,18 +172,18 @@ if __name__ == "__main__":
           "stderr": str(e) if str(e) else type(e).__name__,
           "checkpoint_used": checkpoint_path,
       }
-      
+
       report_dir = os.path.join(os.getcwd(), "reports")
       os.makedirs(report_dir, exist_ok=True)
       output_path = os.path.join(report_dir, f"report_{run_name}.json")
       with open(output_path, "w", encoding="utf-8") as f:
-          json.dump(report, f, indent=4)
-          
+        json.dump(report, f, indent=4)
+
       gcs_dir = args.report_gcs_dir
       if not gcs_dir.endswith("/"):
-          gcs_dir += "/"
+        gcs_dir += "/"
       gcs_utils.upload_blob(f"{gcs_dir}report_{run_name}.json", output_path)
-      
+
     if isinstance(e, SystemExit):
       sys.exit(e.code)
     sys.exit(1)
