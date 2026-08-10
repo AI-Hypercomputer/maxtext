@@ -345,13 +345,13 @@ class TrainRLTest(unittest.TestCase):
     mock_tokenizer = mock.MagicMock()
 
     # Define tokenizer side effect
-    def tokenize_side_effect(text):
+    def encode_side_effect(text):
       if text == "short":
         return [0] * 5
       else:
         return [0] * 15
 
-    mock_tokenizer.tokenize.side_effect = tokenize_side_effect
+    mock_tokenizer.encode.side_effect = encode_side_effect
 
     # Define dataset mock data
     train_data = [

@@ -400,7 +400,9 @@ def prepare_datasets(
       )
 
   def _filter_long_prompts(x):
-    tokens = model_tokenizer.tokenize(x["prompts"])
+    # tokenize() is a HuggingFace method. MaxText's own tokenizers only offer encode(), and the
+    # length being checked is the prefill length in token ids anyway.
+    tokens = model_tokenizer.encode(x["prompts"])
     return len(tokens) <= trainer_config.max_prefill_predict_length
 
   train_dataset = train_dataset.filter(_filter_long_prompts)
