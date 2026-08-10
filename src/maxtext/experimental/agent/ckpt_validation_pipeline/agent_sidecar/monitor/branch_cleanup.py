@@ -50,23 +50,26 @@ def prune_abandoned_branches(days: int, dry_run: bool = False):
       if not branch_name.startswith(BRANCH_PREFIX):
         continue  # Strict safety check so we NEVER delete manual branches
 
-      # Get commit timestamp of head commit
-      ts_cmd = ["git", "log", "-1", "--format=%cI", branch_ref]
-      ts_res = subprocess.run(ts_cmd, capture_output=True, text=True, check=True)
-      commit_iso = ts_res.stdout.strip()
-      commit_dt = datetime.datetime.fromisoformat(commit_iso)
+      try:
+        # Get commit timestamp of head commit
+        ts_cmd = ["git", "log", "-1", "--format=%cI", branch_ref]
+        ts_res = subprocess.run(ts_cmd, capture_output=True, text=True, check=True)
+        commit_iso = ts_res.stdout.strip()
+        commit_dt = datetime.datetime.fromisoformat(commit_iso)
 
-      if commit_dt < cutoff:
-        logger.info("Branch %s is abandoned (last commit %s < cutoff %s).", branch_name, commit_iso, cutoff.isoformat())
-        if dry_run:
-          logger.info("[DRY RUN] Would delete remote branch: origin/%s", branch_name)
+        if commit_dt < cutoff:
+          logger.info("Branch %s is abandoned (last commit %s < cutoff %s).", branch_name, commit_iso, cutoff.isoformat())
+          if dry_run:
+            logger.info("[DRY RUN] Would delete remote branch: origin/%s", branch_name)
+          else:
+            del_cmd = ["git", "push", "origin", "--delete", branch_name]
+            subprocess.run(del_cmd, capture_output=True, text=True, check=True)
+            logger.info("Successfully pruned abandoned branch: origin/%s", branch_name)
+            pruned_count += 1
         else:
-          del_cmd = ["git", "push", "origin", "--delete", branch_name]
-          subprocess.run(del_cmd, capture_output=True, text=True, check=True)
-          logger.info("Successfully pruned abandoned branch: origin/%s", branch_name)
-          pruned_count += 1
-      else:
-        logger.info("Keeping branch %s (active within %s days).", branch_name, days)
+          logger.info("Keeping branch %s (active within %s days).", branch_name, days)
+      except Exception as e:
+        logger.error("Failed to prune branch %s: %s", branch_ref, e)
 
     logger.info("Branch cleanup completed. Total pruned: %s", pruned_count)
 
