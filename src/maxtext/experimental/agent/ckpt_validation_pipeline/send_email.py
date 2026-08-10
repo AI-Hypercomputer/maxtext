@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-;
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,43 +17,54 @@
 # pylint: disable=logging-fstring-interpolation
 
 import argparse
-import base64
-import json
 import os
+import smtplib
 import sys
+from email.message import EmailMessage
 
 from maxtext.utils import max_logging as logger
-from google.cloud import pubsub_v1
+
 
 def send_alert(subject: str, body: str, recipient: str, attachment_path: str = None):
-  """Dispatches an email alert by publishing it to an Application Integration Pub/Sub topic."""
+  """Dispatches an email alert, gracefully degrading to local logging if SMTP is unavailable."""
+  # In a production environment, you would pull these from a secure secrets manager or env.
+  smtp_server = os.environ.get("SMTP_SERVER", "localhost")
+  smtp_port = int(os.environ.get("SMTP_PORT", 1025))  # Default to a local mock server port
+  smtp_user = os.environ.get("SMTP_USERNAME", "")
+  smtp_pass = os.environ.get("SMTP_PASSWORD", "")
+  sender_email = os.environ.get("SENDER_EMAIL", "overwatch-agent@ml-auto-solutions.com")
+
+  msg = EmailMessage()
+  msg.set_content(body)
+  msg["Subject"] = subject
+  msg["From"] = sender_email
+  msg["To"] = recipient
   
-  project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "tpu-prod-env-multipod")
-  topic_id = "maxtext-validation-agent-alerts"
-
-  payload = {
-      "subject": subject,
-      "body": body,
-      "recipient": recipient,
-  }
-
   if attachment_path and os.path.exists(attachment_path):
-    with open(attachment_path, "r", encoding="utf-8") as f:
-      payload["attachment_content"] = f.read()
-      payload["attachment_filename"] = os.path.basename(attachment_path)
-
-  data = json.dumps(payload).encode("utf-8")
+    with open(attachment_path, 'rb') as f:
+      file_data = f.read()
+      file_name = os.path.basename(attachment_path)
+    msg.add_attachment(file_data, maintype='text', subtype='markdown', filename=file_name)
 
   try:
-    publisher = pubsub_v1.PublisherClient()
-    topic_path = publisher.topic_path(project_id, topic_id)
-    
-    future = publisher.publish(topic_path, data)
-    message_id = future.result(timeout=10)
-    logger.info(f"Published alert to Pub/Sub topic {topic_path}. Message ID: {message_id}")
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+      server.starttls()
+      if smtp_user and smtp_pass:
+        server.login(smtp_user, smtp_pass)
+      server.send_message(msg)
+    logger.info(f"Successfully sent email alert to {recipient} regarding: {subject}")
+  except ConnectionRefusedError:
+    logger.info(f"Connection to SMTP server {smtp_server}:{smtp_port} refused.")
+    logger.info("Operating in MOCK/DEV mode. The following email WOULD have been sent:")
+    logger.info("--- EMAIL START ---")
+    logger.info(f"To: {recipient}")
+    logger.info(f"Subject: {subject}")
+    logger.info(f"Body:\n{body}")
+    if attachment_path:
+      logger.info(f"Attachment: {attachment_path}")
+    logger.info("--- EMAIL END ---")
   except Exception as e:  # pylint: disable=broad-exception-caught
-    logger.error(f"Failed to push alert to Pub/Sub topic {topic_id}. Is the Integrations API reachable?")
-    logger.error(f"Exception: {e}")
+    logger.error(f"Failed to dispatch email. Exception: {e}")
     sys.exit(1)
 
 
