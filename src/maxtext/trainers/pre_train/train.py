@@ -1266,7 +1266,7 @@ def train_loop(config, recorder, state=None):
       # Print the stacktrace every 60s and also exit the workload if longer than 600s
       with (
           watchdog.watchdog("step-stack-status", timeout=60),
-          watchdog.watchdog("step-timebomb", timeout=10 * 60, repeat=False),
+          watchdog.watchdog("step-timebomb", timeout=15 * 60, repeat=False),
       ):
         try:
           # Scale-up check at the end of the step (only if elastic)
