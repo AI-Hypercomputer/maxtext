@@ -990,7 +990,7 @@ class NNXDecoder(nnx.Module):
 
     def layer_fn(carry, scanned_vars):
       # Ensure metadata rank matches the sliced values
-      scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, "layers")
+      scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, metadata_axis_name)
 
       # Unpack the sliced variables for THIS layer
       if use_kv:
