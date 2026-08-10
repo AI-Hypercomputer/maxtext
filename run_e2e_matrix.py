@@ -39,8 +39,12 @@ def get_tokenizer_flags(model_name):
     flags.extend(["tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma", "tokenizer_type=sentencepiece"])
   elif "llama" in model_name:
     flags.extend(["tokenizer_path=src/maxtext/assets/tokenizers/tokenizer_llama3.tiktoken", "tokenizer_type=tiktoken"])
+  elif "mistral" in model_name:
+    flags.extend(["tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.mistral-v3", "tokenizer_type=sentencepiece"])
   elif "qwen" in model_name or "olmo" in model_name or "gpt-oss" in model_name:
-    flags.extend([f"tokenizer_path=src/maxtext/assets/tokenizers/{model_name}", "tokenizer_type=huggingface"])
+    # These have no tokenizer asset of their own -- the path built from the model name does not
+    # exist, and a huggingface tokenizer_type then reads it as a repo id and fails. Name the repo.
+    flags.extend([f"tokenizer_path={HF_IDS[model_name]}", "tokenizer_type=huggingface"])
   return flags
 
 
@@ -116,6 +120,11 @@ def run_matrix():
             cmd.append("chat_template_path=src/maxtext/examples/chat_templates/gemma-3-27b-chat_template.json")
             hf_model_name = f"google/gemma-3-{model.rsplit('-', maxsplit=1)[-1]}-it"
             cmd.append(f"vllm_hf_config_path={hf_model_name}")
+          else:
+            # RL needs a chat template, and the base checkpoints are not all instruction tuned,
+            # so their tokenizers do not ship one. The round trip under test does not care which
+            # template it is.
+            cmd.append("chat_template_path=src/maxtext/examples/chat_templates/gsm8k_rl.json")
         else:
           cmd.extend(["steps=5", "per_device_batch_size=1"])
 
@@ -138,13 +147,17 @@ def run_matrix():
         # Inject tokenizers for ALL jobs to prevent missing tokenizer config errors
         cmd.extend(get_tokenizer_flags(model))
 
-        if action == "rl" and "llama3" in model:
-          # RL requires a chat template. Llama3's tiktoken lacks one, so we must use the HF tokenizer path instead.
-          hf_model_name = f"meta-llama/Meta-Llama-3.1-{model.rsplit('-', maxsplit=1)[-1].upper()}-Instruct"
+        if action == "rl":
+          # RL samples through vLLM, which wants the HuggingFace model, and applies a chat
+          # template, which MaxText's own tokenizer assets do not carry. Name the repo for both.
+          if "llama3" in model:
+            hf_model_name = f"meta-llama/Meta-Llama-3.1-{model.rsplit('-', maxsplit=1)[-1].upper()}-Instruct"
+          else:
+            hf_model_name = HF_IDS[model]
           cmd = [c for c in cmd if not c.startswith("tokenizer_path=") and not c.startswith("tokenizer_type=")]
-          cmd.extend(
-              [f"tokenizer_path={hf_model_name}", "tokenizer_type=huggingface", f"vllm_hf_config_path={hf_model_name}"]
-          )
+          cmd.extend([f"tokenizer_path={hf_model_name}", "tokenizer_type=huggingface"])
+          if not any(c.startswith("vllm_hf_config_path=") for c in cmd):
+            cmd.append(f"vllm_hf_config_path={hf_model_name}")
 
         if action == "dpo":
           # DPO reads dataset_type=hf, whose pipeline tokenizes through AutoTokenizer. That cannot
