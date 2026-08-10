@@ -2475,10 +2475,16 @@ class AttentionOp(nnx.Module):
     indexer_mask_prefill = None
     indexer_mask_ar = None
     if indexer_mask is not None:
-      prefill_len = key.shape[1]  # Use original key shape before concat
-      indexer_mask_prefill = indexer_mask[:, :, :prefill_len]
-      if ar_kv_cache is not None:
-        indexer_mask_ar = indexer_mask[:, :, prefill_len:]
+      if pass_comp_to_prefill:
+        # Pass the compressed KV blocks into the prefill/training attention
+        # Forward full (L + C) mask for Compressed Attention
+        indexer_mask_prefill = indexer_mask
+      else:
+        # Use prefill and autoregressive split
+        prefill_len = key.shape[1]  # Use original key shape before concat
+        indexer_mask_prefill = indexer_mask[:, :, :prefill_len]
+        if ar_kv_cache is not None:
+          indexer_mask_ar = indexer_mask[:, :, prefill_len:]
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
