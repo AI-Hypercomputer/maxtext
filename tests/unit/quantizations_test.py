@@ -30,6 +30,7 @@ from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
+from maxtext.kernels.megablox import ops
 from maxtext.kernels.megablox import gmm
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
@@ -37,6 +38,7 @@ from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
+import qwix
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
@@ -713,6 +715,62 @@ class MaybeQuantizeModelTest(unittest.TestCase):
 
     # Assert that intermediates collection is NOT present in the abstract state
     self.assertNotIn("intermediates", state_dict)
+
+
+class StaticScaleTest(unittest.TestCase):
+  """Tests for static scale extraction."""
+
+  def test_get_static_scale_fixed_symmetric(self):
+    scale = quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,224.0")
+    self.assertIsNotNone(scale)
+    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
+
+  def test_get_static_scale_invalid_format(self):
+    with self.assertRaises(ValueError):
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,1,2,3")
+
+    with self.assertRaises(ValueError):
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed,-200.0,224.0")
+
+    with self.assertRaises(ValueError):
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "fixed")
+
+    with self.assertRaises(ValueError):
+      quantizations.get_static_scale(jnp.float8_e4m3fn, "absmax")
+
+
+class LhsScaleTest(unittest.TestCase):
+  """Tests for LHS scale extraction in GMM v2 forward."""
+
+  def test_fwd_prepare_lhs_scale_fixed_symmetric(self):
+
+    rule = qwix.QtRule(
+        act_qtype=jnp.float8_e4m3fn,
+        act_calibration_method="fixed,224.0",
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNotNone(scale)
+    self.assertEqual(scale.shape, (1, 1))
+    self.assertEqual(scale.dtype, jnp.float32)
+    np.testing.assert_allclose(scale, 0.5, rtol=1e-5)
+
+  def test_fwd_prepare_lhs_scale_dynamic_returns_none(self):
+
+    rule = qwix.QtRule(
+        act_qtype=jnp.float8_e4m3fn,
+        act_calibration_method="absmax",
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNone(scale)
+
+  def test_fwd_prepare_lhs_scale_no_rule_returns_none(self):
+
+    rule = qwix.QtRule(
+        act_qtype=None,
+        act_calibration_method=None,
+    )
+    scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
+    self.assertIsNone(scale)
 
 
 if __name__ == "__main__":

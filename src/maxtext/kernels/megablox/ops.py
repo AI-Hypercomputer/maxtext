@@ -202,7 +202,15 @@ def _gmm_fwd(
     out = _fwd_run_tokamax_v1(lhs, rhs, group_sizes, preferred_element_type, transpose_rhs, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
     out = _fwd_run_tokamax_v2(
-        lhs, rhs, group_sizes, preferred_element_type, tiling, group_offset, partial_sum, transpose_rhs
+        lhs,
+        rhs,
+        group_sizes,
+        preferred_element_type,
+        tiling,
+        group_offset,
+        partial_sum,
+        transpose_rhs,
+        quantization_rule,
     )
   else:
     out = _fwd_run_megablox(
@@ -322,6 +330,36 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
   return jnp.broadcast_to(rhs_scale, (G, num_quant_blocks, 1, N))
 
 
+def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array | None:
+  """Extracts the static LHS (activation) scale for the GMM v2 forward pass.
+
+  If a static scale is used, GMM v2 requires it to be from a symmetric fixed-range
+  calibration (e.g., 'fixed,-max,max' or 'fixed,max'). If no static scale is
+  provided, the kernel will compute a dynamic scale on the fly.
+
+  Enforces a default (1, 1) shape for per-tensor quantization kernels.
+
+  Args:
+    quantization_rule: The Qwix quantization rule from which to extract the scale.
+
+  Returns:
+    The extracted static scale array, or None if not using purely fixed calibration.
+  """
+  if quantization_rule is None:
+    return None
+
+  method = quantization_rule.act_calibration_method
+  qtype = quantization_rule.act_qtype
+
+  # Use dynamic quantization, gmm_v2 calculates dynamic scale internally
+  if method is None or qtype is None or not method.lower().startswith("fixed"):
+    return None
+
+  scale_val = quantizations.get_static_scale(qtype, method)
+
+  return jnp.full((1, 1), scale_val, jnp.float32)
+
+
 def _fwd_run_tokamax_v2(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
@@ -331,6 +369,7 @@ def _fwd_run_tokamax_v2(
     group_offset: jnp.ndarray | None,
     partial_sum: jnp.ndarray | None,
     transpose_rhs: bool,
+    quantization_rule: qwix.QtRule | None = None,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
   # if transpose_rhs=False, rhs is [g, k, n], remain unchanged
@@ -358,6 +397,7 @@ def _fwd_run_tokamax_v2(
       preferred_element_type=preferred_element_type,
       partial_sum=partial_sum,
       group_offset=group_offset,
+      lhs_scale=_fwd_prepare_lhs_scale(quantization_rule),
   )
 
 
@@ -502,7 +542,7 @@ def _bwd_prepare_inputs(
   dlhs_dout = grad
   drhs_dout = grad
 
-  # Apply rhs.scale to dlhs_dout, dlhs_dout[m, n] @ rhs_tranpose[g, n, k] = dlhs[m, k]
+  # Apply rhs.scale to dlhs_dout, dlhs_dout[m, n] @ rhs_transpose[g, n, k] = dlhs[m, k]
   # Assume channelwise scale on rhs n.
   # Apply rhs.scale to dlhs_dout to avoid dequantizing or requantizing rhs.
   # We cannot apply the scale to dlhs because axis n will disappear there.
