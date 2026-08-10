@@ -120,6 +120,22 @@ def _as_chain_index(key):
   return None
 
 
+def opt_state_to_linen(opt_state):
+  """Reshapes an optimizer state into the Linen on-disk layout.
+
+  `to_checkpoint_dict` already does this for the state it is given. This is for a caller that
+  has unwrapped something the conversion could not see through -- `optax.inject_hyperparams`
+  hides mu and nu behind its own keys -- and needs the inner state converted on its own.
+
+  Args:
+    opt_state: The optimizer state to reshape.
+
+  Returns:
+    The same state in the Linen layout.
+  """
+  return _opt_state_to_linen(opt_state)
+
+
 def _opt_state_to_linen(opt_state):
   """Reshapes the NNX opt_state to Linen's on-disk layout.
 

@@ -272,7 +272,14 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
       state = nnx.split_state(state, nnx.LoRAParam, ...)[0]
     items = train_state_nnx.to_checkpoint_dict(state)
     if "opt_state" in items:
-      items["opt_state"] = _drop_inject_hyperparams(items["opt_state"])
+      inner = _drop_inject_hyperparams(items["opt_state"])
+      if inner is not items["opt_state"]:
+        # to_checkpoint_dict ran against the inject_hyperparams shell. It puts mu and nu into
+        # the Linen `params` collection by finding those keys at the top of the optimizer
+        # state, and behind the shell they are not there, so it left them bare. Convert what
+        # was behind it, or pre-training finds the accumulators one level short.
+        inner = train_state_nnx.opt_state_to_linen(inner)
+      items["opt_state"] = inner
       if self.model_to_checkpoint(model) is not model:
         items["opt_state"] = _drop_adapter_level(items["opt_state"])
     jax.block_until_ready(items)
