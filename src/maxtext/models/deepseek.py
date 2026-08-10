@@ -76,16 +76,6 @@ class DeepSeekGenericLayer(nnx.Module):
     self.layer_idx = layer_idx
     self.is_engram_enabled = config.engram_layers and layer_idx in config.engram_layers
 
-    self.is_index_share_enabled = getattr(config, "use_index_share", False)
-    self.is_shared_layer = False
-    self.served_group_size = 1
-    if self.is_index_share_enabled and layer_idx >= 0:
-      from maxtext.utils import index_share_utils
-
-      pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
-      self.is_shared_layer = index_share_utils.is_shared_layer(layer_idx, pattern)
-      self.served_group_size = index_share_utils.get_served_group_sizes(pattern)[layer_idx]
-
     batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
     self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
 
@@ -181,8 +171,6 @@ class DeepSeekGenericLayer(nnx.Module):
           model_mode=model_mode,
           rngs=rngs,
           attn_logits_soft_cap=self.config.attn_logits_soft_cap,
-          is_shared_layer=self.is_shared_layer,
-          served_group_size=self.served_group_size,
       )
 
     self.dropout = Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
@@ -226,10 +214,9 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
-      cached_indexer_state=None,
   ):
     """Executes the attention layer."""
-    attn_out = self.self_attention(
+    attention_result, _ = self.self_attention(
         x,
         x,
         decoder_positions,
@@ -239,14 +226,8 @@ class DeepSeekGenericLayer(nnx.Module):
         out_sharding=self.out_sharding,
         previous_chunk=previous_chunk,
         slot=slot,
-        cached_indexer_state=cached_indexer_state,
     )
-    if self.is_index_share_enabled:
-      attention_result, _, new_indexer_state = attn_out
-      return self.with_logical_constraint(attention_result), new_indexer_state
-    else:
-      attention_result, _ = attn_out
-      return self.with_logical_constraint(attention_result), None
+    return self.with_logical_constraint(attention_result)
 
   @property
   def logical_axis_names(self):
@@ -262,7 +243,7 @@ class DeepSeekGenericLayer(nnx.Module):
     axis_names = ["activation_batch", length_name, "activation_mlp"]
     return axis_names
 
-  def post_process(self, layer_output, load_balance_loss, moe_bias_updates, kv_cache=None, cached_indexer_state=None):
+  def post_process(self, layer_output, load_balance_loss, moe_bias_updates, kv_cache=None):
     """postprocessing."""
 
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
@@ -280,11 +261,6 @@ class DeepSeekGenericLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if self.is_index_share_enabled:
-      if self.config.scan_layers:
-        return layer_output, None, cached_indexer_state
-      return layer_output, kv_cache, cached_indexer_state
-
     if self.config.scan_layers:
       return layer_output, None
     return layer_output, kv_cache
@@ -298,7 +274,6 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
-      cached_indexer_state=None,
   ):
     """self-attention with normalization"""
     if self.is_mhc_enabled:
@@ -314,12 +289,10 @@ class DeepSeekGenericLayer(nnx.Module):
           out_sharding=self.out_sharding,
           previous_chunk=previous_chunk,
           slot=slot,
-          cached_indexer_state=cached_indexer_state,
       )
-      new_indexer_state = None
     else:
       lnx = self.pre_attention_norm_op(inputs)
-      attention_lnx, new_indexer_state = self.attention_op(
+      attention_lnx = self.attention_op(
           lnx,
           decoder_segment_ids,
           decoder_positions,
@@ -327,12 +300,11 @@ class DeepSeekGenericLayer(nnx.Module):
           model_mode,
           previous_chunk,
           slot,
-          cached_indexer_state=cached_indexer_state,
       )
       intermediate_inputs = inputs + attention_lnx
     # Normalization
     hidden_states = self.post_attention_norm_op(intermediate_inputs)
-    return hidden_states, intermediate_inputs, new_indexer_state
+    return hidden_states, intermediate_inputs
 
   def engram_op(self, x, decoder_input_tokens):
     normed_x = self.engram_layer_norm(x)  # pyrefly: ignore[not-callable]
@@ -383,7 +355,6 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       kv_cache=None,
       attention_metadata=None,
       decoder_input_tokens=None,
-      cached_indexer_state=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -395,7 +366,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens)
       x = x + engram_output
 
-    hidden_states, intermediate_inputs, new_indexer_state = self.self_attention_with_norm_op(
+    hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
         x,
         decoder_segment_ids,
         decoder_positions,
@@ -403,7 +374,6 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         model_mode,
         previous_chunk,
         slot,
-        cached_indexer_state=cached_indexer_state,
     )
 
     if self.is_mhc_enabled:
@@ -419,7 +389,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
-    return self.post_process(layer_output, None, None, kv_cache, new_indexer_state)
+    return self.post_process(layer_output, None, None, kv_cache)
 
 
 DeepSeekDenseLayerToLinen = nnx_wrappers.to_linen_class(
@@ -468,7 +438,6 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       kv_cache=None,
       attention_metadata=None,
       decoder_input_tokens=None,
-      cached_indexer_state=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -611,7 +580,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens)
       x = x + engram_output
 
-    hidden_states, intermediate_inputs, new_indexer_state = self.self_attention_with_norm_op(
+    hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
         x,
         decoder_segment_ids,
         decoder_positions,
@@ -619,7 +588,6 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         model_mode,
         previous_chunk,
         slot,
-        cached_indexer_state=cached_indexer_state,
     )
 
     if self.is_mhc_enabled:
@@ -636,7 +604,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
-    return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache, new_indexer_state)
+    return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(

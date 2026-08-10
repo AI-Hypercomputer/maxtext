@@ -50,6 +50,7 @@ from maxtext.models import (
     gemma3,
     gemma4,
     gemma4_small,
+    glm5,
     gpt3,
     gpt_oss,
     llama2,
@@ -454,6 +455,11 @@ class Decoder(nn.Module):
             deepseek.DeepSeekDenseLayerToLinen,
             deepseek.DeepSeekMoELayerToLinen,
         ]
+      case DecoderBlockType.GLM5:
+        return [
+            glm5.GLMDenseLayerToLinen,
+            glm5.GLMMoELayerToLinen,
+        ]
       case DecoderBlockType.DEEPSEEK4:
         return (
             [deepseek4.DeepSeek4ScannableBlockToLinen] if self.config.scan_layers else [deepseek4.DeepSeek4LayerToLinen]
@@ -529,6 +535,7 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer],
+        DecoderBlockType.GLM5: [glm5.GLMDenseLayer, glm5.GLMMoELayer],
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
@@ -569,7 +576,11 @@ class Decoder(nn.Module):
   def _build_nnx_pipeline_stage(self, decoder_blocks, rngs):
     """Creates a single NNX pipeline stage module."""
     cfg = self.config
-    base_stage_cls = decoder_blocks[1] if cfg.decoder_block == DecoderBlockType.DEEPSEEK else decoder_blocks[0]
+    base_stage_cls = (
+        decoder_blocks[1]
+        if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5)
+        else decoder_blocks[0]
+    )
 
     if cfg.num_layers_per_pipeline_stage == 1:
       return base_stage_cls(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
@@ -585,7 +596,7 @@ class Decoder(nn.Module):
     """get pipeline stage module"""
 
     def get_layer_to_pipeline(blocks, cfg):
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+      if cfg.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5):
         return blocks[1]  # return the sparse block
       else:
         return blocks[0]

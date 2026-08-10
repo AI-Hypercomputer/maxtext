@@ -35,7 +35,7 @@ routed_scaling_factor: 2.5
 routed_score_func: "sigmoid"
 routed_bias: true
 norm_topk_prob: true
-decoder_block: "deepseek"
+decoder_block: "glm5"
 dtype: "bfloat16"
 weight_dtype: "bfloat16"
 
