@@ -985,6 +985,9 @@ mscale: 1.0
 rope_interleave: true # RoPE with sin/cos interleaved vs concatenated
 rope_truncate: true # Floor lower bound and ceil upper bound for correction range
 rope_attention_scaling: false # Scale the rotary embedding output
+# Keep rank-5 pair tensor intact [batch_size, sequence_length, num_heads, half_dim, 2]
+# where half_dim is the number of 2D rotation planes and 2 contains [real, imag] coordinates, returning interleaved RoPE
+rope_pairwise: false
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
@@ -1151,7 +1154,7 @@ cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: true
-context_parallel_strategy: "all_gather" # "all_gather" or "ring"
+context_parallel_strategy: "all_gather" # "all_gather", "ring", or "ulysses"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
 

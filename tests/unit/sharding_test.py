@@ -26,6 +26,8 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.lax import with_sharding_constraint
 
+from maxtext.utils import sharding
+
 # Global model and data constants
 PER_DEVICE_BATCH_SIZE = 131072
 BATCH_SIZE = 1  # will be updated inside the test
@@ -198,3 +200,10 @@ def test_fsdp_sharding():
     TFLOPs_per_device = parameters * 6 * BATCH_SIZE / 10**12 / len(jax.devices())
     time = simple_timeit(lambda: jax.block_until_ready(jit_func(presharded_X, presharded_layers)))
     print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush=True)
+
+
+def test_with_axis_on_dim_handles_none_and_out_of_range():
+  """with_axis_on_dim passes None through and rejects an out-of-range dimension."""
+  assert sharding.with_axis_on_dim(None, "context", 2) is None
+  with pytest.raises(ValueError, match="out of range"):
+    sharding.with_axis_on_dim(PartitionSpec("data", None), "context", 2)

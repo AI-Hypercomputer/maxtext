@@ -28,7 +28,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.sharding import AxisType, Mesh
+from jax.sharding import AxisType, Mesh, NamedSharding
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
@@ -62,6 +62,7 @@ import numpy as np
 import pytest
 
 from tests.utils import attention_test_util
+from tests.utils import hlo_test_utils
 from tests.utils.test_helpers import get_test_config_path
 
 
@@ -1736,6 +1737,211 @@ class AttentionTest(parameterized.TestCase):
         f"context_parallel_load_balance={context_parallel_load_balance}, "
         f"dq_reduction_steps={dq_reduction_steps}, ring_scan_unroll={ring_scan_unroll}, packing={packing}.",
     )
+
+  def _ulysses_test_config(self, ici_context_parallelism, packing=False):
+    return pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **self.config_arguments,
+        attention="flash",
+        context_parallel_strategy="ulysses",
+        context_parallel_load_balance=False,
+        ici_context_parallelism=ici_context_parallelism,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        packing=packing,
+        dtype="float32",
+    )
+
+  def _ulysses_test_modules(self, cfg_cp, mesh_cp, lnx):
+    """Builds the dot-product reference and the Ulysses flash attention modules."""
+    attention_as_mha_generic = Attention(
+        config=self.cfg,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        rngs=self.nnx_rng,
+    )
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      attention_as_mha_flash_cp = Attention(
+          config=cfg_cp,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=mesh_cp,
+          attention_kernel="flash",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          model_mode=MODEL_MODE_PREFILL,
+          rngs=self.nnx_rng,
+      )
+    return attention_as_mha_generic, attention_as_mha_flash_cp
+
+  @parameterized.named_parameters(
+      {"testcase_name": "ulysses_size_2", "ici_context_parallelism": 2, "packing": False},
+      {"testcase_name": "ulysses_size_4", "ici_context_parallelism": 4, "packing": False},
+      {"testcase_name": "ulysses_size_4_packed", "ici_context_parallelism": 4, "packing": True},
+  )
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_ulysses_context_parallel(self, ici_context_parallelism, packing):
+    """Test equivalence between dot_product and flash attention + Ulysses context parallelism"""
+
+    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    if packing:
+      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+    else:
+      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    mha_generic_output, _ = attention_as_mha_generic(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
+
+    mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
+        cfg_cp,
+        mesh_cp,
+        attention_as_mha_flash_cp,
+        lnx,
+        decoder_segment_ids,
+        decoder_positions,
+    )
+
+    mha_generic_output = jax.device_get(mha_generic_output)
+    mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
+
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        msg="Logits from generic dot product and flash attention + Ulysses context parallelism are not close. "
+        f"ici_context_parallelism={ici_context_parallelism}, packing={packing}.",
+    )
+
+  @parameterized.named_parameters(
+      {"testcase_name": "ulysses_size_2", "ici_context_parallelism": 2, "packing": False},
+      {"testcase_name": "ulysses_size_4", "ici_context_parallelism": 4, "packing": False},
+      {"testcase_name": "ulysses_size_4_packed", "ici_context_parallelism": 4, "packing": True},
+  )
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_ulysses_context_parallel_grad(self, ici_context_parallelism, packing):
+    """Test input-gradient equivalence between dot_product and flash attention + Ulysses context parallelism"""
+
+    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    if packing:
+      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+    else:
+      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
+
+    def generic_loss(lnx):
+      output, _ = attention_as_mha_generic(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    def ulysses_loss(lnx):
+      output, _ = attention_as_mha_flash_cp(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    generic_grad = jax.grad(generic_loss)(lnx)
+    with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      ulysses_grad = jax.grad(ulysses_loss)(lnx)
+    generic_grad = jax.device_get(generic_grad)
+    ulysses_grad = jax.device_get(ulysses_grad)
+
+    self.assertTrue(
+        jax.numpy.allclose(generic_grad, ulysses_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
+        msg="Input gradients from generic dot product and flash attention + Ulysses context parallelism are not "
+        f"close. ici_context_parallelism={ici_context_parallelism}, packing={packing}.",
+    )
+
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_ulysses_hlo_uses_all_to_all(self):
+    """Checks compiled TPU Ulysses attention HLO uses all-to-all collectives."""
+
+    cfg_cp = self._ulysses_test_config(4)
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+
+    def attention_forward(x, pos, seg):
+      output, _ = attention_as_mha_flash_cp(
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return output
+
+    def attention_loss(x, pos, seg):
+      return jnp.sum(attention_forward(x, pos, seg).astype(jnp.float32))
+
+    hlo_texts = []
+    for lowered_fn in (attention_forward, jax.grad(attention_loss)):
+      # The mesh and axis-rules contexts wrap the jit from outside because
+      # jax.set_mesh raises inside a traced function, and the output keeps its
+      # natural sequence sharding so the only full-sequence gathers in the
+      # program are the ones the attention path itself emits.
+      with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+        input_sharding = NamedSharding(
+            mesh_cp,
+            nn_partitioning.logical_to_mesh_axes(
+                ("activation_batch", "activation_length", "activation_embed"), nn_partitioning.get_axis_rules()
+            ),
+        )
+        metadata_sharding = NamedSharding(
+            mesh_cp, nn_partitioning.logical_to_mesh_axes((None, "activation_length"), nn_partitioning.get_axis_rules())
+        )
+        lowered = jax.jit(lowered_fn).lower(
+            jax.device_put(lnx, input_sharding),
+            jax.device_put(decoder_positions, metadata_sharding),
+            jax.device_put(decoder_segment_ids, metadata_sharding),
+        )
+        hlo_texts.append(lowered.compile().as_text())
+
+    sequence_lengths = (cfg_cp.max_target_length,)
+    for hlo_text in hlo_texts:
+      self.assertGreater(len(hlo_test_utils.collective_lines(hlo_text, "all-to-all")), 0)
+      self.assertLen(hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, sequence_lengths), 0)
+      # The int32 segment-ID gathers are the only intended full-sequence gathers.
+      self.assertGreater(
+          len(hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, sequence_lengths, dtypes=("s32",))), 0
+      )
+      self.assertLen(hlo_test_utils.collective_lines(hlo_text, "collective-permute"), 0)
 
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):

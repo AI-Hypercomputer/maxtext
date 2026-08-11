@@ -1030,6 +1030,7 @@ class DeepSeekMoE(BaseModel):
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
   routed_bias_update_rate: float = Field(0.0, description="Update rate applied to the router bias term.")
+  log_moe_bias_norms: bool = Field(False, description="Whether to log the norms of MoE router biases.")
   mlp_bias: bool = Field(
       False,
       description="Whether to add a learnable bias for MLP matmul, "
@@ -1104,7 +1105,7 @@ class HardwareAndMesh(BaseModel):
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
   context_parallel_strategy: str = Field(
       "all_gather",
-      description="Strategy for context parallelism ('all_gather' or 'ring').",
+      description="Strategy for context parallelism ('all_gather', 'ring', or 'ulysses').",
   )
   context_parallel_reorder_strategy: ReorderStrategy = Field(
       ReorderStrategy.AUTO,
@@ -1861,6 +1862,21 @@ class YarnRope(BaseModel):
       False,
       description="Scale the rotary embedding output. Used by some models like gpt-oss.",
   )
+  rope_pairwise: bool = Field(
+      False,
+      description=(
+          "Keep rank-5 pair tensor intact "
+          "[batch_size, sequence_length, num_heads, half_dim, 2] "
+          "where half_dim represents the independent 2D rotation planes "
+          "and 2 represents the real/imag coordinates, returning interleaved RoPE."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_rope_pairwise(self) -> "YarnRope":
+    if self.rope_pairwise and not self.rope_interleave:
+      raise ValueError("rope_pairwise=True requires rope_interleave=True.")
+    return self
 
 
 class InferenceGeneral(BaseModel):
@@ -3564,8 +3580,17 @@ class MaxTextConfig(
           )
       if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
-      if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
+      if (
+          self.routed_bias
+          and self.routed_bias_update_rate > 0.0
+          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
+      ):
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
+        raise ValueError(
+            "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
+            "Please set pure_nnx=True or disable routed_bias."
+        )
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
@@ -3633,6 +3658,9 @@ class MaxTextConfig(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
     context_parallel_strategy = self.context_parallel_strategy.lower()
+    if context_parallel_strategy not in ("all_gather", "ring", "ulysses"):
+      raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', or 'ulysses'.")
+    self.context_parallel_strategy = context_parallel_strategy
     if (
         context_parallel_strategy == "ring"
         and "gpu" not in self.hardware
@@ -3693,6 +3721,69 @@ class MaxTextConfig(
           f"ring_scan_unroll={self.ring_scan_unroll} was specified, but is only supported when "
           "context_parallel_strategy='ring'."
       )
+    if context_parallel_strategy == "ulysses":
+      if self.hardware != "tpu":
+        raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
+      if self.context_sharding != "context":
+        raise ValueError("TPU Ulysses attention requires context_sharding='context'.")
+      ici_context_parallel_size = self.ici_context_parallelism
+      dcn_context_parallel_size = self.dcn_context_parallelism
+      if ici_context_parallel_size <= 0 or dcn_context_parallel_size <= 0:
+        raise ValueError(
+            "TPU Ulysses attention requires explicit positive ici/dcn context parallelism values; "
+            "inferred (-1) sizes are not supported."
+        )
+      if context_parallel_size <= 1:
+        raise ValueError("TPU Ulysses attention requires context_parallel_size > 1.")
+      if dcn_context_parallel_size != 1:
+        raise ValueError("TPU Ulysses attention does not support dcn context parallelism yet.")
+      if self.attention != "flash":
+        raise ValueError("TPU Ulysses attention requires attention=flash.")
+      if not self.use_tokamax_splash:
+        raise ValueError("TPU Ulysses attention requires use_tokamax_splash=True.")
+      if self.use_jax_splash:
+        raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
+      if self.attention_type != "global":
+        raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
+      if self.context_parallel_load_balance:
+        raise ValueError(
+            "TPU Ulysses attention requires context_parallel_load_balance=False: after the all-to-all every device "
+            "attends over the full sequence in natural order, so the load-balancing reorder is unnecessary and "
+            "would corrupt the causal mask."
+        )
+      if self.use_ragged_attention:
+        raise ValueError("TPU Ulysses attention does not support ragged attention.")
+      if self.attention_sink:
+        raise ValueError("TPU Ulysses attention does not support attention sinks.")
+      if self.use_indexer:
+        raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
+      if self.use_chunked_prefill:
+        raise ValueError("TPU Ulysses attention does not support chunked prefill yet.")
+      if self.use_multimodal:
+        raise ValueError("TPU Ulysses attention does not support multimodal attention.")
+      if self.enable_dropout and self.dropout_rate > 0.0:
+        raise ValueError("TPU Ulysses attention does not support dropout yet.")
+      if self.dq_reduction_steps not in (0, 3):
+        raise ValueError("TPU Ulysses attention requires dq_reduction_steps to be 0 or 3.")
+      if self.use_qk_clip:
+        raise ValueError("TPU Ulysses attention does not support QK-Clip statistics yet.")
+      if self.max_target_length % context_parallel_size != 0:
+        raise ValueError(
+            "TPU Ulysses attention requires max_target_length "
+            f"({self.max_target_length}) to be divisible by context_parallel_size ({context_parallel_size})."
+        )
+      if self.num_query_heads % context_parallel_size != 0:
+        raise ValueError(
+            "TPU Ulysses attention requires num_query_heads "
+            f"({self.num_query_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+        )
+      if self.num_kv_heads == 1:
+        raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
+      if self.num_kv_heads % context_parallel_size != 0:
+        raise ValueError(
+            "TPU Ulysses attention requires num_kv_heads "
+            f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+        )
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.

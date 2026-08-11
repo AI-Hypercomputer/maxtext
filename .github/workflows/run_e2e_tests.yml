@@ -57,13 +57,22 @@ jobs:
         env:
           AIRFLOW_URI: ${{ steps.info.outputs.airflow_uri }}
           BUILD_MODE: ${{ inputs.mode }}
-          MAXTEXT_SHA: ${{ inputs.maxtext_sha }}
+          COMMIT_SHA: ${{ inputs.maxtext_sha }}
           RUN_ID: ${{ inputs.run_id }}
           GITHUB_REPO: ${{ github.repository }}
-          AIRFLOW_CALLBACK_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
         run: |
           IAP_TOKEN=$(gcloud auth print-access-token)
-          PAYLOAD=$(python3 -c 'import os, json; print(json.dumps({"conf": {"build_mode": os.environ["BUILD_MODE"], "maxtext_sha": os.environ["MAXTEXT_SHA"], "github_run_id": os.environ["RUN_ID"], "github_repo": os.environ["GITHUB_REPO"], "github_callback_token": os.environ["AIRFLOW_CALLBACK_TOKEN"]}}))')
+          PAYLOAD=$(python3 -c 'import json, os
+          print(json.dumps({
+              "conf": {
+                  "build_mode": os.environ["BUILD_MODE"],
+                  "commit_sha": os.environ["COMMIT_SHA"],
+                  "github_run_id": os.environ["RUN_ID"],
+                  "github_repo": os.environ["GITHUB_REPO"],
+                  "github_token": os.environ["GITHUB_TOKEN"],
+              }
+          }))')
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
             "${AIRFLOW_URI}/api/v1/dags/maxtext_e2e_tests/dagRuns" \
             -H "Authorization: Bearer ${IAP_TOKEN}" \
