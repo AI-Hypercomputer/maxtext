@@ -1,0 +1,10 @@
+Escalation Report:
+Diagnosis: The failure log only indicates that the XPK command failed with code 1. There is no stack trace, no specific error message, and the target model is unknown. This suggests an infrastructure issue, a job scheduling failure, or a missing log.
+Error Type: Infrastructure
+Confidence: 0.9
+Safe to Patch: false
+Remediation Level: escalate
+
+Structured Plan:
+Step 1: Escalate to the infrastructure team to investigate the XPK command failure.
+Step 2: Check the XPK cluster logs for the specific run ID to determine why the job failed to launch or crashed without emitting a Python stack trace.
