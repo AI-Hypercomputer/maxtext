@@ -1199,7 +1199,7 @@ class Attention(nnx.Module):
             md.query_start_loc,
             md.request_distribution,
             self.sinks.astype(jnp.float32) if self.sinks is not None else None,
-            self.query_pre_attn_scalar or (1.0 / math.sqrt(self.head_dim)),
+            1.0 if (self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0) else (1.0 / math.sqrt(self.head_dim)),
             attention_chunk_size,
             q_scale,
             k_scale,

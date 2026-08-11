@@ -1,6 +1,6 @@
 # Isolated Attention Kernel Parity: Splash Attention vs. RPA
 
-**Date:** 2026-08-11 06:41:42 UTC  
+**Date:** 2026-08-11 06:50:11 UTC  
 **Hardware:** Google Cloud TPU v5p (`auto-v5p-8-bodaborg`)  
 **Configuration:** `batch_size=4`, `seq_len=512`, `num_query_heads=16`, `num_kv_heads=2`, `head_dim=256`, `dtype=bfloat16`  
 
