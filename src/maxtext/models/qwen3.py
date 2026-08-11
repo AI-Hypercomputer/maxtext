@@ -754,7 +754,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     v = value.reshape(batch, seq_len, -1)
 
     # =========================================================================
-    # STEP B: 1D Convolution
+    # STEP B & C: 1D Convolution & Gated Delta Rule Recurrence
     # =========================================================================
     qkv = jnp.concatenate([q, k, v], axis=-1)
     batch, seq_len, _ = qkv.shape
@@ -767,7 +767,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       recurrent_state, conv_state = active_cache.get_gdn_states()
       orig_cache_batch = conv_state.shape[0]
 
-      # 1. Safely shrink/expand conv_state to match incoming qkv (e.g. 16 -> 1)
       if conv_state.shape[0] != batch:
         if conv_state.shape[0] == 1:
           conv_state = jnp.broadcast_to(conv_state, (batch,) + conv_state.shape[1:])
@@ -777,7 +776,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         else:
           conv_state = conv_state[:batch]
 
-      # 2. Safely shrink/expand recurrent_state to match incoming qkv
       if recurrent_state.shape[0] != batch:
         if recurrent_state.shape[0] == 1:
           recurrent_state = jnp.broadcast_to(recurrent_state, (batch,) + recurrent_state.shape[1:])
@@ -787,73 +785,24 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         else:
           recurrent_state = recurrent_state[:batch]
 
-      conv_input = jnp.concatenate([conv_state, qkv], axis=1)
-
-      if decoder_segment_ids is not None:
-        valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1)
-
-        def extract_state(c_in, v_len):
-          return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
-
-        next_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
-      else:
-        next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
-    else:
-      conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
-
-    # Perform the convolution.
-    conv_out = self.conv1d(conv_input)
-    # Slice the output to match the original input sequence length.
-    conv_out = conv_out[:, -seq_len:, :]
-    qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
-    # q_conv shape: (B, S, key_dim), k_conv shape: (B, S, key_dim), v_conv shape: (B, S, value_dim)
-    q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
-
-    # Reshape for multi-head processing
-    # query shape: (B, S, H_k, D_k)
-    query = q_conv.reshape(batch, seq_len, self.num_k_heads, self.head_k_dim)
-    # key shape: (B, S, H_k, D_k)
-    key = k_conv.reshape(batch, seq_len, self.num_k_heads, self.head_k_dim)
-    # value shape: (B, S, H_v, D_v)
-    value = v_conv.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
-
-    # =========================================================================
-    # STEP C: Gated Delta Rule Recurrence
-    # =========================================================================
-    A_log = jnp.asarray(self.A_log[...], dtype=cfg.dtype)
-    dt_bias = jnp.asarray(self.dt_bias[...], dtype=cfg.dtype)
-    # beta shape: (B, S, H_v)
-    beta = jax.nn.sigmoid(b)
-    # g shape: (B, S, H_v)
-    g = -jnp.exp(A_log) * jax.nn.softplus(a + dt_bias)
-
-    if decoder_segment_ids is not None:
-      mask = decoder_segment_ids != 0
-      # Apply mask by broadcasting to respective shapes
-      key = jnp.where(mask[..., None, None], key, 0.0)
-      value = jnp.where(mask[..., None, None], value, 0.0)
-      g = jnp.where(mask[..., None], g, 0.0)
-
-    if self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
-      repeats = self.num_v_heads // self.num_k_heads
-      # query shape after repeat: (B, S, H_v, D_k)
-      query = jnp.repeat(query, repeats, axis=2)
-      # key shape after repeat: (B, S, H_v, D_k)
-      key = jnp.repeat(key, repeats, axis=2)
-
-    if seq_len == 1 and model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      core_attn_out, next_recurrent_state = jax_ar_gated_delta_rule(
-          query,
-          key,
-          value,
-          g,
-          beta,
-          initial_state=recurrent_state,
-          use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
-          compute_dtype=cfg.dtype,
-      )
-    elif getattr(cfg, "use_gdn_kernel", False) and getattr(cfg, "use_hybrid_gdn", False):
+    if getattr(cfg, "use_gdn_kernel", False) and getattr(cfg, "use_hybrid_gdn", False):
       from maxtext.models.hybrid_gdn import hybrid_fused_conv1d_gdn
+
+      conv_state_arg = (
+          conv_state
+          if conv_state is not None
+          else jnp.zeros((batch, self.config.gdn_conv_kernel_dim - 1, qkv.shape[-1]), dtype=cfg.dtype)
+      )
+      recurrent_state_arg = (
+          recurrent_state
+          if recurrent_state is not None
+          else jnp.zeros((batch, self.num_v_heads, self.head_k_dim, self.head_v_dim), dtype=cfg.dtype)
+      )
+      conv_bias_arg = (
+          self.conv1d.bias.value
+          if hasattr(self.conv1d, "bias") and self.conv1d.bias is not None
+          else jnp.zeros((qkv.shape[-1],), dtype=cfg.dtype)
+      )
 
       if self.mesh is not None:
         logical_rules = get_logical_axis_rules()
@@ -861,22 +810,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         batch_pspec4 = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=self.mesh, rules=logical_rules)
         none_pspec3 = logical_to_mesh_axes((None, None, None), mesh=self.mesh, rules=logical_rules)
         none_pspec1 = logical_to_mesh_axes((None,), mesh=self.mesh, rules=logical_rules)
-
-        recurrent_state_arg = (
-            recurrent_state
-            if recurrent_state is not None
-            else jnp.zeros((batch, self.num_v_heads, self.head_k_dim, self.head_v_dim), dtype=cfg.dtype)
-        )
-        conv_state_arg = (
-            conv_state
-            if conv_state is not None
-            else jnp.zeros((batch, self.config.gdn_conv_kernel_dim - 1, qkv.shape[-1]), dtype=cfg.dtype)
-        )
-        conv_bias_arg = (
-            self.conv1d.bias.value
-            if hasattr(self.conv1d, "bias") and self.conv1d.bias is not None
-            else jnp.zeros((qkv.shape[-1],), dtype=cfg.dtype)
-        )
 
         @functools.partial(
             jax.shard_map,
@@ -939,8 +872,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             conv_bias=None,
             a_log=self.A_log[...],
             dt_bias=self.dt_bias[...],
-            conv_state=conv_state,
-            recurrent_state=recurrent_state,
+            conv_state=conv_state_arg,
+            recurrent_state=recurrent_state_arg,
             num_k_heads=self.num_k_heads,
             num_v_heads=self.num_v_heads,
             head_k_dim=self.head_k_dim,
@@ -950,72 +883,123 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             use_qk_norm_in_gdn=self.config.use_qk_norm_in_gdn,
             compute_dtype=self.config.dtype,
         )
-    elif getattr(cfg, "use_gdn_kernel", False):
-      core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
-          query,
-          key,
-          value,
-          g,
-          beta,
-          chunk_size=cfg.gdn_chunk_size,
-          initial_state=recurrent_state,
-          use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
-          compute_dtype=cfg.dtype,
-      )
-    elif self.mesh is not None:
-      logical_rules = self.config.logical_axis_rules
-      recurrent_state_arg = (
-          recurrent_state
-          if recurrent_state is not None
-          else jnp.zeros((batch, self.num_v_heads, self.head_k_dim, self.head_v_dim), dtype=cfg.dtype)
-      )
-      qkv_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
-      g_beta_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD), mesh=self.mesh, rules=logical_rules)
-      state_pspec = logical_to_mesh_axes((KV_BATCH, KV_HEAD, None, None), mesh=self.mesh, rules=logical_rules)
+    else:
+      if conv_state is not None:
+        conv_input = jnp.concatenate([conv_state, qkv], axis=1)
+        if decoder_segment_ids is not None:
+          valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1)
 
-      @functools.partial(
-          jax.shard_map,
-          mesh=self.mesh,
-          in_specs=(
-              qkv_pspec,  # query
-              qkv_pspec,  # key
-              qkv_pspec,  # value
-              g_beta_pspec,  # g
-              g_beta_pspec,  # beta
-              state_pspec,  # initial_state
-          ),
-          out_specs=(
-              qkv_pspec,  # core_attn_out
-              state_pspec,  # final_state
-          ),
-          check_vma=False,
-      )
-      def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h):
-        return jax_chunk_gated_delta_rule(
-            query=q,
-            key=k,
-            value=v,
-            g=g_val,
-            beta=beta_val,
-            chunk_size=cfg.gdn_chunk_size,
-            initial_state=init_h,
+          def extract_state(c_in, v_len):
+            return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
+
+          next_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
+        else:
+          next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+      else:
+        conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
+
+      conv_out = self.conv1d(conv_input)
+      conv_out = conv_out[:, -seq_len:, :]
+      qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
+      q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
+
+      query = q_conv.reshape(batch, seq_len, self.num_k_heads, self.head_k_dim)
+      key = k_conv.reshape(batch, seq_len, self.num_k_heads, self.head_k_dim)
+      value = v_conv.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+
+      A_log = jnp.asarray(self.A_log[...], dtype=cfg.dtype)
+      dt_bias = jnp.asarray(self.dt_bias[...], dtype=cfg.dtype)
+      beta = jax.nn.sigmoid(b)
+      g = -jnp.exp(A_log) * jax.nn.softplus(a + dt_bias)
+
+      if decoder_segment_ids is not None:
+        mask = decoder_segment_ids != 0
+        key = jnp.where(mask[..., None, None], key, 0.0)
+        value = jnp.where(mask[..., None, None], value, 0.0)
+        g = jnp.where(mask[..., None], g, 0.0)
+
+      if self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
+        repeats = self.num_v_heads // self.num_k_heads
+        query = jnp.repeat(query, repeats, axis=2)
+        key = jnp.repeat(key, repeats, axis=2)
+
+      if seq_len == 1 and model_mode == MODEL_MODE_AUTOREGRESSIVE:
+        core_attn_out, next_recurrent_state = jax_ar_gated_delta_rule(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            initial_state=recurrent_state,
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=cfg.dtype,
         )
+      elif getattr(cfg, "use_gdn_kernel", False):
+        core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            chunk_size=cfg.gdn_chunk_size,
+            initial_state=recurrent_state,
+            use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+            compute_dtype=cfg.dtype,
+        )
+      elif self.mesh is not None:
+        logical_rules = self.config.logical_axis_rules
+        recurrent_state_arg = (
+            recurrent_state
+            if recurrent_state is not None
+            else jnp.zeros((batch, self.num_v_heads, self.head_k_dim, self.head_v_dim), dtype=cfg.dtype)
+        )
+        qkv_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
+        g_beta_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD), mesh=self.mesh, rules=logical_rules)
+        state_pspec = logical_to_mesh_axes((KV_BATCH, KV_HEAD, None, None), mesh=self.mesh, rules=logical_rules)
 
-      core_attn_out, next_recurrent_state = shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg)
-    else:
-      core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
-          query,
-          key,
-          value,
-          g,
-          beta,
-          chunk_size=cfg.gdn_chunk_size,
-          initial_state=recurrent_state,
-          use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
-          compute_dtype=cfg.dtype,
-      )
+        @functools.partial(
+            jax.shard_map,
+            mesh=self.mesh,
+            in_specs=(
+                qkv_pspec,  # query
+                qkv_pspec,  # key
+                qkv_pspec,  # value
+                g_beta_pspec,  # g
+                g_beta_pspec,  # beta
+                state_pspec,  # initial_state
+            ),
+            out_specs=(
+                qkv_pspec,  # core_attn_out
+                state_pspec,  # final_state
+            ),
+            check_vma=False,
+        )
+        def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h):
+          return jax_chunk_gated_delta_rule(
+              query=q,
+              key=k,
+              value=v,
+              g=g_val,
+              beta=beta_val,
+              chunk_size=cfg.gdn_chunk_size,
+              initial_state=init_h,
+              use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+              compute_dtype=cfg.dtype,
+          )
+
+        core_attn_out, next_recurrent_state = shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg)
+      else:
+        core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            chunk_size=cfg.gdn_chunk_size,
+            initial_state=recurrent_state,
+            use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+            compute_dtype=cfg.dtype,
+        )
 
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       assert next_conv_state is not None
