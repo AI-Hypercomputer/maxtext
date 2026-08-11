@@ -18,7 +18,6 @@ import jax
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
 from maxtext.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
-import qwix.pallas as qpl
 
 
 def ring_ragged_sort(
@@ -103,41 +102,21 @@ def ring_ragged_sort(
     shard_output_start = group_offsets[experts_start]
     shard_output_end = group_offsets[experts_end]
 
+    def _gather(indices, start, end):
+      return ragged_gather(
+          hidden_states_local,
+          indices,
+          start,
+          end,
+          enforce_fallback=enforce_gather_fallback,
+          flops_override=gather_flops_override,
+          bytes_accessed_override=gather_bytes_accessed_override,
+          use_single_sparsecore=use_single_sparsecore,
+      )
+
     if buffer_size is None or buffer_size >= num_tokens_local * topk:
       local_buffer_size = num_tokens_local * topk
-      if isinstance(hidden_states_local, qpl.QArray):
-        x_qval = ragged_gather(
-            hidden_states_local.qvalue,
-            token_indices_sorted,
-            shard_output_start[None],
-            shard_output_end[None],
-            enforce_fallback=enforce_gather_fallback,
-            flops_override=gather_flops_override,
-            bytes_accessed_override=gather_bytes_accessed_override,
-            use_single_sparsecore=use_single_sparsecore,
-        )
-        x_scale = ragged_gather(
-            hidden_states_local.scale,
-            token_indices_sorted,
-            shard_output_start[None],
-            shard_output_end[None],
-            enforce_fallback=enforce_gather_fallback,
-            flops_override=gather_flops_override,
-            bytes_accessed_override=gather_bytes_accessed_override,
-            use_single_sparsecore=use_single_sparsecore,
-        )
-        x = qpl.QArray(qvalue=x_qval, scale=x_scale)
-      else:
-        x = ragged_gather(
-            hidden_states_local,
-            token_indices_sorted,
-            shard_output_start[None],
-            shard_output_end[None],
-            enforce_fallback=enforce_gather_fallback,
-            flops_override=gather_flops_override,
-            bytes_accessed_override=gather_bytes_accessed_override,
-            use_single_sparsecore=use_single_sparsecore,
-        )
+      x = _gather(token_indices_sorted, shard_output_start[None], shard_output_end[None])
     else:
       local_buffer_size = buffer_size
       # We only gather up to the available buffer size or the actual number of
@@ -152,39 +131,7 @@ def ring_ragged_sort(
           local_buffer_size,
           axis=0,
       )
-      if isinstance(hidden_states_local, qpl.QArray):
-        x_qval = ragged_gather(
-            hidden_states_local.qvalue,
-            sliced_indices,
-            jnp.int32(0)[None],
-            gather_end[None],
-            enforce_fallback=enforce_gather_fallback,
-            flops_override=gather_flops_override,
-            bytes_accessed_override=gather_bytes_accessed_override,
-            use_single_sparsecore=use_single_sparsecore,
-        )
-        x_scale = ragged_gather(
-            hidden_states_local.scale,
-            sliced_indices,
-            jnp.int32(0)[None],
-            gather_end[None],
-            enforce_fallback=enforce_gather_fallback,
-            flops_override=gather_flops_override,
-            bytes_accessed_override=gather_bytes_accessed_override,
-            use_single_sparsecore=use_single_sparsecore,
-        )
-        x = qpl.QArray(qvalue=x_qval, scale=x_scale)
-      else:
-        x = ragged_gather(
-            hidden_states_local,
-            sliced_indices,
-            jnp.int32(0)[None],
-            gather_end[None],
-            enforce_fallback=enforce_gather_fallback,
-            flops_override=gather_flops_override,
-            bytes_accessed_override=gather_bytes_accessed_override,
-            use_single_sparsecore=use_single_sparsecore,
-        )
+      x = _gather(sliced_indices, jnp.int32(0)[None], gather_end[None])
 
     out = (x, group_sizes_local, topk_argsort_revert_indices)
 
@@ -221,17 +168,11 @@ def ring_ragged_sort(
     # rather than materializing a (mostly-zero) dense buffer ourselves.
     n = topk_argsort_revert_indices.shape[0]
 
-    if local_buffer_size >= n:
-      valid_rows_mask = (topk_argsort_revert_indices >= shard_output_start) & (
-          topk_argsort_revert_indices < shard_output_end
-      )
-      # The forward scatter-add over `token_indices_sorted` is equivalent to a
-      # gather-reduce: each input token has exactly `topk` contributions located
-      # at sorted positions `topk_argsort_revert_indices[t*topk:(t+1)*topk]`.
-      # `topk_weights` is set to ones because this op has no per-row weighting.
-      grad_hidden_states = ragged_gather_reduce(
+    def _gather_reduce(indices, valid_rows_mask):
+      """`topk_weights` is set to ones because this op has no per-row weighting."""
+      return ragged_gather_reduce(
           g_x,
-          topk_argsort_revert_indices,
+          indices,
           topk_weights=jnp.ones((n,), dtype=jnp.float32),
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
@@ -240,6 +181,12 @@ def ring_ragged_sort(
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
       )
+
+    if local_buffer_size >= n:
+      valid_rows_mask = (topk_argsort_revert_indices >= shard_output_start) & (
+          topk_argsort_revert_indices < shard_output_end
+      )
+      grad_hidden_states = _gather_reduce(topk_argsort_revert_indices, valid_rows_mask)
     else:
       # Buffering: g_x has size `local_buffer_size` (packed).
       # The revert indices are global [0, n), but they must map to the local
@@ -254,18 +201,7 @@ def ring_ragged_sort(
       # Clamp invalid indices to 0 to prevent compile-time/run-time out-of-bounds
       # in JAX. These clamped values will be ignored due to `valid_rows_mask`.
       safe_indices = jnp.where(valid_rows_mask, shifted_indices, 0)
-
-      grad_hidden_states = ragged_gather_reduce(
-          g_x,
-          safe_indices,
-          topk_weights=jnp.ones((n,), dtype=jnp.float32),
-          valid_rows_mask=valid_rows_mask,
-          reduce_group_size=topk,
-          enforce_fallback=enforce_gather_reduce_fallback,
-          flops_override=gather_reduce_flops_override,
-          bytes_accessed_override=gather_reduce_bytes_accessed_override,
-          use_single_sparsecore=use_single_sparsecore,
-      )
+      grad_hidden_states = _gather_reduce(safe_indices, valid_rows_mask)
     return grad_hidden_states, None
 
   _ring_ragged_sort.defvjp(_ring_ragged_sort_fwd, _ring_ragged_sort_bwd)

@@ -112,6 +112,17 @@ def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax
   return jnp.diff(clamped_cumsum_extended, axis=0)
 
 
+def _map_qarray(fn, value: jax.Array | qpl.QArray) -> jax.Array | qpl.QArray:
+  """Applies `fn` to `value`.
+
+  If `value` is a QArray, applies `fn` to `qvalue` and `scale` independently
+  and rewraps the result, instead of requiring the caller to unpack/repack it.
+  """
+  if isinstance(value, qpl.QArray):
+    return qpl.QArray(qvalue=fn(value.qvalue), scale=fn(value.scale))
+  return fn(value)
+
+
 def _sort_activations(
     inputs: jax.Array,
     sort_indices: jax.Array,
@@ -953,20 +964,12 @@ class RoutedMoE(nnx.Module):
         flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
       sorted_selected_experts = jnp.argsort(flatten_selected_experts)
       # sort inputs for number of selected experts
-      if isinstance(inputs_2d, qpl.QArray):
-        replicated_inputs_2d = qpl.QArray(
-            qvalue=jnp.repeat(inputs_2d.qvalue, self.num_experts_per_tok, axis=0),
-            scale=jnp.repeat(inputs_2d.scale, self.num_experts_per_tok, axis=0),
-        )
-        sorted_inputs = qpl.QArray(
-            qvalue=_sort_activations(replicated_inputs_2d.qvalue, sorted_selected_experts, use_custom_sort_vjp),
-            scale=_sort_activations(replicated_inputs_2d.scale, sorted_selected_experts, use_custom_sort_vjp),
-        )
-      else:
-        replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
-            self.dtype
-        )
+      replicated_inputs_2d = _map_qarray(lambda t: jnp.repeat(t, self.num_experts_per_tok, axis=0), inputs_2d)
+      sorted_inputs = _map_qarray(
+          lambda t: _sort_activations(t, sorted_selected_experts, use_custom_sort_vjp), replicated_inputs_2d
+      )
+      if not isinstance(sorted_inputs, qpl.QArray):
+        sorted_inputs = sorted_inputs.astype(self.dtype)
       group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
