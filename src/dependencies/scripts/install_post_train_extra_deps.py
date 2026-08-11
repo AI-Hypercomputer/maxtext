@@ -89,7 +89,7 @@ def main():
 
   # Check if 'uv' is available in the environment
   try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "uv"], check=True, capture_output=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "uv", "-i", "https://pypi.org/simple"], check=False, capture_output=True)
     subprocess.run([sys.executable, "-m", "uv", "--version"], check=True, capture_output=True)
   except subprocess.CalledProcessError as e:
     print(f"Error checking uv version: {e}")

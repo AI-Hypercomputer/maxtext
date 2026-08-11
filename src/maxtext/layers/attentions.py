@@ -1185,6 +1185,8 @@ class Attention(nnx.Module):
         # attention must run against the K/V the donor already wrote for this
         # position. Only the donor writes the cache; shared layers read it as-is.
         update_kv_cache = not self.share_kv_layer
+        if isinstance(rpa_kv_cache, (list, tuple)) and len(rpa_kv_cache) > 0:
+            rpa_kv_cache = rpa_kv_cache[0]
 
         output, kv_cache = rpa_ops(
             self.mesh,
@@ -1197,7 +1199,7 @@ class Attention(nnx.Module):
             md.query_start_loc,
             md.request_distribution,
             self.sinks.astype(jnp.float32) if self.sinks is not None else None,
-            self.query_scale or (1.0 / math.sqrt(self.head_dim)),
+            self.query_pre_attn_scalar or (1.0 / math.sqrt(self.head_dim)),
             attention_chunk_size,
             q_scale,
             k_scale,

@@ -21,6 +21,8 @@ import os
 import sys
 
 os.environ["NEW_MODEL_DESIGN"] = "1"
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+os.environ["VLLM_TARGET_DEVICE"] = "tpu"
 
 sys.path.insert(0, os.path.abspath("."))
 sys.path.insert(0, os.path.abspath("src"))
@@ -38,6 +40,10 @@ from jax.sharding import PartitionSpec as P
 from pathwaysutils.experimental.shared_pathways_service import gke_utils, isc_pathways
 
 pathwaysutils.proxy_backend.register_backend_factory()
+try:
+    from jax._src.pallas.mosaic import lowering as _mosaic_lowering
+except Exception:
+    pass
 
 from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
@@ -223,6 +229,11 @@ def benchmark_layer_on_tpu(
         except Exception as e:
             print(f"     Warning: skipping full npz dump: {e}")
 
+    import gc
+    del train_tensors, infer_tensors, train_layer, infer_layer
+    gc.collect()
+    time.sleep(2)
+
     return table_md, metrics
 
 
@@ -291,15 +302,15 @@ def main():
             num_experts_per_tok=8,
             output_dir="",
             extra_train_kwargs={
-                "sa_block_q": 128,
-                "sa_block_kv": 128,
-                "sa_block_kv_compute": 128,
+                "sa_block_q": 256,
+                "sa_block_kv": 256,
+                "sa_block_kv_compute": 256,
             },
-            test_label="Option 2 (Tile Alignment 128)",
+            test_label="Option 2 (Tile Alignment 256)",
         )
 
         # 3. Option 3: Tile Alignment + Exact Math (use_tokamax_splash, use_base2_exp=False, fuse_reciprocal=False)
-        print(">>> [Run 3/3] Option 3: Tile Alignment 128 + Exact Softmax Math...")
+        print(">>> [Run 3/3] Option 3: Tile Alignment 256 + Exact Softmax Math...")
         b3_table, b3_metrics = benchmark_layer_on_tpu(
             dtype_str="bfloat16",
             batch_size=4,
@@ -310,14 +321,14 @@ def main():
             num_experts_per_tok=8,
             output_dir="",
             extra_train_kwargs={
-                "sa_block_q": 128,
-                "sa_block_kv": 128,
-                "sa_block_kv_compute": 128,
+                "sa_block_q": 256,
+                "sa_block_kv": 256,
+                "sa_block_kv_compute": 256,
                 "use_tokamax_splash": True,
                 "sa_use_base2_exp": False,
                 "sa_fuse_reciprocal": False,
             },
-            test_label="Option 3 (Tile 128 + Exact Math)",
+            test_label="Option 3 (Tile 256 + Exact Math)",
         )
 
         print("\n" + "=" * 80)
@@ -329,8 +340,8 @@ def main():
         print("-" * 90)
         for label, m in [
             ("1. Baseline (Block 512)", b1_metrics),
-            ("2. Option 2 (Tile 128x128)", b2_metrics),
-            ("3. Option 3 (Tile 128 + Exact Math)", b3_metrics),
+            ("2. Option 2 (Tile 256x256)", b2_metrics),
+            ("3. Option 3 (Tile 256 + Exact Math)", b3_metrics),
         ]:
             print(
                 f"{label:<35} | {m['T12_attn_core_out']['max_abs_err']:<15.6e} | "

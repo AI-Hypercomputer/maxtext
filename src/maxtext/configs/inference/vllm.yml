@@ -33,7 +33,7 @@ vllm_additional_config: {}
 
 
 # -------------- Logical Axis Rules --------------
-mesh_axes: ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert', 'dcp']
+mesh_axes: ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert', 'dcp', 'pcp']
 logical_axis_rules: [
                       # ==========================================
                       # Vocabulary Embedding

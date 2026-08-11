@@ -334,6 +334,51 @@ def capture_qwen3_5_layer_intermediates(
             layer.config.attention in ("vllm_rpa", "vllm_batched_rpa")
             and model_mode != MODEL_MODE_TRAIN
         ):
+            if attention_metadata is None or kv_cache is None:
+                block_size = 128
+                num_blocks_per_seq = (seq_len + block_size - 1) // block_size
+                total_pages = batch_size * num_blocks_per_seq
+                block_tables = jnp.arange(total_pages, dtype=jnp.int32)
+                seq_lens = jnp.array([seq_len] * batch_size, dtype=jnp.int32)
+                query_start_loc = jnp.tile(
+                    jnp.array([0, seq_len], dtype=jnp.int32), (batch_size,)
+                )
+                request_distribution = jnp.tile(
+                    jnp.array([0, 0, 1], dtype=jnp.int32), (batch_size,)
+                )
+                input_positions = decoder_positions.reshape(-1)
+
+                class SimpleAttentionMetadata:
+                    def __init__(
+                        self,
+                        input_positions,
+                        block_tables,
+                        seq_lens,
+                        query_start_loc,
+                        request_distribution,
+                        mamba_state_indices=None,
+                    ):
+                        self.input_positions = input_positions
+                        self.block_tables = block_tables
+                        self.seq_lens = seq_lens
+                        self.query_start_loc = query_start_loc
+                        self.request_distribution = request_distribution
+                        self.mamba_state_indices = mamba_state_indices
+
+                attention_metadata = SimpleAttentionMetadata(
+                    input_positions=input_positions,
+                    block_tables=block_tables,
+                    seq_lens=seq_lens,
+                    query_start_loc=query_start_loc,
+                    request_distribution=request_distribution,
+                )
+                num_kv_heads = attn_module.config.num_kv_heads
+                head_dim = attn_module.config.head_dim
+                kv_cache = jnp.zeros(
+                    (total_pages, block_size, num_kv_heads, 2, head_dim),
+                    dtype=inputs.dtype,
+                )
+
             attn_core_raw, _ = attn_module.forward_serve_vllm(
                 q_rope,
                 k_rope,
