@@ -1737,7 +1737,7 @@ class AttentionTest(parameterized.TestCase):
         f"dq_reduction_steps={dq_reduction_steps}, ring_scan_unroll={ring_scan_unroll}, packing={packing}.",
     )
 
-  def _ulysses_test_config(self, ici_context_parallelism):
+  def _ulysses_test_config(self, ici_context_parallelism, packing=False):
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
@@ -1747,7 +1747,7 @@ class AttentionTest(parameterized.TestCase):
         ici_context_parallelism=ici_context_parallelism,
         use_tokamax_splash=True,
         use_jax_splash=False,
-        packing=False,
+        packing=packing,
         dtype="float32",
     )
 
@@ -1788,17 +1788,21 @@ class AttentionTest(parameterized.TestCase):
     return attention_as_mha_generic, attention_as_mha_flash_cp
 
   @parameterized.named_parameters(
-      {"testcase_name": "ulysses_size_2", "ici_context_parallelism": 2},
-      {"testcase_name": "ulysses_size_4", "ici_context_parallelism": 4},
+      {"testcase_name": "ulysses_size_2", "ici_context_parallelism": 2, "packing": False},
+      {"testcase_name": "ulysses_size_4", "ici_context_parallelism": 4, "packing": False},
+      {"testcase_name": "ulysses_size_4_packed", "ici_context_parallelism": 4, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ulysses_context_parallel(self, ici_context_parallelism):
+  def test_tpu_flash_attention_ulysses_context_parallel(self, ici_context_parallelism, packing):
     """Test equivalence between dot_product and flash attention + Ulysses context parallelism"""
 
-    cfg_cp = self._ulysses_test_config(ici_context_parallelism)
+    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    if packing:
+      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+    else:
+      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
     attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
     mha_generic_output, _ = attention_as_mha_generic(
         lnx,
@@ -1825,21 +1829,25 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
         msg="Logits from generic dot product and flash attention + Ulysses context parallelism are not close. "
-        f"ici_context_parallelism={ici_context_parallelism}.",
+        f"ici_context_parallelism={ici_context_parallelism}, packing={packing}.",
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "ulysses_size_2", "ici_context_parallelism": 2},
-      {"testcase_name": "ulysses_size_4", "ici_context_parallelism": 4},
+      {"testcase_name": "ulysses_size_2", "ici_context_parallelism": 2, "packing": False},
+      {"testcase_name": "ulysses_size_4", "ici_context_parallelism": 4, "packing": False},
+      {"testcase_name": "ulysses_size_4_packed", "ici_context_parallelism": 4, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ulysses_context_parallel_grad(self, ici_context_parallelism):
+  def test_tpu_flash_attention_ulysses_context_parallel_grad(self, ici_context_parallelism, packing):
     """Test input-gradient equivalence between dot_product and flash attention + Ulysses context parallelism"""
 
-    cfg_cp = self._ulysses_test_config(ici_context_parallelism)
+    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    if packing:
+      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+    else:
+      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
     attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
     nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
 
@@ -1874,7 +1882,7 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ulysses_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
         msg="Input gradients from generic dot product and flash attention + Ulysses context parallelism are not "
-        f"close. ici_context_parallelism={ici_context_parallelism}.",
+        f"close. ici_context_parallelism={ici_context_parallelism}, packing={packing}.",
     )
 
   @pytest.mark.tpu_only

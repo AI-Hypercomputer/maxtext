@@ -264,9 +264,10 @@ def setup_train_loop(config, recorder, devices=None):
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()
     if context_parallel_size > 1 and config.packing:
-      if context_parallel_strategy not in ("all_gather", "ring"):
+      if context_parallel_strategy not in ("all_gather", "ring", "ulysses"):
         raise ValueError(
-            "Context parallelism with sequence packing supports context_parallel_strategy='all_gather' or 'ring'."
+            "Context parallelism with sequence packing supports context_parallel_strategy='all_gather', 'ring', "
+            "or 'ulysses'."
         )
       if (
           config.hardware in ("gpu", "gpu_multiprocess")
