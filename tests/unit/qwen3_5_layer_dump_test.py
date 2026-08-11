@@ -66,20 +66,22 @@ def compute_drift_metrics(
             "rms_err": float("nan"),
         }
 
-    a = jnp.asarray(t_ref, dtype=jnp.float32)
-    b = jnp.asarray(t_tgt, dtype=jnp.float32)
+    a = np.array(jax.device_get(t_ref), dtype=np.float32)
+    b = np.array(jax.device_get(t_tgt), dtype=np.float32)
 
-    abs_diff = jnp.abs(a - b)
-    max_abs_err = float(jax.device_get(jnp.max(abs_diff)))
-    mae = float(jax.device_get(jnp.mean(abs_diff)))
-    rms_err = float(jax.device_get(jnp.sqrt(jnp.mean(jnp.square(abs_diff)))))
+    abs_diff = np.abs(a - b)
+    max_abs_err = float(np.max(abs_diff))
+    mae = float(np.mean(abs_diff))
+    rms_err = float(np.sqrt(np.mean(abs_diff**2)))
 
-    norm_a = float(jax.device_get(jnp.linalg.norm(a)))
-    norm_b = float(jax.device_get(jnp.linalg.norm(b)))
-    rel_err = float((norm_a - norm_b) / (norm_a + 1e-12)) if norm_a > 0 else 0.0
+    a_flat = a.reshape(-1)
+    b_flat = b.reshape(-1)
+    norm_a = float(np.linalg.norm(a_flat))
+    norm_b = float(np.linalg.norm(b_flat))
+    rel_err = float(np.linalg.norm(a_flat - b_flat) / (norm_a + 1e-12)) if norm_a > 0 else 0.0
 
     denom = (norm_a * norm_b) + 1e-12
-    dot_prod = float(jax.device_get(jnp.sum(a * b)))
+    dot_prod = float(np.dot(a_flat, b_flat))
     cos_sim = float(dot_prod / denom) if denom > 0 else 1.0
 
     return {
@@ -159,24 +161,18 @@ def sync_qwen3_5_layer_weights(
         src_attn = src_layer.attention.attention
         dst_attn = dst_layer.attention.attention
 
-        if hasattr(src_attn, "query") and hasattr(dst_attn, "query"):
+        if hasattr(src_attn, "query"):
             dst_attn.query = src_attn.query
-        if hasattr(src_attn, "key") and hasattr(dst_attn, "key"):
+        if hasattr(src_attn, "key"):
             dst_attn.key = src_attn.key
-        if hasattr(src_attn, "value") and hasattr(dst_attn, "value"):
+        if hasattr(src_attn, "value"):
             dst_attn.value = src_attn.value
-        if hasattr(src_attn, "out") and hasattr(dst_attn, "out"):
+        if hasattr(src_attn, "out"):
             dst_attn.out = src_attn.out
-        if hasattr(src_attn, "query_norm") and hasattr(dst_attn, "query_norm"):
-            if hasattr(src_attn.query_norm, "scale") and hasattr(
-                dst_attn.query_norm, "scale"
-            ):
-                dst_attn.query_norm.scale = src_attn.query_norm.scale
-        if hasattr(src_attn, "key_norm") and hasattr(dst_attn, "key_norm"):
-            if hasattr(src_attn.key_norm, "scale") and hasattr(
-                dst_attn.key_norm, "scale"
-            ):
-                dst_attn.key_norm.scale = src_attn.key_norm.scale
+        if hasattr(src_attn, "query_norm"):
+            dst_attn.query_norm = src_attn.query_norm
+        if hasattr(src_attn, "key_norm"):
+            dst_attn.key_norm = src_attn.key_norm
 
     # 3. MoE Shared Expert and Gate
     if hasattr(src_layer.mlp, "shared_expert_gate") and hasattr(

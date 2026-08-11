@@ -306,12 +306,12 @@ def main():
 
 | Component | Training Kernel | Inference Kernel | Cosine Similarity | Max Abs Error ($L_\\infty$) | MAE |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Pre-Attention (T01–T03)** | RMSNorm / Linear | RMSNorm / Linear | **`1.000000`** | **`0.000000e+00`** | **`0.000000e+00`** |
-| **Attention Core (T12)** | Splash / Flash Attention | vLLM RPA (Pallas) | `0.738960` | `2.515625e+00` | `7.529779e-02` |
-| **Attention Out Proj (T14)** | Linear Projection | Linear Projection | `0.739607` | `9.316406e-01` | `4.176092e-02` |
-| **MoE Routing (T20)** | Top-K Router | Top-K Router | **`0.998316`** | `4.470215e-01` | `4.181680e-02` |
-| **Routed MoE Compute (T23)** | Sparse Matmul | Pallas Fused MoE | **`0.995510`** | `3.637695e-02` | **`1.614570e-03`** |
-| **Full Layer Output (T25)** | Full Decoder Layer | Full Decoder Layer | **`0.998024`** | `1.230469e+00` | `4.637457e-02` |
+| **Pre-Attention (T01)** | Layer Input | Layer Input | **`{b1_metrics['T01_layer_input']['cos_sim']:.6f}`** | **`{b1_metrics['T01_layer_input']['max_abs_err']:.6e}`** | **`{b1_metrics['T01_layer_input']['mae']:.6e}`** |
+| **Attention Core (T12)** | Splash / Flash Attention | vLLM RPA (Pallas) | **`{b1_metrics['T12_attn_core_out']['cos_sim']:.6f}`** | `{b1_metrics['T12_attn_core_out']['max_abs_err']:.6e}` | `{b1_metrics['T12_attn_core_out']['mae']:.6e}` |
+| **Attention Out Proj (T14)** | Linear Projection | Linear Projection | **`{b1_metrics['T14_attn_out_proj']['cos_sim']:.6f}`** | `{b1_metrics['T14_attn_out_proj']['max_abs_err']:.6e}` | `{b1_metrics['T14_attn_out_proj']['mae']:.6e}` |
+| **MoE Routing (T20)** | Top-K Router | Top-K Router | **`{b1_metrics['T20_router_gate_logits']['cos_sim']:.6f}`** | `{b1_metrics['T20_router_gate_logits']['max_abs_err']:.6e}` | `{b1_metrics['T20_router_gate_logits']['mae']:.6e}` |
+| **Routed MoE Compute (T23)** | Sparse Matmul | Pallas Fused MoE | **`{b1_metrics['T23_routed_moe_out']['cos_sim']:.6f}`** | `{b1_metrics['T23_routed_moe_out']['max_abs_err']:.6e}` | **`{b1_metrics['T23_routed_moe_out']['mae']:.6e}`** |
+| **Full Layer Output (T25)** | Full Decoder Layer | Full Decoder Layer | **`{b1_metrics['T25_layer_output']['cos_sim']:.6f}`** | `{b1_metrics['T25_layer_output']['max_abs_err']:.6e}` | `{b1_metrics['T25_layer_output']['mae']:.6e}` |
 
 ---
 
