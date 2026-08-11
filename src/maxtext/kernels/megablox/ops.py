@@ -27,6 +27,7 @@ from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.layers import quantizations
 import qwix
 import qwix.pallas as qpl
+from qwix._src.core import numerics as qwix_numerics
 from qwix._src.core.qarray import call_with_generic_broadcast
 import tokamax
 
@@ -239,11 +240,7 @@ def _fwd_quantize_activation_and_weight(
     transpose_rhs: bool,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
-  if (
-      quantization_rule.act_qtype
-      and not isinstance(lhs, qpl.QArray)
-      and not (jnp.issubdtype(lhs.dtype, jnp.integer) or jnp.issubdtype(lhs.dtype, jnp.float8_e4m3fn))
-  ):
+  if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and qwix_numerics.should_quantize(lhs.dtype):
     lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
         lhs,
         quantization_rule.act_qtype,
@@ -388,9 +385,7 @@ def _fwd_run_tokamax_v2(
     rhs_scale = _fwd_prepare_rhs_scale(rhs, transpose_rhs=transpose_rhs)
 
   lhs_operand = lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs
-  maybe_quantize_lhs = not isinstance(lhs, qpl.QArray) and not (
-      jnp.issubdtype(lhs_operand.dtype, jnp.integer) or jnp.issubdtype(lhs_operand.dtype, jnp.float8_e4m3fn)
-  )
+  maybe_quantize_lhs = not isinstance(lhs, qpl.QArray) and qwix_numerics.should_quantize(lhs_operand.dtype)
 
   # When lhs is not pre-quantized (ahead-of-time by the caller), fall back to
   # a static scale from the quantization rule's fixed calibration if one is
@@ -405,11 +400,7 @@ def _fwd_run_tokamax_v2(
       tile_n=tiling[2],
   )
 
-  eff_pref_dtype = (
-      jnp.bfloat16
-      if (jnp.issubdtype(lhs_operand.dtype, jnp.integer) or jnp.issubdtype(lhs_operand.dtype, jnp.float8_e4m3fn))
-      else preferred_element_type
-  )
+  eff_pref_dtype = preferred_element_type if qwix_numerics.should_quantize(lhs_operand.dtype) else jnp.bfloat16
 
   out = gmm_v2.gmm_v2(
       lhs=lhs_operand,  # pyrefly: ignore[bad-argument-type]
@@ -593,7 +584,7 @@ def _bwd_prepare_inputs(
       quantization_rule
       and quantization_rule.act_qtype
       and not isinstance(lhs, qpl.QArray)
-      and not (jnp.issubdtype(lhs.dtype, jnp.integer) or jnp.issubdtype(lhs.dtype, jnp.float8_e4m3fn))
+      and qwix_numerics.should_quantize(lhs.dtype)
   ):
     lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
         lhs,
