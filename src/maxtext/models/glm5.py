@@ -49,6 +49,8 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
 
     # GLM-5.2 Cross-Layer IndexShare Role Resolution
     self.is_index_share_enabled = getattr(config, "use_index_share", False)
+    self.is_shared_layer = False
+    self.served_group_size = 1
     if self.is_index_share_enabled and layer_idx >= 0:
       from maxtext.utils import index_share_utils
       import absl.logging
