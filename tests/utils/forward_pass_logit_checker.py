@@ -561,6 +561,12 @@ def main(config, test_args):  # pylint: disable=W0621
 
       max_kl_div_val = jax.numpy.max(kl_div)
       max_kl_div_idx = jax.numpy.argmax(kl_div)
+      avg_kl_div_val = jax.numpy.mean(kl_div)
+
+      max_logging.log(f"\nAverage KL divergence per token (D_KL(P_golden || Q_model)): {avg_kl_div_val.item():.2e}")
+      formatted_list = [f"{float(x):.2e}" for x in kl_div]
+      max_logging.log(f"Per-token KL Divergences: \n{formatted_list}")
+      max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div_val.item():.2e}")
 
       # print per token kl for debugging, omit for multimodal as the seq length is usually long
       per_token_kl = "" if config.use_multimodal else f"KL divergence = {kl_div}, "
