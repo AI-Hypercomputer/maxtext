@@ -132,7 +132,7 @@ def run_matrix():
         continue
 
       # 2. Run vLLM Decode on the generated checkpoints
-      load_path = f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/4/items"
+      load_path = f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/5/items"
 
       cmd = [
           "python",
@@ -167,10 +167,6 @@ def run_matrix():
       with open(CSV_REPORT, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([model, scan_mode, "vllm_decode", run_name, status])
-
-      break
-
-    break
 
 
 if __name__ == "__main__":
