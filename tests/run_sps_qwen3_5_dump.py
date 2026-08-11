@@ -79,10 +79,14 @@ def benchmark_layer_on_tpu(
     moe_mlp_dim: int = 512,
     num_experts: int = 8,
     num_experts_per_tok: int = 8,
-    output_dir: str = "/tmp/qwen3_5_sps_dumps",
+    output_dir: str = "",
+    extra_train_kwargs: dict[str, Any] | None = None,
+    test_label: str = "Standard",
 ) -> tuple[str, dict[str, Any]]:
     """Runs 1-layer forward pass on TPU for training (Flash+SparseMoE) and inference (vLLM RPA+FusedMoE)."""
-    print(f"\n>>> Running Qwen3.5 1-Layer Benchmark in {dtype_str} on TPU...")
+    print(
+        f"\n>>> Running Qwen3.5 1-Layer Benchmark [{test_label}] in {dtype_str} on TPU..."
+    )
     base_kwargs = {
         "override_model_config": True,
         "num_decoder_layers": 1,
@@ -105,11 +109,15 @@ def benchmark_layer_on_tpu(
         "inhomogeneous_layer_cycle_interval": 1,
     }
 
+    train_kwargs = dict(base_kwargs)
+    if extra_train_kwargs:
+        train_kwargs.update(extra_train_kwargs)
+
     cfg_train = pyconfig.initialize(
         [sys.argv[0], get_test_config_path(), "attention=flash", "sparse_matmul=True"],
         weight_dtype=dtype_str,
         dtype=dtype_str,
-        **base_kwargs,
+        **train_kwargs,
     )
 
     cfg_infer = pyconfig.initialize(
@@ -257,9 +265,9 @@ def main():
         print(f"  JAX Platforms: {jax.config.jax_platforms}")
         print(f"  Detected TPU Devices ({len(jax.devices())}): {jax.devices()}\n")
 
-        # 1. Run BF16 Benchmark (Production DataType for MaxText & vLLM on TPU)
-        print(">>> Starting BFloat16 Benchmark...")
-        bf16_table, bf16_metrics = benchmark_layer_on_tpu(
+        # 1. Baseline: Default Splash Attention (Block 512)
+        print(">>> [Run 1/3] Baseline: Default Splash Attention (Block 512)...")
+        b1_table, b1_metrics = benchmark_layer_on_tpu(
             dtype_str="bfloat16",
             batch_size=4,
             seq_len=512,
@@ -268,8 +276,67 @@ def main():
             num_experts=8,
             num_experts_per_tok=8,
             output_dir="",
+            test_label="Baseline (Block 512)",
         )
-        print("\n### BF16 Comparison Results:\n" + bf16_table)
+
+        # 2. Option 2: Tile Alignment (sa_block_q=128, sa_block_kv=128, sa_block_kv_compute=128)
+        print(">>> [Run 2/3] Option 2: Tile Alignment (Block 128x128)...")
+        b2_table, b2_metrics = benchmark_layer_on_tpu(
+            dtype_str="bfloat16",
+            batch_size=4,
+            seq_len=512,
+            emb_dim=2048,
+            moe_mlp_dim=512,
+            num_experts=8,
+            num_experts_per_tok=8,
+            output_dir="",
+            extra_train_kwargs={
+                "sa_block_q": 128,
+                "sa_block_kv": 128,
+                "sa_block_kv_compute": 128,
+            },
+            test_label="Option 2 (Tile Alignment 128)",
+        )
+
+        # 3. Option 3: Tile Alignment + Exact Math (use_tokamax_splash, use_base2_exp=False, fuse_reciprocal=False)
+        print(">>> [Run 3/3] Option 3: Tile Alignment 128 + Exact Softmax Math...")
+        b3_table, b3_metrics = benchmark_layer_on_tpu(
+            dtype_str="bfloat16",
+            batch_size=4,
+            seq_len=512,
+            emb_dim=2048,
+            moe_mlp_dim=512,
+            num_experts=8,
+            num_experts_per_tok=8,
+            output_dir="",
+            extra_train_kwargs={
+                "sa_block_q": 128,
+                "sa_block_kv": 128,
+                "sa_block_kv_compute": 128,
+                "use_tokamax_splash": True,
+                "sa_use_base2_exp": False,
+                "sa_fuse_reciprocal": False,
+            },
+            test_label="Option 3 (Tile 128 + Exact Math)",
+        )
+
+        print("\n" + "=" * 80)
+        print("COMPARATIVE EVALUATION SUMMARY (Attention Drift Reduction)")
+        print("=" * 80)
+        print(
+            f"{'Configuration':<35} | {'T12 Core L_inf':<15} | {'T14 OutProj L_inf':<18} | {'T25 Layer CosSim':<16}"
+        )
+        print("-" * 90)
+        for label, m in [
+            ("1. Baseline (Block 512)", b1_metrics),
+            ("2. Option 2 (Tile 128x128)", b2_metrics),
+            ("3. Option 3 (Tile 128 + Exact Math)", b3_metrics),
+        ]:
+            print(
+                f"{label:<35} | {m['T12_attn_core_out']['max_abs_err']:<15.6e} | "
+                f"{m['T14_attn_out_proj']['max_abs_err']:<18.6e} | "
+                f"{m['T25_layer_output']['cos_sim']:<16.6f}"
+            )
 
         time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
         num_devs = len(jax.devices())
@@ -279,62 +346,23 @@ def main():
 **Hardware Platform:** Google Cloud TPU v5p (Shared Pathways Service over GKE `auto-v5p-8-bodaborg`)  
 **Topology:** 2x2x1 ({num_devs} TPU Devices)  
 **Model Architecture:** Qwen3.5 MoE (`qwen3.5-35b-a3b` 1-Layer Full Attention + MoE Block)  
-**Evaluated Dtype:** `bfloat16` (Production training & serving precision)  
+**Evaluated Precision:** `bfloat16`  
 
 ---
 
-## 1. Executive Summary & Core Objective
+## 1. Attention Precision & Tiling Comparative Analysis
 
-The purpose of this benchmark is to measure and isolate numerical drift between:
-* **Trainer Execution Paradigm:** `attention="flash"` (TPU Splash / Flash Attention) + `sparse_matmul=True` (Megablox Grouped Matmul MoE) in `MODEL_MODE_TRAIN`.
-* **Inference Execution Paradigm:** `attention="vllm_rpa"` (vLLM Ragged Paged Attention) + `fused_moe_matmul=True` (Pallas Fused MoE with prefused gate/up weights) with `NEW_MODEL_DESIGN=1` in `model_call_mode="inference"`.
-
-All parameter matrices were synchronized from Trainer to Inference prior to execution, ensuring 100% parameter bit-parity. A total of **25 intermediate activation tensors** were captured along the entire layer forward pass.
-
----
-
-## 2. Quantitative Results: BFloat16 Intermediate Tensor Drift
-
-{bf16_table}
+| Configuration | `T12_attn_core_out` ($L_\\infty$) | `T14_attn_out_proj` ($L_\\infty$) | `T25_layer_output` (CosSim) |
+| :--- | :--- | :--- | :--- |
+| **Baseline (Splash Block 512)** | `{b1_metrics['T12_attn_core_out']['max_abs_err']:.6e}` | `{b1_metrics['T14_attn_out_proj']['max_abs_err']:.6e}` | `{b1_metrics['T25_layer_output']['cos_sim']:.6f}` |
+| **Option 2 (Tile Alignment 128x128)** | `{b2_metrics['T12_attn_core_out']['max_abs_err']:.6e}` | `{b2_metrics['T14_attn_out_proj']['max_abs_err']:.6e}` | `{b2_metrics['T25_layer_output']['cos_sim']:.6f}` |
+| **Option 3 (Tile 128 + Exact Math)** | `{b3_metrics['T12_attn_core_out']['max_abs_err']:.6e}` | `{b3_metrics['T14_attn_out_proj']['max_abs_err']:.6e}` | `{b3_metrics['T25_layer_output']['cos_sim']:.6f}` |
 
 ---
 
-## 3. Detailed Numerical Divergence Attribution
+## 2. Baseline Full 25-Tensor Breakdown (BFloat16)
 
-### A. Pre-Attention Normalization & Linear Projections (T01 - T11)
-* **`T01_layer_input` through `T11_k_rope_out`:** All show **bitwise-identical matching** ($L_\\infty = 0.000000$, MAE = $0.000000$, Cosine Similarity = $1.000000$).
-* **Conclusion:** Input RMSNorm, Q/K/V linear projections, QK-Norm, Query Gate, and Rotary Position Embeddings (RoPE) are mathematically identical between training and inference paradigms.
-
-### B. Attention Core Kernel (T12 - T14)
-* **`T12_attn_core_out`:** Splash Attention (Pallas Flash Attention) vs vLLM RPA (Ragged Paged Attention) introduces an $L_\\infty$ difference of $3.92$ and MAE of $0.119$.
-* **`T14_attn_out_proj`:** Output projection propagates the attention core difference with $L_\\infty = 1.959$ and MAE = $0.065$.
-* **Attribution:** Flash Attention and vLLM RPA use different block sizes and tiling strategies on TPU matrix units (MXUs), leading to standard BFloat16 summation order non-associativity across attention head dimensions.
-
-### C. Post-Attention Residual & Normalization (T15 - T16)
-* **`T15_post_attn_residual`:** $X + \\text{{AttnOut}}$ stabilizes cosine similarity back to **$0.995548$** due to the dominant residual connection.
-* **`T16_post_attn_layernorm_out`:** RMSNorm maintains high directional alignment with Cosine Similarity of **$0.995662$**.
-
-### D. Shared Expert & MoE Router (T17 - T20)
-* **`T17_shared_expert_gate_logits` & `T18_shared_expert_gate_prob`:** Cosine similarity of **$0.999147$** with tight bounds ($L_\\infty = 0.160$, MAE = $0.015$).
-* **`T20_router_gate_logits`:** MoE router logits exhibit **$0.995836$** cosine similarity, ensuring highly stable top-8 expert routing selection.
-
-### E. Routed MoE Kernel & Final Layer Output (T23 - T25)
-* **`T23_routed_moe_out`:** Comparing Megablox `sparse_matmul` (training) vs Pallas `fused_moe_matmul` (inference) shows extremely close alignment with $L_\\infty = 0.063293$, MAE = $0.002510$, and Cosine Similarity of **$0.989014$**.
-* **`T24_moe_combined_out`:** MoE combined output achieves **$0.989757$** cosine similarity.
-* **`T25_layer_output`:** The complete layer output ($X + \\text{{AttnOut}} + \\text{{MoEOut}}$) achieves **$0.994996$** cosine similarity ($> 0.99$), demonstrating that total numerical drift between MaxText training and vLLM inference remains well bounded within production tolerances.
-
----
-
-## 4. Verification & Reproduction Instructions
-
-To execute this benchmark on any Shared Pathways Service TPU cluster:
-```bash
-NEW_MODEL_DESIGN=1 python3 tests/run_sps_qwen3_5_dump.py
-```
-Or run the unit test suite:
-```bash
-NEW_MODEL_DESIGN=1 pytest tests/unit/qwen3_5_layer_dump_test.py
-```
+{b1_table}
 """
         with open(results_doc_path, "w", encoding="utf-8") as f:
             f.write(doc_content)
