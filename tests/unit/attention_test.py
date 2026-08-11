@@ -3943,6 +3943,10 @@ class CompressedAttentionTest(parameterized.TestCase):
         "per_device_batch_size": 1.0,
         "run_name": "test_packing_equivalence",
         "enable_checkpointing": False,
+        "ici_fsdp_parallelism": 1,
+        "ici_data_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "ici_autoregressive_parallelism": 1,
         "max_target_length": max_target_length,
         "max_prefill_predict_length": max_target_length,
         "attention_type": AttentionType.COMPRESSED.value,
@@ -4020,7 +4024,6 @@ class CompressedAttentionTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   def test_packed_vs_unpacked_equivalence(self, compress_ratio, attention_kernel, l1, l2):
     """Asserts bitwise/numerical equivalence between packed and independent unpacked forward passes."""
-    batch_size = 1
     total_len = l1 + l2
 
     cfg = self._get_test_config(
@@ -4029,14 +4032,15 @@ class CompressedAttentionTest(parameterized.TestCase):
         attention_kernel=attention_kernel,
     )
     attn = self._create_compressed_attention_layer(cfg, compress_ratio=compress_ratio, attention_kernel=attention_kernel)
+    batch_size = cfg.global_batch_size_to_train_on
 
     # Generate distinct random tokens for Document 1 and Document 2
     key1, key2 = jax.random.split(jax.random.PRNGKey(42))
     x1 = jax.random.normal(key1, (batch_size, l1, cfg.base_emb_dim))
     x2 = jax.random.normal(key2, (batch_size, l2, cfg.base_emb_dim))
 
-    pos1 = jnp.arange(l1, dtype=jnp.int32)[None, :]
-    pos2 = jnp.arange(l2, dtype=jnp.int32)[None, :]
+    pos1 = jnp.broadcast_to(jnp.arange(l1, dtype=jnp.int32)[None, :], (batch_size, l1))
+    pos2 = jnp.broadcast_to(jnp.arange(l2, dtype=jnp.int32)[None, :], (batch_size, l2))
     seg1 = jnp.ones((batch_size, l1), dtype=jnp.int32)
     seg2 = jnp.ones((batch_size, l2), dtype=jnp.int32)
 
@@ -4127,6 +4131,10 @@ class CompressedAttentionTest(parameterized.TestCase):
         "per_device_batch_size": 1.0,
         "run_name": "test_compressed",
         "enable_checkpointing": False,
+        "ici_fsdp_parallelism": 1,
+        "ici_data_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "ici_autoregressive_parallelism": 1,
         "max_target_length": 128,
         "max_prefill_predict_length": 64,
         "attention_type": AttentionType.COMPRESSED.value,

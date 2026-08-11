@@ -287,9 +287,7 @@ def compute_csa_prefill_chunk_pooling(
     compressed, next_prior_kv, next_prior_gate = csa_overlap_pooling(
         chunk_kv_reshaped, chunk_gate_reshaped, kv_norm, head_dim, prior_kv, prior_gate
     )
-    compressed_len = compressed.shape[1]
-
-    positions = jnp.arange(compressed_len) * compress_rate + position_ids[:, 0:1]
+    positions = position_ids[:, :usable:compress_rate]
     compressed = rotary_emb(compressed, positions, unsqueeze_dim=None)
   else:
     compressed = jnp.zeros((batch_size, 0, head_dim), dtype=dtype)
@@ -604,7 +602,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       compressed = self.kv_norm(jnp.sum(chunk_kv * gate_weights, axis=2))
 
       # Calculate positions for the compressed blocks
-      positions = jnp.arange(n_windows) * self.compress_rate + first_window_position
+      positions = inputs_positions[:, :usable:self.compress_rate]
 
       # Apply Rotary Positional Embeddings to the pooled representations
       # compressed is [batch, n_windows, head_dim]
