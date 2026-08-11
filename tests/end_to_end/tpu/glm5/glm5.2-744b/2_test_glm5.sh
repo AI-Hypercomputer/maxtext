@@ -23,7 +23,7 @@ echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 SCANNED_CKPT_PATH=${SCANNED_CKPT_PATH:-gs://maxtext-glm5-europe-west4/maxtext-glm-5.2-bf16-converted-final-78l/0/items}
 export DATASET_PATH=gs://maxtext-dataset
 
-# 1. Forward Logit & Generation Test
+# 1. Forward Logit & Generation Test with GLM-5.2 Cross-Layer IndexShare
 python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
   base_output_directory=${BASE_OUTPUT_PATH} \
   run_name=decode_glm52 \
@@ -42,4 +42,9 @@ python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
   ici_fsdp_parallelism=16 \
   ici_expert_parallelism=4 \
   checkpoint_storage_concurrent_gb=1024 \
+  use_indexer=true \
+  use_index_share=true \
+  index_share_pattern="FSSS" \
+  prune_shared_indexers=true \
   prompt="The capital of France is"
+
