@@ -1691,12 +1691,9 @@ class RoutedMoE(nnx.Module):
       # expert shards, and then routes within each shard.
 
       # Duplicate inputs to all expert shards
-      rule = None
-      if self.config.quantization and self.config.use_qwix_quantization:
-        rules = quantizations.get_quantization_rule(self.config)
-        rule = rules[0] if isinstance(rules, list) and rules else (rules if isinstance(rules, qwix.QtRule) else None)
+      rule = qpl.get_current_rule("gmm")
 
-      if rule and rule.act_qtype and not isinstance(x, qpl.QArray):
+      if self.config.quantize_before_ep_all_gather and rule and rule.act_qtype and not isinstance(x, qpl.QArray):
         x_q = qpl.quantize(
             x,
             rule.act_qtype,

@@ -867,6 +867,13 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  quantize_before_ep_all_gather: bool = Field(
+      True,
+      description=(
+          "Whether to quantize activations before the Ring of Experts EP all-gather (so the "
+          "collective and ragged sort move fp8, not bf16), vs. quantizing later inside the gmm call."
+      ),
+  )
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
       description=(
