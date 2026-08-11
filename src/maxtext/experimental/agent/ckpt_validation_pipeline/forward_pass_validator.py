@@ -38,7 +38,7 @@ from maxtext.utils import max_logging as logger
 absl.logging.set_verbosity(absl.logging.INFO)
 
 
-def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report_gcs_dir, unknown_args):
+def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report_gcs_dir, golden_logits_path, unknown_args):
   """Run logit checker as a subprocess and generate a standardized JSON report."""
   logger.info(f"Running Forward Pass Logit Verification for {run_name}...")
 
@@ -56,10 +56,16 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
       "--max_kl_div=0.1",
   ]
 
+  if golden_logits_path:
+    command.append(f"--golden_logits_path={golden_logits_path}")
+
   # append additional maxtext configs from unknown args
   if unknown_args:
     logger.info("Applying additional flags from MaxText overrides...")
     for arg in unknown_args:
+      if arg.startswith("--run_hf_model"):
+        logger.info(f"  -> Ignoring {arg} to prevent PyTorch from downloading on the TPU.")
+        continue
       command.append(arg)
       logger.info(f"  -> {arg}")
 
@@ -101,23 +107,26 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
         if raw in node:
           node = node[raw]
           continue
-        if name == "pre_self_attention_layer_norm" and "input_layernorm" in node:
-          node = node["input_layernorm"]
-          continue
-        if name == "post_self_attention_layer_norm" and "post_attention_layernorm" in node:
-          node = node["post_attention_layernorm"]
-          continue
-        if name == "self_attention" and "attention" in node:
-          node = node["attention"]
-          continue
-        if name == "input_layernorm" and "pre_self_attention_layer_norm" in node:
-          node = node["pre_self_attention_layer_norm"]
-          continue
-        if name == "post_attention_layernorm" and "post_self_attention_layer_norm" in node:
-          node = node["post_self_attention_layer_norm"]
-          continue
-        if name == "attention" and "self_attention" in node:
-          node = node["self_attention"]
+        SYNONYMS = {
+            "pre_self_attention_layer_norm": ["input_layernorm", "pre_attention_norm"],
+            "post_self_attention_layer_norm": ["post_attention_layernorm", "post_attention_norm"],
+            "self_attention": ["attention"],
+            "input_layernorm": ["pre_self_attention_layer_norm", "pre_attention_norm"],
+            "post_attention_layernorm": ["post_self_attention_layer_norm", "post_attention_norm"],
+            "attention": ["self_attention"],
+            "mlp": ["feed_forward", "ffn"],
+            "feed_forward": ["mlp", "ffn"],
+            "ffn": ["mlp", "feed_forward"],
+        }
+        
+        found_synonym = False
+        if name in SYNONYMS:
+          for syn in SYNONYMS[name]:
+            if syn in node:
+              node = node[syn]
+              found_synonym = True
+              break
+        if found_synonym:
           continue
         return None
       return node
@@ -187,18 +196,20 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
         - Maps Linen checkpoint key names back to NNX attribute names so
           nnx.update(model, checkpoint) populates all weights.
       """
+      SYNONYMS = {
+          "pre_self_attention_layer_norm": ["input_layernorm", "pre_attention_norm"],
+          "post_self_attention_layer_norm": ["post_attention_layernorm", "post_attention_norm"],
+          "self_attention": ["attention"],
+          "mlp": ["feed_forward", "ffn"],
+      }
+      
       if to_linen:
-        key_map = {
-            "pre_self_attention_layer_norm": "input_layernorm",
-            "post_self_attention_layer_norm": "post_attention_layernorm",
-            "self_attention": "attention",
-        }
+        key_map = {k: v[0] for k, v in SYNONYMS.items()}
       else:
-        key_map = {
-            "input_layernorm": "pre_self_attention_layer_norm",
-            "post_attention_layernorm": "post_self_attention_layer_norm",
-            "attention": "self_attention",
-        }
+        key_map = {}
+        for k, v in SYNONYMS.items():
+          for syn in v:
+            key_map[syn] = k
 
       # Recursively traverse dictionaries or dictionary-like mappings (including nnx.State)
       if isinstance(tree, dict) or hasattr(tree, "items"):
@@ -400,6 +411,7 @@ if __name__ == "__main__":
   )
   parser.add_argument("--checkpoint_gcs_path", type=str, required=True, help="GCS path to checkpoint")
   parser.add_argument("--report_gcs_dir", type=str, default="", help="GCS directory for reports")
+  parser.add_argument("--golden_logits_path", type=str, default="", help="GCS path to precomputed golden logits")
 
   args, unknown = parser.parse_known_args()
 
@@ -409,6 +421,7 @@ if __name__ == "__main__":
         args.maxtext_model_name,
         args.checkpoint_gcs_path,
         args.report_gcs_dir,
+        args.golden_logits_path,
         unknown,
     )
   except (ValueError, KeyError, subprocess.CalledProcessError) as e:
