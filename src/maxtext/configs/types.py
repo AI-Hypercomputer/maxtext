@@ -1084,6 +1084,7 @@ class HardwareAndMesh(BaseModel):
           "fsdp_transpose",
           "sequence",
           "context",
+          "context_usp_ulysses",
           "context_autoregressive",
           "tensor",
           "tensor_sequence",
@@ -1105,7 +1106,7 @@ class HardwareAndMesh(BaseModel):
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
   context_parallel_strategy: str = Field(
       "all_gather",
-      description="Strategy for context parallelism ('all_gather', 'ring', or 'ulysses').",
+      description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
   )
   context_parallel_reorder_strategy: ReorderStrategy = Field(
       ReorderStrategy.AUTO,
@@ -1159,6 +1160,13 @@ class LayoutAndSharding(BaseModel):
   )
   data_sharding: Any = Field([], description="Sharding for input data.")
   context_sharding: str = Field("context", description="Physical axis name for context parallelism.")
+  ulysses_context_sharding: str = Field(
+      "context_usp_ulysses",
+      description=(
+          "Physical axis name for the Ulysses head exchange under context_parallel_strategy='usp'. "
+          "context_sharding names the ring dimension; this names the all-to-all dimension."
+      ),
+  )
   input_data_sharding_logical_axes: list[str] = Field(
       ["activation_embed_and_logits_batch", "activation_norm_length"],
       description="Logical axes for sharding input data.",
@@ -1196,6 +1204,9 @@ class DcnParallelism(BaseModel):
   dcn_fsdp_transpose_parallelism: int = Field(1, description="DCN axis for FSDP transpose.")
   dcn_sequence_parallelism: int = Field(1, description="DCN axis for sequence parallelism (not recommended).")
   dcn_context_parallelism: int = Field(1, description="DCN axis for context parallelism.")
+  dcn_context_usp_ulysses_parallelism: int = Field(
+      1, description="DCN axis for the Ulysses dimension of USP context parallelism."
+  )
   dcn_context_autoregressive_parallelism: int = Field(1, description="DCN axis for context autoregressive parallelism.")
   dcn_tensor_parallelism: int = Field(1, description="DCN axis for tensor parallelism (not recommended).")
   dcn_tensor_sequence_parallelism: int = Field(
@@ -1215,6 +1226,9 @@ class IciParallelism(BaseModel):
   ici_fsdp_transpose_parallelism: int = Field(1, description="ICI axis for FSDP transpose.")
   ici_sequence_parallelism: int = Field(1, description="ICI axis for sequence parallelism.")
   ici_context_parallelism: int = Field(1, description="ICI axis for context parallelism.")
+  ici_context_usp_ulysses_parallelism: int = Field(
+      1, description="ICI axis for the Ulysses dimension of USP context parallelism."
+  )
   ici_context_autoregressive_parallelism: int = Field(1, description="ICI axis for context autoregressive parallelism.")
   ici_tensor_parallelism: int = Field(1, description="ICI axis for tensor parallelism.")
   ici_tensor_sequence_parallelism: int = Field(1, description="ICI axis for tensor sequence parallelism.")
@@ -2861,6 +2875,102 @@ class MaxTextConfig(
           "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
       )
 
+  def _validate_usp_context_parallelism(self):
+    """Validates the USP (Ulysses over ring) context parallelism configuration."""
+    if self.context_parallel_strategy != "usp":
+      if self.ici_context_usp_ulysses_parallelism != 1 or self.dcn_context_usp_ulysses_parallelism != 1:
+        raise ValueError(
+            "ici/dcn_context_usp_ulysses_parallelism was specified, but is only supported when "
+            "context_parallel_strategy='usp'."
+        )
+      return
+    if self.hardware != "tpu":
+      raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
+    if self.context_sharding != "context":
+      raise ValueError("TPU USP attention requires context_sharding='context'.")
+    usp_sequence_axes = (self.context_sharding, self.ulysses_context_sharding)
+    for usp_axis in usp_sequence_axes:
+      if usp_axis not in self.mesh_axes:
+        raise ValueError(f"TPU USP attention requires mesh axis '{usp_axis}' in mesh_axes.")
+    if infer_cp_axes(self.logical_axis_rules) != usp_sequence_axes:
+      raise ValueError(
+          f"TPU USP attention requires activation_length to map to {usp_sequence_axes} in logical_axis_rules."
+      )
+    if infer_cp_axes(self.logical_axis_rules_for_eval) != usp_sequence_axes:
+      raise ValueError(
+          f"TPU USP attention requires activation_length to map to {usp_sequence_axes} in logical_axis_rules_for_eval."
+      )
+    usp_ring_size = self.ici_context_parallelism
+    usp_ulysses_size = self.ici_context_usp_ulysses_parallelism
+    if (
+        usp_ring_size <= 0
+        or usp_ulysses_size <= 0
+        or self.dcn_context_parallelism <= 0
+        or self.dcn_context_usp_ulysses_parallelism <= 0
+    ):
+      raise ValueError(
+          "TPU USP attention requires explicit positive ici/dcn context parallelism values; "
+          "inferred (-1) sizes are not supported."
+      )
+    if usp_ring_size <= 1:
+      raise ValueError("TPU USP attention requires ici_context_parallelism > 1 for the ring dimension.")
+    if usp_ulysses_size <= 1:
+      raise ValueError("TPU USP attention requires ici_context_usp_ulysses_parallelism > 1 for the Ulysses dimension.")
+    if self.dcn_context_parallelism != 1 or self.dcn_context_usp_ulysses_parallelism != 1:
+      raise ValueError("TPU USP attention does not support dcn context parallelism yet.")
+    if self.attention != "flash":
+      raise ValueError("TPU USP attention requires attention=flash.")
+    if not self.use_tokamax_splash:
+      raise ValueError("TPU USP attention requires use_tokamax_splash=True.")
+    if self.use_jax_splash:
+      raise ValueError("TPU USP attention requires use_jax_splash=False.")
+    if self.attention_type != "global":
+      raise ValueError("TPU USP attention is initially supported only for global causal attention.")
+    if self.packing:
+      raise ValueError("TPU USP attention does not support packing yet.")
+    if self.context_parallel_load_balance:
+      raise ValueError("TPU USP attention does not support context_parallel_load_balance=True.")
+    if self.use_ragged_attention:
+      raise ValueError("TPU USP attention does not support ragged attention.")
+    if self.attention_sink:
+      raise ValueError("TPU USP attention does not support attention sinks.")
+    if self.use_indexer:
+      raise ValueError("TPU USP attention does not support sparse indexer masks.")
+    if self.use_chunked_prefill:
+      raise ValueError("TPU USP attention does not support chunked prefill yet.")
+    if self.use_multimodal:
+      raise ValueError("TPU USP attention does not support multimodal attention.")
+    if self.enable_dropout and self.dropout_rate > 0.0:
+      raise ValueError("TPU USP attention does not support dropout yet.")
+    if self.dq_reduction_steps not in (0, 3):
+      raise ValueError("TPU USP attention requires dq_reduction_steps to be 0 or 3.")
+    if self.use_qk_clip:
+      raise ValueError("TPU USP attention does not support QK-Clip statistics yet.")
+    if self.mtp_num_layers > 0:
+      raise ValueError("TPU USP attention does not support multi-token prediction (mtp_num_layers > 0) yet.")
+    if self.sa_bwd_dkv_megacore:
+      raise ValueError("TPU USP attention does not support sa_bwd_dkv_megacore yet.")
+    if self.max_target_length % (usp_ring_size * usp_ulysses_size) != 0:
+      raise ValueError(
+          "TPU USP attention requires max_target_length "
+          f"({self.max_target_length}) to be divisible by the total context parallelism "
+          f"({usp_ring_size * usp_ulysses_size})."
+      )
+    if self.max_target_length % (usp_ring_size * usp_ring_size) != 0:
+      raise ValueError("TPU USP attention requires max_target_length to be divisible by ici_context_parallelism squared.")
+    if self.num_query_heads % usp_ulysses_size != 0:
+      raise ValueError(
+          "TPU USP attention requires num_query_heads "
+          f"({self.num_query_heads}) to be divisible by ici_context_usp_ulysses_parallelism ({usp_ulysses_size})."
+      )
+    if self.num_kv_heads == 1:
+      raise ValueError("TPU USP attention does not support MQA with ici_context_usp_ulysses_parallelism > 1.")
+    if self.num_kv_heads % usp_ulysses_size != 0:
+      raise ValueError(
+          "TPU USP attention requires num_kv_heads "
+          f"({self.num_kv_heads}) to be divisible by ici_context_usp_ulysses_parallelism ({usp_ulysses_size})."
+      )
+
   def validate_num_moe_emb_chunks(self):
     """
     Validates that num_moe_emb_chunks is used with supported settings.
@@ -3644,6 +3754,8 @@ class MaxTextConfig(
         )
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
+    if self.ulysses_context_sharding != "context_usp_ulysses":
+      raise ValueError(f"Assigned ulysses_context_sharding {self.ulysses_context_sharding} is not supported.")
     if (
         self.per_device_batch_size > 0
         and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
@@ -3653,8 +3765,8 @@ class MaxTextConfig(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
     context_parallel_strategy = self.context_parallel_strategy.lower()
-    if context_parallel_strategy not in ("all_gather", "ring", "ulysses"):
-      raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', or 'ulysses'.")
+    if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
+      raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', 'ulysses', or 'usp'.")
     self.context_parallel_strategy = context_parallel_strategy
     if (
         context_parallel_strategy == "ring"
@@ -3711,10 +3823,10 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention does not support QK-Clip statistics yet.")
       if self.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
-    if context_parallel_strategy != "ring" and self.ring_scan_unroll != 1:
+    if context_parallel_strategy not in ("ring", "usp") and self.ring_scan_unroll != 1:
       raise ValueError(
           f"ring_scan_unroll={self.ring_scan_unroll} was specified, but is only supported when "
-          "context_parallel_strategy='ring'."
+          "context_parallel_strategy='ring' or 'usp'."
       )
     if context_parallel_strategy == "ulysses":
       if self.hardware != "tpu":
@@ -3779,6 +3891,7 @@ class MaxTextConfig(
             "TPU Ulysses attention requires num_kv_heads "
             f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
+    self._validate_usp_context_parallelism()
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.
@@ -3801,6 +3914,7 @@ class MaxTextConfig(
         * self.dcn_fsdp_transpose_parallelism
         * self.dcn_sequence_parallelism
         * self.dcn_context_parallelism
+        * self.dcn_context_usp_ulysses_parallelism
         * self.dcn_tensor_parallelism
         * self.dcn_tensor_sequence_parallelism
         * self.dcn_expert_parallelism
@@ -3975,6 +4089,7 @@ class MaxTextConfig(
         "fsdp_transpose": self.ici_fsdp_transpose_parallelism,
         "sequence": self.ici_sequence_parallelism,
         "context": self.ici_context_parallelism,
+        "context_usp_ulysses": self.ici_context_usp_ulysses_parallelism,
         "context_autoregressive": self.ici_context_autoregressive_parallelism,
         "tensor": self.ici_tensor_parallelism,
         "tensor_sequence": self.ici_tensor_sequence_parallelism,
@@ -3994,6 +4109,7 @@ class MaxTextConfig(
         "fsdp_transpose": self.dcn_fsdp_transpose_parallelism,
         "sequence": self.dcn_sequence_parallelism,
         "context": self.dcn_context_parallelism,
+        "context_usp_ulysses": self.dcn_context_usp_ulysses_parallelism,
         "context_autoregressive": self.dcn_context_autoregressive_parallelism,
         "tensor": self.dcn_tensor_parallelism,
         "tensor_sequence": self.dcn_tensor_sequence_parallelism,

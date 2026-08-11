@@ -1942,6 +1942,166 @@ class AttentionTest(parameterized.TestCase):
       )
       self.assertLen(hlo_test_utils.collective_lines(hlo_text, "collective-permute"), 0)
 
+  def _usp_test_config(self):
+    return pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **self.config_arguments,
+        attention="flash",
+        context_parallel_strategy="usp",
+        context_parallel_load_balance=False,
+        ici_context_parallelism=2,
+        ici_context_usp_ulysses_parallelism=2,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        packing=False,
+        dtype="float32",
+    )
+
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_usp_context_parallel(self):
+    """Test equivalence between dot_product and flash attention + USP context parallelism"""
+
+    cfg_cp = self._usp_test_config()
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    mha_generic_output, _ = attention_as_mha_generic(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
+
+    mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
+        cfg_cp,
+        mesh_cp,
+        attention_as_mha_flash_cp,
+        lnx,
+        decoder_segment_ids,
+        decoder_positions,
+    )
+
+    mha_generic_output = jax.device_get(mha_generic_output)
+    mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
+
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        msg="Logits from generic dot product and flash attention + USP context parallelism are not close.",
+    )
+
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_usp_context_parallel_grad(self):
+    """Test input-gradient equivalence between dot_product and flash attention + USP context parallelism"""
+
+    cfg_cp = self._usp_test_config()
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
+
+    def generic_loss(lnx):
+      output, _ = attention_as_mha_generic(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    def usp_loss(lnx):
+      output, _ = attention_as_mha_flash_cp(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    generic_grad = jax.grad(generic_loss)(lnx)
+    with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      usp_grad = jax.grad(usp_loss)(lnx)
+    generic_grad = jax.device_get(generic_grad)
+    usp_grad = jax.device_get(usp_grad)
+
+    self.assertTrue(
+        jax.numpy.allclose(generic_grad, usp_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
+        msg="Input gradients from generic dot product and flash attention + USP context parallelism are not close.",
+    )
+
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_usp_hlo_uses_all_to_all_and_permute(self):
+    """Checks compiled TPU USP attention HLO uses all-to-all and collective-permute."""
+
+    cfg_cp = self._usp_test_config()
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+
+    def attention_forward(x, pos, seg):
+      output, _ = attention_as_mha_flash_cp(
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return output
+
+    def attention_loss(x, pos, seg):
+      return jnp.sum(attention_forward(x, pos, seg).astype(jnp.float32))
+
+    hlo_texts = []
+    for lowered_fn in (attention_forward, jax.grad(attention_loss)):
+      # The mesh and axis-rules contexts wrap the jit from outside because
+      # jax.set_mesh raises inside a traced function, and the output keeps its
+      # natural sequence sharding so the only full-sequence gathers in the
+      # program are the ones the attention path itself emits.
+      with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+        input_sharding = NamedSharding(
+            mesh_cp,
+            nn_partitioning.logical_to_mesh_axes(
+                ("activation_batch", "activation_length", "activation_embed"), nn_partitioning.get_axis_rules()
+            ),
+        )
+        metadata_sharding = NamedSharding(
+            mesh_cp, nn_partitioning.logical_to_mesh_axes((None, "activation_length"), nn_partitioning.get_axis_rules())
+        )
+        lowered = jax.jit(lowered_fn).lower(
+            jax.device_put(lnx, input_sharding),
+            jax.device_put(decoder_positions, metadata_sharding),
+            jax.device_put(decoder_segment_ids, metadata_sharding),
+        )
+        hlo_texts.append(lowered.compile().as_text())
+
+    ring_local_sequence_length = cfg_cp.max_target_length // cfg_cp.ici_context_parallelism
+    sequence_lengths = (cfg_cp.max_target_length, ring_local_sequence_length)
+    for hlo_text in hlo_texts:
+      self.assertGreater(len(hlo_test_utils.collective_lines(hlo_text, "all-to-all")), 0)
+      self.assertGreater(len(hlo_test_utils.collective_lines(hlo_text, "collective-permute")), 0)
+      self.assertLen(hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, sequence_lengths), 0)
+      # The int32 segment-ID gather over the Ulysses axis spans one ring-local
+      # sequence block; it is the only intended sequence all-gather.
+      self.assertGreater(
+          len(
+              hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, (ring_local_sequence_length,), dtypes=("s32",))
+          ),
+          0,
+      )
+      self.assertLen(
+          hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, (cfg_cp.max_target_length,), dtypes=("s32",)), 0
+      )
+
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
     all_axis_orders = tuple(itertools.permutations(range(4)))

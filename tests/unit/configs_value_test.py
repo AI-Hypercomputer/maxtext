@@ -408,6 +408,128 @@ class ConfigTest(absltest.TestCase):
           with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
             pyconfig.initialize(argv)
 
+  def test_tpu_usp_config_validation_accepts_initial_config(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=usp",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "ici_context_usp_ulysses_parallelism=2",
+        "ring_scan_unroll=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.context_parallel_strategy, "usp")
+    self.assertEqual(config.ici_context_parallelism, 2)
+    self.assertEqual(config.ici_context_usp_ulysses_parallelism, 2)
+    self.assertEqual(config.ring_scan_unroll, 2)
+    self.assertEqual(config.ulysses_context_sharding, "context_usp_ulysses")
+    context_usp_ulysses_index = config.mesh_axes.index("context_usp_ulysses")
+    self.assertEqual(context_usp_ulysses_index, config.mesh_axes.index("context") + 1)
+    self.assertEqual(config.ici_parallelism[context_usp_ulysses_index], 2)
+    self.assertEqual(types.infer_cp_axes(config.logical_axis_rules), ("context", "context_usp_ulysses"))
+    self.assertEqual(types.infer_cp_axes(config.logical_axis_rules_for_eval), ("context", "context_usp_ulysses"))
+
+  def test_context_usp_ulysses_parallelism_requires_usp(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "ici_context_usp_ulysses_parallelism=2",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(
+          (ValueError, pydantic.ValidationError), "only supported when context_parallel_strategy='usp'"
+      ):
+        pyconfig.initialize(argv)
+
+  def test_tpu_usp_config_validation_rejects_unsupported_configs(self):
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=usp",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "ici_context_usp_ulysses_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    cases = [
+        (["context_parallel_load_balance=True"], ["context_parallel_load_balance=False"], "load_balance"),
+        (["packing=True", "dataset_type=tfds"], ["packing=False", "dataset_type=synthetic"], "packing"),
+        (["attention=dot_product"], ["attention=flash"], "attention=flash"),
+        (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
+        (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),
+        (["attention_type=mla"], [], "global causal attention"),
+        (["use_ragged_attention=True"], [], "ragged attention"),
+        (["attention_sink=True"], [], "attention sinks"),
+        (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
+        (["use_chunked_prefill=True"], [], "chunked prefill"),
+        (["use_multimodal=True"], [], "multimodal"),
+        (["dropout_rate=0.1"], [], "dropout"),
+        (["dq_reduction_steps=2"], [], "dq_reduction_steps"),
+        (["use_qk_clip=True"], [], "QK-Clip"),
+        (["context_sharding=expert"], [], "context_sharding"),
+        (["ulysses_context_sharding=expert"], [], "ulysses_context_sharding"),
+        (["custom_mesh_and_rule=pure-fsdp"], [], "mesh axis 'context' in"),
+        (["custom_mesh_and_rule=cp-as-ep"], [], "mesh axis 'context_usp_ulysses' in"),
+        (["logical_axis_rules=[['activation_length',['context']]]"], [], r"in logical_axis_rules\."),
+        (["custom_mesh_and_rule_for_eval=pure-fsdp"], [], "logical_axis_rules_for_eval"),
+        (["ici_context_parallelism=1"], ["ici_context_parallelism=2"], "ring dimension"),
+        (["ici_context_usp_ulysses_parallelism=1"], ["ici_context_usp_ulysses_parallelism=2"], "Ulysses dimension"),
+        (["ici_context_parallelism=-1"], ["ici_context_parallelism=2"], "explicit positive"),
+        (["ici_context_usp_ulysses_parallelism=-1"], ["ici_context_usp_ulysses_parallelism=2"], "explicit positive"),
+        (["dcn_context_parallelism=2"], [], "dcn context parallelism"),
+        (["dcn_context_usp_ulysses_parallelism=2"], [], "dcn context parallelism"),
+        (["dcn_context_parallelism=-1"], [], "explicit positive"),
+        (["dcn_context_usp_ulysses_parallelism=-1"], [], "explicit positive"),
+        (["mtp_num_layers=1"], [], "multi-token prediction"),
+        (["sa_bwd_dkv_megacore=True"], [], "sa_bwd_dkv_megacore"),
+        (["max_target_length=2050"], [], "total context parallelism"),
+        (["ici_context_parallelism=4", "max_target_length=2056"], ["ici_context_parallelism=2"], "squared"),
+        (
+            ["base_num_query_heads=18", "ici_context_usp_ulysses_parallelism=4"],
+            ["ici_context_usp_ulysses_parallelism=2"],
+            "requires num_query_heads",
+        ),
+        (["base_num_kv_heads=1"], [], "MQA"),
+        (
+            ["base_num_kv_heads=10", "ici_context_usp_ulysses_parallelism=4"],
+            ["ici_context_usp_ulysses_parallelism=2"],
+            "requires num_kv_heads",
+        ),
+        (["hardware=gpu"], ["hardware=tpu"], "only supported on TPU"),
+        (["hardware=cpu"], ["hardware=tpu"], "only supported on TPU"),
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for bad_args, args_to_remove, expected_regex in cases:
+      with self.subTest(bad_args=bad_args):
+        argv = [arg for arg in base_args if arg not in args_to_remove]
+        argv.extend(bad_args)
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
+          with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
+            pyconfig.initialize(argv)
+
   def test_load_balanced_chunk_context_parallel_config(self):
     argv = [
         "",
