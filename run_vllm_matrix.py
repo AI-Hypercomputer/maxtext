@@ -53,7 +53,12 @@ def execute_command(cmd, log_path):
     f.write(f"Command: {cmd_str}\n\n")
     f.flush()
     with subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env) as process:
-      process.wait()
+      try:
+        process.wait(timeout=3600)  # 1 hour timeout per decode run
+      except subprocess.TimeoutExpired:
+        process.kill()
+        print(f"[ERROR] Job timed out after 1 hour. Check logs at: {log_path}")
+        return False
 
   if process.returncode != 0:
     print(f"[ERROR] Job failed. Check logs at: {log_path}")
