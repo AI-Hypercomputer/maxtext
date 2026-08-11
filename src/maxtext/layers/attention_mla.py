@@ -1287,9 +1287,7 @@ class MLA(Attention):
     if model_mode != MODEL_MODE_TRAIN and decoder_segment_ids is None:
       decoder_segment_ids = jnp.ones(inputs_q.shape[:2], dtype=jnp.int32)
 
-    query, low_rank_q = self.mla_q_projection(
-        inputs_q, inputs_positions, decoder_segment_ids, model_mode, previous_chunk, rope_kwargs
-    )
+    query, low_rank_q = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     if self.config.force_q_layout:
       query = layout.with_layout_constraint(query, DLL(major_to_minor=(0, 2, 3, 1)))
     key, value, cached_values = self.mla_kv_projection(
