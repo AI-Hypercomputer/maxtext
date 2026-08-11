@@ -1254,6 +1254,7 @@ class MLA(Attention):
       kv_cache: Optional[Array] = None,
       attention_metadata: Optional[dict[str, Any]] = None,
       cached_indexer_state: Optional[Any] = None,
+      layer_idx: Optional[Any] = None,
   ) -> tuple[Array, Optional[Array]] | tuple[Array, Optional[Array], Optional[Any]]:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 
@@ -1286,7 +1287,9 @@ class MLA(Attention):
     if model_mode != MODEL_MODE_TRAIN and decoder_segment_ids is None:
       decoder_segment_ids = jnp.ones(inputs_q.shape[:2], dtype=jnp.int32)
 
-    query, low_rank_q = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
+    query, low_rank_q = self.mla_q_projection(
+        inputs_q, inputs_positions, decoder_segment_ids, model_mode, previous_chunk, rope_kwargs
+    )
     if self.config.force_q_layout:
       query = layout.with_layout_constraint(query, DLL(major_to_minor=(0, 2, 3, 1)))
     key, value, cached_values = self.mla_kv_projection(
@@ -1307,7 +1310,14 @@ class MLA(Attention):
       if attention_mask is not None:
         attention_mask = attention_mask.squeeze(axis=(1, 2))
 
-      is_shared = getattr(self.config, "use_index_share", False) and self.is_shared_layer
+      if getattr(self.config, "use_index_share", False):
+        if layer_idx is not None:
+          is_shared = (layer_idx % 4 != 0)
+        else:
+          is_shared = self.is_shared_layer
+      else:
+        is_shared = False
+
       if self.indexer is not None and not is_shared:
         # Full (F) layer: run indexer forward pass
         with jax.named_scope("glm_full_layer_indexer"):

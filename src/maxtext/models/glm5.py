@@ -112,6 +112,7 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
       previous_chunk=None,
       slot: None | int = None,
       cached_indexer_state=None,
+      layer_idx=None,
   ):
     """Executes the attention layer and passes cached indexer state."""
     attn_out = self.self_attention(
@@ -125,6 +126,7 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
         previous_chunk=previous_chunk,
         slot=slot,
         cached_indexer_state=cached_indexer_state,
+        layer_idx=layer_idx,
     )
     if self.is_index_share_enabled:
       attention_result, _, new_indexer_state = attn_out
@@ -169,6 +171,7 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
       previous_chunk=None,
       slot: None | int = None,
       cached_indexer_state=None,
+      layer_idx=None,
   ):
     """Self-attention with normalization and IndexShare caching."""
     if self.is_mhc_enabled:
@@ -198,6 +201,7 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
           previous_chunk,
           slot,
           cached_indexer_state=cached_indexer_state,
+          layer_idx=layer_idx,
       )
       intermediate_inputs = inputs + attention_lnx
     # Normalization
@@ -249,6 +253,7 @@ class GLMDenseLayer(GLMGenericLayer):
       attention_metadata=None,
       decoder_input_tokens=None,
       cached_indexer_state=None,
+      layer_idx=None,
   ):
     if isinstance(inputs, tuple):
       inputs = inputs[0]
@@ -268,6 +273,7 @@ class GLMDenseLayer(GLMGenericLayer):
         previous_chunk,
         slot,
         cached_indexer_state=cached_indexer_state,
+        layer_idx=layer_idx,
     )
 
     if self.is_mhc_enabled:
@@ -329,6 +335,7 @@ class GLMMoELayer(GLMGenericLayer):
       attention_metadata=None,
       decoder_input_tokens=None,
       cached_indexer_state=None,
+      layer_idx=None,
   ):
     if isinstance(inputs, tuple):
       inputs = inputs[0]
@@ -349,6 +356,7 @@ class GLMMoELayer(GLMGenericLayer):
         previous_chunk,
         slot,
         cached_indexer_state=cached_indexer_state,
+        layer_idx=layer_idx,
     )
 
     if self.is_mhc_enabled:

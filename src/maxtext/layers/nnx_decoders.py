@@ -989,6 +989,14 @@ class NNXDecoder(nnx.Module):
     updated_graphdef = [graphdef]
 
     use_kv = kv_caches_stacked is not None
+    is_index_share = getattr(self.config, "use_index_share", False)
+    cached_indexer_state = kwargs.get("cached_indexer_state", None)
+    start_layer_idx = kwargs.get("start_layer_idx", 0)
+
+    if is_index_share:
+      init_scan_carry = (x_in, cached_indexer_state, start_layer_idx)
+    else:
+      init_scan_carry = x_in
 
     def layer_fn(carry, scanned_vars):
       # Ensure metadata rank matches the sliced values
@@ -1014,14 +1022,28 @@ class NNXDecoder(nnx.Module):
       if kv_cache_layer is not None:
         call_kwargs["kv_cache"] = kv_cache_layer
 
-      layer_out = layer(carry, *args, **call_kwargs)
+      if is_index_share:
+        y_in, current_cached_indexer, lyr_idx = carry
+        call_kwargs["cached_indexer_state"] = current_cached_indexer
+        call_kwargs["layer_idx"] = lyr_idx
+      else:
+        y_in = carry
+
+      layer_out = layer(y_in, *args, **call_kwargs)
 
       if isinstance(layer_out, tuple):
-        new_carry = layer_out[0]
+        new_carry_y = layer_out[0]
         updated_kv = layer_out[1] if len(layer_out) > 1 else None
+        new_indexer_state = layer_out[2] if len(layer_out) > 2 else None
       else:
-        new_carry = layer_out
+        new_carry_y = layer_out
         updated_kv = None
+        new_indexer_state = None
+
+      if is_index_share:
+        new_carry = (new_carry_y, new_indexer_state, lyr_idx + 1)
+      else:
+        new_carry = new_carry_y
 
       # Extract the updated state to return it
       if dynamic_graph_init:
@@ -1054,7 +1076,7 @@ class NNXDecoder(nnx.Module):
 
       # kv_caches_stacked is actually the original kv_caches list in this new flow
       kv_caches_list = kv_caches_stacked
-      current_carry = x_in
+      current_carry = init_scan_carry
 
       for i in range(length):
         # Statically slice the parameters and state for this layer
@@ -1069,15 +1091,27 @@ class NNXDecoder(nnx.Module):
         # Update the list in-place (mutates the list passed by reference)
         kv_caches_list[i] = updated_kv
 
+      if is_index_share:
+        final_carry, out_indexer_state, _ = current_carry
+      else:
+        final_carry = current_carry
+        out_indexer_state = None
+
       # We don't need to rebuild scanned_state or return it because during
       # inference with vLLM, parameters do not change and we don't need intermediates.
-      return current_carry, layers, None
+      return final_carry, layers, None, out_indexer_state
     else:
       params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
       state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
 
-      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state), unroll=unroll)
+      scan_res_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, init_scan_carry, (params, state), unroll=unroll)
       returned_kv_stacked = None
+
+      if is_index_share:
+        final_carry, out_indexer_state, _ = scan_res_carry
+      else:
+        final_carry = scan_res_carry
+        out_indexer_state = None
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
       # in the sharding metadata. jax.lax.scan emits it at position 0.
@@ -1095,6 +1129,8 @@ class NNXDecoder(nnx.Module):
       nnx.update(layers, clean_state)
       out_layers = layers
 
+    if is_index_share:
+      return final_carry, out_layers, returned_kv_stacked if use_kv else None, out_indexer_state
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
 
   def get_decoder_layers(self):
@@ -1792,51 +1828,73 @@ class NNXDecoder(nnx.Module):
                 *layer_args,
                 **common_kwargs,
             )
-          else:
-            y, self.dense_layers, _ = self._apply_layers_sequentially(
-                self.dense_layers,
-                y,
-                *layer_args,
-                length=cfg.first_num_dense_layers,
-                **layer_kwargs,
-            )
+            if getattr(cfg, "use_index_share", False):
+              y, self.dense_layers, _, cached_indexer_state = self._apply_layers_sequentially(
+                  self.dense_layers,
+                  y,
+                  *layer_args,
+                  length=cfg.first_num_dense_layers,
+                  start_layer_idx=0,
+                  cached_indexer_state=None,
+                  **layer_kwargs,
+              )
 
-            num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
+              num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
-            if cfg.use_batch_split_schedule:
-              policy = self.get_remat_policy()
-              mock_params = self._build_linen_params(self.moe_layers)
-
-              if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
-                y = deepseek_batchsplit_fp8.scan_batch_split_layers(
-                    y,
-                    mock_params,
-                    decoder_positions,
-                    decoder_segment_ids,
-                    model_mode=model_mode,
-                    mesh=self.mesh,
-                    quant=self.quant,
-                    cfg=cfg,
-                    policy=policy,
-                )
-              else:
-                # bf16 code path
-                y = deepseek_batchsplit.scan_batch_split_layers(
-                    y,
-                    mock_params,
-                    decoder_positions,
-                    mesh=self.mesh,
-                    cfg=cfg,
-                    num_layers=num_moe,
-                )
-            else:
-              y, self.moe_layers, _ = self._apply_layers_sequentially(
+              y, self.moe_layers, _, _ = self._apply_layers_sequentially(
                   self.moe_layers,
                   y,
                   *layer_args,
                   length=num_moe,
+                  start_layer_idx=cfg.first_num_dense_layers,
+                  cached_indexer_state=cached_indexer_state,
                   **layer_kwargs,
               )
+            else:
+              y, self.dense_layers, _ = self._apply_layers_sequentially(
+                  self.dense_layers,
+                  y,
+                  *layer_args,
+                  length=cfg.first_num_dense_layers,
+                  **layer_kwargs,
+              )
+
+              num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
+
+              if cfg.use_batch_split_schedule:
+                policy = self.get_remat_policy()
+                mock_params = self._build_linen_params(self.moe_layers)
+
+                if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
+                  y = deepseek_batchsplit_fp8.scan_batch_split_layers(
+                      y,
+                      mock_params,
+                      decoder_positions,
+                      decoder_segment_ids,
+                      model_mode=model_mode,
+                      mesh=self.mesh,
+                      quant=self.quant,
+                      cfg=cfg,
+                      policy=policy,
+                  )
+                else:
+                  # bf16 code path
+                  y = deepseek_batchsplit.scan_batch_split_layers(
+                      y,
+                      mock_params,
+                      decoder_positions,
+                      mesh=self.mesh,
+                      cfg=cfg,
+                      num_layers=num_moe,
+                  )
+              else:
+                y, self.moe_layers, _ = self._apply_layers_sequentially(
+                    self.moe_layers,
+                    y,
+                    *layer_args,
+                    length=num_moe,
+                    **layer_kwargs,
+                )
 
         elif self.is_deepseek4:
           y = self._apply_deepseek4_scanned_blocks(
