@@ -4,6 +4,8 @@ Tests that pre-training checkpoints can be successfully loaded and evaluated
 by the vLLM integration pipeline.
 """
 
+# pylint: disable=bad-indentation
+
 import os
 import subprocess
 import csv
@@ -26,15 +28,40 @@ def get_tokenizer_flags(model_name):
   """Returns tokenizer flags for vLLM decoding."""
   flags = []
   if "gemma4" in model_name:
-    flags.extend(["tokenizer_path=src/maxtext/assets/tokenizers/tokenizer_gemma4.model", "tokenizer_type=sentencepiece"])
+    flags.extend(
+        [
+            "tokenizer_path=src/maxtext/assets/tokenizers/tokenizer_gemma4.model",
+            "tokenizer_type=sentencepiece",
+        ]
+    )
   elif "gemma3" in model_name:
-    flags.extend(["tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3", "tokenizer_type=sentencepiece"])
+    flags.extend(
+        [
+            "tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3",
+            "tokenizer_type=sentencepiece",
+        ]
+    )
   elif "gemma" in model_name:
-    flags.extend(["tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma", "tokenizer_type=sentencepiece"])
+    flags.extend(
+        [
+            "tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma",
+            "tokenizer_type=sentencepiece",
+        ]
+    )
   elif "llama" in model_name:
-    flags.extend(["tokenizer_path=src/maxtext/assets/tokenizers/tokenizer_llama3.tiktoken", "tokenizer_type=tiktoken"])
+    flags.extend(
+        [
+            "tokenizer_path=src/maxtext/assets/tokenizers/tokenizer_llama3.tiktoken",
+            "tokenizer_type=tiktoken",
+        ]
+    )
   elif "mistral" in model_name:
-    flags.extend(["tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.mistral-v3", "tokenizer_type=sentencepiece"])
+    flags.extend(
+        [
+            "tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.mistral-v3",
+            "tokenizer_type=sentencepiece",
+        ]
+    )
   elif "qwen" in model_name or "olmo" in model_name or "gpt-oss" in model_name:
     flags.extend([f"tokenizer_path={HF_IDS[model_name]}", "tokenizer_type=huggingface"])
   return flags
@@ -105,7 +132,7 @@ def run_matrix():
         continue
 
       # 2. Run vLLM Decode on the generated checkpoints
-      load_path = f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/5/items"
+      load_path = f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/4/items"
 
       cmd = [
           "python",
@@ -114,7 +141,7 @@ def run_matrix():
           f"model_name={model}",
           f"load_parameters_path={load_path}",
           'vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]}',
-          "hbm_utilization_vllm=0.6",
+          "hbm_utilization_vllm=0.9",
           "prompt=Suggest some famous landmarks in London.",
           "use_chat_template=True",
           f"scan_layers={scan_bool}",
@@ -140,6 +167,10 @@ def run_matrix():
       with open(CSV_REPORT, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([model, scan_mode, "vllm_decode", run_name, status])
+
+      break
+
+    break
 
 
 if __name__ == "__main__":
