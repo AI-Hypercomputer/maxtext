@@ -3485,8 +3485,8 @@ class MaxTextConfig(
       supports_dot_product = self.attention == "dot_product"
       supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
       if not (supports_dot_product or supports_flash_splash):
-        raise NotImplementedError(
-            "DeepSeek4 is only supported with dot_product attention or flash attention with use_tokamax_splash set to True."
+        raise ValueError(
+            "DeepSeek4 is only supported with `dot_product` attention or `flash` attention with `use_tokamax_splash=True`."
         )
     if self.mla_qk_head_chunk_size > 0:
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
