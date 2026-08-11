@@ -1308,38 +1308,48 @@ class MLA(Attention):
       if attention_mask is not None:
         attention_mask = attention_mask.squeeze(axis=(1, 2))
 
-      if getattr(self.config, "use_index_share", False):
-        if layer_idx is not None:
-          is_shared = (layer_idx % 4 != 0)
-        else:
-          is_shared = self.is_shared_layer
-      else:
-        is_shared = False
+      if self.indexer is not None:
+        def _run_full(_):
+          with jax.named_scope("glm_full_layer_indexer"):
+            mask, indices, score = self.indexer(
+                inputs_q=inputs_q,
+                low_rank_q=low_rank_q,
+                inputs_kv=inputs_kv,
+                inputs_positions=inputs_positions,
+                attention_mask=attention_mask,
+                decoder_segment_ids=decoder_segment_ids,
+                previous_chunk=previous_chunk,
+                kv_cache=self.IndexerKVCache_0,
+                model_mode=model_mode,
+            )
+            mask = checkpoint_name(mask, "full_layer_indexer_mask")
+            indices = checkpoint_name(indices, "full_layer_topk_indices")
+            return mask, indices, score
 
-      if self.indexer is not None and not is_shared:
-        # Full (F) layer: run indexer forward pass
-        with jax.named_scope("glm_full_layer_indexer"):
-          indexer_mask, topk_indices, indexer_score = self.indexer(
-              inputs_q=inputs_q,
-              low_rank_q=low_rank_q,
-              inputs_kv=inputs_kv,
-              inputs_positions=inputs_positions,
-              attention_mask=attention_mask,
-              decoder_segment_ids=decoder_segment_ids,
-              previous_chunk=previous_chunk,
-              kv_cache=self.IndexerKVCache_0,
-              model_mode=model_mode,
-          )
-          indexer_mask = checkpoint_name(indexer_mask, "full_layer_indexer_mask")
-          topk_indices = checkpoint_name(topk_indices, "full_layer_topk_indices")
-          new_indexer_state = (indexer_mask, topk_indices, indexer_score)
-      elif cached_indexer_state is not None:
-        # Shared (S) layer: inherit cached indexer state from donor F layer (zero indexer GEMMs)
-        with jax.named_scope("glm_shared_layer_index_reuse"):
-          indexer_mask, topk_indices, indexer_score = cached_indexer_state
-          indexer_mask = checkpoint_name(indexer_mask, "shared_layer_reused_mask")
-          topk_indices = checkpoint_name(topk_indices, "shared_layer_reused_indices")
-          new_indexer_state = cached_indexer_state
+        def _run_shared(_):
+          with jax.named_scope("glm_shared_layer_index_reuse"):
+            mask, indices, score = cached_indexer_state
+            mask = checkpoint_name(mask, "shared_layer_reused_mask")
+            indices = checkpoint_name(indices, "shared_layer_reused_indices")
+            return mask, indices, score
+
+        if getattr(self.config, "use_index_share", False) and cached_indexer_state is not None:
+          if layer_idx is not None:
+            is_full = (layer_idx % 4 == 0)
+            indexer_mask, topk_indices, indexer_score = jax.lax.cond(
+                is_full,
+                _run_full,
+                _run_shared,
+                operand=None,
+            )
+          elif self.is_shared_layer:
+            indexer_mask, topk_indices, indexer_score = _run_shared(None)
+          else:
+            indexer_mask, topk_indices, indexer_score = _run_full(None)
+        else:
+          indexer_mask, topk_indices, indexer_score = _run_full(None)
+
+        new_indexer_state = (indexer_mask, topk_indices, indexer_score)
       else:
         indexer_mask, topk_indices, indexer_score = None, None, None
 
