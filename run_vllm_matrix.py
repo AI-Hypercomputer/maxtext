@@ -132,7 +132,7 @@ def run_matrix():
         continue
 
       # 2. Run vLLM Decode on the generated checkpoints
-      load_path = f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/5/items"
+      load_path = f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/4/items"
 
       cmd = [
           "python",
