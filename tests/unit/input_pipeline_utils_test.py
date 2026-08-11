@@ -14,11 +14,18 @@
 
 """Unit tests for input_pipeline_utils."""
 
-import numpy as np
+from types import SimpleNamespace
 import unittest
 
+import numpy as np
+import pytest
+
 from maxtext.input_pipeline import input_pipeline_utils
-from maxtext.input_pipeline.input_pipeline_utils import compute_file_sharding
+from maxtext.input_pipeline.input_pipeline_utils import (
+    MegatronSplitInputsTargets,
+    compute_file_sharding,
+    megatron_min_segment_length,
+)
 
 
 class ComputeFileShardingNormalCaseTest(unittest.TestCase):
@@ -190,6 +197,72 @@ class MegatronSplitInputsTargetsTest(unittest.TestCase):
 
     np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 1, 1, 2, 2, 2], dtype=np.int32))
     np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2, 3, 0, 1, 2], dtype=np.int32))
+
+
+def _cfg(reset_attention_mask: bool, divisor: int, max_target_length: int = 4096):
+  return SimpleNamespace(
+      reset_attention_mask=reset_attention_mask,
+      packing_max_segments_per_sample=divisor,
+      max_target_length=max_target_length,
+  )
+
+
+class TestMegatronMinSegmentLength:
+  """``megatron_min_segment_length`` returns ``max_target_length // divisor`` only when merging is active."""
+
+  def test_default_divisor_matches_prior_hardcoded_25(self):
+    # Prior behavior used a hardcoded 25; the default config value preserves that.
+    cfg = _cfg(reset_attention_mask=True, divisor=25, max_target_length=4096)
+    assert megatron_min_segment_length(cfg) == 4096 // 25
+
+  @pytest.mark.parametrize(
+      "divisor,max_target_length,expected",
+      [
+          (50, 4096, 4096 // 50),
+          (10, 8192, 8192 // 10),
+          (1, 4096, 4096),
+          (100, 4097, 4097 // 100),  # integer division (truncates)
+      ],
+  )
+  def test_custom_divisor(self, divisor, max_target_length, expected):
+    cfg = _cfg(reset_attention_mask=True, divisor=divisor, max_target_length=max_target_length)
+    assert megatron_min_segment_length(cfg) == expected
+
+  @pytest.mark.parametrize("divisor", [0, -1, -25])
+  def test_non_positive_divisor_disables_merging(self, divisor):
+    cfg = _cfg(reset_attention_mask=True, divisor=divisor)
+    assert megatron_min_segment_length(cfg) == 0
+
+  @pytest.mark.parametrize("divisor", [0, 25, 50])
+  def test_reset_attention_mask_false_returns_zero(self, divisor):
+    # reset_attention_mask=False short-circuits regardless of divisor.
+    cfg = _cfg(reset_attention_mask=False, divisor=divisor)
+    assert megatron_min_segment_length(cfg) == 0
+
+
+class MegatronSplitDatasetIdTest(unittest.TestCase):
+
+  def _element(self, with_id=True):
+    el = {"text": np.arange(9, dtype=np.int32)}  # seq_len = 8 after split
+    if with_id:
+      el["dataset_id"] = np.int32(3)
+    return el
+
+  def test_emits_per_token_dataset_id_when_enabled(self):
+    t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=True)
+    result = t.map(self._element())
+    self.assertIn("dataset_id", result)
+    self.assertEqual(result["dataset_id"].shape, (8,))
+    self.assertTrue(np.all(result["dataset_id"] == 3))
+    self.assertEqual(result["dataset_id"].dtype, np.int32)
+
+  def test_omits_dataset_id_when_disabled(self):
+    t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=False)
+    self.assertNotIn("dataset_id", t.map(self._element()))
+
+  def test_omits_when_element_has_no_dataset_id(self):
+    t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=True)
+    self.assertNotIn("dataset_id", t.map(self._element(with_id=False)))
 
 
 if __name__ == "__main__":
