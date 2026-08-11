@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Simplified Multi-Slice Weight Transfer for MaxText using TPU-Raiden with Persistent ACK Server and Stage Profiling."""
+"""Simplified Multi-Slice Weight Transfer for MaxText using TPU-Raiden with Persistent ACK Server."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import math
 import os
 import queue
 import socket
@@ -42,7 +44,7 @@ except (ImportError, AttributeError):
 
 try:
   from tpu_raiden.api.jax import weight_synchronizer
-  from tpu_raiden.frameworks.jax import resharding_planner
+  from tpu_raiden.rpc import raiden_controller
   from tpu_raiden.rpc import raiden_service_pb2
 
   if weight_synchronizer._weight_synchronizer is None:  # pylint: disable=protected-access
@@ -158,132 +160,54 @@ def create_synthetic_weights(num_layers: int, total_size_mb: int, mesh: Mesh, sh
   return arrays
 
 
-def get_dst_sharding_for_array(arr: jax.Array, dst_mesh: Mesh, dst_sharding_spec: P) -> NamedSharding:
+def get_dst_sharding_for_array(_arr: jax.Array, dst_mesh: Mesh, dst_sharding_spec: P) -> NamedSharding:
   """Creates destination sharding for an array."""
   return NamedSharding(dst_mesh, dst_sharding_spec)
 
 
-def build_resharding_start_request(
-    flat_src: List[Any],
-    src_sharding: NamedSharding,
-    dst_sharding: NamedSharding,
-    dest_ip: str,
-    dest_port: int,
-) -> raiden_service_pb2.StartTransferRequest:
-  """Builds a StartTransferRequest protobuf containing reshard_push_schedules."""
-  start_req = raiden_service_pb2.StartTransferRequest(is_sender=True)
-  has_reshard = False
-
+def create_variable_protos(
+    flat_src: List[jax.Array],
+) -> List[raiden_service_pb2.VariableMetadataProto]:
+  """Constructs a list of VariableMetadataProto for synthetic weight matrices."""
+  protos = []
   for idx, arr in enumerate(flat_src):
-    if arr.ndim in (1, 2):
-      if arr.ndim == 1:
-        dim0, dim1 = calculate_layer_dimensions(arr.nbytes, 1)
-        global_shape = (dim0, dim1)
-      else:
-        global_shape = arr.shape
+    sharding = arr.sharding
+    if isinstance(sharding, NamedSharding):
+      mesh = sharding.mesh
+      spec = sharding.spec
+      mesh_shape = []
+      for d in range(len(arr.shape)):
+        if d < len(spec) and spec[d] is not None:
+          axis_spec = spec[d]
+          if isinstance(axis_spec, str):
+            mesh_shape.append(mesh.shape[axis_spec])
+          elif isinstance(axis_spec, tuple):
+            mesh_shape.append(math.prod(mesh.shape[axis] for axis in axis_spec))
+          else:
+            mesh_shape.append(1)
+        else:
+          mesh_shape.append(1)
+    else:
+      mesh_shape = [1] * len(arr.shape)
 
-      try:
-        chunks = resharding_planner.make_resharding_plan(global_shape, src_sharding, dst_sharding)
-      except Exception:  # pylint: disable=broad-exception-caught
-        continue
-
-      if not chunks:
-        continue
-
-      has_reshard = True
-      unit = start_req.src_units.add()
-      unit.data_name = str(idx)
-
-      src_devices = src_sharding.mesh.devices.flatten()
-      dst_devices = dst_sharding.mesh.devices.flatten()
-
-      src_map = src_sharding.devices_indices_map(global_shape)
-      dst_map = dst_sharding.devices_indices_map(global_shape)
-
-      itemsize = arr.dtype.itemsize
-
-      for chunk in chunks:
-        src_dev = src_devices[chunk.src_device_id]
-        dst_dev = dst_devices[chunk.dst_device_id]
-
-        src_row_slice, src_col_slice = src_map[src_dev]
-        dst_row_slice, dst_col_slice = dst_map[dst_dev]
-
-        has_src_cols = src_col_slice.stop is not None and src_col_slice.start is not None
-        src_cols = (src_col_slice.stop - src_col_slice.start) if has_src_cols else global_shape[1]
-
-        has_dst_cols = dst_col_slice.stop is not None and dst_col_slice.start is not None
-        dst_cols = (dst_col_slice.stop - dst_col_slice.start) if has_dst_cols else global_shape[1]
-
-        r_start, _, c_start, _ = chunk.src_slice
-        d_r_start, _, d_c_start, _ = chunk.dst_slice
-        c_rows, c_cols = chunk.shape
-
-        src_row_start = src_row_slice.start if src_row_slice.start is not None else 0
-        src_col_start = src_col_slice.start if src_col_slice.start is not None else 0
-
-        dst_row_start = dst_row_slice.start if dst_row_slice.start is not None else 0
-        dst_col_start = dst_col_slice.start if dst_col_slice.start is not None else 0
-
-        local_src_r = r_start - src_row_start
-        local_src_c = c_start - src_col_start
-
-        local_dst_r = d_r_start - dst_row_start
-        local_dst_c = d_c_start - dst_col_start
-
-        schedule = start_req.shard_push_schedules[chunk.src_device_id]
-        entry = schedule.entries.add()
-        entry.dst_peer = f"{dest_ip}:{dest_port}"
-        entry.dst_shard_idx = chunk.dst_device_id
-        entry.src_block_id = idx
-        entry.dst_block_id = idx
-        if hasattr(entry, "layer_idx"):
-          entry.layer_idx = idx
-        entry.src_offset_bytes = (local_src_r * src_cols + local_src_c) * itemsize
-        entry.dst_offset_bytes = (local_dst_r * dst_cols + local_dst_c) * itemsize
-        entry.size_bytes = c_cols * itemsize
-        if hasattr(entry, "src_stride_bytes"):
-          entry.src_stride_bytes = src_cols * itemsize
-          entry.dst_stride_bytes = dst_cols * itemsize
-          entry.count = c_rows
-
-  for idx in range(len(flat_src)):
-    start_req.skip_tiling[idx] = True
-
-  return start_req if has_reshard else start_req
-
-
-def trigger_raiden_transfer(
-    ws_source: weight_synchronizer.WeightSynchronizer,
-    dest_ip: str,
-    start_transfer_req: raiden_service_pb2.StartTransferRequest | None = None,
-    dest_port: int = 29500,
-):
-  """Triggers Raiden weight transfer over network via native C++ listener."""
-  req = raiden_service_pb2.ControlRequest(
-      command=raiden_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
-      peers=[f"{dest_ip}:{dest_port}"],
-      start_transfer_request=start_transfer_req,
-  )
-  payload = req.SerializeToString()
-  with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    sock.connect(("127.0.0.1", ws_source.listener_port))
-    sock.sendall(len(payload).to_bytes(4, "big") + payload)
-    resp_len = int.from_bytes(sock.recv(4), "big")
-    resp_bytes = sock.recv(resp_len)
-    resp = raiden_service_pb2.ControlResponse()
-    resp.ParseFromString(resp_bytes)
-    if not resp.success:
-      raise RuntimeError(f"Raiden transfer failed: {resp.message}")
+    layout = list(reversed(range(len(arr.shape))))
+    proto = raiden_service_pb2.VariableMetadataProto(
+        name=f"weights_{idx}",
+        shape=list(arr.shape),
+        mesh_shape=mesh_shape,
+        layout=layout,
+        item_size=arr.dtype.itemsize,
+        layer_idx=idx,
+    )
+    protos.append(proto)
+  return protos
 
 
 def send_completion_ack(dest_ip: str, port: int):
   """Sends a single TCP ACK to notify peer of iteration completion."""
   try:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-      s.settimeout(10.0)
-      s.connect((dest_ip, port))
-      s.sendall(b"ACK")
+    with socket.create_connection((dest_ip, port), timeout=10.0) as sock:
+      sock.sendall(b"ACK\n")
   except Exception as e:  # pylint: disable=broad-exception-caught
     print(f"Warning: Failed to send completion ACK to {dest_ip}:{port}: {e}", flush=True)
 
@@ -309,8 +233,9 @@ class PersistentACKServer:
         self.sock.settimeout(1.0)
         conn, _ = self.sock.accept()
         with conn:
-          conn.recv(1024)
-        self.queue.put(True)
+          data = conn.recv(1024)
+          if b"ACK" in data:
+            self.queue.put(True)
       except socket.timeout:
         continue
       except Exception as e:  # pylint: disable=broad-exception-caught
@@ -349,6 +274,7 @@ def wait_for_port(ip: str, port: int, timeout: float = 60.0) -> bool:
   return False
 
 
+# pylint: disable=too-many-positional-arguments,too-many-arguments
 def transfer_and_benchmark(
     args: argparse.Namespace,
     src_devices: List[Any],
@@ -378,11 +304,9 @@ def transfer_and_benchmark(
   flat_src = create_synthetic_weights(args.num_layers, args.weight_size_mb, src_mesh, src_sharding_spec)
   dst_shardings = [get_dst_sharding_for_array(arr, dst_mesh, dst_sharding_spec) for arr in flat_src]
 
-  flat_dst_init = []
-  if is_receiver:
-    flat_dst_init = [
-        jax.device_put(jnp.zeros((dim0, dim1), dtype=jnp.float32), dst_sharding) for dst_sharding in dst_shardings
-    ]
+  flat_dst_init = [
+      jax.device_put(jnp.zeros((dim0, dim1), dtype=jnp.float32), dst_sharding) for dst_sharding in dst_shardings
+  ]
 
   sender_listener_port = dest_port + 100
   receiver_listener_port = dest_port + 150
@@ -390,159 +314,156 @@ def transfer_and_benchmark(
   syncer_src = None
   syncer_dst = None
 
-  src_sharding = NamedSharding(src_mesh, src_sharding_spec)
-  dst_sharding = NamedSharding(dst_mesh, dst_sharding_spec)
-  start_req = build_resharding_start_request(flat_src, src_sharding, dst_sharding, dest_ip, dest_port)
-
   sender_ack_port = dest_port + 200
   receiver_ack_port = dest_port + 300
 
   ack_server = None
+  controller = None
+  src_unit_id = raiden_controller.RaidenId(job_name="source", job_replica_id="0", data_name="weights", data_replica_idx=0)
+  dst_unit_id = raiden_controller.RaidenId(
+      job_name="destination", job_replica_id="0", data_name="weights", data_replica_idx=0
+  )
+
   try:
     if is_sender and is_receiver:
+      syncer_src = weight_synchronizer.WeightSynchronizer(
+          flat_src, bind_ip=source_ip, listener_port=sender_listener_port, parallelism=8
+      )
+      syncer_dst = weight_synchronizer.WeightSynchronizer(
+          flat_dst_init, local_port=dest_port, listener_port=receiver_listener_port, parallelism=8
+      )
       ack_server = None
     elif is_sender:
+      syncer_src = weight_synchronizer.WeightSynchronizer(
+          flat_src, bind_ip=source_ip, listener_port=sender_listener_port, parallelism=8
+      )
       ack_server = PersistentACKServer(sender_ack_port)
       wait_for_port(dest_ip, dest_port, timeout=60.0)
+      wait_for_port(dest_ip, receiver_listener_port, timeout=60.0)
       wait_for_port(dest_ip, receiver_ack_port, timeout=60.0)
     elif is_receiver:
+      syncer_dst = weight_synchronizer.WeightSynchronizer(
+          flat_dst_init, local_port=dest_port, listener_port=receiver_listener_port, parallelism=8
+      )
       ack_server = PersistentACKServer(receiver_ack_port)
       wait_for_port(source_ip, sender_ack_port, timeout=60.0)
 
-    if is_sender:
-      syncer_src = weight_synchronizer.WeightSynchronizer(flat_src, bind_ip=source_ip, listener_port=sender_listener_port)
-    if is_receiver:
-      syncer_dst = weight_synchronizer.WeightSynchronizer(
-          flat_dst_init, local_port=dest_port, listener_port=receiver_listener_port
-      )
+    if ack_server:
+      while not ack_server.queue.empty():
+        try:
+          ack_server.queue.get_nowait()
+        except queue.Empty:
+          break
 
-    if is_receiver:
-      trigger_raiden_transfer(syncer_dst, "127.0.0.1", start_transfer_req=start_req, dest_port=receiver_listener_port)
+    if is_sender:
+      src_protos = create_variable_protos(flat_src)
+      dst_protos = create_variable_protos(flat_dst_init)
+
+      worker_rpc_client = raiden_controller.WeightSyncWorkerRpcClient()
+      controller = raiden_controller.RaidenController(
+          port=0,
+          worker_rpc_client=worker_rpc_client,
+      )
+      src_local_port = syncer_src.local_port if syncer_src and syncer_src.local_port else sender_listener_port
+      controller.register_work_unit(
+          src_unit_id,
+          shards=[f"{source_ip}:{src_local_port}"] * len(src_devices),
+          control_plane_rpc_address=f"{source_ip}:{sender_listener_port}",
+          variables=src_protos,
+      )
+      controller.register_work_unit(
+          dst_unit_id,
+          shards=[f"{dest_ip}:{dest_port}"] * len(dst_devices),
+          control_plane_rpc_address=f"{dest_ip}:{receiver_listener_port}",
+          variables=dst_protos,
+      )
 
     # 1. Warmup Iterations
     for w in range(args.warmup_iterations):
       print(f"  Warmup iteration {w + 1}/{args.warmup_iterations}...", flush=True)
-      if is_sender:
-        syncer_src.bind_weights(flat_src)
-      if is_receiver:
-        syncer_dst.bind_weights(flat_dst_init)
-
       if is_sender and is_receiver:
-        fut_d2h = syncer_src.d2h()
-        if hasattr(fut_d2h, "wait"):
-          fut_d2h.wait()
-        trigger_raiden_transfer(syncer_src, dest_ip, start_transfer_req=start_req, dest_port=dest_port)
-        fut_h2d = syncer_dst.h2d()
-        if hasattr(fut_h2d, "wait"):
-          fut_h2d.wait()
+        future = controller.start_transfer(
+            src_units=[src_unit_id],
+            dst_units=[dst_unit_id],
+            dst_mem_type=raiden_controller.RaidenMemoryType.DRAM,
+            use_block_chunks=True,
+            is_sender=True,
+        )
+        asyncio.run(future.wait())
+        syncer_dst.h2d()
       elif is_sender:
-        fut_d2h = syncer_src.d2h()
-        if hasattr(fut_d2h, "wait"):
-          fut_d2h.wait()
-        trigger_raiden_transfer(syncer_src, dest_ip, start_transfer_req=start_req, dest_port=dest_port)
+        future = controller.start_transfer(
+            src_units=[src_unit_id],
+            dst_units=[dst_unit_id],
+            dst_mem_type=raiden_controller.RaidenMemoryType.DRAM,
+            use_block_chunks=True,
+            is_sender=True,
+        )
+        asyncio.run(future.wait())
         send_completion_ack(dest_ip, receiver_ack_port)
-        ack_server.wait_for_ack(timeout=600.0)
+        if ack_server:
+          ack_server.wait_for_ack(timeout=600.0)
       elif is_receiver:
-        ack_server.wait_for_ack(timeout=600.0)
-        fut_h2d = syncer_dst.h2d()
-        if hasattr(fut_h2d, "wait"):
-          fut_h2d.wait()
+        if ack_server:
+          ack_server.wait_for_ack(timeout=600.0)
+        syncer_dst.h2d()
         send_completion_ack(source_ip, sender_ack_port)
 
-    d2h_ms_list = []
-    h2h_ms_list = []
-    h2d_ms_list = []
     e2e_ms_list = []
 
     # 2. Benchmark Iterations
     for it in range(args.iterations):
-      if is_sender:
-        syncer_src.bind_weights(flat_src)
-      if is_receiver:
-        syncer_dst.bind_weights(flat_dst_init)
-
-      t_start = time.perf_counter()
-      d2h_sec = 0.0
-      h2h_sec = 0.0
-      h2d_sec = 0.0
-
+      e2e_sec = 0.0
       if is_sender and is_receiver:
-        t0 = time.perf_counter()
-        fut_d2h = syncer_src.d2h()
-        if hasattr(fut_d2h, "wait"):
-          fut_d2h.wait()
-        d2h_sec = time.perf_counter() - t0
-
-        t0 = time.perf_counter()
-        trigger_raiden_transfer(syncer_src, dest_ip, start_transfer_req=start_req, dest_port=dest_port)
-        h2h_sec = time.perf_counter() - t0
-
-        t0 = time.perf_counter()
-        fut_h2d = syncer_dst.h2d()
-        if hasattr(fut_h2d, "wait"):
-          fut_h2d.wait()
-        h2d_sec = time.perf_counter() - t0
-
+        t_start = time.perf_counter()
+        future = controller.start_transfer(
+            src_units=[src_unit_id],
+            dst_units=[dst_unit_id],
+            dst_mem_type=raiden_controller.RaidenMemoryType.DRAM,
+            use_block_chunks=True,
+            is_sender=True,
+        )
+        asyncio.run(future.wait())
+        syncer_dst.h2d()
         t_end = time.perf_counter()
         e2e_sec = t_end - t_start
       elif is_sender:
-        t0 = time.perf_counter()
-        fut_d2h = syncer_src.d2h()
-        if hasattr(fut_d2h, "wait"):
-          fut_d2h.wait()
-        d2h_sec = time.perf_counter() - t0
-
-        t0 = time.perf_counter()
-        trigger_raiden_transfer(syncer_src, dest_ip, start_transfer_req=start_req, dest_port=dest_port)
-        h2h_sec = time.perf_counter() - t0
-
+        t_start = time.perf_counter()
+        future = controller.start_transfer(
+            src_units=[src_unit_id],
+            dst_units=[dst_unit_id],
+            dst_mem_type=raiden_controller.RaidenMemoryType.DRAM,
+            use_block_chunks=True,
+            is_sender=True,
+        )
+        asyncio.run(future.wait())
         send_completion_ack(dest_ip, receiver_ack_port)
-        ack_server.wait_for_ack(timeout=600.0)
-
+        if ack_server:
+          ack_server.wait_for_ack(timeout=600.0)
         t_end = time.perf_counter()
         e2e_sec = t_end - t_start
-        h2d_sec = max(0.0, e2e_sec - (d2h_sec + h2h_sec))
       elif is_receiver:
-        ack_server.wait_for_ack(timeout=600.0)
-
-        t0 = time.perf_counter()
-        fut_h2d = syncer_dst.h2d()
-        if hasattr(fut_h2d, "wait"):
-          fut_h2d.wait()
-        h2d_sec = time.perf_counter() - t0
-
+        if ack_server:
+          ack_server.wait_for_ack(timeout=600.0)
+        t_start = time.perf_counter()
+        syncer_dst.h2d()
+        t_end = time.perf_counter()
+        h2d_sec = t_end - t_start
+        e2e_sec = h2d_sec
         send_completion_ack(source_ip, sender_ack_port)
 
-        t_end = time.perf_counter()
-        e2e_sec = t_end - t_start
-
-      d2h_ms = d2h_sec * 1000.0
-      h2h_ms = h2h_sec * 1000.0
-      h2d_ms = h2d_sec * 1000.0
       e2e_ms = e2e_sec * 1000.0
-
-      d2h_ms_list.append(d2h_ms)
-      h2h_ms_list.append(h2h_ms)
-      h2d_ms_list.append(h2d_ms)
       e2e_ms_list.append(e2e_ms)
-
-      d2h_mbps = total_payload_mb / d2h_sec if d2h_sec > 0 else 0.0
-      h2h_mbps = total_payload_mb / h2h_sec if h2h_sec > 0 else 0.0
-      h2d_mbps = total_payload_mb / h2d_sec if h2d_sec > 0 else 0.0
       e2e_mbps = total_payload_mb / e2e_sec if e2e_sec > 0 else 0.0
 
       print(
-          f"  Iteration {it + 1}/{args.iterations}: "
-          f"D2H: {d2h_ms:.2f} ms ({d2h_mbps:.2f} MB/s) | "
-          f"H2H: {h2h_ms:.2f} ms ({h2h_mbps:.2f} MB/s) | "
-          f"H2D: {h2d_ms:.2f} ms ({h2d_mbps:.2f} MB/s) | "
-          f"E2E: {e2e_ms:.2f} ms ({e2e_mbps:.2f} MB/s)",
+          f"  Iteration {it + 1}/{args.iterations}: " f"E2E: {e2e_ms:.2f} ms ({e2e_mbps:.2f} MB/s)",
           flush=True,
       )
 
-    if is_sender:
+    if is_sender and not is_receiver:
       send_completion_ack(dest_ip, receiver_ack_port)
-    if is_receiver and ack_server:
+    if is_receiver and not is_sender and ack_server:
       ack_server.wait_for_ack(timeout=60.0)
 
   finally:
@@ -552,9 +473,6 @@ def transfer_and_benchmark(
   # 3. Correctness Verification
   if is_receiver and args.verify_correctness:
     print("Verifying transferred weight correctness on receiver...", flush=True)
-    fut_h2d = syncer_dst.h2d()
-    if hasattr(fut_h2d, "wait"):
-      fut_h2d.wait()
     for idx, (expected_arr, dst_arr) in enumerate(zip(flat_src, flat_dst_init)):
       expected_data = np.asarray(expected_arr)
       actual_data = np.asarray(dst_arr)
@@ -573,39 +491,12 @@ def transfer_and_benchmark(
         raise ValueError(f"Correctness check failed on layer {idx}!")
     print("VERIFICATION PASSED: All weights matched expected values!", flush=True)
 
-  avg_d2h_ms = float(np.mean(d2h_ms_list))
-  min_d2h_ms = float(np.min(d2h_ms_list))
-  avg_d2h_mbps = total_payload_mb / (avg_d2h_ms / 1000.0) if avg_d2h_ms > 0 else 0.0
-  min_d2h_mbps = total_payload_mb / (min_d2h_ms / 1000.0) if min_d2h_ms > 0 else 0.0
-
-  avg_h2h_ms = float(np.mean(h2h_ms_list))
-  min_h2h_ms = float(np.min(h2h_ms_list))
-  avg_h2h_mbps = total_payload_mb / (avg_h2h_ms / 1000.0) if avg_h2h_ms > 0 else 0.0
-  min_h2h_mbps = total_payload_mb / (min_h2h_ms / 1000.0) if min_h2h_ms > 0 else 0.0
-
-  avg_h2d_ms = float(np.mean(h2d_ms_list))
-  min_h2d_ms = float(np.min(h2d_ms_list))
-  avg_h2d_mbps = total_payload_mb / (avg_h2d_ms / 1000.0) if avg_h2d_ms > 0 else 0.0
-  min_h2d_mbps = total_payload_mb / (min_h2d_ms / 1000.0) if min_h2d_ms > 0 else 0.0
-
   avg_e2e_ms = float(np.mean(e2e_ms_list))
   min_e2e_ms = float(np.min(e2e_ms_list))
   avg_e2e_mbps = total_payload_mb / (avg_e2e_ms / 1000.0) if avg_e2e_ms > 0 else 0.0
   min_e2e_mbps = total_payload_mb / (min_e2e_ms / 1000.0) if min_e2e_ms > 0 else 0.0
 
-  print(f"\nStage Latency & Throughput Summary for {scenario_name}:", flush=True)
-  print(
-      f"  D2H - Avg: {avg_d2h_ms:.3f} ms ({avg_d2h_mbps:.2f} MB/s), Min: {min_d2h_ms:.3f} ms ({min_d2h_mbps:.2f} MB/s)",
-      flush=True,
-  )
-  print(
-      f"  H2H - Avg: {avg_h2h_ms:.3f} ms ({avg_h2h_mbps:.2f} MB/s), Min: {min_h2h_ms:.3f} ms ({min_h2h_mbps:.2f} MB/s)",
-      flush=True,
-  )
-  print(
-      f"  H2D - Avg: {avg_h2d_ms:.3f} ms ({avg_h2d_mbps:.2f} MB/s), Min: {min_h2d_ms:.3f} ms ({min_h2d_mbps:.2f} MB/s)",
-      flush=True,
-  )
+  print(f"\nLatency & Throughput Summary for {scenario_name}:", flush=True)
   print(
       f"  E2E - Avg: {avg_e2e_ms:.3f} ms ({avg_e2e_mbps:.2f} MB/s), Min: {min_e2e_ms:.3f} ms ({min_e2e_mbps:.2f} MB/s)",
       flush=True,
@@ -615,18 +506,10 @@ def transfer_and_benchmark(
       "scenario": scenario_name,
       "payload_bytes": total_payload_bytes,
       "payload_mb": total_payload_mb,
-      "avg_d2h_ms": avg_d2h_ms,
-      "min_d2h_ms": min_d2h_ms,
-      "avg_d2h_mbps": avg_d2h_mbps,
-      "avg_h2h_ms": avg_h2h_ms,
-      "min_h2h_ms": min_h2h_ms,
-      "avg_h2h_mbps": avg_h2h_mbps,
-      "avg_h2d_ms": avg_h2d_ms,
-      "min_h2d_ms": min_h2d_ms,
-      "avg_h2d_mbps": avg_h2d_mbps,
       "avg_e2e_ms": avg_e2e_ms,
       "min_e2e_ms": min_e2e_ms,
       "avg_e2e_mbps": avg_e2e_mbps,
+      "min_e2e_mbps": min_e2e_mbps,
   }
 
 
@@ -681,7 +564,7 @@ def main(raw_args: list[str] | None = None):
           "2D 4-way FSDP (Host 0) -> 2D 4-way TP (Host 1)",
           P("devices", None),
           P(None, "devices"),
-      ),
+      )
   ]
 
   for scenario_name, src_sharding_spec, dst_sharding_spec in scenarios:
@@ -710,14 +593,14 @@ def main(raw_args: list[str] | None = None):
       flush=True,
   )
   print(
-      f"{'Transfer Scenario':<35} | {'Payload(MB)':<11} | {'D2H(ms)':<9} |"
-      f" {'H2H(ms)':<9} | {'H2D(ms)':<9} | {'E2E(ms)':<9} | {'E2E(MB/s)':<10}"
+      f"{'Transfer Scenario':<45} | {'Payload(MB)':<11} | {'E2E Avg(ms)':<11} |"
+      f" {'E2E Min(ms)':<11} | {'E2E (MB/s)':<11}"
   )
-  print("-" * 106)
+  print("-" * 100)
   for r in results:
     print(
-        f"{r['scenario']:<35} | {r['payload_mb']:<11.2f} | {r['avg_d2h_ms']:<9.2f} | {r['avg_h2h_ms']:<9.2f} |"
-        f" {r['avg_h2d_ms']:<9.2f} | {r['avg_e2e_ms']:<9.2f} | {r['avg_e2e_mbps']:<10.2f}"
+        f"{r['scenario']:<45} | {r['payload_mb']:<11.2f} | {r['avg_e2e_ms']:<11.2f} |"
+        f" {r['min_e2e_ms']:<11.2f} | {r['avg_e2e_mbps']:<11.2f}"
     )
   print(
       "==========================================================================================================",
