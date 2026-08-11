@@ -1089,7 +1089,7 @@ class NNXDecoder(nnx.Module):
       new_params, new_rest = scanned_state.split(nnx.Param, ...)
       out_layers = nnx.merge(updated_graphdef[0], new_params, new_rest)
     else:
-      clean_state = nnx.filter_state(scanned_state, nnx.Not((nnx.RngState, nnx.Intermediate)))
+      clean_state = nnx.filter_state(scanned_state, nnx.Not(nnx.RngState))
       nnx.update(layers, clean_state)
       out_layers = layers
 
