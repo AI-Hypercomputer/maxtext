@@ -68,9 +68,26 @@ jobs:
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+  run_ci_tests:
+    name: Run ${{ matrix.name }} CI Tests
+    needs: build_and_push_docker_images
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Pre-Training"
+            image_name: maxtext_gpu_jax_stable
+            workflow: pre-training
+    uses: ./.github/workflows/run_ci_tests.yml
+    with:
+      image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+      image_tag: ${{ github.run_id }}
+      device: gpu
+      workflow: ${{ matrix.workflow }}
+
   notify_failure:
     name: Notify failed build
-    needs: [build_and_push_docker_images]
+    needs: [build_and_push_docker_images, run_ci_tests]
     if: ${{ failure() && inputs.image_suffix == '' }}
     runs-on: ubuntu-latest
     permissions:
@@ -80,5 +97,5 @@ jobs:
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          title-template: "MaxText Docker Image Build Failure"
+          title-template: "MaxText GPU Docker Image Build Failure"
           label-name: "docker-image-build-failure"

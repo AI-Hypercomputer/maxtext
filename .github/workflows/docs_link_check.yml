@@ -33,6 +33,7 @@ permissions:
 
 jobs:
   linkcheck:
+    name: Check Documentation Links
     runs-on: ubuntu-latest
 
     steps:

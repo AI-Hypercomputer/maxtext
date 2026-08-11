@@ -68,6 +68,7 @@ permissions:
 
 jobs:
   run:
+    name: ${{ format('tpu-pathways-{0}', !contains(inputs.pytest_marker, 'not integration_test') && 'integration' || 'unit') }}
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
       image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
