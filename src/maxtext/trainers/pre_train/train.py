@@ -153,6 +153,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         mutable=mutable_collections,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
+        forced_routed_experts=data.get("forced_routed_experts", None),
     )
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
@@ -200,6 +201,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
+        forced_routed_experts=data.get("forced_routed_experts", None),
     )
     # mtp_losses and mtp_acceptance subclass nnx.Intermediate, and nnx type filters match
     # subclasses. Pop them before the generic Intermediate pop below, which would otherwise

@@ -1590,9 +1590,13 @@ class NNXDecoder(nnx.Module):
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
       multimodal_input: None | MultimodalInput = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
+
+    if cfg.scan_layers and forced_routed_experts is not None:
+      raise NotImplementedError("Forced routing with scanned layers is not supported yet.")
 
     policy = self.get_remat_policy()
 
@@ -1637,6 +1641,9 @@ class NNXDecoder(nnx.Module):
     if cfg.engram_layers and decoder_input_tokens is not None:
       layer_kwargs["decoder_input_tokens"] = decoder_input_tokens
 
+    if forced_routed_experts is not None:
+      layer_kwargs["forced_routed_experts"] = forced_routed_experts
+
     if getattr(cfg, "using_pipeline_parallelism", False):
       logical_partition_spec = (
           self.pipeline_module.get_weight_sharding()
@@ -1644,6 +1651,7 @@ class NNXDecoder(nnx.Module):
           else None
       )
 
+    if cfg.scan_layers:
       if self.is_deepseek:
         # Pre-pipeline: dense layers + outside-pipeline MoE layers under PP-as-DP axis rules.
         logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
@@ -1768,7 +1776,6 @@ class NNXDecoder(nnx.Module):
                 "layer_kwargs": layer_kwargs,
                 "decoder_input_tokens": decoder_input_tokens,
             }
-
             y = self._apply_interleaved_scanned_layers(
                 y,
                 "dense_layers",
@@ -1778,7 +1785,6 @@ class NNXDecoder(nnx.Module):
                 *layer_args,
                 **common_kwargs,
             )
-
             y = self._apply_interleaved_scanned_layers(
                 y,
                 "moe_layers",
@@ -1886,14 +1892,16 @@ class NNXDecoder(nnx.Module):
         prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
         dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
 
-        def pure_layer_fn(graphdef_in, state_in, y_in, kv_in):
+        def pure_layer_fn(graphdef_in, state_in, y_in, kv_in, valid_kwargs=None):
+          if valid_kwargs is None:
+            valid_kwargs = layer_kwargs
           if cfg.parameter_memory_host_offload:
             state_in = jax.tree.map(
                 lambda x: jax.device_put(x, max_utils.device_space()),
                 state_in,
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
-          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
+          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
           state_out = nnx.state(merged_layer)
 
           if dynamic_graph_init:
@@ -1904,6 +1912,7 @@ class NNXDecoder(nnx.Module):
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
+        moe_lyr_idx = 0
         for lyr in range(cfg.num_decoder_layers):
           if self.is_deepseek:
             if lyr < cfg.first_num_dense_layers:
@@ -1943,10 +1952,38 @@ class NNXDecoder(nnx.Module):
           if input_tokens is not None:
             layer_kwargs["decoder_input_tokens"] = input_tokens
 
-          if cfg.remat_policy != "none":
-            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache)
+          current_kwargs = dict(layer_kwargs)
+
+          is_moe = False
+          if cfg.decoder_block in (
+              DecoderBlockType.MIXTRAL,
+              DecoderBlockType.QWEN3_MOE,
+              DecoderBlockType.QWEN3_NEXT,
+              DecoderBlockType.QWEN3_5,
+              DecoderBlockType.QWEN3_CUSTOM_MOE,
+          ):
+            is_moe = True
+          elif cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+            is_moe = lyr >= cfg.first_num_dense_layers
+          elif cfg.decoder_block == DecoderBlockType.LLAMA4:
+            is_moe = llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step)
+
+          if is_moe and "forced_routed_experts" in current_kwargs and current_kwargs["forced_routed_experts"] is not None:
+            routed_experts = current_kwargs["forced_routed_experts"]
+            if routed_experts.ndim == 4:
+              current_kwargs["forced_routed_experts"] = routed_experts[:, :, moe_lyr_idx, :]
+            else:
+              current_kwargs["forced_routed_experts"] = routed_experts
+            moe_lyr_idx += 1
           else:
-            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache)
+            current_kwargs.pop("forced_routed_experts", None)
+            if is_moe:
+              moe_lyr_idx += 1
+
+          if cfg.remat_policy != "none":
+            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
+          else:
+            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
 
           if dynamic_graph_init:
             new_layer = nnx.merge(new_graphdef, new_state)
