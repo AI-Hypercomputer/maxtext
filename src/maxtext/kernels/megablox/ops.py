@@ -27,6 +27,7 @@ from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.layers import quantizations
 import qwix
 import qwix.pallas as qpl
+from qwix._src.core.qarray import call_with_generic_broadcast
 import tokamax
 
 
@@ -102,13 +103,18 @@ def gmm(
           act_calibration_method="absmax",
       )
 
+  lhs_scale = None
+  if isinstance(lhs, qpl.QArray):
+    lhs_scale = lhs.scale
+    lhs = lhs.qvalue
+
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
       nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
-  return gmm_fwd_bwd(
+  out = gmm_fwd_bwd(
       lhs,
       rhs,
       group_sizes,
@@ -127,6 +133,9 @@ def gmm(
       use_gmm_v2,
       partial_sum,
   )
+  if lhs_scale is not None:
+    out = call_with_generic_broadcast(jnp.multiply, out, lhs_scale.astype(out.dtype))
+  return out
 
 
 # ==============================================================================
@@ -202,15 +211,7 @@ def _gmm_fwd(
     out = _fwd_run_tokamax_v1(lhs, rhs, group_sizes, preferred_element_type, transpose_rhs, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
     out = _fwd_run_tokamax_v2(
-        lhs,
-        rhs,
-        group_sizes,
-        preferred_element_type,
-        tiling,
-        group_offset,
-        partial_sum,
-        transpose_rhs,
-        quantization_rule,
+        lhs, rhs, group_sizes, preferred_element_type, tiling, group_offset, partial_sum, transpose_rhs
     )
   else:
     out = _fwd_run_megablox(
@@ -238,7 +239,11 @@ def _fwd_quantize_activation_and_weight(
     transpose_rhs: bool,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
-  if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2:
+  if (
+      quantization_rule.act_qtype
+      and not isinstance(lhs, qpl.QArray)
+      and not (jnp.issubdtype(lhs.dtype, jnp.integer) or jnp.issubdtype(lhs.dtype, jnp.float8_e4m3fn))
+  ):
     lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
         lhs,
         quantization_rule.act_qtype,
@@ -330,36 +335,6 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
   return jnp.broadcast_to(rhs_scale, (G, num_quant_blocks, 1, N))
 
 
-def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array | None:
-  """Extracts the static LHS (activation) scale for the GMM v2 forward pass.
-
-  If a static scale is used, GMM v2 requires it to be from a symmetric fixed-range
-  calibration (e.g., 'fixed,-max,max' or 'fixed,max'). If no static scale is
-  provided, the kernel will compute a dynamic scale on the fly.
-
-  Enforces a default (1, 1) shape for per-tensor quantization kernels.
-
-  Args:
-    quantization_rule: The Qwix quantization rule from which to extract the scale.
-
-  Returns:
-    The extracted static scale array, or None if not using purely fixed calibration.
-  """
-  if quantization_rule is None:
-    return None
-
-  method = quantization_rule.act_calibration_method
-  qtype = quantization_rule.act_qtype
-
-  # Use dynamic quantization, gmm_v2 calculates dynamic scale internally
-  if method is None or qtype is None or not method.lower().startswith("fixed"):
-    return None
-
-  scale_val = quantizations.get_static_scale(qtype, method)
-
-  return jnp.full((1, 1), scale_val, jnp.float32)
-
-
 def _fwd_run_tokamax_v2(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
@@ -369,7 +344,6 @@ def _fwd_run_tokamax_v2(
     group_offset: jnp.ndarray | None,
     partial_sum: jnp.ndarray | None,
     transpose_rhs: bool,
-    quantization_rule: qwix.QtRule | None = None,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
   # if transpose_rhs=False, rhs is [g, k, n], remain unchanged
@@ -382,23 +356,39 @@ def _fwd_run_tokamax_v2(
     rhs_operand = rhs_operand.qvalue
     rhs_scale = _fwd_prepare_rhs_scale(rhs, transpose_rhs=transpose_rhs)
 
+  lhs_operand = lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs
+  maybe_quantize_lhs = not isinstance(lhs, qpl.QArray) and not (
+      jnp.issubdtype(lhs_operand.dtype, jnp.integer) or jnp.issubdtype(lhs_operand.dtype, jnp.float8_e4m3fn)
+  )
+
   custom_fwd_tiling = gmm_v2.TileSizes(
       tile_m=tiling[0],
       tile_k=tiling[1],
       tile_n=tiling[2],
   )
 
-  return gmm_v2.gmm_v2(
-      lhs=lhs,  # pyrefly: ignore[bad-argument-type]
+  eff_pref_dtype = (
+      jnp.bfloat16
+      if (jnp.issubdtype(lhs_operand.dtype, jnp.integer) or jnp.issubdtype(lhs_operand.dtype, jnp.float8_e4m3fn))
+      else preferred_element_type
+  )
+
+  out = gmm_v2.gmm_v2(
+      lhs=lhs_operand,  # pyrefly: ignore[bad-argument-type]
       rhs=rhs_operand,  # pyrefly: ignore[bad-argument-type]
       group_sizes=group_sizes,
       rhs_scale=rhs_scale,
       tile_info=custom_fwd_tiling,
-      preferred_element_type=preferred_element_type,
+      preferred_element_type=eff_pref_dtype,
       partial_sum=partial_sum,
       group_offset=group_offset,
-      lhs_scale=_fwd_prepare_lhs_scale(quantization_rule),
+      maybe_quantize_lhs=maybe_quantize_lhs,
   )
+
+  if isinstance(lhs, qpl.QArray):
+    out *= lhs.scale.astype(out.dtype)
+
+  return out
 
 
 def _fwd_run_megablox(
@@ -560,7 +550,12 @@ def _bwd_prepare_inputs(
 
   # GMM2 FWD performs lhs quantization inside kernel, lhs is stored as unquantized dtype
   # in the residual tuple. In BWD, we explicitly quantize lhs.
-  if quantization_rule and quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
+  if (
+      quantization_rule
+      and quantization_rule.act_qtype
+      and not isinstance(lhs, qpl.QArray)
+      and not (jnp.issubdtype(lhs.dtype, jnp.integer) or jnp.issubdtype(lhs.dtype, jnp.float8_e4m3fn))
+  ):
     lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
         lhs,
         quantization_rule.act_qtype,

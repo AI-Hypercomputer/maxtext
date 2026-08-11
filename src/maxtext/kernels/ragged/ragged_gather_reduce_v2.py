@@ -18,6 +18,7 @@
 
 import dataclasses
 import functools
+import math
 from typing import Any
 
 import jax
@@ -175,6 +176,10 @@ def _fallback_implementation(
     reduce_group_size: int,
 ) -> jax.Array:
   """Fallback implementation using JAX ops for non-SparseCore TPU or small inputs."""
+  if hasattr(x, "scale") and hasattr(x, "qvalue"):
+    import qwix  # pylint: disable=import-outside-toplevel
+
+    x = qwix.dequantize(x)
   out = x[indices] * topk_weights[:, None].astype(jnp.float32)
   out = jnp.where(valid_rows_mask[:, None], out, 0)
   out = out.reshape(-1, reduce_group_size, out.shape[-1])
@@ -196,26 +201,16 @@ def _calculate_num_column_partitions(
   preferred_num_stages = 4
   num_column_partitions = 1
   while (
-      num_cores % (num_column_partitions * 2) == 0
+      (num_cores == 2 or num_cores % (num_column_partitions * 2) == 0)
       and hidden_size % (num_lanes * num_column_partitions * 2) == 0
       and hidden_size // (num_column_partitions * 2 * num_lanes) >= preferred_num_stages
   ):
     next_candidate = num_column_partitions * 2
-    next_row_partitions = num_cores // next_candidate
-
-    # Calculate exactly how many pipeline invocations (outer loop)
-    _, row_chunk_size = _calculate_row_tiling(input_size, num_simd_lanes, next_row_partitions)
-    num_iterations = input_size // (row_chunk_size * next_row_partitions)
 
     # Ensure we satisfy the hardware constraint (num_row_partitions <= num_simd_lanes) first.
     if num_cores // num_column_partitions > num_simd_lanes:
       num_column_partitions = next_candidate
       continue
-
-    # Too many iterations cause high cumulative pipeline overhead. Set the
-    # limit based on empirical data.
-    if num_iterations > _CostModelConstants.MAX_ITERATIONS:
-      break
 
     num_column_partitions = next_candidate
 
@@ -228,8 +223,8 @@ def _calculate_row_tiling(
     num_row_partitions: int,
 ) -> tuple[int, int]:
   """Calculates the number of row subchunks and row chunk size."""
-  base_block_size = num_simd_lanes * num_row_partitions
-  num_row_subchunks = max(1, min(4, pl.cdiv(input_size, base_block_size)))
+  base_block_size = max(1, num_simd_lanes * num_row_partitions)
+  num_row_subchunks = max(1, min(2, math.ceil(int(input_size) / base_block_size)))
   row_chunk_size = num_simd_lanes * num_row_subchunks
   return num_row_subchunks, row_chunk_size
 
@@ -625,14 +620,7 @@ def main_kernel(
 
 
 @functools.partial(
-    jax.jit,
-    static_argnames=(
-        "reduce_group_size",
-        "enforce_fallback",
-        "flops_override",
-        "bytes_accessed_override",
-        "use_single_sparsecore",
-    ),
+    jax.jit, static_argnames=("reduce_group_size", "enforce_fallback", "flops_override", "bytes_accessed_override")
 )
 def ragged_gather_reduce(
     x: jax.Array,
@@ -643,7 +631,6 @@ def ragged_gather_reduce(
     enforce_fallback: bool = False,
     flops_override: int = -1,
     bytes_accessed_override: int = -1,
-    use_single_sparsecore: bool = False,
 ) -> jax.Array:
   """Gathers ``x`` by ``indices``, weights and masks, then reduces by group.
 
@@ -681,12 +668,12 @@ def ragged_gather_reduce(
   input_size = indices.size
   num_simd_lanes = sc_info.num_lanes
   num_lanes = pltpu.get_tpu_info().num_lanes
-  num_sc_cores = 1 if use_single_sparsecore else sc_info.num_cores
-  num_cores = num_sc_cores * sc_info.num_subcores
+  num_cores = sc_info.num_cores * sc_info.num_subcores
 
   num_column_partitions = _calculate_num_column_partitions(hidden_size, input_size, num_cores, num_lanes, num_simd_lanes)
   num_row_partitions = num_cores // num_column_partitions
-  assert num_row_partitions <= num_simd_lanes, f"{num_row_partitions=} must be <= {num_simd_lanes=}"
+  if num_row_partitions > num_simd_lanes:
+    return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
   num_row_subchunks, row_chunk_size = _calculate_row_tiling(input_size, num_simd_lanes, num_row_partitions)
 
   aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
@@ -720,7 +707,7 @@ def ragged_gather_reduce(
 
   # Step 4: Launch the SparseCore kernel.
   vector_mesh = plsc.VectorSubcoreMesh(
-      num_cores=num_sc_cores,
+      num_cores=sc_info.num_cores,
       num_subcores=sc_info.num_subcores,
       core_axis_name="core",
       subcore_axis_name="subcore",
@@ -760,7 +747,7 @@ def ragged_gather_reduce(
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
       ),
-      scratch_types=(  # pyrefly: ignore[bad-argument-type]
+      scratch_types=(
           _Scratch(
               num_rows_per_row_partition_vmem=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               prev_iter_last_row_vmem=pltpu.VMEM((col_size // col_chunk_size, col_chunk_size), jnp.float32),

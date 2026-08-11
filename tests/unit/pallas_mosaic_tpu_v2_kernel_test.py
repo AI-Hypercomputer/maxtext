@@ -1068,6 +1068,51 @@ class GmmTest(parameterized.TestCase):
 
     chex.assert_trees_all_close(actual, expected, atol=atol, rtol=rtol)
 
+  def test_gmm_prequantized_activation(self):
+    """Test GMM v2 with pre-quantized activation vs in-kernel quantization."""
+    batch_size = 128
+    in_size = 512
+    out_size = 512
+    num_groups = 4
+    group_offset = 0
+
+    num_local_groups = num_groups - group_offset
+    key = jax.random.key(0)
+    k0, k1 = jax.random.split(key, 2)
+
+    lhs_float = jax.random.normal(k0, (batch_size, in_size), dtype=jnp.bfloat16)
+    rhs_float = jax.random.normal(k1, (num_local_groups, in_size, out_size), dtype=jnp.bfloat16)
+
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    group_offset_arr = jnp.array([group_offset], dtype=jnp.int32)
+
+    rhs_q, rhs_scale = quantize_tensor(rhs_float, jnp.int8, axis=1, block_size=256)
+    rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
+
+    # 1. In-kernel dynamic activation quantization
+    actual_inkernel = gmm_backend.gmm_v2(
+        lhs_float,
+        rhs_q,
+        group_sizes,
+        rhs_scale=rhs_scale,
+        group_offset=group_offset_arr,
+        maybe_quantize_lhs=True,
+    )
+
+    # 2. Pre-quantized activation
+    lhs_q, lhs_scale = quantize_tensor(lhs_float, jnp.int8, axis=1, block_size=in_size)
+    actual_prequantized = gmm_backend.gmm_v2(
+        lhs_q,
+        rhs_q,
+        group_sizes,
+        rhs_scale=rhs_scale,
+        lhs_scale=lhs_scale,
+        group_offset=group_offset_arr,
+        maybe_quantize_lhs=False,
+    )
+
+    assert_arrays_all_close(actual_prequantized, actual_inkernel, atol=1e-2, rtol=1e-2)
+
 
 if __name__ == "__main__":
   absltest.main()
