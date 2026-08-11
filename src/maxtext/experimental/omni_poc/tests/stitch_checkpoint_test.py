@@ -52,12 +52,13 @@ from orbax import checkpoint as ocp
 
 from maxtext.configs import pyconfig
 from maxtext.experimental.omni_poc.utils import stitch_checkpoint
+from maxtext.layers import encoders
 from maxtext.layers.embeddings import Embed
 from maxtext.models import gemma3
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
-from maxtext.utils.globals import MAXTEXT_REPO_ROOT
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -120,9 +121,7 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
   def _create_config(self):
     """Creates a MaxText config from the Omni config file and defaults."""
     omni_config_path = os.path.join(
-        MAXTEXT_REPO_ROOT,
-        "src",
-        "maxtext",
+        MAXTEXT_PKG_DIR,
         "experimental",
         "omni_poc",
         "omni-gemma3-qwen3.yml",
@@ -136,10 +135,12 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
         "stitched_output_path",
         "vision_model_name",
         "llm_model_name",
+        "base_config",
+        "model_name",
     }
     yaml_overrides = {k: v for k, v in custom_cfg.items() if k not in omni_keys}
 
-    base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
+    base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
     config = pyconfig.initialize(
         ["", base_config_path],
         override_model_config=True,
@@ -151,6 +152,7 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
         **yaml_overrides,
     )
     # Use object.__setattr__ to bypass the read-only check on _HyperParameters
+    object.__setattr__(config, "model_name", custom_cfg.get("model_name", "omni-gemma3-qwen3"))
     object.__setattr__(config, "vision_model_name", "gemma3-4b")
     object.__setattr__(config, "llm_model_name", "qwen3-4b")
     object.__setattr__(config, "ici_context_autoregressive_parallelism", 1)
@@ -206,7 +208,11 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
       stitched_inner = stitch_checkpoint._restore_subtrees_from_path(self.output_ckpt_dir, concrete_template, ckptr)
 
       # Load weights from the ORIGINAL Vision checkpoint
-      vision_abstract = concrete_template["vision_encoder"]
+      vision_abstract = {
+          k: v
+          for k, v in concrete_template["vision_encoder"].items()
+          if not ("projector" in k.lower() or "embedder" in k.lower())
+      }
       vision_restored = stitch_checkpoint._restore_subtrees_from_path(
           self.vision_ckpt_dir, {"vision_encoder": vision_abstract}, ckptr
       )
@@ -324,17 +330,13 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
         stitched_inner["token_embedder"]["embedding"].reshape(-1)[:10],
     )
     print(
-        "orig vision projector weights first 10 values:",
-        vision_restored["vision_encoder"]["VisionEmbedder_0"]["mm_input_projection"]["w"].reshape(-1)[:10],
-    )
-    print(
         "stitched vision projector weights first 10 values:",
-        stitched_inner["vision_encoder"]["VisionEmbedder_0"]["mm_input_projection"]["w"].reshape(-1)[:10],
+        stitched_inner["vision_encoder"]["VisionEmbedder_0"]["custom_linear_0"]["kernel"].reshape(-1)[:10],
     )
 
     # Instantiate and update original vision & token embedder modules
     orig_vision_tower = gemma3.Gemma3VisionEncoderLayer(config, self.test_mesh, rngs=rngs)
-    orig_projector = gemma3.VisionEmbedder(config, self.test_mesh, rngs=rngs)
+    orig_projector = encoders.MultimodalMLPProjector(config, self.test_mesh, rngs=nnx.Rngs(1))
     # Manually define qwen3's token embedder to match MaxText's structures
     orig_token_embedder = Embed(
         num_embeddings=config.vocab_size,
@@ -349,17 +351,13 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
         vision_restored["vision_encoder"]["Gemma3VisionEncoderLayer_0"],
     )
     nnx.update(
-        orig_projector,
-        vision_restored["vision_encoder"]["VisionEmbedder_0"],
-    )
-    nnx.update(
         orig_token_embedder,
         {"embedding": llm_restored["token_embedder"]["embedding"]},
     )
 
     # Instantiate and update stitched vision & token embedder modules
     stitched_vision_tower = gemma3.Gemma3VisionEncoderLayer(config, self.test_mesh, rngs=rngs)
-    stitched_projector = gemma3.VisionEmbedder(config, self.test_mesh, rngs=rngs)
+    stitched_projector = encoders.MultimodalMLPProjector(config, self.test_mesh, rngs=rngs)
     stitched_token_embedder = Embed(
         num_embeddings=config.vocab_size,
         num_features=config.emb_dim,

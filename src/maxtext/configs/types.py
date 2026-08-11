@@ -248,6 +248,7 @@ ModelName = Literal[
     "gemma2-27b",
     "gemma3-4b",
     "gemma3-12b",
+    "omni-gemma3-qwen3",
     "gemma3-27b",
     "gemma4-26b",
     "gemma4-31b",
@@ -3853,6 +3854,7 @@ class MaxTextConfig(
           "qwen3-vl-30b-a3b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
+          "omni-gemma3-qwen3",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")

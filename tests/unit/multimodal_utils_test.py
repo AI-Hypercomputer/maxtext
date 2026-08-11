@@ -500,6 +500,29 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
     with self.assertRaises(ValueError):
       mm_processor.preprocess_image_for_training([dummy_image], config_text_only)
 
+  def test_omni_gemma3_qwen3_processor_routing(self):
+    # pylint: disable=protected-access,import-outside-toplevel
+    self.assertEqual(mm_processor._get_vision_block("omni-gemma3-qwen3"), "gemma3")
+    self.assertEqual(mm_processor._get_decoder_block("omni-gemma3-qwen3"), "qwen3")
+
+    omni_config = types.SimpleNamespace(
+        vision_encoder_block=VisionEncoderBlockType.GEMMA3,
+        decoder_block=DecoderBlockType.QWEN3,
+        model_name="omni-gemma3-qwen3",
+    )
+    self.assertEqual(mm_processor.get_image_offsets(omni_config, None), 255)
+
+    from maxtext.experimental.omni_poc.utils import processor_omni_gemma3_qwen3
+
+    tokens = [1, processor_omni_gemma3_qwen3.IMAGE_PAD_ID, 2]
+    fused = mm_processor.prepare_text_for_image_fusion(tokens, config=omni_config)
+    self.assertEqual(len(fused), 1 + 256 + 1)
+
+    mask = mm_processor.get_bidirectional_mask_vision(
+        omni_config, np.array([[10, processor_omni_gemma3_qwen3.IMAGE_PAD_ID]])
+    )
+    np.testing.assert_array_equal(mask, [[False, True]])
+
 
 if __name__ == "__main__":
   unittest.main()
