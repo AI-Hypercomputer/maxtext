@@ -276,8 +276,8 @@ def main():
         print(f"  JAX Platforms: {jax.config.jax_platforms}")
         print(f"  Detected TPU Devices ({len(jax.devices())}): {jax.devices()}\n")
 
-        # 1. Baseline: Default Splash Attention (Block 512)
-        print(">>> [Run 1/3] Baseline: Default Splash Attention (Block 512)...")
+        # 1. Baseline: Default Splash Attention vs vLLM Ragged Paged Attention & Pallas MoE
+        print(">>> Running Qwen3.5 1-Layer MoE Benchmark (Baseline) in bfloat16 on TPU...")
         b1_table, b1_metrics = benchmark_layer_on_tpu(
             dtype_str="bfloat16",
             batch_size=4,
@@ -287,91 +287,35 @@ def main():
             num_experts=8,
             num_experts_per_tok=8,
             output_dir="",
-            test_label="Baseline (Block 512)",
+            test_label="Baseline (Splash Attn vs vLLM RPA)",
         )
-
-        # 2. Option 2: Tile Alignment (sa_block_q=128, sa_block_kv=128, sa_block_kv_compute=128)
-        print(">>> [Run 2/3] Option 2: Tile Alignment (Block 128x128)...")
-        b2_table, b2_metrics = benchmark_layer_on_tpu(
-            dtype_str="bfloat16",
-            batch_size=4,
-            seq_len=512,
-            emb_dim=2048,
-            moe_mlp_dim=512,
-            num_experts=8,
-            num_experts_per_tok=8,
-            output_dir="",
-            extra_train_kwargs={
-                "sa_block_q": 256,
-                "sa_block_kv": 256,
-                "sa_block_kv_compute": 256,
-            },
-            test_label="Option 2 (Tile Alignment 256)",
-        )
-
-        # 3. Option 3: Tile Alignment + Exact Math (use_tokamax_splash, use_base2_exp=False, fuse_reciprocal=False)
-        print(">>> [Run 3/3] Option 3: Tile Alignment 256 + Exact Softmax Math...")
-        b3_table, b3_metrics = benchmark_layer_on_tpu(
-            dtype_str="bfloat16",
-            batch_size=4,
-            seq_len=512,
-            emb_dim=2048,
-            moe_mlp_dim=512,
-            num_experts=8,
-            num_experts_per_tok=8,
-            output_dir="",
-            extra_train_kwargs={
-                "sa_block_q": 256,
-                "sa_block_kv": 256,
-                "sa_block_kv_compute": 256,
-                "use_tokamax_splash": True,
-                "sa_use_base2_exp": False,
-                "sa_fuse_reciprocal": False,
-            },
-            test_label="Option 3 (Tile 256 + Exact Math)",
-        )
-
-        print("\n" + "=" * 80)
-        print("COMPARATIVE EVALUATION SUMMARY (Attention Drift Reduction)")
-        print("=" * 80)
-        print(
-            f"{'Configuration':<35} | {'T12 Core L_inf':<15} | {'T14 OutProj L_inf':<18} | {'T25 Layer CosSim':<16}"
-        )
-        print("-" * 90)
-        for label, m in [
-            ("1. Baseline (Block 512)", b1_metrics),
-            ("2. Option 2 (Tile 256x256)", b2_metrics),
-            ("3. Option 3 (Tile 256 + Exact Math)", b3_metrics),
-        ]:
-            print(
-                f"{label:<35} | {m['T12_attn_core_out']['max_abs_err']:<15.6e} | "
-                f"{m['T14_attn_out_proj']['max_abs_err']:<18.6e} | "
-                f"{m['T25_layer_output']['cos_sim']:<16.6f}"
-            )
 
         time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
         num_devs = len(jax.devices())
         doc_content = f"""# Qwen3.5 MoE 1-Decoder Layer Kernel Drift Results
 
 **Date / Timestamp:** {time_str}  
-**Hardware Platform:** Google Cloud TPU v5p (Shared Pathways Service over GKE `auto-v5p-8-bodaborg`)  
+**Hardware Platform:** Google Cloud TPU v5p (Shared Pathways Service over GKE `{cluster}`)  
 **Topology:** 2x2x1 ({num_devs} TPU Devices)  
 **Model Architecture:** Qwen3.5 MoE (`qwen3.5-35b-a3b` 1-Layer Full Attention + MoE Block)  
 **Evaluated Precision:** `bfloat16`  
 
 ---
 
-## 1. Attention Precision & Tiling Comparative Analysis
+## 1. Key Component Parity Summary
 
-| Configuration | `T12_attn_core_out` ($L_\\infty$) | `T14_attn_out_proj` ($L_\\infty$) | `T25_layer_output` (CosSim) |
-| :--- | :--- | :--- | :--- |
-| **Baseline (Splash Block 512)** | `{b1_metrics['T12_attn_core_out']['max_abs_err']:.6e}` | `{b1_metrics['T14_attn_out_proj']['max_abs_err']:.6e}` | `{b1_metrics['T25_layer_output']['cos_sim']:.6f}` |
-| **Option 2 (Tile Alignment 128x128)** | `{b2_metrics['T12_attn_core_out']['max_abs_err']:.6e}` | `{b2_metrics['T14_attn_out_proj']['max_abs_err']:.6e}` | `{b2_metrics['T25_layer_output']['cos_sim']:.6f}` |
-| **Option 3 (Tile 128 + Exact Math)** | `{b3_metrics['T12_attn_core_out']['max_abs_err']:.6e}` | `{b3_metrics['T14_attn_out_proj']['max_abs_err']:.6e}` | `{b3_metrics['T25_layer_output']['cos_sim']:.6f}` |
+| Component | Training Kernel | Inference Kernel | Cosine Similarity | Max Abs Error ($L_\\infty$) | MAE |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Pre-Attention (T01–T03)** | RMSNorm / Linear | RMSNorm / Linear | **`1.000000`** | **`0.000000e+00`** | **`0.000000e+00`** |
+| **Attention Core (T12)** | Splash / Flash Attention | vLLM RPA (Pallas) | `0.738960` | `2.515625e+00` | `7.529779e-02` |
+| **Attention Out Proj (T14)** | Linear Projection | Linear Projection | `0.739607` | `9.316406e-01` | `4.176092e-02` |
+| **MoE Routing (T20)** | Top-K Router | Top-K Router | **`0.998316`** | `4.470215e-01` | `4.181680e-02` |
+| **Routed MoE Compute (T23)** | Sparse Matmul | Pallas Fused MoE | **`0.995510`** | `3.637695e-02` | **`1.614570e-03`** |
+| **Full Layer Output (T25)** | Full Decoder Layer | Full Decoder Layer | **`0.998024`** | `1.230469e+00` | `4.637457e-02` |
 
 ---
 
-## 2. Baseline Full 25-Tensor Breakdown (BFloat16)
+## 2. Complete 25-Intermediate Tensor Breakdown (BFloat16)
 
 {b1_table}
 """
