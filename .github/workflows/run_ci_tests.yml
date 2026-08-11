@@ -65,7 +65,7 @@ jobs:
             ${{ fromJSON('{
               "gpu-pre-training": ["gpu-unit", "gpu-integration"],
               "tpu-post-training": ["tpu-post-training-unit", "tpu-post-training-integration", "cpu-post-training-unit"],
-              "tpu-pre-training": ["tpu-unit", "tpu-integration", "cpu-unit"]
+              "tpu-pre-training": ["tpu-unit", "tpu-integration", "cpu-unit", "cpu-integration"]
             }')[format('{0}-{1}', inputs.device, inputs.workflow)] }}
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
