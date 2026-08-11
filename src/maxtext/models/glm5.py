@@ -49,14 +49,21 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
 
     # GLM-5.2 Cross-Layer IndexShare Role Resolution
     self.is_index_share_enabled = getattr(config, "use_index_share", False)
-    self.is_shared_layer = False
-    self.served_group_size = 1
     if self.is_index_share_enabled and layer_idx >= 0:
       from maxtext.utils import index_share_utils
+      import absl.logging
 
       pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
       self.is_shared_layer = index_share_utils.is_shared_layer(layer_idx, pattern)
       self.served_group_size = index_share_utils.get_served_group_sizes(pattern)[layer_idx]
+      if layer_idx == 0:
+        num_f = pattern.count("F")
+        num_s = pattern.count("S")
+        absl.logging.info(
+            f"[GLM-5.2 IndexShare Active] Total layers: {config.num_decoder_layers} | "
+            f"Pattern: {config.index_share_pattern} | Full (F) layers with active indexers: {num_f} | "
+            f"Shared (S) layers with pruned indexers: {num_s} (Pruned {num_s / config.num_decoder_layers * 100:.1f}% indexer compute/parameters)"
+        )
 
     # Re-initialize MLA with GLM-specific IndexShare configuration
     self.self_attention = attention_mla.MLA(

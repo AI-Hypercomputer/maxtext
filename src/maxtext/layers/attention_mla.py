@@ -1310,22 +1310,28 @@ class MLA(Attention):
       is_shared = getattr(self.config, "use_index_share", False) and self.is_shared_layer
       if self.indexer is not None and not is_shared:
         # Full (F) layer: run indexer forward pass
-        indexer_mask, topk_indices, indexer_score = self.indexer(
-            inputs_q=inputs_q,
-            low_rank_q=low_rank_q,
-            inputs_kv=inputs_kv,
-            inputs_positions=inputs_positions,
-            attention_mask=attention_mask,
-            decoder_segment_ids=decoder_segment_ids,
-            previous_chunk=previous_chunk,
-            kv_cache=self.IndexerKVCache_0,
-            model_mode=model_mode,
-        )
-        new_indexer_state = (indexer_mask, topk_indices, indexer_score)
+        with jax.named_scope("glm_full_layer_indexer"):
+          indexer_mask, topk_indices, indexer_score = self.indexer(
+              inputs_q=inputs_q,
+              low_rank_q=low_rank_q,
+              inputs_kv=inputs_kv,
+              inputs_positions=inputs_positions,
+              attention_mask=attention_mask,
+              decoder_segment_ids=decoder_segment_ids,
+              previous_chunk=previous_chunk,
+              kv_cache=self.IndexerKVCache_0,
+              model_mode=model_mode,
+          )
+          indexer_mask = checkpoint_name(indexer_mask, "full_layer_indexer_mask")
+          topk_indices = checkpoint_name(topk_indices, "full_layer_topk_indices")
+          new_indexer_state = (indexer_mask, topk_indices, indexer_score)
       elif cached_indexer_state is not None:
-        # Shared (S) layer: inherit cached indexer state from donor F layer
-        indexer_mask, topk_indices, indexer_score = cached_indexer_state
-        new_indexer_state = cached_indexer_state
+        # Shared (S) layer: inherit cached indexer state from donor F layer (zero indexer GEMMs)
+        with jax.named_scope("glm_shared_layer_index_reuse"):
+          indexer_mask, topk_indices, indexer_score = cached_indexer_state
+          indexer_mask = checkpoint_name(indexer_mask, "shared_layer_reused_mask")
+          topk_indices = checkpoint_name(topk_indices, "shared_layer_reused_indices")
+          new_indexer_state = cached_indexer_state
       else:
         indexer_mask, topk_indices, indexer_score = None, None, None
 
