@@ -75,6 +75,13 @@ class Profiler:
     if advanced_config:
       self.profiling_options.advanced_configuration = advanced_config
 
+  def is_active(self, step=None):
+    if self.mode == "":
+      return False
+    if step is not None:
+      return self.start_initial_profile_step <= step <= self.finished_initial_profile_step
+    return getattr(self, "_active", False)
+
   def maybe_activate_profiler(self, step, state):
     """Conditionally activates the profiler based on the current step.
     This method checks if the current training step matches the step designated
@@ -83,13 +90,14 @@ class Profiler:
     """
     if self.mode != "" and (step == self.start_initial_profile_step or self.should_activate_periodic_profile(step)):
       optional_postfix = f"step_{step}" if self.profile_period > 0 else ""
+      self._active = True
       self.activate(blocking_object=state, optional_postfix=optional_postfix)
 
   def activate(self, blocking_object=None, optional_postfix=""):
     """Start the profiler.
     nsys profiler becomes no-op when libcudart.so is not available on the system."""
     if self.profile_cleanly and blocking_object is not None:
-      jax.block_until_ready(blocking_object)
+      jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x, blocking_object)
 
     if self.managed_mldiagnostics and self.mode == "xplane":
       # Handle the special profiling logic for managed_mldiagnostics
@@ -121,13 +129,14 @@ class Profiler:
     deactivating a periodic profile.
     """
     if self.mode != "" and (step == self.finished_initial_profile_step or self.should_deactivate_periodic_profile(step)):
+      self._active = False
       self.deactivate(blocking_object=state)
 
   def deactivate(self, blocking_object=None):
     """End the profiler.
     The result is uploaded to the output bucket."""
     if self.profile_cleanly and blocking_object is not None:
-      jax.block_until_ready(blocking_object)
+      jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x, blocking_object)
 
     if self.managed_mldiagnostics and self.mode == "xplane":
       # Handle the special profileing logic for managed_mldiagnostics
