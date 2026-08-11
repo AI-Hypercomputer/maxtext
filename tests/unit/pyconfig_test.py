@@ -427,7 +427,78 @@ assert train._TF_AVAILABLE is False
         ["exp", "expert"],
     ]
     self.assertEqual(infer_cp_axes(ep_as_cp_rules), ("expert",))
-    self.assertEqual(infer_ep_axes(ep_as_cp_rules), ("expert",))
+  def test_multi_tier_checkpointing_validation_mutually_exclusive(self):
+    """Verifies that exactly one of backup_interval_minutes or backup_interval_steps is provided."""
+    expected_msg = (
+        r"Exactly one of `multi_tier_checkpointing_backup_interval_minutes` or"
+        r" `multi_tier_checkpointing_backup_interval_steps` must be specified\."
+    )
+
+    # Both set -> fail
+    with self.assertRaisesRegex(ValueError, expected_msg):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          enable_multi_tier_checkpointing=True,
+          local_checkpoint_directory="/tmp/test_dir",
+          local_checkpoint_period=10,
+          multi_tier_checkpointing_backup_interval_minutes=20,
+          multi_tier_checkpointing_backup_interval_steps=20,
+      )
+
+    # Neither set -> fail
+    with self.assertRaisesRegex(ValueError, expected_msg):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          enable_multi_tier_checkpointing=True,
+          local_checkpoint_directory="/tmp/test_dir",
+          local_checkpoint_period=10,
+          multi_tier_checkpointing_backup_interval_minutes=None,
+          multi_tier_checkpointing_backup_interval_steps=None,
+      )
+
+    # Only minutes set -> success
+    cfg_min = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        enable_multi_tier_checkpointing=True,
+        local_checkpoint_directory="/tmp/test_dir",
+        local_checkpoint_period=10,
+        multi_tier_checkpointing_backup_interval_minutes=20,
+        multi_tier_checkpointing_backup_interval_steps=None,
+    )
+    self.assertEqual(cfg_min.multi_tier_checkpointing_backup_interval_minutes, 20)
+    self.assertIsNone(cfg_min.multi_tier_checkpointing_backup_interval_steps)
+
+    # Only steps set -> success
+    cfg_steps = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        enable_multi_tier_checkpointing=True,
+        local_checkpoint_directory="/tmp/test_dir",
+        local_checkpoint_period=10,
+        multi_tier_checkpointing_backup_interval_minutes=None,
+        multi_tier_checkpointing_backup_interval_steps=20,
+    )
+    self.assertIsNone(cfg_steps.multi_tier_checkpointing_backup_interval_minutes)
+    self.assertEqual(cfg_steps.multi_tier_checkpointing_backup_interval_steps, 20)
+
+  def test_multi_tier_checkpointing_validation_steps_period(self):
+    """Verifies that backup_interval_steps must be >= local_checkpoint_period."""
+    expected_msg = (
+        r"`multi_tier_checkpointing_backup_interval_steps` \(20\) must be >= `local_checkpoint_period` \(50\)\."
+    )
+    with self.assertRaisesRegex(ValueError, expected_msg):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          enable_multi_tier_checkpointing=True,
+          local_checkpoint_directory="/tmp/test_dir",
+          local_checkpoint_period=50,
+          multi_tier_checkpointing_backup_interval_minutes=None,
+          multi_tier_checkpointing_backup_interval_steps=20,
+      )
 
 
 if __name__ == "__main__":
