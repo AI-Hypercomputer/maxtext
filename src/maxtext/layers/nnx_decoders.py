@@ -1837,73 +1837,73 @@ class NNXDecoder(nnx.Module):
                 *layer_args,
                 **common_kwargs,
             )
-            if getattr(cfg, "use_index_share", False):
-              y, self.dense_layers, _, cached_indexer_state = self._apply_layers_sequentially(
-                  self.dense_layers,
-                  y,
-                  *layer_args,
-                  length=cfg.first_num_dense_layers,
-                  start_layer_idx=0,
-                  cached_indexer_state=None,
-                  **layer_kwargs,
-              )
+          elif getattr(cfg, "use_index_share", False):
+            y, self.dense_layers, _, cached_indexer_state = self._apply_layers_sequentially(
+                self.dense_layers,
+                y,
+                *layer_args,
+                length=cfg.first_num_dense_layers,
+                start_layer_idx=0,
+                cached_indexer_state=None,
+                **layer_kwargs,
+            )
 
-              num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
+            num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
-              y, self.moe_layers, _, _ = self._apply_layers_sequentially(
+            y, self.moe_layers, _, _ = self._apply_layers_sequentially(
+                self.moe_layers,
+                y,
+                *layer_args,
+                length=num_moe,
+                start_layer_idx=cfg.first_num_dense_layers,
+                cached_indexer_state=cached_indexer_state,
+                **layer_kwargs,
+            )
+          else:
+            y, self.dense_layers, _ = self._apply_layers_sequentially(
+                self.dense_layers,
+                y,
+                *layer_args,
+                length=cfg.first_num_dense_layers,
+                **layer_kwargs,
+            )
+
+            num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
+
+            if cfg.use_batch_split_schedule:
+              policy = self.get_remat_policy()
+              mock_params = self._build_linen_params(self.moe_layers)
+
+              if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
+                y = deepseek_batchsplit_fp8.scan_batch_split_layers(
+                    y,
+                    mock_params,
+                    decoder_positions,
+                    decoder_segment_ids,
+                    model_mode=model_mode,
+                    mesh=self.mesh,
+                    quant=self.quant,
+                    cfg=cfg,
+                    policy=policy,
+                )
+              else:
+                # bf16 code path
+                y = deepseek_batchsplit.scan_batch_split_layers(
+                    y,
+                    mock_params,
+                    decoder_positions,
+                    mesh=self.mesh,
+                    cfg=cfg,
+                    num_layers=num_moe,
+                )
+            else:
+              y, self.moe_layers, _ = self._apply_layers_sequentially(
                   self.moe_layers,
                   y,
                   *layer_args,
                   length=num_moe,
-                  start_layer_idx=cfg.first_num_dense_layers,
-                  cached_indexer_state=cached_indexer_state,
                   **layer_kwargs,
               )
-            else:
-              y, self.dense_layers, _ = self._apply_layers_sequentially(
-                  self.dense_layers,
-                  y,
-                  *layer_args,
-                  length=cfg.first_num_dense_layers,
-                  **layer_kwargs,
-              )
-
-              num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
-
-              if cfg.use_batch_split_schedule:
-                policy = self.get_remat_policy()
-                mock_params = self._build_linen_params(self.moe_layers)
-
-                if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
-                  y = deepseek_batchsplit_fp8.scan_batch_split_layers(
-                      y,
-                      mock_params,
-                      decoder_positions,
-                      decoder_segment_ids,
-                      model_mode=model_mode,
-                      mesh=self.mesh,
-                      quant=self.quant,
-                      cfg=cfg,
-                      policy=policy,
-                  )
-                else:
-                  # bf16 code path
-                  y = deepseek_batchsplit.scan_batch_split_layers(
-                      y,
-                      mock_params,
-                      decoder_positions,
-                      mesh=self.mesh,
-                      cfg=cfg,
-                      num_layers=num_moe,
-                  )
-              else:
-                y, self.moe_layers, _ = self._apply_layers_sequentially(
-                    self.moe_layers,
-                    y,
-                    *layer_args,
-                    length=num_moe,
-                    **layer_kwargs,
-                )
 
         elif self.is_deepseek4:
           y = self._apply_deepseek4_scanned_blocks(
