@@ -895,16 +895,6 @@ class RoutedMoE(nnx.Module):
 
     num_expert_parallelism = self.get_expert_parallelism_size()
 
-    # Pre-quantize activations with Qwix before permute / ragged gather if quantization is configured
-    quantization_rule = qpl.get_current_rule("gmm")
-    if quantization_rule and quantization_rule.act_qtype and not isinstance(inputs_2d, qpl.QArray):
-      inputs_2d = qpl.quantize(
-          inputs_2d,
-          quantization_rule.act_qtype,
-          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-          calibration_method=quantization_rule.act_calibration_method,
-      )
-
     # The ragged-kernel path inside permute()/unpermute() is only correct for
     # the ring-of-experts strategy: each shard's output is masked to its own
     # [start, end) range within a globally-sorted layout. When ring of experts
@@ -929,9 +919,9 @@ class RoutedMoE(nnx.Module):
       else:
         buffer_size = None
 
-      if isinstance(inputs_2d, qpl.QArray):
-        sorted_qvalue, group_size, sorted_selected_experts = ring_ragged_sort(
-            inputs_2d.qvalue,
+      def _permute_ring_ragged_sort(tensor):
+        return ring_ragged_sort(
+            tensor,
             topk_indices_2d,
             self.config.num_experts,
             self.num_experts_per_tok,
@@ -946,43 +936,16 @@ class RoutedMoE(nnx.Module):
             gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
             use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
         )
+
+      if isinstance(inputs_2d, qpl.QArray):
+        sorted_qvalue, group_size, sorted_selected_experts = _permute_ring_ragged_sort(inputs_2d.qvalue)
         if inputs_2d.scale.shape[0] == inputs_2d.qvalue.shape[0]:
-          sorted_scale, _, _ = ring_ragged_sort(
-              inputs_2d.scale,
-              topk_indices_2d,
-              self.config.num_experts,
-              self.num_experts_per_tok,
-              self._expert_parallelism_name,
-              num_expert_parallelism,
-              buffer_size=buffer_size,
-              enforce_gather_fallback=self.config.ragged_gather_fallback,
-              enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
-              gather_flops_override=self.config.ragged_gather_cost_estimate_flops,
-              gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
-              gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
-              gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
-              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
-          )
+          sorted_scale, _, _ = _permute_ring_ragged_sort(inputs_2d.scale)
         else:
           sorted_scale = inputs_2d.scale
         sorted_inputs = qpl.QArray(qvalue=sorted_qvalue, scale=sorted_scale)
       else:
-        sorted_inputs, group_size, sorted_selected_experts = ring_ragged_sort(
-            inputs_2d,
-            topk_indices_2d,
-            self.config.num_experts,
-            self.num_experts_per_tok,
-            self._expert_parallelism_name,
-            num_expert_parallelism,
-            buffer_size=buffer_size,
-            enforce_gather_fallback=self.config.ragged_gather_fallback,
-            enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
-            gather_flops_override=self.config.ragged_gather_cost_estimate_flops,
-            gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
-            gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
-            gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
-            use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
-        )
+        sorted_inputs, group_size, sorted_selected_experts = _permute_ring_ragged_sort(inputs_2d)
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
 
