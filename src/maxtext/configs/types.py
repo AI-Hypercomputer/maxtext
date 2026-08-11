@@ -3740,8 +3740,6 @@ class MaxTextConfig(
         raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
       if self.attention_type != "global":
         raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
-      if self.packing:
-        raise ValueError("TPU Ulysses attention does not support packing yet.")
       if self.context_parallel_load_balance:
         raise ValueError(
             "TPU Ulysses attention requires context_parallel_load_balance=False: after the all-to-all every device "

@@ -302,6 +302,27 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.ici_context_parallelism, 4)
     self.assertFalse(config.context_parallel_load_balance)
 
+  def test_tpu_ulysses_config_validation_accepts_packing(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ulysses",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.packing)
+
   def test_context_parallel_strategy_is_normalized(self):
     argv = [
         "",
@@ -366,7 +387,6 @@ class ConfigTest(absltest.TestCase):
         ),
         (["ici_context_parallelism=1"], ["ici_context_parallelism=4"], "context_parallel_size > 1"),
         (["context_sharding=expert"], [], "context_sharding"),
-        (["packing=True", "dataset_type=tfds"], ["packing=False", "dataset_type=synthetic"], "packing"),
         (["use_ragged_attention=True"], [], "ragged attention"),
         (["attention_sink=True"], [], "attention sinks"),
         (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
