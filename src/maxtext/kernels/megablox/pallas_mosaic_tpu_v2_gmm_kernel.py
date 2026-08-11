@@ -525,10 +525,9 @@ def inner_kernel(
           # Perform lhs quantization. Note that for every block_lhs,
           # same computation will be performed tiles_n//mxu_size times.
           # But we can let compiler perform CSE and avoid recomputation.
-          if jnp.issubdtype(tiled_lhs.dtype, jnp.integer) or jnp.issubdtype(tiled_lhs.dtype, jnp.float8_e4m3fn):
-            # lhs block already quantized upstream (pre-quantized ahead-of-time
-            # by the caller); the real dequant scale is applied externally, so
-            # just pass the block through with an identity scale here.
+          if tiled_lhs.dtype == lhs_q_dtype:
+            # lhs block already arrives quantized, the real dequant
+            # scale is applied externally, so just pass an identity scale here. Comparing against lhs_q_dtype
             block_lhs_q = block_lhs
             block_scale = jnp.array(1.0, dtype=acc_ref.dtype)
           elif should_use_external_scale:
