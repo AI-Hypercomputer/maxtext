@@ -17,7 +17,7 @@ MODELS = [
 ]
 SCAN_MODES = ["scanned", "unscanned"]
 
-GCS_BASE = "gs://mesa-maxtext/validation_runs/post_train_layout_v14"
+GCS_BASE = "gs://mesa-maxtext/validation_runs/post_train_layout_0811_1"
 LOCAL_LOGS = "local_logs_vllm"
 CSV_REPORT = "vllm_validation_summary.csv"
 
@@ -76,9 +76,36 @@ def run_matrix():
       print(f"\n{'='*80}\nStarting vLLM decode for Model: {model} | Scan Mode: {scan_mode}\n{'='*80}")
       scan_bool = "True" if scan_mode == "scanned" else "False"
 
-      # Point at the Phase A Pre-train baseline
+      # 1. Run Pre-train to generate checkpoints
       run_name = "ckpt_pretrain_base"
-      load_path = f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/1/items"
+      pretrain_cmd = [
+          "python",
+          "src/maxtext/trainers/pre_train/train.py",
+          "src/maxtext/configs/base.yml",
+          f"run_name={run_name}",
+          f"model_name={model}",
+          f"scan_layers={scan_bool}",
+          f"base_output_directory={GCS_BASE}/{scan_mode}/pre_train/{model}",
+          "steps=5",
+          "per_device_batch_size=1",
+          "checkpoint_period=5",
+          "dataset_type=synthetic",
+      ]
+      pretrain_cmd.extend(get_tokenizer_flags(model))
+
+      log_path_pretrain = f"{LOCAL_LOGS}/{scan_mode}/{model}_pre_train.log"
+      success_pretrain = execute_command(pretrain_cmd, log_path_pretrain)
+      status_pretrain = "PASS" if success_pretrain else "FAIL"
+      print(f"[{status_pretrain}] {model} | {scan_mode} | pre_train")
+      with open(CSV_REPORT, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([model, scan_mode, "pre_train", run_name, status_pretrain])
+
+      if not success_pretrain:
+        continue
+
+      # 2. Run vLLM Decode on the generated checkpoints
+      load_path = f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/5/items"
 
       cmd = [
           "python",
@@ -86,9 +113,9 @@ def run_matrix():
           "maxtext.inference.vllm_decode",
           f"model_name={model}",
           f"load_parameters_path={load_path}",
-          "vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}'",
+          'vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]}',
           "hbm_utilization_vllm=0.6",
-          'prompt="Suggest some famous landmarks in London."',
+          "prompt=Suggest some famous landmarks in London.",
           "use_chat_template=True",
           f"scan_layers={scan_bool}",
       ]
