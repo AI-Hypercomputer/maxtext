@@ -118,7 +118,7 @@ def get_datasets(
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
-      files = get_expanded_file_paths(pattern)
+      files = find_data_files(pattern)
       source = grain.ArrayRecordDataSource(files)
       return grain.MapDataset.source(source)
 
@@ -198,7 +198,7 @@ def get_datasets(
       )
       return dataset
   elif data_file_type in ("tfrecord", "parquet"):
-    data_files = get_expanded_file_paths(data_file_pattern)
+    data_files = find_data_files(data_file_pattern)
     file_slice, files_per_host, row_shard = input_pipeline_utils.compute_file_sharding(
         len(data_files), dataloading_host_index, dataloading_host_count
     )
