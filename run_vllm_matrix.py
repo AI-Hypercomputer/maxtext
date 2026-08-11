@@ -141,7 +141,7 @@ def run_matrix():
           f"model_name={model}",
           f"load_parameters_path={load_path}",
           'vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]}',
-          "hbm_utilization_vllm=0.99",
+          "hbm_utilization_vllm=0.9",
           "prompt=Suggest some famous landmarks in London.",
           "use_chat_template=True",
           f"scan_layers={scan_bool}",
@@ -167,6 +167,10 @@ def run_matrix():
       with open(CSV_REPORT, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([model, scan_mode, "vllm_decode", run_name, status])
+
+      break
+
+    break
 
 
 if __name__ == "__main__":
