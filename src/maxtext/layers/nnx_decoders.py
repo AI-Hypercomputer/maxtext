@@ -994,6 +994,15 @@ class NNXDecoder(nnx.Module):
     start_layer_idx = kwargs.get("start_layer_idx", 0)
 
     if is_index_share:
+      cached_indexer_state = kwargs.get("cached_indexer_state", None)
+      if cached_indexer_state is None:
+        batch, seq_len = x_in.shape[0], x_in.shape[1]
+        topk = getattr(self.config, "indexer_topk", 2048)
+        n_heads = getattr(self.config, "indexer_n_heads", 32)
+        dummy_mask = jnp.zeros((batch, seq_len, seq_len), dtype=jnp.bool_)
+        dummy_indices = jnp.zeros((batch, seq_len, topk), dtype=jnp.int32)
+        dummy_score = jnp.zeros((batch, n_heads, seq_len, seq_len), dtype=jnp.float32)
+        cached_indexer_state = (dummy_mask, dummy_indices, dummy_score)
       init_scan_carry = (x_in, cached_indexer_state, start_layer_idx)
     else:
       init_scan_carry = x_in
