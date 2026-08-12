@@ -20,6 +20,7 @@ UserFacingNameToSystemCharacteristics in xpk/xpk.py !!!!! """
 
 from dataclasses import dataclass
 
+print("Testing....")
 
 @dataclass
 class SystemCharacteristics:
