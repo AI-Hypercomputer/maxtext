@@ -357,18 +357,22 @@ def main(argv: Sequence[str]) -> None:
     diloco_state, state_mesh_shardings, inner_state_shardings = diloco.build_abstract_diloco_state(
         config, abstract_state, state_mesh_shardings, topology_mesh
     )
-    # For NNX, shaped_train_args has 2 elements (state, batch) — no rng; pass None for prng.
+    # For NNX, shaped_train_args has 2 elements (state, batch) — no rng.
     shaped_rng_arg = shaped_train_args[2] if len(shaped_train_args) > 2 else None
-    shaped_train_args = (diloco_state, shaped_train_args[1], shaped_rng_arg)
+    if shaped_rng_arg is not None:
+      shaped_train_args = (diloco_state, shaped_train_args[1], shaped_rng_arg)
+      in_shard = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+    else:
+      shaped_train_args = (diloco_state, shaped_train_args[1])
+      in_shard = (state_mesh_shardings, data_sharding)  # State, batch
 
     # Wrap train_step with diloco
     train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, params_shardings)
     train_step_fn = diloco.build_diloco_train_step(config, train_step_partial)
 
-    # For DiLoCo, the train_step_fn is already fully wrapped and takes (state, batch, prng)
+    # For DiLoCo, the train_step_fn is already fully wrapped
     func_to_compile = train_step_fn
-    func_to_compile.__name__ = "train_step"
-    in_shard = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+    func_to_compile.__name__ = "train_step" 
     out_shard = (state_mesh_shardings, None)  # State, metrics
     static_argnums = ()
     donate_argnums = 0

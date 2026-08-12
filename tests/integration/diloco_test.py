@@ -451,7 +451,7 @@ class DiLoCoTest(unittest.TestCase):
         "num_communication_overlapping_steps=1",
         "communication_overlapping_alpha=0.5",
         "ici_diloco_parallelism=2",
-        "ici_fsdp_parallelism=2",
+        "ici_fsdp_parallelism=-1",
         "ici_tensor_parallelism=1",
         "ici_pipeline_parallelism=1",
         "base_emb_dim=16",

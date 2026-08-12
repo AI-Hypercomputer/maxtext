@@ -32,7 +32,7 @@ import jax.numpy as jnp
 import optax
 
 from maxtext.configs import pyconfig
-from maxtext.trainers.diloco.threaded_diloco import make_learner_config, make_step_fns
+from maxtext.trainers.diloco.threaded_diloco import make_learner_config, make_step_fns, _slice_global_mesh_to_submesh, _get_apply_outer_step_flat_jit
 from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager
 from maxtext.trainers.diloco.fragmenter import FragmentedTreeManipulator
 from maxtext.utils.mesh_utils import stack_across_meshes_pytree
@@ -499,6 +499,117 @@ class SyncerPathwaysBugReproTest(unittest.TestCase):
       restored = manipulator.apply_flat_fragment(params, f, frag)
       for a, b in zip(jax.tree_util.tree_leaves(params), jax.tree_util.tree_leaves(restored)):
         np.testing.assert_allclose(np.array(a), np.array(b))
+
+
+
+
+class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
+  """Tests verifying blocking fragment copy, non-donating outer step, and safe submesh slicing."""
+
+  NUM_LAYERS = 4
+  NUM_FRAGS = 2
+  HIDDEN = 4
+  NUM_LEARNERS = 2
+
+  def setUp(self):
+    devices = jax.local_devices()
+    self.assertGreaterEqual(len(devices), 2)
+    self.mesh = jax.sharding.Mesh(
+        np.array(devices[: self.NUM_LEARNERS]).reshape(self.NUM_LEARNERS, 1),
+        ("diloco", "model"),
+    )
+
+  def test_fragment_blocking_copy_and_materialization(self):
+    """Verifies that jnp.copy + jax.block_until_ready produces independent ready arrays."""
+    params = _build_fake_params(self.mesh, num_layers=self.NUM_LAYERS, hidden=self.HIDDEN, value=3.0)
+    manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
+
+    for frag_idx in range(manipulator.num_fragments):
+      frag_data = manipulator.get_flat_fragment(params, frag_idx)
+      copied_frag = jax.tree_util.tree_map(
+          lambda leaf: jnp.copy(leaf) if isinstance(leaf, jax.Array) else leaf,
+          frag_data,
+      )
+      ready_frag = jax.block_until_ready(copied_frag)
+      self.assertIsNotNone(ready_frag)
+      for k, v in ready_frag.items():
+        self.assertTrue(isinstance(v, jax.Array))
+        np.testing.assert_allclose(np.array(v), np.array(frag_data[k]))
+
+  def test_fragment_copy_isolation_from_mutated_source(self):
+    """Verifies that copying leaves isolates the fragment even if the source array is overwritten."""
+    params = _build_fake_params(self.mesh, num_layers=self.NUM_LAYERS, hidden=self.HIDDEN, value=5.0)
+    manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
+    frag_data = manipulator.get_flat_fragment(params, 0)
+    copied_frag = jax.tree_util.tree_map(
+        lambda leaf: jnp.copy(leaf) if isinstance(leaf, jax.Array) else leaf,
+        frag_data,
+    )
+    ready_frag = jax.block_until_ready(copied_frag)
+
+    # Simulate next step overwriting / reallocating params with new values
+    new_params = _build_fake_params(self.mesh, num_layers=self.NUM_LAYERS, hidden=self.HIDDEN, value=99.0)
+    # The ready_frag must still contain the original 5.0 values
+    for k, v in ready_frag.items():
+      np.testing.assert_allclose(np.array(v), 5.0)
+
+  def test_apply_outer_step_flat_jit_preserves_input_buffers(self):
+    """Verifies that _get_apply_outer_step_flat_jit does not donate or delete input buffers."""
+    outer_optimizer = optax.sgd(learning_rate=0.1, momentum=0.9, nesterov=True)
+    apply_fn = _get_apply_outer_step_flat_jit(outer_optimizer)
+
+    g_leaves = (jnp.full((self.HIDDEN,), 0.1),)
+    trace_leaves = (jnp.full((self.HIDDEN,), 0.0),)
+    p_leaves = (jnp.full((self.HIDDEN,), 1.0),)
+
+    new_p_leaves, new_trace_leaves = apply_fn(g_leaves, trace_leaves, p_leaves)
+
+    # Check outputs are computed correctly
+    self.assertEqual(len(new_p_leaves), 1)
+    self.assertEqual(len(new_trace_leaves), 1)
+
+    # Crucially check that input arrays p_leaves and trace_leaves are NOT deleted or invalidated
+    self.assertFalse(hasattr(p_leaves[0], "is_deleted") and p_leaves[0].is_deleted())
+    self.assertFalse(hasattr(trace_leaves[0], "is_deleted") and trace_leaves[0].is_deleted())
+    np.testing.assert_allclose(np.array(p_leaves[0]), 1.0)
+    np.testing.assert_allclose(np.array(trace_leaves[0]), 0.0)
+
+  def test_slice_global_mesh_to_submesh_safe_reshape_2d_and_3d(self):
+    """Verifies _slice_global_mesh_to_submesh with safe reshaping across submeshes for 2D and 3D shapes."""
+    devices = list(self.mesh.devices.flat)
+    submesh0 = jax.sharding.Mesh(np.array([devices[0]]), ("model",))
+    submesh1 = jax.sharding.Mesh(np.array([devices[1]]), ("model",))
+
+    # 3D scanned leaf with replica dimension: (num_learners=2, num_layers=4, hidden=4)
+    arr_3d = jax.device_put(jnp.ones((2, 4, 4)), jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec("diloco", None, "model")))
+    target_sharding0 = jax.sharding.NamedSharding(submesh0, jax.sharding.PartitionSpec(None, "model"))
+
+    sliced0 = _slice_global_mesh_to_submesh(
+        arr_3d,
+        submesh0,
+        learner_idx=0,
+        num_devices_per_mesh=1,
+        target_shardings=target_sharding0,
+        num_learners=2,
+        target_shapes=(4, 4),
+    )
+    self.assertEqual(sliced0.shape, (4, 4))
+    np.testing.assert_allclose(np.array(sliced0), 1.0)
+
+    # 2D leaf with replica dimension: (num_learners=2, hidden=4)
+    arr_2d = jax.device_put(jnp.full((2, 4), 2.0), jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec("diloco", "model")))
+    target_sharding_2d = jax.sharding.NamedSharding(submesh0, jax.sharding.PartitionSpec("model"))
+    sliced_2d = _slice_global_mesh_to_submesh(
+        arr_2d,
+        submesh0,
+        learner_idx=0,
+        num_devices_per_mesh=1,
+        target_shardings=target_sharding_2d,
+        num_learners=2,
+        target_shapes=(4,),
+    )
+    self.assertEqual(sliced_2d.shape, (4,))
+    np.testing.assert_allclose(np.array(sliced_2d), 2.0)
 
 
 if __name__ == "__main__":

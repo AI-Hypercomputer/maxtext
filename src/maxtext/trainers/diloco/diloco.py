@@ -335,10 +335,13 @@ def build_diloco_train_step(
     )
 
   @drjax.program(placements={"diloco": config.num_diloco_replicas})
-  def diloco_train_step(state, batch, prng):
-    # Split the RNG key across replicas.
-    keys = jax.random.split(prng, config.num_diloco_replicas)
-    inner_state, metrics = drjax.map_fn(train_step, (state.inner_state, batch, keys), mesh=mesh)
+  def diloco_train_step(state, batch, prng=None):
+    # Split the RNG key across replicas if provided.
+    if prng is not None:
+      keys = jax.random.split(prng, config.num_diloco_replicas)
+      inner_state, metrics = drjax.map_fn(train_step, (state.inner_state, batch, keys), mesh=mesh)
+    else:
+      inner_state, metrics = drjax.map_fn(train_step, (state.inner_state, batch), mesh=mesh)
     default_metrics = extract_replica_0(metrics)
     # TODO Remove this all-reduce in the future to avoid cross-DCN comm completely
     # TODO require to modify the metric_logger.py, as we need separate loggers for separate islands.

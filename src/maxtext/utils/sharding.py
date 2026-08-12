@@ -44,7 +44,7 @@ def get_input_data_sharding(config, mesh, rules=None):
   """Get the input data sharding for the model"""
   if rules is None:
     rules = config.logical_axis_rules
-  if config.enable_diloco:
+  if getattr(config, "enable_diloco", False):
     data_sharding = create_sharding(mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=rules)
   else:
     data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=rules)
@@ -683,10 +683,10 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       - updated_state_mesh_shardings: State mesh shardings with updated params field
         (unchanged if shard_optimizer_over_data is False)
   """
-  if config.enable_diloco:
-    return state_mesh_shardings.params, state_mesh_shardings
-  if config.pure_nnx:
+  if getattr(config, "pure_nnx", False):
     return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
+  if getattr(config, "enable_diloco", False):
+    return state_mesh_shardings.params, state_mesh_shardings
   prev_params_shardings = state_mesh_shardings.params
   if config.shard_optimizer_over_data:
     if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):

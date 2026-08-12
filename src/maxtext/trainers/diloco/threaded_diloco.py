@@ -108,11 +108,7 @@ def _slice_global_mesh_to_submesh(
         target_spec = target_sharding.sharding.spec if hasattr(target_sharding.sharding, "spec") else jax.sharding.PartitionSpec()
       else:
         target_spec = target_sharding.spec if hasattr(target_sharding, "spec") else jax.sharding.PartitionSpec()
-      target_named_sharding = (
-          target_sharding
-          if isinstance(target_sharding, jax.sharding.NamedSharding)
-          else jax.sharding.NamedSharding(submesh, target_spec)
-      )
+      target_named_sharding = jax.sharding.NamedSharding(submesh, target_spec)
       if hasattr(leaf, "addressable_shards") and leaf.addressable_shards:
         start_idx = learner_idx * num_devices_per_mesh
         end_idx = start_idx + num_devices_per_mesh
@@ -123,7 +119,7 @@ def _slice_global_mesh_to_submesh(
           for shard_idx, shard in enumerate(leaf.addressable_shards[start_idx:end_idx]):
             s = shard.data
             while s.ndim > len(target_shape) and s.shape[0] == 1:
-              s = s.squeeze(0)
+              s = s.reshape(s.shape[1:])
             s_t = jnp.swapaxes(s, 0, 1)
             tpu_shards.append(jax.device_put(s_t, tpu_devices[shard_idx]))
           shape_t = (target_shape[1], target_shape[0], target_shape[2])
@@ -142,7 +138,7 @@ def _slice_global_mesh_to_submesh(
           for shard_idx, shard in enumerate(leaf.addressable_shards[start_idx:end_idx]):
             s = shard.data
             while s.ndim > len(target_shape) and s.shape[0] == 1:
-              s = s.squeeze(0)
+              s = s.reshape(s.shape[1:])
             s_t = jnp.swapaxes(s, 0, 1)
             tpu_shards.append(jax.device_put(s_t, tpu_devices[shard_idx]))
           shape_t = (target_shape[1], target_shape[0])
@@ -159,7 +155,7 @@ def _slice_global_mesh_to_submesh(
           for shard_idx, shard in enumerate(leaf.addressable_shards[start_idx:end_idx]):
             s = shard.data
             while s.ndim > len(target_shape) and s.shape[0] == 1:
-              s = s.squeeze(0)
+              s = s.reshape(s.shape[1:])
             tpu_shards.append(jax.device_put(s, tpu_devices[shard_idx]))
           return jax.make_array_from_single_device_arrays(target_shape, target_named_sharding, tpu_shards)
       else:
@@ -457,6 +453,7 @@ def _run_learner_loop(
                   lambda leaf: jnp.copy(leaf) if isinstance(leaf, jax.Array) else leaf,
                   frag_data,
               )
+              frag_data = jax.block_until_ready(frag_data)
             transport.send_to_syncer_async(completed_step, frag_idx, frag_data)
 
           if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
@@ -565,7 +562,7 @@ def _get_apply_outer_step_flat_jit(outer_optimizer):
   opt_key = id(outer_optimizer)
   if opt_key not in _FLAT_STEP_JIT_CACHE:
 
-    @functools.partial(jax.jit, donate_argnums=(1, 2))
+    @jax.jit
     def _apply_outer_step_flat_jit(g_leaves, trace_leaves, p_leaves):
       o_state = (optax.TraceState(trace=trace_leaves), optax.EmptyState())
       updates, new_o_state = outer_optimizer.update(g_leaves, o_state, params=p_leaves)
