@@ -102,7 +102,10 @@ def get_functional_train_with_signature(
     in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
-  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  if hasattr(config, "donate_train_state") and not config.donate_train_state:
+    donate_argnums = ()
+  else:
+    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 

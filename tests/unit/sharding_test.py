@@ -22,7 +22,7 @@ import jax
 import pytest
 
 from jax.sharding import PartitionSpec
-from maxtext.utils.sharding import partition_mesh_by_diloco_axis
+from maxtext.utils.mesh_utils import partition_mesh_by_diloco_axis
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.lax import with_sharding_constraint
@@ -258,4 +258,3 @@ def test_partition_mesh_by_diloco_axis():
   global_mesh = Mesh(devices_grid, ["diloco", "data"])
   with pytest.raises(ValueError, match="Diloco axis size .* must match num_replicas"):
     partition_mesh_by_diloco_axis(global_mesh, num_diloco + 1)
->>>>>>> 6d123239a (Non-spmd initial implementation. Having error or input_shardingstarter code)

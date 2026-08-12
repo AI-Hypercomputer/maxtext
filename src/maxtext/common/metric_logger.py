@@ -17,6 +17,7 @@
 """Logger that saves metrics to a local file, GCS and TensorBoard."""
 
 import json
+import math
 import os
 import sys
 import queue
@@ -210,6 +211,11 @@ class MetricLogger:
             f"perplexity: {perplexity:.3f}",
         ]
     )
+    for k in sorted(scalars.keys()):
+      if k.startswith("learning/loss_island_"):
+        island_name = k.split("/")[-1]
+        log_parts.append(f"{island_name}: {scalars[k]:.3f}")
+
     if "learning/dpo_loss" in scalars:
       log_parts.append(f"dpo_loss: {scalars['learning/dpo_loss']:.3f}")
     if "learning/reward_accuracy" in scalars:
@@ -454,10 +460,33 @@ class MetricLogger:
     )
     self.cumulative_eval_metrics["scalar"]["eval/z_loss"] += float(scalar.get("evaluation/z_loss", 0.0))
 
+  def _calculate_learning_rate(self, step: int) -> float:
+    """Calculates learning rate using pure Python math to avoid unplaced JAX device dispatch."""
+    try:
+      lr = float(self.config.learning_rate)
+      schedule_steps = int(self.config.learning_rate_schedule_steps)
+      warmup_steps = int(schedule_steps * float(self.config.warmup_steps_fraction))
+      final_lr = lr * float(self.config.learning_rate_final_fraction)
+
+      if step < warmup_steps:
+        return float(lr * (step / max(1, warmup_steps)))
+      elif step < schedule_steps:
+        cos_steps = schedule_steps - warmup_steps
+        if cos_steps <= 1:
+          return float(final_lr)
+        pct = (step - warmup_steps) / (cos_steps - 1)
+        a = 0.5 * (math.cos(math.pi * pct) + 1.0)
+        return float(lr * a + final_lr * (1.0 - a))
+      else:
+        return 0.0
+    except Exception:
+      return float(self.config.learning_rate)
+
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
-    metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
+    lr = self._calculate_learning_rate(step)
+    metrics["scalar"].update({"learning/current_learning_rate": lr})
     if step >= self.config.rampup_end_step:
       metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
       metrics["scalar"].update(

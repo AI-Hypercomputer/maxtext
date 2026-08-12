@@ -442,6 +442,65 @@ class SyncerPathwaysBugReproTest(unittest.TestCase):
       self.assertIsNotNone(new_o)
 
 
+
+  def test_replace_leaves_from_dict(self):
+    params = _build_fake_params(self.mesh, value=1.0)
+    manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
+    shd = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec())
+    leaf_dict = {"['embed']": jax.device_put(jnp.full((self.HIDDEN,), 5.0), shd)}
+    updated = manipulator.replace_leaves_from_dict(params, leaf_dict)
+    np.testing.assert_allclose(np.array(updated["embed"]), 5.0)
+    np.testing.assert_allclose(np.array(updated["layers"]["w"]), 1.0)
+
+  def test_get_leaves_for_fragment(self):
+    params = _build_fake_params(self.mesh, value=2.0)
+    manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
+    leaves0 = manipulator.get_leaves_for_fragment(params, 0)
+    self.assertIn("['embed']", leaves0)
+    self.assertNotIn("['layers']['w']", leaves0)
+
+    leaves1 = manipulator.get_leaves_for_fragment(params, 1)
+    self.assertNotIn("['embed']", leaves1)
+    self.assertIn("['layers']['w']", leaves1)
+    self.assertEqual(leaves1["['layers']['w']"].shape, (self.NUM_LAYERS, self.HIDDEN))
+
+  def test_abstract_shape_dtype_struct_roundtrip(self):
+    params = _build_fake_params(self.mesh, value=1.0)
+    abstract_params = jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), params)
+    manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
+    for f in range(manipulator.num_fragments):
+      frag = manipulator.get_flat_fragment(abstract_params, f)
+      restored = manipulator.apply_flat_fragment(abstract_params, f, frag)
+      for a, b in zip(jax.tree_util.tree_leaves(abstract_params), jax.tree_util.tree_leaves(restored)):
+        self.assertEqual(a.shape, b.shape)
+        self.assertEqual(a.dtype, b.dtype)
+
+  def test_non_contiguous_layer_indices_roundtrip(self):
+    params = _build_fake_params(self.mesh, num_layers=4, value=3.0)
+    # Fragment 1 has non-contiguous layer indices: (0, 2), Fragment 2 has: (1, 3)
+    fragment_to_layer_indices = {
+        1: (0, 2),
+        2: (1, 3),
+    }
+    scanned_regex = re.compile(r"/(?:layers|blocks|moe_layers|dense_layers|layers_outside_pipeline)(?:/|$)")
+    keypath_to_is_scanned = {}
+    for keypath, _ in jax.tree_util.tree_flatten_with_path(params)[0]:
+      parts = [str(k.key) if hasattr(k, "key") else str(k) for k in keypath]
+      sp = "/" + "/".join(parts)
+      keypath_to_is_scanned[jax.tree_util.keystr(keypath)] = bool(scanned_regex.search(sp))
+    manipulator = FragmentedTreeManipulator(
+        keypath_to_is_scanned=keypath_to_is_scanned,
+        fragment_to_layer_indices=fragment_to_layer_indices,
+        num_fragments=3,
+        param_scan_axis=0,
+    )
+    for f in range(manipulator.num_fragments):
+      frag = manipulator.get_flat_fragment(params, f)
+      restored = manipulator.apply_flat_fragment(params, f, frag)
+      for a, b in zip(jax.tree_util.tree_leaves(params), jax.tree_util.tree_leaves(restored)):
+        np.testing.assert_allclose(np.array(a), np.array(b))
+
+
 if __name__ == "__main__":
   unittest.main()
 

@@ -923,6 +923,7 @@ num_diloco_fragments: 16
 use_sequential_layers: false
 num_communication_overlapping_steps: 0
 communication_overlapping_alpha: 0.0
+donate_train_state: true
 
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.

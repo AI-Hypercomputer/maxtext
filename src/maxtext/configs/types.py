@@ -1731,6 +1731,9 @@ class DilocoParams(BaseModel):
           " globally shared one."
       ),
   )
+  donate_train_state: bool = Field(
+      True, description="Whether to donate train state memory to XLA compiler in train step."
+  )
 
   @model_validator(mode="after")
   def validate_overlap_steps(self) -> "DilocoParams":

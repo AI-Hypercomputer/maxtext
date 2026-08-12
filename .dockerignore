@@ -1,2 +1,7 @@
 .git
 maxtext_venv
+MyStuff/Data
+MyStuff/tmp
+MyStuff/skills/*.pdf
+*.png
+*.svg

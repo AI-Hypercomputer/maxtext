@@ -7,6 +7,8 @@ Unless I told you to edit the code, always avoid directly modifying the code bef
 
 **IMPORTANT**: For every claim you give to me, please make sure there exist sound evidence and not only based on toy experiments, and clearly state to me the evidence and validation.
 
+**IMPORTANT**: STRICT ZERO ESTIMATION / PROJECTION RULE: Never estimate, simulate, fabricate, or synthesize sub-operation timings, kernel breakdowns, or trace segments based on theoretical FLOP ratios, assumptions, or proportions. Every single metric, timestamp, kernel duration, and plot presented MUST be directly and strictly measured from actual execution logs, TensorBoard event files, or physical hardware traces (xplane.pb). If fine-grained sub-op data is not present in the hardware trace, state clearly that it is unavailable and explain what compiler flags or instrumentation are needed to collect real measurements.
+
 **IMPORTANT**: For every data you present to me, tell me the exact data path. For every experiment, record core data to local workspace under MyStuff/Data/ and tell me in the chat the command you ran and the Pantheon log path.
 
 **IMPORTANT**: When solving bugs:

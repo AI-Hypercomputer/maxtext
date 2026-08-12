@@ -125,13 +125,4 @@ class SyncerTransport:
   def recv_from_learner(self, learner_idx: int, step: int, fragment_id: int) -> Any:
     return self.manager.recv_from_learner(learner_idx, step, fragment_id)
 
-  def __init__(self, manager: ThreadedTransportManager):
-    self.manager = manager
-
-  def send_to_learner(self, learner_idx: int, step: int, fragment_id: int, data: Any):
-    self.manager.send_to_learner(learner_idx, step, fragment_id, data)
-
-  def recv_from_learner(self, learner_idx: int, step: int, fragment_id: int) -> Any:
-    return self.manager.recv_from_learner(learner_idx, step, fragment_id)
-
 

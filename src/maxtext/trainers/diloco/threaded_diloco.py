@@ -812,15 +812,6 @@ def _run_syncer_loop(
   manipulator = FragmentedTreeManipulator.create(syncer_state.params, config)
   num_fragments = manipulator.num_fragments
 
-  # AOT pre-warm extraction and application for all fragments
-  with jax.set_mesh(global_mesh):
-    for f in range(num_fragments):
-      ext_fn = manipulator._get_extract_jit_fn(f, has_replica_dim=True)
-      frag = ext_fn(syncer_state.params)
-      app_fn = manipulator._get_apply_jit_fn(f, has_replica_dim=True)
-      _ = app_fn(syncer_state.params, frag)
-  max_logging.log(f"Syncer: AOT pre-compiled extract and apply kernels for all {num_fragments} fragments")
-
   steps_between_syncs_plus_1 = int(round(config.diloco_sync_period / num_fragments))
   steps_between_syncs_plus_1 = max(1, steps_between_syncs_plus_1)
   period = num_fragments * steps_between_syncs_plus_1
