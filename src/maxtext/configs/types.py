@@ -867,6 +867,13 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  quantize_before_ep_all_gather: bool = Field(
+      True,
+      description=(
+          "Whether to quantize activations before the Ring of Experts EP all-gather (so the "
+          "collective and ragged sort move fp8, not bf16), vs. quantizing later inside the gmm call."
+      ),
+  )
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
       description=(
@@ -2841,6 +2848,16 @@ class MaxTextConfig(
           "  2. Ragged sort with ring of experts (use_ring_of_experts=True AND use_ragged_sort=True)"
       )
 
+  def _validate_quantize_before_ep_all_gather(self):
+    """Validates quantize_before_ep_all_gather is used with supported settings."""
+    if self.quantize_before_ep_all_gather and not (
+        self.use_ring_of_experts and self.use_qwix_quantization and self.use_gmm_v2
+    ):
+      raise ValueError(
+          "quantize_before_ep_all_gather=True is only supported with use_ring_of_experts=True and "
+          "qwix quantization, and gmm v2 kernel"
+      )
+
   def _validate_use_te_comm_gemm_overlap(self):
     """Validates that use_te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
     te_has_distributed_env = jax.local_device_count() == 1 and jax.distributed.is_initialized()
@@ -3945,6 +3962,8 @@ class MaxTextConfig(
         raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
+
+    self._validate_quantize_before_ep_all_gather()
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

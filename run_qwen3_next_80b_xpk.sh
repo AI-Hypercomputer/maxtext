@@ -1,0 +1,152 @@
+#!/bin/bash
+set -e
+
+# Activate Python virtual environment
+source /home/shuwenf_google_com/venv-maxtext/bin/activate
+
+# --- Environment Variables ---
+export PROJECT_ID="tpu-prod-env-one-vm"
+export CLUSTER_NAME="bodaborg-v6e-256-lcscld-c"
+export ZONE="southamerica-west1-a"
+
+# --- Configuration & Automated Image Build ---
+TIMESTAMP=$(date +%m%d%H%M%S)
+export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:shuwenf_${TIMESTAMP}"
+export WORKLOAD_NAME="shuwenf-qn80b-${TIMESTAMP}"
+export DEVICE_TYPE="v6e-256"
+export NUM_SLICES=1
+export PRIORITY="very-high"
+export NUM_STEPS=15
+export MAX_RESTARTS=${MAX_RESTARTS:-0}
+export MODEL_NAME="qwen3-next-80b-a3b"
+export BASE_OUTPUT_DIR="gs://shuwenf-hlo-dumps/qwen3-next-80b-profiles/run-${TIMESTAMP}"
+
+echo "========================================================================"
+echo "Building and uploading Docker runner image for full 15-step execution..."
+echo "Target Image: ${WORKLOAD_IMAGE}"
+echo "========================================================================"
+
+(
+  cd /home/shuwenf_google_com/maxtext &&   sudo CLOUD_IMAGE_NAME="${WORKLOAD_IMAGE}"   BASE_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:latest"   bash src/dependencies/scripts/docker_upload_runner.sh
+)
+
+echo "Docker image upload complete: ${WORKLOAD_IMAGE}"
+
+# --- XLA Flags ---
+XLA_FLAGS_ARRAY=(
+  "--xla_tpu_scheduler_percent_shared_memory_limit=35"
+  "--xla_msa_enable_sync_slice_replacement=false"
+  "--xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
+  "--xla_msa_enable_sync_copy_replacement=false"
+  "--xla_tpu_scoped_vmem_limit_kib=81000"
+  "--xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
+  "--xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+  "--xla_tpu_offload_gather_to_sparsecore=true"
+  "--xla_tpu_dvfs_p_state=7"
+  "--xla_tpu_disable_sparse_core_collective_offload_remover=true"
+  "--xla_tpu_enable_async_collective_fusion=true"
+  "--xla_tpu_overlap_compute_collective_tc=true"
+  "--xla_tpu_enable_async_collective_fusion_multiple_steps=true"
+  "--xla_tpu_enable_latency_hiding_scheduler=true"
+  "--xla_latency_hiding_scheduler_rerun=10"
+  "--xla_tpu_all_gather_collective_matmul_mode=post_spmd_conservative"
+  "--xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd_conservative"
+  "--xla_latency_hiding_scheduler_enable_selective_resources=true"
+  "--xla_tpu_enable_ilp_latency_hiding_scheduler=true"
+  "--xla_tpu_enable_all_experimental_scheduler_features=true"
+  "--xla_tpu_enable_scheduler_memory_pressure_tracking=true"
+  "--xla_tpu_host_transfer_overlap_limit=24"
+  "--xla_tpu_aggressive_opt_barrier_removal=ENABLED"
+  "--xla_lhs_prioritize_async_depth_over_stall=DISABLED"
+  "--xla_tpu_enable_ag_backward_pipelining=true"
+  "--xla_should_allow_loop_variant_parameter_in_chain=ENABLED"
+  "--xla_should_add_loop_invariant_op_in_chain=ENABLED"
+  "--xla_max_concurrent_host_send_recv=100"
+)
+export XLA_FLAGS="${XLA_FLAGS_ARRAY[*]}"
+
+# --- MaxText Workload Overrides ---
+MAXTEXT_ARGS_ARRAY=(
+  "model_name=${MODEL_NAME}"
+  "base_output_directory=${BASE_OUTPUT_DIR}"
+  "run_name=param-3"
+  "dataset_type=synthetic"
+  "dataset_name=synthetic"
+  "dtype=bfloat16"
+  "allow_split_physical_axes=True"
+  "ici_expert_parallelism=4"
+  "use_ring_of_experts=True"
+  "custom_mesh=hybrid_ring_64x4"
+  "use_ragged_sort=True"
+  "use_random_routing=True"
+  "per_device_batch_size=4"
+  "opt_type=muon"
+  "muon_consistent_rms=0.2"
+  "muon_weight_decay=0.1"
+  "learning_rate=1e-5"
+  "max_target_length=2048"
+  "ragged_buffer_factor=1.5"
+  "remat_policy=full"
+  "reuse_example_batch=1"
+  "decoder_layer_input=offload"
+  "context=device"
+  "ici_fsdp_parallelism=-1"
+  "steps=15"
+  "shard_exp_on_fsdp=True"
+  "sharding_tolerance=0.5"
+  "sa_q_layout=SEQ_MINOR"
+  "sa_k_layout=HEAD_DIM_MINOR"
+  "sa_v_layout=HEAD_DIM_MINOR"
+  "sa_block_q=2048"
+  "sa_block_kv=2048"
+  "sa_block_kv_compute=1024"
+  "sa_block_q_dkv=2048"
+  "sa_block_kv_dkv=2048"
+  "sa_block_kv_dkv_compute=1024"
+  "hardware=tpu"
+  "skip_jax_distributed_system=False"
+  "attention=flash"
+  "use_tokamax_splash=True"
+  "sa_use_fused_bwd_kernel=True"
+  "use_tokamax_gmm=True"
+  "use_gmm_v2=True"
+  "sparse_matmul=True"
+  "megablox=True"
+  "optimizer_memory_host_offload=True"
+  "parameter_memory_host_offload=False"
+  "enable_checkpointing=False"
+  "async_checkpointing=False"
+  "tokenizer_type=tiktoken"
+  "tokenizer_path=tokenizer_74B/"
+  "override_model_config=true"
+  "mhc_expansion_rate=4"
+  "profiler=xplane"
+  "profiler_steps=5"
+  "skip_first_n_steps_for_profiler=2"
+  "enable_tpu_profiling_options=True"
+  "upload_all_profiler_results=true"
+)
+MAXTEXT_ARGS="${MAXTEXT_ARGS_ARRAY[*]}"
+
+# Clean container temporary log setup safely
+RUN_COMMAND="set -e && rm -rf /tmp/tpu_logs/* 2>/dev/null || true; mkdir -p /tmp/tpu_logs && export LIBTPU_INIT_ARGS=\"${XLA_FLAGS}\" && export JAX_PLATFORMS='tpu,cpu' && export ENABLE_PJRT_COMPATIBILITY='true' && export JAX_DISTRIBUTED_INITIALIZE_TIMEOUT=1800 && export PYTHONPATH=/deps:/deps/src:/deps/src/maxtext/src && python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml ${MAXTEXT_ARGS}"
+
+# --- XPK Workload Creation ---
+echo "Creating XPK workload: ${WORKLOAD_NAME} on cluster: ${CLUSTER_NAME}"
+
+python3 -m xpk.main workload create   --cluster="${CLUSTER_NAME}"   --project="${PROJECT_ID}"   --zone="${ZONE}"   --priority="${PRIORITY}"   --max-restarts="${MAX_RESTARTS}"   --device-type="${DEVICE_TYPE}"   --num-slices="${NUM_SLICES}"   --docker-image="${WORKLOAD_IMAGE}"   --enable-debug-logs   --workload="${WORKLOAD_NAME}"   --command="${RUN_COMMAND}"
+
+LOGS_URL="https://console.cloud.google.com/logs/query;query=resource.type%3D%22k8s_container%22%0Aresource.labels.project_id%3D%22${PROJECT_ID}%22%0Aresource.labels.location%3D%22southamerica-west1%22%0Aresource.labels.cluster_name%3D%22${CLUSTER_NAME}%22%0Aresource.labels.namespace_name%3D%22default%22%0Aresource.labels.pod_name%3A%22${WORKLOAD_NAME}-slice-job-0-0-%22%0Aseverity%3E%3DDEFAULT;storageScope=project;duration=P1D?project=${PROJECT_ID}"
+GKE_URL="https://console.cloud.google.com/kubernetes/service/southamerica-west1/${CLUSTER_NAME}/default/${WORKLOAD_NAME}/details?project=${PROJECT_ID}"
+TB_URL="https://tensorboard.corp.google.com/?logdir=${BASE_OUTPUT_DIR}/param-3/tensorboard"
+
+echo "========================================================================"
+echo "📋 Pantheon Cloud Logging (Worker 0 Logs):"
+echo "${LOGS_URL}"
+echo ""
+echo "☸️ GKE Workload Details:"
+echo "${GKE_URL}"
+echo ""
+echo "📊 GCS TensorBoard Link:"
+echo "${TB_URL}"
+echo "========================================================================"
