@@ -112,6 +112,17 @@ def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax
   return jnp.diff(clamped_cumsum_extended, axis=0)
 
 
+def _map_qarray(fn, value: jax.Array | qpl.QArray) -> jax.Array | qpl.QArray:
+  """Applies `fn` to `value`.
+
+  If `value` is a QArray, applies `fn` to `qvalue` and `scale` independently
+  and rewraps the result, instead of requiring the caller to unpack/repack it.
+  """
+  if isinstance(value, qpl.QArray):
+    return qpl.QArray(qvalue=fn(value.qvalue), scale=fn(value.scale))
+  return fn(value)
+
+
 def _sort_activations(
     inputs: jax.Array,
     sort_indices: jax.Array,
@@ -868,7 +879,10 @@ class RoutedMoE(nnx.Module):
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
-    inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
+    if isinstance(inputs, qpl.QArray):
+      inputs_2d = inputs.reshape(bsz_times_seq_len, inputs.shape[-1])
+    else:
+      inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids)
     lb_loss = None
     if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
@@ -891,6 +905,7 @@ class RoutedMoE(nnx.Module):
       inputs_2d = inputs_2d * router_scores.reshape(bsz_times_seq_len, -1)
 
     num_expert_parallelism = self.get_expert_parallelism_size()
+
     # The ragged-kernel path inside permute()/unpermute() is only correct for
     # the ring-of-experts strategy: each shard's output is masked to its own
     # [start, end) range within a globally-sorted layout. When ring of experts
@@ -915,22 +930,33 @@ class RoutedMoE(nnx.Module):
       else:
         buffer_size = None
 
-      sorted_inputs, group_size, sorted_selected_experts = ring_ragged_sort(
-          inputs_2d,
-          topk_indices_2d,
-          self.config.num_experts,
-          self.num_experts_per_tok,
-          self._expert_parallelism_name,
-          num_expert_parallelism,
-          buffer_size=buffer_size,
-          enforce_gather_fallback=self.config.ragged_gather_fallback,
-          enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
-          gather_flops_override=self.config.ragged_gather_cost_estimate_flops,
-          gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
-          gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
-          gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
-          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
-      )
+      def _permute_ring_ragged_sort(tensor):
+        return ring_ragged_sort(
+            tensor,
+            topk_indices_2d,
+            self.config.num_experts,
+            self.num_experts_per_tok,
+            self._expert_parallelism_name,
+            num_expert_parallelism,
+            buffer_size=buffer_size,
+            enforce_gather_fallback=self.config.ragged_gather_fallback,
+            enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
+            gather_flops_override=self.config.ragged_gather_cost_estimate_flops,
+            gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
+            gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
+            gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+            use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+        )
+
+      if isinstance(inputs_2d, qpl.QArray):
+        sorted_qvalue, group_size, sorted_selected_experts = _permute_ring_ragged_sort(inputs_2d.qvalue)
+        if inputs_2d.scale.shape[0] == inputs_2d.qvalue.shape[0]:
+          sorted_scale, _, _ = _permute_ring_ragged_sort(inputs_2d.scale)
+        else:
+          sorted_scale = inputs_2d.scale
+        sorted_inputs = qpl.QArray(qvalue=sorted_qvalue, scale=sorted_scale)
+      else:
+        sorted_inputs, group_size, sorted_selected_experts = _permute_ring_ragged_sort(inputs_2d)
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
 
@@ -938,10 +964,12 @@ class RoutedMoE(nnx.Module):
         flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
       sorted_selected_experts = jnp.argsort(flatten_selected_experts)
       # sort inputs for number of selected experts
-      replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-      sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
-          self.dtype
+      replicated_inputs_2d = _map_qarray(lambda t: jnp.repeat(t, self.num_experts_per_tok, axis=0), inputs_2d)
+      sorted_inputs = _map_qarray(
+          lambda t: _sort_activations(t, sorted_selected_experts, use_custom_sort_vjp), replicated_inputs_2d
       )
+      if not isinstance(sorted_inputs, qpl.QArray):
+        sorted_inputs = sorted_inputs.astype(self.dtype)
       group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
@@ -1477,6 +1505,8 @@ class RoutedMoE(nnx.Module):
         # Parses the varying mesh axes from JAX's type string for a tensor inside shard_map.
         # jax.typeof(t) renders as e.g. 'f32[128,256]{V:(expert, fsdp)}'; this extracts
         # ('expert', 'fsdp'). Returns () if the tensor has no varying axes.
+        if isinstance(tensor, qpl.QArray):
+          tensor = tensor.qvalue
         type_str = str(jax.typeof(tensor))
         if "{V:" in type_str:
           start = type_str.index("{V:") + 3
@@ -1487,7 +1517,7 @@ class RoutedMoE(nnx.Module):
 
       lhs_vma_axes = extract_vma(inputs)
       rhs_vma_axes = extract_vma(kernel)
-      if inputs.shape[0] != expert_assignments.shape[0]:
+      if (inputs.qvalue if isinstance(inputs, qpl.QArray) else inputs).shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
       tokamax_group_sizes = get_tokamax_group_sizes(group_sizes, inputs, kernel)
@@ -1663,9 +1693,24 @@ class RoutedMoE(nnx.Module):
       # The ring-of-experts strategy first duplicates the inputs to all
       # expert shards, and then routes within each shard.
 
-      # Duplicate inputs to all expert shards.
-      x, logits, pre_bias_logits = tuple(
-          jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True) for z in (x, logits, pre_bias_logits)
+      # Duplicate inputs to all expert shards
+      rule = qpl.get_current_rule("gmm")
+
+      if self.config.quantize_before_ep_all_gather and rule and rule.act_qtype and not isinstance(x, qpl.QArray):
+        x_q = qpl.quantize(
+            x,
+            rule.act_qtype,
+            channelwise_axes=[] if rule.disable_channelwise_axes else [0],
+            calibration_method=rule.act_calibration_method,
+        )
+        x_qvalue = jax.lax.all_gather(x_q.qvalue, axis_name=self._expert_parallelism_name, tiled=True)
+        x_scale = jax.lax.all_gather(x_q.scale, axis_name=self._expert_parallelism_name, tiled=True)
+        x = qpl.QArray(qvalue=x_qvalue, scale=x_scale)
+      else:
+        x = jax.lax.all_gather(x, axis_name=self._expert_parallelism_name, tiled=True)
+
+      logits, pre_bias_logits = tuple(
+          jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True) for z in (logits, pre_bias_logits)
       )
 
       # "Route" tokens within each shard.

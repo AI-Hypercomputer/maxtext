@@ -525,7 +525,12 @@ def inner_kernel(
           # Perform lhs quantization. Note that for every block_lhs,
           # same computation will be performed tiles_n//mxu_size times.
           # But we can let compiler perform CSE and avoid recomputation.
-          if should_use_external_scale:
+          if tiled_lhs.dtype == lhs_q_dtype:
+            # lhs block already arrives quantized, the real dequant
+            # scale is applied externally, so just pass an identity scale here.
+            block_lhs_q = block_lhs
+            block_scale = jnp.array(1.0, dtype=acc_ref.dtype)
+          elif should_use_external_scale:
             assert lhs_scale is not None
             assert lhs_scale_inv is not None
             block_lhs_q = jnp.clip(block_lhs * lhs_scale_inv, -dtype_max, dtype_max).astype(lhs_q_dtype)
@@ -1206,7 +1211,11 @@ def make_gmm_configs(
   )
 
   lhs_q_dtype = None
-  if maybe_quantize_lhs and rhs_cfgs.should_dequantize_after_matmul:
+  if jnp.issubdtype(lhs.dtype, jnp.integer) or jnp.issubdtype(lhs.dtype, jnp.float8_e4m3fn):
+    # lhs arrives already quantized (e.g. pre-quantized ahead-of-time by the
+    # caller): use its dtype as-is, no in-kernel quantization/scale needed.
+    lhs_q_dtype = lhs.dtype
+  elif maybe_quantize_lhs and rhs_cfgs.should_dequantize_after_matmul:
     # Choose lhs quantization dtype based on TPU hardware support.
     is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)  # pyrefly: ignore[bad-argument-type]
     tpu_info = pltpu.get_tpu_info()
@@ -1217,10 +1226,10 @@ def make_gmm_configs(
       # floating rhs as conversion to int8 will cause numeric issues.
       is_rhs_4bits = jax.dtypes.itemsize_bits(rhs_quant_dtype) == 4  # pyrefly: ignore[bad-argument-type]
       if is_rhs_float or is_rhs_4bits:
-        lhs_q_dtype = jnp.float8_e4m3fn.dtype
+        lhs_q_dtype = jnp.float8_e4m3fn
     if tpu_info.int8_ops_per_second > 0:
       if not is_rhs_float:
-        lhs_q_dtype = jnp.int8.dtype
+        lhs_q_dtype = jnp.int8
 
   if lhs_scale is not None:
     assert lhs_q_dtype is not None, (
@@ -1241,17 +1250,21 @@ def make_gmm_configs(
       has_scale=has_lhs_scale,
   )
 
-  if out_dtype is None:
-    out_dtype = lhs.dtype
+  if out_dtype is None or jnp.issubdtype(out_dtype, jnp.float8_e4m3fn):
+    # The raw quantized-domain matmul output isn't yet rescaled -- writing it
+    # directly as fp8 would lose precision before the scale multiply happens
+    # (either inside this kernel via lhs_scale/block_scale, or externally by
+    # the caller for a pre-quantized lhs). Floor to bf16 as a safe intermediate.
+    out_dtype = jnp.bfloat16
 
   if acc_dtype is None:
     if lhs_cfgs.quant_dtype is None:
-      acc_dtype = jnp.float32.dtype
+      acc_dtype = jnp.float32
     else:
       # Input quantization requires elementwise ops which can put pressure on
       # VPUs. Using faster bf16 hardware during accumulation can help offset the
       # pressure.
-      acc_dtype = jnp.bfloat16.dtype
+      acc_dtype = jnp.bfloat16
 
   if isinstance(tile_info, TileSizes):
     tiles = tile_info

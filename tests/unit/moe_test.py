@@ -15,6 +15,7 @@
 
 import unittest
 from absl.testing import parameterized
+import chex
 import pytest
 
 from flax import nnx
@@ -505,6 +506,46 @@ class RoutedMoeTest(parameterized.TestCase):
 
     output = jax.jit(model.apply)(moe_variables, hidden_states)  # pylint: disable=not-callable
     return output
+
+  def get_quantized_moe_model(self, cfg, mesh):
+    """Builds a RoutedMoE wrapped with the fp8_full qwix quantization rule."""
+    model = moe.get_routed_moe(
+        name="MoeBlock",
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+    )
+    # Similar to `quantizations.get_fp8_full_qwix_rule_w_sparsity`.
+    quantization_rule = [
+        qwix.QtRule(
+            module_path=".*",
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=jnp.float8_e5m2,
+            weight_calibration_method=cfg.weight_quantization_calibration_method,
+            act_calibration_method=cfg.act_quantization_calibration_method,
+            bwd_calibration_method=cfg.bwd_quantization_calibration_method,
+            op_names=("gmm", "ragged_dot"),
+        ),
+    ]
+    return qwix.quantize_model(model, qwix.QtProvider(quantization_rule))
+
+  def get_moe_loss_and_grad(self, model, variables, hidden_states):
+    """Computes (loss, output) and grads w.r.t. params and the input hidden states."""
+
+    def loss_fn(params, x):
+      out, lb_loss, _ = model.apply({"params": params}, x)
+      loss = jnp.mean(out.astype(jnp.float32) ** 2)
+      if lb_loss is not None:
+        loss = loss + lb_loss.astype(jnp.float32)
+      return loss, out
+
+    return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))(variables["params"], hidden_states)
 
   @pytest.mark.tpu_only
   def test_megablox(self):
@@ -1622,6 +1663,87 @@ class RoutedMoeTest(parameterized.TestCase):
     relative_norm_diff_threshold = 0.22 if quantization else 0.012
     diff_summary = compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold)
     max_logging.log("\n" + diff_summary)
+
+  def _build_ep_all_gather_test_cfg(self, quantize_before_ep_all_gather):
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="quantize_before_ep_all_gather_equivalence_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        weight_dtype="float32",
+        dtype="bfloat16",
+        per_device_batch_size=2,
+        max_target_length=256,
+        float32_gate_logits=True,
+        ici_expert_parallelism=4,
+        sparse_matmul=True,
+        megablox=True,
+        use_tokamax_gmm=True,
+        use_gmm_v2=True,
+        use_ring_of_experts=True,
+        use_ragged_sort=True,
+        quantization="fp8_full",
+        use_qwix_quantization=True,
+        weight_quantization_calibration_method="absmax",
+        act_quantization_calibration_method="absmax",
+        bwd_quantization_calibration_method="absmax",
+        quantize_before_ep_all_gather=quantize_before_ep_all_gather,
+        wi_tile_fwd_batch_seq=128,
+        wi_tile_dlhs_batch_seq=128,
+        wi_tile_dlhs_embed_dim=256,
+        wi_tile_drhs_batch_seq=128,
+        wo_tile_fwd_batch_seq=128,
+        wo_tile_fwd_embed_dim=256,
+        wo_tile_dlhs_batch_seq=128,
+        wo_tile_dlhs_mlp_dim=256,
+        wo_tile_drhs_batch_seq=128,
+    )
+
+  def _run_ep_all_gather_test(self, quantize_before_ep_all_gather, rng_model, hidden_states):
+    cfg = self._build_ep_all_gather_test_cfg(quantize_before_ep_all_gather)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = self.get_quantized_moe_model(cfg, mesh)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables = model.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      return self.get_moe_loss_and_grad(model, variables, hidden_states)
+
+  @pytest.mark.skip_on_tpu7x
+  @pytest.mark.tpu_only
+  def test_quantize_before_ep_all_gather_equivalence(self):
+    """Quantizing activations before the ring-of-experts EP all-gather should be
+    numerically equivalent to quantizing them later inside the gmm call: both
+    sides quantize the same per-token values (channelwise/absmax scale), just
+    at a different point in the pipeline. Unlike test_gmm_grad_equivalence
+    (which compares quantized vs. unquantized and expects real quantization
+    noise), any meaningful gap here is a bug in the ahead-of-time relocation,
+    not expected noise -- so this uses a much tighter tolerance.
+    """
+    rng = jax.random.PRNGKey(4567)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    cfg = self._build_ep_all_gather_test_cfg(quantize_before_ep_all_gather=False)
+    # Normal distribution for realistic variance/negative values, so the
+    # quantization scale != 1.0 and scale-dropping bugs are actually caught.
+    hidden_states = jax.random.normal(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    # Reference: quantize dynamically inside the gmm call (activations stay
+    # bf16 through the EP all-gather and ragged sort). Target: quantize ahead
+    # of the EP all-gather (this branch's default). Same RNG for both, so the
+    # initial weights match.
+    (_, output_ref), (grads_ref, x_grad_ref) = self._run_ep_all_gather_test(False, rng_model, hidden_states)
+    (_, output_tgt), (grads_tgt, x_grad_tgt) = self._run_ep_all_gather_test(True, rng_model, hidden_states)
+
+    tree_ref = {"output": output_ref, "state_grad": x_grad_ref, "var_grad": grads_ref}
+    tree_tgt = {"output": output_tgt, "state_grad": x_grad_tgt, "var_grad": grads_tgt}
+    # Use an absolute+relative tolerance (not compare_tree's pure relative-norm
+    # metric): the hidden-state gradient's reference norm is near the float32
+    # noise floor for this loss, so a relative-only metric blows up on
+    # ordinary floating-point reordering noise even when both sides agree to
+    # ~1e-9 in absolute terms.
+    chex.assert_trees_all_close(tree_tgt, tree_ref, atol=1e-6, rtol=1e-3)
 
 
 def make_moe(cfg, mesh):

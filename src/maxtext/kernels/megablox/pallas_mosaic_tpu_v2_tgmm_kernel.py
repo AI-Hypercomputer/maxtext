@@ -248,7 +248,7 @@ def make_tgmm_configs(
 
   fuse_act = None  # fuse_act has to be None in tgmm.
   if acc_dtype is None:
-    acc_dtype = jnp.float32.dtype
+    acc_dtype = jnp.float32
   if isinstance(tile_info, gmm_v2.TileSizes):
     tiles = tile_info
   else:
