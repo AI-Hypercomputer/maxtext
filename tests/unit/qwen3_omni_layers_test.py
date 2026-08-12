@@ -25,6 +25,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+import pytest
 from maxtext.configs import pyconfig
 from maxtext.common import common_types
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
@@ -36,7 +37,7 @@ from maxtext.layers.embeddings import (
     Qwen3OmniMoeVisionRotaryEmbedding as JaxQwen3OmniMoeVisionRotaryEmbedding,
 )
 from maxtext.layers.decoders import deepstack_process
-from maxtext.layers.encoders import AudioEncoder
+from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.multimodal.processor_qwen3_omni import (
     maybe_pad_video_values_to_max_grid,
     preprocess_video,
@@ -52,6 +53,7 @@ from maxtext.models.qwen3 import (
     Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector,
 )
 from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
 from tests.utils.multimodal_test_utils import (
     assert_all_close_jax_torch,
     copy_attention_weights_to_maxtext,
@@ -62,7 +64,6 @@ from tests.utils.multimodal_test_utils import (
     copy_patch_embed_weights,
     copy_patch_merger_weights,
     copy_vision_encoder_weights,
-    create_block_diagonal_attention_mask,
     create_random_jax_torch,
 )
 import numpy as np
@@ -417,20 +418,23 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
         config_video_pad,
     )
 
-    raw_output, raw_attention_mask = self.jax_model(raw_hidden_states)
+    patch_shape = (-1, in_channels, temporal_patch_size, patch_size, patch_size)
+    raw_output, raw_attention_mask = self.jax_model(raw_hidden_states.reshape(patch_shape))
     padded_output, attention_mask = self.jax_model(
-        jnp.asarray(padded_hidden_states),
+        jnp.asarray(padded_hidden_states).reshape(patch_shape),
         video_mask=jnp.asarray(video_mask),
     )
 
     self.assertIsNone(raw_attention_mask)
     np.testing.assert_array_equal(padded_grid_thw, raw_grid_thw)
-    self.assertEqual(raw_output.shape, (batch_size, math.prod(raw_grid), self.config.hidden_size_for_vit))
-    self.assertEqual(padded_output.shape, (batch_size, math.prod(max_grid), self.config.hidden_size_for_vit))
+    self.assertEqual(raw_output.shape, (math.prod(raw_grid), 1, self.config.hidden_size_for_vit))
+    self.assertEqual(padded_output.shape, (math.prod(max_grid), 1, self.config.hidden_size_for_vit))
     self.assertEqual(attention_mask.shape, (batch_size, math.prod(max_grid)))
     self.assertEqual(int(jnp.sum(attention_mask)), math.prod(raw_grid))
 
-    padded_valid_output = np.array(padded_output)[np.array(attention_mask, dtype=bool)]
+    padded_valid_output = np.array(padded_output).reshape(-1, self.config.hidden_size_for_vit)[
+        np.array(attention_mask, dtype=bool).reshape(-1)
+    ]
     np.testing.assert_allclose(
         np.array(raw_output).reshape(-1, self.config.hidden_size_for_vit),
         padded_valid_output,
@@ -479,6 +483,30 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
     self.assertEqual(padded_values.shape[3], cfg.video_max_grid_h * cfg.patch_size_for_vit)
     self.assertEqual(padded_values.shape[4], cfg.video_max_grid_w * cfg.patch_size_for_vit)
     np.testing.assert_array_equal(padded_grid, video_grid_thw)  # Grid should not change
+
+  def test_video_mask_downsamples_to_projected_tokens(self):
+    """Pixel padding mask becomes one validity value per projected video token."""
+    cfg = pyconfig.initialize(
+        ["", base_config_path],
+        model_name="qwen3-vl-2b",
+        video_max_grid_t=3,
+        video_max_grid_h=4,
+        video_max_grid_w=4,
+        patch_size_for_vit=16,
+        temporal_patch_size_for_vit=2,
+        spatial_merge_size_for_vit=2,
+        scan_layers=False,
+    )
+    raw_grid = np.asarray([[2, 2, 4]], dtype=np.int32)
+    raw_video = np.ones((1, 3, 4, 32, 64), dtype=np.float32)
+    _, _, pixel_mask = maybe_pad_video_values_to_max_grid(raw_video, raw_grid, cfg)
+
+    token_mask = mm_processor.downsample_video_mask_to_tokens(jnp.asarray(pixel_mask), cfg)
+
+    self.assertEqual(token_mask.shape, (1, 12))
+    self.assertEqual(int(jnp.sum(token_mask)), 4)
+    np.testing.assert_array_equal(np.asarray(token_mask[0, :4]), np.ones(4, dtype=np.int32))
+    np.testing.assert_array_equal(np.asarray(token_mask[0, 4:]), np.zeros(8, dtype=np.int32))
 
   def test_patch_embed_is_jittable(self):
     """Test that patch embed is JIT-compilable."""
@@ -618,6 +646,9 @@ class TestQwen3OmniMoeVisionPosEmbedInterpolate(BaseVisionTestCase):
     pos_embed_jax = self.jax_model(num_frames, height, width)
     pos_embed_torch = self.torch_encoder.fast_pos_embed_interpolate(grid_thw_torch)
 
+    if pos_embed_jax.ndim == 3 and pos_embed_torch.ndim == 2:
+      pos_embed_jax = pos_embed_jax[0]
+
     assert_all_close_jax_torch(pos_embed_jax, pos_embed_torch, rtol=1e-2, atol=1e-2)
 
   def test_pos_embed_interpolate_matches_torch(self):
@@ -695,6 +726,210 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
           atol=1.5e-2,
           error_msg=f"Deep feature {i} differs",
       )
+
+  def test_padded_video_valid_outputs_match_unpadded(self):
+    """Padded tokens do not change valid outputs anywhere in the ViT."""
+    raw_grid = (2, 2, 2)
+    max_grid = (3, 4, 4)
+    config = pyconfig.initialize(
+        ["", base_config_path],
+        model_name="qwen3-omni-30b-a3b",
+        attention="dot_product",
+        attention_type="full",
+        dtype="float32",
+        dtype_mm="float32",
+        weight_dtype="float32",
+        override_model_config=True,
+        attention_for_vit="dot_product",
+        hidden_size_for_vit=16,
+        num_attention_heads_for_vit=2,
+        intermediate_size_for_vit=32,
+        num_hidden_layers_for_vit=1,
+        deepstack_visual_indexes_for_vit=[],
+        video_max_grid_t=max_grid[0],
+        video_max_grid_h=max_grid[1],
+        video_max_grid_w=max_grid[2],
+    )
+    patch_size = config.patch_size_for_vit
+    temporal_patch_size = config.temporal_patch_size_for_vit
+    raw_shape = (
+        1,
+        config.num_channels_for_vit,
+        raw_grid[0] * temporal_patch_size,
+        raw_grid[1] * patch_size,
+        raw_grid[2] * patch_size,
+    )
+    raw_video, _ = create_random_jax_torch(*raw_shape)
+    padded_video, _, video_mask = maybe_pad_video_values_to_max_grid(
+        np.asarray(raw_video), np.asarray([raw_grid]), config
+    )
+
+    encoder = JaxQwen3OmniMoeVisionEncoder(config=config, mesh=self.mesh, rngs=nnx.Rngs(42))
+    raw_output, _ = encoder(raw_video)
+    padded_output, _ = encoder(padded_video, video_mask=video_mask, video_grid_thw=jnp.array([raw_grid], dtype=jnp.int32))
+    patch_mask = np.asarray(video_mask).reshape(1, -1, temporal_patch_size * patch_size * patch_size).max(-1).astype(bool)
+
+    np.testing.assert_allclose(
+        np.asarray(raw_output).reshape(-1, config.hidden_size_for_vit),
+        np.asarray(padded_output)[np.asarray(patch_mask)],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_padded_video_projected_outputs_match_unpadded_batched(self):
+    """Padded tokens do not change valid projected outputs for batched inputs."""
+    raw_grid_1 = (2, 2, 2)
+    raw_grid_2 = (1, 4, 4)
+    max_grid = (3, 4, 4)
+    config = pyconfig.initialize(
+        ["", base_config_path],
+        model_name="qwen3-omni-30b-a3b",
+        attention="dot_product",
+        attention_type="full",
+        dtype="float32",
+        dtype_mm="float32",
+        weight_dtype="float32",
+        override_model_config=True,
+        attention_for_vit="dot_product",
+        hidden_size_for_vit=16,
+        num_attention_heads_for_vit=2,
+        intermediate_size_for_vit=32,
+        num_hidden_layers_for_vit=1,
+        deepstack_visual_indexes_for_vit=[],
+        video_max_grid_t=max_grid[0],
+        video_max_grid_h=max_grid[1],
+        video_max_grid_w=max_grid[2],
+        out_hidden_size_for_vit=24,
+        vision_encoder_block=common_types.VisionEncoderBlockType.QWEN3_OMNI,
+    )
+    patch_size = config.patch_size_for_vit
+    temporal_patch_size = config.temporal_patch_size_for_vit
+
+    # Generate raw videos
+    raw_shape_1 = (
+        1,
+        config.num_channels_for_vit,
+        raw_grid_1[0] * temporal_patch_size,
+        raw_grid_1[1] * patch_size,
+        raw_grid_1[2] * patch_size,
+    )
+    raw_shape_2 = (
+        1,
+        config.num_channels_for_vit,
+        raw_grid_2[0] * temporal_patch_size,
+        raw_grid_2[1] * patch_size,
+        raw_grid_2[2] * patch_size,
+    )
+    raw_video_1, _ = create_random_jax_torch(*raw_shape_1)
+    raw_video_2, _ = create_random_jax_torch(*raw_shape_2)
+
+    # Pad them individually
+    padded_video_1, _, video_mask_1 = maybe_pad_video_values_to_max_grid(
+        np.asarray(raw_video_1), np.asarray([raw_grid_1]), config
+    )
+    padded_video_2, _, video_mask_2 = maybe_pad_video_values_to_max_grid(
+        np.asarray(raw_video_2), np.asarray([raw_grid_2]), config
+    )
+
+    # Batch them
+    batched_padded_video = jnp.concatenate([padded_video_1, padded_video_2], axis=0)
+    batched_video_mask = jnp.concatenate([video_mask_1, video_mask_2], axis=0)
+    batched_grid_thw = jnp.array([raw_grid_1, raw_grid_2], dtype=jnp.int32)
+
+    # Instantiate VisionEncoder (wraps encoder + projector)
+    vision_encoder = VisionEncoder(config=config, mesh=self.mesh, rngs=nnx.Rngs(42))
+
+    # Run individual unpadded
+    raw_output_1, _ = vision_encoder(raw_video_1)
+    raw_output_2, _ = vision_encoder(raw_video_2)
+
+    # Run batched padded
+    batched_padded_output, _ = vision_encoder(
+        batched_padded_video,
+        input_masks=batched_video_mask,
+        video_grid_thw=batched_grid_thw,
+    )
+
+    # Downsample masks to projected tokens
+    projected_mask_1 = mm_processor.downsample_video_mask_to_tokens(video_mask_1, config)
+    projected_mask_2 = mm_processor.downsample_video_mask_to_tokens(video_mask_2, config)
+
+    # Verify equivalence for batch item 0
+    np.testing.assert_allclose(
+        np.asarray(raw_output_1).reshape(-1, config.out_hidden_size_for_vit),
+        np.asarray(batched_padded_output[0])[np.asarray(projected_mask_1[0]).astype(bool)],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+    # Verify equivalence for batch item 1
+    np.testing.assert_allclose(
+        np.asarray(raw_output_2).reshape(-1, config.out_hidden_size_for_vit),
+        np.asarray(batched_padded_output[1])[np.asarray(projected_mask_2[0]).astype(bool)],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+    # --- Test Merging into Text Sequence ---
+    emb_dim = config.out_hidden_size_for_vit
+
+    # Example 1: 2 placeholders at indices 5, 6.
+    text_embeddings_1 = jnp.arange(1 * 20 * emb_dim, dtype=jnp.float32).reshape(1, 20, emb_dim)
+    placeholder_mask_1 = jnp.zeros((1, 20), dtype=jnp.int32)
+    placeholder_mask_1 = placeholder_mask_1.at[:, 5:7].set(1)
+
+    # Example 2: 4 placeholders at indices 5, 6, 7, 8.
+    text_embeddings_2 = jnp.arange(1 * 20 * emb_dim, dtype=jnp.float32).reshape(1, 20, emb_dim) + 1000.0
+    placeholder_mask_2 = jnp.zeros((1, 20), dtype=jnp.int32)
+    placeholder_mask_2 = placeholder_mask_2.at[:, 5:9].set(1)
+
+    # Batch text inputs
+    batched_text_embeddings = jnp.concatenate([text_embeddings_1, text_embeddings_2], axis=0)
+    batched_placeholder_mask = jnp.concatenate([placeholder_mask_1, placeholder_mask_2], axis=0)
+    batched_projected_mask = jnp.concatenate([projected_mask_1, projected_mask_2], axis=0)
+
+    # Run batched merge
+    batched_merged = mm_utils.merge_mm_embeddings(
+        text_embeddings=batched_text_embeddings,
+        multimodal_embeddings=batched_padded_output,
+        mask=batched_placeholder_mask,
+        token_masks=batched_projected_mask,
+    )
+
+    # Run individual unpadded merges
+    token_mask_1 = jnp.ones((1, 2), dtype=jnp.int32)
+    merged_1 = mm_utils.merge_mm_embeddings(
+        text_embeddings=text_embeddings_1,
+        multimodal_embeddings=raw_output_1,
+        mask=placeholder_mask_1,
+        token_masks=token_mask_1,
+    )
+
+    # Example 2 has 4 valid blocks
+    token_mask_2 = jnp.ones((1, 4), dtype=jnp.int32)
+    merged_2 = mm_utils.merge_mm_embeddings(
+        text_embeddings=text_embeddings_2,
+        multimodal_embeddings=raw_output_2,
+        mask=placeholder_mask_2,
+        token_masks=token_mask_2,
+    )
+
+    # Verify that batched merge matches individual unpadded merges
+    # Batch item 0
+    np.testing.assert_allclose(
+        np.asarray(batched_merged[0]),
+        np.asarray(merged_1[0]),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+    # Batch item 1
+    np.testing.assert_allclose(
+        np.asarray(batched_merged[1]),
+        np.asarray(merged_2[0]),
+        rtol=1e-4,
+        atol=1e-4,
+    )
 
 
 class TestDeepstackProcess(unittest.TestCase):
@@ -777,6 +1012,7 @@ class TestDeepstackProcess(unittest.TestCase):
     np.testing.assert_allclose(np.array(result), hidden_np, rtol=1e-6, atol=1e-6)
 
 
+@pytest.mark.skip(reason="Requires decord, which may not be installed in remote CI runners.")
 class TestQwen3OmniPreprocessing(unittest.TestCase):
   """Test MaxText Qwen3 Omni preprocessor against HuggingFace reference."""
 
@@ -1003,17 +1239,12 @@ class TestAudioEncoderLayer(unittest.TestCase):
 
     jax_input, torch_input_3d = create_random_jax_torch(batch_size, seq_len, hidden_size)
 
-    # PyTorch forward pass - expects 2D input (total_seq_len, hidden_dim) with cu_seqlens
-    torch_input_2d = torch_input_3d.reshape(-1, hidden_size)
-
-    # Create cu_seqlens for PyTorch (cumulative sequence lengths for each batch)
-    # For batch_size=2, seq_len=12: [0, 12, 24] indicates two sequences of length 12 each
-    cu_seqlens = torch.tensor([i * seq_len for i in range(batch_size + 1)], dtype=torch.int32)
-
-    attention_mask = create_block_diagonal_attention_mask(cu_seqlens, torch_input_2d.dtype)
-
-    torch_output_1d = torch_layer(torch_input_2d, cu_seqlens=cu_seqlens, attention_mask=attention_mask)[0]
-    torch_output = torch_output_1d.reshape(batch_size, seq_len, hidden_size)
+    # PyTorch audio layers take 2D packed input. Run each batch item separately
+    # to match MaxText's batched attention without relying on HF's old mask API.
+    cu_seqlens = torch.tensor([0, seq_len], dtype=torch.int32)
+    torch_output = torch.stack(
+        [torch_layer(torch_input_3d[i], cu_seqlens=cu_seqlens)[0] for i in range(batch_size)], dim=0
+    )
 
     jax_output = maxtext_layer(jax_input, deterministic=True)
 
@@ -1144,18 +1375,15 @@ class TestAudioEncoder(unittest.TestCase):
     torch_after_pos = torch_conv_out + torch_pos_emb
 
     # Run through encoder layers + layernorm (but not projector)
-    # Process all chunks together
+    # Process chunks separately, matching MaxText's (batch * chunks, seq, hidden) attention shape.
     seq_len_per_chunk = torch_after_pos.shape[1]
-    cu_seqlens = torch.tensor([i * seq_len_per_chunk for i in range(num_chunks + 1)], dtype=torch.int32)
-    attention_mask = create_block_diagonal_attention_mask(cu_seqlens, torch_after_pos.dtype)
-
-    # Flatten: (num_chunks, seq_len_per_chunk, hidden) -> (num_chunks*seq_len_per_chunk, hidden)
-    hidden_state = torch_after_pos.reshape(-1, torch_after_pos.shape[-1])
+    cu_seqlens = torch.tensor([0, seq_len_per_chunk], dtype=torch.int32)
+    hidden_state = torch_after_pos
     for layer in torch_model.layers:
-      hidden_state = layer(hidden_state, cu_seqlens=cu_seqlens, attention_mask=attention_mask)[0]
+      hidden_state = torch.stack([layer(chunk, cu_seqlens=cu_seqlens)[0] for chunk in hidden_state], dim=0)
     hidden_state = torch_model.ln_post(hidden_state)
 
-    # Reshape back: (num_chunks*seq_len_per_chunk, hidden) -> (batch=1, num_chunks*seq_len_per_chunk, hidden)
+    # Reshape back: (num_chunks, seq_len_per_chunk, hidden) -> (batch=1, num_chunks*seq_len_per_chunk, hidden)
     torch_output = hidden_state.reshape(1, num_chunks * seq_len_per_chunk, -1)
 
     # MaxText forward

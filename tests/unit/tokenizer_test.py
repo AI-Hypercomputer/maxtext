@@ -21,9 +21,8 @@ from maxtext.trainers.tokenizer import train_tokenizer
 from maxtext.common.gcloud_stub import is_decoupled
 
 import unittest
-import pytest
-import subprocess
 import os
+from tests.utils.test_helpers import ensure_tokenizer_downloaded
 
 
 @unittest.skipIf(is_decoupled(), "Bypassed in offline decoupled runs (no GCS/internet)")
@@ -60,12 +59,10 @@ class TrainTokenizerTest(unittest.TestCase):
   def tearDownClass(cls):
     os.remove(cls.tokenizer_path)
 
-  @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), self.test_tokenizer.encode(text)))
 
-  @pytest.mark.tpu_only
   def test_detokenize(self):
     tokens = [66, 12, 10, 702]
     self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), np.asarray(self.test_tokenizer.decode(tokens)))
@@ -86,13 +83,11 @@ class TikTokenTest(unittest.TestCase):
     )
     cls.dataset = train_tokenizer.build_grain_iterator(grain_train_files, "parquet")
 
-  @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
     tokens = [2028, 374, 264, 1296]
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), tokens))
 
-  @pytest.mark.tpu_only
   def test_detokenize(self):
     tokens = [2028, 374, 264, 1296]
     text = "This is a test"
@@ -105,20 +100,12 @@ class HFTokenizerTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    source = "gs://maxtext-gemma/huggingface/gemma2-2b"
-    destination = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers")
-    subprocess.run(
-        ["gcloud", "storage", "cp", "-R", source, destination],
-        check=True,
-    )
-    cls.hf_tokenizer = input_pipeline_utils.get_tokenizer(
-        os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
-    )
+    gemma2_path = ensure_tokenizer_downloaded("gemma2-2b", skip_test_on_failure=False)
+    cls.hf_tokenizer = input_pipeline_utils.get_tokenizer(gemma2_path, "huggingface", add_bos=False, add_eos=False)
     cls.sp_tokenizer = input_pipeline_utils.get_tokenizer(
         os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
     )
 
-  @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.hf_tokenizer.encode(text), self.sp_tokenizer.encode(text)))

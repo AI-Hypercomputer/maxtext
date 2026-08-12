@@ -15,13 +15,17 @@
 """Unit tests for Elastic Training utility functions."""
 
 import unittest
-from unittest.mock import create_autospec, Mock
-
-
+from unittest.mock import Mock, create_autospec
+from absl.testing import parameterized
+from maxtext.common import checkpointing
 from maxtext.utils import elastic_utils
 from maxtext.utils import gcs_utils
 import pathwaysutils
 from pathwaysutils.elastic.manager import ScaleUpSignalError
+
+
+class MockJaxRuntimeError(Exception):
+  """Fake JAX Runtime Error class for unit tests."""
 
 
 class FakeDevice:
@@ -46,10 +50,11 @@ class FakeConfig:
     self.elastic_min_slice_count = 1
 
 
-class ElasticUtilsTest(unittest.TestCase):
+class ElasticUtilsTest(parameterized.TestCase):
   """Unit tests for Elastic Training utility functions."""
 
   def setUp(self):
+    """Set up the test environment."""
     super().setUp()
     # Save original dependencies
     self.original_pathwaysutils = elastic_utils.pathwaysutils
@@ -66,15 +71,22 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_logging = create_autospec(self.original_max_logging)
     self.fake_jax = create_autospec(self.original_jax)
     self.fake_manager = create_autospec(self.original_manager_class, instance=True)
-    self.fake_manager.new_slice_event = Mock()
+    self.fake_manager.available_inactive_slices = set()
 
     # Configure default behaviors if needed
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_pathwaysutils.elastic = Mock()
+    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
+    self.fake_pathwaysutils.elastic.get_slice_to_devices.return_value = {
+        0: [FakeDevice()],
+        1: [FakeDevice()],
+    }
     self.fake_jax.process_index.return_value = 0
 
     # Inject fakes into elastic_utils namespace
     elastic_utils.pathwaysutils = self.fake_pathwaysutils
     elastic_utils.jax = self.fake_jax
+    self.fake_jax.errors.JaxRuntimeError = MockJaxRuntimeError
     elastic_utils.gcs_utils = self.fake_gcs_utils
     elastic_utils.max_logging = self.fake_logging
 
@@ -85,13 +97,13 @@ class ElasticUtilsTest(unittest.TestCase):
     # Reset global state for testing is no longer needed
 
   def tearDown(self):
-    # Restore original dependencies
+    """Restore original dependencies"""
     elastic_utils.pathwaysutils = self.original_pathwaysutils
     elastic_utils.jax = self.original_jax
     elastic_utils.gcs_utils = self.original_gcs_utils
     elastic_utils.max_logging = self.original_max_logging
     pathwaysutils.elastic.manager.Manager = self.original_manager_class
-    pathwaysutils.elastic.manager.ScaleUpSignalError = ( # pyrefly: ignore[bad-assignment]
+    pathwaysutils.elastic.manager.ScaleUpSignalError = (  # pyrefly: ignore[bad-assignment]
         self.original_scale_up_signal_error,
     )
     elastic_utils.elastic_manager = None
@@ -99,9 +111,28 @@ class ElasticUtilsTest(unittest.TestCase):
     elastic_utils.pending_elastic_event_type = None
     super().tearDown()
 
+  def test_record_slice_state(self):
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0}
+    self.fake_manager.slice_to_devices = {0: [FakeDevice()], 1: [FakeDevice()]}
+    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = {0, 1}
+
+    fake_recorder = Mock()
+    fake_recorder.record_elastic_slice_counts = Mock()
+
+    elastic_utils.record_slice_state(fake_recorder)
+
+    fake_recorder.record_elastic_slice_counts.assert_called_once_with(available_slices=2, active_slices=1, total_slices=2)
+
+    fake_recorder.record_elastic_slice_counts.reset_mock()
+    elastic_utils.record_slice_state(fake_recorder, active_slices_override=0)
+    fake_recorder.record_elastic_slice_counts.assert_called_once_with(available_slices=2, active_slices=0, total_slices=2)
+
   def test_elastic_enabled(self):
     config = FakeConfig()
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_pathwaysutils.elastic = Mock()
+    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
     config.elastic_enabled = True
     self.assertTrue(elastic_utils.elastic_enabled(config))
 
@@ -146,6 +177,8 @@ class ElasticUtilsTest(unittest.TestCase):
   def test_live_devices_pathways(self):
     """Tests live_devices when pathways is used."""
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_pathwaysutils.elastic = Mock()
+    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
     device0 = FakeDevice(slice_index=0)
     device1 = FakeDevice(slice_index=1)
     self.fake_jax.devices.return_value = [device0, device1]
@@ -170,6 +203,8 @@ class ElasticUtilsTest(unittest.TestCase):
   def test_elastic_retry_disabled(self):
     """Tests elastic_retry when disabled but pathways is used."""
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_pathwaysutils.elastic = Mock()
+    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
     config = FakeConfig()
     config.elastic_enabled = False
     msg = (
@@ -308,13 +343,13 @@ class ElasticUtilsTest(unittest.TestCase):
       def __init__(self):
         self.wait_called = False
 
-      def wait_until_finished(self):
+      def wait(self):
         self.wait_called = True
 
     cm = FakeCheckpointManager()
 
     elastic_utils.elastic_manager = self.fake_manager
-    self.fake_manager.new_slice_event.is_set.return_value = True
+    self.fake_manager.available_inactive_slices = {1}
 
     with self.assertRaises(ScaleUpSignalError):
       elastic_utils.maybe_elastic_scale_up(config, cm)
@@ -359,29 +394,29 @@ class ElasticUtilsTest(unittest.TestCase):
   def test_record_elastic_event_start(self):
     """Tests recording an elastic slice down start."""
     elastic_utils.elastic_manager = self.fake_manager
-    self.fake_manager.new_slice_event.is_set.return_value = False
+    self.fake_manager.available_inactive_slices = set()
+    self.fake_manager.slice_to_devices = {0: [FakeDevice()], 1: [FakeDevice()]}
     fake_recorder = Mock()
     config = FakeConfig()
 
     elastic_utils.record_elastic_event_start(fake_recorder, config)
 
-    fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type="elastic_slice_down"
-    )
+    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(event_type="elastic_slice_down")
+    fake_recorder.record_elastic_slice_counts.assert_called_once()
     self.assertEqual(elastic_utils.pending_elastic_event_type, "elastic_slice_down")
 
   def test_record_elastic_event_start_scale_up(self):
     """Tests recording an elastic slice scale up start."""
     elastic_utils.elastic_manager = self.fake_manager
-    self.fake_manager.new_slice_event.is_set.return_value = True
+    self.fake_manager.available_inactive_slices = {1}
+    self.fake_manager.slice_to_devices = {0: [FakeDevice()], 1: [FakeDevice()]}
     fake_recorder = Mock()
     config = FakeConfig()
 
     elastic_utils.record_elastic_event_start(fake_recorder, config)
 
-    fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type="elastic_scale_up"
-    )
+    fake_recorder.record_elastic_wait_start_time.assert_called_once_with(event_type="elastic_scale_up")
+    fake_recorder.record_elastic_slice_counts.assert_called_once()
 
   def test_record_elastic_wait_end_and_reinit_start_noop_on_first_attempt(self):
     """Tests recording elastic event end and elastic reinit start."""
@@ -390,23 +425,23 @@ class ElasticUtilsTest(unittest.TestCase):
 
     elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
 
-    fake_recorder.record_custom_badput_event_end_time.assert_not_called()
-    fake_recorder.record_custom_badput_event_start_time.assert_not_called()
+    fake_recorder.record_elastic_wait_end_time.assert_not_called()
+    fake_recorder.record_elastic_reinit_start_time.assert_not_called()
     self.assertIsNone(elastic_utils.pending_reinit_recorder)
 
   def test_record_elastic_wait_end_and_reinit_start(self):
     """Test recording end of slice down and start of reinit."""
     elastic_utils.pending_elastic_event_type = "elastic_slice_down"  # pyrefly: ignore[bad-assignment]
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0}
+    self.fake_manager.slice_to_devices = {0: [FakeDevice()], 1: [FakeDevice()]}
     fake_recorder = Mock()
 
     elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
 
-    fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
-        custom_badput_event_type="elastic_slice_down"
-    )
-    fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type="elastic_reinitialization"
-    )
+    fake_recorder.record_elastic_wait_end_time.assert_called_once_with(event_type="elastic_slice_down")
+    fake_recorder.record_elastic_reinit_start_time.assert_called_once()
+    fake_recorder.record_elastic_slice_counts.assert_called_once()
     self.assertIs(elastic_utils.pending_reinit_recorder, fake_recorder)
     self.assertIsNone(elastic_utils.pending_elastic_event_type)
 
@@ -414,12 +449,14 @@ class ElasticUtilsTest(unittest.TestCase):
     """Tests recording end of elastic reinit."""
     fake_recorder = Mock()
     elastic_utils.pending_reinit_recorder = fake_recorder
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0}
+    self.fake_manager.slice_to_devices = {0: [FakeDevice()], 1: [FakeDevice()]}
 
     elastic_utils.record_elastic_reinit_end()
 
-    fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
-        custom_badput_event_type="elastic_reinitialization"
-    )
+    fake_recorder.record_elastic_reinit_end_time.assert_called_once()
+    fake_recorder.record_elastic_slice_counts.assert_called_once()
     self.assertIsNone(elastic_utils.pending_reinit_recorder)
 
   def test_record_elastic_reinit_end_on_cold_start(self):
@@ -442,10 +479,104 @@ class ElasticUtilsTest(unittest.TestCase):
 
     config = ReadOnlyConfig()
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_pathwaysutils.elastic = Mock()
+    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
 
     # Should not raise ValueError
     elastic_utils.ensure_elastic_manager_initialized(config)
     self.assertEqual(elastic_utils.elastic_manager, self.fake_manager)
+
+  @parameterized.parameters(
+      # Positive cases
+      ({1}, True),
+      ({0}, True),
+      ({1, 2}, True),
+      ({0, 3, 6}, True),
+      ({10, 25}, True),
+      # Negative cases
+      (set(), False),
+  )
+  def test_is_scale_up_event_with_set(self, available_inactive_slices, expected):
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+
+    self.fake_manager.available_inactive_slices = available_inactive_slices
+    self.assertEqual(elastic_utils.is_scale_up_event(config), expected)
+
+  def test_maybe_bubble_elastic_exception_bubbles_on_elastic_errors(self):
+    """Tests that elastic exceptions are bubbled up, while other exceptions are returned normally."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+
+    # Scenario 1: Elastic JAX error propagates
+    with self.assertRaises(MockJaxRuntimeError):
+      elastic_utils.maybe_bubble_elastic_exception(config, MockJaxRuntimeError("TPU offline"))
+
+    # Scenario 2: ScaleUpSignalError propagates
+    with self.assertRaises(ScaleUpSignalError):
+      elastic_utils.maybe_bubble_elastic_exception(config, ScaleUpSignalError())
+
+    # Scenario 3: Non-elastic error is returned/ignored
+    elastic_utils.maybe_bubble_elastic_exception(config, ValueError("Disk full"))
+
+  def test_maybe_bubble_elastic_exception_disabled_does_not_bubble(self):
+    """If elasticity is disabled, JaxRuntimeError should not bubble."""
+    config = FakeConfig()
+    config.elastic_enabled = False  # Disabled
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+
+    # Executes normally (no exception raised)
+    elastic_utils.maybe_bubble_elastic_exception(config, MockJaxRuntimeError("JAX error but elasticity disabled"))
+
+  def test_checkpoint_exception_guard_checks_scale_up_on_success(self):
+    """Signals ScaleUpSignalError if scale-up is active when save completes."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_manager.available_inactive_slices = {1}  # Trigger scale-up
+
+    mock_checkpoint_manager = Mock(spec=["wait_until_finished"])
+
+    # Successful checkpoint save block raises ScaleUpSignalError to trigger restart
+    with self.assertRaises(ScaleUpSignalError):
+      with checkpointing.checkpoint_exception_guard(config, mock_checkpoint_manager):
+        pass
+
+    mock_checkpoint_manager.wait_until_finished.assert_called_once()
+
+  def test_checkpoint_exception_guard_none_manager(self):
+    """Checks that checkpoint_manager=None doesn't raise AttributeError on scale-up."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_manager.available_inactive_slices = {1}  # Trigger scale-up
+
+    with self.assertRaises(ScaleUpSignalError):
+      with checkpointing.checkpoint_exception_guard(config, checkpoint_manager=None):
+        pass
+
+  def test_checkpoint_exception_guard_skips_scale_up_on_failure(self):
+    """If checkpoint save fails, scale-up check should be skipped, and exception handled."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_manager.available_inactive_slices = {1}
+
+    handler_called = False
+
+    def handler(_err):
+      nonlocal handler_called
+      handler_called = True
+
+    with checkpointing.checkpoint_exception_guard(config, self.fake_manager, handler):
+      raise ValueError("Save failed")
+
+    self.assertTrue(handler_called)
 
 
 if __name__ == "__main__":

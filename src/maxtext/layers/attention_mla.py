@@ -221,26 +221,47 @@ class Indexer(nnx.Module):
     x = jnp.concatenate([x_pe, x_nope], axis=-1)
     return x
 
-  def generate_mask(self, topk_indices, s):
-    """
-    Creates a mask for top-k indices.
+  def generate_mask(self, indexer_score: Array, topk_values: Array) -> Array:
+    """Creates a mask for top-k indices
 
     Args:
-        topk_indices: [b, t, k] int - The indices to keep.
-        s: int - The total size to select from.
+        indexer_score: [b, t, s] float - The computed relevance scores for all tokens.
+        topk_values: [b, t, k] float - The top-k selected score values from jax.lax.top_k.
 
     Returns:
-        mask: [b, t, s] - `0.0` at topk_indices, `DEFAULT_MASK_VALUE` (large negative) elsewhere.
+        mask: [b, t, s] - `0.0` for top-k selected elements, `DEFAULT_MASK_VALUE` elsewhere.
     """
-    # 1. Create a range [0, 1, ..., s-1]
-    # 2. Broadcast compare against [b, t, k] to get [b, t, k, s]
-    # 3. Use .any() to see if a s-index is present in any of the k slots
-    is_topk = (jnp.arange(s) == topk_indices[..., None]).any(axis=-2)
-    # 4. Use where to select between 0.0 and the mask value
-    # cast values to dtype
+    indexer_cutoff_threshold = topk_values[..., -1]
+    indexer_cutoff_threshold = checkpoint_name(indexer_cutoff_threshold, "indexer_cutoff_threshold")
+    indexer_cutoff_threshold = indexer_cutoff_threshold[..., None]
+
     val_true = jnp.array(0.0, dtype=self.dtype)
     val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=self.dtype)
-    return jnp.where(is_topk, val_true, val_false)
+
+    if self.config.indexer_mask_exact_topk:
+      # Prune ties by keeping only the first k unmasked tokens along sequence dimension
+      k = topk_values.shape[-1]
+      is_strictly_greater = indexer_score > indexer_cutoff_threshold
+      is_equal = indexer_score == indexer_cutoff_threshold
+
+      # Use cumsum to rank both strictly greater and equal tokens (XLA fuses these scans)
+      sg_rank = jnp.cumsum(is_strictly_greater.astype(jnp.int32), axis=-1)
+      eq_rank = jnp.cumsum(is_equal.astype(jnp.int32), axis=-1)
+
+      # Cap strictly greater elements to exactly k
+      sg_kept = is_strictly_greater & (sg_rank <= k)
+
+      # Calculate how many equals we still have room for
+      num_sg_kept = jnp.minimum(sg_rank[..., -1:], k)
+      num_eq_to_keep = k - num_sg_kept
+
+      selected = sg_kept | (is_equal & (eq_rank <= num_eq_to_keep))
+
+      return jnp.where(selected, val_true, val_false)
+    else:
+      # Raw threshold cutoff masking (optional: enables speedups, but may unmask > k tokens under indexer scores ties)
+      raw_mask = indexer_score >= indexer_cutoff_threshold
+      return jnp.where(raw_mask, val_true, val_false)
 
   def __call__(
       self,
@@ -342,18 +363,57 @@ class Indexer(nnx.Module):
     if k.shape[1] <= self.indexer_topk:
       return None, None, None
 
-    # Compute Index Scores
-    # QK product: relu(q @ k.T), [b, t, s, h]
-    # Similar to MQA, each key is shared by h query head
-    logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
-    logits = jax.nn.relu(logits)
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q)
     # Weights scaling affect indexer_score, but does not affect topk_indices. Keep scaling for numerical stability.
     # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
     weights = weights * (self.n_heads**-0.5) * self.softmax_scale
-    # Aggregate head-wise logits: logits @ weights
-    indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
+
+    # Compute Index Scores
+    # When qk_head_chunk_size > 0, compute Index Scores by chunking the 'heads' dimension to reduce memory
+    # The naive evaluation materializes [b, t, s, h].
+    # We use jax.lax.scan to compute the score iteratively over head chunks.
+    b, t, h, d = q.shape
+    # Control the HBM footprint of QK tensor: [batch, q_len, s_len, heads]
+    # If set to 0 (defaults), it falls back to native materialization.
+    head_chunk_size = getattr(self.config, "mla_qk_head_chunk_size", 0)
+
+    def chunked_head_loop(chunk_size):
+
+      num_chunks = h // chunk_size
+      # q: [b, t, h, d] -> [h, b, t, d] -> [num_chunks, head_chunk_size, b, t, d]
+      q_h = q.transpose(2, 0, 1, 3).reshape(num_chunks, chunk_size, b, t, d)
+      # weights: [b, t, h] -> [h, b, t] -> [num_chunks, head_chunk_size, b, t]
+      w_h = weights.transpose(2, 0, 1).reshape(num_chunks, chunk_size, b, t)
+
+      def scan_body_indexer(carry, xs):
+        q_c = xs["q"]  # [h_chunk, b, t, d]
+        w_c = xs["w"]  # [h_chunk, b, t]
+
+        # Directly use the chunked shapes in einsum to avoid transposes inside the loop
+        logits_inner = jnp.einsum("hbtd, bsd -> btsh", q_c, k, precision=self.config.matmul_precision)
+        logits_inner = jax.nn.relu(logits_inner)
+
+        score_chunk = jnp.einsum(
+            "btsh, hbt -> bts",
+            logits_inner,
+            w_c,
+            precision=self.config.matmul_precision,
+        )
+        return carry + score_chunk.astype(jnp.float32), None
+
+      init_score = jnp.zeros((b, t, k.shape[1]), dtype=jnp.float32)
+      idx_score, _ = jax.lax.scan(jax.checkpoint(scan_body_indexer), init_score, {"q": q_h, "w": w_h})
+      return idx_score.astype(q.dtype)
+
+    if head_chunk_size > 0:
+      indexer_score = chunked_head_loop(head_chunk_size)
+
+    else:
+      # Aggregate head-wise logits: logits @ weights natively
+      logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
+      logits = jax.nn.relu(logits)
+      indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)
 
     internal_padding_mask = None
     if cached_s is not None:
@@ -367,16 +427,16 @@ class Indexer(nnx.Module):
 
     # TopK selection based on index score
     if self.config.indexer_use_approx_top_k:
-      _, topk_indices = jax.lax.approx_max_k(
+      topk_values, topk_indices = jax.lax.approx_max_k(
           indexer_score,
           k=self.indexer_topk,
           recall_target=self.config.indexer_approx_top_k_recall,
       )
     else:
-      _, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # topk_indices [b, t, k]
+      topk_values, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # [b, t, k]
 
     # Create Sparse Index Mask: 0 and large negatives
-    indexer_mask = self.generate_mask(topk_indices, k.shape[1])  # [b, t, s]
+    indexer_mask = self.generate_mask(indexer_score, topk_values)  # [b, t, s]
 
     # Re-apply attention mask after TopK: in case number of unmasked tokens < TopK
     if attention_mask is not None:
@@ -859,23 +919,40 @@ class MLA(Attention):
 
     if self.q_lora_rank == 0:
       q = self.query(inputs_q, out_sharding=query_sharding)
+      q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     else:
       # LoRA path
       low_rank_q = self.wq_a(inputs_q, out_sharding=wqa_out_sharding)  # [B, L, q_lora_rank]
       low_rank_q = checkpoint_name(low_rank_q, "query_wa_proj")
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
       low_rank_q = checkpoint_name(low_rank_q, "mla_q")
-      q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads, qk_head_dim]
+      if self.config.use_sliced_mla_proj and self.wq_b.quant is None:
+        q_nope = self.wq_b(
+            low_rank_q,
+            out_sharding=query_sharding,
+            slice_bounds=(0, self.qk_nope_head_dim),
+        )  # [B, L, n_heads, qk_nope_head_dim]
+        q_pe = self.wq_b(
+            low_rank_q,
+            out_sharding=query_sharding,
+            slice_bounds=(self.qk_nope_head_dim, self.qk_head_dim),
+        )  # [B, L, n_heads, qk_rope_head_dim]
+      else:
+        q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [B, L, n_heads, qk_head_dim]
+        q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
 
     # Partial RoPE: Split into non-positional and rotary parts.
     # last dimension: qk_nope_head_dim, qk_rope_head_dim
-    q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name)
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
     q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name)
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
+
+    if self.config.experimental_sa_quant_q_fp8:
+      query = query.astype(jnp.float8_e4m3fn)
+
     query = self._maybe_shard_with_logical(query, query_logical_name)
     return query, low_rank_q
 
@@ -889,15 +966,32 @@ class MLA(Attention):
       value_logical_name = self.value_axis_names
 
     wkva_out_sharding = create_sharding(self.mesh, key_logical_name)
-    kv_out = self.wkv_b(low_rank_main, out_sharding=wkva_out_sharding)
-
-    # Split kv_out into key_nope and value parts.
-    key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
+    if self.config.use_sliced_mla_proj and self.wkv_b.quant is None:
+      key_nope = self.wkv_b(
+          low_rank_main,
+          out_sharding=wkva_out_sharding,
+          slice_bounds=(0, self.qk_nope_head_dim),
+      )  # [B, L, n_heads, qk_nope_head_dim]
+      value = self.wkv_b(
+          low_rank_main,
+          out_sharding=wkva_out_sharding,
+          slice_bounds=(
+              self.qk_nope_head_dim,
+              self.qk_nope_head_dim + self.v_head_dim,
+          ),
+      )  # [B, L, n_heads, v_head_dim]
+    else:
+      kv_out = self.wkv_b(low_rank_main, out_sharding=wkva_out_sharding)
+      # Split kv_out into key_nope and value parts.
+      key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
     key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
     key_nope = self._maybe_shard_with_logical(key_nope, key_logical_name)
     key_rope = self._maybe_shard_with_logical(key_rope, key_logical_name)
 
     key = jnp.concatenate([key_nope, key_rope], axis=-1)
+
+    if self.config.experimental_sa_quant_k_fp8:
+      key = key.astype(jnp.float8_e4m3fn)
 
     key = self._maybe_shard_with_logical(key, key_logical_name)
     value = self._maybe_shard_with_logical(value, value_logical_name)
@@ -1060,23 +1154,65 @@ class MLA(Attention):
     query = jax.lax.stop_gradient(query)
     key = jax.lax.stop_gradient(key)
 
-    # Compute attention scores: [b, t, h, d] @ [b, s, h, d] -> [b, h, t, s]
-    attention_scores = jnp.einsum("bthd, bshd -> bhts", query, key, precision=self.config.matmul_precision)
-
+    # Ensure indexer_score updates identically in all branches
     if sparse_loss:
-      # indexer_mask is already pre-filtered with the attention_mask if any
-      attention_scores = attention_scores + indexer_mask[:, None, :, :]
       indexer_score = indexer_score + indexer_mask
-    elif attention_mask is not None:
-      # indexer_score already applies attention_mask; updating attention_scores only
-      attention_scores = attention_scores + attention_mask[:, None, :, :]
-
-    # Use float32 for softmax numerical stability.
-    attention_probs = jax.nn.softmax(attention_scores.astype(jnp.float32), axis=-1)
     indexer_probs = jax.nn.softmax(indexer_score.astype(jnp.float32), axis=-1)
 
-    # Aggregate heads: [b, h, t, s] -> [b, t, s]
-    attention_probs = jnp.sum(attention_probs, axis=1)
+    batch, q_len, heads, dim = query.shape
+
+    # Chunk across the 'heads' dimension manually using jax.lax.scan
+    # Control the HBM footprint of QK tensor: [batch, q_len, s_len, heads]
+    # If set to 0, it falls back to native implementation.
+    head_chunk_size = getattr(self.config, "mla_qk_head_chunk_size", 0)
+    if head_chunk_size > 0:
+
+      num_chunks = heads // head_chunk_size
+
+      # Transpose and reshape to put chunk dimension first for jax.lax.scan
+      # query: [b, t, h, d] -> [h, b, t, d] -> [num_chunks, head_chunk_size, b, t, d]
+      q_h = query.transpose(2, 0, 1, 3).reshape(num_chunks, head_chunk_size, batch, q_len, dim)
+      k_h = key.transpose(2, 0, 1, 3).reshape(num_chunks, head_chunk_size, batch, key.shape[1], dim)
+
+      def scan_body_heads(carry, xs):
+        q_c = xs["q"]  # [h_chunk, b, t, d]
+        k_c = xs["k"]  # [h_chunk, b, s, d]
+
+        # Directly use the chunked shapes in einsum to avoid transposes inside the loop
+        attn_chunk = jnp.einsum(
+            "hbtd, hbsd -> bhts",
+            q_c,
+            k_c,
+            precision=self.config.matmul_precision,
+        )
+
+        if sparse_loss:
+          attn_chunk = attn_chunk + indexer_mask[:, None, :, :]
+        elif attention_mask is not None:
+          attn_chunk = attn_chunk + attention_mask[:, None, :, :]
+
+        probs_chunk = jax.nn.softmax(attn_chunk.astype(jnp.float32), axis=-1)
+        probs_chunk_sum = jnp.sum(probs_chunk, axis=1)  # [b, t, s]
+
+        return carry + probs_chunk_sum, None
+
+      init_probs = jnp.zeros((batch, q_len, key.shape[1]), dtype=jnp.float32)
+      attention_probs, _ = jax.lax.scan(scan_body_heads, init_probs, {"q": q_h, "k": k_h})
+
+    else:
+      # Native implementation (default) if chunking is disabled
+      attention_scores = jnp.einsum(
+          "bthd, bshd -> bhts",
+          query,
+          key,
+          precision=self.config.matmul_precision,
+      )
+      if sparse_loss:
+        attention_scores = attention_scores + indexer_mask[:, None, :, :]
+      elif attention_mask is not None:
+        attention_scores = attention_scores + attention_mask[:, None, :, :]
+      attention_probs = jnp.sum(jax.nn.softmax(attention_scores.astype(jnp.float32), axis=-1), axis=1)
+      attention_probs = jax.lax.optimization_barrier(attention_probs)
     # L1 normalize aggregated target distribution
     attention_probs = attention_probs / (jnp.sum(attention_probs, axis=-1, keepdims=True) + EPS)
 

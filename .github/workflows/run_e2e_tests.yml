@@ -31,6 +31,9 @@ on:
         description: 'GitHub SHA of MaxText to be passed to the Airflow DAG run.'
         required: true
         type: string
+    secrets:
+      AIRFLOW_CALLBACK_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -51,22 +54,30 @@ jobs:
           echo "airflow_uri=${AIRFLOW_URI}" >> "$GITHUB_OUTPUT"
 
       - name: Trigger DAG
+        env:
+          AIRFLOW_URI: ${{ steps.info.outputs.airflow_uri }}
+          BUILD_MODE: ${{ inputs.mode }}
+          COMMIT_SHA: ${{ inputs.maxtext_sha }}
+          RUN_ID: ${{ inputs.run_id }}
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
         run: |
           IAP_TOKEN=$(gcloud auth print-access-token)
-
+          PAYLOAD=$(python3 -c 'import json, os
+          print(json.dumps({
+              "conf": {
+                  "build_mode": os.environ["BUILD_MODE"],
+                  "commit_sha": os.environ["COMMIT_SHA"],
+                  "github_run_id": os.environ["RUN_ID"],
+                  "github_repo": os.environ["GITHUB_REPO"],
+                  "github_token": os.environ["GITHUB_TOKEN"],
+              }
+          }))')
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-            "${{ steps.info.outputs.airflow_uri }}/api/v1/dags/maxtext_e2e_tests/dagRuns" \
+            "${AIRFLOW_URI}/api/v1/dags/maxtext_e2e_tests/dagRuns" \
             -H "Authorization: Bearer ${IAP_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"conf\": {
-                \"build_mode\": \"${{ inputs.mode }}\",
-                \"maxtext_sha\": \"${{ inputs.maxtext_sha }}\",
-                \"github_run_id\": \"${{ inputs.run_id }}\",
-                \"github_repo\": \"${{ github.repository }}\",
-                \"github_callback_token\": \"${{ secrets.AIRFLOW_CALLBACK_TOKEN }}\"
-              }
-            }")
+            -d "$PAYLOAD")
 
           HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | sed '$d')

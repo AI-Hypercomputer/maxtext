@@ -27,6 +27,7 @@ from absl.testing import absltest
 from flax import nnx
 from transformers import AutoTokenizer
 
+from maxtext.configs import types
 from maxtext.trainers.post_train.rl import train_rl
 from maxtext.trainers.post_train.rl import evaluate_rl
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
@@ -79,13 +80,14 @@ class RLTrainerIntegrationTests(unittest.TestCase):
     """Helper method to run the full RL training workflow and verify parameter updates."""
     argv = self.base_argv + extra_argv
 
-    trainer_config, sampler_config, trainer_devices, sampler_devices = train_rl.setup_configs_and_devices(argv)
+    trainer_config, sampler_config, trainer_devices, sampler_devices = train_rl.setup_configs_and_devices(
+        argv, config_class=types.RLConfig
+    )
 
-    if not trainer_config.debug.rl:
+    if not trainer_config.debug:
       noise_filter = max_logging.NoisyLogFilter()
       logging.getLogger().addFilter(noise_filter)
 
-    max_train_steps = train_rl.get_max_train_steps(trainer_config)
     model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
     train_dataset, test_dataset = train_rl.prepare_datasets(trainer_config, model_tokenizer)
 
@@ -93,7 +95,7 @@ class RLTrainerIntegrationTests(unittest.TestCase):
         trainer_config, sampler_config, trainer_devices, sampler_devices
     )
 
-    rl_cluster, rl_trainer, _ = train_rl.create_rl_components(
+    rl_cluster, rl_trainer, _, _ = train_rl.create_rl_components(
         trainer_config,
         sampler_config,
         sampler_devices,
@@ -103,7 +105,6 @@ class RLTrainerIntegrationTests(unittest.TestCase):
         reference_mesh,
         rollout_mesh,
         model_tokenizer,
-        max_train_steps,
     )
 
     # Pre-train evaluation
@@ -137,7 +138,7 @@ class RLTrainerIntegrationTests(unittest.TestCase):
 
     # Verify results
     for metrics in [pre_metrics, post_metrics]:
-      corr, total, acc, partial_acc, format_acc = metrics
+      corr, total, acc, partial_acc, format_acc, _ = metrics
       self.assertGreaterEqual(total, 1, "There should be at least one eval item")
       self.assertGreaterEqual(corr, 0, "Correct items should be non-negative")
       self.assertTrue(0.0 <= partial_acc <= 100.0, "Partial accuracy should be a percentage between 0 and 100")

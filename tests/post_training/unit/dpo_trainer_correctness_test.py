@@ -36,7 +36,7 @@ from tests.post_training.integration.dpo_correctness_base import (
 
 # Force this test to run only on CPU to avoid GPU/TPU floating point differences.
 # It will be dynamically bypassed on active accelerator hardware testbeds.
-pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
+pytestmark = [pytest.mark.post_training]
 
 
 class DPOTRLCorrectnessTest(DPOCorrectnessTestBase):

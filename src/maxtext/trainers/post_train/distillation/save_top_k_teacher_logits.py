@@ -26,7 +26,12 @@ import argparse
 import time
 import sys
 from etils import epath
-import tensorflow as tf
+
+try:
+  import tensorflow as tf
+except ImportError:
+  sys.exit("Tensorflow is required. Run `pip install tensorflow`")
+
 import re
 import numpy as np
 

@@ -30,6 +30,9 @@ from tempfile import gettempdir
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 
+pytestmark = [pytest.mark.integration_test]
+
+
 _BASE_ARGS = (
     None,
     get_test_config_path(),
@@ -58,7 +61,6 @@ _BASE_ARGS = (
 class CheckVmaTest(absltest.TestCase):
   """Tests that megablox MoE compiles under different check_vma / shard_mode settings."""
 
-  @pytest.mark.cpu_only
   def test_check_vma(self):
     """check_vma=True with fsdp and expert parallelism."""
     temp_dir = gettempdir()
@@ -72,7 +74,6 @@ class CheckVmaTest(absltest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_check_vma_disabled(self):
     """check_vma=False (default) should also compile correctly."""
     temp_dir = gettempdir()
@@ -86,7 +87,6 @@ class CheckVmaTest(absltest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_check_vma_pure_fsdp(self):
     """check_vma=True with only FSDP parallelism (no expert parallelism)."""
     temp_dir = gettempdir()
@@ -100,7 +100,6 @@ class CheckVmaTest(absltest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_check_vma_pure_ep(self):
     """check_vma=True with only expert parallelism (no FSDP)."""
     temp_dir = gettempdir()
@@ -114,7 +113,6 @@ class CheckVmaTest(absltest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   def test_check_vma_error_extra_parallelism(self):
     """check_vma=True must raise ValueError when a non-EP/FSDP ICI axis is enabled."""
     with self.assertRaises(ValueError):
@@ -129,7 +127,6 @@ class CheckVmaTest(absltest.TestCase):
           )
       )
 
-  @pytest.mark.cpu_only
   def test_check_vma_error_tokamax_gmm(self):
     """check_vma=True must raise ValueError when use_tokamax_gmm=True."""
     with self.assertRaises(ValueError):
@@ -144,7 +141,6 @@ class CheckVmaTest(absltest.TestCase):
           )
       )
 
-  @pytest.mark.cpu_only
   def test_explicit_shard_mode(self):
     """shard_mode=explicit should compile correctly without check_vma (check_vma not supported here)."""
     temp_dir = gettempdir()

@@ -18,13 +18,11 @@ import unittest
 from unittest import mock
 import os
 import tempfile
-import pytest
 
 # Module to be tested
 from maxtext.utils import gcs_utils
 
 
-@pytest.mark.cpu_only
 class GcsUtilsTest(unittest.TestCase):
   """Unit tests for GCS utility functions."""
 

@@ -29,7 +29,7 @@ import jax.numpy as jnp
 if jax.__version_info__ >= (0, 6, 3):
   from jax.experimental.layout import Layout as DLL  # type: ignore
 else:
-  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
+  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore # pylint: disable=no-name-in-module
 
 from flax import linen as nn
 from flax import nnx
@@ -57,6 +57,16 @@ config_lib, engine_api, token_utils, tokenizer_api, _token_params_ns = jetstream
 TokenizerParameters = getattr(_token_params_ns, "TokenizerParameters", object)  # type: ignore[assignment]
 TokenizerType = getattr(_token_params_ns, "TokenizerType", object)  # type: ignore[assignment]
 
+_DEEPSEEK_V4_CACHE_KEYS = frozenset(
+    (
+        "entry_count",
+        "accumulator_index",
+        "leftover_buffer_kv",
+        "leftover_buffer_gate",
+        "overlap_kv",
+        "overlap_gate",
+    )
+)
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
@@ -145,11 +155,16 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       # nnx.merge. `rest` (RNG state etc.) is materialized in load_params.
       graphdef, _, _, _ = nnx.split(abstract_model, nnx.Param, nnx.Cache, ...)
       self.graphdef = graphdef
+      # Layers may bake their construction-time model_mode into static attributes,
+      # so a call must be merged with the graphdef built for that same mode.
+      graphdef_ar, _, _, _ = nnx.split(abstract_model_ar, nnx.Param, nnx.Cache, ...)
+      self.graphdef_ar = graphdef_ar
       self._create_model_fn = _create_model
       self._nnx_rest_state = None
     else:
       self.model = models.transformer_as_linen(config, mesh=self._mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
       self.graphdef = None
+      self.graphdef_ar = None
       self._create_model_fn = None
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
 
@@ -164,6 +179,8 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     self.decode_state_layouts = None
     self.param_layouts = None
     self.rng = None
+    self._compiled_initialize_fn = None
+    self._compiled_init_cache_fn = None
 
   def print_stats(self, label: str):
     max_utils.print_mem_stats(label)
@@ -192,7 +209,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     """Zero-filled pure-dict cache matching the abstract NNX model."""
     src = self._abstract_model_for_mode(mode)
     _, cache_state, _ = nnx.split(src, nnx.Cache, ...)
-    cache_dict = cache_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
+    cache_dict = nnx.to_pure_dict(cache_state)
     return jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict)
 
   def _nnx_run_model(
@@ -212,14 +229,21 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       encoder_image_masks=None,
       encoder_videos=None,
       encoder_video_masks=None,
+      encoder_video_grid_thw=None,
       encoder_audios=None,
   ):
     """NNX equivalent of `model.apply(..., mutable=["cache"])`. Returns (logits, new_cache_dict)."""
     cache_state = self._nnx_cache_state_template(mode=model_mode)
     nnx.replace_by_pure_dict(cache_state, cache_dict)
+    # Merge with the graphdef built for this mode. Layers that captured their
+    # model_mode at construction (e.g. the DeepSeek layers) would otherwise run
+    # the prefill attention path during autoregressive decode.
+    graphdef = self.graphdef_ar if model_mode == MODEL_MODE_AUTOREGRESSIVE else self.graphdef
     # copy=True avoids reusing Variable objects across traces (TraceContextError),
     # mirroring the workaround in train.py's diff_wrapper.
-    model = nnx.merge(self.graphdef, params, cache_state, self._nnx_rest_state, copy=True)  # pyrefly: ignore[no-matching-overload]
+    model = nnx.merge(  # pyrefly: ignore[no-matching-overload]
+        graphdef, params, cache_state, self._nnx_rest_state, copy=True
+    )  # pyrefly: ignore[no-matching-overload]
     logits = model(
         decoder_input_tokens,
         decoder_positions,
@@ -228,6 +252,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         encoder_image_masks=encoder_image_masks,
         encoder_videos=encoder_videos,
         encoder_video_masks=encoder_video_masks,
+        encoder_video_grid_thw=encoder_video_grid_thw,
         encoder_audios=encoder_audios,
         enable_dropout=enable_dropout,
         model_mode=model_mode,
@@ -235,7 +260,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         true_length=true_length,
         slot=slot,
     )
-    new_cache = nnx.state(model, nnx.Cache).to_pure_dict()
+    new_cache = nnx.to_pure_dict(nnx.state(model, nnx.Cache))
     return logits, new_cache
 
   def generate_aot(
@@ -280,7 +305,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if x.format == l:
         return x
       # Somehow this can be None sometimes.
-      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l  # pyrefly: ignore[missing-attribute]
+      dll = (
+          # pyrefly: ignore[missing-attribute]
+          (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout)
+          if isinstance(l, Format)
+          else l  # pyrefly: ignore[missing-attribute]
+      )
       f = jax.jit(self._identity, out_shardings=Format(dll, s)).lower(x).compile(compiler_options=xla_flags)
       y = f(x)
       # Achieves donation of the input argument, but allows for different memory
@@ -392,6 +422,23 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         forward. Same output as serve mode (absmax calibration), slower.
     """
 
+    # Safely create the concrete PREFILL model once, avoiding OOM risks:
+    # create_nnx_sharded_model builds the model with a jitted out_shardings so params
+    # are produced already sharded, avoiding a single-device allocation of the full
+    # model.
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      _, full_abs = nnx.split(self.model)
+      full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
+      concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
+          self.model,  # pyrefly: ignore[bad-argument-type]
+          self._create_model_fn,  # pyrefly: ignore[bad-argument-type]
+          mesh=self._mesh,
+          named_sharding=full_sharding,  # pyrefly: ignore[bad-argument-type]
+      )
+      graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
+      self.graphdef = graphdef
+      del concrete_model
+
     if params:
       print("Resharding given NNX params")
       _, params_abs, _ = nnx.split(self.model, nnx.Param, ...)
@@ -400,21 +447,8 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       # device_put actually reshards instead of being a no-op.
       with nn_partitioning.axis_rules(self.config.logical_axis_rules):
         target_shardings = sharding.nnx_construct_named_sharding(params_abs, self._mesh)
-      params_state = jax.device_put(params, target_shardings)
-      # We only need a concrete `rest` (RNG vars) for nnx.merge. create_nnx_sharded_model
-      # builds the model with a jitted out_shardings so params are produced already
-      # sharded, avoiding a single-device allocation of the full model (an OOM risk for
-      # large models). self.model is abstract with no .sharding, so pass an explicit one.
-      _, full_abs = nnx.split(self.model)
-      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
-      concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
-          self.model, self._create_model_fn, mesh=self._mesh, named_sharding=full_sharding  # pyrefly: ignore[bad-argument-type]
-      )
-      graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
-      self.graphdef = graphdef
+        params_state = jax.device_put(params, target_shardings)
       self._nnx_rest_state = rest_state
-      del concrete_model
     else:
       max_logging.log("Loading NNX params via from_pretrained")
       with self._mesh:
@@ -429,22 +463,14 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       # `_nnx_rest_state`. Param-only filtering would silently drop them and
       # the model would run with random qrhs values.
       _, params_state, _, loaded_rest_state = nnx.split(nnx_model, nnx.Param, nnx.Cache, ...)
-      # `_prefill_jit` re-merges with `self.graphdef`, which must be the PREFILL
-      # graphdef built in `__init__` (matching `_create_model_fn`). Don't
-      # overwrite with the AR-mode graphdef from `from_pretrained` — the
-      # PREFILL/AR attention ops have different cache variable shapes, and a
-      # mismatch trips the `assert prefill_kv_cache` check inside attention_op.
-      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        concrete_model = self._create_model_fn()  # pyrefly: ignore[not-callable]
-      graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       # Overlay loaded non-Param/non-Cache leaves (e.g. AQT qrhs.frozen) onto
       # the PREFILL-mode rest_state. The PREFILL concrete_model already has
       # placeholder qrhs vars at the right paths; we just swap in the loaded
       # values. Anything only in `loaded_rest_state` (e.g. AR-only RNG slots)
       # is ignored. We keep PREFILL rest_state as the base so RNG variables
       # match the PREFILL graphdef's expectations.
-      loaded_rest_dict = loaded_rest_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-      rest_dict = rest_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
+      loaded_rest_dict = nnx.to_pure_dict(loaded_rest_state)
+      rest_dict = nnx.to_pure_dict(rest_state)
 
       def _overlay(dst, src):
         if isinstance(dst, dict) and isinstance(src, dict):
@@ -460,9 +486,8 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
       rest_dict = _overlay(rest_dict, loaded_rest_dict)
       nnx.replace_by_pure_dict(rest_state, rest_dict)
-      self.graphdef = graphdef
       self._nnx_rest_state = rest_state
-      del nnx_model, concrete_model
+      del nnx_model, loaded_rest_state, loaded_rest_dict, rest_dict
 
     self.abstract_params = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -485,7 +510,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           lambda x: jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(None, *x.spec)),
           self.prefill_kv_cache_shardings,
       )
-      self.prefill_kv_cache_shardings = {"decoder": {"layers": self.prefill_kv_cache_shardings["decoder"]["layers"][0]}}
+      decoder_dict = self.prefill_kv_cache_shardings["decoder"]
+      first_key = next(k for k in decoder_dict.keys() if k.endswith("layers_0"))
+      first_layer_sharding = decoder_dict[first_key]
+      self.prefill_kv_cache_shardings = {"decoder": {"layers": first_layer_sharding}}
     # scan_layers=True is already stacked on axis 0; shardings stay as-is and stack/unstack are no-ops.
     # AR-mode abstract model so axis names use CACHE_BATCH (not CACHE_BATCH_PREFILL);
     # bulk_insert / _insert_jit search for "cache_batch" in the per-leaf logical axes.
@@ -609,10 +637,17 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if self.config.scan_layers:
         # scan_layers already stacks the per-layer KV cache on axis 0; nothing to restack.
         return cache
-      # scan_layers=False: stack the per-layer subtrees under decoder/layers into one
+      # scan_layers=False: stack the per-layer subtrees under decoder into one
       # subtree with a leading layer axis (matching the scan_layers=True shape).
-      layers = cache["decoder"]["layers"]
-      stacked = jax.tree.map(lambda *c: jnp.stack(c), *[layers[i] for i in range(self.config.num_decoder_layers)])
+      if "dense_layers_0" in cache["decoder"] or "moe_layers_0" in cache["decoder"]:
+        first_dense = self.config.first_num_dense_layers
+        num_moe = self.config.num_decoder_layers - first_dense
+        layer_keys = [f"dense_layers_{i}" for i in range(first_dense)] + [f"moe_layers_{i}" for i in range(num_moe)]
+      else:
+        layer_keys = [f"layers_{i}" for i in range(self.config.num_decoder_layers)]
+
+      layer_cache = [cache["decoder"][key] for key in layer_keys]
+      stacked = jax.tree.map(lambda *c: jnp.stack(c), *layer_cache)
       return {"decoder": {"layers": stacked}}
 
     layer_keys = []
@@ -635,8 +670,22 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         return cache
       # scan_layers=False: split the leading layer axis back into per-layer subtrees.
       stacked = cache["decoder"]["layers"]
-      layers = {i: jax.tree.map(lambda x, i=i: x[i], stacked) for i in range(self.config.num_decoder_layers)}
-      return {"decoder": {"layers": layers}}
+      res_cache = {"decoder": {}}
+      is_deepseek = (
+          getattr(self.model, "is_deepseek", False)
+          or (hasattr(self.model, "decoder") and getattr(self.model.decoder, "is_deepseek", False))
+          or (hasattr(self.config, "decoder_block") and str(self.config.decoder_block).lower() == "deepseek")
+      )
+      if is_deepseek:
+        first_dense = self.config.first_num_dense_layers
+        num_moe = self.config.num_decoder_layers - first_dense
+        layer_keys = [f"dense_layers_{i}" for i in range(first_dense)] + [f"moe_layers_{i}" for i in range(num_moe)]
+      else:
+        layer_keys = [f"layers_{i}" for i in range(self.config.num_decoder_layers)]
+
+      for idx, key in enumerate(layer_keys):
+        res_cache["decoder"][key] = jax.tree.map(lambda x, i=idx: x[i], stacked)
+      return res_cache
 
     flat_cache, treedef = jax.tree.flatten(cache)
     layer_cache = [jax.tree.unflatten(treedef, flat_cache_vars) for flat_cache_vars in zip(*flat_cache, strict=True)]
@@ -664,7 +713,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     )
 
   @functools.partial(
-      jax.jit, static_argnums=(0,), static_argnames=("return_prompt_logp", "algorithm", "topk", "nucleus_topp")
+      jax.jit,
+      static_argnums=(0,),
+      static_argnames=("video_grid_thw", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"),
   )
   def _prefill_jit(
       self,
@@ -678,6 +729,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       image_masks: jax.Array | None = None,
       videos: jax.Array | None = None,
       video_masks: jax.Array | None = None,
+      video_grid_thw: tuple[int, int, int] | None = None,
       audio_values: jax.Array | None = None,
       audio_masks: jax.Array | None = None,
       true_length: int,
@@ -785,6 +837,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
             encoder_image_masks=image_masks,
             encoder_videos=videos,
             encoder_video_masks=video_masks,
+            encoder_video_grid_thw=video_grid_thw,
             encoder_audios=audio_values,
             enable_dropout=False,
             model_mode=MODEL_MODE_PREFILL,
@@ -803,6 +856,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
             encoder_image_masks=image_masks,
             encoder_videos=videos,
             encoder_video_masks=video_masks,
+            encoder_video_grid_thw=video_grid_thw,
             encoder_audios=audio_values,
             decoder_segment_ids=sequence_indicator,
             enable_dropout=False,
@@ -887,6 +941,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       image_masks: jax.Array | None = None,
       videos: jax.Array | None = None,
       video_masks: jax.Array | None = None,
+      video_grid_thw: jax.Array | None = None,
       audio_values: jax.Array | None = None,
       audio_masks: jax.Array | None = None,
       true_length: int,
@@ -901,6 +956,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       temperature: float | None = None,
   ):  # returns (new_prefix, result_tokens)
     """Public API for prefill that updates page state outside JIT."""
+    if video_grid_thw is not None:
+      flat_video_grid = jax.device_get(video_grid_thw).reshape(-1)
+      if flat_video_grid.size != 3:
+        raise ValueError(f"Decode currently supports one video grid with 3 values, got shape {video_grid_thw.shape}.")
+      video_grid_thw = tuple(int(dim) for dim in flat_video_grid)  # pyrefly: ignore[bad-assignment]
+
     # Update page state before JIT call
 
     # Sample rng before JIT call
@@ -920,6 +981,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         image_masks=image_masks,
         videos=videos,
         video_masks=video_masks,
+        video_grid_thw=video_grid_thw,
         audio_values=audio_values,
         audio_masks=audio_masks,
         sampler=sampler,
@@ -1077,11 +1139,11 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       )
       first_generated_tokens.append(first_generated_token)
       if self.config.return_log_prob:
-        # pytype: disable=attribute-error
-        token_logps.append(inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token))
+        p = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
+        token_logps.append(p)  # pytype: disable=attribute-error
     first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
     if self.config.return_log_prob:
-      token_logps = jnp.concatenate(token_logps, axis=0)
+      token_logps = jnp.concatenate(token_logps, axis=0)  # pyrefly: ignore[bad-argument-type]
 
     all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
     generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
@@ -1251,7 +1313,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         prefill_results[k].append(v)
       first_tokens.append(first_token)
     prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
-    prefill_results["prompt_logp"] = prompt_logp
+    prefill_results["prompt_logp"] = prompt_logp  # pyrefly: ignore[unsupported-operation]
     return cache, prefill_results, first_tokens
 
   # Public non-JIT generate method that updates page state
@@ -1335,7 +1397,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     """
 
     previous_token = decode_state["tokens"]
-    rng, new_rng = jax.random.split(rng)
+    rng, new_rng = jax.random.split(rng)  # pyrefly: ignore[bad-argument-type]
     # run one step generation
     if self.config.pure_nnx:
       with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -1442,6 +1504,12 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+
+      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
+        # Copy these states by explicitly overwriting the target slots matching current request id
+        for slot in slots:
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+        return full_cache
 
       for slot in slots:
         if path_key == "cache_ar_segment_id":
@@ -1557,6 +1625,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+
+      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
+        # Copy these states by explicitly overwriting the target slot matching current request id
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
 
       if path_key == "cache_ar_segment_id":
         s = list(full_cache.shape)
@@ -1692,6 +1764,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
+      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
+        # Direct batch slot index overwrite for fixed-size metadata trackers
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+
       if path_key == "cache_ar_segment_id":
         ### goal: zero this out in case there is existing data
         zeros = jnp.zeros((1, self.config.max_target_length - self.config.max_prefill_predict_length), dtype=jnp.int32)
@@ -1815,13 +1891,16 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
       )
     try:
-      tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[self.config.tokenizer_type].number
+      # pyrefly: ignore[missing-attribute]
+      tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[
+          self.config.tokenizer_type
+      ].number  # pyrefly: ignore[missing-attribute]
       return TokenizerParameters(
-          path=self.config.tokenizer_path,
-          tokenizer_type=tokenizer_type_val,
-          access_token=self.config.hf_access_token,
-          use_chat_template=self.config.use_chat_template,
-          extra_ids=0,
+          path=self.config.tokenizer_path,  # pyrefly: ignore[unexpected-keyword]
+          tokenizer_type=tokenizer_type_val,  # pyrefly: ignore[unexpected-keyword]
+          access_token=self.config.hf_access_token,  # pyrefly: ignore[unexpected-keyword]
+          use_chat_template=self.config.use_chat_template,  # pyrefly: ignore[unexpected-keyword]
+          extra_ids=0,  # pyrefly: ignore[unexpected-keyword]
       )
     except KeyError as _:
       raise KeyError(f"Unsupported tokenizer type: {self.config.tokenizer_type}") from None
@@ -1835,11 +1914,11 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; build_tokenizer is unsupported. "
           "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
       )
-    if metadata.tokenizer_type == TokenizerType.tiktoken:
+    if metadata.tokenizer_type == TokenizerType.tiktoken:  # pyrefly: ignore[missing-attribute]
       return token_utils.TikToken(metadata)
-    elif metadata.tokenizer_type == TokenizerType.sentencepiece:
+    elif metadata.tokenizer_type == TokenizerType.sentencepiece:  # pyrefly: ignore[missing-attribute]
       return token_utils.SentencePieceTokenizer(metadata)
-    elif metadata.tokenizer_type == TokenizerType.huggingface:
+    elif metadata.tokenizer_type == TokenizerType.huggingface:  # pyrefly: ignore[missing-attribute]
       tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
       if tokenizer_model.tokenizer.pad_token_id is None:
         if tokenizer_model.tokenizer.unk_token_id is not None:
@@ -1936,11 +2015,15 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         mesh_annotations,
     )
 
-    @functools.partial(jax.jit, out_shardings=shardings)
-    def initialize():
-      return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
+    if self._compiled_initialize_fn is None:
 
-    init_state = initialize()
+      @functools.partial(jax.jit, out_shardings=shardings)
+      def initialize():
+        return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
+
+      self._compiled_initialize_fn = initialize
+
+    init_state = self._compiled_initialize_fn()
     cache = init_state["cache"]
 
     def is_lp(k):
@@ -1964,11 +2047,15 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     # AR-mode cache so the batch dim matches generate's input shape.
     cache_dict_abs = self._nnx_init_cache_dict(mode=MODEL_MODE_AUTOREGRESSIVE)
 
-    @functools.partial(jax.jit, out_shardings=(self.kv_cache_shardings,))
-    def _init_cache():
-      return (jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict_abs),)
+    if self._compiled_init_cache_fn is None:
 
-    (cache,) = _init_cache()
+      @functools.partial(jax.jit, out_shardings=(self.kv_cache_shardings,))
+      def _init_cache():
+        return (jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict_abs),)
+
+      self._compiled_init_cache_fn = _init_cache
+
+    (cache,) = self._compiled_init_cache_fn()
 
     # Per-leaf logical axes for bulk_insert's "cache_batch" lookup. Use model_ar
     # so segment_id leaves carry CACHE_BATCH (under PREFILL they'd carry
@@ -1989,7 +2076,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         cache_state,
         is_leaf=lambda v: isinstance(v, nnx.Variable),
     )
-    self.kv_cache_annotations_named = annotations_state.to_pure_dict()
+    self.kv_cache_annotations_named = nnx.to_pure_dict(annotations_state)
 
     return {
         "logits": jnp.zeros((batch, 1, vocab), dtype=jnp.float32),

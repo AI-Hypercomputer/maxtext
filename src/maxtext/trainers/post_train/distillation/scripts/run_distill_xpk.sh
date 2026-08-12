@@ -105,7 +105,7 @@
 #
 # Image pinning (used by prep_image):
 #   TUNIX_SOURCE  pip-installable spec for tunix.
-#                 default: git+https://github.com/google/tunix@110932a8395086511228483312131841521695c1
+#                 default: git+https://github.com/google/tunix@348959d18a4a09c75e58a7d49aec9d8b0eb4a8b6
 #                 Use "google-tunix==<ver>" once a pypi release ships with the
 #                 multi-host shard_input fix.
 #   JAX_PIN       default: 0.10.0  — version to pin back after tunix deps resolve.
@@ -164,7 +164,7 @@ require_env() {
 : "${DISTILL_LAYER_INDICES:=[0,1,2,3,4,5,6,7]}"
 
 # Image pinning (used by prep_image).
-: "${TUNIX_SOURCE:=git+https://github.com/google/tunix@110932a8395086511228483312131841521695c1}"
+: "${TUNIX_SOURCE:=git+https://github.com/google/tunix@348959d18a4a09c75e58a7d49aec9d8b0eb4a8b6}"
 : "${JAX_PIN:=0.10.0}"
 : "${JAXLIB_PIN:=0.10.0}"
 : "${LIBTPU_PIN:=0.0.39}"

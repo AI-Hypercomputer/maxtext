@@ -24,13 +24,17 @@ tests/integration/train_tests.py:
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 from minio import Minio
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import tensorflow as tf
+try:
+  import tensorflow as tf
+except ImportError:
+  sys.exit("Tensorflow is required. Run `pip install tensorflow`")
 
 # ---------------- Environment / Defaults ----------------
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "minio-frameworks.amd.com")

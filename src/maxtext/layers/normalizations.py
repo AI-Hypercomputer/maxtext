@@ -28,6 +28,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import Initializer, variable_to_logically_partitioned
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import truncate_out_sharding
 
 
 class RMSNorm(nnx.Module):
@@ -75,6 +76,9 @@ class RMSNorm(nnx.Module):
     # out_sharding must be None in auto shard mode
     if self.shard_mode != ShardMode.EXPLICIT:
       out_sharding = None
+
+    if out_sharding is not None:
+      out_sharding = truncate_out_sharding(out_sharding, y.ndim)
 
     if not self.with_scale:
       if out_sharding is not None:

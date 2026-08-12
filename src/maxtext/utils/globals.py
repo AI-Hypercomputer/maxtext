@@ -20,11 +20,11 @@ import os.path
 # Since this file is at src/maxtext/utils/globals.py, we need to go up 2 levels
 MAXTEXT_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# This is the maxtext repo root: with ".git" folder; "README.md"; "pyproject.toml"; &etc.
+# This is the maxtext repo root: with ".git" folder or file (when using Git worktrees); "README.md"; "pyproject.toml"; etc.
 MAXTEXT_REPO_ROOT = os.environ.get(
     "MAXTEXT_REPO_ROOT",
     r
-    if os.path.isdir(
+    if os.path.exists(
         os.path.join(r := os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".git")
     )
     else MAXTEXT_PKG_DIR,
@@ -65,6 +65,7 @@ HF_IDS = {
     "qwen3-32b": "Qwen/Qwen3-32B",
     "qwen3-vl-2b": "Qwen/Qwen3-VL-2B-Instruct",
     "qwen3-vl-4b": "Qwen/Qwen3-VL-4B-Instruct",
+    "qwen3-vl-30b-a3b": "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "llama3.1-8b": "meta-llama/Llama-3.1-8B",
     "llama3.1-8b-Instruct": "meta-llama/Llama-3.1-8B-Instruct",
     "llama3.1-70b-Instruct": "meta-llama/Llama-3.1-70B-Instruct",
@@ -85,6 +86,7 @@ HF_IDS = {
     "qwen3.5-397b-a17b": "Qwen/Qwen3.5-397B-A17B",
     "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
     "mixtral-8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "mistral-7b": "mistralai/Mistral-7B-v0.1",
     "mixtral-8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",
     "olmo3-7b": "allenai/Olmo-3-7B-Instruct",
     "olmo3-7b-pt": "allenai/Olmo-3-1025-7B",

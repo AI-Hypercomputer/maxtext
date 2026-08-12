@@ -48,6 +48,7 @@ norm_topk_prob: true
 load_balance_loss_weight: 0.001
 
 # Multimodal flags (need to set use_multimodal=true)
+vision_encoder_block: "gemma4"
 rope_theta_for_vit: 100
 image_size_for_vit: [672, 960]
 num_channels_for_vit: 3

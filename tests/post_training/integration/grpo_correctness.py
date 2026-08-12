@@ -22,7 +22,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.configs import pyconfig
+from maxtext.configs import pyconfig, types
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, grpo_loss_fn_nnx
 from maxtext.experimental.rl.grpo_utils import compute_log_probs, compute_log_probs_nnx
@@ -34,11 +34,15 @@ import numpy as np
 import pytest
 import torch
 import transformers
-# from datasets import Dataset
+from tests.utils.test_helpers import ensure_tokenizer_downloaded
 
 from trl import GRPOConfig, GRPOTrainer
 
-pytestmark = [pytest.mark.external_training, pytest.mark.post_training]  # uses pre-generated checkpoint
+pytestmark = [
+    pytest.mark.external_training,
+    pytest.mark.post_training,
+    pytest.mark.integration_test,
+]  # uses pre-generated checkpoint
 
 
 class GRPOTest(unittest.TestCase):
@@ -47,6 +51,7 @@ class GRPOTest(unittest.TestCase):
     super().setUp()
     self.cfg = pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo.yml")],
+        config_class=types.RLConfig,
         run_name="grpo_test",
         model_name="llama3.1-8b",
         enable_checkpointing=True,
@@ -74,11 +79,11 @@ class GRPOTest(unittest.TestCase):
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.cfg, False, self.rng)
       self.reference_model = None
       self.state, _ = maxtext_utils.setup_decode_state(self.cfg, mesh, None, init_state_fn)
+    tokenizer_path = ensure_tokenizer_downloaded("llama3.1-tokenizer", skip_test_on_failure=True)
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
-        "meta-llama/Llama-3.1-8B",
+        tokenizer_path,
         add_bos_token=False,
         add_eos_token=False,
-        token=self.cfg.hf_access_token,
     )
     self.input_str = "Hello world this is a test"
 

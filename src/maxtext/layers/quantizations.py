@@ -28,6 +28,7 @@ from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
 import qwix
+from qwix._src.core import numerics
 from qwix._src.core import dot_general_qt
 from qwix._src.core import sparsity
 
@@ -386,13 +387,16 @@ class NANOOFp8Quantization(Quantization):
 
 
 def _get_int8_quant_config(config):
+  """Get int8 quantization configuration."""
   drhs_bits = None
   drhs_accumulator_dtype = None
   drhs_local_aqt = None
   if config.quantization_local_shard_count != 0:
     drhs_bits = 8
     drhs_accumulator_dtype = jnp.int32
-    drhs_local_aqt = aqt_config.LocalAqt(contraction_axis_shard_count=config.quantization_local_shard_count)  # pyrefly: ignore[unexpected-keyword]
+    drhs_local_aqt = aqt_config.LocalAqt(
+        contraction_axis_shard_count=config.quantization_local_shard_count  # pyrefly: ignore[unexpected-keyword]
+    )  # pyrefly: ignore[unexpected-keyword]
   return aqt_config.config_v3(
       fwd_bits=8,
       dlhs_bits=8,
@@ -565,9 +569,13 @@ def _dot_general_make(quant_cfg):
   rhs_scale = quant_cfg[_W_SCALE]
   aqt_dg = aqt_config.dot_general_make(lhs_bits=lhs_bits, rhs_bits=rhs_bits)
   if lhs_scale < 1.0:
-    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=lhs_scale)  # pyrefly: ignore[missing-attribute]
+    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
+        calibration.AbsMaxCalibration, scale=lhs_scale
+    )  # pyrefly: ignore[missing-attribute]
   if rhs_scale < 1.0:
-    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=rhs_scale)  # pyrefly: ignore[missing-attribute]
+    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
+        calibration.AbsMaxCalibration, scale=rhs_scale
+    )  # pyrefly: ignore[missing-attribute]
   return aqt_dg
 
 
@@ -640,7 +648,7 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
-  if config.use_batch_split_schedule and config.quantization:
+  if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
     if config.quantization == "fp8_full" and not config.use_manual_quantization:
       return QwixQuantization(
@@ -651,7 +659,7 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     # The pure JAX version of batch-split that uses manual quantization for dot general.
     return None
 
-  if config.use_qwix_quantization:
+  if config.quantization and config.use_qwix_quantization:
     return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
@@ -806,6 +814,7 @@ def get_quantization_rule(config: Config):
             act_qtype=dtype,
             bwd_qtype=dtype,
             bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+            disable_channelwise_axes=False,
             op_names=("dot_general",),
         )
     ]
@@ -816,6 +825,9 @@ def get_quantization_rule(config: Config):
 
     case "int8":
       return make_qt_rule(jnp.int8)
+
+    case "fp4" | "fp4_e2m1":
+      return make_qt_rule(jnp.float4_e2m1fn)
 
     case "fp8_e5m2":
       return make_qt_rule(jnp.float8_e5m2)
@@ -834,7 +846,7 @@ def get_quantization_rule(config: Config):
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
-    case "int4" | "int8" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
+    case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
       return qwix.QtProvider(get_quantization_rule(config))
     case "fp8_gpu":
       return NvidaFp8Provider(get_quantization_rule(config))
@@ -846,7 +858,7 @@ def get_qt_provider(config):
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   # Batch split is not using Qwix's interception feature but manual plumbing
-  if config.use_qwix_quantization and not config.use_batch_split_schedule:
+  if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       if config.pure_nnx:
@@ -854,6 +866,12 @@ def maybe_quantize_model(model, config):
         dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+        # The MTP block reads the decoder targets, so the qwix forward pass needs them.
+        # The Linen path supplies them from the is_initializing() guard in Transformer.
+        dummy_targets = {}
+        if config.mtp_num_layers > 0:
+          dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
+          dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
         model = qwix.quantize_model(
             model,
             quantization_provider,
@@ -861,6 +879,7 @@ def maybe_quantize_model(model, config):
             dummy_positions,
             dummy_segment_ids,
             enable_dropout=False,
+            **dummy_targets,
         )
         # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
         # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
@@ -887,21 +906,47 @@ def _make_scale_tensor(scale, arr):
   return _cast_reduced_from(scale_tensor, arr)
 
 
-def _get_max_min(target_dtype):
-  if target_dtype in (jnp.int4, jnp.int8):
-    return jnp.iinfo(target_dtype).max, jnp.iinfo(target_dtype).min
-  else:
-    return jnp.finfo(target_dtype).max.astype(jnp.bfloat16), jnp.finfo(target_dtype).min.astype(jnp.bfloat16)
+def get_static_scale(qtype: jax.typing.DTypeLike, calibration_method: str) -> float:
+  """Extracts the static scale.
+  Currently, only symmetric fixed range calibration is supported.
+  For symmetric calibration, the calibration_method must be in the format 'fixed,-max,max' or 'fixed,max'.
+
+  Args:
+    qtype: The dtype to quantize to.
+    calibration_method: A string specifying the calibration method.
+
+  Returns:
+    The extracted static scale value.
+  """
+  if calibration_method is None or not calibration_method.lower().startswith("fixed"):
+    raise ValueError(f"Only static scale quantization is supported, got {calibration_method}")
+
+  args = [float(a) for a in calibration_method.split(",")[1:]]
+  if len(args) == 1:
+    args = [-args[0], args[0]]
+
+  if len(args) != 2 or args[0] + args[1] != 0 or args[1] <= 0:
+    raise ValueError(f"Expected format: 'fixed,max' or 'fixed,-max,max'. Got: {calibration_method}")
+
+  qmax = numerics.get_symmetric_bound(qtype)
+  scale_val = args[1] / qmax
+
+  # Prevent scale from being 0
+  tiny_sqrt = jnp.finfo(jnp.float32).tiny ** 0.5
+  if scale_val < tiny_sqrt:
+    scale_val = 1.0
+
+  return scale_val
 
 
 def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_method: str) -> qwix.QArray:
-  """Manually quantizes a tensor based on a fixed calibration method.
+  """Manually quantizes a tensor based on per-tensor scaling with symmetric fixed range calibration.
 
   Args:
     tensor: The tensor to quantize.
     dtype: The logical type of the quantized value, e.g. jnp.float8_e4m3fn
-    calibration_method: A string specifying the calibration method. Expected
-      format is "fixed,{scale},{max_val}". e.g., "fixed,-224,224"
+    calibration_method: A string specifying the calibration method. Currently only support
+    symmetric fixed range calibration: Expected format is "fixed,{-max_val},{max_val}".
 
   Returns:
     A qwix.QArray containing the quantized value and the scale.
@@ -909,28 +954,17 @@ def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_
   Raises:
     ValueError: If calibration_method is None or has an unexpected format.
   """
-  # validate calibration method and parse
-  calib_method = calibration_method
-  if calib_method is None:
-    raise ValueError("calibration_method cannot be None for manual quantization")
-  if not calib_method.startswith("fixed"):
-    # we can use static scale for weight/activation, but grad usually needs dynamic
-    raise ValueError("Only static scale quantization is supported, but got" f" {calib_method}")
-  parts = calib_method.split(",")
-  if len(parts) != 3:
-    raise ValueError(f"Unexpected format for weight calibration method: {calib_method}")
-
-  dtype_max, dtype_min = _get_max_min(dtype)
-  max_val = float(parts[2])
-  scale = max_val / dtype_max
-  scale = jnp.where(scale == 0, 1.0, scale)
+  scale = get_static_scale(dtype, calibration_method)
+  dtype_max = numerics.get_symmetric_bound(dtype)
+  dtype_min = -dtype_max
   # scale must be converted to a tensor because grad has reduced axes.
   scale_tensor = _make_scale_tensor(scale, tensor)
   min_bound = _make_scale_tensor(dtype_min, tensor)
   max_bound = _make_scale_tensor(dtype_max, tensor)
   q_tensor = jnp.clip(tensor / scale_tensor, min_bound, max_bound).astype(dtype)
 
-  # get scale for QArray
+  # get scale for QArray.
+  # per-tensor scaling: same scale for each axis
   scale_shape = [1] * tensor.ndim
   # It must stay fully replicated for the backward pass and Pallas.
   scale_tensor_qpl = jnp.full(scale_shape, scale, dtype=tensor.dtype)

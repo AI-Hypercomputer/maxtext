@@ -166,6 +166,17 @@ def vision_sft_preprocessing_pipeline(
   operations.append(input_pipeline_utils.ExtractImagesAndMasks())
   operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
   operations.append(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
+  if config.use_mrope:
+    operations.append(
+        input_pipeline_utils.ComputeQwen3OmniPositions(
+            data_column="inputs",
+            spatial_merge_size=config.spatial_merge_size_for_vit,
+            position_id_per_seconds=config.position_id_per_seconds,
+            use_audio_in_video=getattr(config, "use_audio_in_video", False),
+            config=config,
+            keep_aux_fields=False,  # drop aux to match train shape
+        )
+    )
   operations.append(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),
@@ -181,7 +192,7 @@ def vision_sft_preprocessing_pipeline(
       data_source=dataset,
       operations=operations,
       sampler=dummy_index_sampler,
-      worker_count=1,  # only supports <=1 for now, more workers results in duplicated data
+      worker_count=config.grain_worker_count,
       worker_buffer_size=1,
       read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=batch_size * 4),
   )
@@ -446,6 +457,7 @@ def make_hf_train_iterator(
         chat_template=config.chat_template,
         formatting_func_path=config.formatting_func_path,
         formatting_func_kwargs=config.formatting_func_kwargs,
+        grain_worker_count=config.grain_worker_count,
     )
   return train_iter
 
@@ -506,5 +518,6 @@ def make_hf_eval_iterator(
         chat_template=config.chat_template,
         formatting_func_path=config.formatting_func_path,
         formatting_func_kwargs=config.formatting_func_kwargs,
+        grain_worker_count=config.grain_worker_count,
     )
   return eval_iter

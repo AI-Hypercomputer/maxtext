@@ -44,6 +44,7 @@ from maxtext.models import (
     deepseek4,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
+    envy,
     gemma,
     gemma2,
     gemma3,
@@ -215,7 +216,7 @@ class DecoderLayer(nn.Module):
           logical_axis_names,
       )
 
-    if cfg.record_internal_nn_metrics:
+    if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
@@ -328,6 +329,7 @@ class Decoder(nn.Module):
         "query_proj",
         "value_proj",
         "key_proj",
+        "kv_proj",
         "qkv_proj",
         "out_proj",
         "mlpwi_0",
@@ -378,6 +380,7 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "context",
             "out_proj",
@@ -387,6 +390,7 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
             "mlpwo",
@@ -396,6 +400,7 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
         )
@@ -404,37 +409,18 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
         )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
+      elif cfg.remat_policy in ("qkv_proj_offloaded", "minimal_offloaded", "custom"):
+        # minimal_offloaded offloads all except context. All three share a single
+        # source of truth for their save/offload name lists (see
+        # maxtext_utils.get_save_and_offload_names) so that offloading configured via
+        # `custom` resolves identically to the named presets.
+        save_names, offload_names = maxtext_utils.get_save_and_offload_names(cfg)
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "minimal_offloaded":
-        # offload all except context
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=[
-                "query_proj",
-                "value_proj",
-                "key_proj",
-                "qkv_proj",
-                "out_proj",
-                "mlpwi_0",
-                "mlpwi_1",
-                "mlpwi",
-                "mlpwo",
-            ],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "custom":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=cfg.tensors_to_offload,
+            names_which_can_be_saved=save_names,
+            names_which_can_be_offloaded=offload_names,
             offload_src="device",
             offload_dst="pinned_host",
         )
@@ -508,6 +494,8 @@ class Decoder(nn.Module):
         return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
       case DecoderBlockType.OLMO3:
         return [olmo3.Olmo3ScannableBlockToLinen] if self.config.scan_layers else [olmo3.Olmo3DecoderLayerToLinen]
+      case DecoderBlockType.ENVY:
+        return [envy.EnvyScannableBlockToLinen] if self.config.scan_layers else [envy.EnvyDecoderLayerToLinen]
 
       case _:
         # Default case to handle any unknown decoder block types.
@@ -543,6 +531,7 @@ class Decoder(nn.Module):
         DecoderBlockType.DEEPSEEK: [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer],
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
+        DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -730,6 +719,7 @@ class Decoder(nn.Module):
             "qwen3-omni-30b-a3b",
             "qwen3-vl-2b",
             "qwen3-vl-4b",
+            "qwen3-vl-30b-a3b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
         ]:
@@ -744,7 +734,14 @@ class Decoder(nn.Module):
           raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
       if video_embeddings is not None and cfg.use_multimodal:
-        if cfg.model_name in ["qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+        if cfg.model_name in [
+            "qwen3-omni-30b-a3b",
+            "qwen3-vl-2b",
+            "qwen3-vl-4b",
+            "qwen3-vl-30b-a3b",
+            "qwen3.5-35b-a3b",
+            "qwen3.5-397b-a17b",
+        ]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=video_embeddings,
@@ -1011,7 +1008,7 @@ class Decoder(nn.Module):
             # scan with initialized parameters.
             if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
               # old version of batch-split that fully uses qwix quantization.
-              if cfg.use_qwix_quantization and not cfg.use_manual_quantization:
+              if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
                 y = deepseek_batchsplit_fp8.scan_batch_split_layers(
                     y,
                     self.variables["params"]["moe_layers"],
@@ -1093,6 +1090,11 @@ class Decoder(nn.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
+          if cfg.decoder_block == DecoderBlockType.ENVY:
+            layer_kwargs = {
+                "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
+            }
+
           # Update broadcast_args and in_axes_tuple for vLLM RPA
           in_axes_tuple = (nn.broadcast,) * len(broadcast_args)
           current_broadcast_args = list(broadcast_args)
@@ -1218,6 +1220,11 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
+            if cfg.decoder_block == DecoderBlockType.ENVY:
+              layer_kwargs = {
+                  "is_moe_layer": (lyr + 1) % self.config.interleave_moe_layer_step == 0,
+              }
+
             if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
               layer_kwargs = {"layer_idx": lyr}
             if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
@@ -1255,7 +1262,13 @@ class Decoder(nn.Module):
             if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
               visual_embeds = deepstack_visual_embeds[lyr]
               # Use bidirectional_mask to identify visual token positions
-              bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+              bidirectional_mask_value = None
+              if multimodal_input is not None:
+                bidirectional_mask_value = (
+                    multimodal_input.bidirectional_mask
+                    if multimodal_input.bidirectional_mask is not None
+                    else multimodal_input.bidirectional_mask_video
+                )
               if bidirectional_mask_value is not None and visual_embeds is not None:
                 y = deepstack_process(y, bidirectional_mask_value, visual_embeds)
 
@@ -1263,19 +1276,26 @@ class Decoder(nn.Module):
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     if cfg.mhc_expansion_rate > 1:
-      # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
-      hidden_state = mhc_reduce(y)
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+        hidden_state = mhc.DeepSeek4HyperHeadToLinen(
+            config=cfg,
+            mesh=mesh,
+            name="hc_head",
+        )(y)
+      else:
+        # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+        hidden_state = mhc_reduce(y)
     else:
       hidden_state = y
 
     # When initializing with vLLM RPA attention, we need to run the output head to
     # initialize any parameters associated with it.
     # Same case applicable to vocab tiling
-    if self.is_initializing() and (cfg.num_vocab_tiling > 1 or cfg.attention == "vllm_rpa"):
+    if self.is_initializing() and (cfg.num_vocab_tiling > 1 or cfg.attention in ("vllm_rpa", "vllm_batched_rpa")):
       _ = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
-    if cfg.attention == "vllm_rpa":
+    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa"):
       logits = None
     # When in the Indexer Dense Warm-up stage, skip the expensive output head projection
     # for efficiency, as the main model is frozen and the LM loss is not needed.
@@ -1374,18 +1394,19 @@ class Decoder(nn.Module):
         start_idx = scan_length * attention_pattern_length
         remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
 
-      y_and_kv = layer(
-          y,
+      remainder_args = (
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
-          previous_chunk=previous_chunk,
-          slot=slot,
-          bidirectional_mask=bidirectional_mask,
-          kv_cache=remainder_kv,
-          attention_metadata=attention_metadata,
+          slot,
+          None,  # page_state
+          previous_chunk,
+          bidirectional_mask,
+          remainder_kv,
+          attention_metadata,
       )
+      y_and_kv = layer(y, *remainder_args)
 
       if isinstance(y_and_kv, tuple):
         y = y_and_kv[0]
@@ -1427,7 +1448,12 @@ class Decoder(nn.Module):
     if num_full_blocks > 0:
       ScannableBlockToLinen = gemma4.Gemma4ScannableBlockToLinen
       policy = self.get_remat_policy()
-      RemattedGemma4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
+      # Gemma4ScannableBlock rematerializes its own local (scanned) and global
+      # layers when apply_internal_remat=True, so we do NOT wrap it in
+      # block-level remat here (that would double-rematerialize and make XLA
+      # treat the whole block as one unit). Unrolling the block scan lets XLA
+      # free each block's activations across iterations instead of keeping the
+      # block live as a unit.
 
       kv_cache_scanned = maxtext_utils.prepare_kv_caches_for_scan(
           kv_caches, num_full_blocks, block_pattern_len, stack=True
@@ -1450,7 +1476,7 @@ class Decoder(nn.Module):
 
       # For a fully scanned block, apply it inside a nn.scan over the calculated number of full blocks
       y, returned_kv_cache = nn.scan(
-          RemattedGemma4Block,
+          ScannableBlockToLinen,
           variable_axes={
               "params": cfg.param_scan_axis,
               "cache": 0,
@@ -1461,6 +1487,7 @@ class Decoder(nn.Module):
           split_rngs={"params": True, "dropout": cfg.enable_dropout},
           in_axes=in_axes_tuple,
           length=num_full_blocks,
+          unroll=num_full_blocks,
           metadata_params={
               nn.PARTITION_NAME: "layers",
               "abstract_init": False,
@@ -1471,6 +1498,8 @@ class Decoder(nn.Module):
           quant=self.quant,
           model_mode=model_mode,
           num_of_layers=block_pattern_len,
+          remat_policy_fn=policy,
+          apply_internal_remat=True,
           name="scanned_blocks",
       )(
           y, *broadcast_args

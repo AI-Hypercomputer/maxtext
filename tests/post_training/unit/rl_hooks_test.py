@@ -20,7 +20,7 @@ from unittest import mock
 
 import pytest
 
-pytestmark = [pytest.mark.cpu_only, pytest.mark.post_training]
+pytestmark = [pytest.mark.post_training]
 
 from maxtext.trainers.post_train.rl import hooks as rl_hooks
 from maxtext.trainers.post_train.rl import utils_rl

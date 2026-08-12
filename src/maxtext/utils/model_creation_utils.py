@@ -36,7 +36,7 @@ from functools import partial
 import os
 import subprocess
 import sys
-from typing import Callable, overload
+from typing import Any, Callable, overload
 from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
@@ -650,7 +650,13 @@ def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=
     return model
 
 
-def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None = None, **extra_kwargs):
+def setup_configs_and_devices(
+    argv: list[str] | None = None,
+    kwargs: dict | None = None,
+    *,
+    config_class: type[Any],
+    **extra_kwargs,
+):
   """Setup device allocation and configs for training and inference.
   This API is particularly useful for Reinforcement Learning where we might split the available
   devices into separate mesh for trainer and sampler
@@ -660,7 +666,7 @@ def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None
 
   combined_kwargs = dict(kwargs) if kwargs else {}
   combined_kwargs.update(extra_kwargs)
-  config = pyconfig.initialize_pydantic(argv, **combined_kwargs)
+  config = pyconfig.initialize_pydantic(argv, config_class=config_class, **combined_kwargs)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
     max_logging.log("Running on a single slice")
@@ -735,8 +741,8 @@ def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None
         }
     )
 
-    trainer_config = pyconfig.initialize_pydantic(argv, **trainer_kwargs)
-    sampler_config = pyconfig.initialize_pydantic(argv, **sampler_kwargs)
+    trainer_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **trainer_kwargs)
+    sampler_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **sampler_kwargs)
 
   else:
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
@@ -777,7 +783,7 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
           use_no_op_mappings=use_no_op_mappings,
           pad_id=tokenizer_pad_id,
       )
-      actor_model.config = None
+      actor_model.config = None  # pyrefly: ignore[missing-attribute]
     actor_mesh = reference_mesh
   else:
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
@@ -819,6 +825,7 @@ def verify_and_sync_scan_layers(config):
       )
   else:
     max_logging.log(f"Setting scan_layers={saved_scan_layers} loaded from checkpoint metadata.")
+    # pyrefly: ignore[missing-attribute]
     new_pydantic_config = pydantic_config.model_copy(update={"scan_layers": saved_scan_layers})
     # Wrap back in HyperParameters if the original config was wrapped
     if getattr(config, "_pydantic_config", None) is not None:
@@ -829,6 +836,7 @@ def verify_and_sync_scan_layers(config):
   return config
 
 
+# pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
     mesh=None,
@@ -901,7 +909,7 @@ def from_pretrained(
     load_parameters_path = epath.Path(config.base_output_directory) / "0" / "items"
     # Create a copied Pydantic model with the updated values
     pydantic_config = getattr(config, "_pydantic_config", config)
-    new_config = pydantic_config.model_copy(
+    new_config = pydantic_config.model_copy(  # pyrefly: ignore[missing-attribute]
         update={
             "load_parameters_path": load_parameters_path,
         }
@@ -910,32 +918,26 @@ def from_pretrained(
 
   config = verify_and_sync_scan_layers(config)
 
+  # Compute abstract model and logical-axis specs for downstream checkpoint alignment.
+  # We invoke create_nnx_abstract_model once (a lightweight abstract trace with no physical memory cost)
+  # both to initialize pure NNX sharded models and to cleanly extract the logical PartitionSpec tree
+  # (e.g., axis names like "kv_heads", "mlp_moe") required by _align_checkpoint_to_model_shapes.
+  _create_model, abstract_model = create_nnx_abstract_model(
+      config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
+  )
+  _, _abs_state_for_specs = nnx.split(abstract_model)
+  specs = nnx.get_partition_spec(_abs_state_for_specs)
+
   if config.pure_nnx:
-    _create_model, abstract_model = create_nnx_abstract_model(
-        config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
-    )
     model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
     # TODO: print debug_sharding info
   else:
     model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
 
-  # Compute logical-axis specs for downstream checkpoint alignment.
-  # The model-creation helpers above resolve specs internally for sharding, but
-  # the checkpoint-loading branch below needs the logical PartitionSpec tree
-  # (axis names like "kv_heads", "mlp_moe") for repeat/zero-pad dispatch in
-  # _align_checkpoint_to_model_shapes. nnx.eval_shape is cheap (abstract trace).
-  _create_model_for_specs = get_nnx_create_model_fn(
-      config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
-  )
-  with nn.logical_axis_rules(config.logical_axis_rules):
-    _abs_model_for_specs = nnx.eval_shape(_create_model_for_specs)
-  _, _abs_state_for_specs = nnx.split(_abs_model_for_specs)
-  specs = nnx.get_partition_spec(_abs_state_for_specs)
-
   sharded_state = nnx.state(model)
 
   if mesh is None:
-    mesh = model.mesh
+    mesh = model.mesh  # pyrefly: ignore[missing-attribute]
 
   with mesh:
     if config.load_parameters_path:
@@ -999,6 +1001,17 @@ def from_pretrained(
 
         return new_target
 
+      # Filter out transient runtime variables and rngs from NNX state before constructing target_for_restore.
+      # Checkpoints on disk only store persistent weight-like parameters. If we pass the full
+      # sharded_state directly, Orbax checks the disk for transient runtime state (like the layer
+      # dropout RNG seeds) and throws a structure mismatch error when it fails to find them.
+      # Note: We cannot use `nnx.split_state(sharded_state, nnx.Param)` to isolate weights because AQT
+      # serve-mode quantized models store their scale factors and integer payloads in custom AQT variable
+      # types (e.g. `qrhs.frozen`), which are NOT subclasses of `nnx.Param`. Negative filtering with
+      # `not isinstance(...)` safely retains all weight-like leaves while excluding transient runtime state.
+      param_state = sharded_state.filter(
+          lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+      )
       is_nnx_checkpoint = True
       if (
           "params" in metadata.item_metadata.tree.keys()
@@ -1008,7 +1021,7 @@ def from_pretrained(
         is_nnx_checkpoint = False
         target_for_restore = jax.tree.map(
             lambda v: v[...],
-            sharded_state,
+            param_state,
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
 
@@ -1031,8 +1044,8 @@ def from_pretrained(
         # NNX checkpoint: {'decoder': {'value': ...}}, or NNX-RL with extra 'base' nesting.
         # Restore only nnx.Param — RNG variable shapes may differ between checkpoint and model,
         # and pure-dict checkpoints written by `layerwise_quantization._load_and_quantize_nnx`
-        # don't carry RNG/dropout state at all (they only persist nnx.Param leaves, including
-        # AQT serve-mode `qrhs.frozen` which is a Param subclass).
+        # don't carry RNG/dropout state at all (they only persist weight-like leaves, including
+        # AQT serve-mode `qrhs.frozen` which is not an aqt Variable subclass).
         def _build_value_target(v):
           # `v[...]` (a.k.a. `v.get_value(index=...)`) descends into the inner
           # value with `value[Ellipsis]`. AQT serve-mode `qrhs.frozen` variables
@@ -1060,14 +1073,11 @@ def from_pretrained(
 
         # Keep persisted weight-like leaves: `nnx.Param` plus AQT serve-mode
         # `qrhs.frozen` (a separate `aqt` Variable type, NOT a Param subclass).
-        # Excluded: `nnx.RngState` (regenerated per load, shapes can drift) and
-        # `nnx.Cache` (PREFILL/AR scratch, not persisted). Pure-dict checkpoints
-        # written by `layerwise_quantization._load_and_quantize_nnx` carry both
-        # Param kernels and `aqt`-typed `qrhs.frozen` quantized payloads.
-        if hasattr(sharded_state, "filter"):
-          param_state = sharded_state.filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache)))
-        else:
-          param_state = sharded_state
+        # Excluded: `nnx.RngState` (regenerated per load, shapes can drift),
+        # `nnx.Cache` (PREFILL/AR scratch, not persisted), `nnx.Intermediate`
+        # (transient forward-pass activations), and `nnx.BatchStat` (runtime statistics).
+        # Pure-dict checkpoints written by `layerwise_quantization._load_and_quantize_nnx`
+        # carry both Param kernels and `aqt`-typed `qrhs.frozen` quantized payloads.
         target_for_restore = jax.tree.map(
             _build_value_target,
             param_state,
@@ -1083,10 +1093,18 @@ def from_pretrained(
         restore_args = {"base": restore_args} if has_base_key else restore_args
 
       # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
-      # Skip nnx.Cache variables — they hold runtime state (e.g. GDN conv/recurrent state) that is
-      # not present in the checkpoint and must remain valid after the restore.
-      def _free_device_memory(node):
-        if isinstance(node, nnx.Variable) and not isinstance(node, (nnx.RngState, nnx.Cache)):
+      # Skip transient runtime variables (RngState, Cache, Intermediate, BatchStat) — they hold runtime state
+      # that is not present in the checkpoint and must remain valid after the restore.
+      def _free_device_memory(path, node):
+        # Check if the path contains any name containing 'custom' which indicates a customized layer.
+        # If yes, skip freeing device memory for this node and its children so they can be
+        # initialized with random values.
+        is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
+        if (
+            isinstance(node, nnx.Variable)
+            and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+            and not is_custom
+        ):
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
           # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
@@ -1094,12 +1112,12 @@ def from_pretrained(
           for leaf in jax.tree_util.tree_leaves(inner):
             if isinstance(leaf, jax.Array) and not leaf.is_deleted():
               leaf.delete()
-        elif isinstance(node, jax.Array) and not node.is_deleted():
+        elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
           node.delete()
 
         return node
 
-      jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+      jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
       restored = ckptr.restore(
           epath.Path(config.load_parameters_path),
@@ -1109,7 +1127,7 @@ def from_pretrained(
       )
 
       if is_nnx_checkpoint:
-        restored_root = restored["base"] if has_base_key else restored
+        restored_root = restored["base"] if has_base_key else restored  # pyrefly: ignore[unbound-name]
         checkpoint = jax.tree.map(
             lambda v: v["value"],
             restored_root,
@@ -1197,11 +1215,11 @@ def from_pretrained(
       with mesh:
         use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
         model = TunixMaxTextAdapter(
-            base_model=model,
+            base_model=model,  # pyrefly: ignore[bad-argument-type]
             use_no_op_mappings=use_no_op_mappings,
             pad_id=tokenizer_pad_id,
         )
-        model.config = None
+        model.config = None  # pyrefly: ignore[missing-attribute]
 
     if original_mesh:
       return model

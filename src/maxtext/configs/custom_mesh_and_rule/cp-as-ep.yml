@@ -16,7 +16,6 @@
 # parallelism in core MoE part (between EP all2all).
 mesh_axes: ['data', 'stage', 'fsdp', 'context', 'expert']
 data_sharding: [['data', 'stage', 'fsdp', 'context', 'expert']]
-context_sharding: 'context'
 logical_axis_rules: [
                       # ==========================================
                       # Vocabulary Embedding

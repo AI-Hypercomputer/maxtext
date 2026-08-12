@@ -90,9 +90,7 @@ def _scale_from_max_logits(max_logits_batch, tau):
 
 def _clip_mla_weight(layer_name, param, scale, qk_nope):
   """Apply the per-head scale to a wq_b or wkv_b kernel."""
-  scale_b = jnp.expand_dims(
-      scale, axis=-1
-  )  # broadcasts over [..., rank, heads, dim]
+  scale_b = jnp.expand_dims(scale, axis=-1)  # broadcasts over [..., rank, heads, dim]
   head = param[..., :qk_nope]
   tail = param[..., qk_nope:]
   head_new = head * jnp.sqrt(scale_b)

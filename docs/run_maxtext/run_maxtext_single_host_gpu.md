@@ -56,9 +56,14 @@ https://docs.docker.com/engine/install/debian/
 
 https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 
-If you get the NVML Error: Please follow these instructions.
+If you get an NVML error, try the following:
 
-https://stackoverflow.com/questions/72932940/failed-to-initialize-nvml-unknown-error-in-docker-after-few-hours
+1. Edit `/etc/nvidia-container-runtime/config.toml` (e.g., `sudo vim /etc/nvidia-container-runtime/config.toml`), change `no-cgroups = false`, and save.
+2. Restart the Docker daemon: `sudo systemctl restart docker`.
+3. Test by running:
+   ```bash
+   sudo docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi
+   ```
 
 ## Build MaxText Docker image
 
@@ -163,8 +168,8 @@ export XLA_FLAGS="--xla_dump_to=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/HLO_dumps
 --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false
  --xla_gpu_enable_command_buffer='' --xla_gpu_enable_highest_priority_async_stream=true
  --xla_gpu_all_reduce_combine_threshold_bytes=134217728 --xla_gpu_all_gather_combine_threshold_bytes=134217728
- --xla_gpu_reduce_scatter_combine_threshold_bytes=67108864 --xla_gpu_enable_pipelined_all_gather=true
- --xla_gpu_enable_pipelined_reduce_scatter=true --xla_gpu_enable_pipelined_all_reduce=true
+ --xla_gpu_reduce_scatter_combine_threshold_bytes=67108864 --xla_gpu_pipeline_all_gather=on
+ --xla_gpu_pipeline_reduce_scatter=on --xla_gpu_pipeline_all_reduce=on
  --xla_gpu_enable_while_loop_double_buffering=true --xla_gpu_enable_triton_softmax_fusion=false
  --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_enable_reduce_scatter_combine_by_dim=false
  --xla_disable_hlo_passes=rematerialization"

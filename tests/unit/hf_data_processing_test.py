@@ -19,7 +19,6 @@ import unittest
 import os.path
 
 import jax
-import pytest
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
@@ -31,7 +30,6 @@ from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
 
-@pytest.mark.cpu_only
 class HfDataProcessingTest(unittest.TestCase):
 
   def setUp(self):

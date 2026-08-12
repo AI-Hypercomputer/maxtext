@@ -1,0 +1,158 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow builds and pushes TPU MaxText images.
+# It runs automatically daily at 12am UTC, or manually via Workflow Dispatch.
+
+name: Build TPU Nightly Docker Images
+
+on:
+  schedule:
+    # Run the job daily at 12AM UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      image_suffix:
+        description: 'An image suffix can be provided to add to the image name'
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build_maxtext_package:
+    name: Build MaxText Package
+    uses: ./.github/workflows/build_package.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      cloud_runner: linux-x86-n2-16-buildkit
+
+  build_and_push_docker_images:
+    name: Build ${{ matrix.name }} Docker Image
+    needs: build_maxtext_package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "TPU Pre-Training Stable"
+            build_mode: stable
+            workflow: pre-training
+            image_name: maxtext_jax_stable
+          - name: "TPU Pre-Training Nightly"
+            build_mode: nightly
+            workflow: pre-training
+            image_name: maxtext_jax_nightly
+          - name: "TPU Post-Training Nightly"
+            build_mode: nightly
+            workflow: post-training
+            image_name: maxtext_post_training_nightly
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+      device: tpu
+      build_mode: ${{ matrix.build_mode }}
+      workflow: ${{ matrix.workflow }}
+      dockerfile: maxtext_tpu_dependencies.Dockerfile
+      maxtext_sha: ${{ needs.build_maxtext_package.outputs.maxtext_sha }}
+      include_test_assets: true
+      run_tests: false
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  run_ci_tests:
+    name: Run ${{ matrix.name }} CI Tests
+    needs: build_and_push_docker_images
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Pre-Training Stable"
+            image_name: maxtext_jax_stable
+            workflow: pre-training
+          - name: "Pre-Training Nightly"
+            image_name: maxtext_jax_nightly
+            workflow: pre-training
+          - name: "Post-Training Nightly"
+            image_name: maxtext_post_training_nightly
+            workflow: post-training
+    uses: ./.github/workflows/run_ci_tests.yml
+    with:
+      image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+      image_tag: ${{ github.run_id }}
+      device: tpu
+      workflow: ${{ matrix.workflow }}
+
+  run_e2e_tests:
+    name: Run E2E tests
+    needs: build_and_push_docker_images
+    if: github.event_name == 'schedule'
+    uses: ./.github/workflows/run_e2e_tests.yml
+    with:
+      mode: ${{ inputs.image_suffix != '' && format('{0}_{1}', 'nightly', inputs.image_suffix) || 'nightly' }}
+      run_id: ${{ github.run_id }}
+      maxtext_sha: ${{ github.sha }}
+    secrets:
+      AIRFLOW_CALLBACK_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
+
+  # TODO: This is a workaround, to be removed when promote_docker_image.yml workflow is stable
+  tag_docker_image:
+    name: Promote ${{ matrix.image_name }} Docker Image
+    needs: run_ci_tests
+    if: needs.run_ci_tests.result == 'success'
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        image_name:
+          - maxtext_jax_stable
+          - maxtext_jax_nightly
+          - maxtext_post_training_nightly
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+      - name: Add tags to Docker image
+        shell: bash
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          IMAGE_NAME_EXPR: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+        run: |
+          image_name="$IMAGE_NAME_EXPR"
+          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${image_name}"
+
+          # Add the traceability tag to confirm it passed validation suite
+          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
+            "${SOURCE_IMAGE}:verified-${GITHUB_RUN_ID}" --quiet
+
+          # Add "latest" tag
+          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" "${SOURCE_IMAGE}:latest" --quiet
+
+  notify_failure:
+    name: Notify failed build
+    needs: [build_and_push_docker_images, run_ci_tests, run_e2e_tests]
+    if: ${{ failure() && inputs.image_suffix == '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create issue on failure
+        uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          title-template: "MaxText Docker Image Build Failure"
+          label-name: "docker-image-build-failure"

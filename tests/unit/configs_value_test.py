@@ -96,6 +96,318 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_tpu_tokamax_ring_config_validation_accepts_initial_config(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "ring_scan_unroll=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.context_parallel_strategy, "ring")
+    self.assertEqual(config.ici_context_parallelism, 2)
+    self.assertEqual(config.ring_scan_unroll, 2)
+    self.assertEqual(config.attention, "flash")
+    self.assertTrue(config.use_tokamax_splash)
+
+  def test_tpu_tokamax_ring_config_validation_accepts_load_balance(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=True",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.context_parallel_load_balance)
+
+  def test_tpu_tokamax_ring_config_validation_accepts_mla(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.attention_type, "mla")
+
+  def test_tpu_tokamax_ring_config_validation_accepts_packing(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.packing)
+
+  def test_tpu_tokamax_ring_config_validation_accepts_packed_load_balance(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=True",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.context_parallel_load_balance)
+    self.assertTrue(config.packing)
+
+  def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    cases = [
+        (["ici_context_parallelism=1"], ["ici_context_parallelism=2"], "context_parallel_size > 1"),
+        (["context_sharding=expert", "ici_expert_parallelism=2"], [], "context_sharding"),
+        (["dq_reduction_steps=2"], [], "dq_reduction_steps"),
+        (["ring_scan_unroll=-1"], [], "ring_scan_unroll"),
+        (["max_target_length=2050"], [], "context_parallel_size squared"),
+        (["attention=dot_product"], ["attention=flash"], "attention=flash"),
+        (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
+        (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),
+        (["attention_type=full"], [], "attention_type"),
+        (["attention_type=local_sliding", "sliding_window_size=128"], [], "attention_type"),
+        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "attention_type"),
+        (["attention_type=compressed"], [], "attention_type"),
+        (["attention_type=mla", "packing=True"], ["packing=False"], "packing"),
+        (["attention_type=mla", "use_batch_split_schedule=True"], [], "batch-split"),
+        (["attention_type=block_diffusion"], [], "attention_type"),
+        (
+            [
+                "context_parallel_load_balance=True",
+                "ici_context_parallelism=3",
+                "max_target_length=2304",
+            ],
+            ["context_parallel_load_balance=False", "ici_context_parallelism=2"],
+            "even context_parallel_size",
+        ),
+        (
+            [
+                "context_parallel_load_balance=True",
+                "mtp_num_layers=1",
+            ],
+            ["context_parallel_load_balance=False"],
+            "MTP",
+        ),
+        (["use_ragged_attention=True"], [], "ragged attention"),
+        (["attention_sink=True"], [], "attention sinks"),
+        (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
+        (["use_chunked_prefill=True"], [], "chunked prefill"),
+        (["moba=True"], [], "MoBA"),
+        (["use_multimodal=True"], [], "multimodal"),
+        (["use_qk_clip=True"], [], "QK-Clip"),
+        (["dropout_rate=0.1"], [], "dropout"),
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for bad_args, args_to_remove, expected_regex in cases:
+      with self.subTest(bad_args=bad_args):
+        argv = [arg for arg in base_args if arg not in args_to_remove]
+        argv.extend(bad_args)
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
+          with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
+            pyconfig.initialize(argv)
+
+  def test_tpu_ulysses_config_validation_accepts_initial_config(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ulysses",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.context_parallel_strategy, "ulysses")
+    self.assertEqual(config.ici_context_parallelism, 4)
+    self.assertFalse(config.context_parallel_load_balance)
+
+  def test_tpu_ulysses_config_validation_accepts_packing(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ulysses",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.packing)
+
+  def test_context_parallel_strategy_is_normalized(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=Ulysses",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.context_parallel_strategy, "ulysses")
+
+  def test_tpu_ulysses_config_validation_rejects_unsupported_configs(self):
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ulysses",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    cases = [
+        (["context_parallel_load_balance=True"], ["context_parallel_load_balance=False"], "load_balance"),
+        (["base_num_kv_heads=1"], [], "MQA"),
+        (["base_num_query_heads=18"], [], "requires num_query_heads"),
+        (["base_num_kv_heads=10"], [], "requires num_kv_heads"),
+        (["attention_type=mla"], [], "global causal attention"),
+        (["attention_type=local_sliding", "sliding_window_size=128"], [], "global causal attention"),
+        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "global causal attention"),
+        (["attention_type=full"], [], "global causal attention"),
+        (["attention_type=compressed"], [], "global causal attention"),
+        (["use_qk_clip=True"], [], "QK-Clip"),
+        (["dq_reduction_steps=2"], [], "dq_reduction_steps"),
+        (["attention=dot_product"], ["attention=flash"], "attention=flash"),
+        (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
+        (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),
+        (["max_target_length=2050"], [], "divisible by context_parallel_size"),
+        (["ici_context_parallelism=-1"], ["ici_context_parallelism=4"], "explicit positive"),
+        (["dcn_context_parallelism=-1"], [], "explicit positive"),
+        (["dcn_context_parallelism=2"], [], "dcn context parallelism"),
+        (
+            ["ici_context_parallelism=-1", "dcn_context_parallelism=-1"],
+            ["ici_context_parallelism=4"],
+            "explicit positive",
+        ),
+        (["ici_context_parallelism=1"], ["ici_context_parallelism=4"], "context_parallel_size > 1"),
+        (["context_sharding=expert"], [], "context_sharding"),
+        (["use_ragged_attention=True"], [], "ragged attention"),
+        (["attention_sink=True"], [], "attention sinks"),
+        (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
+        (["use_chunked_prefill=True"], [], "chunked prefill"),
+        (["moba=True"], [], "MoBA"),
+        (["use_multimodal=True"], [], "multimodal"),
+        (["dropout_rate=0.1"], [], "dropout"),
+        (["context_parallel_strategy=ulysess"], ["context_parallel_strategy=ulysses"], "context_parallel_strategy"),
+        (["hardware=gpu"], ["hardware=tpu"], "only supported on TPU"),
+        (["hardware=gpu_multiprocess"], ["hardware=tpu"], "only supported on TPU"),
+        (["hardware=cpu"], ["hardware=tpu"], "only supported on TPU"),
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for bad_args, args_to_remove, expected_regex in cases:
+      with self.subTest(bad_args=bad_args):
+        argv = [arg for arg in base_args if arg not in args_to_remove]
+        argv.extend(bad_args)
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
+          with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
+            pyconfig.initialize(argv)
+
   def test_load_balanced_chunk_context_parallel_config(self):
     argv = [
         "",
@@ -117,6 +429,59 @@ class ConfigTest(absltest.TestCase):
 
     self.assertEqual(config.attention_type, "chunk")
     self.assertTrue(config.context_parallel_load_balance)
+
+  def test_block_diffusion_attention_config(self):
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "attention=dot_product",
+            "attention_type=block_diffusion",
+            "causal_block_size=7",
+            "vocab_size=256",
+            "max_target_length=2048",
+            "hardware=cpu",
+            "packing=False",
+            "skip_jax_distributed_system=True",
+        ]
+    )
+
+    self.assertEqual(config.attention_type, "block_diffusion")
+    self.assertEqual(config.causal_block_size, 7)
+    self.assertNotEqual(config.max_target_length % config.causal_block_size, 0)
+
+  def test_block_diffusion_attention_rejects_unsupported_configs(self):
+    base_overrides = {
+        "run_name": "test",
+        "steps": 1,
+        "attention": "dot_product",
+        "attention_type": "block_diffusion",
+        "causal_block_size": 32,
+        "vocab_size": 256,
+        "max_target_length": 2048,
+        "hardware": "cpu",
+        "packing": False,
+        "skip_jax_distributed_system": True,
+    }
+    cases = (
+        {"causal_block_size": 0},
+        {"packing": True},
+        {"attention": "cudnn_flash_te"},
+        {"attention": "flash", "hardware": "gpu"},
+    )
+    for overrides in cases:
+      with self.subTest(overrides=overrides):
+        values = base_overrides | overrides
+        argv = ["", _BASE_CONFIG_PATH, *(f"{key}={value}" for key, value in values.items())]
+        with self.assertRaises((ValueError, pydantic.ValidationError)):
+          pyconfig.initialize(argv)
+
+  def test_default_attention_remains_global(self):
+    config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "steps=1"])
+
+    self.assertEqual(config.attention_type, "global")
 
   @unittest.mock.patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_env_override(self):
@@ -158,40 +523,6 @@ class ConfigTest(absltest.TestCase):
           ]
       )
 
-  def test_gmm_v2_quantization_disallowed(self):
-    """Tests that use_gmm_v2=True with quantization enabled is disallowed."""
-    argv = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "use_gmm_v2=true",
-        "quantization=fp8_full",
-    ]
-    with self.assertRaises(pydantic.ValidationError):
-      pyconfig.initialize(argv)
-
-    argv_qwix = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "use_gmm_v2=true",
-        "use_qwix_quantization=true",
-    ]
-    with self.assertRaises(pydantic.ValidationError):
-      pyconfig.initialize(argv_qwix)
-
-  def test_gmm_v2_requires_tokamax_gmm(self):
-    """Tests that use_gmm_v2=True requires use_tokamax_gmm=True."""
-    argv = [
-        "",
-        _BASE_CONFIG_PATH,
-        "run_name=test",
-        "use_gmm_v2=true",
-        "use_tokamax_gmm=false",
-    ]
-    with self.assertRaises(pydantic.ValidationError):
-      pyconfig.initialize(argv)
-
   def test_safetensors_dynamic_disallows_single_controller(self):
     """Tests that source_checkpoint_layout=safetensors_dynamic disallows enable_single_controller=True."""
     argv = [
@@ -200,6 +531,70 @@ class ConfigTest(absltest.TestCase):
         "run_name=test",
         "source_checkpoint_layout=safetensors_dynamic",
         "enable_single_controller=true",
+    ]
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv)
+
+  def test_elastic_backup_kind_validation(self):
+    """Tests that elastic_backup_kind must be either 'snapshot' or 'checkpoint'."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "elastic_backup_kind=invalid_backup_kind",
+    ]
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv)
+
+  def test_indexer_cutoff_threshold_remat_policy(self):
+    """Tests custom remat policy and validation for indexer_cutoff_threshold."""
+    # 1. Verify custom remat policy puts indexer_cutoff_threshold on device
+    argv_device = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_indexer=true",
+        "q_lora_rank=1536",
+        "attention=dot_product",
+        "remat_policy=custom",
+        "indexer_cutoff_threshold=device",
+    ]
+    config_device = pyconfig.initialize(argv_device)
+    self.assertIn("indexer_cutoff_threshold", config_device.tensors_on_device)
+
+    # 2. Verify custom remat policy puts indexer_cutoff_threshold on offload
+    argv_offload = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_indexer=true",
+        "q_lora_rank=1536",
+        "attention=dot_product",
+        "remat_policy=custom",
+        "indexer_cutoff_threshold=offload",
+    ]
+    config_offload = pyconfig.initialize(argv_offload)
+    self.assertIn("indexer_cutoff_threshold", config_offload.tensors_to_offload)
+
+    # 3. Verify validation error when use_indexer=False and indexer_cutoff_threshold != 'remat'
+    argv_invalid = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_indexer=false",
+        "indexer_cutoff_threshold=device",
+    ]
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(argv_invalid)
+
+  def test_sliced_mla_proj_disallows_quantization(self):
+    """Tests that use_sliced_mla_proj=True is incompatible with quantization."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_sliced_mla_proj=true",
+        "quantization=int8",
     ]
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)

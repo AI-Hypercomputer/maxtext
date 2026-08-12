@@ -112,7 +112,6 @@ def compare_sharding_jsons(json1: dict, model1_name: str, json2: dict, model2_na
 
 
 # Requires JAX TPU support to generate the simulated TPU topology.
-@pytest.mark.cpu_only
 @pytest.mark.tpu_backend
 @pytest.mark.parametrize("model_name, topology, num_slice, custom_mesh_and_rule, overrides", TEST_CASES)
 def test_sharding_dump_for_model(
@@ -274,7 +273,6 @@ def abstract_state_and_shardings(request):
   )
 
 
-@pytest.mark.cpu_only
 @pytest.mark.tpu_backend
 class TestGetAbstractState:
   """Test class for get_abstract_state function and sharding comparison."""

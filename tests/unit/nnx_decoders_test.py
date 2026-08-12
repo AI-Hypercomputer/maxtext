@@ -22,7 +22,11 @@ Tests cover:
 """
 
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest import mock
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 import jax
@@ -34,8 +38,10 @@ from jax.sharding import Mesh
 
 from maxtext.common.common_types import (
     DECODING_ACTIVE_SEQUENCE_INDICATOR,
+    MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
+    AttentionType,
     DecoderBlockType,
     MultimodalInput,
 )
@@ -45,10 +51,10 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.models import gemma4_small
+from maxtext.models import gemma4, gemma4_small
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
-from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils, maxtext_utils_nnx
 from tests.utils.test_helpers import get_test_config_path
 
 # ---------------------------------------------------------------------------
@@ -710,8 +716,131 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
     self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
 
 
-if __name__ == "__main__":
-  unittest.main()
+class _StatefulGemma4DecoderLayer(nnx.Module):
+  """Small stand-in that exposes cache ordering and mutable-state updates."""
+
+  def __init__(self, *, attention_type, **unused_kwargs):
+    self.increment = 10 if attention_type == AttentionType.GLOBAL else 1
+    self.call_count = nnx.Intermediate(jnp.array(0, dtype=jnp.int32))
+    self.received_attention_metadata = nnx.Intermediate(jnp.array(False))
+
+  def __call__(
+      self,
+      inputs,
+      *unused_args,
+      kv_cache=None,
+      attention_metadata=None,
+      **unused_kwargs,
+  ):
+    self.call_count.value += 1
+    self.received_attention_metadata.value = attention_metadata is not None
+    output = inputs + self.increment
+    if kv_cache is None:
+      return output
+    return output, kv_cache + self.increment
+
+
+class _SowingGemma4DecoderLayer(nnx.Module):
+  """Stand-in whose global layer sows an accumulating Intermediate, like MoE moe_lb_loss."""
+
+  def __init__(self, *, attention_type, **unused_kwargs):
+    self.is_global = attention_type == AttentionType.GLOBAL
+    # A trivial variable so the local layers have state for apply_scanned_layers to
+    # scan over (a bare module has nothing to scan and lax.scan can't infer length).
+    self.marker = nnx.Intermediate(jnp.zeros(()))
+
+  def __call__(self, inputs, *unused_args, kv_cache=None, **unused_kwargs):
+    output = inputs + 1
+    if self.is_global:
+      # nnx.sow appends into a tuple by default, so it grows across calls -- the
+      # MoE moe_lb_loss pattern that must not enter the global length-1 scan carry.
+      self.sow(nnx.Intermediate, "moe_lb_loss", jnp.sum(output))
+    if kv_cache is None:
+      return output
+    return output, kv_cache
+
+
+class TestGemma4ScannableBlock(unittest.TestCase):
+  """Tests Gemma4's nested local/global decoder block behavior."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = SimpleNamespace(
+        dtype=jnp.float32,
+        param_scan_axis=1,
+        remat_policy="none",
+        scan_layers=True,
+    )
+
+  def _make_block(self):
+    return gemma4.Gemma4ScannableBlock(
+        config=self.config,
+        mesh=None,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=nnx.Rngs(0),
+    )
+
+  def test_updates_state_through_global_single_iteration_scan(self):
+    with mock.patch.object(gemma4, "Gemma4DecoderLayer", _StatefulGemma4DecoderLayer):
+      block = self._make_block()
+      output, updated_kvs = block(
+          jnp.zeros((1, 1, 1)),
+          decoder_segment_ids=None,
+          decoder_positions=None,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 15))
+    self.assertIsNone(updated_kvs)
+    np.testing.assert_array_equal(block.local_layers.call_count.value, jnp.ones(5, dtype=jnp.int32))
+    np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
+
+  def test_global_layer_sown_intermediate_accumulates_across_calls(self):
+    """A global layer that sows an accumulating Intermediate (e.g. MoE moe_lb_loss)
+    must not break the length-1 scan carry, even when the Intermediate already
+    exists from a previous call and the sow grows its tuple (1 -> 2 elements)."""
+    call_kwargs = {
+        "decoder_segment_ids": None,
+        "decoder_positions": None,
+        "deterministic": True,
+        "model_mode": MODEL_MODE_AUTOREGRESSIVE,
+    }
+    with mock.patch.object(gemma4, "Gemma4DecoderLayer", _SowingGemma4DecoderLayer):
+      block = self._make_block()
+      # First call creates moe_lb_loss on the global layer (1-tuple).
+      block(jnp.zeros((1, 1, 1)), **call_kwargs)
+      # Second call: moe_lb_loss already exists and the sow appends -> 2-tuple.
+      # Carrying it in the scan would change the carry pytree; the type-based
+      # split keeps Intermediates on the ys path instead.
+      block(jnp.zeros((1, 1, 1)), **call_kwargs)
+
+    self.assertEqual(len(block.global_layer.moe_lb_loss.value), 2)
+
+  def test_restores_local_state_and_preserves_kv_order(self):
+    attention_metadata = object()
+
+    with mock.patch.object(gemma4, "Gemma4DecoderLayer", _StatefulGemma4DecoderLayer):
+      block = self._make_block()
+      output, updated_kvs = block(
+          jnp.zeros((1, 1, 1)),
+          decoder_segment_ids=None,
+          decoder_positions=None,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=tuple(jnp.array(i) for i in range(6)),
+          attention_metadata=attention_metadata,
+      )
+
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 15))
+    np.testing.assert_array_equal(jnp.stack(updated_kvs), jnp.array([1, 2, 3, 4, 5, 15]))
+    np.testing.assert_array_equal(block.local_layers.call_count.value, jnp.ones(5, dtype=jnp.int32))
+    np.testing.assert_array_equal(
+        block.local_layers.received_attention_metadata.value,
+        jnp.ones(5, dtype=jnp.bool_),
+    )
+    np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
+    np.testing.assert_array_equal(block.global_layer.received_attention_metadata.value, True)
 
 
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
@@ -743,6 +872,111 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         rngs=self.rngs,
     )
 
+  def test_gemma_scan_layers_equivalence(self):
+    # Test that scan_layers=True and scan_layers=False produce identical logits
+    # even when bidirectional_mask is provided, proving kwargs are not dropped.
+    cfg_base = {
+        "run_name": "gemma3_scan_equiv_test",
+        "decoder_block": "gemma3",
+        "model_name": "gemma3-4b",
+        "num_decoder_layers": 2,
+        "base_emb_dim": 128,
+        "base_num_query_heads": 4,
+        "base_num_kv_heads": 4,
+        "base_mlp_dim": 256,
+        "hidden_size_per_layer_input": 128,
+        "vocab_size_per_layer_input": 256,
+        "vocab_size": 256,
+        "max_target_length": 64,
+        "per_device_batch_size": 1.0,
+    }
+
+    cfg_scanned = _make_config(scan_layers=True, **cfg_base)
+    cfg_unscanned = _make_config(scan_layers=False, **cfg_base)
+
+    # Use identical RNGs to guarantee the same parameter initialization
+    rngs_scanned = nnx.Rngs(params=0, dropout=1)
+    rngs_unscanned = nnx.Rngs(params=0, dropout=1)
+
+    decoder_scanned = NNXDecoder(config=cfg_scanned, mesh=self.mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs_scanned)
+    decoder_unscanned = NNXDecoder(config=cfg_unscanned, mesh=self.mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs_unscanned)
+
+    ids, segment_ids, positions = self._make_token_inputs(cfg_scanned)
+    shared_embedding = self._make_shared_embedding(cfg_scanned)
+
+    # Provide a mock bidirectional_mask to trigger the code path that dropped the kwarg
+    batch = cfg_scanned.global_batch_size_to_train_on
+    seq_len = cfg_scanned.max_target_length
+    bidirectional_mask = jax.random.normal(self.rng, (batch, seq_len)) > 0
+    mm_input = MultimodalInput(bidirectional_mask=bidirectional_mask)
+
+    logits_scanned, _, _ = decoder_scanned(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+        multimodal_input=mm_input,
+    )
+
+    logits_unscanned, _, _ = decoder_unscanned(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+        multimodal_input=mm_input,
+    )
+
+    np.testing.assert_allclose(logits_scanned, logits_unscanned, atol=1e-4, rtol=1e-4)
+
+  def test_gemma_scan_layers_kv_cache_updated(self):
+    # Test that scan_layers=True correctly forwards kv_caches to _apply_layers_sequentially.
+    # Patching/inspecting the private _apply_gemma3_scanned_blocks is intentional here.
+    # pylint: disable=protected-access
+    cfg = _make_config(
+        run_name="gemma3_scan_kv_test",
+        decoder_block="gemma3",
+        model_name="gemma3-4b",
+        scan_layers=True,
+        num_decoder_layers=2,
+        base_emb_dim=128,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        base_mlp_dim=256,
+        hidden_size_per_layer_input=128,
+        vocab_size_per_layer_input=256,
+        vocab_size=256,
+        max_target_length=64,
+        per_device_batch_size=1.0,
+    )
+
+    decoder = NNXDecoder(config=cfg, mesh=self.mesh, model_mode=MODEL_MODE_PREFILL, rngs=self.rngs)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+    shared_embedding = self._make_shared_embedding(cfg)
+
+    decoder._apply_gemma3_scanned_blocks = MagicMock(return_value=jnp.zeros((1, 1)))
+
+    mock_kv_caches = [jnp.zeros((1, 1)) for _ in range(cfg.num_decoder_layers)]
+
+    _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+        kv_caches=mock_kv_caches,
+    )
+
+    # Verify that _apply_gemma3_scanned_blocks was called with the kv_caches
+    self.assertTrue(decoder._apply_gemma3_scanned_blocks.called)
+    call_kwargs = decoder._apply_gemma3_scanned_blocks.call_args[1]
+    self.assertIn("kv_caches", call_kwargs)
+    self.assertEqual(call_kwargs["kv_caches"], mock_kv_caches)
+
   def test_gemma4_scanned_layers(self):
     """Test NNXDecoder with gemma4 block and scan_layers=True."""
     cfg = _make_config(
@@ -773,6 +1007,75 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size),
     )
 
+  def test_gemma4_block_external_kv_cache_matches_scanned_path(self):
+    """External-kv-cache path must numerically match the scanned (kv=None) path.
+
+    Guards the real stacked-parameter slice/re-stack in
+    ``Gemma4ScannableBlock._forward_with_external_kv_cache`` (``nnx.split`` of the
+    scanned local stack, ``param_scan_axis`` moveaxis, per-layer merge, re-stack,
+    ``nnx.update``) against the ``jax.lax.scan`` path. The mock-based
+    ``TestGemma4ScannableBlock`` tests cover call ordering / cache collection but
+    use trivial params, so they never exercise the real stacked-param mechanics.
+
+    Uses ``model_mode=TRAIN`` with ``dot_product`` attention: attention then
+    ignores the external caches (passing them straight through), so both paths
+    compute the same forward and only the loop mechanism (scan vs static unroll)
+    differs -- any mismatch is a slice/re-stack bug.
+    """
+    cfg = _make_config(
+        decoder_block="gemma4",
+        scan_layers=True,
+        num_decoder_layers=len(gemma4.GEMMA4_ATTENTION_PATTERN),  # exactly one full 5-local + 1-global block
+        base_emb_dim=128,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        # float32 + high matmul precision so the two paths agree to tight tolerance;
+        # the paths are mathematically identical, so any bf16-level rounding drift
+        # between scan and static-unroll compilation would only mask a real bug.
+        dtype="float32",
+        weight_dtype="float32",
+        matmul_precision="highest",
+    )
+    mesh = _make_mesh(cfg)
+
+    def make_block():
+      # Same seed => identical params in both blocks, so any output difference is
+      # attributable to the scan-vs-unroll code path, not initialization.
+      return gemma4.Gemma4ScannableBlock(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          quant=None,
+          num_of_layers=len(gemma4.GEMMA4_ATTENTION_PATTERN),
+          remat_policy_fn=None,
+          apply_internal_remat=False,
+          rngs=nnx.Rngs(params=0),
+      )
+
+    batch = cfg.global_batch_size_to_train_on
+    seq = cfg.max_target_length
+    inputs = jax.random.normal(self.rng, (batch, seq, cfg.emb_dim), dtype=cfg.dtype)
+    segment_ids = jnp.full((batch, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq)[None], (batch, seq))
+    call_kwargs = {
+        "decoder_segment_ids": segment_ids,
+        "decoder_positions": positions,
+        "deterministic": True,
+        "model_mode": MODEL_MODE_TRAIN,
+    }
+
+    # Scanned path (kv_cache=None); scan_layers=True => returns (y, None).
+    y_scanned, _ = make_block()(inputs, **call_kwargs)
+
+    # External-kv path: one cache per layer, ordered local[0..4] then global.
+    num_layers = len(gemma4.GEMMA4_ATTENTION_PATTERN)
+    external_kv = tuple(jnp.zeros((batch, seq), dtype=cfg.dtype) for _ in range(num_layers))
+    y_external, updated_kvs = make_block()(inputs, **call_kwargs, kv_cache=external_kv)
+
+    self.assertEqual(y_external.shape, inputs.shape)
+    self.assertEqual(len(updated_kvs), num_layers)
+    np.testing.assert_allclose(y_external, y_scanned, rtol=1e-5, atol=1e-5)
+
 
 @pytest.mark.tpu_only
 class TestGemma4SmallNNXDecoder(unittest.TestCase):
@@ -799,6 +1102,8 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "hidden_size_per_layer_input=128",
             "vocab_size_per_layer_input=256",
             "vocab_size=256",
+            "max_target_length=128",
+            "per_device_batch_size=1.0",
         ],
         override_model_config=True,
     )
@@ -849,9 +1154,6 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
     )
 
   def test_gemma4_small_decoder_with_mock_cache_and_ple(self):
-    # pylint: disable=import-outside-toplevel
-    from unittest.mock import MagicMock, patch
-
     cfg = pyconfig.initialize(
         [
             None,
@@ -872,6 +1174,8 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "hidden_size_per_layer_input=128",
             "vocab_size_per_layer_input=256",
             "vocab_size=256",
+            "max_target_length=128",
+            "per_device_batch_size=1.0",
         ],
         override_model_config=True,
     )
@@ -891,7 +1195,7 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
     )
 
     # Mock each layer's compute_shared_kv
-    for layer in decoder.layers:
+    for layer in decoder.get_layers():
       layer.compute_shared_kv = MagicMock(return_value=(jnp.zeros((1, 16, 128)), jnp.zeros((1, 16, 128))))
 
     # Inputs
@@ -951,3 +1255,67 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
               model_mode=MODEL_MODE_TRAIN,
               kv_caches=kv_caches,
           )
+
+
+class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
+  """Tests for metadata axis name parameterization in NNXDecoder."""
+
+  def test_metadata_axis_name_parameterization(self):
+    cfg = _make_config(param_scan_axis=0)
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0)
+
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=rngs,
+    )
+
+    class DummyLayer(nnx.Module):
+      """A dummy NNX module for testing."""
+
+      def __init__(self):
+        self.p = nnx.Param(jax.numpy.zeros((2,)))
+
+      def __call__(self, x, **kwargs):
+        return x + self.p.value, None
+
+    # Manually create a stacked layer using NNX scan
+    stacked_layers = nnx.vmap(DummyLayer, in_axes=(), out_axes=0, axis_size=2)()
+
+    x_in = jax.numpy.zeros((2,))
+
+    # We mock maxtext_utils_nnx.nnx_add_and_sync_scan_axis to ensure the custom name is passed
+    original_add_scan_axis = maxtext_utils_nnx.nnx_add_and_sync_scan_axis
+    mock_add_scan_axis = MagicMock(side_effect=original_add_scan_axis)
+    maxtext_utils_nnx.nnx_add_and_sync_scan_axis = mock_add_scan_axis
+
+    try:
+      # Use a custom metadata_axis_name
+      custom_axis_name = "custom_scanned_blocks"
+      # pylint: disable=protected-access
+      _, _, _ = decoder._apply_layers_sequentially(
+          layers=stacked_layers,
+          x_in=x_in,
+          length=2,
+          metadata_axis_name=custom_axis_name,
+      )
+
+      # Verify that the custom axis name was indeed passed down
+      found_custom_name = False
+      for call_args in mock_add_scan_axis.call_args_list:
+        if call_args[0][1] == custom_axis_name:
+          found_custom_name = True
+          break
+
+      self.assertTrue(
+          found_custom_name,
+          "The custom metadata_axis_name was not passed to nnx_add_and_sync_scan_axis!",
+      )
+    finally:
+      maxtext_utils_nnx.nnx_add_and_sync_scan_axis = original_add_scan_axis
+
+
+if __name__ == "__main__":
+  unittest.main()

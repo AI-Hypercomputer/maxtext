@@ -108,6 +108,26 @@ flags.DEFINE_bool(
     "with values from the MaxText config. If False, raises a ValueError on mismatch.",
 )
 
+flags.DEFINE_string(
+    "hf_model_path",
+    None,
+    "(Optional) Customized remote HF repo (or local path) to source the tokenizer/processor "
+    "from. If not specified, defaults to maxtext.utils.globals.HF_IDS[model_name]. Use this to "
+    "bundle a different tokenizer than the default (e.g., the base model's tokenizer instead of "
+    "the instruction-tuned one).",
+)
+
+flags.DEFINE_integer(
+    "parallel_threads",
+    4,
+    "Number of threads used for parallel saving of weights. Lower this value to reduce peak host RAM usage.",
+)
+flags.register_validator(
+    "parallel_threads",
+    lambda value: value > 0,
+    message="--parallel_threads must be a positive integer.",
+)
+
 FLAGS = flags.FLAGS
 
 
@@ -422,7 +442,14 @@ def _transform_and_save_weights(
       raise ValueError("Error: No weights were transformed. Check mappings and parameter paths.")
 
     max_logging.log("\nSaving HuggingFace model...")
-    save_model_files(transformed_hf_weights, hf_config_obj, tokenizer, processor, output_directory)
+    save_model_files(
+        transformed_hf_weights,
+        hf_config_obj,
+        tokenizer,
+        processor,
+        output_directory,
+        parallel_threads=FLAGS.parallel_threads,
+    )
     max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
 
   max_logging.log(f"Elapse for transform and save: {(time.time() - start) / 60:.2f} min")
@@ -493,7 +520,7 @@ def main(argv: Sequence[str]) -> None:
   if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_token = config.hf_access_token
-  hf_tokenizer_id = HF_IDS[model_key]
+  hf_tokenizer_id = FLAGS.hf_model_path or HF_IDS[model_key]
   tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
 
   # For multi-modal case:

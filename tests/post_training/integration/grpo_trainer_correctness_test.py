@@ -27,7 +27,6 @@ Usage:
 
 import functools
 import os
-import subprocess
 import sys
 import unittest
 from flax import linen as nn
@@ -36,13 +35,14 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 import jsonlines
 import maxtext as mt
-from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
+from maxtext.configs import pyconfig, types
+from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from flax import nnx
 from maxtext.experimental.rl import grpo_utils
 from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, grpo_loss_fn_nnx, setup_train_loop
 from maxtext.experimental.rl.grpo_utils import compute_log_probs, compute_log_probs_nnx
+from tests.utils.test_helpers import ensure_tokenizer_downloaded
 from maxtext.inference import offline_engine
 from maxtext.inference.maxengine import maxengine
 from maxtext.inference.offline_engine import InputData
@@ -143,24 +143,15 @@ class GrpoTrainerTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-    command = [
-        "gcloud",
-        "storage",
-        "cp",
-        "--recursive",
-        "gs://maxtext-dataset/hf/llama3.1-tokenizer",
-        os.path.join(MAXTEXT_ASSETS_ROOT, ""),
-    ]
-    exit_code = subprocess.call(command, cwd=os.path.dirname(MAXTEXT_PKG_DIR))
-    if exit_code != 0:
-      raise ValueError(f"{command} failed with exit code: {exit_code}")
+    tokenizer_path = ensure_tokenizer_downloaded("llama3.1-tokenizer", skip_test_on_failure=True)
     self.config = pyconfig.initialize(
         [
             None,
             os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"),
         ],
+        config_class=types.RLConfig,
         run_name="unit_test_grpo_trainer",
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama3.1-tokenizer"),
+        tokenizer_path=tokenizer_path,
         enable_checkpointing=False,
         train_data_columns="prompt",
     )
@@ -169,8 +160,9 @@ class GrpoTrainerTest(unittest.TestCase):
             None,
             os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_trainer_test.yml"),
         ],
+        config_class=types.RLConfig,
         run_name="unit_test_grpo_trainer_inference",
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "llama3.1-tokenizer"),
+        tokenizer_path=tokenizer_path,
         enable_checkpointing=False,
         ici_tensor_parallelism=4,
         per_device_batch_size=self.config.per_device_batch_size * self.config.rl["num_generations"],
@@ -307,6 +299,7 @@ class ReshardingTest(unittest.TestCase):
             sys.argv[0],
             os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", config_file),
         ],
+        config_class=types.RLConfig,
         **init_kwargs,
     )
     return config

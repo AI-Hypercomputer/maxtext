@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for multimodal vision encoder. """
+"""Tests for multimodal vision encoder."""
 
 from collections.abc import Callable
 import os

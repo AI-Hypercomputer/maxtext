@@ -19,7 +19,7 @@ import functools
 import os
 from typing import Sequence
 
-from flax import linen as nn, nnx
+from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.training.train_state import TrainState
 import jax
@@ -156,7 +156,9 @@ def get_shaped_batch(config, batch_sharding=None):
     batch_shape = (config.global_batch_size_to_load, config.max_target_length)
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  # MRoPE uses (batch, seq, 3); same batch/seq axes as 1D positions so batch_sharding applies as-is.
+  position_shape = batch_shape + (3,) if config.use_mrope and config.use_multimodal else batch_shape
+  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(position_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
@@ -166,7 +168,10 @@ def get_shaped_batch(config, batch_sharding=None):
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
-    shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
+    # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
+    # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
+    if "llama4" in config.model_name:
+      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)
@@ -193,6 +198,47 @@ def should_prevent_cse_in_remat(config):
     return False
 
   return True
+
+
+def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
+  """Returns the ``(save_names, offload_names)`` split for remat policies built via
+  ``jax.checkpoint_policies.save_and_offload_only_these_names``.
+
+  ``save_names`` are checkpointed tensors kept in device HBM; ``offload_names`` are moved to
+  pinned host. This is the single source of truth shared by ``Decoder.get_remat_policy`` (which
+  builds the save-and-offload policy) and by models that use custom ways to handle offload (
+  e.g. Gemma4's global-layer with scan). It also makes ``remat_policy=custom`` with tensors marked
+  ``offload`` resolve to the same name sets as the named presets.
+
+  Returns a ``(save_names, offload_names)`` tuple:
+    * ``custom``: ``(config.tensors_on_device, config.tensors_to_offload)`` -- the per-tensor
+      assignments. Either list may be empty: all tensors set to ``device`` gives an empty offload
+      list, all set to ``remat`` gives ``([], [])``.
+    * ``qkv_proj_offloaded`` / ``minimal_offloaded``: ``([], <hardcoded offload names>)`` -- presets
+      that only offload and save nothing on device.
+    * any other policy (``full``, ``minimal``, ``save_*``, ``none``, ...): ``([], [])`` -- these do
+      not use ``save_and_offload_only_these_names``, so they contribute no names to this split.
+      Note ``([], [])`` here means "no names for this split", not that the policy saves nothing
+      overall (e.g. ``save_out_proj`` still saves ``out_proj`` via ``save_only_these_names``).
+  """
+  if config.remat_policy == "qkv_proj_offloaded":
+    return [], ["query_proj", "value_proj", "key_proj", "kv_proj"]
+  if config.remat_policy == "minimal_offloaded":
+    return [], [
+        "query_proj",
+        "value_proj",
+        "key_proj",
+        "kv_proj",
+        "qkv_proj",
+        "out_proj",
+        "mlpwi_0",
+        "mlpwi_1",
+        "mlpwi",
+        "mlpwo",
+    ]
+  if config.remat_policy == "custom":
+    return list(config.tensors_on_device or []), list(config.tensors_to_offload or [])
+  return [], []
 
 
 def load_compiled(config, partial_train, state, execution_devices):
@@ -702,7 +748,7 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -938,6 +984,163 @@ def calculate_vision_encoder_tflops(config):
   return mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops
 
 
+def calculate_mhc_flops_per_layer(config):
+  """Calculates the training FLOPs per layer for Manifold-Constrained Hyper-Connections (mHC)."""
+  batch_size = config.per_device_batch_size
+  seq_len = config.max_target_length
+  k_mhc = getattr(config, "mhc_expansion_rate", 1)
+  emb_dim = config.emb_dim
+
+  # Inside mhc.py, inputs are projected to an expanded manifold space bounded by k_mhc.
+  # pre_alpha / post_alpha maps input [B, S, k * D] to [B, S, k]
+  pre_alpha_flops = 2 * batch_size * seq_len * (k_mhc * emb_dim) * k_mhc
+  pre_contract_flops = 2 * batch_size * seq_len * k_mhc * emb_dim
+  post_alpha_flops = 2 * batch_size * seq_len * (k_mhc * emb_dim) * k_mhc
+  post_outer_flops = batch_size * seq_len * k_mhc * emb_dim
+  # res_alpha maps input [B, S, k * D] to [B, S, k^2]
+  res_alpha_flops = 2 * batch_size * seq_len * (k_mhc * emb_dim) * (k_mhc**2)
+  res_contract_flops = 2 * batch_size * seq_len * (k_mhc**2) * emb_dim
+
+  return pre_alpha_flops + pre_contract_flops + post_alpha_flops + post_outer_flops + res_alpha_flops + res_contract_flops
+
+
+def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_layers, embedding_flops):
+  """Calculates the training TFLOPs per device for DeepSeek-V4.
+
+  DeepSeek-V4 adopts a multi-track attention topology and Manifold-Constrained
+  Hyper-Connections (mHC). This function models:
+  1. Base Attention block projections (Q/KV/Grouped Out mapping).
+  2. mHC projections (pre, post, residual alpha/contraction projections) applied twice per layer.
+  3. Prefix-only Sliding Window track (C=0).
+  4. HCA (Hybrid Compressed Attention, C=128) incorporating global context.
+  5. CSA (Causal Sparse Attention, C=4) containing poolers, indexer top-k query scoring,
+     and sparse sequence attention.
+
+  Args:
+    config: MaxTextConfig instance containing architectural hyperparameters.
+    total_ffn_flops_all_layers: Pre-computed Feed-Forward (MoE/Shared MLP) FLOPs.
+    embedding_flops: Pre-computed input token embedding layer FLOPs.
+
+  Returns:
+    A tuple of (total_attn_flops_in_tflops, total_weight_flops_in_tflops).
+  """
+  batch_size = config.per_device_batch_size
+  seq_len = config.max_target_length
+  sliding_window_size = config.sliding_window_size
+  num_layers = config.num_decoder_layers
+
+  # DeepSeek-V4 Attention topology compression rates (HCA = 128, CSA = 4)
+  HCA_RATIO = 128
+  CSA_RATIO = 4
+
+  # 1. Dynamic YAML-compliant Layer Counting
+  # DeepSeek-V4 alternates layers with different compression rates (C = 0, 128, 4).
+  # If the YAML config doesn't declare it explicitly, we default to the standard
+  # DeepSeek-V4 profile (2 prefix sliding window, 20 HCA, and 21 CSA layers).
+  c_ratios = getattr(config, "compress_ratios", [])
+  if not c_ratios:
+    num_sliding_layers, num_hca_layers, num_csa_layers = 2, 20, 21
+  else:
+    num_sliding_layers = c_ratios.count(0)
+    num_hca_layers = c_ratios.count(HCA_RATIO)
+    num_csa_layers = c_ratios.count(CSA_RATIO)
+
+  # 2. Base Attention Block Projections (Executed on all layers)
+  # - Q projection: projects inputs to q_lora_rank, then up-projects to query_heads * head_dim.
+  #   FLOPs = 2 * B * S * (D * Q_rank + Q_rank * H * D_h)
+  wq_flops = (
+      2
+      * batch_size
+      * seq_len
+      * ((config.emb_dim * config.q_lora_rank) + (config.q_lora_rank * config.num_query_heads * config.head_dim))
+  )
+  # - KV projection: embeds to kv_heads * head_dim.
+  #   FLOPs = 2 * B * S * D * (KV_heads * D_h)
+  wkv_flops = 2 * batch_size * seq_len * config.emb_dim * (config.num_kv_heads * config.head_dim)
+  # - Grouped Out projection: projects out groups of heads down to o_lora_rank, then up to emb_dim.
+  #   FLOPs = 2 * B * S * (H * D_h) * o_lora_rank + 2 * B * S * (o_groups * o_lora_rank) * D
+  grp_feat = (config.num_query_heads * config.head_dim) // config.o_groups
+  o_flops = (2 * batch_size * seq_len * config.o_groups * grp_feat * config.o_lora_rank) + (
+      2 * batch_size * seq_len * (config.o_groups * config.o_lora_rank) * config.emb_dim
+  )
+  base_attention_weights = wq_flops + wkv_flops + o_flops
+
+  # 3. Manifold-Constrained Hyper-Connections (mHC) Overheads
+  # Inside mhc.py, inputs are projected to an expanded manifold space.
+  # These operations are executed twice per layer (wrapping the attention block and FFN block).
+  if getattr(config, "mhc_expansion_rate", 1) > 1:
+    mhc_flops_per_layer = calculate_mhc_flops_per_layer(config)
+  else:
+    mhc_flops_per_layer = 0
+
+  # 4. Multi-Track Sequence Length Operations
+  # - Track 1: Sliding Window Prefix (C=0)
+  #   Uses exact causal sliding window surface area formula to count attention dot products:
+  #   FLOPs = 4 * B * (S * W - 0.5 * W^2) * H * D_h
+  prefix_attn = (
+      4
+      * batch_size
+      * (seq_len * sliding_window_size - 0.5 * sliding_window_size**2)
+      * config.num_query_heads
+      * config.head_dim
+  )
+
+  # - Track 2: HCA Compressed Branch (C=128)
+  #   Includes HCA compressor dense projection: D -> D_h
+  hca_pooler = 4 * batch_size * seq_len * config.emb_dim * config.head_dim
+  #   Calculates prefix sliding window attention + global cross-attention to the S/128 elements
+  hca_attn = prefix_attn + 2 * batch_size * seq_len * (seq_len / HCA_RATIO) * config.num_query_heads * config.head_dim
+
+  # - Track 3: CSA Sparse Branch (C=4)
+  #   - Indexer Projections: Q_rank -> H_idx * D_idx, and D -> H_idx
+  idx_proj = (
+      2
+      * batch_size
+      * seq_len
+      * (
+          (config.q_lora_rank * config.indexer_n_heads * config.indexer_head_dim)
+          + (config.emb_dim * config.indexer_n_heads)
+      )
+  )
+  #   - Indexer query-block scoring (divided by 2 for causal mask)
+  idx_score = batch_size * seq_len * (seq_len / CSA_RATIO) * config.indexer_n_heads * config.indexer_head_dim
+  #   - Indexer head reduction (divided by 2 for causal mask)
+  idx_reduce = batch_size * seq_len * (seq_len / CSA_RATIO) * config.indexer_n_heads
+  #   - Indexer key/gate pooler projections: Down-projects D -> 2 * D_idx
+  idx_kv_gate_pool = 4 * batch_size * seq_len * config.emb_dim * (2 * config.indexer_head_dim)
+  csa_indexer = idx_proj + idx_score + idx_reduce + idx_kv_gate_pool
+
+  #   Includes CSA compressor pooler projection: D -> 2 * D_h
+  csa_pooler = 4 * batch_size * seq_len * config.emb_dim * (2 * config.head_dim)
+  #   - Sparse causal attention: attends to top-k blocks of size 4 in preceding sequence of size S/4
+  csa_k = min(config.indexer_topk, seq_len // CSA_RATIO)
+  #   We reuse the mask multiplier helper for the csa causal ratio:
+  #   Ratio = (K/T) - 0.5 * (K/T)^2
+  csa_mask_ratio = calculate_indexer_mask_ratio(csa_k, seq_len // CSA_RATIO)
+  csa_sparse_attn = (
+      4 * batch_size * (seq_len * (seq_len / CSA_RATIO)) * config.num_query_heads * config.head_dim * csa_mask_ratio
+  )
+  csa_attn = prefix_attn + csa_sparse_attn + csa_indexer
+
+  # 5. Pipeline TFLOP Aggregation
+  total_attn_flops = (num_sliding_layers * prefix_attn) + (num_hca_layers * hca_attn) + (num_csa_layers * csa_attn)
+
+  total_weight_flops = (
+      (num_layers * base_attention_weights)
+      + (2 * num_layers * mhc_flops_per_layer)  # mHC runs twice per layer
+      + (num_hca_layers * hca_pooler)
+      + (num_csa_layers * csa_pooler)
+      + total_ffn_flops_all_layers
+      + embedding_flops
+  )
+
+  # Scale final values by 3x to account for Forward + Backward (2x Forward) training passes
+  return (
+      total_attn_flops * 3 / 10**12,
+      total_weight_flops * 3 / 10**12,
+  )
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   # MLP flops
@@ -950,6 +1153,7 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
         DecoderBlockType.GEMMA4,
+        DecoderBlockType.DEEPSEEK4,
     ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
@@ -1040,6 +1244,10 @@ def calculate_tflops_training_per_device(config, log=True):
     # KV sharing, double-wide MLP on shared layers, and the per-layer-embedding
     # block.
     attention_tflops, learnable_weight_tflops = calculate_gemma4_small_tflops_training_per_device(config, embedding_flops)
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK4:
+    attention_tflops, learnable_weight_tflops = calculate_deepseek4_tflops_training_per_device(
+        config, total_ffn_flops_all_layers, embedding_flops
+    )
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
@@ -1293,10 +1501,15 @@ def get_intermediate_value(model, nested_key, default=None, clear=False):
   intermediate_value = default
   match nested_key:
     case "out_projection_activations":
-      if nested_key in model.decoder.layers["self_attention"]:
-        intermediate_value = model.decoder.layers["self_attention"][nested_key].get_value()[-1]
-        if clear:
-          del model.decoder.layers["self_attention"][nested_key]
+      layers = model.decoder.get_layers()
+      last_layer = layers[-1]
+      if hasattr(last_layer, "self_attention"):
+        attn = last_layer.self_attention
+        if hasattr(attn, nested_key):
+          var = getattr(attn, nested_key)
+          intermediate_value = var.get_value()[-1]
+          if clear:
+            delattr(attn, nested_key)
     case _:
       # Default case to handle any unknown nested keys
       raise ValueError(f"Incorrect nested_key: {nested_key}")
@@ -1392,7 +1605,9 @@ def get_abstract_param(model, config):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,  # pyrefly: ignore[no-matching-overload]
+      encoder_images=np.ones(image_shape, dtype=jnp.int32)  # pyrefly: ignore[no-matching-overload]
+      if config.use_multimodal
+      else None,  # pyrefly: ignore[no-matching-overload]
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
   )
   return abstract_vars
@@ -1413,7 +1628,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   if not config.load_parameters_path:
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
-    state, state_mesh_annotations, _, _ = setup_initial_state(
+    state, state_mesh_annotations, _, _, _ = setup_initial_state(
         None, config, mesh, checkpoint_manager, init_state_fn, False
     )
   else:
@@ -1468,6 +1683,9 @@ def setup_initial_state(
   Returns:
     train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
     state_mesh_annotations: the mesh annotations for the train state
+    state_mesh_shardings: the mesh shardings for the train state
+    data_iterator: the updated data iterator
+    was_restored: True if state or params were restored from checkpoint, False if freshly initialized
   """
 
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
@@ -1493,33 +1711,102 @@ def setup_initial_state(
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
     )
+    # Partial or fully restored
+    was_restored = bool(restored is not None or raw_params is not None)
 
-    if restored:
-      if isinstance(
-          checkpoint_manager,
-          (
-              emergency_checkpoint_manager.CheckpointManager,
-              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
-          ),
-      ):
-        state = restored
-      else:
-        # The update of data_iterator state happens in place, no need to assign explicitly
-        state = restored["items"]
+    init_state_partial = init_state_fn
+    init_state_partial.__name__ = "initialize_state"
 
-      # For NNX, convert the pure dict to nnx.State using the abstract state as template
-      if config.pure_nnx:
-        nnx.replace_by_pure_dict(unboxed_abstract_state, state)
-        state = unboxed_abstract_state
+    if config.pure_nnx:
+      # Always build the concrete init state, then overlay whatever we loaded. Anything the
+      # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
+      # value, so restore doesn't depend on knowing exactly what was saved.
+      state = jax.jit(
+          lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+          in_shardings=None,
+          out_shardings=state_mesh_shardings,
+      )()
+      if raw_params:
+        # Params-only load (base model weights): overlay restored weights, keep init for everything else.
+        target_model = (
+            state["model"]
+            if (isinstance(state, (nnx.State, dict)) and "model" in state)
+            else getattr(state, "model", state)
+        )
+        raw_model_params = (
+            raw_params["model"] if (isinstance(raw_params, (nnx.State, dict)) and "model" in raw_params) else raw_params
+        )
+        if hasattr(raw_model_params, "to_pure_dict"):
+          raw_model_params = raw_model_params.to_pure_dict()
+        if isinstance(raw_model_params, dict) and "params" in raw_model_params:
+          raw_model_params = raw_model_params["params"]
+        target_pure = target_model.to_pure_dict() if hasattr(target_model, "to_pure_dict") else target_model
+
+        def _reshard_aligned(target, raw):
+          """Aligns raw arrays with target device shardings using Flax's native flatten_dict utilities."""
+          target_flat = traverse_util.flatten_dict(target)
+          raw_flat = traverse_util.flatten_dict(raw)
+
+          res_flat = {}
+          for k, target_val in target_flat.items():
+            if k in raw_flat and not isinstance(raw_flat[k], jax.ShapeDtypeStruct):
+              raw_val = raw_flat[k]
+              if hasattr(target_val, "sharding") and target_val.sharding is not None:
+                res_flat[k] = jax.device_put(raw_val, target_val.sharding)
+              else:
+                res_flat[k] = raw_val
+            else:
+              res_flat[k] = target_val
+
+          return traverse_util.unflatten_dict(res_flat)
+
+        sharded_aligned = _reshard_aligned(target_pure, raw_model_params)
+        nnx.update(target_model, sharded_aligned)
+
+      if restored:
+        is_emergency = isinstance(
+            checkpoint_manager,
+            (
+                emergency_checkpoint_manager.CheckpointManager,
+                emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+            ),
+        )
+        overlay = restored if is_emergency else restored["items"]
+        overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
+
+        def _has_shape_dtype_struct(tree):
+          return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
+
+        def _merge_restored_overlay(ckpt_node, init_node):
+          """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
+          if _has_shape_dtype_struct(ckpt_node):
+            if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
+              res = {}
+              for k in init_node:
+                if k in ckpt_node:
+                  res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
+                else:
+                  res[k] = init_node[k]
+              return res
+            else:
+              return init_node
+          return ckpt_node
+
+        merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
+        nnx.replace_by_pure_dict(state, merged)
     else:
-      init_state_partial = init_state_fn
-      init_state_partial.__name__ = "initialize_state"
-      if config.pure_nnx:
-        state = jax.jit(
-            lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
-            in_shardings=None,
-            out_shardings=state_mesh_shardings,
-        )()
+      if restored:
+        if isinstance(
+            checkpoint_manager,
+            (
+                emergency_checkpoint_manager.CheckpointManager,
+                emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+            ),
+        ):
+          state = restored
+        else:
+          # The update of data_iterator state happens in place, no need to assign explicitly
+          state = restored["items"]
       else:
         # pylint: disable=not-callable
         state = jax.jit(
@@ -1527,11 +1814,7 @@ def setup_initial_state(
             in_shardings=None,
             out_shardings=state_mesh_shardings,
         )()
-      if raw_params:  # If we loaded a partial state, we need to merge it.
-        if config.pure_nnx:
-          # raw_params should have the same sharding info as in the model
-          nnx.update(state.model, raw_params)
-        else:
+        if raw_params:  # If we loaded a partial state, we need to merge it.
           sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
           if sparsity_enabled:
             # Sparsity-init keeps freshly initialized params for any leaf still
@@ -1548,7 +1831,7 @@ def setup_initial_state(
             state = state.replace(params=raw_params)
   if not config.pure_nnx:
     state = max_utils.unbox_logicallypartioned(state)
-  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 
 def get_logical_annotations(config, mesh, init_state_fn):
@@ -1650,10 +1933,48 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
     named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
+
+    def _to_abstract_var(a_var, s_var):
+      a_val = a_var.get_value()
+      s_val = getattr(s_var, "sharding", None) if isinstance(s_var, nnx.Variable) else s_var
+      if s_val is None and isinstance(s_var, nnx.Variable):
+        s_val = s_var.get_value()
+
+      def _extract_primary_sharding(s):
+        if isinstance(s, (jax.sharding.Sharding, jax.sharding.PartitionSpec)):
+          return s
+        if hasattr(s, "qvalue"):
+          return _extract_primary_sharding(s.qvalue)
+        leaves = jax.tree.leaves(s)
+        return leaves[0] if leaves else s
+
+      def _make_abstract_leaf(leaf_a, leaf_s):
+        leaf_s = _extract_primary_sharding(leaf_s)
+        if hasattr(leaf_s, "spec") and len(leaf_a.shape) != len(leaf_s.spec):
+          leaf_s = jax.sharding.NamedSharding(leaf_s.mesh, jax.sharding.PartitionSpec(*leaf_s.spec[: len(leaf_a.shape)]))
+        return jax.ShapeDtypeStruct(leaf_a.shape, leaf_a.dtype, sharding=leaf_s)
+
+      if type(a_val) in (jax.Array, jax.ShapeDtypeStruct) or (hasattr(a_val, "shape") and not hasattr(a_val, "qvalue")):
+        new_val = _make_abstract_leaf(a_val, s_val)
+      else:
+        s_tree = (
+            jax.tree.map(lambda _: s_val, a_val)
+            if isinstance(s_val, (jax.sharding.Sharding, jax.sharding.PartitionSpec))
+            else s_val
+        )
+        new_val = jax.tree.map(
+            _make_abstract_leaf,
+            a_val,
+            s_tree,
+            is_leaf=lambda x: hasattr(x, "shape") and hasattr(x, "dtype"),
+        )
+      return a_var.replace(value=new_val)
+
     abstract_state = jax.tree.map(
-        lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
+        _to_abstract_var,
         abs_var_state,
         named_sharding_state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
   state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(abstract_state)
@@ -1811,7 +2132,7 @@ def create_device_mesh(config, devices=None):
   if devices is None:
     devices = jax.devices()
 
-  if config.elastic_enabled:
+  if getattr(config, "elastic_enabled", False):
     devices = elastic_utils.live_devices(config)
     num_slices = len(elastic_utils.live_slice_indices(config))
   else:
@@ -1834,18 +2155,61 @@ def create_device_mesh(config, devices=None):
     devices = subslice_devices
 
   num_devices = len(devices)
-  num_slices = 1 if config.inference_benchmark_test else num_slices
+  num_slices = 1 if getattr(config, "inference_benchmark_test", False) else num_slices
   num_devices_per_slice = num_devices // num_slices
 
-  multi_slice_env = num_slices > 1
-
   # Find possible unspecified parallelisms
-  ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
+  ici_parallelism = getattr(config, "ici_parallelism", None)
+  if ici_parallelism is None:
+    ici_map = {
+        "diloco": getattr(config, "ici_diloco_parallelism", 1),
+        "data": getattr(config, "ici_data_parallelism", 1),
+        "stage": getattr(config, "ici_pipeline_parallelism", 1),
+        "fsdp": getattr(config, "ici_fsdp_parallelism", -1),
+        "fsdp_transpose": getattr(config, "ici_fsdp_transpose_parallelism", 1),
+        "sequence": getattr(config, "ici_sequence_parallelism", 1),
+        "context": getattr(config, "ici_context_parallelism", 1),
+        "context_autoregressive": getattr(config, "ici_context_autoregressive_parallelism", 1),
+        "tensor": getattr(config, "ici_tensor_parallelism", 1),
+        "tensor_sequence": getattr(config, "ici_tensor_sequence_parallelism", 1),
+        "model": getattr(config, "ici_tensor_parallelism", 1),
+        "expert": getattr(config, "ici_expert_parallelism", 1),
+        "autoregressive": getattr(config, "ici_autoregressive_parallelism", 1),
+        "attn_dp": 1,
+        "attn_dp_expert": 1,
+    }
+    ici_parallelism = [ici_map[axis] for axis in config.mesh_axes]
+  else:
+    ici_parallelism = ici_parallelism.copy()
+  ici_parallelism = max_utils.fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if multi_slice_env:
-    dcn_parallelism = max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
+  if num_slices > 1:
+    dcn_parallelism = getattr(config, "dcn_parallelism", None)
+    if dcn_parallelism is None:
+      dcn_map = {
+          "diloco": getattr(config, "dcn_diloco_parallelism", 1),
+          "data": getattr(config, "dcn_data_parallelism", 1),
+          "stage": getattr(config, "dcn_pipeline_parallelism", 1),
+          "fsdp": getattr(config, "dcn_fsdp_parallelism", 1),
+          "fsdp_transpose": getattr(config, "dcn_fsdp_transpose_parallelism", 1),
+          "sequence": getattr(config, "dcn_sequence_parallelism", 1),
+          "context": getattr(config, "dcn_context_parallelism", 1),
+          "context_autoregressive": getattr(config, "dcn_context_autoregressive_parallelism", 1),
+          "tensor": getattr(config, "dcn_tensor_parallelism", 1),
+          "tensor_sequence": getattr(config, "dcn_tensor_sequence_parallelism", 1),
+          "model": getattr(config, "dcn_tensor_parallelism", 1),
+          "expert": getattr(config, "dcn_expert_parallelism", 1),
+          "autoregressive": getattr(config, "dcn_autoregressive_parallelism", 1),
+          "attn_dp": 1,
+          "attn_dp_expert": 1,
+      }
+      dcn_parallelism = [dcn_map[axis] for axis in config.mesh_axes]
+    else:
+      dcn_parallelism = dcn_parallelism.copy()
+    dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
+
     if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
       mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
     else:

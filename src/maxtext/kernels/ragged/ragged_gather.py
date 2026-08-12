@@ -21,25 +21,6 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
-from packaging.version import Version
-
-# JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
-# versions renamed them to `out_type`/`scratch_types`.
-if Version(jax.__version__) <= Version("0.10.0"):
-  _OUT_KW = "out_shape"
-  _SCRATCH_KW = "scratch_shapes"
-  _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
-      "disable_bounds_checks": True,
-  }
-else:
-  _OUT_KW = "out_type"
-  _SCRATCH_KW = "scratch_types"
-  _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
-      "disable_bounds_checks": True,
-      "needs_layout_passes": False,
-  }
 
 
 def main_kernel(
@@ -294,6 +275,8 @@ def get_cost_estimate(
       auto-computing.  -1 (default) means auto-compute.
     bytes_accessed_override: If > 0, use this value as bytes_accessed instead
       of auto-computing.  -1 (default) means auto-compute.
+    use_single_sparsecore: Static bool flag. When True, launch the kernel
+      on 1 SparseCore instead of all SparseCores.
 
   Returns:
     A ``pl.CostEstimate`` suitable for XLA scheduling.
@@ -362,7 +345,14 @@ def calculate_col_size(hidden_size: int) -> int:
 
 
 @functools.partial(
-    jax.jit, static_argnames=("has_weights", "enforce_fallback", "flops_override", "bytes_accessed_override")
+    jax.jit,
+    static_argnames=(
+        "has_weights",
+        "enforce_fallback",
+        "flops_override",
+        "bytes_accessed_override",
+        "use_single_sparsecore",
+    ),
 )
 def ragged_gather(
     x: jax.Array,
@@ -374,6 +364,7 @@ def ragged_gather(
     enforce_fallback: bool = False,
     flops_override: int = -1,
     bytes_accessed_override: int = -1,
+    use_single_sparsecore: bool = False,
 ) -> jax.Array:
   """Perform gather on indices within dynamic array start and end.
 
@@ -394,6 +385,8 @@ def ragged_gather(
       auto-computing.  -1 (default) means auto-compute.
     bytes_accessed_override: If > 0, use this value as bytes_accessed instead
       of auto-computing.  -1 (default) means auto-compute.
+    use_single_sparsecore: Static bool flag. When True, launch the kernel
+      on 1 SparseCore instead of all SparseCores.
 
   Returns:
     Gathered output of shape ``(indices_size, hidden_size)``.
@@ -415,16 +408,22 @@ def ragged_gather(
 
   dtype = x.dtype
 
+  # Guard against eager initialization on non-TPU hardware (e.g. during CPU tests).
+  # pltpu.get_tpu_info() expects TPU hardware and will crash if executed on CPU.
+  if enforce_fallback or jax.devices()[0].platform != "tpu":
+    return _fallback_implementation(x, indices, weights, has_weights)
+
   sc_info = pltpu.get_tpu_info().sparse_core
-  if sc_info is None or enforce_fallback:
-    # Sparse core is not available or fallback is enforced. Use JAX reference.
+  if sc_info is None:
+    # Sparse core is not available. Use JAX reference.
     return _fallback_implementation(x, indices, weights, has_weights)
 
   hidden_size = x.shape[-1]
   out_size = indices.size
 
   num_simd_lanes = sc_info.num_lanes
-  num_cores = sc_info.num_cores * sc_info.num_subcores
+  num_sc_cores = 1 if use_single_sparsecore else sc_info.num_cores
+  num_cores = num_sc_cores * sc_info.num_subcores
   block_size = num_simd_lanes * num_cores
   col_size = calculate_col_size(hidden_size)
 
@@ -441,7 +440,7 @@ def ragged_gather(
   aligned_hidden_size = pl.cdiv(hidden_size, col_size) * col_size
 
   vector_mesh = plsc.VectorSubcoreMesh(
-      num_cores=sc_info.num_cores,
+      num_cores=num_sc_cores,
       num_subcores=sc_info.num_subcores,
       core_axis_name="core",
       subcore_axis_name="subcore",
@@ -453,8 +452,11 @@ def ragged_gather(
           subcore_axis_name=vector_mesh.subcore_axis_name,
           has_weights=has_weights,
       ),
-      compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
-          **_COMPILER_PARAMS,  # pyrefly: ignore[bad-argument-type]
+      out_type=jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
+      compiler_params=pltpu.CompilerParams(
+          use_tc_tiling_on_sc=True,
+          disable_bounds_checks=True,
+          needs_layout_passes=False,
       ),
       cost_estimate=get_cost_estimate(
           out_size=out_size + out_pad_size,
@@ -464,17 +466,14 @@ def ragged_gather(
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
       ),
+      scratch_types=[
+          pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+          pltpu.VMEM((num_simd_lanes,), jnp.int32),
+          pltpu.VMEM((num_simd_lanes,), jnp.float32),
+          pltpu.SemaphoreType.DMA((2,)),
+      ],
       mesh=vector_mesh,
       name="sc_ragged_gather",
-      **{  # pyrefly: ignore[bad-argument-type]
-          _OUT_KW: jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
-          _SCRATCH_KW: [
-              pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              pltpu.VMEM((num_simd_lanes,), jnp.float32),
-              pltpu.SemaphoreType.DMA((2,)),
-          ],
-      },
   )(start, end, x, indices, weights)[:out_size, :hidden_size]

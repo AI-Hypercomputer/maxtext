@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-A DSL agent class, to propose potential new DSL rules/ops based on the previous analysis call. 
+A DSL agent class, to propose potential new DSL rules/ops based on the previous analysis call.
 """
 import argparse
 import os
