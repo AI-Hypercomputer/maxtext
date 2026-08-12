@@ -42,8 +42,8 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec, get_logical_axis_rules
+from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec, logical_to_mesh_axes
+from maxtext.utils.sharding import get_logical_axis_rules, remove_expert_from_partition_spec, remove_mesh_axes_from_partition_spec
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -1630,6 +1630,10 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
+        # Update kernel pspec for FSDP AG
+        w0_pspec = remove_mesh_axes_from_partition_spec(w0_pspec, ("fsdp",))
+        w1_pspec = remove_mesh_axes_from_partition_spec(w1_pspec, ("fsdp",))
+        wo_pspec = remove_mesh_axes_from_partition_spec(wo_pspec, ("fsdp",))
       return (
           batch_logical_axis,
           input_partition_pspec,
