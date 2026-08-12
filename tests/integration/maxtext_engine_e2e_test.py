@@ -133,7 +133,7 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
 
     trainer_instance.with_loss_fn(
         lambda *args, **kwargs: (
-            jnp.array(0.25),
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.25), denominator=jnp.array(1.0)),
             {},
         )
     )
