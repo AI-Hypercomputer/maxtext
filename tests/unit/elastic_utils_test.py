@@ -61,6 +61,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.original_jax = elastic_utils.jax
     self.original_gcs_utils = elastic_utils.gcs_utils
     self.original_max_logging = elastic_utils.max_logging
+    self.original_elastic = elastic_utils.elastic
     self.original_manager_class = pathwaysutils.elastic.manager.Manager
     self.original_scale_up_signal_error = getattr(pathwaysutils.elastic.manager, "ScaleUpSignalError", None)
 
@@ -72,12 +73,12 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.fake_jax = create_autospec(self.original_jax)
     self.fake_manager = create_autospec(self.original_manager_class, instance=True)
     self.fake_manager.available_inactive_slices = set()
+    self.fake_elastic = create_autospec(self.original_elastic)
 
     # Configure default behaviors if needed
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
-    self.fake_pathwaysutils.elastic = Mock()
-    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
-    self.fake_pathwaysutils.elastic.get_slice_to_devices.return_value = {
+    self.fake_elastic.get_active_slice_indices.return_value = [0, 1]
+    self.fake_elastic.get_slice_to_devices.return_value = {
         0: [FakeDevice()],
         1: [FakeDevice()],
     }
@@ -89,6 +90,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.fake_jax.errors.JaxRuntimeError = MockJaxRuntimeError
     elastic_utils.gcs_utils = self.fake_gcs_utils
     elastic_utils.max_logging = self.fake_logging
+    elastic_utils.elastic = self.fake_elastic
 
     # Hook up pathwaysutils.elastic.manager.Manager to return our fake_manager
     pathwaysutils.elastic.manager.Manager = lambda *args, **kwargs: self.fake_manager  # pyrefly: ignore[bad-assignment]
@@ -102,6 +104,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     elastic_utils.jax = self.original_jax
     elastic_utils.gcs_utils = self.original_gcs_utils
     elastic_utils.max_logging = self.original_max_logging
+    elastic_utils.elastic = self.original_elastic
     pathwaysutils.elastic.manager.Manager = self.original_manager_class
     pathwaysutils.elastic.manager.ScaleUpSignalError = (  # pyrefly: ignore[bad-assignment]
         self.original_scale_up_signal_error,
@@ -115,7 +118,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     elastic_utils.elastic_manager = self.fake_manager
     self.fake_manager.active_slice_indices = {0}
     self.fake_manager.slice_to_devices = {0: [FakeDevice()], 1: [FakeDevice()]}
-    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = {0, 1}
+    self.fake_elastic.get_active_slice_indices.return_value = {0, 1}
 
     fake_recorder = Mock()
     fake_recorder.record_elastic_slice_counts = Mock()
@@ -131,8 +134,6 @@ class ElasticUtilsTest(parameterized.TestCase):
   def test_elastic_enabled(self):
     config = FakeConfig()
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
-    self.fake_pathwaysutils.elastic = Mock()
-    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
     config.elastic_enabled = True
     self.assertTrue(elastic_utils.elastic_enabled(config))
 
@@ -177,8 +178,6 @@ class ElasticUtilsTest(parameterized.TestCase):
   def test_live_devices_pathways(self):
     """Tests live_devices when pathways is used."""
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
-    self.fake_pathwaysutils.elastic = Mock()
-    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
     device0 = FakeDevice(slice_index=0)
     device1 = FakeDevice(slice_index=1)
     self.fake_jax.devices.return_value = [device0, device1]
@@ -203,8 +202,6 @@ class ElasticUtilsTest(parameterized.TestCase):
   def test_elastic_retry_disabled(self):
     """Tests elastic_retry when disabled but pathways is used."""
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
-    self.fake_pathwaysutils.elastic = Mock()
-    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
     config = FakeConfig()
     config.elastic_enabled = False
     msg = (
@@ -465,6 +462,36 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     elastic_utils.record_elastic_reinit_end()
 
+  def test_record_elastic_event_start_non_elastic_recorder_noop(self):
+    """A recorder lacking the elastic API (e.g. the ImportError fallback) must not raise."""
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.available_inactive_slices = set()
+    non_elastic_recorder = Mock(spec=[])  # No record_elastic_* attributes.
+    config = FakeConfig()
+
+    elastic_utils.record_elastic_event_start(non_elastic_recorder, config)  # Must not raise.
+
+    self.assertEqual(elastic_utils.pending_elastic_event_type, "elastic_slice_down")
+
+  def test_record_elastic_wait_end_and_reinit_start_non_elastic_recorder_noop(self):
+    """A recorder lacking the elastic API must not raise, but is still tracked as pending."""
+    elastic_utils.pending_elastic_event_type = "elastic_slice_down"  # pyrefly: ignore[bad-assignment]
+    non_elastic_recorder = Mock(spec=[])
+
+    elastic_utils.record_elastic_wait_end_and_reinit_start(non_elastic_recorder)  # Must not raise.
+
+    self.assertIs(elastic_utils.pending_reinit_recorder, non_elastic_recorder)
+    self.assertIsNone(elastic_utils.pending_elastic_event_type)
+
+  def test_record_elastic_reinit_end_non_elastic_recorder_noop(self):
+    """A recorder lacking the elastic API must not raise, and pending state is still cleared."""
+    non_elastic_recorder = Mock(spec=[])
+    elastic_utils.pending_reinit_recorder = non_elastic_recorder
+
+    elastic_utils.record_elastic_reinit_end()  # Must not raise.
+
+    self.assertIsNone(elastic_utils.pending_reinit_recorder)
+
   def test_ensure_elastic_manager_initialized_readonly_config(self):
     """Tests that ensure_elastic_manager_initialized works with read-only config."""
 
@@ -479,8 +506,6 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     config = ReadOnlyConfig()
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
-    self.fake_pathwaysutils.elastic = Mock()
-    self.fake_pathwaysutils.elastic.get_active_slice_indices.return_value = [0, 1]
 
     # Should not raise ValueError
     elastic_utils.ensure_elastic_manager_initialized(config)
