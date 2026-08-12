@@ -459,4 +459,19 @@ def recalculate_batch_sizes(config, new_num_devices: int):
     else:
       object.__setattr__(config, "rampup_end_step", 0)
 
+def elastic_snapshot(config) -> bool:
+  """Returns whether elastic snapshot mode is enabled."""
+  return elastic_enabled(config) and config.elastic_backup_kind == "snapshot"
+
+
+def maybe_bubble_elastic_exception(config, e: Exception) -> None:
+  """Checks JAX/ScaleUp elastic errors and re-raises them if elasticity is enabled.
+
+  Args:
+    config: Maxtext configuration object.
+    e: The exception currently being evaluated.
+  """
+  if elastic_enabled(config) and isinstance(e, (jax.errors.JaxRuntimeError, manager.ScaleUpSignalError)):
+    raise e
+
 
