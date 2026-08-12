@@ -27,6 +27,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from jax.experimental import xla_metadata
 from maxtext.common.common_types import (
     Config,
     DecoderBlockType,
@@ -2231,7 +2232,14 @@ class NNXDecoder(nnx.Module):
     """Apply Gemma 4 small (E2B/E4B) decoder layers (pure-NNX)."""
     cfg = self.config
     bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
-
+    
+    global_remat_policy = self.get_remat_policy()
+    offload_names = maxtext_utils.get_save_and_offload_names(cfg) 
+    if offload_names[0] or offload_names[1]:
+      save_names, offload_to_device = offload_names
+      global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+    
     per_layer_inputs = None
     if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
       per_layer_inputs = self.per_layer_embedder(decoder_input_tokens, y)
@@ -2257,34 +2265,80 @@ class NNXDecoder(nnx.Module):
           )
         shared_key, shared_value = shared_kv_states[donor_idx]
 
-      # Donor layers expose their rotated, normed K/V to downstream shared layers, and reuse the
-      # just-computed K/V in their own forward to avoid double-computing the K/V projection.
-      if is_donor:
-        donor_k, donor_v = layer.compute_shared_kv(y, decoder_positions)
-        shared_kv_states[lyr] = (donor_k, donor_v)
-        shared_key, shared_value = donor_k, donor_v
-
       ple_slice = per_layer_inputs[..., lyr, :] if per_layer_inputs is not None else None
 
       cache_idx = cache_index_of[lyr]
       kv_cache = kv_caches[cache_idx] if kv_caches is not None else None
-      y, kv_cache = layer(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk=previous_chunk,
-          slot=slot,
-          bidirectional_mask=bidirectional_mask_value,
-          kv_cache=kv_cache,
-          attention_metadata=attention_metadata,
-          per_layer_input=ple_slice,
-          shared_key=shared_key,
-          shared_value=shared_value,
+      
+      graphdef_l, intermediate_l, other_l = nnx.split(layer, nnx.Intermediate, ...)
+      intermediate_xs = jax.tree.map(lambda x: x[None], intermediate_l)
+
+      def scan_body(carry, intermediate_slice):
+        y_c, other_c, kv_c = carry
+        l_merged = nnx.merge(graphdef_l, intermediate_slice, other_c)
+        
+        current_shared_key = shared_key
+        current_shared_value = shared_value
+
+        # Donor layers expose their rotated, normed K/V to downstream shared layers, and reuse the
+        # just-computed K/V in their own forward to avoid double-computing the K/V projection.
+        donor_kv_out = ()
+        if is_donor:
+          donor_k, donor_v = l_merged.compute_shared_kv(y_c, decoder_positions)
+          donor_kv_out = (donor_k, donor_v)
+          current_shared_key = donor_k
+          current_shared_value = donor_v
+
+        out = l_merged(
+            y_c,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            previous_chunk=previous_chunk,
+            slot=slot,
+            bidirectional_mask=bidirectional_mask_value,
+            kv_cache=kv_c,
+            attention_metadata=attention_metadata,
+            per_layer_input=ple_slice,
+            shared_key=current_shared_key,
+            shared_value=current_shared_value,
+        )
+        if isinstance(out, tuple):
+          new_y = out[0]
+          new_kv = out[1] if len(out) > 1 else None
+        else:
+          new_y = out
+          new_kv = None
+
+        _, new_intermediate, new_other = nnx.split(l_merged, nnx.Intermediate, ...)
+        
+        return (new_y, new_other, new_kv), (new_intermediate, donor_kv_out)
+
+      run_global_layer = jax.checkpoint(
+          scan_body,
+          policy=global_remat_policy,
+          prevent_cse=prevent_cse,
       )
-      if kv_caches is not None and kv_cache is not None:
-        kv_caches[cache_idx] = kv_cache
+
+      with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+        (y, final_other, updated_kv_cache), (stacked_intermediate, stacked_donor_kv) = jax.lax.scan(
+            run_global_layer,
+            (y, other_l, kv_cache),
+            intermediate_xs,
+            length=1,
+        )
+
+      intermediate_state = jax.tree.map(lambda x: x[0], stacked_intermediate)
+      nnx.update(layer, final_other, intermediate_state)
+
+      if is_donor and stacked_donor_kv:
+        donor_kv = jax.tree.map(lambda x: x[0], stacked_donor_kv)
+        shared_kv_states[lyr] = donor_kv
+        shared_key, shared_value = donor_kv
+
+      if kv_caches is not None and updated_kv_cache is not None:
+        kv_caches[cache_idx] = updated_kv_cache
 
     return y, kv_caches
 
