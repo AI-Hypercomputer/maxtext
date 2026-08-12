@@ -86,6 +86,7 @@ permissions:
   contents: read
 jobs:
   run:
+    name: ${{ inputs.flavor }}
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
       image: gcr.io/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]

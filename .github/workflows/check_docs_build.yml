@@ -30,6 +30,7 @@ permissions:
 
 jobs:
   build-docs:
+    name: Build Sphinx Docs
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
