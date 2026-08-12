@@ -53,6 +53,14 @@ class TestTransformLogic(unittest.TestCase):
   def test_bias_is_excluded(self):
     self.assertIsNone(muon_utils.transform_logic(("decoder", "dense", "bias")))
 
+  def test_bias_variant_is_excluded(self):
+    # Bias names (e.g., in MoE with mlp_bias=True) are excluded across all expert projections.
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "moe_block", "wi_0_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "GptOssMlp", "wi_0_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "GptOssMlp", "wi_1_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "GptOssMlp", "wo_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "mlp", "mlp_bias")))
+
   def test_embedding_is_excluded(self):
     self.assertIsNone(muon_utils.transform_logic(("token_embedder", "embedding")))
 
@@ -118,6 +126,18 @@ class TestTransformLogic(unittest.TestCase):
     # o_a_proj projects with reduction on in_features_per_group (-2)
     # and output on out_features_per_group (-1)
     self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "o_a_proj")), mdn((-2,), (-1,)))
+
+  def test_deepseek_v4_position_bias_is_standard_weight(self):
+    # position_bias in DeepSeek V4 compressed attention is a 2D weight matrix (not a 1D bias vector),
+    # so it receives standard Muon dimension numbers mdn((0,), (-1,)).
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "csa_compressor", "position_bias")),
+        mdn((0,), (-1,)),
+    )
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "self_attention", "hca_compressor", "position_bias")),
+        mdn((0,), (-1,)),
+    )
 
 
 class TestGetTransformTree(unittest.TestCase):

@@ -93,7 +93,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
               "tid2eid",
           )
       )
-      or segment == "bias"
+      or (segment.endswith("bias") and segment != "position_bias")
       for segment in path
   ):
     return None
