@@ -3935,7 +3935,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     """Direct forward-value numerical equivalence between dot_product and flash attention."""
     out_dot = self._run_compressed_attention(compress_ratio, "dot_product")
     out_flash = self._run_compressed_attention(compress_ratio, "flash")
-    np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1.0, atol=1.0)
+    np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
 
   def _get_test_config(self, max_target_length, compress_ratio, attention_kernel):
     """Initializes and returns a MaxTextConfig for document packing tests."""

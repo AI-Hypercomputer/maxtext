@@ -1029,13 +1029,6 @@ class AttentionOp(nnx.Module):
       target_shape = compressed_mask.shape[:-1] + (s_len,)
       expanded_uncompressed_mask = jnp.broadcast_to(expanded_uncompressed_mask, target_shape)
 
-      if output_mask is not None:
-        output_mask_aligned = _align_mask(output_mask, max_ndim)
-        expanded_uncompressed_mask = expanded_uncompressed_mask & output_mask_aligned[..., :s_len]
-        if output_mask_aligned.shape[-1] > s_len:
-          comp_seg_mask = output_mask_aligned[..., s_len : s_len + compressed_mask.shape[-1]]
-          compressed_mask = jnp.where(comp_seg_mask, compressed_mask, DEFAULT_MASK_VALUE)
-
       if pad_kv_total > 0 and compressed_mask is not None:
         pad_width = [(0, 0)] * (compressed_mask.ndim - 1) + [(pad_kv_total, 0)]
         compressed_mask = jnp.pad(
@@ -1043,6 +1036,13 @@ class AttentionOp(nnx.Module):
             pad_width,
             constant_values=DEFAULT_MASK_VALUE,
         )
+
+      if output_mask is not None:
+        output_mask_aligned = _align_mask(output_mask, max_ndim)
+        expanded_uncompressed_mask = expanded_uncompressed_mask & output_mask_aligned[..., :s_len]
+        if output_mask_aligned.shape[-1] > s_len:
+          comp_seg_mask = output_mask_aligned[..., s_len : s_len + compressed_mask.shape[-1]]
+          compressed_mask = jnp.where(comp_seg_mask, compressed_mask, DEFAULT_MASK_VALUE)
 
       expanded_uncompressed_mask = jnp.where(expanded_uncompressed_mask, 0.0, DEFAULT_MASK_VALUE).astype(
           compressed_mask.dtype
