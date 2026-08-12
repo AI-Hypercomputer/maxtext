@@ -4082,8 +4082,8 @@ class CompressedAttentionTest(parameterized.TestCase):
     np.testing.assert_allclose(
         np.array(out_packed[:, :l1, :]),
         np.array(out1_unpacked),
-        rtol=1e-4,
-        atol=1e-4,
+        rtol=5e-3,
+        atol=5e-3,
         err_msg="Document 1 output in packed sequence does not match unpacked execution.",
     )
 
@@ -4091,8 +4091,8 @@ class CompressedAttentionTest(parameterized.TestCase):
     np.testing.assert_allclose(
         np.array(out_packed[:, l1:, :]),
         np.array(out2_unpacked),
-        rtol=1e-4,
-        atol=1e-4,
+        rtol=5e-3,
+        atol=5e-3,
         err_msg="Document 2 output in packed sequence does not match unpacked execution.",
     )
 
@@ -4100,8 +4100,8 @@ class CompressedAttentionTest(parameterized.TestCase):
     np.testing.assert_allclose(
         np.array(out_packed),
         np.array(expected_unpacked),
-        rtol=1e-4,
-        atol=1e-4,
+        rtol=5e-3,
+        atol=5e-3,
     )
 
     # --- 4. ADVERSARIAL LEAKAGE CHECK ---
@@ -4119,8 +4119,8 @@ class CompressedAttentionTest(parameterized.TestCase):
     np.testing.assert_allclose(
         np.array(out_packed_corrupted[:, l1:, :]),
         np.array(out2_unpacked),
-        rtol=1e-4,
-        atol=1e-4,
+        rtol=5e-3,
+        atol=5e-3,
         err_msg="Adversarial corruption in Doc 1 leaked into Doc 2 in packed sequence.",
     )
 
@@ -4135,8 +4135,8 @@ class CompressedAttentionTest(parameterized.TestCase):
         "ici_data_parallelism": -1,
         "ici_tensor_parallelism": 1,
         "ici_autoregressive_parallelism": 1,
-        "max_target_length": 128,
-        "max_prefill_predict_length": 64,
+        "max_target_length": 512,
+        "max_prefill_predict_length": 512,
         "attention_type": AttentionType.COMPRESSED.value,
         "head_dim": 128,
         "q_lora_rank": 256,

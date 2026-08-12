@@ -771,50 +771,54 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
   def test_forward_uncompressed(self):
     self._run_e2e_test("sliding_attention")
 
-  @parameterized.named_parameters(
-      {"testcase_name": "dot_product", "attention_kernel": "dot_product"},
-      {"testcase_name": "flash", "attention_kernel": "flash", "check_norm": True},
-  )
-  def test_forward_hca(self, attention_kernel, check_norm=False):
-    self._run_e2e_test("heavily_compressed_attention", attention_kernel=attention_kernel, check_norm=check_norm)
+  def test_forward_hca_dot_product(self):
+    self._run_e2e_test("heavily_compressed_attention", attention_kernel="dot_product")
 
-  @parameterized.named_parameters(
-      {"testcase_name": "dot_product", "attention_kernel": "dot_product"},
-      {"testcase_name": "flash", "attention_kernel": "flash", "check_norm": True},
-  )
-  def test_forward_csa(self, attention_kernel, check_norm=False):
-    self._run_e2e_test("compressed_sparse_attention", attention_kernel=attention_kernel, check_norm=check_norm)
+  @pytest.mark.tpu_only
+  def test_forward_hca_flash(self):
+    self._run_e2e_test("heavily_compressed_attention", attention_kernel="flash", check_norm=True)
+
+  def test_forward_csa_dot_product(self):
+    self._run_e2e_test("compressed_sparse_attention", attention_kernel="dot_product")
+
+  @pytest.mark.tpu_only
+  def test_forward_csa_flash(self):
+    self._run_e2e_test("compressed_sparse_attention", attention_kernel="flash", check_norm=True)
 
   @parameterized.named_parameters(
       {
           "testcase_name": "hca_dot_product",
           "layer_type": "heavily_compressed_attention",
-          "attention_kernel": "dot_product",
-      },
-      {
-          "testcase_name": "hca_flash",
-          "layer_type": "heavily_compressed_attention",
-          "attention_kernel": "flash",
-          "check_norm": True,
       },
       {
           "testcase_name": "csa_dot_product",
           "layer_type": "compressed_sparse_attention",
-          "attention_kernel": "dot_product",
+      },
+  )
+  def test_document_packing_masking_dot_product(self, layer_type):
+    self._run_e2e_test(
+        layer_type,
+        is_packed=True,
+        attention_kernel="dot_product",
+    )
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "hca_flash",
+          "layer_type": "heavily_compressed_attention",
       },
       {
           "testcase_name": "csa_flash",
           "layer_type": "compressed_sparse_attention",
-          "attention_kernel": "flash",
-          "check_norm": True,
       },
   )
-  def test_document_packing_masking(self, layer_type, attention_kernel, check_norm=False):
+  @pytest.mark.tpu_only
+  def test_document_packing_masking_flash(self, layer_type):
     self._run_e2e_test(
         layer_type,
         is_packed=True,
-        attention_kernel=attention_kernel,
-        check_norm=check_norm,
+        attention_kernel="flash",
+        check_norm=True,
     )
 
   @pytest.mark.tpu_only
@@ -1324,13 +1328,13 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
   def setUp(self):
     self.batch_size = 2
     self.seq_len = 32
-    self.hidden_dim = 4096
-    self.num_heads = 64
-    self.head_dim = 512
-    self.q_lora_rank = 1024
-    self.o_groups = 8
-    self.o_lora_rank = 1024
-    self.qk_rope_head_dim = 64
+    self.hidden_dim = 64
+    self.num_heads = 4
+    self.head_dim = 32
+    self.q_lora_rank = 16
+    self.o_groups = 4
+    self.o_lora_rank = 16
+    self.qk_rope_head_dim = 32
     self.partial_rotary_factor = self.qk_rope_head_dim / self.head_dim
     self.vocab_size = 129280
 
@@ -1343,6 +1347,9 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
         kv_lora_rank=self.head_dim,
         o_groups=self.o_groups,
         o_lora_rank=self.o_lora_rank,
+        index_head_dim=self.head_dim,
+        index_n_heads=self.num_heads,
+        index_topk=16,
         layer_types=[
             "sliding_attention",
             "sliding_attention",
@@ -1354,8 +1361,10 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
         ],
         num_hidden_layers=7,
         num_nextn_predict_layers=0,
-        num_local_experts=8,
-        num_experts_per_tok=3,
+        moe_intermediate_size=64,
+        n_routed_experts=16,
+        n_shared_experts=1,
+        num_experts_per_tok=4,
         vocab_size=self.vocab_size,
     )
 
@@ -1369,6 +1378,7 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
         "dtype": "float32",
         "weight_dtype": "float32",
         "skip_jax_distributed_system": True,
+        "use_tokamax_splash": True,
     }
     argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
     self.mx_config = pyconfig.initialize(argv, **config_arguments)
@@ -1602,13 +1612,18 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
     # Build MaxText config dictionary
     argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-tiny"]
     config_arguments = {
+        "override_model_config": True,
         "attention": "dot_product",
         "dtype": "float32",
         "weight_dtype": "float32",
         "mhc_expansion_rate": self.hc_mult,
+        "base_emb_dim": self.hidden_dim,
         "emb_dim": self.hidden_dim,
+        "megablox": False,
+        "sparse_matmul": False,
         "normalization_layer_epsilon": 1e-6,
         "skip_jax_distributed_system": True,
+        "use_tokamax_splash": True,
     }
     self.mx_config = pyconfig.initialize(argv, **config_arguments)
 

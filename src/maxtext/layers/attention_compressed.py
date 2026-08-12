@@ -638,7 +638,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
     entry_indices = jnp.arange(compressed_len)
     absolute_positions = jnp.arange(seq_len)
     causal_threshold = (absolute_positions + 1) // self.compress_rate
-    future_mask = entry_indices[None, None, None, :] >= jnp.expand_dims(causal_threshold, axis=(1, 3))
+    future_mask = entry_indices[None, None, None, :] >= causal_threshold[None, None, :, None]
     compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0).astype(self.dtype)
 
     return compressed_kv, compressed_causal_mask
