@@ -84,6 +84,10 @@ class FragmentedTreeManipulator:
     num_layers = config.num_decoder_layers
     num_transformer_fragments = config.num_diloco_fragments
 
+    # If user provided total fragments (e.g. 37 = 1 non-scanned + 36 layer fragments)
+    if num_transformer_fragments == num_layers + 1:
+      num_transformer_fragments = num_layers
+
     assert num_layers % num_transformer_fragments == 0, (
         f"num_decoder_layers ({num_layers}) must be divisible by "
         f"num_diloco_fragments ({num_transformer_fragments}) for now."

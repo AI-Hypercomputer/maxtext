@@ -359,8 +359,7 @@ def build_diloco_train_step(
     if config.enable_streaming_diloco:
       manipulator = FragmentedTreeManipulator.create(state.params, config)
 
-      num_transformer_fragments = config.num_diloco_fragments
-      num_fragments = 1 + num_transformer_fragments
+      num_fragments = manipulator.num_fragments
 
       steps_between_syncs_plus_1 = int(round(config.diloco_sync_period / num_fragments))
       steps_between_syncs_plus_1 = max(1, steps_between_syncs_plus_1)
