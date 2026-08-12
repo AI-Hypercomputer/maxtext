@@ -634,8 +634,10 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       return compressed_kv, compressed_mask
 
     # Construct a causal mask preventing early queries from attending to future compressed blocks
+    seq_len = position_ids.shape[1]
     entry_indices = jnp.arange(compressed_len)
-    causal_threshold = (position_ids + 1) // self.compress_rate
+    absolute_positions = jnp.arange(seq_len)
+    causal_threshold = (absolute_positions + 1) // self.compress_rate
     future_mask = entry_indices[None, None, None, :] >= jnp.expand_dims(causal_threshold, axis=(1, 3))
     compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0).astype(self.dtype)
 
@@ -873,7 +875,9 @@ class DeepseekV4Indexer(nnx.Module):
 
     # --- ONLY RUN MATHEMATICAL CAUSAL MASK IN PREFILL/TRAIN ---
     if future_mask is None:
-      causal_threshold = (position_ids + 1) // self.compress_rate
+      seq_len = position_ids.shape[1]
+      absolute_positions = jnp.arange(seq_len)
+      causal_threshold = (absolute_positions + 1) // self.compress_rate
       entry_indices_mask = jnp.arange(compressed_len)
       future_mask = entry_indices_mask[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
 
