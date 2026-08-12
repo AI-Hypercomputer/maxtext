@@ -15,13 +15,11 @@
 """Tests validating Hy3 (Tencent Hunyuan V3) MaxText components against PyTorch references."""
 
 import os
-from types import SimpleNamespace
 from typing import Optional, Tuple
 import unittest
 
 from flax import nnx
 import jax
-from jax.experimental import mesh_utils
 import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
@@ -29,16 +27,11 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from maxtext.common.common_types import (
-    Config,
-    DecoderBlockType,
-    MODEL_MODE_TRAIN,
-)
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
-from maxtext.layers import attentions, linears, moe, normalizations
+from maxtext.layers import linears
 from maxtext.models import hy3
 from maxtext.utils import maxtext_utils
-from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 
 
 # ==============================================================================
@@ -141,6 +134,7 @@ class Hy3Attention_PT(nn.Module):
       position_ids: torch.Tensor,
       attention_mask: Optional[torch.Tensor] = None,
   ) -> torch.Tensor:
+    """Forward pass."""
     bsz, q_len, _ = hidden_states.shape
 
     query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -211,6 +205,7 @@ class Hy3MoE_PT(nn.Module):
     self.shared_expert = Hy3MLP_PT(hidden_size, shared_intermediate_size)
 
   def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Forward pass."""
     # hidden_states: (bsz, seq_len, hidden_size)
     orig_shape = hidden_states.shape
     x_flat = hidden_states.view(-1, orig_shape[-1])
@@ -270,6 +265,7 @@ class Hy3DenseLayer_PT(nn.Module):
       position_ids: torch.Tensor,
       attention_mask: Optional[torch.Tensor] = None,
   ) -> torch.Tensor:
+    """Forward pass."""
     # Self Attention with pre-norm & residual
     normed_attn_in = self.input_layernorm(hidden_states)
     attn_out = self.self_attn(normed_attn_in, position_ids, attention_mask)
@@ -317,6 +313,7 @@ class Hy3MoELayer_PT(nn.Module):
       position_ids: torch.Tensor,
       attention_mask: Optional[torch.Tensor] = None,
   ) -> torch.Tensor:
+    """Forward pass."""
     # Self Attention with pre-norm & residual
     normed_attn_in = self.input_layernorm(hidden_states)
     attn_out = self.self_attn(normed_attn_in, position_ids, attention_mask)
