@@ -33,17 +33,20 @@ def main():
     base_branch = os.environ.get("MAXTEXT_BRANCH", "main")
 
     if not os.path.exists(repo_dir):
-      print(f"Cloning {base_branch} into {repo_dir}...")
+      print(f"Cloning repository into {repo_dir}...")
       subprocess.run(
-          ["git", "clone", "-b", base_branch, "https://github.com/AI-Hypercomputer/maxtext.git", repo_dir], check=True
+          ["git", "clone", "https://github.com/AI-Hypercomputer/maxtext.git", repo_dir], check=True
       )
 
-    subprocess.run(["git", "fetch", "origin"], cwd=repo_dir, check=False)
+    subprocess.run(["git", "fetch", "--all"], cwd=repo_dir, check=False)
     if args.action == "create":
       # Check out the base branch first so we branch off the correct code
       res = subprocess.run(["git", "checkout", base_branch], cwd=repo_dir, check=False)
       if res.returncode != 0:
-        subprocess.run(["git", "checkout", "-b", base_branch, f"origin/{base_branch}"], cwd=repo_dir, check=True)
+        res2 = subprocess.run(["git", "checkout", "-b", base_branch, f"origin/{base_branch}"], cwd=repo_dir, check=False)
+        if res2.returncode != 0:
+           print(f"Warning: {base_branch} not found. Falling back to main.")
+           subprocess.run(["git", "checkout", "main"], cwd=repo_dir, check=True)
       subprocess.run(["git", "checkout", "-b", args.branch], cwd=repo_dir, check=True)
     elif args.action == "checkout":
       # Checkout local branch or track remote branch
