@@ -1151,7 +1151,15 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
 class TestGetShapedBatch(unittest.TestCase):
   """Tests for get_shaped_batch."""
 
-  def _make_cfg(self, *, enable_diloco=False, use_multimodal=False, use_audio=False, model_name="llama3.1-8b"):
+  def _make_cfg(
+      self,
+      *,
+      enable_diloco=False,
+      use_multimodal=False,
+      use_audio=False,
+      use_mrope=False,
+      model_name="llama3.1-8b",
+  ):
     """Build a minimal config mock for get_shaped_batch tests."""
     cfg = MagicMock()
     cfg.enable_diloco = enable_diloco
@@ -1159,6 +1167,7 @@ class TestGetShapedBatch(unittest.TestCase):
     cfg.max_target_length = 16
     cfg.use_multimodal = use_multimodal
     cfg.use_audio = use_audio
+    cfg.use_mrope = use_mrope
     cfg.model_name = model_name
     if enable_diloco:
       cfg.num_diloco_replicas = 2
@@ -1213,6 +1222,22 @@ class TestGetShapedBatch(unittest.TestCase):
       batch = maxtext_utils.get_shaped_batch(self._make_cfg(use_multimodal=True, model_name=model_name))
       self.assertIn("images", batch)
       self.assertNotIn("image_masks", batch, msg=f"{model_name} should omit image_masks")
+
+  def test_mrope_inputs_position_shape(self):
+    """inputs_position is (B, S, 3) only for multimodal + MRoPE; else (B, S)."""
+    cases = (
+        # text-only + MRoPE → still (B, S)
+        ({"use_mrope": True, "use_multimodal": False}, (4, 16)),
+        # multimodal SFT + MRoPE → (B, S, 3)
+        ({"use_mrope": True, "use_multimodal": True, "model_name": "qwen3-vl-2b"}, (4, 16, 3)),
+        # multimodal SFT without MRoPE → (B, S)
+        ({"use_mrope": False, "use_multimodal": True, "model_name": "qwen3-vl-2b"}, (4, 16)),
+    )
+    for cfg_kwargs, expected_inputs_position_shape in cases:
+      with self.subTest(**cfg_kwargs):
+        batch = maxtext_utils.get_shaped_batch(self._make_cfg(**cfg_kwargs))
+        self.assertEqual(batch["inputs_position"].shape, expected_inputs_position_shape)
+        self.assertEqual(batch["targets_position"].shape, (4, 16))
 
   def test_all_values_are_shape_dtype_struct(self):
     batch = maxtext_utils.get_shaped_batch(self._make_cfg())

@@ -35,14 +35,14 @@ _ROPE_THETA = 10_000_000
 def _reference_partial_mrope(inputs: np.ndarray, positions: np.ndarray) -> np.ndarray:
   """Independent NumPy implementation of the Qwen3.5 partial-MRoPE rule."""
   if positions.ndim == 2:
-    positions = np.broadcast_to(positions[np.newaxis, ...], (3,) + positions.shape)
+    positions = np.broadcast_to(positions[..., np.newaxis], positions.shape + (3,))
 
   inv_freq = 1.0 / (_ROPE_THETA ** (np.arange(0, _ROTARY_DIM, 2, dtype=np.float32) / _ROTARY_DIM))
   freqs = positions[..., np.newaxis].astype(np.float32) * inv_freq
-  interleaved = np.array(freqs[0], copy=True)
+  interleaved = np.array(freqs[..., 0, :], copy=True)
   for dim, offset in enumerate((1, 2), start=1):
     idx = slice(offset, _MROPE_SECTION[dim] * 3, 3)
-    interleaved[..., idx] = freqs[dim, ..., idx]
+    interleaved[..., idx] = freqs[..., dim, idx]
 
   angles = np.concatenate([interleaved, interleaved], axis=-1)
   cos = np.cos(angles)[:, :, np.newaxis, :]
@@ -60,7 +60,7 @@ class Qwen35PartialMropeTest(unittest.TestCase):
   def test_matches_reference_and_preserves_unrotated_suffix(self):
     inputs = np.linspace(-1.0, 1.0, num=2 * 4 * 3 * _HEAD_DIM, dtype=np.float32).reshape((2, 4, 3, _HEAD_DIM))
     text_positions = np.broadcast_to(np.arange(4, dtype=np.int32), (2, 4))
-    multimodal_positions = np.stack([text_positions, text_positions + 3, text_positions + 7], axis=0)
+    multimodal_positions = np.stack([text_positions, text_positions + 3, text_positions + 7], axis=-1)
     embedding = Qwen3OmniMoeThinkerTextRotaryEmbedding(
         min_timescale=1,
         max_timescale=_ROPE_THETA,
