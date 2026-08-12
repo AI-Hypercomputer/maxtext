@@ -807,6 +807,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       segment_positions: Array | None = None,
       pad_kv_total: int = 0,
+      decoder_segment_ids_kv: Optional[Array] = None,
   ) -> Array | None:
     """Generates a combined attention mask for Transformer models.
 
@@ -870,6 +871,8 @@ class AttentionOp(nnx.Module):
       segment_positions: Optional `Array` of shape `[batch_size,
         q_sequence_length]`. Identifies original positions for load-balanced
         context-parallel inputs.
+      decoder_segment_ids_kv: Optional `Array` of shape `[batch_size,
+        kv_sequence_length]`. Identifies distinct sequences for keys/values.
 
     Returns:
       An `Array` representing the attention mask, with shape
@@ -892,7 +895,8 @@ class AttentionOp(nnx.Module):
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
-      mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+      seg_kv = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+      mask = (decoder_segment_ids[:, :, None] == seg_kv[:, None, :]) & (seg_kv[:, None, :] >= 0)
       mask = mask[:, None, None, :, :]
 
     _, q_seq_len, _, _ = query.shape
@@ -989,7 +993,10 @@ class AttentionOp(nnx.Module):
             return in_window & (distance >= 0)
 
         # For prefill and training phases (q_seq_len > 1)
-        abs_k = jnp.arange(s_len)[None, None, :]
+        if segment_positions is not None:
+          abs_k = segment_positions[:, None, :s_len]
+        else:
+          abs_k = jnp.arange(s_len)[None, None, :]
         distance = abs_q - abs_k
         in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
         return in_window & (distance >= 0)
@@ -1025,6 +1032,9 @@ class AttentionOp(nnx.Module):
       if output_mask is not None:
         output_mask_aligned = _align_mask(output_mask, max_ndim)
         expanded_uncompressed_mask = expanded_uncompressed_mask & output_mask_aligned[..., :s_len]
+        if output_mask_aligned.shape[-1] > s_len:
+          comp_seg_mask = output_mask_aligned[..., s_len : s_len + compressed_mask.shape[-1]]
+          compressed_mask = jnp.where(comp_seg_mask, compressed_mask, DEFAULT_MASK_VALUE)
 
       if pad_kv_total > 0 and compressed_mask is not None:
         pad_width = [(0, 0)] * (compressed_mask.ndim - 1) + [(pad_kv_total, 0)]
@@ -1328,6 +1338,7 @@ class AttentionOp(nnx.Module):
           indexer_mask=indexer_mask,
           compressed_mask=compressed_mask,
           record_max_logits=record_max_logits,
+          decoder_segment_ids_kv=decoder_segment_ids_kv,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -2339,6 +2350,7 @@ class AttentionOp(nnx.Module):
       indexer_mask: Array | None = None,
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
+      decoder_segment_ids_kv: Optional[Array] = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -2400,6 +2412,7 @@ class AttentionOp(nnx.Module):
         bidirectional_mask,
         compressed_mask=compressed_mask,
         segment_positions=segment_positions,
+        decoder_segment_ids_kv=decoder_segment_ids_kv,
     )
 
     if self.config.moba:
