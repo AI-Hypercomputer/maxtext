@@ -602,7 +602,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       compressed = self.kv_norm(jnp.sum(chunk_kv * gate_weights, axis=2))
 
       # Calculate positions for the compressed blocks
-      positions = inputs_positions[:, :usable:self.compress_rate]
+      positions = inputs_positions[:, : usable : self.compress_rate]
 
       # Apply Rotary Positional Embeddings to the pooled representations
       # compressed is [batch, n_windows, head_dim]
