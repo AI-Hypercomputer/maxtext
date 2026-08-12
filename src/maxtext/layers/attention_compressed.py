@@ -643,7 +643,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
 
     # Construct a causal mask preventing early queries from attending to future compressed blocks
     usable_len = compressed_len * self.compress_rate
-    block_positions = position_ids[:, :usable_len:self.compress_rate]
+    block_positions = position_ids[:, : usable_len : self.compress_rate]
     future_mask = (block_positions[:, None, None, :] + self.compress_rate) > (position_ids[:, None, :, None] + 1)
     compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0).astype(self.dtype)
 
@@ -882,7 +882,7 @@ class DeepseekV4Indexer(nnx.Module):
     # --- ONLY RUN MATHEMATICAL CAUSAL MASK IN PREFILL/TRAIN ---
     if future_mask is None:
       usable_len = compressed_len * self.compress_rate
-      block_positions = position_ids[:, :usable_len:self.compress_rate]
+      block_positions = position_ids[:, : usable_len : self.compress_rate]
       future_mask = (block_positions[:, None, :] + self.compress_rate) > (position_ids[:, :, None] + 1)
 
     # Apply the mask to the scores
