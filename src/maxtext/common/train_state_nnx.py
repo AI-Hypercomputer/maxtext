@@ -41,11 +41,10 @@ class TrainStateNNX(nnx.Module):
     self.optimizer = optimizer
 
   def apply_gradients(self, grads: Any, **kwargs):
-    """Mimics the Linen apply_gradients function.
+    """Applies gradients using the internal optimizer.
 
-    Updates the optimizer state, applies updates to parameters, and increments
-    the step counter. Only updates `self.model`. Extra kwargs (e.g. loss/grad_norm
-    for the skip-step-on-spikes optimizer) are forwarded to the optax update.
+    Parameters and gradients must be staged to device HBM prior to this call.
+    All optimizer state updates occur purely in TPU HBM.
     """
     if self.optimizer is None:
       raise RuntimeError(

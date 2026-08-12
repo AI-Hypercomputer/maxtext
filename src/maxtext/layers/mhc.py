@@ -27,6 +27,7 @@ from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.utils import max_utils
 
 
 def get_permutation_matrices(k: int) -> Array:
@@ -59,7 +60,6 @@ def get_functions(expansion_rate: int):
 
 def sinkhorn(t, iters=20):
   """Computes the Sinkhorn normalization of a matrix (rows and columns sum to 1)."""
-  # Use float32 precision for numerical stability during normalization
   initial_dtype = t.dtype
   t = t.astype(jnp.float32)
   eps = 1e-6
@@ -67,11 +67,15 @@ def sinkhorn(t, iters=20):
   t = jax.nn.softmax(t, axis=-1) + eps
   t = t / (jnp.sum(t, axis=-2, keepdims=True) + eps)
 
-  for _ in range(iters - 1):
-    t = t / (jnp.sum(t, axis=-1, keepdims=True) + eps)
-    t = t / (jnp.sum(t, axis=-2, keepdims=True) + eps)
+  def scan_body(carry, _):
+    t_prev = carry
+    t_row = t_prev / (jnp.sum(t_prev, axis=-1, keepdims=True) + eps)
+    t_col = t_row / (jnp.sum(t_row, axis=-2, keepdims=True) + eps)
+    return t_col, None
 
+  t, _ = jax.lax.scan(scan_body, t, None, length=iters - 1)
   return t.astype(initial_dtype)
+
 
 
 class ManifoldConstrainedHyperConnections(nnx.Module):
@@ -110,6 +114,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         weight_dtype=self.weight_dtype,
         kernel_axes=("norm",),
         epsilon=self.config.normalization_layer_epsilon,
+        parameter_memory_host_offload=self.config.parameter_memory_host_offload,
         rngs=self.rngs,
     )
 
@@ -254,6 +259,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     pre_alpha = jnp.asarray(self.pre_alpha[...], self.dtype)
     post_alpha = jnp.asarray(self.post_alpha[...], self.dtype)
     res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
+    pre_alpha_scale = self.pre_alpha_scale[...]
+    pre_beta = self.pre_beta[...]
 
     alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
 
@@ -267,15 +274,13 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # 2. Pre mapping
     pre_mapping = self.mapping(
         h_pre,
-        self.pre_alpha_scale[...],
-        self.pre_beta[...],
+        pre_alpha_scale,
+        pre_beta,
         1.0,
         eps=1e-6,
     )
-    # Moving away from einsum seems to allow XLA to perform better fusions
-    # https://github.com/AI-Hypercomputer/maxtext/pull/4664#discussion_r3677899970
-    # bskd, bsk -> bsd
-    layer_input = jnp.sum(x * jnp.expand_dims(pre_mapping, axis=3), axis=2)
+    # bskd, bsk -> bsd via matrix multiplication of transpose(pre_mapping) @ x
+    layer_input = jnp.squeeze(jnp.matmul(jnp.expand_dims(pre_mapping.astype(x.dtype), axis=2), x), axis=2)
 
     # 3. Pre-norm
     layer_input = norm_fn(layer_input)
@@ -294,22 +299,23 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       raise ValueError(f"Unsupported type: {mhc_type}")
 
     # 5. Post mapping
+    post_alpha_scale = self.post_alpha_scale[...]
+    post_beta = self.post_beta[...]
+
     post_mapping = self.mapping(
         h_post,
-        self.post_alpha_scale[...],
-        self.post_beta[...],
+        post_alpha_scale,
+        post_beta,
         2.0,
     )
-    # Moving away from einsum seems to allow XLA to perform better fusions
-    # bsd,bsk -> bskd
-    post_out = jnp.expand_dims(layer_out, axis=2) * jnp.expand_dims(post_mapping, axis=3)
+    # bsd, bsk -> bskd
+    post_out = jnp.matmul(jnp.expand_dims(post_mapping.astype(layer_out.dtype), axis=-1), jnp.expand_dims(layer_out, axis=2))
 
     # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
     res_mapping = self.res_mapping(h_res)
 
-    # Moving away from einsum seems to allow XLA to perform better fusions
-    # bskd,bskm -> bsmd
-    res_out = jnp.sum(jnp.expand_dims(x, axis=3) * jnp.expand_dims(res_mapping, axis=4), axis=2)
+    # bskd, bskm -> bsmd via matrix multiplication of transpose(res_mapping) @ x
+    res_out = jnp.matmul(res_mapping.swapaxes(-1, -2).astype(x.dtype), x)
     return res_out + post_out, metadata
 
 

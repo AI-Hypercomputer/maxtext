@@ -339,7 +339,8 @@ class GateLogit(nnx.Module):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
-      kernel = self.kernel[...]
+      kernel = getattr(self.kernel, "value", self.kernel)
+      kernel = max_utils.to_device(kernel)
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(norm_axis)))
@@ -368,7 +369,9 @@ class GateLogit(nnx.Module):
       pre_bias_logits = output
 
     if self.use_bias:
-      bias = jnp.asarray(self.bias[...], self.dtype)
+      bias = getattr(self.bias, "value", self.bias)
+      bias = max_utils.to_device(bias)
+      bias = jnp.asarray(bias, self.dtype)
       output += bias
     return output, pre_bias_logits
 
@@ -644,7 +647,13 @@ class RoutedMoE(nnx.Module):
     )
 
   def _logical_to_mesh_axes(self, logical_name):
-    logical_rules = get_logical_axis_rules()
+    # The ambient flax nn.partitioning.axis_rules context can be empty here
+    # (e.g. when this module is traced inside a jax.lax.scan body, which does
+    # not propagate the Python contextvar set by the outer axis_rules context
+    # manager). Fall back to the config's rules so batch/expert sharding
+    # (e.g. "activation_batch") still resolves correctly instead of silently
+    # replicating (P(None, ...)) in that case.
+    logical_rules = get_logical_axis_rules() or self.config.logical_axis_rules
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
   def _maybe_shard_with_pspec(self, inputs, pspec: jax.sharding.PartitionSpec | None):
@@ -3064,34 +3073,34 @@ class RoutedMoE(nnx.Module):
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
-    wo_kernel = jnp.asarray(self.wo[...], self.dtype)
+    wo_kernel = jnp.asarray(max_utils.to_device(self.wo[...]), self.dtype)
 
     fused_kernel = None
     w0_kernel = None
     w1_kernel = None
     if cfg.prefuse_moe_weights and cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
-      fused_kernel = jnp.asarray(self.wi[...], self.dtype)
+      fused_kernel = jnp.asarray(max_utils.to_device(self.wi[...]), self.dtype)
     elif cfg.prefuse_moe_weights:
-      wi = jnp.asarray(self.wi[...], self.dtype)
+      wi = jnp.asarray(max_utils.to_device(self.wi[...]), self.dtype)
       n = wi.shape[-1] // 2
       w0_kernel = wi[..., :n]
       w1_kernel = wi[..., n:]
     else:
-      w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
-      w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
+      w0_kernel = jnp.asarray(max_utils.to_device(self.wi_0[...]), self.dtype)
+      w1_kernel = jnp.asarray(max_utils.to_device(self.wi_1[...]), self.dtype)
 
     # Only apply per expert scales if we have not fused with the out-projections at init time.
     if self.per_expert_scale is not None and cfg.model_call_mode != "inference" and not cfg.fuse_expert_scales:
-      wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
+      wo_kernel = wo_kernel * jnp.asarray(max_utils.to_device(self.per_expert_scale[...]), self.dtype)[:, None, None]
 
     if self.wi_0_sparsity_module is not None:
       _, w0_kernel = self.wi_0_sparsity_module(jnp.zeros_like(w0_kernel), w0_kernel)
       _, w1_kernel = self.wi_1_sparsity_module(jnp.zeros_like(w1_kernel), w1_kernel)
       _, wo_kernel = self.wo_sparsity_module(jnp.zeros_like(wo_kernel), wo_kernel)
     if cfg.mlp_bias:
-      w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
-      w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype)
-      wo_bias = jnp.asarray(self.wo_bias[...], self.dtype)
+      w0_bias = jnp.asarray(max_utils.to_device(self.wi_0_bias[...]), self.dtype)
+      w1_bias = jnp.asarray(max_utils.to_device(self.wi_1_bias[...]), self.dtype)
+      wo_bias = jnp.asarray(max_utils.to_device(self.wo_bias[...]), self.dtype)
     else:
       w0_bias, w1_bias, wo_bias = None, None, None
 

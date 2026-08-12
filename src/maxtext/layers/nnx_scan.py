@@ -20,6 +20,7 @@ from typing import Any
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.utils import max_utils
 
 
 def create_scanned_layers(
@@ -34,7 +35,7 @@ def create_scanned_layers(
   if length == 0:
     return None
 
-  forked_rngs = rngs.fork(split=length)
+  forked_rngs = rngs.split(length) if hasattr(rngs, "split") else rngs.fork(split=length)
   rngs_graphdef, rngs_state = nnx.split(forked_rngs)
 
   first_rng_state = jax.tree.map(lambda x: x[0], rngs_state)
@@ -54,7 +55,7 @@ def create_scanned_layers(
 
   def add_scan_metadata(state, axis):
     def update_leaf(leaf):
-      if hasattr(leaf, "replace") and hasattr(leaf, "value"):
+      if isinstance(leaf, nnx.Variable) and hasattr(leaf, "replace"):
         replace_kwargs = {}
         if hasattr(leaf, "get_metadata"):
           replace_kwargs.update(leaf.get_metadata())
@@ -62,7 +63,7 @@ def create_scanned_layers(
         replace_kwargs[nnx.PARTITION_NAME] = metadata_axis_name
         replace_kwargs["param_scan_axis"] = axis
 
-        for key in ["sharding", "out_sharding", "kernel_axes", "sharding_names"]:
+        for key in ["sharding", "out_sharding", "kernel_axes"]:
           value = getattr(leaf, key, None)
           if value is None and key in replace_kwargs:
             value = replace_kwargs[key]
@@ -82,7 +83,7 @@ def create_scanned_layers(
     return jax.tree.map(
         update_leaf,
         state,
-        is_leaf=lambda x: hasattr(x, "replace") and hasattr(x, "value"),
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
   stacked_params = add_scan_metadata(stacked_params, param_scan_axis)
@@ -101,6 +102,8 @@ def apply_scanned_layers(
     remat_policy: Callable[..., Any] | None = None,
     prevent_cse: bool = True,
     unroll: int = 1,
+    parameter_memory_host_offload: bool = False,
+    parameter_memory_two_layer_buffer: bool = False,
 ) -> Any:
   """Applies stacked NNX layers using ``jax.lax.scan``.
 
@@ -128,17 +131,66 @@ def apply_scanned_layers(
 
   def scan_body(current_carry, scanned_state):
     current_params, current_state = scanned_state
+    if parameter_memory_host_offload or parameter_memory_two_layer_buffer:
+      def move_param_to_device(param, outer_param):
+        param_dev = max_utils.to_device(param)
+        sharding = getattr(param, "sharding", None)
+        if sharding is None and hasattr(param, "aval"):
+          sharding = getattr(param.aval, "sharding", None)
+        if sharding is None:
+          sharding = getattr(outer_param, "sharding", None)
+          if sharding is None:
+            val = outer_param.get_value() if isinstance(outer_param, nnx.Variable) else getattr(outer_param, "value", outer_param)
+            sharding = getattr(val, "sharding", getattr(getattr(val, "aval", None), "sharding", None))
+        if hasattr(sharding, "with_memory_kind"):
+          mesh = getattr(sharding, "mesh", None)
+          if mesh is not None and not getattr(mesh, "empty", False) and bool(getattr(mesh, "shape", None)):
+            spec = getattr(sharding, "spec", None)
+            ndim = getattr(param, "ndim", len(param.shape) if hasattr(param, "shape") else None)
+            if spec is not None and ndim is not None:
+              if len(spec) > ndim:
+                target_spec = jax.sharding.PartitionSpec(*spec[-ndim:])
+              elif len(spec) == ndim:
+                target_spec = spec
+              else:
+                target_spec = jax.sharding.PartitionSpec(*(spec + (None,) * (ndim - len(spec))))
+              target_sharding = jax.sharding.NamedSharding(mesh, target_spec, memory_kind="device")
+            else:
+              target_sharding = sharding.with_memory_kind("device")
+            return jax.lax.with_sharding_constraint(param_dev, target_sharding)
+        return param_dev
+
+      current_params = jax.tree.map(
+          move_param_to_device,
+          current_params,
+          params,
+          is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.ShapeDtypeStruct)) or (hasattr(x, "shape") and hasattr(x, "dtype")),
+      )
     current_layer = nnx.merge(layer_graphdef, current_params, current_state)
     next_carry = apply_fn(current_layer, current_carry)
-    return next_carry, nnx.state(current_layer)
+    rng_filters = tuple(f for f in (getattr(nnx, "RngCount", None), getattr(nnx, "RngKey", None), getattr(nnx, "Intermediate", None)) if f is not None)
+    if rng_filters:
+      non_param_state = nnx.state(current_layer, (nnx.Not(nnx.Param), *(nnx.Not(f) for f in rng_filters)))
+    else:
+      non_param_state = nnx.state(current_layer, nnx.Not(nnx.Param))
+    return next_carry, non_param_state
 
   scan_fn = jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse) if remat else scan_body
   final_carry, scanned_state = jax.lax.scan(scan_fn, carry, (params, state), unroll=unroll)
 
-  if param_scan_axis != 0:
-    scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
-    scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), scanned_params)
-    scanned_state = nnx.State.merge(scanned_params, scanned_other)
+  if bool(scanned_state):
+    if param_scan_axis != 0:
+      if hasattr(nnx, "split_state"):
+        scanned_params, scanned_other = nnx.split_state(scanned_state, nnx.Param, ...)
+      else:
+        scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
+      scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), scanned_params)
+      if hasattr(nnx, "merge_state"):
+        scanned_state = nnx.merge_state(scanned_params, scanned_other)
+      elif hasattr(nnx, "State") and hasattr(nnx.State, "merge"):
+        scanned_state = nnx.State.merge(scanned_params, scanned_other)
+      else:
+        scanned_state = nnx.merge(scanned_params, scanned_other)
 
-  nnx.update(layers, scanned_state)
+    nnx.update(layers, scanned_state)
   return final_carry

@@ -185,34 +185,25 @@ def naive_jax_chunk_gated_delta_rule(
 
 @jax.custom_vjp
 def invert_unit_lower_triangular_log_depth(S):
-  """
-  Computes (I + S)^-1 for a strictly lower triangular matrix S
-  using log-depth Newton-Schulz iterations.
-
-  This is highly optimized for TPUs/GPUs and replaces
-  jax.scipy.linalg.solve_triangular for chunkwise linear attention.
-  """
+  """Computes (I + S)^-1 for a strictly lower triangular matrix S using log-depth Newton-Schulz iterations."""
   chunk_size = S.shape[-1]
-
-  # Ensure S is strictly lower triangular (zero out diagonal and upper half)
-  # This guarantees mathematical correctness and stability
-  S_strict = jnp.tril(S, k=-1)
-
-  # Base identity matrix
-  identity = jnp.eye(chunk_size, dtype=S.dtype)
-
-  # Initial approximation and error term
+  dtype = S.dtype
+  mask_strict = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=dtype), k=-1)
+  S_strict = S * mask_strict
+  identity = jnp.eye(chunk_size, dtype=dtype)
   A = identity - S_strict
-  E = jnp.tril(S_strict @ S_strict, k=-1)
+  E = S_strict @ S_strict
 
-  # Log-depth Taylor series exact computation
   steps = int(math.ceil(math.log2(chunk_size)))
-  for _ in range(steps - 1):
-    # Update inverse and error using batched matmuls
-    A = jnp.tril(A + A @ E)
-    E = jnp.tril(E @ E, k=-1)
 
-  return A
+  def loop_body(carry, _):
+    A_prev, E_prev = carry
+    A_next = A_prev + A_prev @ E_prev
+    E_next = E_prev @ E_prev
+    return (A_next, E_next), None
+
+  (A, _), _ = jax.lax.scan(loop_body, (A, E), None, length=steps - 1)
+  return A * jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=dtype))
 
 
 @functools.partial(jax.named_call, name="invert_triangular_fwd")
@@ -224,7 +215,9 @@ def _invert_unit_lower_triangular_log_depth_fwd(S):
 @functools.partial(jax.named_call, name="invert_triangular_bwd")
 def _invert_unit_lower_triangular_log_depth_bwd(res, g):
   A = res
-  grad_S = jnp.tril(-(A.mT @ g @ A.mT), k=-1)
+  chunk_size = A.shape[-1]
+  mask_strict = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=A.dtype), k=-1)
+  grad_S = -(A.swapaxes(-1, -2) @ g @ A.swapaxes(-1, -2)) * mask_strict
   return (grad_S,)
 
 
@@ -311,14 +304,11 @@ def jax_chunk_gated_delta_rule(
   S = S.astype(jnp.float32)
 
   # Apply mask BEFORE exp to prevent 'inf' gradients
-  g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
-  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
-  g_diff = jnp.where(mask, g_diff, -1e30)
+  mask_strict_float = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
+  inf_mask_strict = (1.0 - mask_strict_float) * -1e30
+  g_diff = (g_cumsum[..., :, None] - g_cumsum[..., None, :]) * mask_strict_float + inf_mask_strict
 
-  S = S * jnp.exp(g_diff)
-  S = jnp.where(mask, S, 0.0)
-
-  # Cast to float32 explicitly as you were doing before
+  S = S * jnp.exp(g_diff) * mask_strict_float
   S = S.astype(jnp.float32)
 
   # Inversion (A) - Replaces solve_triangular entirely
@@ -352,6 +342,7 @@ def jax_chunk_gated_delta_rule(
 
   xs = (w_scan, u_scan, q_scan, k_scan, g_scan)
 
+  @jax.checkpoint
   def scan_body(h, args):
     w, u, q, k, g = args
     prec = jax.lax.Precision.HIGHEST
@@ -371,12 +362,11 @@ def jax_chunk_gated_delta_rule(
     attn = attn.astype(jnp.float32)
 
     # Mask before exp
-    g_diff = g[..., :, None] - g[..., None, :]
-    mask_intra = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool))
-    g_diff = jnp.where(mask_intra, g_diff, -1e30)
+    mask_intra_float = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
+    inf_mask_intra = (1.0 - mask_intra_float) * -1e30
+    g_diff = (g[..., :, None] - g[..., None, :]) * mask_intra_float + inf_mask_intra
 
-    attn_i = attn * jnp.exp(g_diff)
-    attn_i = jnp.where(mask_intra, attn_i, 0.0)
+    attn_i = attn * jnp.exp(g_diff) * mask_intra_float
 
     # Note: We do NOT multiply attn_i by beta here. The Delta rule mathematically
     # absorbed beta inside v_new (via u).
@@ -666,7 +656,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
     mixed_qkvz = qkvz.reshape(new_shape_qkvz)
     if self.mesh is not None:
-      logical_rules = get_logical_axis_rules()
+      logical_rules = getattr(cfg, "logical_axis_rules", None) or get_logical_axis_rules()
       qkvz_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
       mixed_qkvz = jax.lax.with_sharding_constraint(mixed_qkvz, qkvz_sharding)
@@ -749,7 +739,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       # Conv weight: transpose from (kernel_size, 1, conv_dim) → (conv_dim, 1, kernel_size),
       # then reorder so each TP shard gets its local [q_local | k_local | v_local] channels.
-      conv_weight = jnp.transpose(self.conv1d.kernel.value, (2, 1, 0))
+      conv_weight = jnp.transpose(self.conv1d.kernel[...], (2, 1, 0))
       conv_weight = reorder_concatenated_tensor_for_sharding(
           conv_weight, [self.key_dim, self.key_dim, self.value_dim], tp_size, 0
       )
@@ -898,7 +888,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       from maxtext.models.hybrid_gdn import hybrid_fused_conv1d_gdn
 
       if self.mesh is not None:
-        logical_rules = get_logical_axis_rules()
+        logical_rules = getattr(cfg, "logical_axis_rules", None) or get_logical_axis_rules()
         batch_pspec3 = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
         batch_pspec4 = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=self.mesh, rules=logical_rules)
         none_pspec3 = logical_to_mesh_axes((None, None, None), mesh=self.mesh, rules=logical_rules)
@@ -965,7 +955,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             qkv,
             b,
             a,
-            self.conv1d.kernel.value,
+            self.conv1d.kernel[...],
             conv_bias_arg,
             self.A_log[...],
             self.dt_bias[...],
@@ -977,7 +967,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             qkv=qkv,
             b=b,
             a=a,
-            conv_weight=self.conv1d.kernel.value,
+            conv_weight=self.conv1d.kernel[...],
             conv_bias=None,
             a_log=self.A_log[...],
             dt_bias=self.dt_bias[...],
@@ -1005,7 +995,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           compute_dtype=cfg.dtype,
       )
     elif self.mesh is not None:
-      logical_rules = get_logical_axis_rules()
+      logical_rules = getattr(cfg, "logical_axis_rules", None) or get_logical_axis_rules()
       recurrent_state_arg = (
           recurrent_state
           if recurrent_state is not None
@@ -1387,63 +1377,33 @@ class Qwen3NextScannableBlock(nnx.Module):
     out = layer(y, **layer_kwargs, kv_cache=kv_cache)
     return out if isinstance(out, tuple) else (out, None)
 
+
+
   @property
   def _remat_enabled(self):
     """Whether the block rematerializes its own layers."""
     return self.apply_internal_remat and self.config.remat_policy != "none"
 
   def _scan_local_layers(self, y, layer_kwargs):
-    """Runs the local (linear attention / GatedDeltaNet) layers via a per-layer rematerialized ``jax.lax.scan``."""
-    remat = self._remat_enabled
-    return nnx_scan.apply_scanned_layers(
-        self.local_layers,
-        y,
-        length=self.num_local,
-        param_scan_axis=self.config.param_scan_axis,
-        apply_fn=lambda layer, carry: self._run_layer(layer, carry, layer_kwargs)[0],
-        remat=remat,
-        remat_policy=self.remat_policy_fn if remat else None,
-        prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config) if remat else True,
-    )
+    """Runs the local (linear attention / GatedDeltaNet) layers sequentially on device."""
+    if self.local_layers is None or self.num_local == 0:
+      return y
+    graphdef, params, state = nnx.split(self.local_layers, nnx.Param, ...)
+    scan_axis = self.config.param_scan_axis
+    if scan_axis != 0:
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+    for i in range(self.num_local):
+      layer_params = jax.tree.map(lambda x, i=i: x[i], params)
+      layer_state = jax.tree.map(lambda x, i=i: x[i], state)
+      layer = nnx.merge(graphdef, layer_params, layer_state)
+      y = self._run_layer(layer, y, layer_kwargs)[0]
+    return y
 
   def _scan_global_layer(self, y, layer_kwargs):
-    """Runs the single global-attention layer inside a length-1 ``jax.lax.scan``."""
-    cfg = self.config
-    graphdef_g, intermediate_g, other_g = nnx.split(self.global_layer, nnx.Intermediate, ...)
-    intermediate_xs = jax.tree.map(lambda x: x[None], intermediate_g)
-
-    def run_global_layer(carry, intermediate_slice):
-      hidden_states, other = carry
-      layer = nnx.merge(graphdef_g, intermediate_slice, other)
-      new_hidden_states = self._run_layer(layer, hidden_states, layer_kwargs)[0]
-      _, new_intermediate, new_other = nnx.split(layer, nnx.Intermediate, ...)
-      return (new_hidden_states, new_other), new_intermediate
-
-    global_remat_policy = self.remat_policy_fn
-    offload_names = maxtext_utils.get_save_and_offload_names(cfg)
-    if offload_names[0] or offload_names[1]:
-      save_names, offload_to_device = offload_names
-      global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
-
-    if self._remat_enabled:
-      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
-      run_global_layer = jax.checkpoint(
-          run_global_layer,
-          policy=global_remat_policy,
-          prevent_cse=prevent_cse,
-      )
-
-    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
-      (y, final_other), stacked_intermediate = jax.lax.scan(
-          run_global_layer,
-          (y, other_g),
-          intermediate_xs,
-          length=1,
-      )
-
-    intermediate_state = jax.tree.map(lambda x: x[0], stacked_intermediate)
-    nnx.update(self.global_layer, final_other, intermediate_state)
-    return y
+    """Runs the single global-attention layer on device."""
+    if self.global_layer is None or self.num_global == 0:
+      return y
+    return self._run_layer(self.global_layer, y, layer_kwargs)[0]
 
   def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs):
     """Runs the block with externally-supplied per-layer kv caches (vLLM PagedAttention / Mamba)."""
@@ -1614,6 +1574,8 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
+    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     if self.is_mhc_enabled:
       mhc_expand, mhc_reduce = mhc.get_functions(self.config.mhc_expansion_rate)

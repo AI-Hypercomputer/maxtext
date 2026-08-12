@@ -130,6 +130,20 @@ def device_space():
     return jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access # pytype: disable=module-attr
 
 
+def to_device(x, sharding=None, mesh=None):
+  """Moves a tensor/array to device memory kind."""
+  try:
+    return jax.device_put(x, device_space())
+  except Exception:
+    pass
+  try:
+    from jax._src.api import TransferToMemoryKind  # pylint: disable=protected-access,g-importing-member
+    return jax.device_put(x, TransferToMemoryKind("device"))
+  except Exception:
+    pass
+  return x
+
+
 def calculate_total_params_per_chip(params):
   """Calculate total params per chip."""
 

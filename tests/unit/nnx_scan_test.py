@@ -31,7 +31,7 @@ class _LinearLayer(nnx.Module):
     self.kernel = nnx.Param(jax.random.normal(rngs.params(), (2, 2)))
 
   def __call__(self, inputs):
-    return inputs @ self.kernel.value
+    return inputs @ self.kernel.get_value()
 
 
 class TestCreateScannedLayers(unittest.TestCase):
@@ -48,7 +48,7 @@ class TestCreateScannedLayers(unittest.TestCase):
           metadata_axis_name="layers",
           rngs=nnx.Rngs(0),
       )
-      self.assertEqual(layers.kernel.value.shape, expected_shape)
+      self.assertEqual(layers.kernel.get_value().shape, expected_shape)
 
   def test_create_zero_length_returns_none(self):
     """A zero-length stack short-circuits to None."""
@@ -76,10 +76,10 @@ class TestApplyScannedLayers(unittest.TestCase):
         rngs=nnx.Rngs(0),
     )
 
-    self.assertEqual(layers.kernel.value.shape, (2, length, 2))
+    self.assertEqual(layers.kernel.get_value().shape, (2, length, 2))
 
     inputs = jnp.array([1.0, -1.0])
-    kernels = jnp.moveaxis(layers.kernel.value, 1, 0)
+    kernels = jnp.moveaxis(layers.kernel.get_value(), 1, 0)
     expected = inputs
     for kernel in kernels:
       expected = expected @ kernel
@@ -93,7 +93,7 @@ class TestApplyScannedLayers(unittest.TestCase):
     )
 
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
-    self.assertEqual(layers.kernel.value.shape, (2, length, 2))
+    self.assertEqual(layers.kernel.get_value().shape, (2, length, 2))
 
   def test_full_remat_checkpoints_scan_body_with_none_policy(self):
     """A None policy means full remat and must not disable jax.checkpoint."""

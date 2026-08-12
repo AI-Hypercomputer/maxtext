@@ -19,6 +19,7 @@ from typing import Any, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+from maxtext.utils import max_utils
 
 
 def pure_jax_fused_conv1d_gdn(
@@ -48,7 +49,7 @@ def pure_jax_fused_conv1d_gdn(
 
     # --- Step B: Pure JAX 1D Convolution ---
     conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
-    conv_weight_cast = conv_weight.astype(qkv.dtype)
+    conv_weight_cast = max_utils.to_device(conv_weight).astype(qkv.dtype)
     conv_out = jax.lax.conv_general_dilated(
         lhs=conv_input,
         rhs=conv_weight_cast,
@@ -58,7 +59,8 @@ def pure_jax_fused_conv1d_gdn(
         feature_group_count=qkv.shape[-1],
     )
     if conv_bias is not None:
-        conv_out = conv_out + conv_bias.astype(qkv.dtype)
+        conv_bias_cast = max_utils.to_device(conv_bias).astype(qkv.dtype)
+        conv_out = conv_out + conv_bias_cast
     conv_out = conv_out[:, -seq_len:, :]
     qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(compute_dtype)
 
@@ -69,8 +71,8 @@ def pure_jax_fused_conv1d_gdn(
     key = k_conv.reshape(batch, seq_len, num_k_heads, head_k_dim)
     value = v_conv.reshape(batch, seq_len, num_v_heads, head_v_dim)
 
-    A_log_cast = jnp.asarray(a_log, dtype=compute_dtype)
-    dt_bias_cast = jnp.asarray(dt_bias, dtype=compute_dtype)
+    A_log_cast = jnp.asarray(max_utils.to_device(a_log), dtype=compute_dtype)
+    dt_bias_cast = jnp.asarray(max_utils.to_device(dt_bias), dtype=compute_dtype)
     beta = jax.nn.sigmoid(b)
     g = -jnp.exp(A_log_cast) * jax.nn.softplus(a + dt_bias_cast)
 
@@ -118,6 +120,12 @@ def _run_tokamax_fused_fwd(
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
 ):
+    conv_weight = max_utils.to_device(conv_weight)
+    if conv_bias is not None:
+        conv_bias = max_utils.to_device(conv_bias)
+    a_log = max_utils.to_device(a_log)
+    dt_bias = max_utils.to_device(dt_bias)
+
     if jax.default_backend() != "tpu":
         return pure_jax_fused_conv1d_gdn(
             qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
@@ -125,8 +133,13 @@ def _run_tokamax_fused_fwd(
             conv_kernel_size=conv_kernel_size, chunk_size=chunk_size, use_qk_norm_in_gdn=use_qk_norm_in_gdn, compute_dtype=compute_dtype,
         )
 
-    # When on TPU, invoke Tokamax GDN v3 fused_conv1d_gdn kernel
-    from tokamax._src.ops.experimental.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+    try:
+        from tokamax._src.ops.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+    except ImportError:
+        try:
+            from tokamax._src.ops.experimental.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+        except ImportError:
+            from tokamax.ops.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
     batch_size, seq_len, dim_size = qkv.shape
     num_seqs = batch_size
 
@@ -254,6 +267,7 @@ def _hybrid_fused_conv1d_gdn_bwd(
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state
     ) = residuals
 
+    @jax.checkpoint
     def target_fn(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_):
         return pure_jax_fused_conv1d_gdn(
             qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_,

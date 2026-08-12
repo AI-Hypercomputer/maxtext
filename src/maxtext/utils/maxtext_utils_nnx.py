@@ -93,16 +93,24 @@ def get_partition_spec_nnx(named_sharding: nnx.State) -> nnx.State:
 
 
 def set_named_sharding_nnx(abstract_state: nnx.State, named_sharding: nnx.State) -> nnx.State:
-  """Set named sharding to NNX abstract state.
+  """Recursively tags abstract TrainStateNNX leaves with input mesh shardings and memory kinds."""
+  def _set_leaf(x, y):
+    sharding_val = getattr(y, "value", y)
+    if hasattr(sharding_val, "sharding"):
+      sharding_val = sharding_val.sharding
+    if isinstance(x, nnx.Variable):
+      val = x.get_value()
+      shape = getattr(val, "shape", ())
+      dtype = getattr(val, "dtype", jnp.float32)
+      return x.replace(value=jax.ShapeDtypeStruct(shape, dtype, sharding=sharding_val))
+    return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=sharding_val)
 
-  Args:
-    abstract_state: NNX model abstract state created from nnx.get_abstract_model().
-    named_sharding: named sharding. It must have the same tree structure with abstract_state.
-
-  Returns:
-    updated abstract_state
-  """
-  return jax.tree.map(lambda x, y: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=y), abstract_state, named_sharding)
+  return jax.tree.map(
+      _set_leaf,
+      abstract_state,
+      named_sharding,
+      is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.ShapeDtypeStruct, jax.sharding.Sharding)),
+  )
 
 
 def move_memory_to_host(path: tuple[str, ...], x: NamedSharding) -> NamedSharding:

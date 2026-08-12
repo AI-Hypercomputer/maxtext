@@ -18,6 +18,7 @@
 from collections.abc import Iterable
 import inspect  # for debugging only
 from pathlib import Path
+from typing import Any
 
 from flax import linen as nn, nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
@@ -644,6 +645,47 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
   return prev_params_shardings, state_mesh_shardings
 
 
+def is_scanned_block_param_path(path: tuple[Any, ...]) -> bool:
+  """Returns True if the PyTree path corresponds strictly to a scanned block model parameter.
+
+  Invariants:
+  1. Must be under `model` (or root parameter container).
+  2. Must contain scanned container identifiers ('scanned_blocks', 'local_layers', 'scanned_layers').
+  3. Must NOT contain unscanned exclusions ('layers_remainder', 'token_embedder',
+     'decoder_norm', 'logits_dense').
+  4. Must NOT contain optimizer state identifiers ('opt_state', 'optimizer', 'mu', 'nu', 'step', 'count', 'rngs').
+  """
+  path_keys = [str(k.key if hasattr(k, "key") else k.name if hasattr(k, "name") else k) for k in path]
+
+  # Check if under optimizer hierarchy
+  if any(k in path_keys for k in ("optimizer", "opt_state", "mu", "nu", "step", "count")):
+    return False
+
+  # Check if under RNG / dropout hierarchy
+  if any(k in path_keys for k in ("rngs", "dropout")):
+    return False
+
+  # Check if model parameter
+  is_model = ("model" in path_keys) or (len(path_keys) > 0 and path_keys[0] != "optimizer")
+
+  # Check for scanned containers
+  has_scanned = any(k in path_keys for k in ("scanned_blocks", "local_layers", "scanned_layers", "layers"))
+
+  # Check for unscanned exceptions
+  is_unscanned_exclusion = any(
+      k in path_keys
+      for k in (
+          "layers_remainder",
+          "token_embedder",
+          "embedding",
+          "decoder_norm",
+          "logits_dense",
+      )
+  )
+
+  return is_model and has_scanned and not is_unscanned_exclusion
+
+
 def maybe_update_params_sharding_with_opt_nnx(
     config: pyconfig.HyperParameters, state_mesh_shardings: nnx.State
 ) -> tuple[nnx.State, nnx.State]:
@@ -677,7 +719,7 @@ def maybe_update_params_sharding_with_opt_nnx(
     """
     result = {}
     for k, v in state.items():
-      if isinstance(v, nnx.Param):
+      if isinstance(v, (nnx.Param, jax.sharding.Sharding)):
         result[k] = v
       elif isinstance(v, nnx.Variable):
         pass  # skip non-Param variables (RngKey, RngCount, OptVariable, etc.)
@@ -737,17 +779,30 @@ def maybe_update_params_sharding_with_opt_nnx(
   # Build a path → new_PS lookup from sharded_fp32_params (mu), then update model_shardings
   # at those paths while preserving rngs and any other non-Param variables.
   mu_leaves_with_paths = list(
-      jax.tree_util.tree_leaves_with_path(sharded_fp32_params, is_leaf=lambda x: isinstance(x, nnx.Variable))
+      jax.tree_util.tree_leaves_with_path(sharded_fp32_params, is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.sharding.Sharding)))
   )
-  mu_lookup = {path: mu_var.get_value() for path, mu_var in mu_leaves_with_paths}
+  mu_lookup = {path: (mu_var.get_value() if hasattr(mu_var, "get_value") else mu_var) for path, mu_var in mu_leaves_with_paths}
 
   def _update_model_var(path, var):
     if path in mu_lookup:
-      return var.replace(mu_lookup[path])
+      new_s = mu_lookup[path]
+      curr_s = getattr(var, "value", var)
+      # If model parameter was tagged pinned_host, preserve pinned_host
+      if hasattr(curr_s, "memory_kind") and curr_s.memory_kind == "pinned_host":
+        new_s = new_s.with_memory_kind("pinned_host")
+      elif is_scanned_block_param_path(path) and (
+          config.parameter_memory_host_offload or getattr(config, "parameter_memory_two_layer_buffer", False)
+      ):
+        new_s = new_s.with_memory_kind("pinned_host")
+      else:
+        new_s = new_s.with_memory_kind("device")
+      if isinstance(var, nnx.Variable):
+        return var.replace(new_s)
+      return new_s
     return var
 
   new_model_shardings = jax.tree_util.tree_map_with_path(
-      _update_model_var, model_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable)
+      _update_model_var, model_shardings, is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.sharding.Sharding))
   )
   # Use jax.tree_util.tree_map (identity) to create a new nnx.State via JAX's unflatten
   # mechanism (not the nnx.State constructor). This is critical because:
@@ -756,44 +811,49 @@ def maybe_update_params_sharding_with_opt_nnx(
   #    nested module states as plain dicts). JAX's unflatten preserves the original types.
   # 2. copy.deepcopy fails because NamedSharding contains non-picklable jaxlib.Device objects.
   # Direct __setattr__ assignment stores new_model_shardings as-is (no type conversion).
-  updated_state = jax.tree_util.tree_map(lambda x: x, state_mesh_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  updated_state = jax.tree_util.tree_map(lambda x: x, state_mesh_shardings, is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.sharding.Sharding)))
   updated_state.model = new_model_shardings
 
   return prev_params_shardings, updated_state
 
 
 def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_shardings):
-  """Build the train-step input shardings under shard_optimizer_over_data (Zero-1).
-
-  Model params on input use the original pre-Zero-1 sharding (params_shardings),
-  while the rest
-  of the state — including the optimizer state — keeps the Zero-1 layout from
-  state_mesh_shardings,
-  so the optimizer state input matches its output. When
-  shard_optimizer_over_data is False,
-  state_mesh_shardings passes through unchanged.
-  """
-  if not config.shard_optimizer_over_data:
+  """Constructs the canonical input state shardings for TrainStateNNX under Zero-1 and Host Offload."""
+  if not config.shard_optimizer_over_data and not (
+      config.parameter_memory_host_offload or getattr(config, "parameter_memory_two_layer_buffer", False)
+  ):
     return state_mesh_shardings
   if not config.pure_nnx:
     return state_mesh_shardings.replace(params=params_shardings)
-  # nnx.State has no .replace: shallow-copy via tree_map (preserves nested container
-  # types) and overlay params_shardings under input_state.model.
-  input_state = jax.tree_util.tree_map(
-      lambda x: x,
-      state_mesh_shardings,
-      is_leaf=lambda x: isinstance(x, nnx.Variable),
+
+  def _to_str_path(path):
+    return tuple(str(k.key if hasattr(k, "key") else k.name if hasattr(k, "name") else k) for k in path)
+
+  param_leaves = list(
+      jax.tree_util.tree_leaves_with_path(params_shardings, is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.sharding.Sharding)))
   )
+  param_lookup = {_to_str_path(path): (v.value if hasattr(v, "value") else v) for path, v in param_leaves}
 
-  def _overlay(model_node, params_node):
-    for k, pv in params_node.items():
-      if isinstance(pv, nnx.Variable):
-        model_node[k] = pv
-      elif hasattr(pv, "items"):
-        _overlay(model_node[k], pv)
+  def _update_sharding(path, curr_s):
+    str_path = _to_str_path(path)
+    lookup_path = str_path[1:] if len(str_path) > 0 and str_path[0] == "model" else str_path
+    target_sharding = param_lookup.get(lookup_path, param_lookup.get(str_path, curr_s))
 
-  _overlay(input_state.model, params_shardings)
-  return input_state
+    # Apply memory_kind rules
+    if hasattr(target_sharding, "with_memory_kind"):
+      if is_scanned_block_param_path(path) and (
+          config.parameter_memory_host_offload or getattr(config, "parameter_memory_two_layer_buffer", False)
+      ):
+        target_sharding = target_sharding.with_memory_kind("pinned_host")
+      else:
+        target_sharding = target_sharding.with_memory_kind("device")
+    return target_sharding
+
+  return jax.tree_util.tree_map_with_path(
+      _update_sharding,
+      state_mesh_shardings,
+      is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.sharding.Sharding)),
+  )
 
 
 def logical_axis_rules_pp_act_as_dp(logical_rules):

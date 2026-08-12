@@ -1,43 +1,30 @@
 #!/bin/bash
 set -e
 
-# Activate Python virtual environment
-source /mnt/data/workspace/max_venv/bin/activate
+# Activate Python virtual environment containing xpk
+source /usr/local/google/home/mohitkhatwani/max_venv/bin/activate
 
 # --- Environment Variables ---
 export PROJECT_ID="tpu-prod-env-one-vm"
 export CLUSTER_NAME="bodaborg-v6e-256-lcscld-c"
 export ZONE="southamerica-west1-a"
 
-# --- Configuration & Automated Image Build ---
 TIMESTAMP=$(date +%m%d%H%M%S)
-export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:mohit_${TIMESTAMP}"
-export WORKLOAD_NAME="mohit-qn80b-${TIMESTAMP}"
+export WORKLOAD_NAME="mohitk-qn80b-pdb16-${TIMESTAMP}"
 export DEVICE_TYPE="v6e-256"
 export NUM_SLICES=1
 export PRIORITY="very-high"
-export NUM_STEPS=15
 export MODEL_NAME="qwen3-next-80b-a3b"
-export BASE_OUTPUT_DIR="gs://runner-maxtext-logs/qwen3-next-80b-profiles/run-${TIMESTAMP}"
+export BASE_OUTPUT_DIR="gs://chengnuojin-maxtext-logs/qwen3-next-80b-profiles/run-${TIMESTAMP}"
+export BASE_DOCKER_IMAGE="maxtext_base_image"
 
 echo "========================================================================"
-echo "Building and uploading Docker runner image from /mnt/data/workspace/maxtext"
-echo "Target Image: ${WORKLOAD_IMAGE}"
+echo "Creating XPK Workload for Qwen3-Next-80B (pdb=16) on v6e-256"
+echo "Workload: ${WORKLOAD_NAME}"
+echo "Cluster:  ${CLUSTER_NAME}"
+echo "Zone:     ${ZONE}"
+echo "Base:     ${BASE_DOCKER_IMAGE}"
 echo "========================================================================"
-
-(
-  cd /mnt/data/workspace/maxtext && \
-  if ! docker image inspect maxtext_base_image &> /dev/null; then
-    echo "Local image 'maxtext_base_image' not found. Pulling gcr.io/tpu-prod-env-one-vm/param3_21jul:latest and tagging as maxtext_base_image..."
-    docker pull gcr.io/tpu-prod-env-one-vm/param3_21jul:latest
-    docker tag gcr.io/tpu-prod-env-one-vm/param3_21jul:latest maxtext_base_image
-  fi && \
-  CLOUD_IMAGE_NAME="${WORKLOAD_IMAGE}" \
-       BASE_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:latest" \
-       bash src/dependencies/scripts/docker_upload_runner.sh
-)
-
-echo "Docker image upload complete: ${WORKLOAD_IMAGE}"
 
 # --- XLA Flags ---
 XLA_FLAGS_ARRAY=(
@@ -45,7 +32,7 @@ XLA_FLAGS_ARRAY=(
   "--xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
   "--xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
   "--xla_msa_enable_sync_copy_replacement=false"
-  "--xla_tpu_scoped_vmem_limit_kib=78500"
+  "--xla_tpu_scoped_vmem_limit_kib=81000"
   "--xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
   "--xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
   "--xla_tpu_enable_concurrent_sparse_core_offloading=true"
@@ -62,17 +49,16 @@ XLA_FLAGS_ARRAY=(
   "--xla_sc_disable_megacore_partitioning=true"
   "--xla_tpu_enable_async_collective_fusion=true"
   "--xla_tpu_overlap_compute_collective_tc=true"
-  "--xla_tpu_enable_async_collective_fusion_multiple_steps=true"
+  "--xla_tpu_enable_async_collective_fusion_multiple_steps=false"
   "--xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
   "--xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter=false"
   "--xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
   "--xla_tpu_enable_latency_hiding_scheduler=true"
-  "--xla_latency_hiding_scheduler_rerun=10"
+  "--xla_latency_hiding_scheduler_rerun=0"
   "--xla_tpu_all_gather_collective_matmul_mode=post_spmd_conservative"
   "--xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd_conservative"
   "--xla_latency_hiding_scheduler_enable_selective_resources=true"
-  "--xla_tpu_enable_ilp_latency_hiding_scheduler=true"
-  "--xla_tpu_enable_all_experimental_scheduler_features=true"
+  "--xla_tpu_enable_ilp_latency_hiding_scheduler=false"
   "--xla_tpu_enable_scheduler_memory_pressure_tracking=true"
   "--xla_tpu_host_transfer_overlap_limit=4"
   "--xla_tpu_aggressive_opt_barrier_removal=ENABLED"
@@ -80,22 +66,16 @@ XLA_FLAGS_ARRAY=(
   "--xla_tpu_enable_ag_backward_pipelining=true"
   "--xla_should_allow_loop_variant_parameter_in_chain=ENABLED"
   "--xla_should_add_loop_invariant_op_in_chain=ENABLED"
-  "--xla_max_concurrent_host_send_recv=100"
-  "--xla_tpu_scheduler_percent_shared_memory_limit=100"
-  # Lets XLA's own rematerialization pass spill to pinned host memory instead of
-  # recomputing. Required for per_device_batch_size >= 6 with
-  # decoder_layer_input=offload + context=offload: without it pdb=8 misses the
-  # 31.24GiB HBM budget by 5.37MB. Costs ~26GiB/step of host traffic - measure
-  # step time on hardware before adopting.
-  "--xla_tpu_rematerialization_use_host_memory_offload=true"
+  "--xla_max_concurrent_host_send_recv=32"
+  "--xla_tpu_scheduler_percent_shared_memory_limit=95"
 )
 export XLA_FLAGS="${XLA_FLAGS_ARRAY[*]}"
 
-# --- MaxText Workload Overrides ---
+# --- MaxText Arguments ---
 MAXTEXT_ARGS_ARRAY=(
   "model_name=${MODEL_NAME}"
   "base_output_directory=${BASE_OUTPUT_DIR}"
-  "run_name=param-3"
+  "run_name=param-3-pdb16"
   "dataset_type=synthetic"
   "dataset_name=synthetic"
   "dtype=bfloat16"
@@ -105,17 +85,20 @@ MAXTEXT_ARGS_ARRAY=(
   "custom_mesh=hybrid_ring_64x4"
   "use_ragged_sort=True"
   "use_random_routing=True"
-  "num_moe_token_chunks=2"
-  "per_device_batch_size=8"
+  "num_moe_token_chunks=8"
+  "num_vocab_tiling=8"
+  "per_device_batch_size=16"
   "opt_type=adamw"
   "max_target_length=2048"
   "ragged_buffer_factor=1.5"
   "remat_policy=custom"
   "reuse_example_batch=1"
-  "decoder_layer_input=offload"
-  "context=offload"
+  "decoder_layer_input=device"
   "ici_fsdp_parallelism=-1"
-  "steps=20"
+  "steps=15"
+  "sa_q_layout=SEQ_MINOR"
+  "sa_k_layout=HEAD_DIM_MINOR"
+  "sa_v_layout=HEAD_DIM_MINOR"
   "sa_block_q=1024"
   "sa_block_kv=1024"
   "sa_block_kv_compute=512"
@@ -151,61 +134,65 @@ MAXTEXT_ARGS_ARRAY=(
   "wo_tile_dlhs_mlp_dim=1536"
   "wo_tile_drhs_embed_dim=3072"
   "wo_tile_drhs_mlp_dim=1536"
-  "use_tokamax_gmm=True"
-  "use_gmm_v2=True"
+  "use_tokamax_gmm=False"
+  "use_gmm_v2=False"
   "optimizer_memory_host_offload=False"
-  "parameter_memory_host_offload=False"
+  "parameter_memory_host_offload=True"
+  "parameter_memory_two_layer_buffer=True"
+  "param_scan_axis=0"
   "enable_checkpointing=False"
   "async_checkpointing=False"
   "tokenizer_type=tiktoken"
   "tokenizer_path=tokenizer_74B/"
-  "override_model_config=true"
-  "mhc_expansion_rate=4"
   "use_gdn_kernel=True"
   "use_hybrid_gdn=True"
+  "override_model_config=True"
+  "gdn_chunk_size=64"
   "profiler=xplane"
-  "profiler_steps=2"
+  "profiler_steps=5"
   "skip_first_n_steps_for_profiler=2"
   "enable_tpu_profiling_options=True"
   "upload_all_profiler_results=False"
 )
 MAXTEXT_ARGS="${MAXTEXT_ARGS_ARRAY[*]}"
 
-# The command to run inside the container
+# Command executed on each worker inside the container
 RUN_COMMAND="set -e && \
 export LIBTPU_INIT_ARGS=\"${XLA_FLAGS}\" && \
 export JAX_PLATFORMS='tpu,cpu' && \
 export ENABLE_PJRT_COMPATIBILITY='true' && \
 export JAX_DISTRIBUTED_INITIALIZE_TIMEOUT=1800 && \
-export PYTHONPATH=/deps:/deps/src:/deps/src/maxtext/src && \
-python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml ${MAXTEXT_ARGS}"
+export PYTHONPATH=/app/src:/deps:/deps/src:/deps/src/maxtext/src:\$PYTHONPATH && \
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml ${MAXTEXT_ARGS}"
 
-# --- XPK Workload Creation ---
-echo "Creating XPK workload: ${WORKLOAD_NAME} on cluster: ${CLUSTER_NAME}"
+export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/tpu-prod-env-one-vm/param3_21jul:mohitkhatwani_${TIMESTAMP}}"
 
-PYTHONPATH=/mnt/data/workspace/xpk/src python3 -m xpk.main workload create \
+# --- Build & Upload Docker Image ---
+echo "Building and uploading runner image: ${DOCKER_IMAGE}..."
+bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME="${DOCKER_IMAGE}"
+
+# --- Create Workload via XPK ---
+echo "Submitting workload ${WORKLOAD_NAME} via XPK..."
+
+xpk workload create \
   --cluster="${CLUSTER_NAME}" \
   --project="${PROJECT_ID}" \
   --zone="${ZONE}" \
   --priority="${PRIORITY}" \
-  --max-restarts="${MAX_RESTARTS}" \
   --device-type="${DEVICE_TYPE}" \
   --num-slices="${NUM_SLICES}" \
-  --docker-image="${WORKLOAD_IMAGE}" \
+  --docker-image="${DOCKER_IMAGE}" \
   --workload="${WORKLOAD_NAME}" \
   --command="${RUN_COMMAND}"
 
 LOGS_URL="https://console.cloud.google.com/logs/query;query=resource.type%3D%22k8s_container%22%0Aresource.labels.project_id%3D%22${PROJECT_ID}%22%0Aresource.labels.location%3D%22southamerica-west1%22%0Aresource.labels.cluster_name%3D%22${CLUSTER_NAME}%22%0Aresource.labels.namespace_name%3D%22default%22%0Aresource.labels.pod_name%3A%22${WORKLOAD_NAME}-slice-job-0-0-%22%0Aseverity%3E%3DDEFAULT;storageScope=project;duration=P1D?project=${PROJECT_ID}"
 GKE_URL="https://console.cloud.google.com/kubernetes/service/southamerica-west1/${CLUSTER_NAME}/default/${WORKLOAD_NAME}/details?project=${PROJECT_ID}"
-TB_URL="https://tensorboard.corp.google.com/?logdir=${BASE_OUTPUT_DIR}/param-3/tensorboard"
+TB_URL="https://tensorboard.corp.google.com/?logdir=${BASE_OUTPUT_DIR}/param-3-pdb16/tensorboard"
 
 echo "========================================================================"
-echo "📋 Pantheon Cloud Logging (Worker 0 Logs):"
-echo "${LOGS_URL}"
-echo ""
-echo "☸️ GKE Workload Details:"
-echo "${GKE_URL}"
-echo ""
-echo "📊 GCS TensorBoard Link:"
-echo "${TB_URL}"
+echo "Workload Created Successfully!"
+echo "Workload:  ${WORKLOAD_NAME}"
+echo "Cloud Logs: ${LOGS_URL}"
+echo "GKE UI:     ${GKE_URL}"
+echo "TensorBoard: ${TB_URL}"
 echo "========================================================================"

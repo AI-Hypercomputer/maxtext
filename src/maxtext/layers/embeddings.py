@@ -35,11 +35,11 @@ from maxtext.utils.sharding import logical_to_mesh_axes, create_sharding
 _MAX_WAVELENGTH = 10_000
 
 
-def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> Array:
+def _maybe_move_embedding_to_device(embedding_table: Array, config: Config, sharding=None) -> Array:
   """Moves embedding table to device if parameter offloading is enabled."""
   if config.parameter_memory_host_offload:
     max_logging.log("embeddings.py: Moving embedding parameter to device")
-    return jax.device_put(embedding_table, max_utils.device_space())
+    return max_utils.to_device(embedding_table, sharding=sharding)
   return embedding_table
 
 
@@ -152,10 +152,7 @@ class Embed(nnx.Module):
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError("Input type must be an integer or unsigned integer.")
 
-    embedding = jnp.asarray(
-        _maybe_move_embedding_to_device(self.embedding.get_value(), self.config),
-        self.dtype,
-    )
+    embedding = jnp.asarray(self.embedding.get_value(), self.dtype)
 
     output_axis_names = (
         (

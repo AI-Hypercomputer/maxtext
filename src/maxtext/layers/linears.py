@@ -33,6 +33,7 @@ from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Arra
 from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.layers import normalizations
+from maxtext.utils.sharding import logical_to_mesh_axes
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
@@ -273,13 +274,9 @@ class DenseGeneral(nnx.Module):
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
       kernel = getattr(self.kernel, "value", self.kernel)
-      if hasattr(kernel, "value"):
-        kernel = kernel.value
-      # Move logit_dense kernel to device if parameter offloading is enabled
-      if self.parameter_memory_host_offload:
-        max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, max_utils.device_space())
+      kernel = max_utils.to_device(kernel)
       kernel = jnp.asarray(kernel, self.dtype)
+
 
     kernel = self._maybe_two_stage_all_gather(kernel)
 
@@ -300,7 +297,9 @@ class DenseGeneral(nnx.Module):
     )
 
     if self.bias is not None:
-      bias = jnp.asarray(self.bias[...], self.dtype)
+      bias = getattr(self.bias, "value", self.bias)
+      bias = max_utils.to_device(bias)
+      bias = jnp.asarray(bias, self.dtype)
       output += bias
     return output
 
@@ -723,11 +722,10 @@ class DeepSeekV4GroupedLinear(nnx.Module):
     """
     inputs = jnp.asarray(inputs, self.dtype)
 
-    kernel = self.kernel[...]
-    if self.parameter_memory_host_offload:
-      max_logging.log("linear.py: Moving parameter grouped_linear kernel to device")
-      kernel = jax.device_put(kernel, max_utils.device_space())
+    kernel = getattr(self.kernel, "value", self.kernel)
+    kernel = max_utils.to_device(kernel)
     kernel = jnp.asarray(kernel, self.dtype)
+
 
     # Perform a batched matrix multiplication using einsum with explicit precision.
     # We use jnp.einsum instead of explicitly flattening and using lax.dot_general

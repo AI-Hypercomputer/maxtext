@@ -408,7 +408,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       if config.parameter_memory_host_offload:
         # Params are kept on host (pinned_host) in in_shardings. Move only Param
         # variables to device before the forward/backward pass so that all dot_general
-        # operands share the same memory space (XLA on GPU requires this).
+        # operands share the same memory space.
         # Using params_shardings (Param-only) avoids Shardy rank mismatches that
         # occur when applying PartitionSpec() (rank-0 in SDY) to rank-1 RNG key tensors.
         device_param_shardings = jax.tree_util.tree_map_with_path(
@@ -452,10 +452,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       raw_grads,
   )
   if config.parameter_memory_host_offload:
-    raw_grads = jax.device_put(
-        raw_grads,
-        max_utils.with_memory_kind(params_shardings, "device"),
+    def _to_device_sharding(leaf):
+      if hasattr(leaf, "with_memory_kind"):
+        return leaf.with_memory_kind("device")
+      return leaf
+    device_grad_shardings = jax.tree.map(
+        _to_device_sharding,
+        params_shardings,
+        is_leaf=lambda x: isinstance(x, (NamedSharding, jax.sharding.Sharding)),
     )
+    raw_grads = jax.device_put(raw_grads, device_grad_shardings)
 
   # Extract aux fields into locals
   intermediate_outputs = aux["intermediate_outputs"]
@@ -530,29 +536,123 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
       new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)
   else:
-    if config.gradient_clipping_threshold > 0:
-      grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
-    else:
-      grads = raw_grads
-    if config.optimizer_memory_host_offload:
-      # state.optimizer is an NNX Optimizer module; state_mesh_shardings.optimizer
-      # is an NNX State. Use nnx.state() to get a compatible State for device_put.
-      device_opt_shardings = jax.tree_util.tree_map_with_path(
-          maxtext_utils_nnx.move_memory_to_device,
-          state_mesh_shardings.optimizer,
-          is_leaf=lambda x: isinstance(x, NamedSharding),
+    def _is_tree_leaf(x):
+      return isinstance(x, (jax.sharding.Sharding, jax.sharding.PartitionSpec, nnx.Variable, jax.ShapeDtypeStruct)) or (
+          hasattr(x, "shape") and hasattr(x, "dtype")
       )
-      opt_state = nnx.state(state.optimizer)
-      new_opt_state = jax.device_put(opt_state, device_opt_shardings)
-      nnx.update(state.optimizer, new_opt_state)
+
+    def _normalize_path(path):
+      def _key_to_str(k):
+        if hasattr(k, "key"):
+          return str(k.key)
+        if hasattr(k, "name"):
+          return str(k.name)
+        if hasattr(k, "idx"):
+          return str(k.idx)
+        return str(k)
+
+      return tuple(
+          _key_to_str(k)
+          for k in path
+          if _key_to_str(k) not in ["model", "optimizer", "opt_state", "value"]
+      )
+
+    sh_leaves = list(jax.tree_util.tree_leaves_with_path(state_mesh_shardings, is_leaf=_is_tree_leaf))
+    sh_lookup = {}
+    for p, l in sh_leaves:
+      val = l.get_value() if isinstance(l, nnx.Variable) else getattr(l, "value", l)
+      s = getattr(val, "sharding", getattr(l, "sharding", val if isinstance(val, (jax.sharding.Sharding, NamedSharding)) else None))
+      norm_p = _normalize_path(p)
+      if norm_p not in sh_lookup and s is not None:
+        sh_lookup[norm_p] = s
+
+    def _get_sharding(x):
+      val = x.get_value() if isinstance(x, nnx.Variable) else getattr(x, "value", x)
+      if hasattr(val, "sharding") and val.sharding is not None:
+        return val.sharding
+      if hasattr(x, "sharding") and x.sharding is not None:
+        return x.sharding
+      return None
+
+    def _get_param_sharding(path, val):
+      s = _get_sharding(val)
+      if s is not None and hasattr(s, "with_memory_kind"):
+        return s
+      norm_p = _normalize_path(path)
+      if norm_p in sh_lookup:
+        lookup_s = sh_lookup[norm_p]
+        if hasattr(lookup_s, "with_memory_kind"):
+          return lookup_s
+      for lookup_p, lookup_s in sh_lookup.items():
+        if len(norm_p) >= 2 and len(lookup_p) >= 2 and norm_p[-2:] == lookup_p[-2:]:
+          if hasattr(lookup_s, "with_memory_kind"):
+            return lookup_s
+      return None
+
+    # 1. Immediately post-VJP: Force all gradients to device HBM with correct NamedSharding
+    def _force_grad_to_device(path, g):
+      s = _get_param_sharding(path, g)
+      if s is not None and hasattr(s, "with_memory_kind"):
+        target_s = s.with_memory_kind("device")
+        return jax.device_put(g, target_s)
+      sharding_val = getattr(g, "sharding", None)
+      if hasattr(sharding_val, "with_memory_kind"):
+        return jax.device_put(g, sharding_val.with_memory_kind("device"))
+      return max_utils.to_device(g)
+
+    grads = jax.tree_util.tree_map_with_path(
+        _force_grad_to_device,
+        raw_grads,
+        is_leaf=_is_tree_leaf,
+    )
+
+    # 2. Gradient clipping executes purely on device HBM
+    if config.gradient_clipping_threshold > 0:
+      grads = maxtext_utils.apply_gradient_clipping(grads, None, config.gradient_clipping_threshold)
+
+    # 3. Pre-Apply-Gradients: Stage scanned model parameters to device HBM
+    if config.parameter_memory_host_offload or getattr(config, "parameter_memory_two_layer_buffer", False):
+      model_params = nnx.state(state.model)
+
+      def _stage_to_device(path, val):
+        if not sharding.is_scanned_block_param_path(path):
+          return val
+        val_arr = val.get_value() if isinstance(val, nnx.Variable) else getattr(val, "value", val)
+        s = _get_param_sharding(path, val)
+        if s is not None and hasattr(s, "with_memory_kind"):
+          target_s = s.with_memory_kind("device")
+          new_val = jax.device_put(val_arr, target_s)
+        else:
+          new_val = max_utils.to_device(val_arr)
+        if isinstance(val, nnx.Variable):
+          return val.replace(value=new_val)
+        return new_val
+
+      dev_model_params = jax.tree_util.tree_map_with_path(
+          _stage_to_device, model_params, is_leaf=_is_tree_leaf
+      )
+      nnx.update(state.model, dev_model_params)
+
+    # 4. Native Optax update on TPU hardware
+    update_kwargs = {}
     if config.skip_step_on_spikes:
       # The skip-step optimizer is a GradientTransformationExtraArgs that reads
       # loss/grad_norm to decide whether to zero the update on a spike. nnx
       # Optimizer.update forwards these kwargs to tx.update.
-      grad_norm = max_utils.l2norm_pytree(grads)
-      state.apply_gradients(grads, loss=loss, grad_norm=grad_norm)
+      update_kwargs = {"loss": loss, "grad_norm": max_utils.l2norm_pytree(grads)}
+
+    if config.scanned_optimizer_update:
+      # Applies the optimizer update one decoder layer at a time via
+      # jax.lax.scan instead of materializing all layers' params/grads/opt_state
+      # on device simultaneously -- see layerwise_scanned_optimizer_update's
+      # docstring for the correctness argument (verified numerically offline).
+      scanned_leading_dim = config.num_decoder_layers // max(config.inhomogeneous_layer_cycle_interval, 1)
+      maxtext_utils.layerwise_scanned_optimizer_update(
+          state.optimizer, state.model, grads, scanned_leading_dim, **update_kwargs
+      )
     else:
-      state.apply_gradients(grads)
+      state.apply_gradients(grads, **update_kwargs)
+
     new_state = state
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
@@ -610,6 +710,30 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   if isinstance(model, nn.Module):
     return new_state, metrics
+
+  # 5. Post-Apply-Gradients: Evict scanned model parameters back to pinned_host strictly after metrics
+  if config.parameter_memory_host_offload or getattr(config, "parameter_memory_two_layer_buffer", False):
+    model_params = nnx.state(new_state.model)
+
+    def _evict_to_host(path, val):
+      if not sharding.is_scanned_block_param_path(path):
+        return val
+      val_arr = val.get_value() if isinstance(val, nnx.Variable) else getattr(val, "value", val)
+      s = _get_param_sharding(path, val)
+      if s is not None and hasattr(s, "with_memory_kind"):
+        target_s = s.with_memory_kind("pinned_host")
+        new_val = jax.device_put(val_arr, target_s)
+      else:
+        new_val = val_arr
+      if isinstance(val, nnx.Variable):
+        return val.replace(value=new_val)
+      return new_val
+
+    host_model_params = jax.tree_util.tree_map_with_path(
+        _evict_to_host, model_params, is_leaf=_is_tree_leaf
+    )
+    nnx.update(new_state.model, host_model_params)
+
   # Drop Intermediates (e.g. sowed max_logits for QK-Clip) and the MTP sown
   # vars (mtp_losses/mtp_acceptance) before returning. They're absent from
   # state_mesh_shardings and would cause a leaf-count / structure mismatch.
@@ -829,7 +953,7 @@ def train_loop(config, recorder, state=None):
       params_shardings,
   )
 
-  with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     data_sharding = sharding.get_input_data_sharding(config, mesh)
     shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     if config.shard_optimizer_over_data and isinstance(model, nn.Module):

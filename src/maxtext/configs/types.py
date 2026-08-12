@@ -1319,6 +1319,22 @@ class RematAndOffload(BaseModel):
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
+  parameter_memory_two_layer_buffer: bool = Field(
+      False, description="Enable layer-wise 2-layer buffer parameter offloading."
+  )
+  scanned_optimizer_update: bool = Field(
+      False,
+      description=(
+          "For NNX models with scanned decoder blocks, apply the optimizer update "
+          "(tx.update + apply_updates) to the scanned-block params/grads/opt_state "
+          "via a jax.lax.scan over the layer axis, one layer at a time, instead of "
+          "materializing all layers' params/grads/opt_state on device simultaneously "
+          "for a single whole-tree optax update. Mathematically identical to the "
+          "whole-tree update for optimizers whose transforms are per-parameter "
+          "independent (e.g. adamw, adam_pax) -- NOT verified safe for optimizers "
+          "with cross-parameter coupling (e.g. muon), which should not enable this."
+      ),
+  )
 
 
 class Tokenizer(BaseModel):

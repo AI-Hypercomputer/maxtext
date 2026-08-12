@@ -26,6 +26,7 @@ from jax.sharding import NamedSharding
 from maxtext.common.common_types import Array, DType, ShardMode
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import Initializer, variable_to_logically_partitioned
+from maxtext.utils.sharding import logical_to_mesh_axes
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 
@@ -81,12 +82,7 @@ class RMSNorm(nnx.Module):
         y = jax.lax.with_sharding_constraint(y, out_sharding)
       return y
 
-    scale = self.scale.get_value()
-    # Move scale to device if parameter offloading is enabled
-    if self.parameter_memory_host_offload:
-      max_logging.log("normalizations.py: Moving scale parameter to device")
-      scale = jax.device_put(scale, max_utils.device_space())
-
+    scale = max_utils.to_device(self.scale.get_value())
     scale = jnp.asarray(scale, self.dtype)
     effective_scale = scale + self.scale_offset
     return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)

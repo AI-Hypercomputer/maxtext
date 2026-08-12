@@ -1509,24 +1509,8 @@ class AttentionOp(nnx.Module):
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
 
-      # Create the splash attention kernel object separately, jit it for performance
-      @partial(
-          jax.jit,
-          static_argnames=[
-              "single_head_mask",
-          ],
-      )
-      def wrap_tokamax_splash_kernel(single_head_mask):
-        splash_kernel = tokamax_splash_kernel.make_splash_mha(
-            mask=single_head_mask,
-            config=sa_config,
-            q_seq_shards=cp_size,  # axis for sequence sharding,
-        )
-        return splash_kernel
-
-      splash_kernel = wrap_tokamax_splash_kernel(single_head_mask)
-      segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
-      splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
+      splash_kernel = None
+      segment_axis_names_splash_kernel = None
     elif not use_tokamax_ring and self.config.use_jax_splash:
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
@@ -1679,6 +1663,12 @@ class AttentionOp(nnx.Module):
             attention_output, _ = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
             return attention_output, None
         else:
+          if splash_kernel is None:
+            splash_kernel = tokamax_splash_kernel.make_splash_mha(
+                mask=single_head_mask,
+                config=sa_config,
+                q_seq_shards=cp_size,
+            )
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
 
           if record_max_logits:

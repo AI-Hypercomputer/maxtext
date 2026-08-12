@@ -543,18 +543,29 @@ class Decoder(nn.Module):
     RemattedBlockLayers = []
     for block_layer in block_layers:
       if self.config.parameter_memory_host_offload:
-        # Define parameter movement with mesh-based sharding
-        def move_to_device(variables):
-          """Move parameters to device with proper sharding."""
+        if getattr(self.config, "parameter_memory_two_layer_buffer", False):
+          # Define 2-layer double-buffered parameter prefetching to device
+          def move_to_device_double_buffered(variables):
+            def map_fn(path, value):
+              max_logging.log(f"models.py: Double-buffer moving parameter {path} to device")
+              return max_utils.to_device(value)
 
-          def map_fn(path, value):
-            max_logging.log(f"models.py: Moving parameter {path} to device")
-            return jax.device_put(value, max_utils.device_space())
+            return jax.tree_util.tree_map_with_path(map_fn, variables)
 
-          return jax.tree_util.tree_map_with_path(map_fn, variables)
+          block_layer = nn.map_variables(block_layer, ["params"], move_to_device_double_buffered, mutable=True)
+        else:
+          # Define standard parameter movement with mesh-based sharding
+          def move_to_device(variables):
+            """Move parameters to device with proper sharding."""
 
-        # Transform layer class before remat
-        block_layer = nn.map_variables(block_layer, ["params"], move_to_device, mutable=True)
+            def map_fn(path, value):
+              max_logging.log(f"models.py: Moving parameter {path} to device")
+              return max_utils.to_device(value)
+
+            return jax.tree_util.tree_map_with_path(map_fn, variables)
+
+          # Transform layer class before remat
+          block_layer = nn.map_variables(block_layer, ["params"], move_to_device, mutable=True)
 
       # Apply remat policy to layer
       layer = nn.remat(

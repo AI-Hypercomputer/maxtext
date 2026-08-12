@@ -5,8 +5,6 @@ if [ -f /mnt/data/workspace/max_venv/bin/activate ]; then
   source /mnt/data/workspace/max_venv/bin/activate
 elif [ -f /usr/local/google/home/chengnuojin/.venv/bin/activate ]; then
   source /usr/local/google/home/chengnuojin/.venv/bin/activate
-elif [ -f /usr/local/google/home/mohitkhatwani/max_venv/bin/activate ]; then
-  source /usr/local/google/home/mohitkhatwani/max_venv/bin/activate
 fi
 
 # Execute in a subshell to ensure environment recovery automatically
@@ -17,7 +15,7 @@ fi
   "--xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
   "--xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
   "--xla_msa_enable_sync_copy_replacement=false"
-  "--xla_tpu_scoped_vmem_limit_kib=78500"
+  "--xla_tpu_scoped_vmem_limit_kib=81000"
   "--xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
   "--xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
   "--xla_tpu_enable_concurrent_sparse_core_offloading=true"
@@ -46,25 +44,19 @@ fi
   "--xla_tpu_enable_ilp_latency_hiding_scheduler=true"
   "--xla_tpu_enable_all_experimental_scheduler_features=true"
   "--xla_tpu_enable_scheduler_memory_pressure_tracking=true"
-  "--xla_tpu_host_transfer_overlap_limit=4"
+  "--xla_tpu_host_transfer_overlap_limit=2"
   "--xla_tpu_aggressive_opt_barrier_removal=ENABLED"
   "--xla_lhs_prioritize_async_depth_over_stall=ENABLED"
   "--xla_tpu_enable_ag_backward_pipelining=true"
   "--xla_should_allow_loop_variant_parameter_in_chain=ENABLED"
   "--xla_should_add_loop_invariant_op_in_chain=ENABLED"
-  "--xla_max_concurrent_host_send_recv=100"
-  "--xla_tpu_scheduler_percent_shared_memory_limit=100"
-  # Lets XLA's own rematerialization pass spill to pinned host memory instead of
-  # recomputing. Required for per_device_batch_size >= 6 with
-  # decoder_layer_input=offload + context=offload: without it pdb=8 misses the
-  # 31.24GiB HBM budget by 5.37MB. Costs ~26GiB/step of host traffic - measure
-  # step time on hardware before adopting.
-  "--xla_tpu_rematerialization_use_host_memory_offload=true"
+  "--xla_max_concurrent_host_send_recv=4"
+  "--xla_tpu_scheduler_percent_shared_memory_limit=95"
 )
   export LIBTPU_INIT_ARGS="${XLA_FLAGS_ARRAY[*]}"
 
   # --- 2. Export Required Environment Variables ---
-  export PYTHONPATH=$PWD/src:$PWD/src/maxtext/src:$PYTHONPATH
+  export PYTHONPATH=$PWD/src:$PWD:$PYTHONPATH
   export JAX_PLATFORMS='cpu'
   export ENABLE_PJRT_COMPATIBILITY='true'
 
@@ -78,7 +70,7 @@ fi
     "compile_xla_flags=${LIBTPU_INIT_ARGS}"
     "model_name=${MODEL_NAME}"
     "base_output_directory=${BASE_OUTPUT_DIR}"
-    "run_name=param-3"
+    "run_name=param-3-pdb16"
     "log_config=false"
     "debug_sharding=false"
     "ragged_gather_reduce_fallback=false"
@@ -93,11 +85,12 @@ fi
     "custom_mesh=hybrid_ring_64x4"
     "use_ragged_sort=True"
     "use_random_routing=True"
-    "num_moe_token_chunks=2"
-    "per_device_batch_size=8"
+    "num_moe_token_chunks=8"
+    "num_vocab_tiling=8"
+    "per_device_batch_size=16"
     "opt_type=adamw"
     "max_target_length=2048"
-    "ragged_buffer_factor=1.5"
+    "ragged_buffer_factor=1.0"
     "remat_policy=custom"
     "reuse_example_batch=1"
     "decoder_layer_input=offload"
@@ -142,16 +135,21 @@ fi
     "wo_tile_dlhs_mlp_dim=1536"
     "wo_tile_drhs_embed_dim=3072"
     "wo_tile_drhs_mlp_dim=1536"
-    "use_tokamax_gmm=True"
-    "use_gmm_v2=True"
-    "optimizer_memory_host_offload=False"
-    "parameter_memory_host_offload=False"
+    "use_tokamax_gmm=False"
+    "use_gmm_v2=False"
+    "optimizer_memory_host_offload=True"
+    "scanned_optimizer_update=True"
+    "parameter_memory_host_offload=True"
+    "parameter_memory_two_layer_buffer=True"
+    "param_scan_axis=0"
     "enable_checkpointing=False"
     "async_checkpointing=False"
     "tokenizer_type=tiktoken"
     "tokenizer_path=tokenizer_74B/"
     "use_gdn_kernel=True"
     "use_hybrid_gdn=True"
+    "override_model_config=True"
+    "gdn_chunk_size=128"
     "profiler=xplane"
     "profiler_steps=5"
     "skip_first_n_steps_for_profiler=2"
@@ -161,7 +159,7 @@ fi
   )
 
   echo "========================================================================"
-  echo "Running MaxText AOT train_compile for ${MODEL_NAME} on v6e-256"
+  echo "Running MaxText AOT train_compile for ${MODEL_NAME} on v6e-256 (pdb=16)"
   echo "========================================================================"
 
   rm -f /tmp/libtpu_lockfile 2>/dev/null || true

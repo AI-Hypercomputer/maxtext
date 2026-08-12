@@ -227,7 +227,29 @@ def jit_and_compile(
         donate_argnums=donate_argnums,
     )
     maxtext_utils.maybe_dump_jaxpr(config, jitted, func_input_args)
+    out_leaves = jax.tree_util.tree_leaves_with_path(out_shardings)
+    in_state_leaves = jax.tree_util.tree_leaves_with_path(func_input_args[0])
+    print(f"[OPT_OFFLOAD_DEBUG] Total out_shardings leaves: {len(out_leaves)}, in_state leaves: {len(in_state_leaves)}", flush=True)
+    for (p1, l1), (p2, l2) in zip(out_leaves, in_state_leaves):
+      mk1 = getattr(l1, "memory_kind", None)
+      var_val = getattr(l2, "value", l2)
+      sh2 = getattr(var_val, "sharding", getattr(l2, "sharding", None))
+      mk2 = getattr(sh2, "memory_kind", None)
+      if mk1 == "pinned_host" or mk2 == "pinned_host":
+        p_str = "/".join(str(k.key if hasattr(k, "key") else k.name if hasattr(k, "name") else k) for k in p1)
+        spec1 = getattr(l1, "spec", None)
+        spec2 = getattr(sh2, "spec", None)
+        print(f"[OPT_OFFLOAD_DEBUG] Leaf {p_str}: out_mk={mk1} (spec={spec1}) | in_mk={mk2} (spec={spec2})", flush=True)
+
+    # `.lower()` is where the function is actually traced, so it must stay
+    # inside the `logical_axis_rules` context manager above -- otherwise every
+    # nn.with_logical_constraint call in the model traces with no active
+    # logical axis rules and silently becomes a no-op (fully replicated
+    # instead of sharded), causing massive HBM overallocation at compile time.
     lowered = jitted.lower(*func_input_args, **func_input_kwargs)
+  with open("/tmp/hlo_dump.hlo", "w") as f:
+    f.write(lowered.as_text())
+  print("[OPT_OFFLOAD_DEBUG] Dumped lowered HLO to /tmp/hlo_dump.hlo", flush=True)
   # Import libtpu flags as compiler options. Defaults to empty dict if string is empty.
   compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
   compiled = lowered.compile(compiler_options=compiler_options)
@@ -347,6 +369,11 @@ def main(argv: Sequence[str]) -> None:
 
   input_state_mesh_shardings = sharding.build_zero1_input_state_mesh_shardings(
       config, state_mesh_shardings, params_shardings
+  )
+
+  shaped_train_args = (
+      maxtext_utils_nnx.set_named_sharding_nnx(shaped_train_args[0], input_state_mesh_shardings),
+      *shaped_train_args[1:],
   )
 
   # Get data sharding

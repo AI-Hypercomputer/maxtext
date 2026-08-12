@@ -69,7 +69,7 @@ from maxtext.models import (
 )
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
-from maxtext.utils.sharding import create_sharding
+from maxtext.utils.sharding import create_sharding, get_logical_axis_rules
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -347,6 +347,34 @@ class NNXScannedPipelineStage(nnx.Module):
 
     def layer_fn(carry, scanned_vars):
       current_params, current_state = scanned_vars
+      if self.config.parameter_memory_host_offload or getattr(self.config, "parameter_memory_two_layer_buffer", False):
+        def move_param_to_device(param, outer_param):
+          sharding = getattr(param, "sharding", None)
+          if sharding is None and hasattr(param, "aval"):
+            sharding = getattr(param.aval, "sharding", None)
+          if sharding is None:
+            sharding = getattr(outer_param, "sharding", None)
+            if sharding is None:
+              val = getattr(outer_param, "value", outer_param)
+              sharding = getattr(val, "sharding", getattr(getattr(val, "aval", None), "sharding", None))
+          if hasattr(sharding, "with_memory_kind"):
+            spec = getattr(sharding, "spec", None)
+            ndim = getattr(param, "ndim", len(param.shape) if hasattr(param, "shape") else None)
+            if spec is not None and ndim is not None and len(spec) == ndim + 1:
+              # Drop leading scan axis partition for the unstacked slice
+              target_spec = jax.sharding.PartitionSpec(*spec[1:])
+              target_sharding = jax.sharding.NamedSharding(sharding.mesh, target_spec, memory_kind="device")
+            else:
+              target_sharding = sharding.with_memory_kind("device")
+            return jax.lax.with_sharding_constraint(param, target_sharding)
+          return max_utils.to_device(param)
+
+        current_params = jax.tree.map(
+            move_param_to_device,
+            current_params,
+            params,
+            is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.ShapeDtypeStruct)) or (hasattr(x, "shape") and hasattr(x, "dtype")),
+        )
       layer = nnx.merge(graphdef, current_params, current_state)
       layer_out = layer(
           carry,
@@ -730,12 +758,10 @@ class NNXDecoder(nnx.Module):
     layer_kwargs = {
         "num_of_layers": cycle_interval,
         "remat_policy_fn": policy,
-        "apply_internal_remat": True,
     }
     rem_layer_kwargs = {
         "num_of_layers": num_remaining_layers,
         "remat_policy_fn": policy,
-        "apply_internal_remat": True,
     }
 
     RemattedQwen3NextBlock = qwen3.Qwen3NextScannableBlock
@@ -1034,7 +1060,7 @@ class NNXDecoder(nnx.Module):
         current_params, current_state = scanned_vars
         kv_cache_layer = None
 
-      if self.config.parameter_memory_host_offload:
+      if self.config.parameter_memory_host_offload or getattr(self.config, "parameter_memory_two_layer_buffer", False):
         current_params = jax.tree.map(
             lambda x: jax.device_put(x, max_utils.device_space()),
             current_params,
@@ -1066,7 +1092,10 @@ class NNXDecoder(nnx.Module):
         # Avoid returning and stacking read-only parameters inside the scan body.
         # This prevents huge unnecessary memory allocation.
         _, _, updated_state = nnx.split(layer, nnx.Param, ...)
-        new_current_state = updated_state
+        if hasattr(nnx, "filter_state"):
+          new_current_state = nnx.filter_state(updated_state, nnx.Not((nnx.RngState, nnx.Intermediate)))
+        else:
+          new_current_state = updated_state
 
       if use_kv:
         return new_carry, (new_current_state, updated_kv)
@@ -1124,8 +1153,13 @@ class NNXDecoder(nnx.Module):
       new_params, new_rest = scanned_state.split(nnx.Param, ...)
       out_layers = nnx.merge(updated_graphdef[0], new_params, new_rest)
     else:
-      clean_state = nnx.filter_state(scanned_state, nnx.Not((nnx.RngState, nnx.Intermediate)))
-      nnx.update(layers, clean_state)
+      if bool(scanned_state):
+        if hasattr(nnx, "filter_state"):
+          clean_state = nnx.filter_state(scanned_state, nnx.Not((nnx.RngState, nnx.Intermediate)))
+        else:
+          clean_state = scanned_state
+        if bool(clean_state):
+          nnx.update(layers, clean_state)
       out_layers = layers
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
@@ -1450,10 +1484,18 @@ class NNXDecoder(nnx.Module):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
+    # get_logical_axis_rules() (used implicitly by create_sharding when rules=None)
+    # reads flax's ambient nn.partitioning.axis_rules context, which is not
+    # propagated into a jax.lax.scan body (e.g. the vocab-tiling chunk scan in
+    # vocabulary_tiling.py that calls apply_output_head per chunk). Falling back
+    # to config.logical_axis_rules explicitly avoids silently replicating
+    # (instead of sharding) the output head's activations in that case.
+    axis_rules = get_logical_axis_rules() or cfg.logical_axis_rules
     if cfg.shard_mode == ShardMode.EXPLICIT:
       norm_out_sharding = create_sharding(
           self.mesh,
           ("activation_batch", "activation_length", "activation_embed"),
+          rules=axis_rules,
       )
     else:
       norm_out_sharding = None
@@ -1462,7 +1504,7 @@ class NNXDecoder(nnx.Module):
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
     if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE}:
-      out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
+      out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"), rules=axis_rules)
     else:
       out_sharding = create_sharding(
           self.mesh,
@@ -1471,6 +1513,7 @@ class NNXDecoder(nnx.Module):
               "activation_length",
               "activation_vocab",
           ),
+          rules=axis_rules,
       )
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
@@ -1929,9 +1972,9 @@ class NNXDecoder(nnx.Module):
         dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
 
         def pure_layer_fn(graphdef_in, state_in, y_in, kv_in):
-          if cfg.parameter_memory_host_offload:
+          if cfg.parameter_memory_host_offload or getattr(cfg, "parameter_memory_two_layer_buffer", False):
             state_in = jax.tree.map(
-                lambda x: jax.device_put(x, max_utils.device_space()),
+                max_utils.to_device,
                 state_in,
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
@@ -2274,7 +2317,7 @@ class NNXDecoder(nnx.Module):
     cycle_interval = cfg.inhomogeneous_layer_cycle_interval
     scan_length = cfg.num_decoder_layers // cycle_interval
 
-    block_unroll = 1
+    block_unroll = getattr(cfg, "block_unroll", 1)
     if scan_length > 0:
       grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, cycle_interval, stack=False)
       y, self.scanned_blocks, _ = self._apply_layers_sequentially(
@@ -2283,7 +2326,6 @@ class NNXDecoder(nnx.Module):
           *layer_args,
           length=scan_length,
           kv_caches_stacked=grouped_kv_caches,
-          skip_block_remat=True,
           unroll=block_unroll,
           **layer_kwargs,
       )
@@ -2300,6 +2342,11 @@ class NNXDecoder(nnx.Module):
         remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
 
       def pure_qwen3_fn(graphdef, state_in, y_in, kv_in):
+        if cfg.parameter_memory_host_offload or getattr(cfg, "parameter_memory_two_layer_buffer", False):
+          state_in = jax.tree.map(
+              max_utils.to_device,
+              state_in,
+          )
         merged_layer = nnx.merge(graphdef, state_in)
         call_kwargs = dict(layer_kwargs)
         if kv_in is not None:

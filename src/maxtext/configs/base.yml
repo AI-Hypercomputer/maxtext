@@ -381,6 +381,7 @@ engram: 'remat'
 
 optimizer_memory_host_offload: false
 parameter_memory_host_offload: false
+parameter_memory_two_layer_buffer: false
 # Whether to use jax.lax.scan over layers (stacked/unstacked checkpoint). We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations. When resuming from a checkpoint, this flag is auto-determined from metadata.
 scan_layers: true
 param_scan_axis: 1
