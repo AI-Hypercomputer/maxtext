@@ -30,10 +30,6 @@ on:
         required: false
       GEMINI_API_KEY:
         required: false
-    outputs:
-      tests_result:
-        description: 'The result of all_tests_passed and all_notebooks_passed jobs.'
-        value: ${{ (jobs.all_tests_passed.result == 'success' && jobs.all_notebooks_passed.result == 'success') && 'success' || 'failure' }}
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours

@@ -14,7 +14,7 @@
 
 # This workflow will run unit and integration tests on MaxText Docker images.
 
-name: MaxText Unit and Integration Tests
+name: MaxText CI Tests on Docker Images
 
 on:
   workflow_call:
@@ -31,6 +31,11 @@ on:
       workflow:
         required: true
         type: string
+      additional_image_to_tag:
+        description: 'Optional additional image to tag as latest if tests pass.'
+        required: false
+        type: string
+        default: ''
 permissions:
   contents: read
 
@@ -51,9 +56,9 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           if gcloud container images describe "gcr.io/${PROJECT_NAME}/${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
   test:
@@ -92,6 +97,7 @@ jobs:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           IMAGE_NAME_EXPR: ${{ inputs.image_name }}
           IMAGE_TAG_EXPR: ${{ inputs.image_tag }}
+          ADDITIONAL_IMAGE_TO_TAG: ${{ inputs.additional_image_to_tag }}
         run: |
           image_name="$IMAGE_NAME_EXPR"
           image_tag="$IMAGE_TAG_EXPR"
@@ -104,3 +110,10 @@ jobs:
           # TODO: This is a workaround, to be removed when promote_docker_image.yml workflow is stable
           # Add "latest" tag
           gcloud container images add-tag "${SOURCE_IMAGE}:${image_tag}" "${SOURCE_IMAGE}:latest" --quiet
+
+          # Add "latest" tag to additional image if specified
+          if [ -n "$ADDITIONAL_IMAGE_TO_TAG" ]; then
+            ADDITIONAL_IMAGE="gcr.io/${PROJECT_NAME}/${ADDITIONAL_IMAGE_TO_TAG}"
+            echo "Tagging ${ADDITIONAL_IMAGE}:${image_tag} as ${ADDITIONAL_IMAGE}:latest"
+            gcloud container images add-tag "${ADDITIONAL_IMAGE}:${image_tag}" "${ADDITIONAL_IMAGE}:latest" --quiet
+          fi

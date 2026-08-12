@@ -51,24 +51,24 @@ jobs:
           enable-cache: true
 
       - name: Set venv
-        run: uv venv --python 3.12 $GITHUB_WORKSPACE/venv
+        run: uv venv --python 3.12 "$GITHUB_WORKSPACE"/venv
 
       - name: Install dependencies
-        run: . $GITHUB_WORKSPACE/venv/bin/activate && uv pip install -r src/dependencies/requirements/requirements_docs.txt
+        run: . "$GITHUB_WORKSPACE"/venv/bin/activate && uv pip install -r src/dependencies/requirements/requirements_docs.txt
 
       - name: Run Sphinx linkcheck
         id: linkcheck
         continue-on-error: true
         run: |
-          . $GITHUB_WORKSPACE/venv/bin/activate
+          . "$GITHUB_WORKSPACE"/venv/bin/activate
           sphinx-build -b linkcheck docs docs/_build/linkcheck -q --keep-going
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
       - name: Prepare issue body
         if: steps.linkcheck.outcome == 'failure' && github.event_name == 'schedule'
         run: |
           DATE=$(date +%Y-%m-%d)
-          echo "ISSUE_DATE=$DATE" >> $GITHUB_ENV
+          echo "ISSUE_DATE=$DATE" >> "$GITHUB_ENV"
 
           cat > issue-body.md << 'EOF'
           ## Documentation Link Check Failed
@@ -82,15 +82,19 @@ jobs:
           EOF
 
           if [ -f docs/_build/linkcheck/output.txt ]; then
-            echo '```' >> issue-body.md
-            cat docs/_build/linkcheck/output.txt >> issue-body.md
-            echo '```' >> issue-body.md
+            {
+              echo '```'
+              cat docs/_build/linkcheck/output.txt
+              echo '```'
+            } >> issue-body.md
           else
             echo 'No output file generated.' >> issue-body.md
           fi
 
-          echo '' >> issue-body.md
-          echo 'Please review and fix the broken links in the documentation.' >> issue-body.md
+          {
+            echo ''
+            echo 'Please review and fix the broken links in the documentation.'
+          } >> issue-body.md
 
       - name: Create issue for broken links
         if: steps.linkcheck.outcome == 'failure' && github.event_name == 'schedule'
