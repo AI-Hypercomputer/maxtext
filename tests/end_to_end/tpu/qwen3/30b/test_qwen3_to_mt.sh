@@ -58,4 +58,5 @@ python3 -m tests.utils.forward_pass_logit_checker \
     --hf_model_path=${HF_GOLDEN_MODEL} \
     --max_kl_div=0.03 \
     --run_hf_model=true \
+    attention=dot_product \
     hardware=cpu skip_jax_distributed_system=True
