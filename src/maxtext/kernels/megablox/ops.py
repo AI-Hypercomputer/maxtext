@@ -387,12 +387,7 @@ def _fwd_run_tokamax_v2(
   lhs_operand = lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs
   maybe_quantize_lhs = not isinstance(lhs, qpl.QArray) and qwix_numerics.should_quantize(lhs_operand.dtype)
 
-  # When lhs is not pre-quantized (ahead-of-time by the caller), fall back to
-  # a static scale from the quantization rule's fixed calibration if one is
-  # configured; the kernel uses it directly instead of computing a dynamic
-  # per-block absmax. If lhs is already a QArray, its scale is applied
-  # externally below, so no in-kernel scale is needed.
-  lhs_scale = None if isinstance(lhs, qpl.QArray) else _fwd_prepare_lhs_scale(quantization_rule)
+  lhs_scale = _fwd_prepare_lhs_scale(quantization_rule) if maybe_quantize_lhs else None
 
   custom_fwd_tiling = gmm_v2.TileSizes(
       tile_m=tiling[0],
