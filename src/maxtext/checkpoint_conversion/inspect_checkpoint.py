@@ -217,7 +217,7 @@ def inspect_maxtext(args, remaining_args):
   # Defer imports to avoid overhead when running in other modes.
   import jax
   from maxtext.utils import max_utils, maxtext_utils
-  from maxtext import pyconfig
+  from maxtext.configs import pyconfig
   from maxtext.utils.globals import MAXTEXT_PKG_DIR
   from maxtext.layers import quantizations
   from maxtext.models import models
