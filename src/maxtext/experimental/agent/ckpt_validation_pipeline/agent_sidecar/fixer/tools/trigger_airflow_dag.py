@@ -24,10 +24,7 @@ import google.auth
 import google.auth.transport.requests
 
 # Note: In a production environment, the Airflow Webserver URL and auth token would be injected via environment variables.
-AIRFLOW_URL = os.environ.get(
-    "AIRFLOW_WEBSERVER_URL",
-    "https://4bae0a6de8f94e92aa8ee3a6ffc8b278-dot-us-central1.composer.googleusercontent.com",
-)
+AIRFLOW_URL = os.environ.get("AIRFLOW_WEBSERVER_URL", "")
 DAG_ID = "maxtext_validation_master_dag"
 
 

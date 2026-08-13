@@ -106,11 +106,11 @@ def main():
   except subprocess.CalledProcessError as e:
     print(f"Note: gh pr create failed (code {e.returncode}):\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}")
     print(f"Successfully created forked branch '{fork_branch}' and committed fix locally.")
-    print(f"PR Title: {args.title}\nPR Body: {args.body}")
+    print(f"PR Title: {title}\nPR Body: {body}")
   except Exception as e:
     print(f"Note: gh CLI or remote push could not authenticate in serverless mode ({e}).")
     print(f"Successfully created forked branch '{fork_branch}' and committed fix locally.")
-    print(f"PR Title: {args.title}\nPR Body: {args.body}")
+    print(f"PR Title: {title}\nPR Body: {body}")
 
 
 if __name__ == "__main__":

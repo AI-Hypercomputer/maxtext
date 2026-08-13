@@ -30,6 +30,9 @@ def check_for_failures(expected_run_name=None):
   Returns a tuple (report_data, blob_name) if a failure is found, else (None, None).
   """
   logger.info("Checking for failures in gs://%s/", GCS_BUCKET_NAME)
+  report_data_out = None
+  blob_name_out = None
+  
   try:
     client = storage.Client()
     bucket = client.bucket(GCS_BUCKET_NAME)
@@ -60,12 +63,14 @@ def check_for_failures(expected_run_name=None):
           report_data.get("status") in ("failed", "FAILED", "FAILURE") or report_data.get("success") is False
       ):
         logger.info("Detected failure report: %s", blob.name)
-        return report_data, blob.name
+        report_data_out = report_data
+        blob_name_out = blob.name
+        break
 
   except Exception as e:
     logger.error("Error checking GCS for failures: %s", e)
 
-  return None, None
+  return report_data_out, blob_name_out
 
 
 def check_for_direct_airflow_failures():

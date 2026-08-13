@@ -74,9 +74,9 @@ def dispatch_email_alert(run_id, model_name, recipient="", state_entry=None):
     history_json = json.dumps(iteration_history, indent=2)
 
     # Compile the final Markdown body with Github & Airflow links
-    pr_url = state_entry.get("pr_url", "https://github.com/AI-Hypercomputer/maxtext/pulls")
-    log_url = f"https://console.cloud.google.com/run/jobs/executions/list?project=tpu-prod-env-multipod"
-    report_url = f"https://console.cloud.google.com/storage/browser/maxtext-validation-agent-reports"
+    pr_url = state_entry.get("pr_url", "")
+    log_url = state_entry.get("log_url", "")
+    report_url = state_entry.get("report_url", "")
 
     body = (
         f"""### Pipeline Halted: Optimization Limit Reached

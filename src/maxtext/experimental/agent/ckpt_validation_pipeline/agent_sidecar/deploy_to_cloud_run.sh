@@ -3,11 +3,11 @@ set -e
 
 # Ensure temporary Dockerfile in root is cleaned up on exit
 trap "rm -f ./Dockerfile .gcloudignore.tmp" EXIT
-PROJECT_ID="tpu-prod-env-multipod"
-REGION="us-central1"
-REPO_NAME="maxtext-agent-repo"
-IMAGE_NAME="overwatch-sidecar"
-JOB_NAME="maxtext-validation-job"
+PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-tpu-prod-env-multipod}"
+REGION="${GOOGLE_CLOUD_REGION:-us-central1}"
+REPO_NAME="${AGENT_REPO_NAME:-maxtext-agent-repo}"
+IMAGE_NAME="${AGENT_IMAGE_NAME:-overwatch-sidecar}"
+JOB_NAME="${AGENT_JOB_NAME:-maxtext-validation-job}"
 
 echo "1. Configuring GCP Project..."
 gcloud config set project $PROJECT_ID

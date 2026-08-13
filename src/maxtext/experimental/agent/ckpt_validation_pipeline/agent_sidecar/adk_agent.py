@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from google import genai
 from google.genai import types
+from google.cloud import storage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -193,8 +194,6 @@ def write_remediation_report(run_id: str, content: str) -> str:
       f.write(content)
 
     # Upload to the reports bucket so it persists after the Cloud Run job exits
-    from google.cloud import storage
-
     gcs_bucket = os.environ.get("AGENT_TRIGGER_BUCKET", "maxtext-validation-agent-reports")
     if gcs_bucket.startswith("gs://"):
       gcs_bucket = gcs_bucket[5:]

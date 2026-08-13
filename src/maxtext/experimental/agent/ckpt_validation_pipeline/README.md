@@ -27,7 +27,7 @@ If a step fails, the Overwatch Agent analyzes the divergence, attempts to fix th
 To begin, you'll need:
 
 1. A valid Google Cloud Storage (GCS) bucket where your converted checkpoint is located (e.g., `gs://my-bucket/converted_ckpt/0/items`).
-2. The corresponding MaxText internal model name (e.g., `qwen3-8b`, `llama3-70b`).
+2. The corresponding MaxText internal model name (e.g., `llama2-7b`, `gemma-7b`).
 3. To trigger the pipeline via the Airflow UI using the `maxtext_validation_agent` DAG.
 4. A full run of the pipeline should typically take about 1-2 hours if all stages pass.
 
@@ -61,7 +61,7 @@ python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/checkpoint_shape
 ```bash
 python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/forward_compile_validator.py \
   --checkpoint_gcs_path=gs://your-bucket/checkpoint/0/items \
-  --maxtext_model_name=qwen3-8b \
+  --maxtext_model_name=llama2-7b \
   --report_gcs_dir=gs://your-bucket/reports/ \
   --scan_layers=true
 ```
@@ -71,9 +71,9 @@ python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/forward_compile_
 ```bash
 python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/forward_pass_validator.py \
   --checkpoint_gcs_path=gs://your-bucket/checkpoint/0/items \
-  --maxtext_model_name=qwen3-8b \
+  --maxtext_model_name=llama2-7b \
   --run_hf_model=true \
-  --hf_model_path=Qwen/Qwen2.5-7B-Instruct \
+  --hf_model_path=meta-llama/Llama-2-7b-hf \
   --report_gcs_dir=gs://your-bucket/reports/
 ```
 
@@ -82,7 +82,7 @@ python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/forward_pass_val
 ```bash
 python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/decode_validator.py \
   --checkpoint_gcs_path=gs://your-bucket/checkpoint/0/items \
-  --maxtext_model_name=qwen3-8b \
+  --maxtext_model_name=llama2-7b \
   --report_gcs_dir=gs://your-bucket/reports/
 ```
 
