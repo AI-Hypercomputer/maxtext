@@ -2473,3 +2473,152 @@ def update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length, block
       start_idx = i * block_len
       for offset, updated_item in enumerate(returned_kv_cache[i]):
         kv_caches[start_idx + offset] = updated_item
+
+
+def _is_scanned_block_leaf(x, scanned_leading_dim):
+  """True for array leaves whose leading dim matches the scanned-block axis length.
+
+  Used to split a params/grads/opt_state pytree into the "scanned" part (one
+  slice per decoder layer, e.g. a stacked block weight or its optax mu/nu
+  momentum buffer -- which mirrors the params tree exactly) vs "rest" (e.g.
+  embeddings, or scalar optax state like `count`/`step`, which have no
+  natural per-layer axis).
+  """
+  if not hasattr(x, "shape") or not hasattr(x, "dtype"):
+    return False
+  if len(x.shape) == 0 or x.shape[0] != scanned_leading_dim:
+    return False
+  return jnp.issubdtype(x.dtype, jnp.floating)
+
+
+def _split_scanned_tree(tree, scanned_leading_dim):
+  """Returns (scanned_only, rest_only): both keep the full tree structure,
+  with the non-matching side's leaves replaced by None."""
+  is_leaf = lambda x: hasattr(x, "shape")
+  scanned = jax.tree_util.tree_map(
+      lambda x: x if _is_scanned_block_leaf(x, scanned_leading_dim) else None, tree, is_leaf=is_leaf
+  )
+  rest = jax.tree_util.tree_map(
+      lambda x: None if _is_scanned_block_leaf(x, scanned_leading_dim) else x, tree, is_leaf=is_leaf
+  )
+  return scanned, rest
+
+
+def _combine_scanned_tree(scanned, rest, template, scanned_leading_dim):
+  is_leaf = lambda x: hasattr(x, "shape")
+
+  def pick(orig, s, r):
+    if not hasattr(orig, "shape"):
+      return s if s is not None else r
+    return s if _is_scanned_block_leaf(orig, scanned_leading_dim) else r
+
+  return jax.tree_util.tree_map(pick, template, scanned, rest, is_leaf=is_leaf)
+
+
+def layerwise_scanned_optimizer_update(optimizer: nnx.Optimizer, model: nnx.Module, grads, scanned_leading_dim: int, **kwargs):
+  """Drop-in alternative to `optimizer.update(model, grads, **kwargs)` for NNX
+  models with scanned decoder blocks.
+
+  `nnx.Optimizer.update` materializes the *entire* stacked params/grads/opt_state
+  (all layers at once) on device to run a single whole-tree `tx.update` call. For
+  a model whose optimizer is per-parameter independent (e.g. optax.adamw,
+  optax.adam_pax -- their momentum/weight-decay/scale transforms have no
+  cross-parameter coupling once gradient clipping has already been applied
+  upstream, which MaxText always does before this point), splitting that update
+  into one `tx.update` call per decoder layer via `jax.lax.scan` is mathematically
+  identical to the whole-tree call (verified by a standalone numerical check
+  comparing both paths bit-for-bit across multiple steps), while never needing
+  more than ~1-2 layers' worth of params/grads/opt_state resident on device
+  simultaneously -- mirroring how this codebase already streams *parameters*
+  layer-by-layer during the forward pass (see the per-layer `device_space()` staging
+  in the scan bodies of `nnx_decoders.py` under `parameter_memory_host_offload`).
+
+  NOT verified safe for optimizers with cross-parameter coupling in their `tx`
+  chain (e.g. muon's Newton-Schulz orthogonalization) -- callers should only
+  enable this for verified per-parameter-independent optimizers.
+
+  Args:
+    optimizer: the nnx.Optimizer whose `.tx`/`.opt_state`/`.step` drive the update.
+    model: the nnx.Module whose params (filtered by `optimizer.wrt`) are updated in place.
+    grads: gradients pytree matching `model`'s structure.
+    scanned_leading_dim: the length of the decoder-block scan axis (e.g.
+      `config.num_decoder_layers // config.inhomogeneous_layer_cycle_interval`
+      for Qwen3-Next, or `config.num_decoder_layers` for a flat single-scan model).
+      Only array leaves whose leading dimension equals this value are treated
+      as "scanned" and updated via the per-layer scan; everything else (e.g.
+      un-scanned embeddings, scalar `count`) goes through one small whole-tree
+      `tx.update` call, same as today.
+    **kwargs: forwarded to `tx.update` (e.g. `loss`, `grad_norm` for
+      `skip_step_on_spikes`), applied identically to every scan iteration and
+      to the "rest" call, matching what a single whole-tree call would receive.
+  """
+  param_arrays = nnx.as_pure(nnx.state(model, optimizer.wrt, graph=optimizer.graph))
+  grad_arrays = nnx.as_pure(nnx.state(grads, optimizer.wrt, graph=optimizer.graph))
+  opt_state_arrays = nnx.as_pure(optimizer.opt_state)
+  kwargs_arrays = nnx.as_pure(kwargs)
+
+  tx = optimizer.tx
+
+  scanned_params, rest_params = _split_scanned_tree(param_arrays, scanned_leading_dim)
+  scanned_grads, rest_grads = _split_scanned_tree(grad_arrays, scanned_leading_dim)
+
+  # Scalar/non-scanned opt_state leaves (e.g. `count`) are broadcast into a
+  # fake per-layer axis so they can validly accompany the scan as xs -- every
+  # tx.update call needs a real count value, but it represents one global
+  # step, not a per-layer quantity, so all iterations see the same value.
+  is_leaf = lambda x: hasattr(x, "shape")
+
+  def to_scanned_opt_state_leaf(x):
+    if not hasattr(x, "shape"):
+      return x
+    if _is_scanned_block_leaf(x, scanned_leading_dim):
+      return x
+    return jnp.broadcast_to(x, (scanned_leading_dim,) + x.shape)
+
+  scanned_opt_state = jax.tree_util.tree_map(to_scanned_opt_state_leaf, opt_state_arrays, is_leaf=is_leaf)
+  _, rest_opt_state = _split_scanned_tree(opt_state_arrays, scanned_leading_dim)
+
+  has_scanned_leaves = any(leaf is not None for leaf in jax.tree_util.tree_leaves(scanned_params))
+
+  if has_scanned_leaves:
+
+    def scan_body(_, layer_slice):
+      # Stage this iteration's slice to device explicitly -- mirrors the
+      # existing per-layer parameter-streaming pattern (nnx_decoders.py) so
+      # that when opt_state/grads/params are sharded with a "pinned_host"
+      # memory kind (optimizer_memory_host_offload / parameter_memory_host_offload),
+      # only this one layer's worth is ever pulled onto device at a time,
+      # instead of requiring the whole stacked tree to already be device-resident.
+      g_i, os_i, p_i = jax.tree_util.tree_map(
+          max_utils.to_device, layer_slice, is_leaf=lambda x: hasattr(x, "shape")
+      )
+      updates_i, new_os_i = tx.update(g_i, os_i, p_i, **kwargs_arrays)
+      new_p_i = optax.apply_updates(p_i, updates_i)
+      return None, (new_p_i, new_os_i)
+
+    _, (new_scanned_params, new_scanned_opt_state_full) = jax.lax.scan(
+        scan_body, None, (scanned_grads, scanned_opt_state, scanned_params)
+    )
+    # Only the real per-layer leaves (mu/nu-like) are meaningful; the
+    # replicated `count`-like outputs are identical across layers (same input
+    # every iteration) -- the true global count comes from the "rest" call below.
+    new_scanned_opt_state, _ = _split_scanned_tree(new_scanned_opt_state_full, scanned_leading_dim)
+  else:
+    new_scanned_params, new_scanned_opt_state = scanned_params, scanned_opt_state
+
+  # rest_opt_state may carry a "pinned_host" memory kind (optimizer_memory_host_offload
+  # offloads the whole opt_state tree, not just the scanned portion), while rest_grads/
+  # rest_params are always device-resident -- bring it back to device before this
+  # whole-tree update, mirroring the per-layer scan_body above. These leaves are the
+  # small non-scanned ones (e.g. embeddings, top-level norms), so this costs nothing
+  # memory-wise; the actual offload savings come from the scanned leaves above.
+  rest_opt_state = jax.tree_util.tree_map(max_utils.to_device, rest_opt_state, is_leaf=lambda x: hasattr(x, "shape"))
+  rest_updates, new_rest_opt_state = tx.update(rest_grads, rest_opt_state, rest_params, **kwargs_arrays)
+  new_rest_params = optax.apply_updates(rest_params, rest_updates)
+
+  new_params = _combine_scanned_tree(new_scanned_params, new_rest_params, param_arrays, scanned_leading_dim)
+  new_opt_state = _combine_scanned_tree(new_scanned_opt_state, new_rest_opt_state, opt_state_arrays, scanned_leading_dim)
+
+  nnx.update(model, new_params)
+  nnx.update(optimizer.opt_state, nnx.state(new_opt_state, graph=optimizer.graph))
+  optimizer.step[...] += 1

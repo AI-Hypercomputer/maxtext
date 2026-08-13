@@ -130,6 +130,28 @@ def device_space():
     return jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access # pytype: disable=module-attr
 
 
+def to_device(x, sharding=None, mesh=None):  # pylint: disable=unused-argument
+  """Moves a tensor/array to device memory kind.
+
+  Thin wrapper over `jax.device_put(x, device_space())` used by the host-offload
+  paths to stage a host-resident (pinned_host) value back to HBM. A no-op for
+  values already in device memory. Falls back across JAX versions that expose
+  the device memory space differently, and returns `x` unchanged if neither
+  form is available so that callers work on backends without memory spaces.
+  """
+  try:
+    return jax.device_put(x, device_space())
+  except Exception:  # pylint: disable=broad-except
+    pass
+  try:
+    from jax._src.api import TransferToMemoryKind  # pylint: disable=protected-access,g-importing-member,g-import-not-at-top
+
+    return jax.device_put(x, TransferToMemoryKind("device"))
+  except Exception:  # pylint: disable=broad-except
+    pass
+  return x
+
+
 def calculate_total_params_per_chip(params):
   """Calculate total params per chip."""
 

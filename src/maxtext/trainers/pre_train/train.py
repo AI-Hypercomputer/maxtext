@@ -539,9 +539,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
     else:
       grads = raw_grads
-    if config.optimizer_memory_host_offload:
+    if config.optimizer_memory_host_offload and not config.scanned_optimizer_update:
       # state.optimizer is an NNX Optimizer module; state_mesh_shardings.optimizer
       # is an NNX State. Use nnx.state() to get a compatible State for device_put.
+      # Skipped when scanned_optimizer_update is on: that path stages one layer's
+      # slice at a time inside the scan, so pulling the whole stacked opt_state to
+      # device here would defeat the offload entirely.
       device_opt_shardings = jax.tree_util.tree_map_with_path(
           maxtext_utils_nnx.move_memory_to_device,
           state_mesh_shardings.optimizer,
@@ -550,14 +553,25 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       opt_state = nnx.state(state.optimizer)
       new_opt_state = jax.device_put(opt_state, device_opt_shardings)
       nnx.update(state.optimizer, new_opt_state)
+
+    update_kwargs = {}
     if config.skip_step_on_spikes:
       # The skip-step optimizer is a GradientTransformationExtraArgs that reads
       # loss/grad_norm to decide whether to zero the update on a spike. nnx
       # Optimizer.update forwards these kwargs to tx.update.
-      grad_norm = max_utils.l2norm_pytree(grads)
-      state.apply_gradients(grads, loss=loss, grad_norm=grad_norm)
+      update_kwargs = {"loss": loss, "grad_norm": max_utils.l2norm_pytree(grads)}
+
+    if config.scanned_optimizer_update:
+      # Applies the optimizer update one decoder layer at a time via jax.lax.scan
+      # instead of materializing all layers' params/grads/opt_state on device
+      # simultaneously -- see layerwise_scanned_optimizer_update's docstring for
+      # the correctness argument. adamw/adam_pax only; NOT safe for muon.
+      scanned_leading_dim = config.num_decoder_layers // max(config.inhomogeneous_layer_cycle_interval, 1)
+      maxtext_utils.layerwise_scanned_optimizer_update(
+          state.optimizer, state.model, grads, scanned_leading_dim, **update_kwargs
+      )
     else:
-      state.apply_gradients(grads)
+      state.apply_gradients(grads, **update_kwargs)
     new_state = state
 
     # Apply updates for Auxiliary-Loss-Free load balancing.
