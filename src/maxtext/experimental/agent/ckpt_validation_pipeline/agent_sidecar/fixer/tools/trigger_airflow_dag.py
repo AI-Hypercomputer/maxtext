@@ -64,11 +64,8 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
 
   if overrides:
     # Determine the target override container key based on target_dag
-    if target_dag.startswith("dag_verify_decoding"):
-      default_override_keys = ["decode_maxtext_overrides"]
-    elif target_dag.startswith("dag_verify_forward_pass") or target_dag.startswith("dag_verify_checkpoint_shape") or target_dag.startswith("dag_verify_forward_compile"):
-      default_override_keys = ["forward_pass_maxtext_overrides"]
-    elif target_dag == "maxtext_validation_master_dag":
+    # Always synchronize hyperparameter architectural fixes to both Sub-DAGs to prevent serial testing failures
+    if target_dag == "maxtext_validation_master_dag" or target_dag.startswith("dag_verify_"):
       default_override_keys = ["forward_pass_maxtext_overrides", "decode_maxtext_overrides"]
     else:
       default_override_keys = ["forward_pass_maxtext_overrides"]
