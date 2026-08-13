@@ -275,6 +275,7 @@ ModelName = Literal[
     "qwen3-vl-4b",
     "qwen3-vl-30b-a3b",
     "qwen3-next-80b-a3b",
+    "qwen3-next-80b-a3b-256e",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-35b-a3b",
