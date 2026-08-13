@@ -73,37 +73,6 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
   maxtext_module_dir = os.path.dirname(maxtext.__file__)
   repo_root = os.path.abspath(os.path.join(maxtext_module_dir, "../../"))
 
-  # Load dynamic Linen-to-NNX mappings from external JSON config
-  mapping_file = os.path.join(os.path.dirname(__file__), "linen_to_nnx_mappings.json")
-  with open(mapping_file, "r") as f:
-    mappings = json.load(f)
-
-  _original_fix_restore = model_creation_utils._fix_restore_args_for_shape_mismatch  # pylint: disable=protected-access
-
-  def _wrapped_fix_restore(restore_args, stored_metadata_tree, mesh):
-    def _translate_metadata_tree(tree):
-      if isinstance(tree, dict) or hasattr(tree, "items"):
-        new_tree = {}
-        for k, v in tree.items():
-          k_str = str(k)
-          new_k = mappings["synonyms"].get(k_str, k_str)
-          new_tree[new_k] = _translate_metadata_tree(v)
-        
-        layer_key = mappings["layer_prefix"]
-        if layer_key in new_tree and isinstance(new_tree[layer_key], dict):
-          layers_dict = new_tree.pop(layer_key)
-          for key_idx, val in layers_dict.items():
-            new_tree[f"{layer_key}_{key_idx}"] = val
-        return new_tree
-      elif isinstance(tree, (list, tuple)):
-        return type(tree)(_translate_metadata_tree(x) for x in tree)
-      return tree
-
-    transformed_metadata = _translate_metadata_tree(stored_metadata_tree)
-    return _original_fix_restore(restore_args, transformed_metadata, mesh)
-
-  model_creation_utils._fix_restore_args_for_shape_mismatch = _wrapped_fix_restore  # pylint: disable=protected-access
-
   import orbax.checkpoint as ocp  # pylint: disable=import-outside-toplevel
 
   _original_restore = ocp.Checkpointer.restore
@@ -275,9 +244,6 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
     returncode = 1
   finally:
     ocp.Checkpointer.restore = _original_restore
-    model_creation_utils._fix_restore_args_for_shape_mismatch = _original_fix_restore  # pylint: disable=protected-access
-    if _orig_array_delete is not None:
-      jax.Array.delete = _orig_array_delete
     transformers.AutoTokenizer.from_pretrained = _orig_from_pretrained
 
     # Restore logging handlers
