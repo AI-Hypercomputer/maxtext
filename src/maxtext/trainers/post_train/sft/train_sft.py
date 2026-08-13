@@ -41,6 +41,7 @@ from typing import Any, Sequence
 from absl import app
 import os
 import jax
+import jax.numpy as jnp
 import optax
 import pathwaysutils
 
@@ -111,8 +112,9 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
     def train_step(
         model: nnx.Module,
         optimizer: nnx.Optimizer,
+        grad_accumulator: Any,
         inputs: Any,
-        grad_accumulator: Any = None,
+        is_update_step: Any = True,
     ):
       inputs = gen_fn(inputs)
 
@@ -157,13 +159,35 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
 
       nnx.update(model, new_rest)
 
-      # Apply optimizer update. grads has the same nnx.State(wrt) structure
-      # as diff_params, which is compatible with optimizer.update.
-      optimizer.update(model, grads)
+      # Handle gradient accumulation and conditional/direct optimizer update
+      if grad_accumulator is not None and hasattr(grad_accumulator, "add"):
+        grad_accumulator.add(grads)
+
+        def apply_updates(model, optimizer, grad_accumulator):
+          acc_grads = grad_accumulator.get()
+          norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads))
+          optimizer.update(model, acc_grads)
+          grad_accumulator.reset()
+          return norm
+
+        def skip_updates(model, optimizer, grad_accumulator):
+          return jnp.array(0.0, dtype=jnp.float32)
+
+        grad_norm = nnx.cond(
+            is_update_step,
+            apply_updates,
+            skip_updates,
+            model,
+            optimizer,
+            grad_accumulator,
+        )
+      else:
+        optimizer.update(model, grads)
+        grad_norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads))
 
       aux_out = aux if has_aux else None
       if tunix_expects_grad_norm:
-        return out_val, aux_out, optax.global_norm(grads)
+        return out_val, aux_out, grad_norm
       return out_val, aux_out
 
     return train_step

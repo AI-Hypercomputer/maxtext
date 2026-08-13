@@ -23,7 +23,7 @@ HF_GOLDEN_MODEL=Qwen/Qwen3-VL-2B-Instruct
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
 
 # Step 1: Install torch
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 python3 -m pip install decord
 
 # Step 2: Convert to scanned multimodal checkpoint (for multimodal training)

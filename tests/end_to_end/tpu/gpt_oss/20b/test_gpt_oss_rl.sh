@@ -59,6 +59,6 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
-    rollout_data_parallelism=4 \
-    rollout_tensor_parallelism=8 \
+    rollout_data_parallelism=-1 \
+    rollout_tensor_parallelism=4 \
     hbm_utilization_vllm=0.8

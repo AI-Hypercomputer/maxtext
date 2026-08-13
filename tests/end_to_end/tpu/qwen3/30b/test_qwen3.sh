@@ -59,8 +59,6 @@ python3 -m maxtext.trainers.pre_train.train \
     model_name=${MODEL_NAME} \
     scan_layers=true \
     remat_policy=full \
-    ici_tensor_parallelism=4 \
-    ici_fsdp_parallelism=16 \
     weight_dtype=bfloat16 \
     dtype=bfloat16 \
     opt_type=sgd
