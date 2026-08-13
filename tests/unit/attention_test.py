@@ -3901,5 +3901,137 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     self.assertEqual(mask_none.shape[-1], kv_len)
 
 
+class KVHeadShardingTest(parameterized.TestCase):
+  """Tests that KV heads must divide the mesh axes that shard `kv_heads`.
+
+  Attention heads are atomic under tensor parallelism, so a mesh that shards
+  `kv_heads` more ways than there are heads has to be rejected. The mesh is
+  faked here to keep the test hermetic on a single-device host; only
+  `mesh.shape` is consulted when resolving logical axes onto mesh axes.
+  """
+
+  _KV_KERNEL_AXES = ("embed", "kv_heads", "kv_head_dim")
+  _NUM_KV_HEADS = 2
+  _EMBED_DIM = 16
+  _INDIVISIBLE = r"num_kv_heads \(2\).*must be divisible"
+  _INDIVISIBLE_BY_4 = r"num_kv_heads \(2\).*must be divisible by 4"
+
+  def setUp(self):
+    """Builds an attention layer with two KV heads on a single-device mesh."""
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        max_target_length=128,
+    )
+    self.inputs_kv_shape = (1, self.cfg.max_target_length, self._EMBED_DIM)
+    mesh = Mesh(maxtext_utils.create_device_mesh(self.cfg), self.cfg.mesh_axes)
+    # A single-device mesh shards nothing, so construction always succeeds; each
+    # test then swaps in a fake mesh to exercise the sharding check.
+    self.attention = Attention(
+        config=self.cfg,
+        num_query_heads=self._NUM_KV_HEADS * 2,
+        num_kv_heads=self._NUM_KV_HEADS,
+        head_dim=self.cfg.head_dim,
+        max_target_length=self.cfg.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+        inputs_q_shape=self.inputs_kv_shape,
+        inputs_kv_shape=self.inputs_kv_shape,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        dtype=self.cfg.dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        attention_type=self.cfg.attention_type,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+
+  def _set_mesh_shape(self, **mesh_shape):
+    """Replaces the attention mesh with one reporting `mesh_shape`."""
+    self.attention.mesh = types.SimpleNamespace(shape=mesh_shape)
+
+  def _use_ulysses(self):
+    """Returns a context manager putting the layer on Ulysses context parallelism.
+
+    Patched into the config's flat dictionary rather than assigned as an
+    attribute, because `HyperParameters` is read-only after initialization.
+    Not built through `pyconfig` either, because a genuine Ulysses config
+    additionally demands TPU hardware, flash attention with Tokamax Splash and
+    several other options that are irrelevant here.
+    """
+    return mock.patch.dict(
+        self.attention.config.get_keys(),
+        {"context_parallel_strategy": "ulysses"},
+    )
+
+  @parameterized.named_parameters(
+      # `kv_heads` maps to tensor x tensor_sequence x autoregressive, so each of
+      # those axes, and their product, constrains the KV head count.
+      ("tensor", {"tensor": 4}),
+      ("tensor_sequence", {"tensor_sequence": 4}),
+      ("autoregressive", {"autoregressive": 4}),
+      (
+          "product_of_axes",
+          {"tensor": 2, "tensor_sequence": 2, "autoregressive": 2},
+      ),
+  )
+  def test_indivisible_kv_heads_rejected(self, mesh_shape):
+    self._set_mesh_shape(**mesh_shape)
+    with self.assertRaisesRegex(ValueError, self._INDIVISIBLE):
+      self.attention.init_kv_w(inputs_kv_shape=self.inputs_kv_shape)
+
+  @parameterized.named_parameters(
+      ("exactly_divisible", {"tensor": 2}),
+      ("size_one_axes_ignored", {"tensor": 2, "tensor_sequence": 1}),
+      # fsdp shards `embed`, not `kv_heads`, so it places no constraint.
+      ("axis_that_does_not_shard_kv_heads", {"fsdp": 4}),
+      ("unsharded", {}),
+  )
+  def test_divisible_kv_heads_accepted(self, mesh_shape):
+    # The validator is called directly rather than through `init_kv_w`, which
+    # would go on to initialize parameters against the fake mesh.
+    self._set_mesh_shape(**mesh_shape)
+    self.attention._validate_kv_head_sharding(self._KV_KERNEL_AXES)  # pylint: disable=protected-access
+
+  def test_replicated_kernel_axes_skip_validation(self):
+    """A replicated KV projection is unconstrained even on an over-sharded mesh."""
+    self._set_mesh_shape(tensor=4)
+    self.attention._validate_kv_head_sharding((None, None, None))  # pylint: disable=protected-access
+
+  def test_context_axis_ignored_without_ulysses(self):
+    """Only Ulysses shards KV heads over the context axis."""
+    self._set_mesh_shape(context=4)
+    self.attention._validate_kv_head_sharding(self._KV_KERNEL_AXES)  # pylint: disable=protected-access
+
+  def test_ulysses_context_axis_rejected(self):
+    """Ulysses shards KV heads over context via all-to-all, not a logical rule."""
+    self._set_mesh_shape(context=4)
+    with (
+        self._use_ulysses(),
+        self.assertRaisesRegex(ValueError, self._INDIVISIBLE_BY_4),
+    ):
+      self.attention.init_kv_w(inputs_kv_shape=self.inputs_kv_shape)
+
+  def test_ulysses_multiplies_with_tensor_parallelism(self):
+    """The binding constraint is the product of the context and tensor axes.
+
+    Two KV heads clear `context`=2 and `tensor`=1 individually, and `types.py`
+    only checks the context factor, so the combined degree of 4 is caught here.
+    """
+    self._set_mesh_shape(context=2, tensor=2)
+    with (
+        self._use_ulysses(),
+        self.assertRaisesRegex(ValueError, self._INDIVISIBLE_BY_4),
+    ):
+      self.attention.init_kv_w(inputs_kv_shape=self.inputs_kv_shape)
+
+  def test_ulysses_divisible_accepted(self):
+    self._set_mesh_shape(context=2)
+    with self._use_ulysses():
+      self.attention._validate_kv_head_sharding(self._KV_KERNEL_AXES)  # pylint: disable=protected-access
+
+
 if __name__ == "__main__":
   unittest.main()
