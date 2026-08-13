@@ -31,7 +31,7 @@ import pytest
 pytest.importorskip("optax")
 pytest.importorskip("tunix")
 
-pytestmark = [pytest.mark.cpu_only, pytest.mark.post_training]
+pytestmark = [pytest.mark.post_training]
 
 import unittest
 from typing import List, Optional

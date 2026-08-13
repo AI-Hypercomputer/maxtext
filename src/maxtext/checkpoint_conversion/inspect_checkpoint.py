@@ -61,15 +61,17 @@ Optional Flags:
 """
 
 import argparse
-import sys
 import os
-import re
 import pathlib
+import re
+import sys
+
 import absl
-from maxtext.inference.inference_utils import str2bool
-from maxtext.checkpoint_conversion.utils.utils import print_peak_memory
-from maxtext.utils.model_creation_utils import create_nnx_abstract_model
 from flax import nnx
+
+from maxtext.checkpoint_conversion.utils.utils import print_peak_memory
+from maxtext.inference.inference_utils import str2bool
+from maxtext.utils.model_creation_utils import create_nnx_abstract_model
 
 
 def natural_sort_key(s: str):
@@ -216,12 +218,12 @@ def inspect_maxtext(args, remaining_args):
   """
   # Defer imports to avoid overhead when running in other modes.
   import jax
-  from maxtext.utils import max_utils, maxtext_utils
-  from maxtext import pyconfig
-  from maxtext.utils.globals import MAXTEXT_PKG_DIR
+  from maxtext.checkpoint_conversion.utils.utils import param_key_parts_from_path
+  from maxtext.configs import pyconfig
   from maxtext.layers import quantizations
   from maxtext.models import models
-  from maxtext.checkpoint_conversion.utils.utils import param_key_parts_from_path
+  from maxtext.utils import max_utils, maxtext_utils
+  from maxtext.utils.globals import MAXTEXT_PKG_DIR
 
   Transformer = models.transformer_as_linen
 

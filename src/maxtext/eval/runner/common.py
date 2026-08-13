@@ -29,7 +29,12 @@ def resolve_token(cfg: dict, hf_token: str | None) -> str | None:
   return hf_token or os.environ.get("HF_TOKEN") or None
 
 
-def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
+def build_server_manager(
+    cfg: dict,
+    token: str | None,
+    *,
+    enable_chat_api: bool = False,
+) -> "VllmServerManager":
   """Build a VllmServerManager from a merged config dict.
 
   Args:
@@ -37,6 +42,7 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
       optional keys: tensor_parallel_size, server_host, server_port,
       max_num_batched_tokens, max_num_seqs, hf_mode, enable_expert_parallel.
     token: HuggingFace token (or None).
+    enable_chat_api: Whether this runner needs /v1/chat/completions.
 
   Returns:
     A VllmServerManager instance ready for use as a context manager.
@@ -64,6 +70,9 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
   expert_parallel_size = int(cfg.get("expert_parallel_size") or 1)
   data_parallel_size = int(cfg.get("data_parallel_size") or 1)
   hbm_memory_utilization = float(cfg.get("hbm_memory_utilization") or 0.3)
+  concurrency = cfg.get("concurrency")
+  if concurrency is not None:
+    concurrency = int(concurrency)
 
   server_env = {"HF_TOKEN": token} if token else None
 
@@ -80,6 +89,8 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
       max_num_batched_tokens=max_num_batched_tokens,
       max_num_seqs=max_num_seqs,
       hbm_memory_utilization=hbm_memory_utilization,
+      enable_chat_api=enable_chat_api,
+      concurrency=concurrency,
       env=server_env,
   )
 

@@ -784,6 +784,16 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
     else:
       return input_tensor.T.reshape(target_shape)
 
+  def reshape_expert_kernel(input_tensor, target_shape=None):
+    """Transposes expert weights.
+
+    3D: (num_experts, in_dim, out_dim) -> (num_experts, out_dim, in_dim)
+    2D: (in_dim, out_dim) -> (out_dim, in_dim)
+    """
+    if input_tensor.ndim == 3:
+      return input_tensor.transpose(0, 2, 1)
+    return input_tensor.transpose(1, 0)
+
   def reshape_bias(input_tensor, target_shape=None):
     """Reshapes biases between MaxText 2D (heads, dim) and HF 1D (hidden)."""
     # saving_to_hf: MaxText [heads, head_dim] -> HF [hidden_dim] (flatten)
@@ -809,11 +819,13 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
       "self_attention-key-bias",
       "self_attention-value-bias",
   ]
-  moe_kernel_hooks = [
+  moe_gate_hooks = [
       "moe_block-gate-kernel",
       "moe_block-wi_0-kernel",
       "moe_block-wi_1-kernel",
       "moe_block-wo-kernel",
+  ]
+  moe_expert_hooks = [
       "moe_block-wi_0",
       "moe_block-wi_1",
       "moe_block-wo",
@@ -825,8 +837,10 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
     for key in bias_hooks:
       mapping[f"params-decoder-layers-{key}"] = reshape_bias
     if num_experts > 1:
-      for key in moe_kernel_hooks:
+      for key in moe_gate_hooks:
         mapping[f"params-decoder-layers-{key}"] = reshape_kernel
+      for key in moe_expert_hooks:
+        mapping[f"params-decoder-layers-{key}"] = reshape_expert_kernel
   else:
     for i in range(n_layers):
       for key in kernel_hooks:
@@ -834,8 +848,10 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
       for key in bias_hooks:
         mapping[f"params-decoder-layers_{i}-{key}"] = reshape_bias
       if num_experts > 1:
-        for key in moe_kernel_hooks:
+        for key in moe_gate_hooks:
           mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
+        for key in moe_expert_hooks:
+          mapping[f"params-decoder-layers_{i}-{key}"] = reshape_expert_kernel
   return mapping
 
 
@@ -1268,7 +1284,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
     hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
-
+    # pyrefly: ignore[unsupported-operation]
     hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
         process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
     )
@@ -1392,7 +1408,7 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       prefix = f"params-decoder-layers-layer_{block_idx}"
 
       # Layer norms
-      mapping[f"{prefix}-input_layernorm-scale"] = [
+      mapping[f"{prefix}-input_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
       ]  # pyrefly: ignore[bad-assignment]
       mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
@@ -1953,6 +1969,7 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     hooks[f"{prefix}-GptOssMlp-gate-kernel"] = transpose
     # `composite_mt_key`: A hook for combining multiple MaxText params.
     hooks[(f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1")] = interleave  # pyrefly: ignore[unsupported-operation]
+    # pyrefly: ignore[unsupported-operation]
     hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = (
         interleave  # pyrefly: ignore[unsupported-operation]
     )
@@ -2874,10 +2891,10 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
     local_positions = list(range(attention_pattern_length - 1))
     for subkey, suffix, gate in param_specs:
       if _spec_active(gate):
-        mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[no-matching-overload]
+        mapping[f"{local_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
             [hf_layer(b * attention_pattern_length + l, suffix) for l in local_positions] for b in range(num_blocks)
         ]
-    mapping[f"{local_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[no-matching-overload]
+    mapping[f"{local_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
         [hf_layer(b * attention_pattern_length + l, "self_attn.v_proj.weight") for l in local_positions]
         for b in range(num_blocks)
     ]
@@ -2887,11 +2904,11 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
     global_position = attention_pattern_length - 1
     for subkey, suffix, gate in param_specs:
       if _spec_active(gate):
-        mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[no-matching-overload]
+        mapping[f"{global_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
             hf_layer(b * attention_pattern_length + global_position, suffix) for b in range(num_blocks)
         ]
     if not share_kv_projections:
-      mapping[f"{global_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[no-matching-overload]
+      mapping[f"{global_prefix}-self_attention-value-kernel"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
           hf_layer(b * attention_pattern_length + global_position, "self_attn.v_proj.weight") for b in range(num_blocks)
       ]
 
@@ -3645,8 +3662,9 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   mapping = {}
 
   n_layers_text = config["text_config"]["num_hidden_layers"]
+  num_experts_text = config["text_config"].get("num_local_experts", 0)
   text_mapping = QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(
-      config={"num_hidden_layers": n_layers_text},
+      config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text},
       maxtext_config=maxtext_config,
       scan_layers=scan_layers,
   )
@@ -3660,6 +3678,22 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
 
   for key, value in text_mapping.items():
     mapping[key] = replace_prefix(value)
+
+  # For correct layer replication vs scanning.
+  if num_experts_text > 0 and not scan_layers:
+    for i in range(n_layers_text):
+      key0 = f"params-decoder-layers_{i}-moe_block-wi_0"
+      key1 = f"params-decoder-layers_{i}-moe_block-wi_1"
+      key_wo = f"params-decoder-layers_{i}-moe_block-wo"
+
+      if key0 in mapping:
+        del mapping[key0]
+      if key1 in mapping:
+        del mapping[key1]
+
+      composite_key = (key0, key1)
+      mapping[composite_key] = f"model.language_model.layers.{i}.mlp.experts.gate_up_proj"
+      mapping[key_wo] = f"model.language_model.layers.{i}.mlp.experts.down_proj"
 
   vision_config = config["vision_config"]
   n_vision_layers = vision_config["depth"]
@@ -3729,13 +3763,35 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   mapping = {}
 
   n_layers_text = config["text_config"]["num_hidden_layers"]
+  num_experts_text = config["text_config"].get("num_local_experts", 0)
   text_hooks = QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(
-      config={"num_hidden_layers": n_layers_text},
+      config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text},
       maxtext_config=maxtext_config,
       scan_layers=scan_layers,
       saving_to_hf=saving_to_hf,
   )
+
+  def process_wi_0_wi_1_fused(input_tensor, target_shape=None):
+    if saving_to_hf:
+      wi_0, wi_1 = input_tensor
+      gate_up = np.concatenate([wi_0, wi_1], axis=-1)
+      return gate_up
+    else:
+      gate, up = np.split(input_tensor, 2, axis=-1)
+      return np.stack([gate, up], axis=-1)
+
   mapping.update(text_hooks)
+
+  # Special case for Qwen3-VL: MaxText model has separate wi_0 and wi_1 weights
+  # for the MoE block, but the HF model expects a single fused weight.
+  if num_experts_text > 0 and not scan_layers:
+    for i in range(n_layers_text):
+      composite_key = (
+          f"params-decoder-layers_{i}-moe_block-wi_0",
+          f"params-decoder-layers_{i}-moe_block-wi_1",
+      )
+      mapping[composite_key] = process_wi_0_wi_1_fused
+      mapping[f"params-decoder-layers_{i}-moe_block-wo"] = None
 
   vision_config = config["vision_config"]
   n_vision_layers = vision_config["depth"]
@@ -3975,7 +4031,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
             }
         )
 
-    mapping.update(layer_map)
+    mapping.update(layer_map)  # pyrefly: ignore[no-matching-overload]
 
   if not scan_layers:
     for i in range(n_layers):
@@ -3999,7 +4055,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     return np.transpose(input_tensor)
 
   def ones_norm(input_tensor, target_shape=None):
-    return np.ones(target_shape, dtype=np.float32)
+    return np.ones(target_shape, dtype=np.float32)  # pyrefly: ignore[no-matching-overload]
 
   def identity(input_tensor, target_shape=None):
     return input_tensor
@@ -4030,9 +4086,9 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
     if saving_to_hf:
       tensor = np.transpose(input_tensor, (0, 2, 1))
       return tensor.reshape(target_shape)
-    num_heads = target_shape[0]
-    embed_dim = target_shape[1]
-    kv_lora_rank = target_shape[2]
+    num_heads = target_shape[0]  # pyrefly: ignore[unsupported-operation]
+    embed_dim = target_shape[1]  # pyrefly: ignore[unsupported-operation]
+    kv_lora_rank = target_shape[2]  # pyrefly: ignore[unsupported-operation]
     tensor = input_tensor.reshape((num_heads, kv_lora_rank, embed_dim))
     return np.transpose(tensor, (0, 2, 1))
 
@@ -4188,6 +4244,7 @@ PARAM_MAPPING = {
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4241,6 +4298,7 @@ HOOK_FNS = {
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,

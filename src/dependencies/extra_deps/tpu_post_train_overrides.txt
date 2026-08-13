@@ -9,3 +9,4 @@ jaxlib==0.11.0
 libtpu==0.0.44
 optax==0.2.6
 qwix==0.1.8
+xprof<=2.23.0

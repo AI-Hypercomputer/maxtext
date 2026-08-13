@@ -44,6 +44,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     num_batches=5 batch_size=1 num_test_batches=5 \
     model_name=${MODEL_NAME} tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     enable_single_controller=${use_pathways} \
+    remat_policy=full \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     rollout_tensor_parallelism=4 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \

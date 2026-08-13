@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytestmark = [pytest.mark.cpu_only, pytest.mark.external_training, pytest.mark.post_training]
+pytestmark = [pytest.mark.external_training, pytest.mark.post_training]
 
 import jax
 from jax.sharding import Mesh

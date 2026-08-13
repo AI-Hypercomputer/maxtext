@@ -21,7 +21,6 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from maxtext.layers import nnx_scan
 
@@ -35,7 +34,6 @@ class _LinearLayer(nnx.Module):
     return inputs @ self.kernel.value
 
 
-@pytest.mark.cpu_only
 class TestCreateScannedLayers(unittest.TestCase):
   """Tests for nnx_scan.create_scanned_layers."""
 
@@ -64,7 +62,6 @@ class TestCreateScannedLayers(unittest.TestCase):
     self.assertIsNone(layers)
 
 
-@pytest.mark.cpu_only
 class TestApplyScannedLayers(unittest.TestCase):
   """Tests for nnx_scan.apply_scanned_layers."""
 

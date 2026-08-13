@@ -1512,6 +1512,35 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
     print(f"HYPER HEAD PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
     np.testing.assert_allclose(mt_out, pt_out, rtol=5e-5, atol=5e-5)
 
+  def test_nnx_decoder_hyperhead_integration(self):
+    from maxtext.layers.nnx_decoders import NNXDecoder
+    from unittest.mock import patch
+
+    # Specifically instantiate full NNXDecoder to ensure it didn't bypass the HyperHead!
+    mt_decoder = NNXDecoder(
+        config=self.mx_config,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+    self.assertTrue(hasattr(mt_decoder, "hc_head"), "NNXDecoder completely missed hc_head setup! Bug in nnx_decoders.py!")
+    self.assertIsInstance(mt_decoder.hc_head, DeepSeek4HyperHead, "NNXDecoder instantiated the wrong HyperHead class!")
+
+    # Verify hc_head.__call__ is invoked during NNXDecoder forward pass
+    def dummy_embed(tokens, **kwargs):
+      return jnp.zeros((tokens.shape[0], tokens.shape[1], self.mx_config.emb_dim), dtype=jnp.float32)
+
+    dummy_tokens = jnp.zeros((2, 4), dtype=jnp.int32)
+    dummy_positions = jnp.arange(4, dtype=jnp.int32)[None, :]
+
+    with patch.object(DeepSeek4HyperHead, "__call__", wraps=mt_decoder.hc_head.__call__) as mock_call:
+      _ = mt_decoder(
+          shared_embedding=dummy_embed,
+          decoder_input_tokens=dummy_tokens,
+          decoder_positions=dummy_positions,
+          deterministic=True,
+      )
+      self.assertTrue(mock_call.called, "NNXDecoder forward pass did not invoke hc_head.__call__!")
+
 
 if __name__ == "__main__":
   unittest.main()

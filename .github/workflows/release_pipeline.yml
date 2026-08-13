@@ -30,10 +30,7 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  id-token: write
   actions: read
-  pull-requests: write
 
 jobs:
   get_maxtext_sha:
@@ -43,21 +40,22 @@ jobs:
       maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
     steps:
       - name: Checkout MaxText
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.release_tag || github.event.release.tag_name }}
           fetch-depth: 1
+          persist-credentials: false
       - name: Resolve SHA
         id: vars
         shell: bash
         run: |
           MAXTEXT_SHA=$(git rev-parse HEAD)
           echo "Using MaxText SHA: ${MAXTEXT_SHA}"
-          echo "maxtext_sha=${MAXTEXT_SHA}" >> $GITHUB_OUTPUT
+          echo "maxtext_sha=${MAXTEXT_SHA}" >> "$GITHUB_OUTPUT"
 
   release_approval:
     name: Approve Release Candidate
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     # "release" environment is configured in MaxText repository settings.
     # This environment requires manual approval before proceeding to the next job.
@@ -71,20 +69,29 @@ jobs:
     needs: [release_approval, get_maxtext_sha]
     if: |
       always() &&
+      needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
+    permissions:
+      issues: write
+      id-token: write
+      pull-requests: write
+      contents: read
+      actions: read
     uses: ./.github/workflows/ci_pipeline.yml
     with:
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-    secrets: inherit
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   build_release_candidate_images:
     name: Build ${{ matrix.name }} Docker Image
     needs: [build_and_test_maxtext_package, get_maxtext_sha]
-    # Ensure the SHA resolved, and CI pipeline tests are not failed or cancelled
+    # Ensure the SHA resolved, and CI pipeline tests succeeded
     if: |
       always() &&
       needs.get_maxtext_sha.result == 'success' &&
-      needs.build_and_test_maxtext_package.outputs.tests_result == 'success'
+      needs.build_and_test_maxtext_package.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -118,39 +125,40 @@ jobs:
   run_e2e_tests:
     name: Run E2E tests
     needs: [build_release_candidate_images, get_maxtext_sha]
-    # Ensure the SHA resolved, the build job itself wasn't skipped or cancelled, and all builds succeeded
+    # Ensure the SHA resolved and all image builds succeeded
     if: |
       always() &&
       needs.get_maxtext_sha.result == 'success' &&
-      needs.build_release_candidate_images.result != 'skipped' &&
-      needs.build_release_candidate_images.result != 'cancelled' &&
-      !contains(needs.build_release_candidate_images.outputs.*.build_result, 'failure') &&
-      !contains(needs.build_release_candidate_images.outputs.*.build_result, 'cancelled')
+      needs.build_release_candidate_images.result == 'success'
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
       mode: stable
       run_id: ${{ github.run_id }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-    secrets: inherit
+    secrets:
+      AIRFLOW_CALLBACK_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
 
   build_docs:
     name: Build Documentation
     needs: [release_approval, get_maxtext_sha]
     if: |
       always() &&
+      needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/check_docs_build.yml
     with:
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-    secrets: inherit
 
   check_links:
     name: Check Links in Documentation
     needs: [release_approval, get_maxtext_sha]
     if: |
       always() &&
+      needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
+    permissions:
+      issues: write
+      contents: read
     uses: ./.github/workflows/docs_link_check.yml
     with:
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-    secrets: inherit

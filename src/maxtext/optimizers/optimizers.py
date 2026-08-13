@@ -224,7 +224,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         "adam_eps_root": config.adam_eps_root,
         "adam_weight_decay": config.adam_weight_decay,
     }
-    base_opt = muon(**muon_kwargs)
+    base_opt = muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 

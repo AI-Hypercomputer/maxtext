@@ -208,7 +208,12 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
       def create_train_state_fn():
         nnx_model = _create_model_partial()
-        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        wrt = (
+            getattr(nnx, "LoRAParam", nnx.Param)
+            if getattr(getattr(config, "lora", None), "enable_lora", False)
+            else nnx.Param
+        )
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
         return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
       init_state_fn = create_train_state_fn
@@ -465,10 +470,18 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
   return qwix.LoraProvider(**lora_kwargs)
 
 
-def _prepare_dummy_inputs(dummy_bs: int = 1) -> tuple[jnp.ndarray, jnp.ndarray]:
-  """Builds dummy decoder inputs used to materialize LoRA parameters."""
-  # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
-  seq_len = 1
+def _prepare_dummy_inputs(
+    mesh: Optional[jax.sharding.Mesh] = None,
+    dummy_bs: int = 1,
+    seq_len: int = 1,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Builds minimal dummy decoder inputs partitioned appropriately for the mesh."""
+  if mesh is not None:
+    for axis in ("data", "fsdp", "fsdp_transpose", "expert"):
+      dummy_bs *= mesh.shape.get(axis, 1)
+    for axis in ("tensor_sequence", "context"):
+      seq_len *= mesh.shape.get(axis, 1)
+
   decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   return decoder_input_tokens, decoder_positions
@@ -593,12 +606,8 @@ def apply_lora_to_model(
 
   lora_provider = _build_lora_provider(mt_config)
 
-  dp_size = 1
-  if mesh is not None and "data" in mesh.shape:
-    dp_size = mesh.shape["data"]
-
-  model_rngs = getattr(model.decoder, "rngs", None)
-  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(dummy_bs=dp_size)
+  model_rngs = getattr(model.decoder, "rngs", None)  # pyrefly: ignore[missing-attribute]
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mesh)
 
   lora_model = qwix.apply_lora_to_model(
       model,
@@ -641,9 +650,9 @@ def apply_lora_to_model(
 
       lora_model = nnx.merge(graph_def, state)
 
-  _verify_lora_parameters(lora_model, mt_config)
+  _verify_lora_parameters(lora_model, mt_config)  # pyrefly: ignore[bad-argument-type]
 
-  return lora_model
+  return lora_model  # pyrefly: ignore[bad-return]
 
 
 def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameters) -> nnx.Module:
@@ -724,6 +733,20 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
     else:
       matched_val = curr
 
+    target_sharding = getattr(variable, "sharding", None)
+    if target_sharding is None:
+      try:
+        mesh = maxtext_utils.get_mesh_from_config(mt_config)
+        if mesh:
+          target_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    if target_sharding is not None:
+      try:
+        matched_val = jax.device_put(matched_val, target_sharding)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
     variable.value = matched_val
 
   jax.tree_util.tree_map_with_path(
@@ -732,7 +755,7 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  nnx.update(model, abstract_lora_params)
+  nnx.pop(model, nnx.Intermediate)
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
   return model
 
@@ -911,7 +934,7 @@ def get_lora_abstract_state_nnx(base_abstract_params, lora_config):
   )
   lora_state_mesh_annotations = train_state.TrainState(
       step=0,
-      apply_fn=None,
+      apply_fn=None,  # pyrefly: ignore[bad-argument-type]
       params=jax.tree_util.tree_map(
           lambda x: x.sharding.spec if x.sharding is not None else None,
           lora_abstract_params,

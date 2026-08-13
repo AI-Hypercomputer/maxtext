@@ -949,7 +949,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       preferred_element_type,
       weight_gather_axes,
   ):
-    if config.use_qwix_quantization:
+    if config.quantization and config.use_qwix_quantization:
       output = megablox.gmm(
           lhs=inputs,
           rhs=kernel,
@@ -1000,7 +1000,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       config.wo_tile_drhs_embed_dim,  # Called n in megablox, and indeed is the RHS batch dim
   )
 
-  if config.use_qwix_quantization:
+  if config.quantization and config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
     w0_pspec = nn.logical_to_mesh_axes(gating_pspec)
     wo_pspec = nn.logical_to_mesh_axes(linear_pspec)
@@ -1152,7 +1152,7 @@ def process_activations(
       None,
       None,
   )
-  if config.use_qwix_quantization:
+  if config.quantization and config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
     gating_pspec = nn.logical_to_mesh_axes(gating_pspec)
     linear_pspec = nn.logical_to_mesh_axes(linear_pspec)

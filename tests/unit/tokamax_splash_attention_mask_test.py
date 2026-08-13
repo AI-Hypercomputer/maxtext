@@ -20,6 +20,7 @@ import numpy as np
 
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask_info
+from maxtext.layers.attention_op import BlockCausalMask
 
 
 class TokamaxSplashAttentionMaskTest(absltest.TestCase):
@@ -109,6 +110,22 @@ class TokamaxSplashAttentionMaskTest(absltest.TestCase):
     right.kv_sequence = np.arange(7, -1, -1, dtype=np.int32)
 
     self.assertNotEqual(hash(left), hash(right))
+
+  def test_process_block_causal_mask_keeps_lazy_mask_function(self):
+    mask = BlockCausalMask((8, 8), causal_block_size=4)
+
+    mask_info, mask_function = splash_attention_mask_info.process_mask(
+        mask,
+        block_shape=(2, 2),
+        q_seq_shards=1,
+        kv_seq_shards=1,
+        return_dynamic_grid=True,
+    )
+
+    self.assertIs(mask_function, mask.mask_function)
+    self.assertIsNotNone(mask_info.q_sequence)
+    self.assertIsNone(mask_info.partial_mask_blocks)
+    np.testing.assert_array_equal(mask_info.q_sequence, np.arange(8, dtype=np.int32))
 
 
 if __name__ == "__main__":

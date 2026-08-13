@@ -36,13 +36,14 @@ from maxtext.layers.embeddings import Qwen3OmniMoeThinkerTextRotaryEmbedding as 
 
 
 # Qwen3-Omni special token IDs
-VISION_START = processor_qwen3_omni.QWEN3_OMNI_VISION_START_TOKEN
-VISION_END = processor_qwen3_omni.QWEN3_OMNI_VISION_END_TOKEN
-AUDIO_START = processor_qwen3_omni.QWEN3_OMNI_AUDIO_START_TOKEN
-AUDIO_END = processor_qwen3_omni.QWEN3_OMNI_AUDIO_END_TOKEN
-IMAGE_TOKEN = processor_qwen3_omni.QWEN3_OMNI_IMAGE_TOKEN
-VIDEO_TOKEN = processor_qwen3_omni.QWEN3_OMNI_VIDEO_TOKEN
-AUDIO_TOKEN = processor_qwen3_omni.QWEN3_OMNI_AUDIO_TOKEN
+special_tokens = processor_qwen3_omni.QwenTokens()
+VISION_START = special_tokens.vision_start
+VISION_END = special_tokens.vision_end
+AUDIO_START = special_tokens.audio_start
+AUDIO_END = special_tokens.audio_end
+IMAGE_TOKEN = special_tokens.image_pad
+VIDEO_TOKEN = special_tokens.video_pad
+AUDIO_TOKEN = special_tokens.audio_pad
 
 
 def create_pytorch_config(head_dim=128, mrope_section=(24, 20, 20), rope_max_timescale=1_000_000):
@@ -60,9 +61,15 @@ def create_pytorch_config(head_dim=128, mrope_section=(24, 20, 20), rope_max_tim
       self.hidden_size = head_dim
       self.num_attention_heads = 1
       self.max_position_embeddings = 65536
+      self.rope_parameters = {
+          "rope_type": "default",
+          "rope_theta": float(rope_max_timescale),
+          "mrope_section": list(mrope_section),
+      }
+      # Legacy aliases kept for older code paths / get_rope_index
       self.rope_theta = rope_max_timescale
       self.mrope_section = mrope_section
-      self.rope_scaling = {"mrope_section": list(mrope_section)}
+      self.rope_scaling = self.rope_parameters
       self.attention_scaling = 1.0
       self.partial_rotary_factor = 1.0
 
@@ -168,7 +175,7 @@ def assert_mrope_matches_pytorch(
 
   Args:
     query_states: Query tensor. Shape: (batch, seq_len, num_heads, head_dim)
-    position_ids: 3D position IDs. Shape: (3, batch, seq_len)
+    position_ids: 3D position IDs. Shape: (batch, seq_len, 3)
     err_msg: Error message for assertion failure
     mrope_section: Dimensions for temporal, height, width
     rope_max_timescale: Max timescale for RoPE
@@ -176,7 +183,7 @@ def assert_mrope_matches_pytorch(
     rtol: Relative tolerance for comparison
     atol: Absolute tolerance for comparison
   """
-  # JAX version
+  # JAX version — MaxText uses (batch, seq, 3)
   rngs = nnx.Rngs(0)
   jax_mrope = JaxMRoPE(
       min_timescale=1,
@@ -192,12 +199,12 @@ def assert_mrope_matches_pytorch(
   jax_position_ids = jnp.array(position_ids)
   jax_output = jax_mrope(jax_query, jax_position_ids)
 
-  # PyTorch version
+  # PyTorch version still expects HF layout (3, batch, seq)
   torch_config = create_pytorch_config(head_dim, mrope_section, rope_max_timescale)
   torch_mrope = PyTorchMRoPE(torch_config)
 
   torch_query = torch.from_numpy(np.array(query_states)).float()
-  torch_position_ids = torch.from_numpy(np.array(position_ids))
+  torch_position_ids = torch.from_numpy(np.transpose(np.array(position_ids), (2, 0, 1)))
 
   # PyTorch expects (batch, num_heads, seq_len, head_dim)
   # We have (batch, seq_len, num_heads, head_dim), so transpose
@@ -289,8 +296,8 @@ class GetRopeIndexComparisonTest(unittest.TestCase):
         second_per_grids=torch_second_per_grids,
     )
 
-    # Convert to numpy for comparison
-    torch_position_ids_np = torch_position_ids.cpu().numpy()
+    # Convert to numpy for comparison. PyTorch uses HF (3, B, S); MaxText uses (B, S, 3).
+    torch_position_ids_np = np.transpose(torch_position_ids.cpu().numpy(), (1, 2, 0))
     torch_deltas_np = torch_deltas.cpu().numpy()
 
     return jax_position_ids_np, torch_position_ids_np, jax_deltas_np, torch_deltas_np
@@ -532,9 +539,9 @@ class MRoPEComparisonTest(unittest.TestCase):
     # Query states
     query_states = np.random.randn(batch, seq_len, num_heads, head_dim).astype(np.float32)
 
-    # 1D position IDs (text-only): same value in all 3 dimensions
+    # 1D position IDs (text-only): same value in all 3 dimensions -> (B, S, 3)
     position_ids_1d = np.arange(seq_len).reshape(1, seq_len)
-    position_ids_3d = np.broadcast_to(position_ids_1d[np.newaxis, :, :], (3, batch, seq_len))
+    position_ids_3d = np.stack([position_ids_1d, position_ids_1d, position_ids_1d], axis=-1)
 
     assert_mrope_matches_pytorch(query_states, position_ids_3d, err_msg="MRoPE text-only output doesn't match PyTorch")
 
@@ -545,12 +552,19 @@ class MRoPEComparisonTest(unittest.TestCase):
     # Query states
     query_states = np.random.randn(batch, seq_len, num_heads, head_dim).astype(np.float32)
 
-    # 3D position IDs for vision: temporal=0, height=[0,0,1,1,...], width=[0,1,0,1,...]
+    # 3D position IDs for vision as (B, S, 3): temporal / height / width
     position_ids_3d = np.array(
         [
-            [[0, 0, 0, 0, 25, 25, 25, 25]],  # temporal
-            [[0, 0, 1, 1, 0, 0, 1, 1]],  # height
-            [[0, 1, 0, 1, 0, 1, 0, 1]],  # width
+            [  # t   h  w
+                [0, 0, 0],
+                [0, 0, 1],
+                [0, 1, 0],
+                [0, 1, 1],
+                [25, 0, 0],
+                [25, 0, 1],
+                [25, 1, 0],
+                [25, 1, 1],
+            ]
         ],
         dtype=np.float32,
     )
@@ -564,12 +578,21 @@ class MRoPEComparisonTest(unittest.TestCase):
     # Query states
     query_states = np.random.randn(batch, seq_len, num_heads, head_dim).astype(np.float32)
 
-    # Mixed: text tokens [0,1], vision tokens (4 tokens), text tokens [5,6,7]
+    # Mixed: text tokens [0,1], vision tokens (4 tokens), text tokens — (B, S, 3)
     position_ids_3d = np.array(
         [
-            [[0, 1, 2, 2, 2, 2, 6, 7, 8, 9]],  # temporal
-            [[0, 1, 2, 2, 3, 3, 6, 7, 8, 9]],  # height (vision different)
-            [[0, 1, 2, 3, 2, 3, 6, 7, 8, 9]],  # width (vision different)
+            [  # t  h  w
+                [0, 0, 0],
+                [1, 1, 1],
+                [2, 2, 2],
+                [2, 2, 3],
+                [2, 3, 2],
+                [2, 3, 3],
+                [6, 6, 6],
+                [7, 7, 7],
+                [8, 8, 8],
+                [9, 9, 9],
+            ]
         ],
         dtype=np.float32,
     )
@@ -585,12 +608,16 @@ class MRoPEComparisonTest(unittest.TestCase):
     # Query states
     query_states = np.random.randn(batch, seq_len, num_heads, head_dim).astype(np.float32)
 
-    # 3D position IDs
+    # 3D position IDs as (B, S, 3)
     position_ids_3d = np.array(
         [
-            [[0, 0, 25, 25, 50]],  # temporal
-            [[0, 1, 0, 1, 0]],  # height
-            [[0, 0, 1, 1, 2]],  # width
+            [  # t   h  w
+                [0, 0, 0],
+                [0, 1, 0],
+                [25, 0, 1],
+                [25, 1, 1],
+                [50, 0, 2],
+            ]
         ],
         dtype=np.float32,
     )
@@ -613,7 +640,7 @@ class MRoPEComparisonTest(unittest.TestCase):
     query_states = np.random.randn(batch, seq_len, num_heads, head_dim).astype(np.float32)
 
     # Different position IDs for each sequence in batch
-    position_ids_3d = np.random.randint(0, 100, size=(3, batch, seq_len)).astype(np.float32)
+    position_ids_3d = np.random.randint(0, 100, size=(batch, seq_len, 3)).astype(np.float32)
 
     # Batch test may have slightly larger numerical differences due to accumulation
     assert_mrope_matches_pytorch(
@@ -628,7 +655,11 @@ class ComputeQwen3OmniPositionsTest(unittest.TestCase):
     """Test that the Grain transform wrapper correctly calls get_rope_index."""
     # Test with image to verify multimodal handling
     spatial_merge_size = 2
-    transform = ComputeQwen3OmniPositions(data_column="inputs", spatial_merge_size=spatial_merge_size)
+    transform = ComputeQwen3OmniPositions(
+        data_column="inputs",
+        spatial_merge_size=spatial_merge_size,
+        keep_aux_fields=True,
+    )
 
     element = {
         "inputs": np.array(
@@ -640,9 +671,10 @@ class ComputeQwen3OmniPositionsTest(unittest.TestCase):
 
     result = transform.map(element)
 
-    # Verify transform adds position fields
+    # Verify transform adds position fields as (B, S, 3)
     self.assertIn("inputs_position", result)
     self.assertIn("inputs_mrope_deltas", result)
+    self.assertEqual(result["inputs_position"].shape, (1, 7, 3))
 
     # Verify it matches direct get_rope_index call
     expected_pos, expected_deltas = processor_qwen3_omni.get_rope_index(
@@ -659,6 +691,25 @@ class ComputeQwen3OmniPositionsTest(unittest.TestCase):
 
     np.testing.assert_array_equal(result["inputs_position"], expected_pos)
     np.testing.assert_array_equal(result["inputs_mrope_deltas"], expected_deltas)
+
+  def test_training_drops_aux_fields(self):
+    """Training path stores (B, S, 3) and drops aux fields."""
+    transform = ComputeQwen3OmniPositions(
+        data_column="inputs",
+        spatial_merge_size=2,
+        keep_aux_fields=False,
+    )
+    element = {
+        "inputs": np.array(
+            [[VISION_START, IMAGE_TOKEN, IMAGE_TOKEN, IMAGE_TOKEN, IMAGE_TOKEN, VISION_END, 100]], dtype=np.int32
+        ),
+        "inputs_segmentation": np.array([[1, 1, 1, 1, 1, 1, 1]], dtype=np.int32),
+        "image_grid_thw": np.array([[1, 2, 2]], dtype=np.int32),
+    }
+    result = transform.map(element)
+    self.assertEqual(result["inputs_position"].shape, (1, 7, 3))
+    self.assertNotIn("inputs_mrope_deltas", result)
+    self.assertNotIn("image_grid_thw", result)
 
 
 if __name__ == "__main__":

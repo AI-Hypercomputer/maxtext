@@ -20,6 +20,7 @@ require external integrations or specific hardware (for example `tpu_only`)
 are not marked.
 """
 
+import gc
 import pytest
 import sys
 import warnings
@@ -123,6 +124,7 @@ if is_decoupled():
 
 
 GCP_MARKERS = {"external_serving", "external_training"}
+HARDWARE_MARKERS = {"tpu_only", "gpu_only", "cpu_only"}
 
 
 def _has_tpu_backend_support() -> bool:
@@ -149,6 +151,7 @@ def pytest_collection_modifyitems(config, items):
   - Skip hardware-specific tests when hardware is missing.
   - Deselect tests marked as external_serving/training in decoupled mode.
   - Mark remaining tests with the `decoupled` marker when running decoupled.
+  - Mark tests without explicit hardware markers as `cpu_only`.
   """
 
   changed_tests = get_changed_tests()  # set[(file_path, test_name)]
@@ -197,6 +200,12 @@ def pytest_collection_modifyitems(config, items):
     for item in remaining:
       item.add_marker(pytest.mark.decoupled)
 
+  # Auto-mark remaining tests as cpu_only unless explicitly marked with hardware target markers.
+  for item in remaining:
+    cur_test_markers = {m.name for m in item.iter_markers()}
+    if cur_test_markers.isdisjoint(HARDWARE_MARKERS):
+      item.add_marker(pytest.mark.cpu_only)
+
 
 def pytest_configure(config):
   """Registers custom pytest markers dynamically."""
@@ -212,6 +221,23 @@ def pytest_configure(config):
       "newly_added: newly introduced or modified tests in PRs, executed even if scheduled_only",
   ]:
     config.addinivalue_line("markers", m)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def clear_jax_compilation_cache():
+  """Clears JAX compilation caches and forces garbage collection after each test module.
+
+  Prevents XLA memory accumulation and compilation cache buildup across
+  long test runs while preserving intra-module compilation cache reuse.
+  """
+  yield
+  try:
+    has_accelerator = any(d.platform in ("tpu", "gpu", "proxy") for d in jax.devices())
+    if has_accelerator:
+      jax.clear_caches()
+      gc.collect()
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
 
 
 @pytest.fixture(autouse=True)
