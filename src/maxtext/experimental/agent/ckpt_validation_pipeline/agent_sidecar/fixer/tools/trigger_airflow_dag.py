@@ -63,6 +63,15 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
     conf_dict["xpk_zone"] = zone
 
   if overrides:
+    # Determine the target override container key based on target_dag
+    if target_dag.startswith("dag_verify_decoding"):
+      default_override_keys = ["decode_maxtext_overrides"]
+    elif target_dag.startswith("dag_verify_forward_pass") or target_dag.startswith("dag_verify_checkpoint_shape") or target_dag.startswith("dag_verify_forward_compile"):
+      default_override_keys = ["forward_pass_maxtext_overrides"]
+    elif target_dag == "maxtext_validation_master_dag":
+      default_override_keys = ["forward_pass_maxtext_overrides", "decode_maxtext_overrides"]
+    else:
+      default_override_keys = ["forward_pass_maxtext_overrides"]
 
     def _merge_override(key, value):
       root_keys = {
@@ -71,6 +80,7 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
           "hf_config_url",
           "hf_model_path",
           "hf_ref_code_url",
+          "hf_token",
           "max_kl_div",
           "maxtext_branch",
           "maxtext_commit_hash",
@@ -80,31 +90,58 @@ def trigger_dag(branch_name, cluster_name=None, project_name=None, zone=None, ov
           "xpk_cluster_name",
           "xpk_project",
           "xpk_zone",
-          "maxtext_overrides",
+          "skip_decoding",
+          "prompts",
+          "email",
       }
 
       is_delete = value is None or (isinstance(value, str) and value.upper() in ("REMOVE", "DELETE"))
 
-      # Edge case: If the agent explicitly nests its output like {"maxtext_overrides": {"attention": "dot_product"}},
-      # we must not overwrite the entire dictionary. We should merge its contents recursively.
+      # Case 1: Explicit forward_pass_maxtext_overrides dict
+      if key == "forward_pass_maxtext_overrides" and isinstance(value, dict):
+        if "forward_pass_maxtext_overrides" not in conf_dict:
+          conf_dict["forward_pass_maxtext_overrides"] = {}
+        for sub_k, sub_v in value.items():
+          sub_delete = sub_v is None or (isinstance(sub_v, str) and sub_v.upper() in ("REMOVE", "DELETE"))
+          if sub_delete:
+            conf_dict["forward_pass_maxtext_overrides"].pop(sub_k, None)
+          else:
+            conf_dict["forward_pass_maxtext_overrides"][sub_k] = sub_v
+        return
+
+      # Case 2: Explicit decode_maxtext_overrides dict
+      if key == "decode_maxtext_overrides" and isinstance(value, dict):
+        if "decode_maxtext_overrides" not in conf_dict:
+          conf_dict["decode_maxtext_overrides"] = {}
+        for sub_k, sub_v in value.items():
+          sub_delete = sub_v is None or (isinstance(sub_v, str) and sub_v.upper() in ("REMOVE", "DELETE"))
+          if sub_delete:
+            conf_dict["decode_maxtext_overrides"].pop(sub_k, None)
+          else:
+            conf_dict["decode_maxtext_overrides"][sub_k] = sub_v
+        return
+
+      # Case 3: Legacy maxtext_overrides dict
       if key == "maxtext_overrides" and isinstance(value, dict):
         for sub_k, sub_v in value.items():
           _merge_override(sub_k, sub_v)
         return
 
+      # Case 4: Top-level root parameter
       if key in root_keys:
         if is_delete:
           conf_dict.pop(key, None)
         else:
           conf_dict[key] = value
       else:
-        if "maxtext_overrides" not in conf_dict:
-          conf_dict["maxtext_overrides"] = {}
-
-        if is_delete:
-          conf_dict["maxtext_overrides"].pop(key, None)
-        else:
-          conf_dict["maxtext_overrides"][key] = value
+        # Case 5: Model/runtime hyperparameter override -> route to target DAG override container(s)
+        for target_key in default_override_keys:
+          if target_key not in conf_dict:
+            conf_dict[target_key] = {}
+          if is_delete:
+            conf_dict[target_key].pop(key, None)
+          else:
+            conf_dict[target_key][key] = value
 
     if isinstance(overrides, dict):
       for k, v in overrides.items():
