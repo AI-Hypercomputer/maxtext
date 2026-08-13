@@ -55,6 +55,18 @@ class GLM52IndexSharePatternTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       index_share_utils.parse_index_share_pattern("", 4)
 
+  def test_checkpoint_donor_resolution(self):
+    pattern = index_share_utils.parse_index_share_pattern("FSSS", 12)
+    # Layers 0..3 share with Layer 0
+    for l in range(4):
+      self.assertEqual(index_share_utils.get_donor_layer_idx(l, pattern), 0)
+    # Layers 4..7 share with Layer 4
+    for l in range(4, 8):
+      self.assertEqual(index_share_utils.get_donor_layer_idx(l, pattern), 4)
+    # Layers 8..11 share with Layer 8
+    for l in range(8, 12):
+      self.assertEqual(index_share_utils.get_donor_layer_idx(l, pattern), 8)
+
 
 if __name__ == "__main__":
   unittest.main()

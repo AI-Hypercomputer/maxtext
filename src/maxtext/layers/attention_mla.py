@@ -737,6 +737,18 @@ class MLA(Attention):
     self.use_indexer = config.use_indexer
     self.is_shared_layer = is_shared_layer
     self.served_group_size = served_group_size
+    if getattr(config, "use_index_share", False):
+      from maxtext.utils import index_share_utils
+
+      pattern = index_share_utils.parse_index_share_pattern(
+          config.index_share_pattern, config.num_decoder_layers
+      )
+      self.is_full_array = jnp.array([role == "F" for role in pattern], dtype=jnp.bool_)
+      group_sizes = index_share_utils.get_served_group_sizes(pattern)
+      self.served_group_size_array = jnp.array(group_sizes, dtype=jnp.float32)
+    else:
+      self.is_full_array = None
+      self.served_group_size_array = None
     is_pruned = (
         getattr(config, "use_index_share", False)
         and getattr(config, "prune_shared_indexers", True)
@@ -1335,7 +1347,7 @@ class MLA(Attention):
 
         if getattr(self.config, "use_index_share", False) and cached_indexer_state is not None:
           if layer_idx is not None:
-            is_full = (layer_idx % 4 == 0)
+            is_full = self.is_full_array[layer_idx]
             indexer_mask, topk_indices, indexer_score = jax.lax.cond(
                 is_full,
                 _run_full,
@@ -1355,8 +1367,14 @@ class MLA(Attention):
 
       if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0 and indexer_score is not None:
         loss_scale = self.config.indexer_loss_scaling_factor
-        if getattr(self.config, "use_index_share", False) and self.served_group_size > 1:
-          loss_scale = loss_scale / float(self.served_group_size)
+        if getattr(self.config, "use_index_share", False):
+          group_size = (
+              self.served_group_size_array[layer_idx]
+              if layer_idx is not None and self.served_group_size_array is not None
+              else float(self.served_group_size)
+          )
+          if group_size > 1:
+            loss_scale = loss_scale / group_size
 
         indexer_loss = self.calculate_indexer_loss(
             indexer_score=indexer_score,

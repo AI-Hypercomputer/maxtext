@@ -58,7 +58,7 @@ class GLMGenericLayer(deepseek.DeepSeekGenericLayer):
       pattern = index_share_utils.parse_index_share_pattern(config.index_share_pattern, config.num_decoder_layers)
       self.is_shared_layer = index_share_utils.is_shared_layer(layer_idx, pattern)
       self.served_group_size = index_share_utils.get_served_group_sizes(pattern)[layer_idx]
-      if layer_idx == 0:
+      if layer_idx == 0 and jax.process_index() == 0:
         num_f = pattern.count("F")
         num_s = pattern.count("S")
         absl.logging.info(

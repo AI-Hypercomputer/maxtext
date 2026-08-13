@@ -471,11 +471,17 @@ def _build_single_axis_stacked_tensor(
 
           m = re.match(r"model\.layers\.(\d+)\.(.+)", str(hf_key_single))
           if m:
+            layer_idx = int(m.group(1))
             rest = m.group(2)
-            donor_key = f"model.layers.0.{rest}"
-            try:
-              hf_tensor_numpy = tensor_getter_fn(donor_key)
-            except Exception:
+            # Search backwards for the closest preceding donor layer containing the key
+            for candidate_idx in range(layer_idx - 1, -1, -1):
+              donor_key = f"model.layers.{candidate_idx}.{rest}"
+              try:
+                hf_tensor_numpy = tensor_getter_fn(donor_key)
+                break
+              except Exception:
+                continue
+            else:
               hf_tensor_numpy = np.zeros(mt_slice_shape, dtype=np.float32)
           else:
             raise e
@@ -1023,15 +1029,9 @@ def main(
             if m:
               layer_idx = int(m.group(1))
               rest = m.group(2)
-              matching_layers = [
-                  int(k.split(".")[2])
-                  for k in hf_state_dict_numpy
-                  if k.startswith("model.layers.") and k.endswith(f".{rest}")
-              ]
-              if matching_layers:
-                preceding = [l for l in matching_layers if l <= layer_idx]
-                donor_idx = max(preceding) if preceding else min(matching_layers)
-                donor_key = f"model.layers.{donor_idx}.{rest}"
+              # Search backwards for the closest preceding donor layer containing the key
+              for candidate_idx in range(layer_idx - 1, -1, -1):
+                donor_key = f"model.layers.{candidate_idx}.{rest}"
                 if donor_key in hf_state_dict_numpy:
                   return _eager_getter(donor_key)
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
@@ -1064,12 +1064,15 @@ def main(
 
             m = re.match(r"model\.layers\.(\d+)\.(.+)", key)
             if m:
+              layer_idx = int(m.group(1))
               rest = m.group(2)
-              donor_key = f"model.layers.0.{rest}"
-              try:
-                return orig_tensor_getter(donor_key)
-              except Exception:
-                pass
+              # Search backwards for the closest preceding donor layer containing the key
+              for candidate_idx in range(layer_idx - 1, -1, -1):
+                donor_key = f"model.layers.{candidate_idx}.{rest}"
+                try:
+                  return orig_tensor_getter(donor_key)
+                except (ValueError, KeyError):
+                  continue
           raise e
 
       tensor_getter = _index_share_tensor_getter
