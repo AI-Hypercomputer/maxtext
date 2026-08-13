@@ -175,8 +175,20 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
       # Pathways only supports the persistence APIs, so drop ocdbt/zarr3 there as Tunix does.
       pathways = "proxy" in os.getenv("JAX_PLATFORMS", "")
 
+      # Orbax otherwise materialises the whole tree on the host at once (its default concurrency
+      # is ~89GiB), which OOMKills the container the trainer runs in. MaxText already has a knob
+      # for this, checkpoint_storage_concurrent_gb, but it was never plumbed into this path.
+      concurrent_gb = getattr(config, "checkpoint_storage_concurrent_gb", None) if config is not None else None
+
       def pytree_handler():
-        return ocp.PyTreeCheckpointHandler(use_ocdbt=not pathways, use_zarr3=not pathways)
+        kwargs = {"use_ocdbt": not pathways, "use_zarr3": not pathways}
+        if concurrent_gb:
+          # Only the device-to-host budget: that is the one that decides how much of the tree is
+          # resident in host memory at once. Capping save_concurrent_gb/restore_concurrent_gb as
+          # well breaks reads of any single array larger than the cap, e.g. llama3.1-8b's
+          # mlp.wi_0.kernel at 3.75GiB ("Requested more bytes than we reserved space for").
+          kwargs["save_device_host_concurrent_gb"] = concurrent_gb
+        return ocp.PyTreeCheckpointHandler(**kwargs)
 
       handlers = {
           _ITEM_NAME: pytree_handler(),

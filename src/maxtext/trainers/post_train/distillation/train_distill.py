@@ -204,6 +204,22 @@ class ModelBundle(nnx.Module):
     return jax.lax.stop_gradient(self.teacher_model(*args, **kwargs))  # pyrefly: ignore[not-callable]
 
 
+def _select_inputs(args, kwargs):
+  """Picks the training batch out of Tunix's train-step arguments.
+
+  Tunix passes the gradient accumulator alongside the batch, and has swapped their order between
+  versions, so the batch cannot be taken from a fixed position. Identify the accumulator by type
+  and take the remaining argument.
+  """
+  if "inputs" in kwargs:
+    return kwargs["inputs"]
+  accumulator_type = getattr(peft_trainer, "GradientAccumulator", ())
+  candidates = [a for a in args if a is not None and not isinstance(a, accumulator_type)]
+  if not candidates:
+    raise ValueError(f"No training batch found in train-step arguments: {[type(a) for a in args]}")
+  return candidates[0]
+
+
 class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   """Custom Trainer to preserve MaxText fields and log Teacher metrics.
 
@@ -274,7 +290,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   # Inherits _shard_optimizer from PeftTrainer.
 
-  def _train_step(self, model, optimizer, inputs, grad_accumulator=None, **kwargs):  # pyrefly: ignore[bad-override]
+  def _train_step(self, model, optimizer, *args, **kwargs):  # pyrefly: ignore[bad-override]
     """Overrides the main JIT block to natively handle ModelBundle module.
 
     Uses jax.value_and_grad with explicit split/merge to avoid nesting
@@ -282,7 +298,15 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     conflicting outer_index values and raises:
       ValueError: The graph structure of a node added to cached_partial was
       mutated inside the transformation.
+
+    Tunix has moved grad_accumulator either side of inputs across versions: older builds call
+    (model, optimizer, inputs, grad_accumulator), newer ones
+    (model, optimizer, grad_accumulator, inputs, is_update_step=...). Binding those positionally
+    hands the accumulator to gen_model_input_fn, which then fails with
+    "'GradientAccumulator' object has no attribute 'input_tokens'". Pick the batch out of the
+    positional arguments instead of trusting their order.
     """
+    inputs = _select_inputs(args, kwargs)
     batch = self.gen_model_input_fn(inputs)
     student = model.student_model
     teacher = model.teacher_model
