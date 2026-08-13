@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Automated Decode Validation Agent for MaxText."""
+"""Automated Decode Validation Agent for MaxText. Validates decoding."""
 
 import maxtext
 import subprocess
