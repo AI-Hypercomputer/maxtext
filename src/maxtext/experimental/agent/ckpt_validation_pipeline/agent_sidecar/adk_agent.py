@@ -318,7 +318,9 @@ def run_agent_workflow(context: dict, failure_log: str):
   maxtext_branch = context.get("maxtext_branch") or os.environ.get("MAXTEXT_BRANCH", "main")
   hf_ref_code_url = context.get("hf_ref_code_url") or os.environ.get("HF_REF_CODE_URL", "")
   hf_config_url = context.get("hf_config_url") or os.environ.get("HF_CONFIG_URL", "")
-  maxtext_overrides = context.get("maxtext_overrides", {})
+  fp_overrides = context.get("forward_pass_maxtext_overrides", {})
+  decode_overrides = context.get("decode_maxtext_overrides", {})
+  maxtext_overrides = {"forward_pass_maxtext_overrides": fp_overrides, "decode_maxtext_overrides": decode_overrides}
   airflow_dag_id = context.get("airflow_dag_id") or os.environ.get("TARGET_DAG_ID", "")
   airflow_task_id = context.get("airflow_task_id", "")
   airflow_run_id = context.get("airflow_run_id", "")
