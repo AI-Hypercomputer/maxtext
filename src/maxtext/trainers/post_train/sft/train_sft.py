@@ -35,7 +35,6 @@ Training:
     eval_interval=-1 steps=10 profiler=xplane
 """
 
-import inspect
 from typing import Any, Sequence
 
 from absl import app
@@ -95,19 +94,13 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
     is_lora_enabled = self._lora_enabled
     wrt = nnx.LoRAParam if is_lora_enabled else nnx.Param
 
-    # Detect whether Tunix's train() expects (loss, aux, grad_norm) or just
-    # (loss, aux) by inspecting the source of PeftTrainer._train_step.
-    tunix_expects_grad_norm = False
-    try:
-      source = inspect.getsource(peft_trainer.PeftTrainer._train_step)  # pylint: disable=protected-access
-      tunix_expects_grad_norm = "grad_norm" in source
-    except (TypeError, OSError):
-      pass
-
     # Capture the graphdef once outside of JIT so that split/merge inside
     # jax.value_and_grad can use a stable (non-traced) structural descriptor.
     nnx.pop(self.model, nnx.Intermediate)
     graphdef, _, _ = nnx.split(self.model, wrt, ...)
+    _uses_gradient_accumulation = not (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1 and self.config.max_seq_token_per_tpu is None
+    )
 
     def train_step(
         model: nnx.Module,
@@ -160,12 +153,19 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
       nnx.update(model, new_rest)
 
       # Handle gradient accumulation and conditional/direct optimizer update
-      if grad_accumulator is not None and hasattr(grad_accumulator, "add"):
+      if not _uses_gradient_accumulation:
+        if isinstance(grads, dict) and not isinstance(grads, nnx.State):
+          grads = nnx.State(grads)
+        optimizer.update(model, grads)
+        grad_norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads))
+      else:
         grad_accumulator.add(grads)
 
         def apply_updates(model, optimizer, grad_accumulator):
           acc_grads = grad_accumulator.get()
           norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads))
+          if isinstance(acc_grads, dict) and not isinstance(acc_grads, nnx.State):
+            acc_grads = nnx.State(acc_grads)
           optimizer.update(model, acc_grads)
           grad_accumulator.reset()
           return norm
@@ -181,14 +181,9 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
             optimizer,
             grad_accumulator,
         )
-      else:
-        optimizer.update(model, grads)
-        grad_norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads))
 
       aux_out = aux if has_aux else None
-      if tunix_expects_grad_norm:
-        return out_val, aux_out, grad_norm
-      return out_val, aux_out
+      return out_val, aux_out, grad_norm
 
     return train_step
 
