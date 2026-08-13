@@ -1,36 +1,65 @@
 # Qwen3.5 MoE 1-Decoder Layer Kernel Drift Results
 
-**Date / Timestamp:** 2026-08-11 07:37:49 UTC  
+**Date / Timestamp:** 2026-08-13 05:36:31 UTC  
 **Hardware Platform:** Google Cloud TPU v5p (Shared Pathways Service over GKE `auto-v5p-8-bodaborg`)  
 **Topology:** 2x2x1 (4 TPU Devices)  
 **Model Architecture:** Qwen3.5 MoE (`qwen3.5-35b-a3b` 1-Layer Full Attention + MoE Block)  
-**Evaluated Precision:** `bfloat16`  
 
 ---
 
-## 1. Key Component Parity Summary
+## 1. Key Component Parity Summary (BFloat16 vs. Float32)
 
-| Component | Training Kernel | Inference Kernel | Cosine Similarity | Max Abs Error ($L_\infty$) | MAE |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Pre-Attention (T01)** | Layer Input | Layer Input | **`1.000000`** | **`0.000000e+00`** | **`0.000000e+00`** |
-| **Attention Core (T12)** | Splash / Flash Attention | vLLM RPA (Pallas) | **`0.999912`** | `1.562500e-02` | `3.285446e-04` |
-| **Attention Out Proj (T14)** | Linear Projection | Linear Projection | **`0.999947`** | `7.812500e-03` | `2.506588e-04` |
-| **MoE Routing (T20)** | Top-K Router | Top-K Router | **`0.999998`** | `1.562500e-02` | `9.060609e-04` |
-| **Routed MoE Compute (T23)** | Sparse Matmul | Pallas Fused MoE | **`0.999921`** | `1.464844e-03` | **`1.059607e-04`** |
-| **Full Layer Output (T25)** | Full Decoder Layer | Full Decoder Layer | **`0.999976`** | `3.125000e-02` | `1.065484e-03` |
+| Component | Training Kernel | Inference Kernel | BF16 CosSim | BF16 $L_\infty$ | BF16 MAE | FP32 CosSim | FP32 $L_\infty$ | FP32 MAE |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Pre-Attention (T01)** | Layer Input | Layer Input | **`1.000000`** | `0.00e+00` | `0.00e+00` | **`1.000000`** | `0.00e+00` | `0.00e+00` |
+| **Attention Core (T12)** | Splash / Flash Attention | vLLM RPA (Pallas) | **`0.999912`** | `1.56e-02` | `3.29e-04` | **`1.000000`** | `8.14e-04` | `1.53e-05` |
+| **Attention Out Proj (T14)** | Linear Projection | Linear Projection | **`0.999947`** | `7.81e-03` | `2.51e-04` | **`1.000000`** | `3.86e-04` | `2.30e-05` |
+| **MoE Routing (T20)** | Top-K Router | Top-K Router | **`0.999999`** | `9.90e-03` | `9.00e-04` | **`1.000000`** | `2.35e-03` | `1.69e-04` |
+| **Routed MoE Compute (T23)** | Sparse Matmul | Pallas Fused MoE | **`0.999925`** | `1.46e-03` | `9.70e-05` | **`1.000000`** | `6.03e-04` | `1.42e-05` |
+| **Full Layer Output (T25)** | Full Decoder Layer | Full Decoder Layer | **`0.999976`** | `3.12e-02` | `1.05e-03` | **`1.000000`** | `7.12e-03` | `1.73e-04` |
 
 ---
 
-## 2. Complete 25-Intermediate Tensor Breakdown (BFloat16)
+## 2. Complete 25-Intermediate Tensor Breakdown (Float32)
 
 | Tensor Name | Shape | Max Abs Err ($L_\infty$) | MAE | Cosine Sim | Rel Err |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `T01_layer_input` | `4x512x2048` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
 | `T02_input_layernorm_out` | `4x512x2048` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
-| `T03_q_proj_raw` | `4x512x16x512` | `7.531250e+00` | `7.031320e-02` | `0.937515` | `3.535181e-01` |
+| `T03_q_proj_raw` | `4x512x16x512` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
 | `T04_q_proj_heads` | `4x512x16x256` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
 | `T05_query_gate` | `4x512x4096` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
 | `T06_k_proj_heads` | `4x512x2x256` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
+| `T07_v_proj_heads` | `4x512x2x256` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
+| `T08_q_norm_out` | `4x512x16x256` | `6.962217e+00` | `1.411639e-01` | `0.875007` | `5.000235e-01` |
+| `T09_k_norm_out` | `4x512x2x256` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
+| `T10_q_rope_out` | `4x512x16x256` | `7.256462e+00` | `7.050336e-02` | `0.937598` | `3.532870e-01` |
+| `T11_k_rope_out` | `4x512x2x256` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
+| `T12_attn_core_out` | `4x512x16x256` | `8.142143e-04` | `1.530465e-05` | `1.000000` | `3.105304e-04` |
+| `T13_attn_gated_out` | `4x512x4096` | `6.859172e-04` | `7.653317e-06` | `1.000000` | `3.101167e-04` |
+| `T14_attn_out_proj` | `4x512x2048` | `3.856122e-04` | `2.298062e-05` | `1.000000` | `4.888637e-04` |
+| `T15_post_attn_residual` | `4x512x2048` | `3.855824e-04` | `2.298062e-05` | `1.000000` | `4.310372e-05` |
+| `T16_post_attn_layernorm_out` | `4x512x2048` | `3.925562e-04` | `2.295293e-05` | `1.000000` | `4.321630e-05` |
+| `T17_shared_expert_gate_logits` | `4x512x1` | `2.490580e-04` | `2.283715e-05` | `1.000000` | `4.217246e-05` |
+| `T18_shared_expert_gate_prob` | `4x512x1` | `5.897880e-05` | `4.648798e-06` | `1.000000` | `1.651837e-05` |
+| `T19_shared_expert_mlp_out` | `4x512x2048` | `8.207202e-03` | `3.404434e-04` | `1.000000` | `1.096903e-03` |
+| `T20_router_gate_logits` | `4x512x8` | `2.347946e-03` | `1.691656e-04` | `1.000000` | `3.206529e-04` |
+| `T23_routed_moe_out` | `4x512x2048` | `6.027594e-04` | `1.420830e-05` | `1.000000` | `1.131564e-03` |
+| `T24_moe_combined_out` | `4x512x2048` | `6.959572e-03` | `1.705201e-04` | `1.000000` | `1.092008e-03` |
+| `T25_layer_output` | `4x512x2048` | `7.123828e-03` | `1.726777e-04` | `1.000000` | `3.390795e-04` |
+
+---
+
+## 3. Complete 25-Intermediate Tensor Breakdown (BFloat16)
+
+| Tensor Name | Shape | Max Abs Err ($L_\infty$) | MAE | Cosine Sim | Rel Err |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `T01_layer_input` | `4x512x2048` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
+| `T02_input_layernorm_out` | `4x512x2048` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
+| `T03_q_proj_raw` | `4x512x16x512` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
+| `T04_q_proj_heads` | `4x512x16x256` | `7.140625e+00` | `1.405316e-01` | `0.875078` | `4.996834e-01` |
+| `T05_query_gate` | `4x512x4096` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
+| `T06_k_proj_heads` | `4x512x2x256` | `8.265625e+00` | `2.819684e-01` | `0.749270` | `7.082729e-01` |
 | `T07_v_proj_heads` | `4x512x2x256` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
 | `T08_q_norm_out` | `4x512x16x256` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
 | `T09_k_norm_out` | `4x512x2x256` | `0.000000e+00` | `0.000000e+00` | `1.000000` | `0.000000e+00` |
@@ -43,8 +72,8 @@
 | `T16_post_attn_layernorm_out` | `4x512x2048` | `3.125000e-02` | `2.693846e-04` | `0.999994` | `1.142150e-03` |
 | `T17_shared_expert_gate_logits` | `4x512x1` | `1.562500e-02` | `8.818870e-04` | `0.999998` | `1.982377e-03` |
 | `T18_shared_expert_gate_prob` | `4x512x1` | `3.906250e-03` | `2.186298e-04` | `0.999999` | `1.479646e-03` |
-| `T19_shared_expert_mlp_out` | `4x512x2048` | `1.953125e-02` | `1.549102e-03` | `0.999949` | `4.005917e-03` |
-| `T20_router_gate_logits` | `4x512x8` | `1.562500e-02` | `9.060609e-04` | `0.999998` | `2.065531e-03` |
-| `T23_routed_moe_out` | `4x512x2048` | `1.464844e-03` | `1.059607e-04` | `0.999921` | `6.133668e-03` |
-| `T24_moe_combined_out` | `4x512x2048` | `4.960938e+00` | `9.413179e-02` | `0.638946` | `7.732792e-01` |
-| `T25_layer_output` | `4x512x2048` | `3.125000e-02` | `1.065484e-03` | `0.999976` | `2.374252e-03` |
+| `T19_shared_expert_mlp_out` | `4x512x2048` | `1.562500e-02` | `1.524454e-03` | `0.999949` | `3.952690e-03` |
+| `T20_router_gate_logits` | `4x512x8` | `9.899631e-03` | `8.997058e-04` | `0.999999` | `1.153476e-03` |
+| `T23_routed_moe_out` | `4x512x2048` | `1.464844e-03` | `9.695098e-05` | `0.999925` | `5.662032e-03` |
+| `T24_moe_combined_out` | `4x512x2048` | `2.343750e-02` | `8.659092e-04` | `0.999951` | `4.620779e-03` |
+| `T25_layer_output` | `4x512x2048` | `3.125000e-02` | `1.049024e-03` | `0.999976` | `2.352864e-03` |
