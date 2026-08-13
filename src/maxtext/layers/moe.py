@@ -3119,9 +3119,14 @@ class RoutedMoE(nnx.Module):
       w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
       w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
 
-    # Only apply per expert scales if we have not fused with the out-projections at init time.
-    if self.per_expert_scale is not None and cfg.model_call_mode != "inference" and not cfg.fuse_expert_scales:
-      wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
+    # For fused MoE path (inference only), if we have not fused expert
+    # scales at init, we must apply them to wo_kernel here because
+    # fused_moe_func doesn't support them. Other paths (dense/sparse
+    # matmul) apply them to top_k_weights in get_topk.
+    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
+    if is_fused_moe_path:
+      if self.per_expert_scale is not None and not (cfg.model_call_mode == "inference" and cfg.fuse_expert_scales):
+        wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
 
     if self.wi_0_sparsity_module is not None:
       _, w0_kernel = self.wi_0_sparsity_module(jnp.zeros_like(w0_kernel), w0_kernel)
