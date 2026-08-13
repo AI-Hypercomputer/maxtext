@@ -288,6 +288,7 @@ use_2d_fsdp_sharding: false
 # deepseek moe
 first_num_dense_layers: 0 # number of initial dense layers in the model
 shared_experts: 0
+moe_shared_expert_gate: false
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: false # a flag if a learnable bias is added for routing
@@ -305,6 +306,7 @@ batch_split_factor: 1 # the factor by which to split the batch. Only used if use
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
 # which can only be scanned together in one large block of inhomogeneous_layer_cycle_interval=4 layers.
 inhomogeneous_layer_cycle_interval: 1
+full_attention_layer_offset: 0
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -1283,6 +1285,10 @@ gdn_num_value_heads: 32
 gdn_chunk_size: 64
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
+# Whether to use GDN Pallas kernel
+use_gdn_kernel: false
+# Whether to use hybrid GDN v3 Tokamax forward + Custom VJP backward
+use_hybrid_gdn: false
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
 

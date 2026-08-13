@@ -204,7 +204,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
       ns_steps = 10
     else:
       ns_coeffs = (3.4445, -4.7750, 2.0315)
-      ns_steps = 5
+      ns_steps = getattr(config, "muon_ns_steps", 5)
 
     muon_kwargs = {
         # Shared parameters: "nesterov" uses default

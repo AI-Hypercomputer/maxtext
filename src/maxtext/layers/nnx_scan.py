@@ -122,23 +122,20 @@ def apply_scanned_layers(
   if length <= 0:
     return carry
 
-  layer_graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+  layer_graphdef, params, rest = nnx.split(layers, nnx.Param, ...)
   if param_scan_axis != 0:
     params = jax.tree.map(lambda x: jnp.moveaxis(x, param_scan_axis, 0), params)
 
   def scan_body(current_carry, scanned_state):
-    current_params, current_state = scanned_state
-    current_layer = nnx.merge(layer_graphdef, current_params, current_state)
+    current_params, current_rest = scanned_state
+    current_layer = nnx.merge(layer_graphdef, current_params, current_rest)
     next_carry = apply_fn(current_layer, current_carry)
-    return next_carry, nnx.state(current_layer)
+    # Avoid returning and stacking read-only parameters inside the scan body.
+    _, _, updated_rest = nnx.split(current_layer, nnx.Param, ...)
+    return next_carry, updated_rest
 
   scan_fn = jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse) if remat else scan_body
-  final_carry, scanned_state = jax.lax.scan(scan_fn, carry, (params, state), unroll=unroll)
+  final_carry, scanned_rest = jax.lax.scan(scan_fn, carry, (params, rest), unroll=unroll)
 
-  if param_scan_axis != 0:
-    scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
-    scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), scanned_params)
-    scanned_state = nnx.State.merge(scanned_params, scanned_other)
-
-  nnx.update(layers, scanned_state)
+  nnx.update(layers, scanned_rest)
   return final_carry
