@@ -21,6 +21,7 @@ import functools
 import ml_collections
 from concurrent import futures
 import json
+from dataclasses import asdict, dataclass
 
 import jax
 
@@ -36,8 +37,59 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
 
+@dataclass(frozen=True)
+class FileInstruction:
+  """File instruction for Grain ArrayRecordDataSource to bypass remote index discovery."""
+  filename: str
+  skip: int
+  take: int
+  examples_in_shard: int
+
+  def to_dict(self):
+    return asdict(self)
+
+  @classmethod
+  def from_dict(cls, d):
+    return cls(
+        filename=d["filename"],
+        skip=d["skip"],
+        take=d["take"],
+        examples_in_shard=d.get("examples_in_shard", d["take"]),
+    )
+
+
+def extract_file_instructions(
+    pattern_or_files,
+    grain_data_source_max_workers: int = 128,
+) -> tuple[FileInstruction, ...]:
+  """Pre-resolves file paths and extracts FileInstruction metadata on the coordinator."""
+  if isinstance(pattern_or_files, (list, tuple)) and pattern_or_files and isinstance(pattern_or_files[0], FileInstruction):
+    return tuple(pattern_or_files)
+  files = find_data_files(pattern_or_files) if isinstance(pattern_or_files, str) else list(pattern_or_files)
+
+  # Initialize data source on coordinator once to inspect file headers
+  ds = grain.ArrayRecordDataSource(files)
+  instructions = []
+  for ri in ds._read_instructions:
+    instructions.append(
+        FileInstruction(
+            filename=ri.filename,
+            skip=ri.start,
+            take=ri.num_records,
+            examples_in_shard=ri.num_records,
+        )
+    )
+  max_logging.log(
+      f"Extracted {len(instructions)} FileInstructions on coordinator "
+      f"(total records: {sum(inst.take for inst in instructions)})"
+  )
+  return tuple(instructions)
+
+
 def find_data_files(data_file_pattern):
   """Find data files matching the pattern."""
+  if isinstance(data_file_pattern, (list, tuple)):
+    return list(data_file_pattern)
   if data_file_pattern.startswith("gs://"):
     data_files = gcs_utils.gcs_glob_pattern(data_file_pattern)
   else:
@@ -101,8 +153,11 @@ def get_datasets(
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
-      files = find_data_files(pattern)
-      source = grain.ArrayRecordDataSource(files)
+      if isinstance(pattern, (list, tuple)) and pattern and isinstance(pattern[0], FileInstruction):
+        source = grain.ArrayRecordDataSource(pattern)
+      else:
+        files = find_data_files(pattern)
+        source = grain.ArrayRecordDataSource(files)
       return grain.MapDataset.source(source)
 
     # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
@@ -137,7 +192,29 @@ def get_datasets(
 
       dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
       return dataset
-    elif ";" in data_file_pattern:
+    elif isinstance(data_file_pattern, tuple) and len(data_file_pattern) == 2 and isinstance(data_file_pattern[1], (list, tuple)):
+      data_file_patterns, weights = data_file_pattern
+      weights = [float(weight) for weight in weights]
+      weights = [round(weight / sum(weights), 4) for weight in weights]
+
+      executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
+      dataset_list = list(executor.map(create_dataset_from_pattern, data_file_patterns))
+      executor.shutdown(wait=True)
+
+      for d, _ in enumerate(dataset_list):
+        dataset_list[d] = _apply_mapdataset_transforms(
+            dataset_list[d],
+            shuffle,
+            shuffle_seed,
+            num_epoch,
+            dataloading_host_index,
+            dataloading_host_count,
+            grain_num_threads,
+            grain_prefetch_buffer_size,
+        )
+      dataset = grain.IterDataset.mix(dataset_list, weights)
+      return dataset
+    elif isinstance(data_file_pattern, str) and ";" in data_file_pattern:
       data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
       assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
       weights = [float(weight) for weight in weights]
@@ -166,7 +243,7 @@ def get_datasets(
       dataset = grain.IterDataset.mix(dataset_list, weights)
       return dataset
     else:
-      # Single pattern case - no need for parallelization
+      # Single pattern case or pre-resolved FileInstruction case
       dataset = create_dataset_from_pattern(data_file_pattern)
       dataset = _apply_mapdataset_transforms(
           dataset,
@@ -432,9 +509,24 @@ def make_grain_train_iterator(
 
   pipeline_fn = _get_pipeline_fn(config)
 
+  train_files = config.grain_train_files
+  if config.grain_file_type == "arrayrecord":
+    try:
+      if config.grain_train_mixture_config_path:
+        pass
+      elif ";" in train_files:
+        raw_patterns, weights = zip(*[pattern.split(",") for pattern in train_files.split(";")])
+        cached_instructions_list = [extract_file_instructions(p, config.grain_data_source_max_workers) for p in raw_patterns]
+        train_files = (cached_instructions_list, weights)
+      else:
+        train_files = extract_file_instructions(train_files, config.grain_data_source_max_workers)
+    except Exception as e:
+      max_logging.log(f"Warning: Failed to pre-extract FileInstructions on coordinator: {e}. Falling back to raw pattern.")
+      train_files = config.grain_train_files
+
   get_ds_fn = functools.partial(
       get_datasets,
-      config.grain_train_files,
+      train_files,
       config.grain_file_type,
       shuffle=config.enable_data_shuffling,
       shuffle_seed=config.data_shuffle_seed,
@@ -533,9 +625,22 @@ def make_grain_eval_iterator(
 
   pipeline_fn = _get_pipeline_fn(config)
 
+  eval_files = config.grain_eval_files
+  if eval_files and config.grain_file_type == "arrayrecord":
+    try:
+      if ";" in eval_files:
+        raw_patterns, weights = zip(*[pattern.split(",") for pattern in eval_files.split(";")])
+        cached_instructions_list = [extract_file_instructions(p, config.grain_data_source_max_workers) for p in raw_patterns]
+        eval_files = (cached_instructions_list, weights)
+      else:
+        eval_files = extract_file_instructions(eval_files, config.grain_data_source_max_workers)
+    except Exception as e:
+      max_logging.log(f"Warning: Failed to pre-extract FileInstructions on coordinator for eval: {e}. Falling back to raw pattern.")
+      eval_files = config.grain_eval_files
+
   get_ds_fn = functools.partial(
       get_datasets,
-      config.grain_eval_files,
+      eval_files,
       config.grain_file_type,
       shuffle=False,  # No shuffle for eval
       shuffle_seed=config.data_shuffle_seed,
