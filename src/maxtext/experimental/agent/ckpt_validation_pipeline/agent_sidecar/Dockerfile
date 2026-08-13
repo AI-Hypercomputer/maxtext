@@ -17,7 +17,7 @@ COPY src/dependencies/requirements/generated_requirements/tpu-requirements.txt /
 COPY pyproject.toml /app/pyproject.toml
 
 # Automatically install all MaxText TPU requirements and local package
-RUN pip install --no-cache-dir google-cloud-storage google-genai requests google-auth pyink pylint && \
+RUN pip install --no-cache-dir google-cloud-storage google-cloud-pubsub google-genai requests google-auth pyink pylint && \
     pip install --no-cache-dir -r /tmp/tpu-requirements.txt
 
 # Now copy the full source code (any python code changes will invalidate this layer but skip the pip install)

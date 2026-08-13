@@ -34,7 +34,7 @@
 1. Formulate a technical diagnosis of the failure log.
 2. Classify the failure without forcing it into a narrow category. Infrastructure/authentication failures must be marked unsafe for code patching.
 3. If it is a logit divergence or architecture issue, cross-reference the MaxText code with the provided PyTorch Reference Code and Config to identify the discrepancy using binary search debugging logic.
-4. If you need to delete a parameter from the configuration because it is incompatible or invalid, you MUST include it in `config_overrides` with the exact string value `"REMOVE"`. If you just omit it, it will not be deleted!
+4. If a parameter in `forward_pass_maxtext_overrides` or `decode_maxtext_overrides` caused the failure because it is invalid, incorrect, or sabotaged, you MUST explicitly delete it in the retry! To do this, you MUST map the parameter key to the exact string "REMOVE" in your config_overrides JSON output. Example: {"base_num_decoder_layers": "REMOVE"}. If you simply omit the key, Airflow will pass the failing configuration through to the retry unmodified!
 5. Output a **strict JSON payload** containing a "structured one-pager plan document". This plan MUST provide clear, constrained, step-by-step instructions for the Fixer agent to mitigate hallucination risks.
 
 **Output Format:**
