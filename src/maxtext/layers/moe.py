@@ -54,7 +54,10 @@ from maxtext.utils.sharding import (
 )
 import numpy as np
 import qwix
-from qwix.contrib.sparsity import sparsity_module
+try:
+  from qwix.contrib.sparsity import sparsity_module
+except ImportError:
+  sparsity_module = None
 import qwix.pallas as qpl
 import tokamax
 
@@ -377,14 +380,14 @@ class GateLogit(nnx.Module):
         _initializing,
         out_sharding=output_sharding,
     )
-    pre_bias_logits = None
-
     if self.score_func:
       output = linears._convert_to_activation_function(self.score_func)(output)
 
-    # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(("deepseek3", "deepseek4")):
-      pre_bias_logits = output
+    # Snapshot pre-bias logits unconditionally (cheap, already-computed array). Only
+    # consumed by callers that need it (DeepSeek V3/V4, or Qwen3-Next opting into
+    # bias/grouped routing via RoutedMoE.uses_grouped_or_bias_routing()); harmless
+    # no-op for every other decoder block.
+    pre_bias_logits = output
 
     if self.use_bias:
       bias = jnp.asarray(self.bias[...], self.dtype)
@@ -714,6 +717,18 @@ class RoutedMoE(nnx.Module):
     """
     return self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and not self.is_hash_routing
 
+  def uses_grouped_or_bias_routing(self) -> bool:
+    """Whether expert selection uses post-bias/grouped logits, weighted by pre-bias logits.
+
+    True for DeepSeek V3/V4 (kept as a model_name check, not decoder_block, since DeepSeek V2
+    and V3 share DecoderBlockType.DEEPSEEK), and additively for Qwen3-Next once it opts in via
+    routed_bias (aux-loss-free bias) or n_routing_groups (expert grouping).
+    """
+    return self.config.model_name.startswith(("deepseek3", "deepseek4")) or (
+        self.config.decoder_block == ctypes.DecoderBlockType.QWEN3_NEXT
+        and (self.config.routed_bias or self.config.n_routing_groups != -1)
+    )
+
   def get_topk(self, gate_logits, pre_bias_logits, rngs=None, input_ids=None):
     """get topk."""
     # shape of top_k_weights & top_k_indices:
@@ -736,8 +751,7 @@ class RoutedMoE(nnx.Module):
       # Cast input_ids to int32 to safely index the hash routing table
       top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
-    # NOTE: deepseek2 has a different pattern
-    elif self.config.model_name.startswith(("deepseek3", "deepseek4")):
+    elif self.uses_grouped_or_bias_routing():
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
     elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
       router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
@@ -746,11 +760,19 @@ class RoutedMoE(nnx.Module):
     else:
       top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
+    # Qwen3-Next takes the DeepSeek-style scaling path once it opts into a non-default
+    # routed_score_func / routed_scaling_factor / grouped-or-bias routing; a fully-default
+    # qwen3_next config falls through to the plain softmax branch below, identical to
+    # before this option existed.
+    qwen3_next_needs_deepseek_style_scaling = self.config.decoder_block == ctypes.DecoderBlockType.QWEN3_NEXT and (
+        bool(self.config.routed_score_func)
+        or self.config.routed_scaling_factor != 1.0
+        or self.uses_grouped_or_bias_routing()
+    )
+    if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK or qwen3_next_needs_deepseek_style_scaling:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    else:
-      if self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
-        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    elif self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
+      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
 
       # Normalization of router weights (e.g. used by Qwen3, Gemma4).
       if self.config.norm_topk_prob:
@@ -1465,9 +1487,11 @@ class RoutedMoE(nnx.Module):
       elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
         return group_sizes
       else:
+        num_groups = group_sizes.shape[0]
+        avg_size = inputs.shape[0] // num_groups
         return tokamax.RaggedDotGroupSizes(
             group_sizes,
-            inputs.shape[0],
+            (avg_size,) * num_groups,
         )
 
     def get_quantization_dtypes():
@@ -1624,8 +1648,7 @@ class RoutedMoE(nnx.Module):
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed"))
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
-      # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(("deepseek3", "deepseek4")):
+      if self.uses_grouped_or_bias_routing():
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -2424,9 +2447,7 @@ class RoutedMoE(nnx.Module):
     input_logical_axes = (batch_logical_axis, "activation_norm_length", None)
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length", None)
     pre_bias_logits_logical_axes = (
-        (batch_logical_axis, "activation_norm_length", None)
-        if self.config.model_name.startswith(("deepseek3", "deepseek4"))
-        else None
+        (batch_logical_axis, "activation_norm_length", None) if self.uses_grouped_or_bias_routing() else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
     gate_logits = self._maybe_shard_with_pspec(
@@ -2745,9 +2766,7 @@ class RoutedMoE(nnx.Module):
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
-    # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4")):
-      # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
+    if self.uses_grouped_or_bias_routing():
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
       )
