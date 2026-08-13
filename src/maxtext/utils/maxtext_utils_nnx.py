@@ -180,6 +180,86 @@ def create_nnx_sharded_model(
   return nnx.merge(graphdef, sharded_state)
 
 
+def create_nnx_random_sharded_model(
+    abstract_model: nnx.Module,
+    rng_key: jax.Array | None = None,
+    mesh: Mesh | None = None,
+    named_sharding: nnx.State | None = None,
+) -> nnx.Module:
+  """
+  Create a model with random weights, allocated directly at the abstract dtype.
+
+  This is the memory-lean counterpart to `create_nnx_sharded_model`, intended
+  for performance benchmarking where weight *values* are irrelevant.
+
+  `create_nnx_sharded_model` runs the real `init_fn()` inside the JIT, which
+  materializes every parameter at `weight_dtype` (e.g. bfloat16) and only then
+  applies `maybe_quantize_model`. Peak init memory is therefore bf16-sized even
+  when `quantization=fp8_e4m3`, which OOMs large MoE models: qwen3.5-397b-a17b
+  needs ~157-165GiB of HLO temporaries per chip against 94.74GiB of HBM.
+
+  The abstract model produced by `create_nnx_abstract_model` has already been
+  traced through `maybe_quantize_model`, so its leaves carry the *final* dtypes
+  (fp8 qvalue + scale when quantization is enabled). Filling those leaves
+  directly skips the full-precision stage entirely: peak memory equals the final
+  parameter size, and the model graph is never executed.
+
+  Args:
+    abstract_model: the abstract model, from `create_nnx_abstract_model`
+    rng_key: the Rng key used to draw the random weights
+    mesh: the device mesh
+    named_sharding: the given sharding
+
+  Returns:
+    The initialized sharded model, with random weights
+  """
+  graphdef, abstract_state = nnx.split(abstract_model)
+  if named_sharding is None:
+    named_sharding = nnx_extract_named_sharding(abstract_state)
+
+  if mesh is None:
+    mesh = abstract_model.mesh  # pyrefly: ignore[missing-attribute]
+
+  if rng_key is None:
+    rng_key = jax.random.PRNGKey(0)
+
+  leaves, treedef = jax.tree.flatten(abstract_state)
+
+  # Dtypes jax.random can emit natively. Anything else (notably fp8) must be
+  # filled with a constant: drawing at a wider dtype and casting down would
+  # allocate a temporary several times the size of the leaf itself, which is
+  # exactly the blowup this function exists to avoid. Empirically, casting fp8
+  # leaves down from float32 costs 164.90GiB of HLO temporaries per chip.
+  _NATIVE_RANDOM_DTYPES = (jnp.float32, jnp.bfloat16, jnp.float16)
+
+  def _random_leaf(key, leaf):
+    # Integer leaves (e.g. token counters) get zeros; drawing garbage indices
+    # could push downstream gathers out of bounds.
+    if not jnp.issubdtype(leaf.dtype, jnp.floating):
+      return jnp.zeros(leaf.shape, leaf.dtype)
+    if any(leaf.dtype == d for d in _NATIVE_RANDOM_DTYPES):
+      # Small values keep activations finite through deep stacks; the magnitude
+      # is arbitrary since only throughput is being measured.
+      return jax.random.normal(key, leaf.shape, leaf.dtype) * 0.02
+    # Narrow float (fp8): allocate straight at the target dtype. Non-zero so
+    # quantization scale leaves stay well-formed.
+    return jnp.full(leaf.shape, 0.02, leaf.dtype)
+
+  @partial(jax.jit, out_shardings=named_sharding)
+  def create_random_state():
+    keys = jax.random.split(rng_key, len(leaves))
+    state = jax.tree.unflatten(treedef, [_random_leaf(k, leaf) for k, leaf in zip(keys, leaves)])
+    # Constrain *inside* the JIT, as create_nnx_sharded_model does. With only
+    # out_shardings, XLA is free to build each leaf at its full global shape and
+    # shard just before returning, so the unsharded tensors show up as HLO
+    # temporaries and defeat the point of this function.
+    return jax.lax.with_sharding_constraint(state, named_sharding)
+
+  with jax.set_mesh(mesh):
+    sharded_state = create_random_state()
+  return nnx.merge(graphdef, sharded_state)
+
+
 def nnx_ensure_scan_leading_axis(tree, length):
   """Broadcasts scalar-like variables to have a leading scan axis."""
 

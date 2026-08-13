@@ -846,12 +846,19 @@ def from_pretrained(
     tokenizer_pad_id=None,
     *,
     quant_mode_str: str = "train",
+    random_init: bool = False,
 ):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint.
 
   `quant_mode_str` is forwarded to model construction. Pass `"serve"` when
   loading a pre-quantized checkpoint so AQT layers materialize the on-disk
   scale factors instead of full-precision kernels.
+
+  `random_init` fills parameters directly at their abstract (post-quantization)
+  dtypes instead of running the real initializer, avoiding the full-precision
+  materialization that OOMs large quantized MoE models. Weight values are
+  meaningless, so this is for performance benchmarking only. Requires
+  `config.pure_nnx`, and skips checkpoint loading entirely.
   """
   original_mesh = mesh
   if config.convert_checkpoint_if_possible and not config.load_parameters_path:
@@ -927,7 +934,15 @@ def from_pretrained(
   _, _abs_state_for_specs = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(_abs_state_for_specs)
 
-  if config.pure_nnx:
+  if random_init:
+    if not config.pure_nnx:
+      raise ValueError("random_init requires config.pure_nnx; the hybrid path has no abstract-model seam.")
+    max_logging.log(
+        "random_init: filling parameters from the abstract model. Weights are random and the model output is"
+        " meaningless -- performance benchmarking only."
+    )
+    model = maxtext_utils_nnx.create_nnx_random_sharded_model(abstract_model, rng_key=rng_key, mesh=mesh)
+  elif config.pure_nnx:
     model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
     # TODO: print debug_sharding info
   else:
@@ -939,7 +954,7 @@ def from_pretrained(
     mesh = model.mesh  # pyrefly: ignore[missing-attribute]
 
   with mesh:
-    if config.load_parameters_path:
+    if config.load_parameters_path and not random_init:
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,

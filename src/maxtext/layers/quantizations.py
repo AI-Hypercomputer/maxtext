@@ -846,6 +846,15 @@ def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
     case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
+      # QtProvider is Quantized *Training*: it keeps full-precision master
+      # weights and only simulates quantization inside the ops, so it saves no
+      # parameter memory. For inference that is pure cost -- a 397B model still
+      # needs its bf16 footprint and cannot be served on a host sized for fp8.
+      # PtqProvider stores genuinely quantized weights instead; combined with an
+      # abstract (eval_shape) init, the full-precision weights are never
+      # materialized. See qwix PtqProvider's docstring.
+      if getattr(config, "model_call_mode", "") == "inference":
+        return qwix.PtqProvider(get_quantization_rule(config))
       return qwix.QtProvider(get_quantization_rule(config))
     case "fp8_gpu":
       return NvidaFp8Provider(get_quantization_rule(config))

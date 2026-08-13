@@ -347,9 +347,20 @@ class MaxTextForCausalLM(nnx.Module):
     if self.model is not None:
       return
 
+    # With `--load-format dummy` the weight values are already discarded, so fill
+    # parameters straight from the abstract model rather than running the real
+    # initializer. That keeps peak init memory at the final (post-quantization)
+    # parameter size instead of the full-precision size, which is what lets large
+    # quantized MoE models come up at all.
+    random_init = self.vllm_config.load_config.load_format == "dummy"
+
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       model = model_creation_utils.from_pretrained(
-          self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
+          self.maxtext_config,
+          mesh=self.mesh,
+          model_mode=self.model_mode,
+          rng_key=rng_key,
+          random_init=random_init,
       )
       if self.maxtext_config.lora.enable_lora:
         model = lora_utils.apply_lora_to_model(model, self.mesh, self.maxtext_config)
