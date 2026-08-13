@@ -73,100 +73,36 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
   maxtext_module_dir = os.path.dirname(maxtext.__file__)
   repo_root = os.path.abspath(os.path.join(maxtext_module_dir, "../../"))
 
-  # applying a monkeypatch to maxtext's model_creation_utils because it has a bug where
-  # it cannot resolve SequenceKey (list indices) to string keys in Linen checkpoints.
-
-  source = inspect.getsource(model_creation_utils._fix_restore_args_for_shape_mismatch)  # pylint: disable=protected-access
-
-  new_lookup = """  def _lookup_stored_meta(path):
-    # Monkeypatched to handle NNX to Linen structural mismatches
-    def _navigate(p):
-      node = stored_metadata_tree
-      for key in p:
-        if isinstance(key, jax.tree_util.SequenceKey):
-          if isinstance(node, (list, tuple)) and 0 <= key.idx < len(node):
-            node = node[key.idx]
-            continue
-          if isinstance(node, dict) and str(key.idx) in node:
-            node = node[str(key.idx)]
-            continue
-          return None
-        if isinstance(node, (list, tuple)):
-          name = _key_str(key)
-          if name.isdigit() and 0 <= int(name) < len(node):
-            node = node[int(name)]
-            continue
-          return None
-        if not isinstance(node, dict):
-          return None
-        name = _key_str(key)
-        if name in node:
-          node = node[name]
-          continue
-        raw = str(key)
-        if raw in node:
-          node = node[raw]
-          continue
-        SYNONYMS = {
-            "pre_self_attention_layer_norm": ["input_layernorm", "pre_attention_norm"],
-            "post_self_attention_layer_norm": ["post_attention_layernorm", "post_attention_norm"],
-            "self_attention": ["attention"],
-            "input_layernorm": ["pre_self_attention_layer_norm", "pre_attention_norm"],
-            "post_attention_layernorm": ["post_self_attention_layer_norm", "post_attention_norm"],
-            "attention": ["self_attention"],
-            "mlp": ["feed_forward", "ffn"],
-            "feed_forward": ["mlp", "ffn"],
-            "ffn": ["mlp", "feed_forward"],
-        }
-        
-        found_synonym = False
-        if name in SYNONYMS:
-          for syn in SYNONYMS[name]:
-            if syn in node:
-              node = node[syn]
-              found_synonym = True
-              break
-        if found_synonym:
-          continue
-        return None
-      return node
-
-    # Try navigating the original path first (for Linen-Linen or NNX-NNX)
-    res = _navigate(path)
-    if res is not None:
-      return res
-
-    # Otherwise fallback to converting layers.0 -> layers_0 and navigate
-    new_path = []
-    i = 0
-    while i < len(path):
-      k_str = _key_str(path[i])
-      if i + 1 < len(path) and k_str.endswith("layers"):
-        next_k_str = _key_str(path[i+1])
-        if next_k_str.isdigit():
-          new_path.append(f"{k_str}_{next_k_str}")
-          i += 2
-          continue
-      new_path.append(path[i])
-      i += 1
-
-    return _navigate(new_path)"""
-
-  target_lookup = r"  def _lookup_stored_meta\(path\):[\s\S]*?(?=\n\s*mismatched_paths_sharded = \[\])"
-  patched_source = re.sub(target_lookup, new_lookup, source)
-  if patched_source == source:
-    raise RuntimeError(
-        "Failed to apply the monkeypatch to _fix_restore_args_for_shape_mismatch. "
-        "The target regex pattern was not found in model_creation_utils.py."
-    )
-
-  env = dict(model_creation_utils.__dict__)
-  exec(patched_source, env)  # pylint: disable=exec-used
+  # Load dynamic Linen-to-NNX mappings from external JSON config
+  mapping_file = os.path.join(os.path.dirname(__file__), "linen_to_nnx_mappings.json")
+  with open(mapping_file, "r") as f:
+    mappings = json.load(f)
 
   _original_fix_restore = model_creation_utils._fix_restore_args_for_shape_mismatch  # pylint: disable=protected-access
-  model_creation_utils._fix_restore_args_for_shape_mismatch = env[  # pylint: disable=protected-access
-      "_fix_restore_args_for_shape_mismatch"
-  ]
+
+  def _wrapped_fix_restore(restore_args, stored_metadata_tree, mesh):
+    def _translate_metadata_tree(tree):
+      if isinstance(tree, dict) or hasattr(tree, "items"):
+        new_tree = {}
+        for k, v in tree.items():
+          k_str = str(k)
+          new_k = mappings["synonyms"].get(k_str, k_str)
+          new_tree[new_k] = _translate_metadata_tree(v)
+        
+        layer_key = mappings["layer_prefix"]
+        if layer_key in new_tree and isinstance(new_tree[layer_key], dict):
+          layers_dict = new_tree.pop(layer_key)
+          for key_idx, val in layers_dict.items():
+            new_tree[f"{layer_key}_{key_idx}"] = val
+        return new_tree
+      elif isinstance(tree, (list, tuple)):
+        return type(tree)(_translate_metadata_tree(x) for x in tree)
+      return tree
+
+    transformed_metadata = _translate_metadata_tree(stored_metadata_tree)
+    return _original_fix_restore(restore_args, transformed_metadata, mesh)
+
+  model_creation_utils._fix_restore_args_for_shape_mismatch = _wrapped_fix_restore  # pylint: disable=protected-access
 
   import orbax.checkpoint as ocp  # pylint: disable=import-outside-toplevel
 
@@ -196,26 +132,14 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
         - Maps Linen checkpoint key names back to NNX attribute names so
           nnx.update(model, checkpoint) populates all weights.
       """
-      SYNONYMS = {
-          "pre_self_attention_layer_norm": ["input_layernorm", "pre_attention_norm"],
-          "post_self_attention_layer_norm": ["post_attention_layernorm", "post_attention_norm"],
-          "self_attention": ["attention"],
-          "mlp": ["feed_forward", "ffn"],
-          "pre_cross_attention_layer_norm": ["pre_cross_attention_layernorm", "pre_cross_attention_norm"],
-          "post_cross_attention_layer_norm": ["post_cross_attention_layernorm", "post_cross_attention_norm"],
-          "cross_attention": ["cross_attention"],
-          "pre_ffw_layer_norm": ["pre_ffw_layernorm", "pre_ffw_norm"],
-          "post_ffw_layer_norm": ["post_ffw_layernorm", "post_ffw_norm"],
-          "decoder_norm": ["final_layernorm", "norm"],
-      }
-      
       if to_linen:
-        key_map = {k: v[0] for k, v in SYNONYMS.items()}
-      else:
         key_map = {}
-        for k, v in SYNONYMS.items():
-          for syn in v:
-            key_map[syn] = k
+        for linen_k, nnx_k in mappings["synonyms"].items():
+          if nnx_k not in key_map:
+            key_map[nnx_k] = linen_k
+      else:
+        key_map = mappings["synonyms"]
+
 
       # Recursively traverse dictionaries or dictionary-like mappings (including nnx.State)
       if isinstance(tree, dict) or hasattr(tree, "items"):
