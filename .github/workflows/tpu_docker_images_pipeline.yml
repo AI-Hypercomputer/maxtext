@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This workflow builds and pushes GPU MaxText images.
+# This workflow builds and pushes TPU MaxText images.
 # It runs automatically daily at 12am UTC, or manually via Workflow Dispatch.
 
-name: Build GPU Nightly Docker Images
+name: TPU Docker Images Pipeline
 
 on:
   schedule:
@@ -48,21 +48,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "GPU Pre-Training Stable"
+          - name: "TPU Pre-Training Stable"
             build_mode: stable
             workflow: pre-training
-            image_name: maxtext_gpu_jax_stable
-          - name: "GPU Pre-Training Nightly"
+            image_name: maxtext_jax_stable
+          - name: "TPU Pre-Training Nightly"
             build_mode: nightly
             workflow: pre-training
-            image_name: maxtext_gpu_jax_nightly
+            image_name: maxtext_jax_nightly
+          - name: "TPU Post-Training Stable"
+            build_mode: stable
+            workflow: post-training
+            image_name: maxtext_post_training_stable
+          - name: "TPU Post-Training Nightly"
+            build_mode: nightly
+            workflow: post-training
+            image_name: maxtext_post_training_nightly
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
-      device: gpu
+      device: tpu
       build_mode: ${{ matrix.build_mode }}
       workflow: ${{ matrix.workflow }}
-      dockerfile: maxtext_gpu_dependencies.Dockerfile
+      dockerfile: maxtext_tpu_dependencies.Dockerfile
       maxtext_sha: ${{ needs.build_maxtext_package.outputs.maxtext_sha }}
       include_test_assets: true
     secrets:
@@ -76,18 +84,36 @@ jobs:
       matrix:
         include:
           - name: "Pre-Training"
-            image_name: maxtext_gpu_jax_stable
+            image_name: maxtext_jax_stable
             workflow: pre-training
+            additional_image_to_tag: maxtext_jax_nightly
+          - name: "Post-Training"
+            image_name: maxtext_post_training_stable
+            additional_image_to_tag: maxtext_post_training_nightly
+            workflow: post-training
     uses: ./.github/workflows/run_ci_tests.yml
     with:
       image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
       image_tag: ${{ github.run_id }}
-      device: gpu
+      device: tpu
       workflow: ${{ matrix.workflow }}
+      additional_image_to_tag: ${{ matrix.additional_image_to_tag != '' && (inputs.image_suffix != '' && format('{0}_{1}', matrix.additional_image_to_tag, inputs.image_suffix) || matrix.additional_image_to_tag) || '' }}
+
+  run_e2e_tests:
+    name: Run E2E tests
+    needs: build_and_push_docker_images
+    if: github.event_name == 'schedule'
+    uses: ./.github/workflows/run_e2e_tests.yml
+    with:
+      mode: stable
+      run_id: ${{ github.run_id }}
+      maxtext_sha: ${{ github.sha }}
+    secrets:
+      AIRFLOW_CALLBACK_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
 
   notify_failure:
     name: Notify failed build
-    needs: [build_and_push_docker_images, run_ci_tests]
+    needs: [build_and_push_docker_images, run_ci_tests, run_e2e_tests]
     if: ${{ failure() && inputs.image_suffix == '' }}
     runs-on: ubuntu-latest
     permissions:
@@ -97,5 +123,5 @@ jobs:
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          title-template: "MaxText GPU Docker Image Build Failure"
+          title-template: "MaxText TPU Docker Image Build Failure"
           label-name: "docker-image-build-failure"

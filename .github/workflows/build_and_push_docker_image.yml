@@ -42,10 +42,6 @@ on:
         required: false
         type: boolean
         default: false
-    outputs:
-      build_result:
-        description: 'The result of build_and_push job.'
-        value: ${{ jobs.build_and_push.result }}
     secrets:
       HF_TOKEN:
         required: true
@@ -64,13 +60,12 @@ jobs:
         id: check
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
           TARGET_DEVICE: ${{ github.event.inputs.target_device || 'all' }}
           INPUT_DEVICE: ${{ inputs.device }}
           IMAGE_NAME: ${{ inputs.image_name }}
           BUILD_MODE: ${{ inputs.build_mode }}
         run: |
-          EVENT_NAME="${{ github.event_name }}"
-
           SHOULD_RUN="false"
           if [[ "$EVENT_NAME" == "release" || "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "pull_request" ]]; then
             SHOULD_RUN="true"
@@ -81,10 +76,10 @@ jobs:
           fi
 
           if [[ "$SHOULD_RUN" == "true" ]]; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
             echo "Building $IMAGE_NAME for device: $INPUT_DEVICE in $BUILD_MODE mode."
           else
-            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
             echo "Skipping $IMAGE_NAME build for device: $INPUT_DEVICE in $BUILD_MODE mode."
           fi
 
@@ -116,7 +111,7 @@ jobs:
           persist-credentials: false
 
       - name: Mark git repositories as safe
-        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Configure Docker
         run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
@@ -146,15 +141,15 @@ jobs:
           uv venv --seed
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
-          uv pip install ${maxtext_wheel}[runner] --resolution=lowest
+          uv pip install "${maxtext_wheel}[runner]" --resolution=lowest
 
       - name: Copy tests assets to package directory
         if: inputs.include_test_assets == true
         shell: bash
         run: |
           source .venv/bin/activate
-          cp -r ${PWD}/tests .venv/lib/python3.12/site-packages/
-          cp ${PWD}/pytest.ini .venv/lib/python3.12/site-packages/
+          cp -r "${PWD}/tests" .venv/lib/python3.12/site-packages/
+          cp "${PWD}/pytest.ini" .venv/lib/python3.12/site-packages/
 
       - name: Build and push Docker image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
