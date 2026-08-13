@@ -470,10 +470,18 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
   return qwix.LoraProvider(**lora_kwargs)
 
 
-def _prepare_dummy_inputs(dummy_bs: int = 1) -> tuple[jnp.ndarray, jnp.ndarray]:
-  """Builds dummy decoder inputs used to materialize LoRA parameters."""
-  # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
-  seq_len = 1
+def _prepare_dummy_inputs(
+    mesh: Optional[jax.sharding.Mesh] = None,
+    dummy_bs: int = 1,
+    seq_len: int = 1,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Builds minimal dummy decoder inputs partitioned appropriately for the mesh."""
+  if mesh is not None:
+    for axis in ("data", "fsdp", "fsdp_transpose", "expert"):
+      dummy_bs *= mesh.shape.get(axis, 1)
+    for axis in ("tensor_sequence", "context"):
+      seq_len *= mesh.shape.get(axis, 1)
+
   decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   return decoder_input_tokens, decoder_positions
@@ -598,12 +606,8 @@ def apply_lora_to_model(
 
   lora_provider = _build_lora_provider(mt_config)
 
-  dp_size = 1
-  if mesh is not None and "data" in mesh.shape:
-    dp_size = mesh.shape["data"]
-
   model_rngs = getattr(model.decoder, "rngs", None)  # pyrefly: ignore[missing-attribute]
-  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(dummy_bs=dp_size)
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mesh)
 
   lora_model = qwix.apply_lora_to_model(
       model,

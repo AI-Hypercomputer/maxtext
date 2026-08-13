@@ -747,6 +747,12 @@ class RoutedMoE(nnx.Module):
       if self.config.norm_topk_prob:
         top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
 
+      if self.per_expert_scale is not None and not (
+          self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
+      ):
+        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
+        top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
+
     return top_k_weights, top_k_indices
 
   def deepseek_scale_weights(self, weights):
