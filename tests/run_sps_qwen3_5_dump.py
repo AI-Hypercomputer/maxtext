@@ -113,14 +113,41 @@ def benchmark_layer_on_tpu(
         "enable_checkpointing": False,
         "log_config": False,
         "inhomogeneous_layer_cycle_interval": 1,
+        "norm_topk_prob": True,
+        "float32_logits": True,
+        "float32_gate_logits": True,
+        "float32_weight_sum": True,
     }
 
     train_kwargs = dict(base_kwargs)
+    train_kwargs.update({
+        "megablox": True,
+        "use_tokamax_gmm": True,
+        "use_gmm_v2": True,
+        "sparse_matmul": True,
+        "wi_tile_fwd_batch_seq": 256,
+        "wi_tile_fwd_embed_dim": 128,
+        "wi_tile_fwd_mlp_dim": 128,
+        "use_tokamax_splash": True,
+        "sa_use_base2_exp": False,
+        "sa_fuse_reciprocal": True,
+    })
     if extra_train_kwargs:
         train_kwargs.update(extra_train_kwargs)
 
     cfg_train = pyconfig.initialize(
-        [sys.argv[0], get_test_config_path(), "attention=flash", "sparse_matmul=True"],
+        [
+            sys.argv[0],
+            get_test_config_path(),
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "sa_use_base2_exp=False",
+            "sa_fuse_reciprocal=True",
+            "sparse_matmul=True",
+            "megablox=True",
+            "use_tokamax_gmm=True",
+            "use_gmm_v2=True",
+        ],
         weight_dtype=dtype_str,
         dtype=dtype_str,
         **train_kwargs,
@@ -276,8 +303,8 @@ def main():
         print(f"  JAX Platforms: {jax.config.jax_platforms}")
         print(f"  Detected TPU Devices ({len(jax.devices())}): {jax.devices()}\n")
 
-        # 1. Baseline: Default Splash Attention vs vLLM Ragged Paged Attention & Pallas MoE
-        print(">>> Running Qwen3.5 1-Layer MoE Benchmark (Baseline) in bfloat16 on TPU...")
+        # 1. Baseline: BFloat16 Benchmark
+        print(">>> Running Qwen3.5 1-Layer MoE Benchmark in bfloat16 on TPU...")
         b1_table, b1_metrics = benchmark_layer_on_tpu(
             dtype_str="bfloat16",
             batch_size=4,
@@ -287,7 +314,21 @@ def main():
             num_experts=8,
             num_experts_per_tok=8,
             output_dir="",
-            test_label="Baseline (Splash Attn vs vLLM RPA)",
+            test_label="BFloat16 (Tokamax Splash base-e vs vLLM RPA)",
+        )
+
+        # 2. Float32 Benchmark
+        print("\n>>> Running Qwen3.5 1-Layer MoE Benchmark in float32 on TPU...")
+        f32_table, f32_metrics = benchmark_layer_on_tpu(
+            dtype_str="float32",
+            batch_size=4,
+            seq_len=512,
+            emb_dim=2048,
+            moe_mlp_dim=512,
+            num_experts=8,
+            num_experts_per_tok=8,
+            output_dir="",
+            test_label="Float32 (Tokamax Splash base-e vs vLLM RPA)",
         )
 
         time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
@@ -298,24 +339,29 @@ def main():
 **Hardware Platform:** Google Cloud TPU v5p (Shared Pathways Service over GKE `{cluster}`)  
 **Topology:** 2x2x1 ({num_devs} TPU Devices)  
 **Model Architecture:** Qwen3.5 MoE (`qwen3.5-35b-a3b` 1-Layer Full Attention + MoE Block)  
-**Evaluated Precision:** `bfloat16`  
 
 ---
 
-## 1. Key Component Parity Summary
+## 1. Key Component Parity Summary (BFloat16 vs. Float32)
 
-| Component | Training Kernel | Inference Kernel | Cosine Similarity | Max Abs Error ($L_\\infty$) | MAE |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Pre-Attention (T01)** | Layer Input | Layer Input | **`{b1_metrics['T01_layer_input']['cos_sim']:.6f}`** | **`{b1_metrics['T01_layer_input']['max_abs_err']:.6e}`** | **`{b1_metrics['T01_layer_input']['mae']:.6e}`** |
-| **Attention Core (T12)** | Splash / Flash Attention | vLLM RPA (Pallas) | **`{b1_metrics['T12_attn_core_out']['cos_sim']:.6f}`** | `{b1_metrics['T12_attn_core_out']['max_abs_err']:.6e}` | `{b1_metrics['T12_attn_core_out']['mae']:.6e}` |
-| **Attention Out Proj (T14)** | Linear Projection | Linear Projection | **`{b1_metrics['T14_attn_out_proj']['cos_sim']:.6f}`** | `{b1_metrics['T14_attn_out_proj']['max_abs_err']:.6e}` | `{b1_metrics['T14_attn_out_proj']['mae']:.6e}` |
-| **MoE Routing (T20)** | Top-K Router | Top-K Router | **`{b1_metrics['T20_router_gate_logits']['cos_sim']:.6f}`** | `{b1_metrics['T20_router_gate_logits']['max_abs_err']:.6e}` | `{b1_metrics['T20_router_gate_logits']['mae']:.6e}` |
-| **Routed MoE Compute (T23)** | Sparse Matmul | Pallas Fused MoE | **`{b1_metrics['T23_routed_moe_out']['cos_sim']:.6f}`** | `{b1_metrics['T23_routed_moe_out']['max_abs_err']:.6e}` | **`{b1_metrics['T23_routed_moe_out']['mae']:.6e}`** |
-| **Full Layer Output (T25)** | Full Decoder Layer | Full Decoder Layer | **`{b1_metrics['T25_layer_output']['cos_sim']:.6f}`** | `{b1_metrics['T25_layer_output']['max_abs_err']:.6e}` | `{b1_metrics['T25_layer_output']['mae']:.6e}` |
+| Component | Training Kernel | Inference Kernel | BF16 CosSim | BF16 $L_\\infty$ | BF16 MAE | FP32 CosSim | FP32 $L_\\infty$ | FP32 MAE |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Pre-Attention (T01)** | Layer Input | Layer Input | **`{b1_metrics['T01_layer_input']['cos_sim']:.6f}`** | `{b1_metrics['T01_layer_input']['max_abs_err']:.2e}` | `{b1_metrics['T01_layer_input']['mae']:.2e}` | **`{f32_metrics['T01_layer_input']['cos_sim']:.6f}`** | `{f32_metrics['T01_layer_input']['max_abs_err']:.2e}` | `{f32_metrics['T01_layer_input']['mae']:.2e}` |
+| **Attention Core (T12)** | Splash / Flash Attention | vLLM RPA (Pallas) | **`{b1_metrics['T12_attn_core_out']['cos_sim']:.6f}`** | `{b1_metrics['T12_attn_core_out']['max_abs_err']:.2e}` | `{b1_metrics['T12_attn_core_out']['mae']:.2e}` | **`{f32_metrics['T12_attn_core_out']['cos_sim']:.6f}`** | `{f32_metrics['T12_attn_core_out']['max_abs_err']:.2e}` | `{f32_metrics['T12_attn_core_out']['mae']:.2e}` |
+| **Attention Out Proj (T14)** | Linear Projection | Linear Projection | **`{b1_metrics['T14_attn_out_proj']['cos_sim']:.6f}`** | `{b1_metrics['T14_attn_out_proj']['max_abs_err']:.2e}` | `{b1_metrics['T14_attn_out_proj']['mae']:.2e}` | **`{f32_metrics['T14_attn_out_proj']['cos_sim']:.6f}`** | `{f32_metrics['T14_attn_out_proj']['max_abs_err']:.2e}` | `{f32_metrics['T14_attn_out_proj']['mae']:.2e}` |
+| **MoE Routing (T20)** | Top-K Router | Top-K Router | **`{b1_metrics['T20_router_gate_logits']['cos_sim']:.6f}`** | `{b1_metrics['T20_router_gate_logits']['max_abs_err']:.2e}` | `{b1_metrics['T20_router_gate_logits']['mae']:.2e}` | **`{f32_metrics['T20_router_gate_logits']['cos_sim']:.6f}`** | `{f32_metrics['T20_router_gate_logits']['max_abs_err']:.2e}` | `{f32_metrics['T20_router_gate_logits']['mae']:.2e}` |
+| **Routed MoE Compute (T23)** | Sparse Matmul | Pallas Fused MoE | **`{b1_metrics['T23_routed_moe_out']['cos_sim']:.6f}`** | `{b1_metrics['T23_routed_moe_out']['max_abs_err']:.2e}` | `{b1_metrics['T23_routed_moe_out']['mae']:.2e}` | **`{f32_metrics['T23_routed_moe_out']['cos_sim']:.6f}`** | `{f32_metrics['T23_routed_moe_out']['max_abs_err']:.2e}` | `{f32_metrics['T23_routed_moe_out']['mae']:.2e}` |
+| **Full Layer Output (T25)** | Full Decoder Layer | Full Decoder Layer | **`{b1_metrics['T25_layer_output']['cos_sim']:.6f}`** | `{b1_metrics['T25_layer_output']['max_abs_err']:.2e}` | `{b1_metrics['T25_layer_output']['mae']:.2e}` | **`{f32_metrics['T25_layer_output']['cos_sim']:.6f}`** | `{f32_metrics['T25_layer_output']['max_abs_err']:.2e}` | `{f32_metrics['T25_layer_output']['mae']:.2e}` |
 
 ---
 
-## 2. Complete 25-Intermediate Tensor Breakdown (BFloat16)
+## 2. Complete 25-Intermediate Tensor Breakdown (Float32)
+
+{f32_table}
+
+---
+
+## 3. Complete 25-Intermediate Tensor Breakdown (BFloat16)
 
 {b1_table}
 """

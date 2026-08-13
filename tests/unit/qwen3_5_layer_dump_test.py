@@ -183,14 +183,7 @@ def sync_qwen3_5_layer_weights(
     if hasattr(src_layer.mlp, "shared_expert") and hasattr(
         dst_layer.mlp, "shared_expert"
     ):
-        src_shared = src_layer.mlp.shared_expert
-        dst_shared = dst_layer.mlp.shared_expert
-        if hasattr(src_shared, "wi_0") and hasattr(dst_shared, "wi_0"):
-            dst_shared.wi_0 = src_shared.wi_0
-        if hasattr(src_shared, "wi_1") and hasattr(dst_shared, "wi_1"):
-            dst_shared.wi_1 = src_shared.wi_1
-        if hasattr(src_shared, "wo") and hasattr(dst_shared, "wo"):
-            dst_shared.wo = src_shared.wo
+        dst_layer.mlp.shared_expert = src_layer.mlp.shared_expert
 
     # 4. MoE Routed Experts
     if hasattr(src_layer.mlp, "routed_experts") and hasattr(
@@ -266,8 +259,6 @@ def capture_qwen3_5_layer_intermediates(
             norm1_out, proj_name="value", out_sharding=qkv_sharding
         )
 
-        tensors["T03_q_proj_raw"] = q_proj
-
         # Query and Gate Split (Qwen3 hybrid attention)
         if attn_module.is_qwen3_hybrid:
             q_split, gate = jnp.split(q_proj, 2, axis=-1)
@@ -276,10 +267,12 @@ def capture_qwen3_5_layer_intermediates(
                 seq_len,
                 attn_module.config.num_query_heads * attn_module.config.head_dim,
             )
+            tensors["T03_q_proj_raw"] = q_proj
             tensors["T04_q_proj_heads"] = q_split
             tensors["T05_query_gate"] = gate_flat
             q_to_norm = q_split
         else:
+            tensors["T03_q_proj_raw"] = q_proj
             q_to_norm = q_proj
             gate_flat = None
             tensors["T04_q_proj_heads"] = q_proj
@@ -370,10 +363,24 @@ def capture_qwen3_5_layer_intermediates(
                 )
                 num_kv_heads = attn_module.config.num_kv_heads
                 head_dim = attn_module.config.head_dim
-                kv_cache = jnp.zeros(
-                    (total_pages, block_size, num_kv_heads, 2, head_dim),
-                    dtype=inputs.dtype,
-                )
+                try:
+                    from tpu_inference.layers.common.attention_interface import (
+                        get_kv_cache_shape,
+                    )
+
+                    kv_shape = get_kv_cache_shape(
+                        total_pages,
+                        block_size,
+                        num_kv_heads,
+                        head_dim,
+                        inputs.dtype,
+                    )
+                    kv_cache = jnp.zeros(kv_shape, dtype=inputs.dtype)
+                except Exception:
+                    kv_cache = jnp.zeros(
+                        (total_pages, block_size, num_kv_heads, 2, head_dim),
+                        dtype=inputs.dtype,
+                    )
 
             attn_core_raw, _ = attn_module.forward_serve_vllm(
                 q_rope,
@@ -435,7 +442,7 @@ def capture_qwen3_5_layer_intermediates(
     # Step 5: MoE Block (Shared Expert + Routed Experts)
     moe_block = layer.mlp
     shared_gate_logits = moe_block.shared_expert_gate(norm2_out)
-    shared_gate_prob = jax.nn.sigmoid(shared_gate_logits)
+    shared_gate_prob = jax.nn.sigmoid(shared_gate_logits.astype(jnp.float32)).astype(inputs.dtype)
     shared_mlp_out = moe_block.shared_expert(norm2_out, deterministic=deterministic)
 
     tensors["T17_shared_expert_gate_logits"] = shared_gate_logits
@@ -509,22 +516,45 @@ class Qwen3_5LayerDumpTest(unittest.TestCase):
             "enable_checkpointing": False,
             "log_config": False,
             "inhomogeneous_layer_cycle_interval": 1,  # Ensure layer 0 is full attention
+            "norm_topk_prob": True,
+            "float32_logits": True,
+            "float32_gate_logits": True,
+            "float32_weight_sum": True,
         }
 
     def _create_configs_and_layers(
         self, dtype_str: str = "bfloat16"
     ) -> tuple[qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5DecoderLayer, Mesh]:
         """Instantiates and synchronizes Training and Inference Qwen3.5 decoder layers."""
+        train_kwargs = dict(self.base_kwargs)
+        train_kwargs.update({
+            "megablox": True,
+            "use_tokamax_gmm": True,
+            "use_gmm_v2": True,
+            "sparse_matmul": True,
+            "wi_tile_fwd_batch_seq": 256,
+            "wi_tile_fwd_embed_dim": 128,
+            "wi_tile_fwd_mlp_dim": 128,
+            "use_tokamax_splash": True,
+            "sa_use_base2_exp": False,
+            "sa_fuse_reciprocal": True,
+        })
         cfg_train = pyconfig.initialize(
             [
                 sys.argv[0],
                 get_test_config_path(),
                 "attention=flash",
+                "use_tokamax_splash=True",
+                "sa_use_base2_exp=False",
+                "sa_fuse_reciprocal=True",
                 "sparse_matmul=True",
+                "megablox=True",
+                "use_tokamax_gmm=True",
+                "use_gmm_v2=True",
             ],
             weight_dtype=dtype_str,
             dtype=dtype_str,
-            **self.base_kwargs,
+            **train_kwargs,
         )
         cfg_infer = pyconfig.initialize(
             [
