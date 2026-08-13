@@ -89,7 +89,10 @@ def extract_file_instructions(
 def find_data_files(data_file_pattern):
   """Find data files matching the pattern."""
   if isinstance(data_file_pattern, (list, tuple)):
-    return list(data_file_pattern)
+    files = []
+    for p in data_file_pattern:
+      files.extend(find_data_files(p))
+    return files
   if data_file_pattern.startswith("gs://"):
     data_files = gcs_utils.gcs_glob_pattern(data_file_pattern)
   else:
@@ -192,41 +195,24 @@ def get_datasets(
 
       dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
       return dataset
-    elif isinstance(data_file_pattern, tuple) and len(data_file_pattern) == 2 and isinstance(data_file_pattern[1], (list, tuple)):
+
+    is_mixture = False
+    if isinstance(data_file_pattern, tuple) and len(data_file_pattern) == 2 and isinstance(data_file_pattern[1], (list, tuple)):
       data_file_patterns, weights = data_file_pattern
-      weights = [float(weight) for weight in weights]
-      weights = [round(weight / sum(weights), 4) for weight in weights]
-
-      executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
-      dataset_list = list(executor.map(create_dataset_from_pattern, data_file_patterns))
-      executor.shutdown(wait=True)
-
-      for d, _ in enumerate(dataset_list):
-        dataset_list[d] = _apply_mapdataset_transforms(
-            dataset_list[d],
-            shuffle,
-            shuffle_seed,
-            num_epoch,
-            dataloading_host_index,
-            dataloading_host_count,
-            grain_num_threads,
-            grain_prefetch_buffer_size,
-        )
-      dataset = grain.IterDataset.mix(dataset_list, weights)
-      return dataset
+      is_mixture = True
     elif isinstance(data_file_pattern, str) and ";" in data_file_pattern:
       data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
       assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
+      is_mixture = True
+
+    if is_mixture:
       weights = [float(weight) for weight in weights]
       weights = [round(weight / sum(weights), 4) for weight in weights]
 
-      # Parallelize file finding (globbing), data source creation, and dataset wrapping
-      # File finding and source creation are I/O-bound operations that release the GIL
       executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
       dataset_list = list(executor.map(create_dataset_from_pattern, data_file_patterns))
       executor.shutdown(wait=True)
 
-      # Apply shuffle, repeat, sharding, and conversion to IterDataset to each dataset before mixing
       for d, _ in enumerate(dataset_list):
         dataset_list[d] = _apply_mapdataset_transforms(
             dataset_list[d],
@@ -238,8 +224,6 @@ def get_datasets(
             grain_num_threads,
             grain_prefetch_buffer_size,
         )
-      # Use IterDataset.mix instead of MapDataset.mix in order to have per-mixture component checkpoints
-      # for supporting changing the mixture after checkpointing
       dataset = grain.IterDataset.mix(dataset_list, weights)
       return dataset
     else:
@@ -516,7 +500,17 @@ def make_grain_train_iterator(
         pass
       elif ";" in train_files:
         raw_patterns, weights = zip(*[pattern.split(",") for pattern in train_files.split(";")])
-        cached_instructions_list = [extract_file_instructions(p, config.grain_data_source_max_workers) for p in raw_patterns]
+        executor = futures.ThreadPoolExecutor(max_workers=config.grain_data_source_max_workers)
+        cached_instructions_list = list(
+            executor.map(
+                functools.partial(
+                    extract_file_instructions,
+                    grain_data_source_max_workers=config.grain_data_source_max_workers,
+                ),
+                raw_patterns,
+            )
+        )
+        executor.shutdown(wait=True)
         train_files = (cached_instructions_list, weights)
       else:
         train_files = extract_file_instructions(train_files, config.grain_data_source_max_workers)
@@ -630,7 +624,17 @@ def make_grain_eval_iterator(
     try:
       if ";" in eval_files:
         raw_patterns, weights = zip(*[pattern.split(",") for pattern in eval_files.split(";")])
-        cached_instructions_list = [extract_file_instructions(p, config.grain_data_source_max_workers) for p in raw_patterns]
+        executor = futures.ThreadPoolExecutor(max_workers=config.grain_data_source_max_workers)
+        cached_instructions_list = list(
+            executor.map(
+                functools.partial(
+                    extract_file_instructions,
+                    grain_data_source_max_workers=config.grain_data_source_max_workers,
+                ),
+                raw_patterns,
+            )
+        )
+        executor.shutdown(wait=True)
         eval_files = (cached_instructions_list, weights)
       else:
         eval_files = extract_file_instructions(eval_files, config.grain_data_source_max_workers)

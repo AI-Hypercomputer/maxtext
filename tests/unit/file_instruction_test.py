@@ -22,42 +22,7 @@ from dataclasses import asdict, dataclass
 
 import grain.python as grain
 from array_record.python.array_record_module import ArrayRecordWriter
-
-
-@dataclass(frozen=True)
-class FileInstruction:
-  """File instruction for Grain ArrayRecordDataSource."""
-  filename: str
-  skip: int
-  take: int
-  examples_in_shard: int
-
-  def to_dict(self):
-    return asdict(self)
-
-  @classmethod
-  def from_dict(cls, d):
-    return cls(
-        filename=d["filename"],
-        skip=d["skip"],
-        take=d["take"],
-        examples_in_shard=d.get("examples_in_shard", d["take"]),
-    )
-
-
-def extract_file_instructions(data_source: grain.ArrayRecordDataSource) -> list[FileInstruction]:
-  """Extracts FileInstructions from an initialized ArrayRecordDataSource."""
-  instructions = []
-  for ri in data_source._read_instructions:
-    instructions.append(
-        FileInstruction(
-            filename=ri.filename,
-            skip=ri.start,
-            take=ri.num_records,
-            examples_in_shard=ri.num_records,
-        )
-    )
-  return instructions
+from maxtext.input_pipeline.grain_data_processing import FileInstruction, extract_file_instructions
 
 
 class FileInstructionTest(unittest.TestCase):
@@ -88,7 +53,7 @@ class FileInstructionTest(unittest.TestCase):
     ds_path = grain.ArrayRecordDataSource(self.file_paths)
     self.assertEqual(len(ds_path), self.num_shards * self.records_per_shard)
 
-    instructions = extract_file_instructions(ds_path)
+    instructions = extract_file_instructions(self.file_paths)
     self.assertEqual(len(instructions), self.num_shards)
 
     ds_cached = grain.ArrayRecordDataSource(instructions)
@@ -100,8 +65,7 @@ class FileInstructionTest(unittest.TestCase):
 
   def test_json_serialization_roundtrip(self):
     """Verify serialization to/from JSON manifest."""
-    ds_path = grain.ArrayRecordDataSource(self.file_paths)
-    instructions = extract_file_instructions(ds_path)
+    instructions = extract_file_instructions(self.file_paths)
 
     json_str = json.dumps([inst.to_dict() for inst in instructions])
     loaded_dicts = json.loads(json_str)
