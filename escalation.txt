@@ -1,0 +1,2 @@
+Escalate to the infrastructure team to investigate the XPK command failure logs.
+Check cluster status and XPK job logs for detailed error messages.
