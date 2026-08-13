@@ -69,9 +69,28 @@ def main():
     )
 
     print("=" * 80)
-    print("STANDALONE ATTENTION KERNEL REPRO TEST: SPLASH ATTENTION VS. RPA")
+    print("STANDALONE ATTENTION KERNEL REPRO: SPLASH VS RPA CONFIGURATION SWEEP")
     print(f"Connecting to {cluster} ({tpu_instance_type} x {tpu_slice_count} slice)...")
     print("=" * 80)
+
+    configs_to_test = [
+        ("JAX Splash Attention (Legacy Default)", ["use_tokamax_splash=False"]),
+        ("Tokamax Splash (Default: base2_exp=True, fuse_recip=True)", [
+            "use_tokamax_splash=True", "sa_use_base2_exp=True", "sa_fuse_reciprocal=True"
+        ]),
+        ("Tokamax Splash (base2_exp=False, fuse_recip=True)", [
+            "use_tokamax_splash=True", "sa_use_base2_exp=False", "sa_fuse_reciprocal=True"
+        ]),
+        ("Tokamax Splash (base2_exp=True, fuse_recip=False)", [
+            "use_tokamax_splash=True", "sa_use_base2_exp=True", "sa_fuse_reciprocal=False"
+        ]),
+        ("Tokamax Splash (base2_exp=False, fuse_recip=False)", [
+            "use_tokamax_splash=True", "sa_use_base2_exp=False", "sa_fuse_reciprocal=False"
+        ]),
+        ("Tokamax Splash (BlockSize=256)", [
+            "use_tokamax_splash=True", "sa_block_q=256", "sa_block_kv=256", "sa_block_kv_compute=256"
+        ]),
+    ]
 
     with isc_pathways.connect(
         cluster=cluster,
@@ -84,62 +103,63 @@ def main():
         collect_service_metrics=True,
     ):
         print("✓ Connected to SPS Cloud TPU v5p!\n")
-        print(">>> Running Attention Kernel Comparison (Qwen3.5 Shape: B=4, S=512, H_q=16, H_kv=2, D=256)...")
-        results = compare_attention_kernels_on_tpu(
-            batch_size=4,
-            seq_len=512,
-            num_query_heads=16,
-            num_kv_heads=2,
-            head_dim=256,
-            dtype_str="bfloat16",
-            block_size=128,
-        )
 
-        m_splash_rpa = results["splash_vs_rpa"]
+        for infer_attn in ["vllm_rpa", "vllm_batched_rpa"]:
+            infer_label = "DEFAULT RPA (v3)" if infer_attn == "vllm_rpa" else "BATCHED RPA (Target)"
+            print("\n" + "#" * 90)
+            print(f"### INFERENCE KERNEL: {infer_label}")
+            print("#" * 90)
 
-        print("=" * 80)
-        print("ISOLATED ATTENTION KERNEL PARITY: SPLASH ATTENTION VS. RPA")
-        print("=" * 80)
-        print_metrics_table("Splash Attention (Training) vs. RPA (Inference)", m_splash_rpa)
+            for dtype_str in ["float32", "bfloat16"]:
+                print("=" * 90)
+                print(f">>> ATTENTION KERNEL SWEEP ({dtype_str.upper()}) [Inference = {infer_label}]")
+                print("=" * 90)
 
-        print("\n" + "=" * 80)
-        print("ATTENTION KERNEL PARITY SUMMARY")
-        print("=" * 80)
-        print(f"{'Comparison':<42} | {'Max Abs Err (L_inf)':<20} | {'MAE':<15} | {'Cosine Sim':<12}")
-        print("-" * 95)
-        print(f"{'Splash Attention vs. RPA (Serving)':<42} | {m_splash_rpa['max_abs_err']:<20.6e} | {m_splash_rpa['mae']:<15.6e} | {m_splash_rpa['cos_sim']:<12.6f}")
+                print(f"{'Configuration':<52} | {'Vs RPA L_inf':<12} | {'Vs RPA MAE':<12} | {'Vs RPA CosSim':<13} | {'Vs Ref MAE':<12}")
+                print("-" * 115)
 
-        # Save standalone report
-        doc_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "docs",
-            "attention_kernel_repro_results.md",
-        )
-        time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        doc = f"""# Isolated Attention Kernel Parity: Splash Attention vs. RPA
+                for cfg_name, extra_args in configs_to_test:
+                    try:
+                        res = compare_attention_kernels_on_tpu(
+                            batch_size=4,
+                            seq_len=512,
+                            num_query_heads=16,
+                            num_kv_heads=2,
+                            head_dim=256,
+                            dtype_str=dtype_str,
+                            block_size=128,
+                            extra_train_args=extra_args,
+                            infer_attention=infer_attn,
+                        )
+                        m_rpa = res["splash_vs_rpa"]
+                        m_ref = res["splash_vs_ref"]
+                        print(
+                            f"{cfg_name:<52} | "
+                            f"{m_rpa['max_abs_err']:<12.2e} | "
+                            f"{m_rpa['mae']:<12.2e} | "
+                            f"{m_rpa['cos_sim']:<13.6f} | "
+                            f"{m_ref['mae']:<12.2e}"
+                        )
+                    except Exception as e:
+                        print(f"{cfg_name:<52} | FAILED: {e}")
 
-**Date:** {time_str}  
-**Hardware:** Google Cloud TPU v5p (`{cluster}`)  
-**Configuration:** `batch_size=4`, `seq_len=512`, `num_query_heads=16`, `num_kv_heads=2`, `head_dim=256`, `dtype=bfloat16`  
-
----
-
-## 1. Direct Comparative Parity
-
-| Comparison Pair | Max Abs Error ($L_\\infty$) | MAE | MSE | Cosine Similarity | Relative Error |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Splash Attn (Train) vs. RPA (Infer)** | `{m_splash_rpa['max_abs_err']:.6e}` | `{m_splash_rpa['mae']:.6e}` | `{m_splash_rpa['mse']:.6e}` | **`{m_splash_rpa['cos_sim']:.6f}`** | `{m_splash_rpa['rel_err']:.6e}` |
-
----
-
-## 2. Key Diagnostic Takeaway
-
-1. **Kernel Disparity Root Cause:** By isolating $(Q, K, V)$ to identical synthetic inputs, all outer network operations (projections, layernorms, RoPE, gating, and MoE) are completely eliminated.
-2. **Current Metric:** Splash Attention and RPA produce a baseline cosine similarity of **{m_splash_rpa['cos_sim']*100:.2f}%** on identical inputs.
-"""
-        with open(doc_path, "w", encoding="utf-8") as f:
-            f.write(doc)
-        print(f"\n✓ Repro results successfully written to: {doc_path}")
+                # Print RPA vs Ref
+                try:
+                    res_ref = compare_attention_kernels_on_tpu(
+                        batch_size=4,
+                        seq_len=512,
+                        num_query_heads=16,
+                        num_kv_heads=2,
+                        head_dim=256,
+                        dtype_str=dtype_str,
+                        block_size=128,
+                        extra_train_args=["use_tokamax_splash=False"],
+                        infer_attention=infer_attn,
+                    )
+                    rpa_ref = res_ref["rpa_vs_ref"]
+                    print(f"--> {infer_label} vs Exact Ref ({dtype_str.upper()}): L_inf={rpa_ref['max_abs_err']:.2e}, MAE={rpa_ref['mae']:.2e}, CosSim={rpa_ref['cos_sim']:.6f}")
+                except Exception as e:
+                    print(f"--> {infer_label} vs Exact Ref FAILED: {e}")
 
 
 if __name__ == "__main__":

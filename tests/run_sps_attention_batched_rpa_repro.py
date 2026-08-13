@@ -1,0 +1,265 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Standalone attention kernel comparison: Splash vs Default RPA vs Batched RPA on TPU."""
+
+import math
+import os
+import sys
+
+os.environ["NEW_MODEL_DESIGN"] = "1"
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+os.environ["VLLM_TARGET_DEVICE"] = "tpu"
+
+sys.path.insert(0, os.path.abspath("."))
+sys.path.insert(0, os.path.abspath("src"))
+
+import jax
+from jax import numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+import numpy as np
+import pathwaysutils.proxy_backend
+
+pathwaysutils.proxy_backend.register_backend_factory()
+
+from pathwaysutils.experimental.shared_pathways_service import isc_pathways
+from maxtext.configs import pyconfig
+from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
+from tests.unit.attention_kernel_repro_test import (
+    compute_drift_metrics,
+    run_splash_attention,
+    run_reference_attention,
+)
+import tpu_inference.kernels.ragged_paged_attention.v3.kernel as default_rpa
+import tpu_inference.kernels.experimental.batched_rpa.wrapper as batched_rpa
+from tpu_inference.layers.common import attention_interface
+
+
+def run_standalone_rpa(
+    mesh: Mesh,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    use_batched_kernel: bool,
+    block_size: int = 128,
+    softmax_scale: float | None = None,
+) -> jax.Array:
+    """Runs either Default RPA v3 or Batched RPA in isolation on TPU."""
+    batch_size, seq_len, num_query_heads, head_dim = q.shape
+    num_kv_heads = k.shape[2]
+    num_blocks_per_seq = (seq_len + block_size - 1) // block_size
+    total_pages = batch_size * num_blocks_per_seq
+
+    if q.dtype == jnp.float32:
+        kv_cache = jnp.zeros((total_pages, block_size, num_kv_heads * 2, 1, head_dim), dtype=q.dtype)
+    else:
+        kv_cache = jnp.zeros((total_pages, block_size, num_kv_heads, 2, head_dim), dtype=q.dtype)
+
+    block_tables = jnp.arange(total_pages, dtype=jnp.int32)
+    seq_lens = jnp.array([seq_len] * batch_size, dtype=jnp.int32)
+    query_start_loc = jnp.tile(jnp.array([0, seq_len], dtype=jnp.int32), (batch_size,))
+    request_distribution = jnp.tile(jnp.array([0, 0, 1], dtype=jnp.int32), (batch_size,))
+
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    if use_batched_kernel:
+        def _batched_rpa_wrapper(*args, **kwargs):
+            kwargs.setdefault("vmem_limit_bytes", 120 * 1024 * 1024)
+            return batched_rpa.ragged_paged_attention(*args, **kwargs)
+
+        attention_interface.ragged_paged_attention = _batched_rpa_wrapper
+    else:
+        attention_interface.ragged_paged_attention = default_rpa.ragged_paged_attention
+
+    q_3d = q.reshape(-1, num_query_heads, head_dim)
+    k_3d = k.reshape(-1, num_kv_heads, head_dim)
+    v_3d = v.reshape(-1, num_kv_heads, head_dim)
+
+    out_rpa, _ = attention_interface.sharded_ragged_paged_attention(
+        mesh,
+        q_3d,
+        k_3d,
+        v_3d,
+        kv_cache,
+        seq_lens,
+        block_tables,
+        query_start_loc,
+        request_distribution,
+        None,             # sinks
+        softmax_scale,    # query_pre_attn_scalar
+        None,             # attention_chunk_size
+        None,             # q_scale
+        None,             # k_scale
+        None,             # v_scale
+        update_kv_cache=True,
+    )
+    return out_rpa.reshape(batch_size, seq_len, num_query_heads, head_dim)
+
+
+def benchmark_attention_kernels(dtype_str: str = "float32"):
+    batch_size = 4
+    seq_len = 512
+    num_query_heads = 16
+    num_kv_heads = 2
+    head_dim = 256
+    block_size = 128
+    dtype = jnp.bfloat16 if dtype_str == "bfloat16" else jnp.float32
+
+    train_kwargs = {
+        "override_model_config": True,
+        "model_name": "qwen3.5-35b-a3b",
+        "base_emb_dim": 2048,
+        "base_num_query_heads": num_query_heads,
+        "base_num_kv_heads": num_kv_heads,
+        "head_dim": head_dim,
+        "max_target_length": seq_len,
+        "per_device_batch_size": 1.0,
+        "enable_nnx": True,
+        "pure_nnx": True,
+        "pure_nnx_decoder": True,
+        "scan_layers": False,
+        "enable_checkpointing": False,
+        "log_config": False,
+        "weight_dtype": dtype_str,
+        "dtype": dtype_str,
+        "inhomogeneous_layer_cycle_interval": 1,
+    }
+
+    train_cfg = pyconfig.initialize(
+        [
+            sys.argv[0],
+            get_test_config_path(),
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "sa_use_base2_exp=False",
+            "sa_fuse_reciprocal=False",
+        ],
+        **train_kwargs,
+    )
+
+    train_devices = maxtext_utils.create_device_mesh(train_cfg)
+    train_mesh = Mesh(train_devices, train_cfg.mesh_axes)
+
+    cfg_infer = pyconfig.initialize(
+        [
+            sys.argv[0],
+            get_test_config_path("inference/vllm.yml"),
+            "attention=vllm_rpa",
+            "model_call_mode=inference",
+            "ici_data_parallelism=-1",
+        ],
+        **train_kwargs,
+    )
+    infer_devices = maxtext_utils.create_device_mesh(cfg_infer)
+    infer_mesh = Mesh(infer_devices, cfg_infer.mesh_axes)
+
+    key_rng = jax.random.PRNGKey(42)
+    k_q, k_k, k_v = jax.random.split(key_rng, 3)
+
+    q_init = jax.random.normal(k_q, (batch_size, seq_len, num_query_heads, head_dim), dtype=dtype)
+    k_init = jax.random.normal(k_k, (batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype)
+    v_init = jax.random.normal(k_v, (batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype)
+
+    decoder_positions = jnp.tile(jnp.arange(seq_len, dtype=jnp.int32), (batch_size, 1))
+    decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+    q_sharded = jax.device_put(q_init, NamedSharding(train_mesh, P(("data", "fsdp"), None, None, None)))
+    k_sharded = jax.device_put(k_init, NamedSharding(train_mesh, P(("data", "fsdp"), None, None, None)))
+    v_sharded = jax.device_put(v_init, NamedSharding(train_mesh, P(("data", "fsdp"), None, None, None)))
+    pos_sharded = jax.device_put(decoder_positions, NamedSharding(train_mesh, P(("data", "fsdp"), None)))
+    seg_sharded = jax.device_put(decoder_segment_ids, NamedSharding(train_mesh, P(("data", "fsdp"), None)))
+
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    # 1. Tokamax Splash (Training Kernel)
+    print("  [1/4] Executing Tokamax Splash (base2_exp=False, fuse_recip=False)...", flush=True)
+    q_splash_input = q_sharded * softmax_scale
+    out_splash = run_splash_attention(
+        train_mesh,
+        train_cfg,
+        q_splash_input,
+        k_sharded,
+        v_sharded,
+        seg_sharded,
+        pos_sharded,
+    )
+    out_splash.block_until_ready()
+
+    # 2. Default Pallas RPA v3 (Inference Kernel)
+    print("  [2/4] Executing Default Pallas RPA v3...", flush=True)
+    out_default_rpa = run_standalone_rpa(
+        infer_mesh, q_sharded, k_sharded, v_sharded, use_batched_kernel=False, block_size=block_size, softmax_scale=softmax_scale
+    )
+    out_default_rpa.block_until_ready()
+
+    # 3. Batched RPA (Target Inference Kernel)
+    print("  [3/4] Executing Batched RPA...", flush=True)
+    out_batched_rpa = run_standalone_rpa(
+        infer_mesh, q_sharded, k_sharded, v_sharded, use_batched_kernel=True, block_size=block_size, softmax_scale=softmax_scale
+    )
+    out_batched_rpa.block_until_ready()
+
+    # 4. Exact Mathematical Reference (FP32)
+    print("  [4/4] Executing Exact Math Reference Attention...", flush=True)
+    out_ref = run_reference_attention(q_init, k_init, v_init, softmax_scale)
+
+    m_splash_vs_default_rpa = compute_drift_metrics(out_splash, out_default_rpa)
+    m_splash_vs_batched_rpa = compute_drift_metrics(out_splash, out_batched_rpa)
+    m_splash_vs_ref = compute_drift_metrics(out_splash, out_ref)
+    m_default_rpa_vs_ref = compute_drift_metrics(out_default_rpa, out_ref)
+    m_batched_rpa_vs_ref = compute_drift_metrics(out_batched_rpa, out_ref)
+    m_batched_vs_default_rpa = compute_drift_metrics(out_batched_rpa, out_default_rpa)
+
+    print(f"\n==================== STANDALONE ATTENTION RESULTS ({dtype_str.upper()}) ====================")
+    print(f"1. Tokamax Splash vs Default RPA v3 : L_inf={m_splash_vs_default_rpa['max_abs_err']:.2e}, MAE={m_splash_vs_default_rpa['mae']:.2e}, CosSim={m_splash_vs_default_rpa['cos_sim']:.6f}")
+    print(f"2. Tokamax Splash vs Batched RPA    : L_inf={m_splash_vs_batched_rpa['max_abs_err']:.2e}, MAE={m_splash_vs_batched_rpa['mae']:.2e}, CosSim={m_splash_vs_batched_rpa['cos_sim']:.6f}")
+    print(f"3. Batched RPA vs Default RPA v3    : L_inf={m_batched_vs_default_rpa['max_abs_err']:.2e}, MAE={m_batched_vs_default_rpa['mae']:.2e}, CosSim={m_batched_vs_default_rpa['cos_sim']:.6f}")
+    print(f"4. Tokamax Splash vs Exact Ref Math : L_inf={m_splash_vs_ref['max_abs_err']:.2e}, MAE={m_splash_vs_ref['mae']:.2e}, CosSim={m_splash_vs_ref['cos_sim']:.6f}")
+    print(f"5. Batched RPA vs Exact Ref Math    : L_inf={m_batched_rpa_vs_ref['max_abs_err']:.2e}, MAE={m_batched_rpa_vs_ref['mae']:.2e}, CosSim={m_batched_rpa_vs_ref['cos_sim']:.6f}")
+    print(f"6. Default RPA v3 vs Exact Ref Math : L_inf={m_default_rpa_vs_ref['max_abs_err']:.2e}, MAE={m_default_rpa_vs_ref['mae']:.2e}, CosSim={m_default_rpa_vs_ref['cos_sim']:.6f}")
+    print("================================================================================\n")
+
+
+def main():
+    cluster = "auto-v5p-8-bodaborg"
+    project = "cloud-tpu-multipod-dev"
+    region = "europe-west4"
+    gcs_bucket = "gs://cloud-pathways-staging/mohit-scratch"
+    pathways_service = "sps-mohit-pathways-head-0-0.sps-mohit:29001"
+    tpu_instance_type = "tpuv5:2x2x1"
+    tpu_slice_count = 1
+    proxy_server_image = (
+        "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@"
+        "sha256:cca2c7eeb5d6b1f49a7619d078e74ef4d0ef2d6129d7ac9fb36b8c937194204b"
+    )
+
+    with isc_pathways.connect(
+        cluster=cluster,
+        project=project,
+        region=region,
+        gcs_bucket=gcs_bucket,
+        pathways_service=pathways_service,
+        expected_tpu_instances={tpu_instance_type: tpu_slice_count},
+        proxy_server_image=proxy_server_image,
+        collect_service_metrics=True,
+    ):
+        print("✓ Connected to SPS Cloud TPU v5p!")
+        for dt in ["float32", "bfloat16"]:
+            benchmark_attention_kernels(dt)
+
+
+if __name__ == "__main__":
+    main()

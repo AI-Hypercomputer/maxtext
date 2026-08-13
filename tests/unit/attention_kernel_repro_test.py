@@ -134,8 +134,19 @@ def run_rpa_attention(
     block_size: int = 128,
     softmax_scale: float | None = None,
 ) -> jax.Array:
-    """Executes the authentic inference Pallas Ragged Paged Attention (RPA) kernel on TPU."""
     from tpu_inference.layers.common import attention_interface
+
+    if hasattr(config, "attention") and config.attention == "vllm_batched_rpa":
+        import tpu_inference.kernels.experimental.batched_rpa.wrapper as batched_rpa
+
+        def _batched_rpa_wrapper(*args, **kwargs):
+            kwargs.setdefault("vmem_limit_bytes", 32 * 1024 * 1024)
+            return batched_rpa.ragged_paged_attention(*args, **kwargs)
+
+        attention_interface.ragged_paged_attention = _batched_rpa_wrapper
+    else:
+        import tpu_inference.kernels.ragged_paged_attention.v3.kernel as default_rpa
+        attention_interface.ragged_paged_attention = default_rpa.ragged_paged_attention
 
     batch_size, seq_len, num_query_heads, head_dim = query.shape
     num_kv_heads = key.shape[2]
@@ -143,13 +154,20 @@ def run_rpa_attention(
     num_blocks_per_seq = (seq_len + block_size - 1) // block_size
     total_pages = batch_size * num_blocks_per_seq
 
-    # 5D Paged KV Cache: (total_pages, block_size, num_kv_heads, 2, head_dim)
-    kv_cache = jnp.zeros(
-        (total_pages, block_size, num_kv_heads, 2, head_dim),
-        dtype=query.dtype,
-    )
+    # 5D Paged KV Cache matching tpu_inference RPA layout:
+    # BF16: (pages, block_size, num_kv_heads, 2, head_dim)
+    # FP32: (pages, block_size, num_kv_heads * 2, 1, head_dim)
+    if query.dtype == jnp.float32:
+        kv_cache = jnp.zeros(
+            (total_pages, block_size, num_kv_heads * 2, 1, head_dim),
+            dtype=query.dtype,
+        )
+    else:
+        kv_cache = jnp.zeros(
+            (total_pages, block_size, num_kv_heads, 2, head_dim),
+            dtype=query.dtype,
+        )
 
-    # 1D Metadata arrays matching RPA sharding rules
     block_tables = jnp.arange(total_pages, dtype=jnp.int32)
     seq_lens = jnp.array([seq_len] * batch_size, dtype=jnp.int32)
     query_start_loc = jnp.tile(jnp.array([0, seq_len], dtype=jnp.int32), (batch_size,))
@@ -157,28 +175,6 @@ def run_rpa_attention(
 
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
-
-    @jax.jit
-    def _forward_rpa(q, k, v, kv, sl, bt, qsl, rd):
-        out, _ = attention_interface.sharded_ragged_paged_attention(
-            mesh,
-            q,
-            k,
-            v,
-            kv,
-            sl,
-            bt,
-            qsl,
-            rd,
-            None,             # sinks
-            softmax_scale,    # query_pre_attn_scalar
-            None,             # attention_chunk_size (None for full global attention)
-            None,             # q_scale
-            None,             # k_scale
-            None,             # v_scale
-            update_kv_cache=True,
-        )
-        return out
 
     q_3d = query.reshape(-1, num_query_heads, head_dim)
     k_3d = key.reshape(-1, num_kv_heads, head_dim)
@@ -190,6 +186,30 @@ def run_rpa_attention(
     return out_rpa.reshape(batch_size, seq_len, num_query_heads, head_dim)
 
 
+def run_reference_attention(
+    query: jax.Array,
+    key: jax.Array,
+    value: jax.Array,
+    softmax_scale: float,
+) -> jax.Array:
+    """Computes exact mathematical causal attention in FP32."""
+    num_query_heads = query.shape[2]
+    num_kv_heads = key.shape[2]
+    rep = num_query_heads // num_kv_heads
+
+    k_rep = jnp.repeat(key, rep, axis=2)
+    v_rep = jnp.repeat(value, rep, axis=2)
+
+    # (B, S, H, D) x (B, S, H, D) -> (B, H, S, S)
+    scores = jnp.einsum("bshd,bthd->bhst", query.astype(jnp.float32), k_rep.astype(jnp.float32)) * softmax_scale
+    seq_len = query.shape[1]
+    mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=bool))
+    scores = jnp.where(mask[None, None, :, :], scores, -1e9)
+    probs = jax.nn.softmax(scores, axis=-1)
+    out = jnp.einsum("bhst,bthd->bshd", probs, v_rep.astype(jnp.float32))
+    return out.astype(query.dtype)
+
+
 def compare_attention_kernels_on_tpu(
     batch_size: int = 4,
     seq_len: int = 512,
@@ -199,6 +219,8 @@ def compare_attention_kernels_on_tpu(
     dtype_str: str = "bfloat16",
     block_size: int = 128,
     extra_train_kwargs: Dict[str, Any] | None = None,
+    extra_train_args: list[str] | None = None,
+    infer_attention: str = "vllm_rpa",
 ) -> Dict[str, Any]:
     """Runs a pure attention kernel isolated comparison on Cloud TPU."""
     from maxtext.utils import maxtext_utils
@@ -224,15 +246,19 @@ def compare_attention_kernels_on_tpu(
     if extra_train_kwargs:
         train_kwargs.update(extra_train_kwargs)
 
+    cli_train_args = [sys.argv[0], get_test_config_path(), "attention=flash"]
+    if extra_train_args:
+        cli_train_args.extend(extra_train_args)
+
     train_cfg = pyconfig.initialize(
-        [sys.argv[0], get_test_config_path(), "attention=flash"],
+        cli_train_args,
         **train_kwargs,
     )
     cfg_infer = pyconfig.initialize(
         [
             sys.argv[0],
             get_test_config_path("inference/vllm.yml"),
-            "attention=vllm_rpa",
+            f"attention={infer_attention}",
             "model_call_mode=inference",
             "ici_data_parallelism=-1",
         ],
@@ -265,7 +291,7 @@ def compare_attention_kernels_on_tpu(
     softmax_scale = 1.0 / math.sqrt(head_dim)
 
     # 1. Splash / Flash Attention (Training Kernel expects pre-scaled Q = Q / sqrt(d))
-    print("  [1/2] Executing Splash Attention (Training Kernel on TPU)...", flush=True)
+    print("  [1/3] Executing Splash Attention (Training Kernel on TPU)...", flush=True)
     q_splash_input = q_sharded * softmax_scale
     out_splash = run_splash_attention(
         train_mesh,
@@ -279,7 +305,7 @@ def compare_attention_kernels_on_tpu(
     out_splash.block_until_ready()
 
     # 2. Ragged Paged Attention (Inference Kernel)
-    print("  [2/2] Executing vLLM Ragged Paged Attention (Inference Pallas RPA Kernel on TPU)...", flush=True)
+    print("  [2/3] Executing vLLM Ragged Paged Attention (Inference Pallas RPA Kernel on TPU)...", flush=True)
     out_rpa = run_rpa_attention(
         infer_mesh,
         cfg_infer,
@@ -291,11 +317,20 @@ def compare_attention_kernels_on_tpu(
     )
     out_rpa.block_until_ready()
 
-    # Compute Splash vs. RPA Pairwise Drift Metrics
+    # 3. Exact Mathematical Reference Attention (FP32)
+    print("  [3/3] Executing Exact Math Reference Attention...", flush=True)
+    out_ref = run_reference_attention(q_init, k_init, v_init, softmax_scale)
+
+    # Compute Pairwise Drift Metrics
     metrics_splash_vs_rpa = compute_drift_metrics(out_splash, out_rpa)
+    metrics_splash_vs_ref = compute_drift_metrics(out_splash, out_ref)
+    metrics_rpa_vs_ref = compute_drift_metrics(out_rpa, out_ref)
 
     return {
         "splash_vs_rpa": metrics_splash_vs_rpa,
+        "splash_vs_ref": metrics_splash_vs_ref,
+        "rpa_vs_ref": metrics_rpa_vs_ref,
         "out_splash": out_splash,
         "out_rpa": out_rpa,
+        "out_ref": out_ref,
     }
