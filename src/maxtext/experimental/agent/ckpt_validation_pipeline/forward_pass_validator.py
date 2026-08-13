@@ -101,6 +101,19 @@ def validate_forward_pass(run_name, internal_model_name, checkpoint_path, report
         - Maps Linen checkpoint key names back to NNX attribute names so
           nnx.update(model, checkpoint) populates all weights.
       """
+      SYNONYMS = {
+          "pre_self_attention_layer_norm": ["input_layernorm", "pre_attention_norm"],
+          "post_self_attention_layer_norm": ["post_attention_layernorm", "post_attention_norm"],
+          "self_attention": ["attention"],
+          "mlp": ["feed_forward", "ffn"],
+          "pre_cross_attention_layer_norm": ["pre_cross_attention_layernorm", "pre_cross_attention_norm"],
+          "post_cross_attention_layer_norm": ["post_cross_attention_layernorm", "post_cross_attention_norm"],
+          "cross_attention": ["cross_attention"],
+          "pre_ffw_layer_norm": ["pre_ffw_layernorm", "pre_ffw_norm"],
+          "post_ffw_layer_norm": ["post_ffw_layernorm", "post_ffw_norm"],
+          "decoder_norm": ["final_layernorm", "norm"],
+      }
+      
       if to_linen:
         key_map = {}
         for linen_k, nnx_k in mappings["synonyms"].items():
