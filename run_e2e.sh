@@ -5,7 +5,7 @@ echo "==========================================================================
 echo "Starting MaxText End-to-End TPU Validation Matrix"
 echo "=========================================================================="
 echo "This script will orchestrate 224 training jobs across 8 models and 2 scan modes."
-echo "Models and Checkpoints will be saved to GCS: gs://mesa-maxtext/validation_runs/post_train_layout_v1/"
+echo "Models and Checkpoints will be saved to GCS: gs://mesa-maxtext/validation_runs/post_train_layout_v21/"
 echo "Execution Logs will be saved locally to: ./local_logs/"
 echo ""
 

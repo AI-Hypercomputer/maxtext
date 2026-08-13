@@ -12,7 +12,7 @@ from maxtext.utils.globals import HF_IDS
 
 MODELS = [
     "llama3.1-8b",
-    "gemma3-4b",
+    # "gemma3-4b",
     # "gemma2-2b",
     # "gemma4-e2b",
     # "qwen2.5-1.5b",
@@ -22,7 +22,7 @@ MODELS = [
 ]
 SCAN_MODES = ["scanned", "unscanned"]
 
-GCS_BASE = "gs://mesa-maxtext/validation_runs/post_train_layout_v14"
+GCS_BASE = "gs://mesa-maxtext/validation_runs/post_train_layout_v21"
 HF_BASE = "gs://mesa-maxtext/huggingface_transformers"
 LOCAL_LOGS = "local_logs"
 CSV_REPORT = "validation_summary.csv"
@@ -99,7 +99,10 @@ def run_matrix():
           writer.writerow([model, scan_mode, phase, action, run_name, status])
 
       def get_ckpt_path(action, run_name):
-        step = "0" if action in ("sft", "distill") else "1"
+        if action == "rl":
+          step = 1
+        else:
+          step = 9
         return f"{GCS_BASE}/{scan_mode}/{action}/{model}/{run_name}/checkpoints/{step}/items"
 
       def build_cmd(script, action, run_name, load_path, extra_flags=None):
@@ -111,6 +114,8 @@ def run_matrix():
             f"run_name={run_name}",
             f"model_name={model}",
             f"scan_layers={scan_bool}",
+            "async_checkpointing=False",
+            "save_checkpoint_on_start=False",
             f"base_output_directory={GCS_BASE}/{scan_mode}/{action}/{model}",
         ]
         # Handle steps vs num_batches for RL
@@ -126,7 +131,7 @@ def run_matrix():
             # template it is.
             cmd.append("chat_template_path=src/maxtext/examples/chat_templates/gsm8k_rl.json")
         else:
-          cmd.extend(["steps=5", "per_device_batch_size=1"])
+          cmd.extend(["steps=10", "per_device_batch_size=1"])
 
         # Handle datasets: DPO needs HF dataset, others can use synthetic to bypass tokenization
         if action == "dpo":
@@ -158,6 +163,10 @@ def run_matrix():
           cmd.extend([f"tokenizer_path={hf_model_name}", "tokenizer_type=huggingface"])
           if not any(c.startswith("vllm_hf_config_path=") for c in cmd):
             cmd.append(f"vllm_hf_config_path={hf_model_name}")
+          if not any(c.startswith("vllm_hf_overrides=") for c in cmd):
+            cmd.append('vllm_hf_overrides={architectures: ["MaxTextForCausalLM"]}')
+          if not any(c.startswith("vllm_additional_config=") for c in cmd):
+            cmd.append(f'vllm_additional_config={{"maxtext_config": {{"model_name": "{model}"}}}}')
 
         if action == "dpo":
           # DPO reads dataset_type=hf, whose pipeline tokenizes through AutoTokenizer. That cannot
