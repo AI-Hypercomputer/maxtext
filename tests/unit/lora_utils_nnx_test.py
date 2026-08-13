@@ -16,6 +16,8 @@
 Linen regression block at the end."""
 
 import unittest
+from dataclasses import dataclass
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -288,6 +290,38 @@ class TestLinenLoraRegression(unittest.TestCase):
         np.asarray(base["params"]["decoder"]["layers"]["self_attention"]["out"]["kernel"]),
         np.asarray(base_orig["params"]["decoder"]["layers"]["self_attention"]["out"]["kernel"]),
     )
+
+
+class TestGetLoraAnnotations(unittest.TestCase):
+  """Unit test for get_lora_annotations handling of None or non-sharded leaves."""
+
+  def test_get_lora_annotations_handles_none_and_non_sharded(self):
+    @dataclass
+    class ShardedLeaf:
+
+      class MockSharding:
+        spec = ("data", "model")
+
+      sharding: Any = MockSharding()
+
+    class NonShardedLeaf:
+      pass
+
+    # A PyTree containing a mixture of sharded, non-sharded, and None leaves
+    lora_abstract_params = {
+        "sharded_leaf": ShardedLeaf(),
+        "non_sharded_leaf": NonShardedLeaf(),
+        "none_leaf": None,
+    }
+
+    mapped = jax.tree_util.tree_map(
+        lambda x: x.sharding.spec if getattr(x, "sharding", None) is not None else None,
+        lora_abstract_params,
+    )
+
+    self.assertEqual(mapped["sharded_leaf"], ("data", "model"))
+    self.assertIsNone(mapped["non_sharded_leaf"])
+    self.assertIsNone(mapped["none_leaf"])
 
 
 if __name__ == "__main__":

@@ -1043,7 +1043,7 @@ def get_rope_index(
 
   Returns:
     A tuple of:
-      - position_ids: 3D position IDs. Shape: (3, batch, seq_len).
+      - position_ids: 3D position IDs. Shape: (batch, seq_len, 3)
       - mrope_position_deltas: Position offset for each sequence. Shape: (batch, 1).
 
   Raises:
@@ -1062,10 +1062,10 @@ def get_rope_index(
     position_ids = np.where(attention_mask == 0, 1.0, position_ids)
 
     # Expand to 3D (same value in all dimensions for text-only)
-    position_ids = np.broadcast_to(position_ids[np.newaxis, :, :], (3, batch_size, seq_len))
+    position_ids = np.stack([position_ids, position_ids, position_ids], axis=-1)
 
     # Calculate deltas for each sequence
-    max_position_ids = np.max(position_ids, axis=(0, 2), keepdims=True).transpose(1, 0, 2)  # (batch, 1, 1)
+    max_position_ids = np.max(position_ids, axis=(1, 2), keepdims=True)  # (batch, 1, 1)
     mrope_position_deltas = max_position_ids.squeeze(-1) + 1 - np.sum(attention_mask, axis=-1, keepdims=True)
 
     return position_ids, mrope_position_deltas
@@ -1075,6 +1075,7 @@ def get_rope_index(
     attention_mask = np.ones_like(input_ids)
 
   attention_mask_bool = attention_mask == 1
+  # Internally still build (3, batch, seq) then transpose to (batch, seq, 3).
   position_ids = np.zeros((3, batch_size, seq_len), dtype=jnp.float32)
   mrope_position_deltas = []
 
@@ -1158,7 +1159,7 @@ def get_rope_index(
       # Audio Only
       if min_ed == ed_audio_start:
         audio_len = _get_feat_extract_output_lengths(
-            audio_lengths[audio_idx]
+            audio_lengths[audio_idx]  # pyrefly: ignore[unsupported-operation]
         ).item()  # pyrefly: ignore[unsupported-operation]
         audio_pos = np.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
         llm_pos_ids_list.append(audio_pos)
@@ -1175,12 +1176,12 @@ def get_rope_index(
         t_index = np.arange(grid_t, dtype=np.float32) * 1 * position_id_per_seconds
 
         image_pos = get_llm_pos_ids_for_vision(
-            st_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws
+            st_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws  # pyrefly: ignore[bad-argument-type]
         )  # pyrefly: ignore[bad-argument-type]
         llm_pos_ids_list.append(image_pos)
 
         image_len = int(
-            np.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2)
+            np.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2)  # pyrefly: ignore[unsupported-operation]
         )  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + image_len + eos_len)
         image_idx += 1
@@ -1192,16 +1193,19 @@ def get_rope_index(
         grid_hs = video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
         grid_ws = video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
         t_index = (
-            np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+            np.arange(grid_t, dtype=np.float32)
+            # pyrefly: ignore[unsupported-operation]
+            * second_per_grids[video_idx].item()
+            * position_id_per_seconds
         )  # pyrefly: ignore[unsupported-operation]
 
         video_pos = get_llm_pos_ids_for_vision(
-            st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws
+            st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws  # pyrefly: ignore[bad-argument-type]
         )  # pyrefly: ignore[bad-argument-type]
         llm_pos_ids_list.append(video_pos)
 
         video_len = int(
-            np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2)
+            np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2)  # pyrefly: ignore[unsupported-operation]
         )  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + video_len + eos_len)
         video_idx += 1
@@ -1210,7 +1214,7 @@ def get_rope_index(
       # Audio in Video (interleaved)
       elif min_ed == ed_vision_start and ed_vision_start + 1 == ed_audio_start:
         audio_len = _get_feat_extract_output_lengths(
-            audio_lengths[audio_idx]
+            audio_lengths[audio_idx]  # pyrefly: ignore[unsupported-operation]
         ).item()  # pyrefly: ignore[unsupported-operation]
         audio_llm_pos_ids = np.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
 
@@ -1218,11 +1222,14 @@ def get_rope_index(
         grid_hs = video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
         grid_ws = video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
         t_index = (
-            np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+            np.arange(grid_t, dtype=np.float32)
+            # pyrefly: ignore[unsupported-operation]
+            * second_per_grids[video_idx].item()
+            * position_id_per_seconds
         )  # pyrefly: ignore[unsupported-operation]
 
         video_llm_pos_ids = get_llm_pos_ids_for_vision(
-            st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws
+            st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws  # pyrefly: ignore[bad-argument-type]
         )  # pyrefly: ignore[bad-argument-type]
 
         # Interleave audio and video based on temporal ordering
@@ -1243,7 +1250,7 @@ def get_rope_index(
           llm_pos_ids_list.append(audio_llm_pos_ids[:, audio_data_index:])
 
         video_len = int(
-            np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2)
+            np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2)  # pyrefly: ignore[unsupported-operation]
         )  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + audio_len + video_len + eos_len)
 
@@ -1275,6 +1282,7 @@ def get_rope_index(
     mrope_position_deltas.append(llm_positions.max().item() + 1 - len(valid_input_ids))
 
   mrope_position_deltas = np.array(mrope_position_deltas).reshape(batch_size, 1)
+  position_ids = np.transpose(position_ids, (1, 2, 0))  # (3, batch, seq) -> (batch, seq, 3)
 
   return position_ids, mrope_position_deltas
 

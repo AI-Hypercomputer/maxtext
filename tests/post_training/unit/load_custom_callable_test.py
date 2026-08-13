@@ -60,7 +60,6 @@ def _write_user_file(tmpdir):
 class LoadCustomCallableTest(unittest.TestCase):
   """Verify load_custom_callable loads a function from a user .py file."""
 
-  @pytest.mark.cpu_only
   def test_loads_function_from_user_file(self):
     """Returns a callable that behaves like the function in the user file."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -81,7 +80,6 @@ class LoadCustomCallableTest(unittest.TestCase):
       self.assertEqual(result["question"], "2+2?")
       self.assertEqual(result["answer"], "4")
 
-  @pytest.mark.cpu_only
   def test_loads_any_named_function(self):
     """function_name argument selects which symbol to return."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -89,7 +87,6 @@ class LoadCustomCallableTest(unittest.TestCase):
       fn = load_custom_callable(user_file, "another_helper")
       self.assertEqual(fn(5), 10)  # pylint: disable=not-callable
 
-  @pytest.mark.cpu_only
   def test_raises_when_file_does_not_exist(self):
     """Nonexistent path -> ValueError, not a cryptic ImportError."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -97,7 +94,6 @@ class LoadCustomCallableTest(unittest.TestCase):
       with self.assertRaises(ValueError):
         load_custom_callable(bogus, "process_data")
 
-  @pytest.mark.cpu_only
   def test_raises_when_function_not_defined(self):
     """File exists but doesn't define the named function -> ValueError."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -105,7 +101,6 @@ class LoadCustomCallableTest(unittest.TestCase):
       with self.assertRaises(ValueError):
         load_custom_callable(user_file, "no_such_function")
 
-  @pytest.mark.cpu_only
   def test_does_not_pollute_sys_path(self):
     """Loading the file must not append its directory to sys.path."""
     sys_path_before = list(sys.path)
@@ -114,7 +109,6 @@ class LoadCustomCallableTest(unittest.TestCase):
       load_custom_callable(user_file, "process_data")
     self.assertEqual(sys.path, sys_path_before)
 
-  @pytest.mark.cpu_only
   def test_does_not_pollute_sys_modules_globally(self):
     """The loaded module gets a unique synthetic name; it should not shadow
     other modules with a generic name like 'user_processor'."""

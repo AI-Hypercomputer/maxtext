@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""End-to-end RL Orchestrator training loop driver and integration test."""
+"""End-to-end MaxText training engine test."""
 
 from collections.abc import Iterator
 import dataclasses
@@ -26,9 +26,11 @@ from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
 import optax
+import pytest
 
 
 class DummyNNXModel(nnx.Module):
+  """Dummy NNX model for testing."""
 
   def __init__(self):
     self.weights = nnx.Param(jnp.array([1.0, 2.0]))
@@ -36,12 +38,14 @@ class DummyNNXModel(nnx.Module):
 
 @dataclasses.dataclass(kw_only=True)
 class DummyPayload(abstract_engine.TrainerPayload):
+  """Dummy payload for testing."""
+
   token_ids: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
   token_mask: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
 
 
 class TrainingLoopRunner:
-  """Drives an end-to-end RL training loop across MaxTextTrainingEngine APIs."""
+  """Drives an end-to-end training loop across MaxTextTrainingEngine APIs."""
 
   def __init__(
       self,
@@ -62,7 +66,7 @@ class TrainingLoopRunner:
       num_minibatches: int,
       dummy_compile_payload: abstract_engine.TrainerPayload | None = None,
   ) -> list[abstract_engine.MetricsBuffer]:
-    """Executes the full RL training loop and returns step metric buffers."""
+    """Executes the full training loop and returns step metric buffers."""
     history: list[abstract_engine.MetricsBuffer] = []
 
     _ = self.trainer.restore_checkpoint()
@@ -92,7 +96,9 @@ class TrainingLoopRunner:
     return history
 
 
+@pytest.mark.integration_test
 class MaxTextTrainingEngineE2ETest(absltest.TestCase):
+  """End-to-end MaxText training engine test."""
 
   def setup_config(self, enable_checkpointing: bool = False):
     """Sets up mock configuration for testing."""
@@ -111,34 +117,23 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
 
   @mock.patch.object(maxtext_engine.train_utils, "create_training_optimizer")
   @mock.patch.object(maxtext_engine.checkpointing, "CheckpointManager")
-  @mock.patch.object(
-      maxtext_engine.gradient_accumulation,
-      "gradient_accumulation_loss_and_grad",
-  )
   @mock.patch.object(maxtext_engine.model_creation_utils, "from_pretrained")
-  def test_e2e_training_loop_exercises_all_trainer_apis(
-      self, mock_from_pretrained, mock_ga, unused_mock_ckpt_mgr, mock_create_opt
-  ):
+  def test_e2e_training_loop_exercises_all_trainer_apis(self, mock_from_pretrained, mock_ckpt_mgr, mock_create_opt):
     mock_config = self.setup_config(enable_checkpointing=True)
     dummy_model = DummyNNXModel()
     mock_from_pretrained.return_value = dummy_model
     dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
     mock_create_opt.return_value = (lambda step: jnp.array(0.001), dummy_opt)
-    mock_ga.return_value = (
-        jnp.array(0.25),
-        {},
-        {"weights": jnp.array([0.1, 0.1])},
-    )
+
+    mock_ckpt_mgr_inst = mock.MagicMock()
+    mock_ckpt_mgr_inst.restore_checkpoint.return_value = (None, None, None)
+    mock_ckpt_mgr.return_value = mock_ckpt_mgr_inst
 
     trainer_instance = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    trainer_instance._checkpoint_manager.restore_checkpoint.return_value = (  # pylint: disable=protected-access
-        None,
-        {},
-    )
 
     trainer_instance.with_loss_fn(
         lambda *args, **kwargs: (
-            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(1.0), denominator=jnp.array(4.0)),
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.25), denominator=jnp.array(1.0)),
             {},
         )
     )

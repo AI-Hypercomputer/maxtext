@@ -1,10 +1,17 @@
 # syntax=docker/dockerfile:experimental
 
-ARG BASEIMAGE=python:3.12-slim-bullseye
+ARG BASEIMAGE=python:3.12-slim-bookworm
 FROM $BASEIMAGE
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y curl gnupg
+# Install system dependencies including C++20 compiler for vLLM
+RUN if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then \
+        echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list.d/bookworm.list && \
+        apt-get update && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build curl gnupg && \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        apt-get update && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build curl gnupg && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Add the Google Cloud SDK package repository
 RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
@@ -16,8 +23,10 @@ RUN apt-get update && apt-get install -y google-cloud-sdk
 # Set the default Python version to 3.12
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.12 1
 
-# Set environment variables for Google Cloud SDK and Python 3.12
+# Set environment variables for Google Cloud SDK, Python 3.12, and GCC 12
 ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.12:${PATH}"
+ENV CC=gcc-12
+ENV CXX=g++-12
 
 # Set environment variables via build arguments
 ARG MODE

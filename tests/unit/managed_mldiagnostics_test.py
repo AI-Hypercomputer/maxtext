@@ -18,10 +18,8 @@ import unittest
 from unittest import mock
 
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics, mldiag
-import pytest
 
 
-@pytest.mark.cpu_only
 class ManagedMLDiagnosticsTest(unittest.TestCase):
   # pylint: disable=protected-access
 

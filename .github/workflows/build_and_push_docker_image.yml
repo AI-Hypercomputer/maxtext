@@ -42,14 +42,6 @@ on:
         required: false
         type: boolean
         default: false
-      run_tests:
-        required: false
-        type: boolean
-        default: true
-    outputs:
-      build_result:
-        description: 'The result of build_and_push job.'
-        value: ${{ jobs.build_and_push.result }}
     secrets:
       HF_TOKEN:
         required: true
@@ -67,12 +59,13 @@ jobs:
       - name: Check if build should run
         id: check
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TARGET_DEVICE: ${{ github.event.inputs.target_device || 'all' }}
+          INPUT_DEVICE: ${{ inputs.device }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          BUILD_MODE: ${{ inputs.build_mode }}
         run: |
-          EVENT_NAME="${{ github.event_name }}"
-          # Default to 'all' if the input is null/empty
-          TARGET_DEVICE="${{ github.event.inputs.target_device || 'all' }}"
-          INPUT_DEVICE="${{ inputs.device }}"
-
           SHOULD_RUN="false"
           if [[ "$EVENT_NAME" == "release" || "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "pull_request" ]]; then
             SHOULD_RUN="true"
@@ -83,11 +76,11 @@ jobs:
           fi
 
           if [[ "$SHOULD_RUN" == "true" ]]; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            echo "Building ${{ inputs.image_name }} for device: ${{ inputs.device }} in ${{ inputs.build_mode }} mode."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Building $IMAGE_NAME for device: $INPUT_DEVICE in $BUILD_MODE mode."
           else
-            echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Skipping ${{ inputs.image_name }} build for device: ${{ inputs.device }} in ${{ inputs.build_mode }} mode."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping $IMAGE_NAME build for device: $INPUT_DEVICE in $BUILD_MODE mode."
           fi
 
   build_and_push:
@@ -98,38 +91,46 @@ jobs:
     if: needs.pre_build_check.outputs.should_run == 'true'
     steps:
       - name: Matrix Debugger
+        env:
+          DEVICE: ${{ inputs.device }}
+          WORKFLOW: ${{ inputs.workflow }}
+          BUILD_MODE: ${{ inputs.build_mode }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
         run: |
-          echo "device: ${{ inputs.device }}"
-          echo "workflow: ${{ inputs.workflow }}"
-          echo "build_mode: ${{ inputs.build_mode }}"
-          echo "image_name: ${{ inputs.image_name }}"
-          echo "dockerfile: ${{ inputs.dockerfile }}"
+          echo "device: $DEVICE"
+          echo "workflow: $WORKFLOW"
+          echo "build_mode: $BUILD_MODE"
+          echo "image_name: $IMAGE_NAME"
+          echo "dockerfile: $DOCKERFILE"
 
       - name: Checkout MaxText
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.maxtext_sha }}
+          persist-credentials: false
 
       - name: Mark git repositories as safe
-        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Configure Docker
         run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
 
       - name: Set up Docker BuildX
-        uses: docker/setup-buildx-action@v3.11.1
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
         with:
           driver: remote
           endpoint: tcp://localhost:1234
 
       - name: Download MaxText wheel
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
           path: .
 
       - name: Install uv and set Python version
-        uses: astral-sh/setup-uv@v7
+        # zizmor: ignore[cache-poisoning]
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           python-version: '3.12'
           enable-cache: true
@@ -140,18 +141,18 @@ jobs:
           uv venv --seed
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
-          uv pip install ${maxtext_wheel}[runner] --resolution=lowest
+          uv pip install "${maxtext_wheel}[runner]" --resolution=lowest
 
       - name: Copy tests assets to package directory
         if: inputs.include_test_assets == true
         shell: bash
         run: |
           source .venv/bin/activate
-          cp -r ${PWD}/tests .venv/lib/python3.12/site-packages/
-          cp ${PWD}/pytest.ini .venv/lib/python3.12/site-packages/
+          cp -r "${PWD}/tests" .venv/lib/python3.12/site-packages/
+          cp "${PWD}/pytest.ini" .venv/lib/python3.12/site-packages/
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           push: true
           context: .
@@ -169,7 +170,7 @@ jobs:
       - name: Add tags to Docker image
         shell: bash
         run: |
-          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${INPUTS_IMAGE_NAME}"
+          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${INPUTS_IMAGE_NAME}"
           TEMP_IMG="${SOURCE_IMAGE}:${{ github.run_id }}"
 
           # Add date tag
@@ -184,14 +185,4 @@ jobs:
           gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
         env:
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
-
-  run_ci_tests:
-    name: Run Unit and Integration Tests
-    needs: [pre_build_check, build_and_push]
-    if: needs.pre_build_check.outputs.should_run == 'true' && inputs.include_test_assets == true && inputs.run_tests == true
-    uses: ./.github/workflows/run_ci_tests.yml
-    with:
-      image_name: ${{ inputs.image_name }}
-      image_tag: ${{ github.run_id }}
-      device: ${{ inputs.device }}
-      workflow: ${{ inputs.workflow }}
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}

@@ -408,5 +408,37 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
       sharding.remove_size_one_mesh_axis = lambda spec, mesh: spec
 
 
+class TruncateOutShardingTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.mesh = _create_2d_test_mesh(("data", "model"))
+
+  def test_truncate_out_sharding_none(self):
+    self.assertIsNone(sharding.truncate_out_sharding(None, 3))
+
+  def test_truncate_out_sharding_named_sharding(self):
+    ns = NamedSharding(self.mesh, PartitionSpec(("data", "model"), None, None, None))
+    truncated = sharding.truncate_out_sharding(ns, 3)
+    self.assertIsInstance(truncated, NamedSharding)
+    self.assertEqual(truncated.mesh, self.mesh)
+    self.assertEqual(truncated.spec, PartitionSpec(("data", "model"), None, None))
+
+  def test_truncate_out_sharding_named_sharding_no_op(self):
+    ns = NamedSharding(self.mesh, PartitionSpec(("data", "model"), None))
+    truncated = sharding.truncate_out_sharding(ns, 3)
+    self.assertIs(truncated, ns)
+
+  def test_truncate_out_sharding_partition_spec(self):
+    pspec = PartitionSpec("data", "model", None, None)
+    truncated = sharding.truncate_out_sharding(pspec, 2)
+    self.assertEqual(truncated, PartitionSpec("data", "model"))
+
+  def test_truncate_out_sharding_tuple(self):
+    spec = ("data", "model", None, None)
+    truncated = sharding.truncate_out_sharding(spec, 2)
+    self.assertEqual(truncated, ("data", "model"))
+
+
 if __name__ == "__main__":
   unittest.main()

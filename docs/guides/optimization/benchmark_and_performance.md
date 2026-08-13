@@ -191,7 +191,7 @@ Different quantization recipes are available, including` "int8", "fp8", "fp8_ful
 
 For v6e and earlier generation TPUs, use the "int8" recipe. For v7x and later generation TPUs, use "fp8_full". GPUs should use “fp8_gpu” for NVIDIA and "nanoo_fp8" for AMD.
 
-See [](quantization-doc).
+See [Quantization guide](../../reference/core_concepts/quantization.md).
 
 ### Choose sharding strategy
 

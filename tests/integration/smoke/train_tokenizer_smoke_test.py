@@ -16,7 +16,6 @@
 
 import os
 import unittest
-import pytest
 
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.input_pipeline import input_pipeline_utils
@@ -49,12 +48,10 @@ class TrainTokenizerFormatTest(unittest.TestCase):
       if os.path.exists(output_path):
         os.remove(output_path)
 
-  @pytest.mark.cpu_only
   def test_parquet(self):
     path = os.path.join(get_test_dataset_path(), "hf", "c4", "c4-train-00000-of-01637.parquet")
     self._run_format_test(path, "parquet")
 
-  @pytest.mark.cpu_only
   def test_arrayrecord(self):
     dataset_root = get_test_dataset_path()
     if is_decoupled():
@@ -63,7 +60,6 @@ class TrainTokenizerFormatTest(unittest.TestCase):
       path = os.path.join(dataset_root, "array-record", "c4", "en", "3.0.1", "c4-train.array_record-00000-of-01024")
     self._run_format_test(path, "arrayrecord")
 
-  @pytest.mark.cpu_only
   def test_tfrecord(self):
     dataset_root = get_test_dataset_path()
     if is_decoupled():

@@ -98,7 +98,7 @@ mv generated_artifacts/python3_12/tpu-requirements.txt \
 
 ### TPU Post-Training
 
-> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt` in the repository was generated using JAX build commit hash: [a0d62932cbb02835296964e707f1cac0cbb939f8](https://github.com/jax-ml/jax/commit/a0d62932cbb02835296964e707f1cac0cbb939f8). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
+> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt` in the repository was generated using JAX build commit hash: [52d5cb3893727451d0f695bfa6f8206cdd9492c7](https://github.com/jax-ml/jax/commit/52d5cb3893727451d0f695bfa6f8206cdd9492c7). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
 
 If you have made changes to the post-training dependencies in `src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt`, you need to regenerate the pinned post-training requirements in `generated_requirements/` directory. Run the following command, replacing `<jax-build-commit-hash>` with the hash you copied in the previous step:
 
@@ -108,7 +108,7 @@ bash src/dependencies/scripts/generate_requirements.sh \
 --base-requirements src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt \
 --generated-requirements tpu-post-train-requirements.txt \
 --override-requirements src/dependencies/extra_deps/tpu_post_train_overrides.txt \
---seed-commit a0d62932cbb02835296964e707f1cac0cbb939f8
+--seed-commit 52d5cb3893727451d0f695bfa6f8206cdd9492c7
 
 # Copy generated requirements to src/dependencies/requirements/generated_requirements
 mv generated_artifacts/python3_12/tpu-post-train-requirements.txt \
@@ -133,6 +133,16 @@ bash src/dependencies/scripts/generate_requirements.sh \
 mv generated_artifacts/python3_12/cuda12-requirements.txt \
   src/dependencies/requirements/generated_requirements/cuda12-requirements.txt
 ```
+
+### Decoupled mode
+
+`generated_requirements/decoupled-requirements.txt` is derived from the GPU pre-training requirements above: the same packages at the same versions, minus the Google Cloud clients and the accelerator wheels. [Decoupled mode](../run_maxtext/decoupled_mode.md) is only exercised when those packages are genuinely absent, so this file is what CI installs for the decoupled test run. It carries no `seed-env` step of its own, it is a filter over a lock that `seed-env` already produced, which is why regenerating it needs no network. Pass `--source` to derive the same thing from another hardware lock. Regenerate it after updating any requirements file:
+
+```bash
+python3 src/dependencies/scripts/generate_decoupled_requirements.py
+```
+
+The `decoupled-requirements` pre-commit hook fails when a change under `src/dependencies/requirements/` leaves this file stale.
 
 ## Step 4: Verify the new dependencies
 

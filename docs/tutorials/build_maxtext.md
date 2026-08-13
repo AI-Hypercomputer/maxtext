@@ -59,9 +59,17 @@ post-training workloads in Google Artifact Registry. You can use these images
 directly with Google Kubernetes Engine (GKE) or XPK without building images from
 scratch.
 
-| MaxText Version | TPU Pre-Training Image                                                     | TPU Post-Training Image                                                     |
-| --------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `0.2.3`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.3` | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training:0.2.3` |
+### TPU Pre-Training images
+
+| MaxText Version | Container Image                                                            |
+| :-------------- | :------------------------------------------------------------------------- |
+| `0.2.3`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.3` |
+
+### TPU Post-Training images
+
+| MaxText Version | Container Image                                                             |
+| :-------------- | :-------------------------------------------------------------------------- |
+| `0.2.3`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training:0.2.3` |
 
 If you need to customize dependencies or build from source, follow the
 instructions below to build your own MaxText Docker image.

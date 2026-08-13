@@ -260,22 +260,7 @@ _DEEPSEEK4_MLP = {
     },
 }
 
-_DEEPSEEK4_MLP_SCANNED = {
-    "MoeBlock_0": {
-        "gate": {
-            "bias": None,
-            "kernel": mdn(reduction_axis=(0,), output_axis=(-1,)),
-        },
-        "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
-        "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
-        "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
-    },
-    "shared_experts": {
-        "wi_0": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-        "wi_1": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-        "wo": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-    },
-}
+_DEEPSEEK4_MLP_SCANNED = _DEEPSEEK4_MLP
 
 _DEEPSEEK4_ATTN_BASIC = {
     "kv_norm": {"scale": None},
@@ -414,7 +399,8 @@ class MuonDimensionTest(parameterized.TestCase):
     Initializes the specified MaxText model and asserts that the generated
     Muon dimension numbers match the hardcoded reference.
     """
-    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, pure_nnx=False)
+    is_pure_nnx = model_name in {"deepseek4-284b"}
+    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, pure_nnx=is_pure_nnx)
     if "params" in expected_output and "params" in actual_output:
       self.assertEqual(actual_output["params"], expected_output["params"])
     else:

@@ -51,6 +51,7 @@ load_full_state_path: ""
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: true
+save_checkpoint_on_start: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
 checkpoint_period: 10_000
@@ -141,7 +142,7 @@ kv_quant_dtype: "int8"
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
 # saves params quantized on fly at following path
 save_quantized_params_path: ""
-#used to configure the mode in which model is called
+# used to configure the mode in which model is called
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
@@ -162,7 +163,9 @@ weight_sparsity_update_step: 10
 # The first number of steps before updating the sparsity masks.
 weight_sparsity_start_step: 50
 # Whether to use Transformer Engine's collective GEMM overlap algorithm with quantization in MLP layers. Note: only valid with tensor-sequence parallelism.
-use_te_comm_gemm_overlap: false
+# "disabled" means no overlap, "mlp" means to only overlap up and down projections in MLP layers,
+# and "full" means to overlap MLP projections as well as the QKV and output projection layers in attention.
+te_comm_gemm_overlap: "disabled"
 
 decoder_block: "llama2" # which style of decoderblock to use.
 # global parameter scale needs to be a power of 2. if you want finer grained control of the model sizes
@@ -267,6 +270,11 @@ wo_tile_drhs_mlp_dim: 1024
 
 merge_gating_gmm: false
 
+# Use tokamax library for gmm kernel implementation
+use_tokamax_gmm: false
+# Whether to use Tokamax GMM v2 for MoE kernel. Requires use_tokamax_gmm=true.
+use_gmm_v2: false
+
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
@@ -351,6 +359,7 @@ remat_policy: 'full'
 # If "custom" remat_policy is chosen, you can select tensors from the following list to offload on host memory, rematerialize or save on device memory.
 # Pick one of these options for following tensors: ['remat','device','offload']
 decoder_layer_input: 'device' # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
+indexer_cutoff_threshold: 'remat' # Remat policy for indexer cutoff threshold (can be set to 'remat', 'offload', or 'device')
 context: 'remat' # From https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py#L581-L583
 mlpwi: 'remat'
 mlpwi_0: 'remat'
@@ -381,12 +390,15 @@ param_scan_axis: 1
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
+attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla, full, compressed, block_diffusion
 share_kv_projections: false # Note: Not compatible with attention_type='mla'
 attention_bias: false # If true, adds a learnable bias to the query, key, and value projections
 attention_sink: false
 sliding_window_size: 0
 chunk_attn_window_size: 0
+# Token block size B for block-causal attention in Block Diffusion (arXiv:2503.09573).
+# Tokens attend bidirectionally within a block and causally across blocks.
+causal_block_size: 32
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 z_loss_multiplier: 0.0
@@ -438,6 +450,7 @@ kv_lora_rank: 512
 qk_nope_head_dim: 128
 qk_rope_head_dim: 64
 v_head_dim: 128
+use_sliced_mla_proj: false # Whether to slice projection kernel weights before contraction in MLA instead of running full projection + jnp.split.
 
 # Compressed Attention parameters
 o_lora_rank: 0 # Output LoRA rank for Compressed Attention.
@@ -523,6 +536,7 @@ logical_axis_rules: [
                       # ==========================================
                       # Attention Activations
                       ['activation_batch_attn', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_input_length_attn', ['tensor_sequence', 'context']],
                       ['activation_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_sequence']],
                       ['activation_length_attn', ['context']],
@@ -584,6 +598,7 @@ logical_axis_rules: [
                       ['engram_dim', ['tensor']],
                       ['dense_layers', []],
                       ['moe_layers', []],
+                      ['local_layers', []],
                       ['mhc', []],
                       # ==========================================
                       # Inference(Prefill, Decode, Cache)
@@ -973,6 +988,9 @@ mscale: 1.0
 rope_interleave: true # RoPE with sin/cos interleaved vs concatenated
 rope_truncate: true # Floor lower bound and ceil upper bound for correction range
 rope_attention_scaling: false # Scale the rotary embedding output
+# Keep rank-5 pair tensor intact [batch_size, sequence_length, num_heads, half_dim, 2]
+# where half_dim is the number of 2D rotation planes and 2 contains [real, imag] coordinates, returning interleaved RoPE
+rope_pairwise: false
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
@@ -988,7 +1006,7 @@ decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
 decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
-eval_start_step: 0 # start eval after train step is >= eval_start_step
+eval_start_step: 0 # start eval when train step is >= eval_start_step
 eval_interval: -1  # the specific number of train step between eval_step
 eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
@@ -1106,10 +1124,12 @@ sa_block_kv_dkv_compute: 512
 sa_block_q_dq: 512
 sa_block_kv_dq: 512
 sa_use_fused_bwd_kernel: false
+sa_bwd_dkv_megacore: false  # megacore-parallel kv-head groups in the static dkv grid
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
+ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax
 sa_use_base2_exp: true # defaults to true in Tokamax
 # local_sa_* variants apply to local (sliding window) attention layers;
@@ -1137,7 +1157,7 @@ cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: true
-context_parallel_strategy: "all_gather" # "all_gather" or "ring"
+context_parallel_strategy: "all_gather" # "all_gather", "ring", or "ulysses"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
 
@@ -1266,11 +1286,6 @@ use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
 
-# Use tokamax library for gmm kernel implementation
-use_tokamax_gmm: false
-# Whether to use GMM v2 for MoE.
-# Requires use_tokamax_gmm: true. Currently incompatible with quantization.
-use_gmm_v2: false
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
 use_jax_splash: false
@@ -1339,8 +1354,8 @@ distill_beta_schedule: "constant"
 ##### Elastic training parameters
 # Elastic training is Pathways-specific and does not work on McJAX.
 elastic_enabled: false
+elastic_backup_kind: "snapshot"
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
-
 

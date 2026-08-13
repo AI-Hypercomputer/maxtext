@@ -25,22 +25,27 @@ import os
 
 from absl import app
 
-
 import optax
 
 import pathwaysutils  # pylint: disable=unused-import
 
-import tensorflow as tf
+try:
+  import tensorflow as tf
+
+  _TF_AVAILABLE = True
+except ImportError:
+  _TF_AVAILABLE = False
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
-from flax import linen as nn, nnx
+from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
+from maxtext.configs.types import TeCommGemmOverlapPolicy
 from maxtext.utils.globals import EPS
 from maxtext.utils import elastic_utils
 # Placeholder: internal
@@ -397,7 +402,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     else:
       owg_type = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
       custom_param_filter = nnx.Any(owg_type)
-      model_graphdef, curr_params, custom_params, rest = nnx.split(state.model, nnx.Param, custom_param_filter, ...)
+      train_param_type = (
+          getattr(nnx, "LoRAParam", nnx.Param)
+          if getattr(getattr(config, "lora", None), "enable_lora", False)
+          else nnx.Param
+      )
+      nnx.pop(state.model, nnx.Intermediate)
+      model_graphdef, curr_params, custom_params, rest = nnx.split(
+          state.model, train_param_type, custom_param_filter, ...
+      )
       if config.parameter_memory_host_offload:
         # Params are kept on host (pinned_host) in in_shardings. Move only Param
         # variables to device before the forward/backward pass so that all dot_general
@@ -412,22 +425,33 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         curr_params = jax.device_put(curr_params, device_param_shardings)
         nnx.update(state.model, curr_params)  # ensure state.model has device params for optimizer update
       if config.shard_optimizer_over_data:
-        curr_params = jax.tree.map(
-            functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
+        param_sharding_lookup = {}
+        for p, s in jax.tree_util.tree_leaves_with_path(
+            params_shardings, is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding, jax.sharding.Sharding))
+        ):
+          param_sharding_lookup[p] = s.get_value() if isinstance(s, nnx.Variable) else s
+
+        def _maybe_shard_param(path, var):
+          if path in param_sharding_lookup:
+            return sharding.maybe_shard_with_name(var, param_sharding_lookup[path], shard_mode=config.shard_mode)
+          return var
+
+        curr_params = jax.tree_util.tree_map_with_path(
+            _maybe_shard_param,
             curr_params,
-            params_shardings,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
         nnx.update(state.model, curr_params)
 
       def diff_wrapper(curr_params, custom_params, rest, config, data):
         local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
         loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
-        _, _, _, new_rest = nnx.split(local_model, nnx.Param, custom_param_filter, ...)
-        return loss, (aux, new_rest)
+        non_param_rest = nnx.state(local_model, nnx.Not(nnx.Any(nnx.Param, nnx.Intermediate)))
+        return loss, (aux, non_param_rest)
 
       grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
-      (loss, (aux, new_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
-      nnx.update(state.model, nnx.State.merge(custom_grads, new_rest))
+      (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
+      nnx.update(state.model, nnx.State.merge(custom_grads, non_param_rest))
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -449,6 +473,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   moe_bias_updates = aux.get("moe_bias_updates")
   mtp_loss = aux.get("mtp_loss", 0.0)
   new_opt_state = None
+  bias_metrics = {}
 
   if isinstance(model, nn.Module):
     if config.gradient_clipping_threshold > 0:
@@ -538,9 +563,38 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     new_state = state
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
-    if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
-      target_bias = new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
-      target_bias.value = target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
+    # pylint: disable=too-many-nested-blocks
+    if config.routed_bias and config.routed_bias_update_rate > 0.0:
+      if config.model_name.startswith("deepseek4"):
+        max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
+        flat_intermediates = traverse_util.flatten_dict(aux.get("intermediate_outputs", {}))
+        for path, update in flat_intermediates.items():
+          if path[-1] != "moe_bias_updates":
+            continue
+          target = new_state.model
+          prefix = path[1:-1] if path[0] == "intermediates" else path[:-1]
+          for key in prefix:
+            if hasattr(target, key):
+              target = getattr(target, key)
+            elif isinstance(target, dict) and key in target:
+              target = target[key]
+            else:
+              target = None
+              break
+          if target is None:
+            continue
+          for _, node in nnx.iter_graph(target):
+            if type(node).__name__ == "GateLogit" and hasattr(node, "bias") and node.bias is not None:
+              update_val = update[0] if isinstance(update, (tuple, list)) else update
+              name_prefix = "-".join(map(str, prefix))
+              if getattr(config, "log_moe_bias_norms", False):
+                bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(node.bias.value)
+              node.bias.value = node.bias.value + jnp.array(update_val)
+              if getattr(config, "log_moe_bias_norms", False):
+                bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
+      elif moe_bias_updates is not None:
+        target_bias = new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
+        target_bias.value = target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
 
   lm_loss = xent_sum / (total_weights + EPS)
   scalar_metrics = {
@@ -553,6 +607,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
+  scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
     if isinstance(model, nn.Module):
       new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)
@@ -718,7 +773,12 @@ def training_loop_iteration(
         all_host_upload=dump_hlo_upload_all,
     )
 
-  if eval_interval > 0 and step >= start_step and step >= eval_start_step and (step + 1) % eval_interval == 0:
+  if (
+      eval_interval > 0
+      and step >= start_step
+      and step >= eval_start_step
+      and (step - eval_start_step) % eval_interval == 0
+  ):
     assert eval_data_iterator
     # Explicitly reset the eval iterator and counters before starting the eval loop
     eval_data_iterator.reset()
@@ -920,9 +980,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  # TF allocates extraneous GPU memory when using TFDS data
-  # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
-  tf.config.set_visible_devices([], "GPU")
+  if _TF_AVAILABLE:
+    # TF allocates extraneous GPU memory when using TFDS data
+    # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
+    tf.config.set_visible_devices([], "GPU")
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
@@ -939,7 +1000,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.use_te_comm_gemm_overlap:
+  if config.te_comm_gemm_overlap != TeCommGemmOverlapPolicy.DISABLED:
     max_utils.bootstrap_transformer_engine_cgemm(config)
 
   # Create the Goodput recorder

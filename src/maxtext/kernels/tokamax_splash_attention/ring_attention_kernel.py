@@ -21,6 +21,7 @@ import functools
 from typing import Any
 
 import jax
+from jax import ad_checkpoint
 from jax import lax
 from jax import tree_util
 import jax.numpy as jnp
@@ -67,7 +68,7 @@ def _ring_attention_forward(
     segment_ids: SegmentIds | None,
     mask_value: float,
     is_mqa: bool,
-    config: SplashConfig | None,
+    config: SplashConfig,
     mask_function: MaskFunctionType | None,
     fwd_mask_sparsity: float,
     *,
@@ -169,7 +170,7 @@ def _ring_attention_forward(
       initial_carry,
       xs=jnp.arange(0, ring_axis_size),
       length=ring_axis_size,
-      unroll=False,
+      unroll=config.ring_scan_unroll,
   )  # type: ignore[arg-type]
   # Final normalization
   assert l_final.dtype == jnp.float32
@@ -185,7 +186,7 @@ def _ring_attention_forward(
 def _ring_attention_bwd(
     mask_value: float,
     is_mqa: bool,
-    config: SplashConfig | None,
+    config: SplashConfig,
     mask_function: MaskFunctionType | None,
     fwd_mask_sparsity: float,
     dkv_mask_sparsity: float,
@@ -211,32 +212,27 @@ def _ring_attention_bwd(
       axis_name=ring_axis,
       perm=[(i, (i + 1) % ring_axis_size) for i in range(ring_axis_size)],
   )
-  dq_accum = jnp.zeros(q.shape, dtype=jnp.float32)
+  use_dq_carry = config.dq_reduction_steps == 3
+  dq_accum = jnp.zeros((3, *q.shape), dtype=jnp.float32) if use_dq_carry else jnp.zeros(q.shape, dtype=jnp.float32)
   dk_accum = jnp.zeros(k.shape, dtype=jnp.float32)
   dv_accum = jnp.zeros(v.shape, dtype=jnp.float32)
   dsinks = sinks
 
-  def body(carry, i: int):
-    (
-        dq_accum,
-        dk_accum,
-        dv_accum,
-        k_current,
-        v_current,
-        segment_ids_current,
-        _,
-    ) = carry
+  def rotate_kv(k_current, v_current, segment_ids_current):
     k_next = shift(k_current)
     v_next = shift(v_current)
 
-    current_kv_shard_idx = (ring_axis_idx - i) % ring_axis_size
-    local_dkv_mask_info = _dynamic_slice_mask_info(dkv_mask_info, current_kv_shard_idx, ring_axis_size)
-    local_dkv_mask_info = _offset_q_sequence_for_kv_shard(local_dkv_mask_info, current_kv_shard_idx, k_current.shape[-2])
     if segment_ids is not None:
       kv_segment_ids_next = shift(segment_ids_current.kv)
       segment_ids_next = SegmentIds(segment_ids.q, kv_segment_ids_next)
     else:
       segment_ids_next = None
+    return k_next, v_next, segment_ids_next
+
+  def compute_step(i: int, k_current, v_current, segment_ids_current, dq_accum):
+    current_kv_shard_idx = (ring_axis_idx - i) % ring_axis_size
+    local_dkv_mask_info = _dynamic_slice_mask_info(dkv_mask_info, current_kv_shard_idx, ring_axis_size)
+    local_dkv_mask_info = _offset_q_sequence_for_kv_shard(local_dkv_mask_info, current_kv_shard_idx, k_current.shape[-2])
 
     residuals_for_chunk = (
         q,
@@ -259,30 +255,72 @@ def _ring_attention_bwd(
         fwd_mask_sparsity=fwd_mask_sparsity,
         dkv_mask_sparsity=dkv_mask_sparsity,
         return_fp32_grads=True,
+        return_unreduced_dq=use_dq_carry,
     )
-    _, _, dq_i, dk_i, dv_i, _, dsinks, _ = attn_bwd(res=residuals_for_chunk, grads=do)
-    dv_next = shift(dv_accum + dv_i.astype(jnp.float32))
-    dk_next = shift(dk_accum + dk_i.astype(jnp.float32))
-    dq_accum = dq_accum + dq_i.astype(jnp.float32)
+    _, _, dq_i, dk_i, dv_i, _, dsinks, _ = attn_bwd(
+        res=residuals_for_chunk,
+        grads=do,
+        dq_carry_in=dq_accum if use_dq_carry else None,
+    )
+    if not use_dq_carry:
+      dq_i = dq_accum + dq_i.astype(jnp.float32)
+    return dq_i, dk_i, dv_i, dsinks
 
+  dq_i, dk_pending, dv_pending, dsinks = compute_step(0, k, v, segment_ids, dq_accum)
+  dq_accum = dq_i
+  k_current, v_current, segment_ids_current = rotate_kv(k, v, segment_ids)
+
+  def body(carry, i: int):
+    (
+        dq_accum,
+        dk_accum,
+        dv_accum,
+        dk_pending,
+        dv_pending,
+        k_current,
+        v_current,
+        segment_ids_current,
+        _,
+    ) = carry
+    dk_next = shift(dk_accum + dk_pending.astype(jnp.float32))
+    dv_next = shift(dv_accum + dv_pending.astype(jnp.float32))
+    k_next, v_next, segment_ids_next = rotate_kv(k_current, v_current, segment_ids_current)
+    dq_i, dk_i, dv_i, dsinks = compute_step(i, k_current, v_current, segment_ids_current, dq_accum)
+    dq_accum = dq_i
     return (
         dq_accum,
         dk_next,
         dv_next,
+        dk_i,
+        dv_i,
         k_next,
         v_next,
         segment_ids_next,
         dsinks,
     ), None
 
-  initial_carry = (dq_accum, dk_accum, dv_accum, k, v, segment_ids, dsinks)
-  (dq, dk, dv, _, _, _, dsinks), _ = lax.scan(
+  initial_carry = (
+      dq_accum,
+      dk_accum,
+      dv_accum,
+      dk_pending,
+      dv_pending,
+      k_current,
+      v_current,
+      segment_ids_current,
+      dsinks,
+  )
+  (dq, dk, dv, dk_pending, dv_pending, _, _, _, dsinks), _ = lax.scan(
       body,
       initial_carry,
-      xs=jnp.arange(ring_axis_size),
-      length=ring_axis_size,
-      unroll=False,
+      xs=jnp.arange(1, ring_axis_size),
+      length=ring_axis_size - 1,
+      unroll=config.ring_scan_unroll,
   )
+  dk = shift(dk + dk_pending.astype(jnp.float32))
+  dv = shift(dv + dv_pending.astype(jnp.float32))
+  if use_dq_carry:
+    dq = dq.sum(axis=0)
 
   if sinks is not None:
     dsinks = jax.lax.psum(dsinks, axis_name=ring_axis)
@@ -309,7 +347,7 @@ def _ring_attention_fwd(
     # nondiff_args
     mask_value: float,  # 1
     is_mqa: bool,  # 2
-    config: SplashConfig | None,  # 3
+    config: SplashConfig,  # 3
     mask_function: MaskFunctionType | None,  # 4
     fwd_mask_sparsity: float,  # 5
     dkv_mask_sparsity: float,  # 6
@@ -363,6 +401,10 @@ def _ring_attention_fwd(
       ring_axis=ring_axis,
       expected_ring_size=expected_ring_size,
   )
+  # The ring backward reads the merged residuals, not the per-hop splash outputs.
+  if config.residual_checkpoint_name is not None:
+    out = ad_checkpoint.checkpoint_name(out, name=config.residual_checkpoint_name)
+    logsumexp = ad_checkpoint.checkpoint_name(logsumexp, name=config.residual_checkpoint_name)
   residuals = (q, k, v, segment_ids, sinks, out, logsumexp, dkv_mask_info)
   return out, residuals
 
@@ -391,7 +433,7 @@ def _ring_attention_custom(
     sinks: jax.Array | None,
     mask_value: float,
     is_mqa: bool,
-    config: SplashConfig | None,
+    config: SplashConfig,
     mask_function: MaskFunctionType | None,
     fwd_mask_sparsity: float,
     dkv_mask_sparsity: float,
@@ -469,7 +511,7 @@ def _ring_attention(
     sinks: jax.Array | None = None,
     *,
     is_mqa: bool,
-    config: SplashConfig | None,
+    config: SplashConfig,
     mask_value: float,
     mask_function: MaskFunctionType | None,
     fwd_mask_sparsity: float,
@@ -595,16 +637,19 @@ class RingSplashAttentionKernel:
       if mask_info is None:
         return None
       return MaskInfo(  # pytype: disable=wrong-arg-types
-          mask_next=_resolve_spec(mask_info.mask_next),
-          active_rows=_resolve_spec(mask_info.active_rows),
-          active_cols=_resolve_spec(mask_info.active_cols),
-          num_active_blocks=_resolve_spec(mask_info.num_active_blocks),
-          block_mask=_resolve_spec(mask_info.block_mask),
-          partial_mask_blocks=jax.sharding.PartitionSpec()  # replicated
+          mask_next=_resolve_spec(mask_info.mask_next),  # pyrefly: ignore[bad-argument-type]
+          active_rows=_resolve_spec(mask_info.active_rows),  # pyrefly: ignore[bad-argument-type]
+          active_cols=_resolve_spec(mask_info.active_cols),  # pyrefly: ignore[bad-argument-type]
+          num_active_blocks=_resolve_spec(mask_info.num_active_blocks),  # pyrefly: ignore[bad-argument-type]
+          block_mask=_resolve_spec(mask_info.block_mask),  # pyrefly: ignore[bad-argument-type]
+          partial_mask_blocks=jax.sharding.PartitionSpec()  # replicated  # pyrefly: ignore[bad-argument-type]
           if mask_info.partial_mask_blocks is not None
           else None,
-          q_sequence=_resolve_spec(mask_info.q_sequence),
-          kv_sequence=jax.sharding.PartitionSpec() if mask_info.kv_sequence is not None else None,
+          q_sequence=_resolve_spec(mask_info.q_sequence),  # pyrefly: ignore[bad-argument-type]
+          # pyrefly: ignore[bad-argument-type]
+          kv_sequence=jax.sharding.PartitionSpec()
+          if mask_info.kv_sequence is not None
+          else None,  # pyrefly: ignore[bad-argument-type]
       )
 
     return RingSplashAttentionKernel(
@@ -735,7 +780,7 @@ def make_ring_attention(
         mask,
         (bq_dkv, bkv_dkv),
         is_dkv=True,
-        return_dynamic_grid=config.dq_reduction_steps == 3,
+        return_dynamic_grid=config.dq_reduction_steps == 3 and not config.bwd_dkv_megacore,
     )
     assert (mask_function_fwd is None) == (mask_function_dkv is None)
     dkv_mask_sparsity = _mask_sparsity(dkv_mask_info)

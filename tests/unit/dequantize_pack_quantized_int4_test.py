@@ -25,7 +25,6 @@ Not run in GitHub runners (depends on torch + compressed_tensors).
 """
 
 import unittest
-import pytest
 import torch
 
 from compressed_tensors.compressors.quantized_compressors.pack_quantized import (
@@ -54,7 +53,6 @@ def _quantize_per_group(w_fp32: torch.Tensor, group_size: int = INT4_GROUP_SIZE)
   return w_int.reshape(out_features, in_features), scale.squeeze(-1)
 
 
-@pytest.mark.cpu_only
 class DequantizePackQuantizedInt4Test(unittest.TestCase):
 
   def setUp(self):

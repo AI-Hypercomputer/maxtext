@@ -151,6 +151,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
+        model_mode,
         previous_chunk,
         slot,
     )

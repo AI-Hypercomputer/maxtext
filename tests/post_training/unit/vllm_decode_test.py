@@ -22,6 +22,8 @@ import pytest
 pytest.importorskip("vllm")
 pytest.importorskip("tunix")
 
+pytestmark = pytest.mark.post_training
+
 from maxtext.inference.vllm_decode import build_chat_messages
 
 

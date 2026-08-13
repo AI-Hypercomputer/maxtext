@@ -276,7 +276,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   # Inherits _shard_optimizer from PeftTrainer.
 
-  def _train_step(self, model, optimizer, inputs):
+  def _train_step(self, model, optimizer, inputs, grad_accumulator=None, **kwargs):  # pyrefly: ignore[bad-override]
     """Overrides the main JIT block to natively handle ModelBundle module.
 
     Uses jax.value_and_grad with explicit split/merge to avoid nesting
@@ -411,6 +411,9 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     Returns:
       A new MaxTextTrainingInput containing the Teacher's outputs (logits).
     """
+    if hasattr(input_data, "microbatches"):
+      input_data.microbatches = [self._prepare_inputs(mb) for mb in input_data.microbatches]
+      return input_data
 
     # 3. Return extended object so fields are available for Student training step
     # pylint: disable=unexpected-keyword-arg
@@ -439,7 +442,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     for name, value in aux.items():
       if name not in self._buffered_train_metrics.additional_metrics:
-        self._buffered_train_metrics.additional_metrics[name] = (
+        self._buffered_train_metrics.additional_metrics[name] = (  # pyrefly: ignore[unsupported-operation]
             [],
             distillation_utils.weighted_mean,
         )  # pyrefly: ignore[unsupported-operation]
@@ -522,7 +525,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         raw_iterator=iterator_to_manage,
         root_directory=config.checkpoint_dir,
         student_config=config,  # Pass the config here
-        options=self.config.checkpointing_options,
+        options=self.config.checkpointing_options,  # pyrefly: ignore[bad-argument-type]
     )
 
     # 3. Restore Model & Optimizer State correctly via MaxTextCheckpointManager.

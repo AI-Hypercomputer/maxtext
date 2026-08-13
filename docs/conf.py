@@ -44,9 +44,9 @@ project = "MaxText"
 copyright = "2023–2026, Google LLC"
 author = "MaxText developers"
 
-# Get version from the __init__.py file
-init_path = os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "__init__.py"))
-with open(init_path, "r", encoding="utf-8") as f:
+# Get version from the version.py file
+version_path = os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "version.py"))
+with open(version_path, "r", encoding="utf-8") as f:
   match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]", f.read(), re.MULTILINE)
   if match:
     version = match.group(1)

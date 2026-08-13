@@ -74,7 +74,7 @@ google-cloud-resource-manager>=1.18.0
 google-cloud-storage>=3.13.1
 google-cloud-storage-control>=1.13.0
 google-crc32c>=1.8.0
-google-genai>=2.18.0
+google-genai>=2.17.0
 google-pasta>=0.2.0
 google-resumable-media>=2.10.1
 googleapis-common-protos>=1.75.1
@@ -131,7 +131,7 @@ namex>=0.1.0
 nest-asyncio>=1.6.0 ; sys_platform == 'win32'
 networkx>=3.6.1
 ninja>=1.13.0
-nltk>=3.10.3
+nltk>=3.10.2
 nodeenv>=1.10.0
 numpy>=2.0.2
 numpy-typing-compat>=20251206.2.0
@@ -233,7 +233,7 @@ typing-inspection>=0.4.4
 tzdata>=2026.3 ; sys_platform == 'emscripten' or sys_platform == 'win32'
 uritemplate>=4.2.0
 urllib3>=2.7.0
-uvicorn>=0.52.2
+uvicorn>=0.52.1
 uvloop>=0.22.1
 virtualenv>=21.7.4
 wadler-lindig>=0.1.7

@@ -7,7 +7,7 @@ A vLLM-native evaluation framework for MaxText models supporting harness-based e
 All runners share a single entry point:
 
 ```bash
-python -m maxtext.eval.runner.run --runner <eval|lm_eval|evalchemy> [flags]
+python -m maxtext.eval.runner.run --runner <eval|lm_eval|evalchemy|simple_evals> [flags]
 ```
 
 ### Custom dataset (MLPerf OpenOrca, ROUGE scoring, Other)
@@ -76,6 +76,66 @@ python -m maxtext.eval.runner.run \
   --max_model_len 8192 \
   --tensor_parallel_size 4 \
   --hf_token $HF_TOKEN
+```
+
+### Simple Evals (OpenAI simple-evals)
+
+Runs OpenAI's [simple-evals](https://github.com/openai/simple-evals) benchmarks
+against the vLLM server's OpenAI-compatible `/v1/chat/completions` endpoint.
+
+Requires: `pip install aiohttp openai jinja2 numpy pandas scipy requests tqdm`
+
+Phase 1 supports grader-free evals only: `mmlu`, `gpqa`, `gsm8k`, `drop`, `mgsm`,
+`mgsm_en`, `aime2024`, `aime2025`. Grader-dependent evals (math, simpleqa, browsecomp,
+healthbench) need an LLM grader endpoint and are not yet supported.
+
+`mmlu`, `gpqa`, `drop`, `mgsm` are based on the vendored implementations from
+[openai/simple-evals](https://github.com/openai/simple-evals); `gsm8k` and
+`aime2024`/`aime2025` are not part of upstream simple-evals and are
+MaxText-authored (`maxtext.eval.simple_evals_template`) following the same
+grader-free Eval conventions. `mgsm` matches upstream's 11-language suite;
+`mgsm_en` is the explicitly named English-only variant.
+
+```bash
+python -m maxtext.eval.runner.run \
+  --runner simple_evals \
+  --checkpoint_path gs://<bucket>/checkpoints/0/items \
+  --model_name llama3.1-8b \
+  --hf_path meta-llama/Llama-3.1-8B-Instruct \
+  --tasks mmlu gpqa gsm8k drop mgsm aime2024 aime2025 \
+  --base_output_directory gs://<bucket>/ \
+  --run_name simple_evals_run \
+  --max_model_len 8192 \
+  --tensor_parallel_size 4 \
+  --num_samples 50 \
+  --hf_token $HF_TOKEN
+```
+
+Simple-evals specific flags:
+
+| Flag | Description |
+|---|---|
+| `--tasks` | Space-separated task names (`mmlu`, `gpqa`, `gsm8k`, `drop`, `mgsm`, `mgsm_en`, `aime2024`, `aime2025`). |
+| `--num_samples` | Limit examples per task; for MGSM variants this is per language (None = full dataset). |
+| `--n_repeats` | Repeats per example (defaults: upstream GPQA=4, AIME=1; forced to 1 with `--num_samples`). |
+| `--max_tokens` | Max tokens per generation (default: 2048). |
+| `--temperature` | Sampling temperature (upstream default: 0.5). |
+| `--concurrency` | Task worker count and maximum in-flight requests. Omit for automatic selection from CPU count, accelerator count, `max_num_seqs`, and chat batch capacity. This is the only request-pressure setting users normally need to tune. |
+| `--log-debug-info` | Write a timestamp-matched `.debug.txt` report beside the result JSON. The report includes request/token throughput, latency percentiles, retry and terminal-error rates, output truncation, answer-extraction failures, confidence intervals, and bounded samples of final, reasoning, and raw model output. Reasoning and raw output remain diagnostic-only and are never graded. |
+| `--continue-on-request-error` | Score terminal request failures as zero instead of aborting. This is independent of debug logging. |
+
+Debug logging is observational and does not change request-failure behavior.
+When `--continue-on-request-error` is enabled, failed requests count as zero in
+official accuracy. The debug report also shows diagnostic accuracy excluding
+infrastructure failures; that diagnostic must not be used as the published
+benchmark score.
+
+Before a long TPU benchmark, run the simple-evals unit suite, which checks
+Harmony output separation, request-error behavior, concurrency, and result
+reporting:
+
+```bash
+pytest tests/unit/eval/test_simple_evals_runner.py
 ```
 
 ## Common Flags

@@ -27,6 +27,10 @@ The GRPO NNX building blocks the other dispatch helpers call
 import os
 import sys
 import unittest
+import pytest
+
+pytestmark = [pytest.mark.decoupled_target]
+
 
 import jax
 import jax.numpy as jnp

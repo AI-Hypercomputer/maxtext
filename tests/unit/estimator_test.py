@@ -17,7 +17,6 @@ These tests verify the proper functioning of MaxText estimator.
 """
 
 import unittest
-import pytest
 from unittest.mock import MagicMock, patch
 import os
 
@@ -47,7 +46,6 @@ class TestRematEstimator(unittest.TestCase):
     self.tensor_names = ["context", "mlpwo"]
     self.base_argv = (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"))
 
-  @pytest.mark.cpu_only
   def test_policy_to_dict_conversion(self):
     """Verify the Action enum correctly maps to MaxText string flags."""
     policy = RematPolicy(self.tensor_names, initial_level=Action.REMAT)
@@ -57,7 +55,6 @@ class TestRematEstimator(unittest.TestCase):
     policy.tensors["context"] = Action.DEVICE
     self.assertEqual(policy.to_dict["context"], "device")
 
-  @pytest.mark.cpu_only
   def test_next_policy_logic(self):
     """
     Verify that next_policy moves through actions incrementally
@@ -76,19 +73,16 @@ class TestRematEstimator(unittest.TestCase):
     same_p = next_p.previous_policy()
     self.assertEqual(same_p.tensors["mlpwo"], Action.REMAT)
 
-  @pytest.mark.cpu_only
   def test_policy_terminal_state(self):
     """Verify next_policy returns None when no more upgrades are possible."""
     policy = RematPolicy(self.tensor_names, initial_level=Action.DEVICE)
     self.assertIsNone(policy.next_policy())
 
-  @pytest.mark.cpu_only
   def test_previous_policy_terminal_state(self):
     """Verify previous_policy returns None when no more downgrades are possible."""
     policy = RematPolicy(self.tensor_names, initial_level=Action.REMAT)
     self.assertIsNone(policy.previous_policy())
 
-  @pytest.mark.cpu_only
   def test_find_pdb_scalar(self):
     """Verify pdb_scalar ignores data/fsdp axes and multiplies parallelism axes."""
     mock_config = MagicMock()
@@ -101,7 +95,6 @@ class TestRematEstimator(unittest.TestCase):
     # Only "tensor" is left -> scalar should be 4.0
     self.assertEqual(scalar, 4.0)
 
-  @pytest.mark.cpu_only
   @patch("maxtext.utils.estimator.is_oom")
   def test_largest_batch_size_binary_search(self, mock_is_oom):
     """
@@ -119,7 +112,6 @@ class TestRematEstimator(unittest.TestCase):
     result = largest_batch_size(self.base_argv, policy, min_pdb=1.0, max_pdb=8.0, pdb_scalar=1.0)
     self.assertEqual(result, 4.0)
 
-  @pytest.mark.cpu_only
   @patch("maxtext.utils.estimator.is_oom")
   def test_largest_batch_size_min_equals_max_no_oom(self, mock_is_oom):
     """When min_pdb == max_pdb and it does NOT OOM, return that batch size."""
@@ -128,7 +120,6 @@ class TestRematEstimator(unittest.TestCase):
     result = largest_batch_size(self.base_argv, policy, min_pdb=4.0, max_pdb=4.0, pdb_scalar=1.0)
     self.assertEqual(result, 4.0)
 
-  @pytest.mark.cpu_only
   @patch("maxtext.utils.estimator.is_oom")
   def test_largest_batch_size_min_equals_max_oom(self, mock_is_oom):
     """When min_pdb == max_pdb and it DOES OOM, return below min."""
@@ -137,21 +128,18 @@ class TestRematEstimator(unittest.TestCase):
     result = largest_batch_size(self.base_argv, policy, min_pdb=4.0, max_pdb=4.0, pdb_scalar=1.0)
     self.assertEqual(result, 3.0)
 
-  @pytest.mark.cpu_only
   def test_largest_batch_size_zero_scalar(self):
     """Verify ValueError is raised when pdb_scalar is zero."""
     policy = RematPolicy(self.tensor_names)
     with self.assertRaises(ValueError):
       largest_batch_size(self.base_argv, policy, min_pdb=1.0, max_pdb=8.0, pdb_scalar=0.0)
 
-  @pytest.mark.cpu_only
   def test_largest_batch_size_invalid_range(self):
     """Verify ValueError when max_pdb < min_pdb."""
     policy = RematPolicy(self.tensor_names)
     with self.assertRaises(ValueError):
       largest_batch_size(self.base_argv, policy, min_pdb=8.0, max_pdb=4.0, pdb_scalar=1.0)
 
-  @pytest.mark.cpu_only
   @patch("maxtext.utils.estimator.is_oom")
   def test_largest_batch_size_default_min_pdb(self, mock_is_oom):
     """Verify min_pdb defaults to 1/pdb_scalar when None."""
@@ -161,7 +149,6 @@ class TestRematEstimator(unittest.TestCase):
     # min_pdb defaults to 1/4 = 0.25; since no OOM at max, result should be 8.0
     self.assertEqual(result, 8.0)
 
-  @pytest.mark.cpu_only
   def test_build_argv_default_layer_input(self):
     """Ensure decoder_layer_input=device is added if not present."""
     policy = RematPolicy(["context"], initial_level=Action.REMAT)
@@ -171,7 +158,6 @@ class TestRematEstimator(unittest.TestCase):
     self.assertIn("per_device_batch_size=2", argv)
     self.assertIn("context=remat", argv)
 
-  @pytest.mark.cpu_only
   def test_build_argv_with_existing_layer_input(self):
     """Ensure decoder_layer_input is NOT added when already present."""
     base = self.base_argv[1:] + ("decoder_layer_input=offload",)
@@ -183,7 +169,6 @@ class TestRematEstimator(unittest.TestCase):
     self.assertEqual(count, 1)
     self.assertIn("decoder_layer_input=offload", argv)
 
-  @pytest.mark.cpu_only
   def test_build_argv_with_dict_policy(self):
     """Ensure build_argv works with a dict policy (as stored in Mode 2 results)."""
     policy_dict = {"context": "remat", "mlpwo": "offload"}
@@ -194,7 +179,6 @@ class TestRematEstimator(unittest.TestCase):
     self.assertIn("mlpwo=offload", argv)
     self.assertIn("per_device_batch_size=4", argv)
 
-  @pytest.mark.cpu_only
   def test_priority_list_generation(self):
     """Test that generate_priority_list pulls the correct key from config."""
     mock_config = MagicMock()
@@ -214,7 +198,6 @@ class TestRematEstimator(unittest.TestCase):
     self.assertIn("mlpwi_0", plist)
     self.assertIn("mlpwi_1", plist)
 
-  @pytest.mark.cpu_only
   def test_get_parameter_value_found(self):
     """Verify get_parameter_value finds a matching prefix."""
     config = ("foo=bar", "per_device_batch_size=4", "baz=qux")
@@ -222,7 +205,6 @@ class TestRematEstimator(unittest.TestCase):
     self.assertTrue(found)
     self.assertEqual(value, "4")
 
-  @pytest.mark.cpu_only
   def test_get_parameter_value_not_found(self):
     """Verify get_parameter_value returns (False, None) when not found."""
     config = ("foo=bar", "baz=qux")
@@ -230,7 +212,6 @@ class TestRematEstimator(unittest.TestCase):
     self.assertFalse(found)
     self.assertIsNone(value)
 
-  @pytest.mark.cpu_only
   def test_find_batch_size_provided(self):
     """Verify find_batch_size returns the batch size when present."""
     argv = ("base.yml", "per_device_batch_size=2.5", "model_name=llama")
@@ -238,7 +219,6 @@ class TestRematEstimator(unittest.TestCase):
     self.assertTrue(provided)
     self.assertEqual(pdb, 2.5)
 
-  @pytest.mark.cpu_only
   def test_find_batch_size_not_provided(self):
     """Verify find_batch_size returns (False, None) when not present."""
     argv = ("base.yml", "model_name=llama")
@@ -246,7 +226,6 @@ class TestRematEstimator(unittest.TestCase):
     self.assertFalse(provided)
     self.assertIsNone(pdb)
 
-  @pytest.mark.cpu_only
   def test_find_remat_policy_tensor_names(self):
     """Verify tensor names are detected from argv."""
     argv = ("base.yml", "context=offload", "mlpwo=remat", "model_name=llama")
@@ -255,14 +234,12 @@ class TestRematEstimator(unittest.TestCase):
     self.assertIn("mlpwo", result)
     self.assertNotIn("query_proj", result)
 
-  @pytest.mark.cpu_only
   def test_find_remat_policy_tensor_names_none(self):
     """Verify empty list when no tensor names in argv."""
     argv = ("base.yml", "model_name=llama")
     result = find_remat_policy_tensor_names(argv)
     self.assertEqual(result, [])
 
-  @pytest.mark.cpu_only
   def test_generate_remat_config_from_policy(self):
     """Verify generate_remat_config works with a RematPolicy object."""
     policy = RematPolicy(["context", "mlpwo"], initial_level=Action.REMAT)
@@ -271,7 +248,6 @@ class TestRematEstimator(unittest.TestCase):
     self.assertIn("context=remat", config)
     self.assertIn("mlpwo=remat", config)
 
-  @pytest.mark.cpu_only
   def test_generate_remat_config_from_dict(self):
     """Verify generate_remat_config works with a dict."""
     policy_dict = {"context": "offload", "mlpwo": "device"}
@@ -280,13 +256,11 @@ class TestRematEstimator(unittest.TestCase):
     self.assertIn("context=offload", config)
     self.assertIn("mlpwo=device", config)
 
-  @pytest.mark.cpu_only
   def test_generate_pdb_config(self):
     """Verify generate_pdb_config returns the expected tuple."""
     result = generate_pdb_config(4.0)
     self.assertEqual(result, ("per_device_batch_size=4.0",))
 
-  @pytest.mark.cpu_only
   @patch("maxtext.utils.estimator.is_oom")
   def test_search_policy_only_finds_fitting_policy(self, mock_is_oom):
     """Verify search_policy_only returns the first non-OOM policy."""
@@ -315,7 +289,6 @@ class TestRematEstimator(unittest.TestCase):
     # Result should be a RematPolicy that fits
     self.assertIsInstance(result, RematPolicy)
 
-  @pytest.mark.cpu_only
   @patch("maxtext.utils.estimator.is_oom")
   def test_search_policy_only_raises_on_impossible_batch(self, mock_is_oom):
     """Verify search_policy_only raises ValueError when full remat OOMs."""
@@ -324,7 +297,6 @@ class TestRematEstimator(unittest.TestCase):
     with self.assertRaises(ValueError):
       search_policy_only(self.tensor_names, self.base_argv, pdb=999.0)
 
-  @pytest.mark.cpu_only
   @patch("maxtext.utils.estimator.is_oom")
   def test_search_returns_pareto_frontier(self, mock_is_oom):
     """Verify search returns a list of (pdb, dict) tuples."""
@@ -350,7 +322,6 @@ class TestRematEstimator(unittest.TestCase):
       # pdb should be > 0 (valid)
       self.assertGreater(pdb, 0)
 
-  @pytest.mark.cpu_only
   def test_next_previous_policy_full_traversal(self):
     """Verify we can traverse from full remat to full device and back."""
     names = ["a", "b"]

@@ -41,6 +41,7 @@ from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
+from maxtext.utils.sharding import truncate_out_sharding
 
 
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
@@ -101,6 +102,10 @@ def _compute_dot_general_nnx(
     if initializing:
       quant_dot_general.lazy_init(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
     return quant_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None, mutable=["aqt"])
+
+  if out_sharding is not None:
+    out_ndim = (inputs.ndim - len(axis)) + (kernel.ndim - len(contract_ind))
+    out_sharding = truncate_out_sharding(out_sharding, out_ndim)
 
   return dot_general(
       inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision, out_sharding=out_sharding
@@ -249,11 +254,21 @@ class DenseGeneral(nnx.Module):
     kernel = shard(kernel, stage2)
     return kernel
 
-  def __call__(self, inputs: Array, _initializing: bool = False, out_sharding: NamedSharding | None = None) -> Array:
+  def __call__(
+      self,
+      inputs: Array,
+      _initializing: bool = False,
+      out_sharding: NamedSharding | None = None,
+      slice_bounds: tuple[int, int] | None = None,
+  ) -> Array:
     """Applies a linear transformation to the inputs along multiple dimensions.
 
     Args:
       inputs: The nd-array to be transformed.
+      _initializing: Whether the module is initializing.
+      out_sharding: Optional sharding for the output.
+      slice_bounds: Optional tuple (begin, end) to slice the kernel and bias on
+        the last (output-feature) axis before contraction. Unquantized only.
 
     Returns:
       The transformed input.
@@ -272,12 +287,22 @@ class DenseGeneral(nnx.Module):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
-      kernel = self.kernel[...]
+      kernel = getattr(self.kernel, "value", self.kernel)
+      if hasattr(kernel, "value"):
+        kernel = kernel.value
       # Move logit_dense kernel to device if parameter offloading is enabled
       if self.parameter_memory_host_offload:
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
         kernel = jax.device_put(kernel, max_utils.device_space())
       kernel = jnp.asarray(kernel, self.dtype)
+
+    if slice_bounds is not None:
+      if self.quant is not None:
+        raise ValueError("sliced contraction is only supported when quant is None")
+      begin, end = slice_bounds
+      if not 0 <= begin < end <= kernel.shape[-1]:
+        raise ValueError(f"slice_bounds {slice_bounds} must be valid and within [0, {kernel.shape[-1]}]")
+      kernel = kernel[..., begin:end]
 
     kernel = self._maybe_two_stage_all_gather(kernel)
 
@@ -292,13 +317,16 @@ class DenseGeneral(nnx.Module):
         norm_axis,
         contract_ind,
         self.matmul_precision,
-        self.quant_dot_general,
+        self.quant_dot_general if slice_bounds is None else None,
         _initializing,
         out_sharding,
     )
 
     if self.bias is not None:
       bias = jnp.asarray(self.bias[...], self.dtype)
+      if slice_bounds is not None:
+        begin, end = slice_bounds
+        bias = bias[..., begin:end]
       output += bias
     return output
 

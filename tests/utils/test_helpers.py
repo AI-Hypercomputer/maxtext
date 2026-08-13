@@ -20,8 +20,53 @@ of Google Cloud Storage paths.
 """
 
 import os
+import shutil
+import subprocess
+import unittest
+import filelock
 from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR
+
+
+def ensure_tokenizer_downloaded(
+    tokenizer_name: str,
+    target_path: str | None = None,
+    skip_test_on_failure: bool = False,
+) -> str:
+  """Ensures a tokenizer directory exists locally and is non-empty, downloading from GCS if missing.
+
+  Args:
+    tokenizer_name: Name of the tokenizer folder in gs://maxtext-dataset/hf/ (e.g. 'llama2-chat-tokenizer').
+    target_path: Optional local target path. Defaults to os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", tokenizer_name).
+    skip_test_on_failure: If True, raises unittest.SkipTest on download failure instead of RuntimeError.
+
+  Returns:
+    The local path to the tokenizer directory.
+  """
+  if target_path is None:
+    target_path = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", tokenizer_name)
+
+  lock_path = target_path + ".lock"
+  with filelock.FileLock(lock_path):
+    if not os.path.exists(target_path) or not os.listdir(target_path):
+      os.makedirs(os.path.dirname(target_path), exist_ok=True)
+      exit_code = subprocess.call(
+          [
+              "gcloud",
+              "storage",
+              "cp",
+              "--recursive",
+              f"gs://maxtext-dataset/hf/{tokenizer_name}",
+              os.path.join(os.path.dirname(target_path), ""),
+          ]
+      )
+      if exit_code != 0:
+        shutil.rmtree(target_path, ignore_errors=True)
+        msg = f"Failed to download {tokenizer_name} from GCS with exit code {exit_code}"
+        if skip_test_on_failure:
+          raise unittest.SkipTest(f"Skipping test: {msg}")
+        raise RuntimeError(msg)
+  return target_path
 
 
 def get_test_config_path(relative_path: str = "base.yml"):
@@ -91,6 +136,7 @@ def get_test_base_output_directory(cloud_path=None):
 
 
 __all__ = [
+    "ensure_tokenizer_downloaded",
     "get_test_base_output_directory",
     "is_rocm_backend",
     "get_test_config_path",

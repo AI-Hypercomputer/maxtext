@@ -14,13 +14,11 @@
 
 """Unit tests for input_pipeline_utils."""
 
-import pytest
 import unittest
 
 from maxtext.input_pipeline.input_pipeline_utils import compute_file_sharding
 
 
-@pytest.mark.cpu_only
 class ComputeFileShardingNormalCaseTest(unittest.TestCase):
   """file_count >= host_count: disjoint file subsets, no row sharding."""
 
