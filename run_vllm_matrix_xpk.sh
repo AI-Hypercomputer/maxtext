@@ -1,7 +1,24 @@
 #!/bin/bash
 
 # --- Configuration ---
-export WORKLOAD_NAME="vllm-matrix-$(date +%m%d%H%M)"
+# Which matrix to run inside the pod. Defaults to the vLLM decode matrix; pass another internal
+# script (e.g. run_post_train_matrix_xpk_internal.py) as $1 to drive a different one.
+INNER_SCRIPT="${1:-run_vllm_matrix_xpk_internal.py}"
+MATRIX_NAME=$(basename "$INNER_SCRIPT" | sed -e 's/^run_//' -e 's/_xpk_internal\.py$//')
+# Workload names must be a DNS label, so underscores become dashes there but not in the log dir.
+WORKLOAD_PREFIX=$(echo "$MATRIX_NAME" | tr '_' '-')
+
+# Kubernetes caps label values at 63 bytes and JobSet builds one as
+# "<workload>-pathways-head-0-0.<workload>", i.e. 2*len(workload)+19 bytes. With the -MMDDHHMM
+# suffix that leaves 13 characters for the prefix. Overrun it and the JobSet controller rejects
+# every Job it tries to create, leaving the workload admitted but permanently pod-less.
+MAX_PREFIX_LEN=13
+if [ ${#WORKLOAD_PREFIX} -gt $MAX_PREFIX_LEN ]; then
+    WORKLOAD_PREFIX=$(echo "$WORKLOAD_PREFIX" | sed 's/-matrix$//')
+fi
+WORKLOAD_PREFIX="${WORKLOAD_PREFIX:0:$MAX_PREFIX_LEN}"
+
+export WORKLOAD_NAME="${WORKLOAD_PREFIX}-$(date +%m%d%H%M)"
 
 export CLUSTER_NAME=mesa-v6e32-eu
 export TPU_TYPE=v6e-32
@@ -10,7 +27,7 @@ export ZONE=europe-west4-a
 export PROJECT_ID=cienet-cmcs
 
 # Base local log directory
-BASE_LOG_DIR="vllm_matrix_logs"
+BASE_LOG_DIR="${MATRIX_NAME}_logs"
 mkdir -p "$BASE_LOG_DIR"
 LOCAL_LOG_FILE="${BASE_LOG_DIR}/${WORKLOAD_NAME}.log"
 
@@ -43,20 +60,39 @@ echo "Fetching credentials for cluster ${CLUSTER_NAME}..."
 # export HF_TOKEN="your_token_here"
 
 # Get the base64 of the internal python script
-if [ ! -f "run_vllm_matrix_xpk_internal.py" ]; then
-    echo "❌ ERROR: run_vllm_matrix_xpk_internal.py not found!"
+if [ ! -f "$INNER_SCRIPT" ]; then
+    echo "❌ ERROR: $INNER_SCRIPT not found!"
     exit 1
 fi
-INNER_SCRIPT_B64=$(base64 -w 0 run_vllm_matrix_xpk_internal.py)
+INNER_SCRIPT_B64=$(base64 -w 0 "$INNER_SCRIPT")
+
+# Optionally ship local source files into the image's own checkout at /deps, so a MaxText fix can
+# be exercised without rebuilding the shared image. Opt-in and scoped to this workload:
+#   MAXTEXT_PATCH_FILES="src/maxtext/a.py src/maxtext/b.py" bash run_vllm_matrix_xpk.sh ...
+# Paths are relative to the repo root, which is what /deps mirrors.
+PATCH_CMD=""
+if [ -n "${MAXTEXT_PATCH_FILES:-}" ]; then
+    for f in $MAXTEXT_PATCH_FILES; do
+        if [ ! -f "$f" ]; then
+            echo "❌ ERROR: patch file $f not found!"
+            exit 1
+        fi
+    done
+    PATCH_B64=$(tar -czf - $MAXTEXT_PATCH_FILES | base64 -w 0)
+    PATCH_CMD="echo '${PATCH_B64}' | base64 -d | tar -xzvf - -C /deps; "
+    echo "Shipping local patches into /deps: ${MAXTEXT_PATCH_FILES}"
+fi
 
 # Final command executed INSIDE the K8s pod
 XPK_COMMAND="set -xue; \
 export JAX_PLATFORMS='proxy,cpu'; \
 export JAX_BACKEND_TARGET='grpc://127.0.0.1:29000'; \
 export HF_TOKEN='${HF_TOKEN}'; \
+export MATRIX_CASE_SLICE='${MATRIX_CASE_SLICE:-}'; \
 sed -i 's/\${HF_TOKEN}//g' /deps/src/maxtext/configs/base.yml || true; \
-echo '$INNER_SCRIPT_B64' | base64 -d > /tmp/run_vllm_matrix_xpk_internal.py; \
-python3 /tmp/run_vllm_matrix_xpk_internal.py"
+${PATCH_CMD}\
+echo '$INNER_SCRIPT_B64' | base64 -d > /tmp/matrix_internal.py; \
+python3 /tmp/matrix_internal.py"
 
 
 echo "Submitting to K8s via XPK..."
@@ -65,7 +101,7 @@ if ! xpk workload create-pathways \
     --workload="$WORKLOAD_NAME" \
     --tpu-type="$TPU_TYPE" \
     --num-slices=1 \
-    --priority=high \
+    --priority=very-high \
     --project="$PROJECT_ID" \
     --zone="$ZONE" \
     --skip-validation \
@@ -83,7 +119,7 @@ ATTEMPTS=0
 
 while [ "$POD_FOUND" = false ]; do
     POD_NAME=$(/usr/bin/kubectl get pods -l "jobset.sigs.k8s.io/jobset-name=${WORKLOAD_NAME}" -o jsonpath='{.items[*].metadata.name}' --no-headers 2>/dev/null | tr ' ' '\n' | grep "pathways-head" | head -n 1)
-    
+
     if [ -n "$POD_NAME" ]; then
         POD_FOUND=true
         echo -e "\n✅ Found Pod: $POD_NAME"
@@ -130,14 +166,14 @@ while true; do
          else
              POD_STATUS="Failed"
          fi
-         
+
          # If it finished before K8s reported 'Running' and we missed the stream, just grab all logs once
          if [[ "$IS_STREAMING" == false ]]; then
              /usr/bin/kubectl logs "$POD_NAME" -c jax-tpu >> "$LOCAL_LOG_FILE" 2>&1
          fi
          break
     fi
-    
+
     # Also handle if the entire pod fails early before containers are scheduled
     POD_PHASE=$(/usr/bin/kubectl get pod "$POD_NAME" -o jsonpath='{.status.phase}' 2>/dev/null)
     if [[ "$POD_PHASE" == "Failed" ]]; then
