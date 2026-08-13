@@ -86,6 +86,8 @@ def maybe_shard_with_name(
   """
   if inputs is None:
     return None
+  if hasattr(inputs, "ndim"):
+    named_sharding = truncate_out_sharding(named_sharding, inputs.ndim)
   if (
       isinstance(named_sharding, NamedSharding)
       and hasattr(inputs, "shape")
@@ -190,6 +192,40 @@ def remove_size_one_mesh_axis(spec, mesh):
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 
+def mesh_axes_for_dim(axis_names):
+  """Returns the mesh axes attached to one tensor dimension."""
+  if axis_names is None:
+    return ()
+  if isinstance(axis_names, str):
+    return (axis_names,)
+  return tuple(axis for axis in axis_names if axis is not None)
+
+
+def mesh_axes_size(mesh, axes, *, label):
+  """Returns the product of mesh sizes for a set of axes."""
+  size = 1
+  for axis in axes:
+    if axis not in mesh.shape:
+      raise ValueError(f"{label} requires mesh axis {axis!r} to exist.")
+    size *= mesh.shape[axis]
+  return size
+
+
+def with_axis_on_dim(axis_names, axis, dim):
+  """Returns sharding axis names with one dimension replaced."""
+  if axis_names is None:
+    return None
+  if dim >= len(axis_names):
+    raise ValueError(f"Dimension {dim} is out of range for sharding axis names {axis_names}.")
+  axes = list(axis_names)
+  axes[dim] = axis
+  if isinstance(axis_names, P):
+    return P(*axes, unreduced=axis_names.unreduced, reduced=axis_names.reduced)
+  if isinstance(axis_names, tuple):
+    return tuple(axes)
+  return axes
+
+
 def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -> P:
   """Removes physical mesh axes from spec where array dimension is not divisible by the mesh axis size."""
   if spec is None or mesh is None or not shape:
@@ -278,6 +314,7 @@ def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Vari
       if 0 < orig_len < len(pspec):
         pspec = P(*pspec[:orig_len])
 
+  # pyrefly: ignore[bad-argument-type]
   return v.replace(NamedSharding(mesh, pspec))
 
 
@@ -345,6 +382,25 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
 def create_sharding(mesh, logical_names, rules=None):
   """Create NamedSharding with given logical names."""
   return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
+
+
+def truncate_out_sharding(out_sharding, out_ndim: int):
+  """Truncates out_sharding if tensor ndim is less than out_sharding pspec length."""
+  if out_sharding is None:
+    return None
+  if isinstance(out_sharding, NamedSharding):
+    if len(out_sharding.spec) > out_ndim:
+      return NamedSharding(
+          out_sharding.mesh,
+          P(*out_sharding.spec[:out_ndim]),
+      )
+  elif isinstance(out_sharding, P):
+    if len(out_sharding) > out_ndim:
+      return P(*out_sharding[:out_ndim])
+  elif isinstance(out_sharding, (tuple, list)):
+    if len(out_sharding) > out_ndim:
+      return tuple(out_sharding[:out_ndim])
+  return out_sharding
 
 
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
@@ -633,12 +689,12 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
     else:
       raise NotImplementedError(f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}")
-    if "params" not in sharded_fp32_params.keys():
+    if "params" not in sharded_fp32_params.keys():  # pyrefly: ignore[missing-attribute]
       # When quantization=fp8 is enabled the sharded_fp32_params
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
     state_mesh_shardings = state_mesh_shardings.replace(
-        params=dict(prev_params_shardings, **sharded_fp32_params)
+        params=dict(prev_params_shardings, **sharded_fp32_params)  # pyrefly: ignore[bad-unpacking]
     )  # pyrefly: ignore[bad-unpacking]
   return prev_params_shardings, state_mesh_shardings
 

@@ -264,14 +264,10 @@ def setup_train_loop(config, recorder, devices=None):
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()
     if context_parallel_size > 1 and config.packing:
-      if config.dataset_type == "synthetic":
+      if context_parallel_strategy not in ("all_gather", "ring", "ulysses"):
         raise ValueError(
-            "Context parallelism with sequence packing is not supported with synthetic data. "
-            "Please disable sequence packing (set packing=False)."
-        )
-      if context_parallel_strategy not in ("all_gather", "ring"):
-        raise ValueError(
-            "Context parallelism with sequence packing supports context_parallel_strategy='all_gather' or 'ring'."
+            "Context parallelism with sequence packing supports context_parallel_strategy='all_gather', 'ring', "
+            "or 'ulysses'."
         )
       if (
           config.hardware in ("gpu", "gpu_multiprocess")
@@ -319,6 +315,7 @@ def setup_train_loop(config, recorder, devices=None):
             if (isinstance(state, (nnx.State, dict)) and "model" in state)
             else getattr(state, "model", state)
         )
+        # pyrefly: ignore[bad-argument-type]
         lora_utils.restore_lora_from_path(target_model_state, config)
         _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
       with nn_partitioning.axis_rules(config.logical_axis_rules):

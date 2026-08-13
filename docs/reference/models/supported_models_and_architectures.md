@@ -43,8 +43,8 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 
 ### DeepSeek
 
-- **Variants**: V2 (16B, 236B), V3 (671B) / R1 / V3.1, V3.2 (671B)
-- **Notes**: MLA; shared/finer-grained experts; MTP; YaRN-style scaling; DeepSeek Sparse Attention (V3.2).
+- **Variants**: V2 (16B, 236B), V3 (671B) / R1 / V3.1, V3.2 (671B), V4 Flash (284B)
+- **Notes**: MLA; shared/finer-grained experts; MTP; YaRN-style scaling; DeepSeek Sparse Attention (V3.2); Heavily compressed attention + compressed sparse attention + manifold-constrained hyperconnections + HashRouting (V4).
 
 ### Qwen3
 

@@ -35,6 +35,7 @@ from maxtext.common.common_types import (
     AxisNames,
     AxisIdxes,
     ATTN_LENGTH,
+    ATTN_INPUT_LENGTH,
     DType,
     Config,
     Array,
@@ -51,7 +52,7 @@ from maxtext.common.common_types import (
     AttentionType,
 )
 from maxtext.layers import nnx_wrappers
-from maxtext.layers.attention_op import AttentionOp
+from maxtext.layers.attention_op import AttentionOp, _resolve_attention_type
 from maxtext.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
@@ -120,7 +121,7 @@ def attention_as_linen(
     float32_logits: bool = False,  # cast logits in float32 for stability.
     quant: Optional[Quant] = None,
     kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+    attention_type: AttentionType = AttentionType.GLOBAL,
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
     use_ragged_attention: bool = False,
@@ -142,7 +143,7 @@ def attention_as_linen(
     query_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
     key_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
     value_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH_ATTN, ATTN_LENGTH, ATTN_EMBED),
+    input_axis_names: AxisNames = (BATCH_ATTN, ATTN_INPUT_LENGTH, ATTN_EMBED),
     out_axis_names: AxisNames = (BATCH_ATTN, ATTN_LENGTH, HEAD, D_KV),
     prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, ATTN_EMBED),
     decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, ATTN_EMBED),
@@ -277,7 +278,7 @@ class Attention(nnx.Module):
       float32_logits: bool = False,  # cast logits in float32 for stability.
       quant: Optional[Quant] = None,
       kv_quant: Optional[KVQuant] = None,
-      attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+      attention_type: AttentionType = AttentionType.GLOBAL,
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
       use_ragged_attention: bool = False,
@@ -299,7 +300,7 @@ class Attention(nnx.Module):
       query_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
       key_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
       value_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      input_axis_names: AxisNames = (BATCH_ATTN, ATTN_LENGTH, ATTN_EMBED),
+      input_axis_names: AxisNames = (BATCH_ATTN, ATTN_INPUT_LENGTH, ATTN_EMBED),
       out_axis_names: AxisNames = (BATCH_ATTN, ATTN_LENGTH, HEAD, D_KV),
       prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, ATTN_EMBED),
       decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, ATTN_EMBED),
@@ -388,7 +389,7 @@ class Attention(nnx.Module):
     self.float32_logits = float32_logits
     self.quant = quant
     self.kv_quant = kv_quant
-    self.attention_type = attention_type
+    self.attention_type = _resolve_attention_type(self.config, attention_type)
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.use_ragged_attention = use_ragged_attention
@@ -851,6 +852,9 @@ class Attention(nnx.Module):
           cast_as_fprop_dtype=True,
           fprop_dtype=self.dtype,
           mrope_section=self.mrope_section,
+          partial_rotary_factor=(
+              self.partial_rotary_factor if self.partial_rotary_factor is not None else self.config.partial_rotary_factor
+          ),
           rngs=self.rngs,
       )
 
@@ -879,6 +883,7 @@ class Attention(nnx.Module):
           interleave=self.config.rope_interleave,
           truncate=self.config.rope_truncate,
           attention_scaling=self.config.rope_attention_scaling,
+          pairwise=self.config.rope_pairwise,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )

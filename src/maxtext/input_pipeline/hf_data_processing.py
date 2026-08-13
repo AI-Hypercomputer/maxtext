@@ -166,6 +166,17 @@ def vision_sft_preprocessing_pipeline(
   operations.append(input_pipeline_utils.ExtractImagesAndMasks())
   operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
   operations.append(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
+  if config.use_mrope:
+    operations.append(
+        input_pipeline_utils.ComputeQwen3OmniPositions(
+            data_column="inputs",
+            spatial_merge_size=config.spatial_merge_size_for_vit,
+            position_id_per_seconds=config.position_id_per_seconds,
+            use_audio_in_video=getattr(config, "use_audio_in_video", False),
+            config=config,
+            keep_aux_fields=False,  # drop aux to match train shape
+        )
+    )
   operations.append(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),

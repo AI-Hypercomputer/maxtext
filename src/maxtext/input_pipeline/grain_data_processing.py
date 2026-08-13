@@ -247,7 +247,7 @@ def get_datasets(
     if data_file_type == "tfrecord":
       dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)  # pyrefly: ignore[missing-attribute]
     else:
-      dataset = dataset.map(
+      dataset = dataset.map(  # pyrefly: ignore[missing-attribute]
           functools.partial(input_pipeline_utils.make_parquet_iter_dataset, hf_access_token=hf_access_token)
       )  # pyrefly: ignore[missing-attribute]
     cycle_length = min(files_per_host, grain_num_threads)

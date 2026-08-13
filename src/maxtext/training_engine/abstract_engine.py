@@ -71,6 +71,19 @@ class WeightedMetric:
 
 
 @flax.struct.dataclass
+class LossOutput:
+  """Output of a loss function containing unreduced primary loss and aux metrics.
+
+  Attributes:
+    primary_loss: The main loss to be optimized.
+    aux_metrics: A dictionary of auxiliary metrics.
+  """
+
+  primary_loss: WeightedMetric
+  aux_metrics: dict[str, Any] = flax.struct.field(default_factory=dict)
+
+
+@flax.struct.dataclass
 class MetricsBuffer:
   """A buffer for storing and aggregating unreduced metrics on-device.
 
@@ -240,3 +253,12 @@ class AbstractTrainingEngine(abc.ABC):
     Returns:
       Synchronization endpoints or file coordinates for weight transfer.
     """
+
+  @property
+  @abc.abstractmethod
+  def train_step(self) -> int:
+    """Returns the current training step integer."""
+
+  @abc.abstractmethod
+  def close(self) -> None:
+    """Cleans up engine resources and blocks until async saves complete."""

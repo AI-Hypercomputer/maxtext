@@ -20,11 +20,11 @@ import os.path
 # Since this file is at src/maxtext/utils/globals.py, we need to go up 2 levels
 MAXTEXT_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# This is the maxtext repo root: with ".git" folder; "README.md"; "pyproject.toml"; &etc.
+# This is the maxtext repo root: with ".git" folder or file (when using Git worktrees); "README.md"; "pyproject.toml"; etc.
 MAXTEXT_REPO_ROOT = os.environ.get(
     "MAXTEXT_REPO_ROOT",
     r
-    if os.path.isdir(
+    if os.path.exists(
         os.path.join(r := os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".git")
     )
     else MAXTEXT_PKG_DIR,

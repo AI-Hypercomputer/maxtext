@@ -42,8 +42,8 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec, get_logical_axis_rules
+from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec, logical_to_mesh_axes
+from maxtext.utils.sharding import get_logical_axis_rules, remove_expert_from_partition_spec, remove_mesh_axes_from_partition_spec
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -232,6 +232,10 @@ class Tid2EidVar(nnx.Variable):
   """Custom variable to hold tid2eid without trainable param overhead."""
 
 
+class MoEBiasVar(nnx.Variable):
+  """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -307,10 +311,17 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
+      # DSV3 was using nnx.Param and that code we are keeping the same
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
           out_sharding=bias_axes,
       )
+      if self.model_name.startswith("deepseek4"):
+        # DSV4 uses MoEBiasVar to naturally isolate from sequence-wise updates
+        self.bias = MoEBiasVar(
+            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            out_sharding=bias_axes,
+        )
     else:
       self.bias = None
 
@@ -713,7 +724,8 @@ class RoutedMoE(nnx.Module):
       tid2eid_int = self.tid2eid.value
       # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
       tid2eid_int = tid2eid_int.astype(jnp.int32)
-      top_k_indices = tid2eid_int[input_ids]
+      # Cast input_ids to int32 to safely index the hash routing table
+      top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     # NOTE: deepseek2 has a different pattern
     elif self.config.model_name.startswith(("deepseek3", "deepseek4")):
@@ -1524,7 +1536,9 @@ class RoutedMoE(nnx.Module):
             group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=bool(self.config.quantization) and self.config.use_qwix_quantization,
+            # Only "fp8_full" quantizes GMM; other schemes (e.g. "fp8", "int8")
+            # do not define a GMM quantization rule.
+            use_qwix_quantization=bool(self.config.quantization == "fp8_full") and self.config.use_qwix_quantization,
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,
@@ -1616,6 +1630,10 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
+        # Update kernel pspec for FSDP AG
+        w0_pspec = remove_mesh_axes_from_partition_spec(w0_pspec, ("fsdp",))
+        w1_pspec = remove_mesh_axes_from_partition_spec(w1_pspec, ("fsdp",))
+        wo_pspec = remove_mesh_axes_from_partition_spec(wo_pspec, ("fsdp",))
       return (
           batch_logical_axis,
           input_partition_pspec,
@@ -2573,13 +2591,29 @@ class RoutedMoE(nnx.Module):
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits) -> jax.Array:
-    """Compute the load balance loss."""
+    """Compute the sequence-wise load balance loss.
+
+    For DeepSeek V4 like models, standard load balancing across an entire batch can
+    be inadequate due to heterogeneous prompt lengths and varying sequence
+    characteristics. This method implements sequence-wise load balancing by
+    computing the token density and routing probabilities on a per-sequence basis.
+
+    The resulting loss is scaled by `self.config.load_balance_loss_weight`.
+    When this configuration value is set > 0, the computed loss is aggregated
+    into the total training loss. By minimizing this scaled auxiliary loss,
+    the optimizer updates the routing parameters to actively enforce an even
+    distribution of tokens to experts within each individual sequence.
+    """
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     summed_expert_mask = jnp.sum(expert_mask, axis=2)
     # Get fraction of tokens dispatched to each expert
+    # jnp.mean over axis=1 (sequence length) isolates the token density per sequence.
     density = jnp.mean(summed_expert_mask, axis=1)
     # get fraction of probability allocated to each expert
+    # jnp.mean over axis=1 isolates the routing probability per sequence.
     density_prob = jnp.mean(logits, axis=1)
+    # The sequence-wise densities and probabilities are multiplied and then averaged
+    # over the batch dimension, scaled by the required constant.
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 

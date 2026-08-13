@@ -156,7 +156,9 @@ def get_shaped_batch(config, batch_sharding=None):
     batch_shape = (config.global_batch_size_to_load, config.max_target_length)
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  # MRoPE uses (batch, seq, 3); same batch/seq axes as 1D positions so batch_sharding applies as-is.
+  position_shape = batch_shape + (3,) if config.use_mrope and config.use_multimodal else batch_shape
+  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(position_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
@@ -1603,7 +1605,7 @@ def get_abstract_param(model, config):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32)
+      encoder_images=np.ones(image_shape, dtype=jnp.int32)  # pyrefly: ignore[no-matching-overload]
       if config.use_multimodal
       else None,  # pyrefly: ignore[no-matching-overload]
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,

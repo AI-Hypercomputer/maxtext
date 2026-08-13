@@ -608,7 +608,7 @@ def tgmm(
   else:
     group_offset = group_offset[None]
   group_sizes = _validate_args(
-      lhs=lhs, rhs=rhs, group_sizes=group_sizes, expected_rhs_dims=2
+      lhs=lhs, rhs=rhs, group_sizes=group_sizes, expected_rhs_dims=2  # pyrefly: ignore[bad-argument-type]
   )  # pyrefly: ignore[bad-argument-type]
 
   # Gather shape information.

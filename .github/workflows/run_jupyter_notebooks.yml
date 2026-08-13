@@ -47,6 +47,7 @@ permissions:
   contents: read
 jobs:
   run:
+    name: Execute Notebooks
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
       image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
@@ -84,7 +85,7 @@ jobs:
               (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || true
             fi
           fi
-          uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
+          uv pip install "${maxtext_wheel}[tpu-post-train]" --resolution=lowest
           install_tpu_post_train_extra_deps
 
           python3 -m pip freeze
@@ -109,9 +110,10 @@ jobs:
           fi
           export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-          export MAXTEXT_REPO_ROOT=$(pwd)
-          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
-          export MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+          MAXTEXT_REPO_ROOT=$(pwd)
+          MAXTEXT_PKG_DIR="$(pwd)/src/maxtext"
+          MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+          export MAXTEXT_REPO_ROOT MAXTEXT_PKG_DIR MAXTEXT_NOTEBOOKS_ROOT
 
           # Register maxtext_venv as a selectable kernel in Jupyter
           $PYTHON_EXE -m ipykernel install --user --name maxtext_venv

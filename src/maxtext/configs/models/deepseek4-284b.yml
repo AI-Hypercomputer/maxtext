@@ -22,6 +22,7 @@ base_mlp_dim: 2048
 base_moe_mlp_dim: 2048
 vocab_size: 129280
 head_dim: 512
+qk_rope_head_dim: 64
 
 # --- Standard Defaults ---
 enable_dropout: false
@@ -51,6 +52,9 @@ shared_experts: 1
 routed_score_func: "sqrtsoftplus"
 norm_topk_prob: true
 routed_bias: true
+routed_bias_update_rate: 0.001
+load_balance_loss_weight: 0.0001
+log_moe_bias_norms: false
 routed_scaling_factor: 1.5
 
 

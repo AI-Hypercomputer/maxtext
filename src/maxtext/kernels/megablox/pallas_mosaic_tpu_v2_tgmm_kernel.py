@@ -350,7 +350,7 @@ def tgmm_inner_kernel(
         scale_slice = tiled_rhs_scale_ref[0]  # pyrefly: ignore[unsupported-operation]
         acc *= scale_slice
       if cfgs.has_partial_sum:
-        acc += tiled_ps_ref[...].astype(acc.dtype)
+        acc += tiled_ps_ref[...].astype(acc.dtype)  # pyrefly: ignore[unsupported-operation]
       tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
     else:
       acc_ref[...] = acc

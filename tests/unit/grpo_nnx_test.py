@@ -24,7 +24,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import pytest
 from flax import nnx
+
+pytestmark = [pytest.mark.decoupled_target]
+
 
 from maxtext.common import train_state_nnx
 from maxtext.experimental.rl import grpo_trainer

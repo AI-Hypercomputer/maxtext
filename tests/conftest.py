@@ -20,6 +20,7 @@ require external integrations or specific hardware (for example `tpu_only`)
 are not marked.
 """
 
+import gc
 import pytest
 import sys
 import warnings
@@ -220,6 +221,23 @@ def pytest_configure(config):
       "newly_added: newly introduced or modified tests in PRs, executed even if scheduled_only",
   ]:
     config.addinivalue_line("markers", m)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def clear_jax_compilation_cache():
+  """Clears JAX compilation caches and forces garbage collection after each test module.
+
+  Prevents XLA memory accumulation and compilation cache buildup across
+  long test runs while preserving intra-module compilation cache reuse.
+  """
+  yield
+  try:
+    has_accelerator = any(d.platform in ("tpu", "gpu", "proxy") for d in jax.devices())
+    if has_accelerator:
+      jax.clear_caches()
+      gc.collect()
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
 
 
 @pytest.fixture(autouse=True)

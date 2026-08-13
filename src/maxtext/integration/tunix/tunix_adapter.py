@@ -65,6 +65,7 @@ def _compat_top_k(operand, k, axis=-1):
 
 
 jax.lax.with_sharding_constraint = _compat_wsc
+# pyrefly: ignore[bad-assignment]
 jax.lax.top_k = _compat_top_k
 
 

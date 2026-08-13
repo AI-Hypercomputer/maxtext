@@ -9,7 +9,7 @@ repos:
         args:
           - '-w'
           - '--skip="*.txt,pylintrc,.*,src/maxtext/assets/*,src/maxtext/input_pipeline/protos/*"'
-          - '-L ND,nd,sems,TE,ROUGE,rouge,astroid,ags,dout'
+          - '-L ND,nd,sems,TE,te,als,ROUGE,rouge,astroid,ags,dout'
           - '.'
         additional_dependencies:
           - tomli
@@ -30,7 +30,7 @@ repos:
         args:
           - '--disable=R0401,R0917,W0201,W0613'
           - "--ignore-patterns='.pytype,.*pyi$'"
-          - '--ignore-paths=src/maxtext/input_pipeline/protos'
+          - '--ignore-paths=src/maxtext/input_pipeline/protos|src/maxtext/eval/simple_evals_template'
 
   #  - repo: https://github.com/google/pytype
   #    rev: 2024.10.11
@@ -74,3 +74,22 @@ repos:
     hooks:
       - id: yamllint
         types: [yaml]
+
+  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
+    rev: v1.7.7.23
+    hooks:
+      - id: actionlint
+        args:
+          - -ignore
+          - 'label ".*" is unknown'
+        additional_dependencies:
+          - shellcheck-py
+
+  - repo: local
+    hooks:
+      - id: decoupled-requirements
+        name: decoupled requirements are derived from the current GPU requirements
+        entry: python3 src/dependencies/scripts/generate_decoupled_requirements.py --check
+        language: system
+        files: ^src/dependencies/requirements/
+        pass_filenames: false

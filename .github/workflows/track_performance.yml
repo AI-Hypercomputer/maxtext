@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
 
       - name: Mark git repositories as safe
-        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Download all test results
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -50,12 +50,20 @@ jobs:
           git show origin/gh-pages:dev/bench/per_test_baseline.json > per_test_baseline.json || echo "{}" > per_test_baseline.json
 
       - name: Process Test Results (Limits, Regressions, and Dashboard Formatting)
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
         run: |
+          EXTRA_ARGS=()
+          if { [ "$EVENT_NAME" = "schedule" ] && [ "$REF" = "refs/heads/main" ]; } || [ "$HEAD_REF" = "ci/test-duration-tracking" ]; then
+            EXTRA_ARGS+=("--warn-only")
+          fi
           python3 tests/utils/process_test_results.py test-results \
             --baseline per_test_baseline.json \
             --save-baseline new_per_test_baseline.json \
             --output-benchmark benchmark-results.json \
-            ${{ (github.event_name == 'schedule' && github.ref == 'refs/heads/main' || github.head_ref == 'ci/test-duration-tracking') && '--warn-only' || '' }}
+            "${EXTRA_ARGS[@]}"
 
       - name: Push per-test baseline to gh-pages
         if: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}

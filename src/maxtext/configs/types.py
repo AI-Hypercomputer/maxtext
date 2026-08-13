@@ -102,6 +102,14 @@ class QuantizationType(str, Enum):
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
 
 
+class TeCommGemmOverlapPolicy(str, Enum):
+  """Transformer Engine collective GEMM overlap scope."""
+
+  DISABLED = "disabled"
+  MLP = "mlp"
+  FULL = "full"
+
+
 class KvQuantAxis(str, Enum):
   """Axes to quantize over for the Key-Value cache."""
 
@@ -483,8 +491,13 @@ class Quantization(BaseModel):
       50,
       description=("The first number of steps before updating the sparsity masks."),
   )
-  use_te_comm_gemm_overlap: bool = Field(
-      False, description="If True, uses Transformer Engine's collective GEMM overlap algorithm."
+  te_comm_gemm_overlap: str = Field(
+      TeCommGemmOverlapPolicy.DISABLED.value,
+      description=(
+          "Transformer Engine collective GEMM overlap policy. "
+          "'disabled' disables overlap; 'mlp' overlaps MLP up/down projections; "
+          "'full' also overlaps attention QKV and output projections."
+      ),
   )
 
 
@@ -579,7 +592,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
@@ -626,6 +639,10 @@ class Attention(BaseModel):
   )
   sliding_window_size: NonNegativeInt = Field(0, description="The size of the sliding window for local attention.")
   chunk_attn_window_size: NonNegativeInt = Field(0, description="The window size for chunked attention.")
+  causal_block_size: PositiveInt = Field(
+      32,
+      description="The number of token positions in each bidirectional block for block-causal attention.",
+  )
   attn_logits_soft_cap: None | NonNegativeFloat = Field(
       None, description="Soft-cap value for attention logits. None means no cap."
   )
@@ -666,6 +683,13 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+  use_sliced_mla_proj: bool = Field(
+      False,
+      description=(
+          "Whether to slice projection kernel weights before contraction in MLA"
+          " instead of running full projection + jnp.split."
+      ),
+  )
 
 
 class CompressedAttention(BaseModel):
@@ -733,6 +757,10 @@ class SplashAttention(BaseModel):
   sa_block_q_dq: int = Field(512, description="Block size for Q_dq in splash attention.")
   sa_block_kv_dq: int = Field(512, description="Block size for KV_dq in splash attention.")
   sa_use_fused_bwd_kernel: bool = Field(False, description="Use fused backward kernel in splash attention.")
+  sa_bwd_dkv_megacore: bool = Field(
+      False,
+      description="Megacore-parallel kv-head groups in the static dkv grid. Needs >1 KV head; useful at local batch 1.",
+  )
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
@@ -1015,6 +1043,7 @@ class DeepSeekMoE(BaseModel):
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
   routed_bias_update_rate: float = Field(0.0, description="Update rate applied to the router bias term.")
+  log_moe_bias_norms: bool = Field(False, description="Whether to log the norms of MoE router biases.")
   mlp_bias: bool = Field(
       False,
       description="Whether to add a learnable bias for MLP matmul, "
@@ -1089,7 +1118,7 @@ class HardwareAndMesh(BaseModel):
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
   context_parallel_strategy: str = Field(
       "all_gather",
-      description="Strategy for context parallelism ('all_gather' or 'ring').",
+      description="Strategy for context parallelism ('all_gather', 'ring', or 'ulysses').",
   )
   context_parallel_reorder_strategy: ReorderStrategy = Field(
       ReorderStrategy.AUTO,
@@ -1245,6 +1274,9 @@ class RematAndOffload(BaseModel):
   remat_policy_for_vit: str = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
   decoder_layer_input: RematLocation = Field(
       RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
+  )
+  indexer_cutoff_threshold: RematLocation = Field(
+      RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
   )
   context: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the attention context.")
   mlpwi: RematLocation = Field(
@@ -1843,6 +1875,21 @@ class YarnRope(BaseModel):
       False,
       description="Scale the rotary embedding output. Used by some models like gpt-oss.",
   )
+  rope_pairwise: bool = Field(
+      False,
+      description=(
+          "Keep rank-5 pair tensor intact "
+          "[batch_size, sequence_length, num_heads, half_dim, 2] "
+          "where half_dim represents the independent 2D rotation planes "
+          "and 2 represents the real/imag coordinates, returning interleaved RoPE."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_rope_pairwise(self) -> "YarnRope":
+    if self.rope_pairwise and not self.rope_interleave:
+      raise ValueError("rope_pairwise=True requires rope_interleave=True.")
+    return self
 
 
 class InferenceGeneral(BaseModel):
@@ -2807,8 +2854,8 @@ class MaxTextConfig(
           "  2. Ragged sort with ring of experts (use_ring_of_experts=True AND use_ragged_sort=True)"
       )
 
-  def _validate_use_te_comm_gemm_overlap(self):
-    """Validates that use_te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
+  def _validate_te_comm_gemm_overlap(self):
+    """Validates that te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
     te_has_distributed_env = jax.local_device_count() == 1 and jax.distributed.is_initialized()
 
     if self.hardware != "gpu_multiprocess" or not te_has_distributed_env:
@@ -3233,6 +3280,7 @@ class MaxTextConfig(
     if self.remat_policy == "custom":
       tensors = [
           "decoder_layer_input",
+          "indexer_cutoff_threshold",
           "context",
           "mlpwi",
           "moe_mlpwi_0",
@@ -3476,6 +3524,11 @@ class MaxTextConfig(
             "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
             "short-circuits to select all tokens and no indexer loss is produced."
         )
+    if not self.use_indexer and self.indexer_cutoff_threshold != RematLocation.REMAT:
+      raise ValueError(
+          f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
+          "`use_indexer=True` (DeepSeek Sparse Attention / MLA Indexer)."
+      )
     if self.attention_type == AttentionType.CHUNK.value and (
         not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
     ):
@@ -3484,6 +3537,19 @@ class MaxTextConfig(
         not isinstance(self.sliding_window_size, int) or self.sliding_window_size <= 0
     ):
       raise ValueError("`sliding_window_size` must be an integer > 0 for 'local_sliding' attention.")
+    if self.attention_type == AttentionType.BLOCK_DIFFUSION.value:
+      if self.packing:
+        # Document-local block origins inside a packed sequence are not tracked
+        # in attention metadata; packing without realignment would cause
+        # cross-document block-attention leakage.
+        raise ValueError("Block-diffusion attention does not support packing; set `packing=False`.")
+      if self.attention not in ("autoselected", "dot_product", "flash"):
+        raise ValueError("Block-diffusion attention is supported only by dot_product attention and TPU Splash attention.")
+      if self.attention in ("autoselected", "flash") and self.hardware != "tpu":
+        raise ValueError(
+            "Block-diffusion attention with attention='autoselected' or attention='flash' requires hardware='tpu'; "
+            "use attention='dot_product' on other hardware."
+        )
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
     if (
@@ -3522,8 +3588,17 @@ class MaxTextConfig(
           )
       if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
-      if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
+      if (
+          self.routed_bias
+          and self.routed_bias_update_rate > 0.0
+          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
+      ):
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
+        raise ValueError(
+            "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
+            "Please set pure_nnx=True or disable routed_bias."
+        )
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
@@ -3591,6 +3666,9 @@ class MaxTextConfig(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
     context_parallel_strategy = self.context_parallel_strategy.lower()
+    if context_parallel_strategy not in ("all_gather", "ring", "ulysses"):
+      raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', or 'ulysses'.")
+    self.context_parallel_strategy = context_parallel_strategy
     if (
         context_parallel_strategy == "ring"
         and "gpu" not in self.hardware
@@ -3651,6 +3729,69 @@ class MaxTextConfig(
           f"ring_scan_unroll={self.ring_scan_unroll} was specified, but is only supported when "
           "context_parallel_strategy='ring'."
       )
+    if context_parallel_strategy == "ulysses":
+      if self.hardware != "tpu":
+        raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
+      if self.context_sharding != "context":
+        raise ValueError("TPU Ulysses attention requires context_sharding='context'.")
+      ici_context_parallel_size = self.ici_context_parallelism
+      dcn_context_parallel_size = self.dcn_context_parallelism
+      if ici_context_parallel_size <= 0 or dcn_context_parallel_size <= 0:
+        raise ValueError(
+            "TPU Ulysses attention requires explicit positive ici/dcn context parallelism values; "
+            "inferred (-1) sizes are not supported."
+        )
+      if context_parallel_size <= 1:
+        raise ValueError("TPU Ulysses attention requires context_parallel_size > 1.")
+      if dcn_context_parallel_size != 1:
+        raise ValueError("TPU Ulysses attention does not support dcn context parallelism yet.")
+      if self.attention != "flash":
+        raise ValueError("TPU Ulysses attention requires attention=flash.")
+      if not self.use_tokamax_splash:
+        raise ValueError("TPU Ulysses attention requires use_tokamax_splash=True.")
+      if self.use_jax_splash:
+        raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
+      if self.attention_type != "global":
+        raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
+      if self.context_parallel_load_balance:
+        raise ValueError(
+            "TPU Ulysses attention requires context_parallel_load_balance=False: after the all-to-all every device "
+            "attends over the full sequence in natural order, so the load-balancing reorder is unnecessary and "
+            "would corrupt the causal mask."
+        )
+      if self.use_ragged_attention:
+        raise ValueError("TPU Ulysses attention does not support ragged attention.")
+      if self.attention_sink:
+        raise ValueError("TPU Ulysses attention does not support attention sinks.")
+      if self.use_indexer:
+        raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
+      if self.use_chunked_prefill:
+        raise ValueError("TPU Ulysses attention does not support chunked prefill yet.")
+      if self.use_multimodal:
+        raise ValueError("TPU Ulysses attention does not support multimodal attention.")
+      if self.enable_dropout and self.dropout_rate > 0.0:
+        raise ValueError("TPU Ulysses attention does not support dropout yet.")
+      if self.dq_reduction_steps not in (0, 3):
+        raise ValueError("TPU Ulysses attention requires dq_reduction_steps to be 0 or 3.")
+      if self.use_qk_clip:
+        raise ValueError("TPU Ulysses attention does not support QK-Clip statistics yet.")
+      if self.max_target_length % context_parallel_size != 0:
+        raise ValueError(
+            "TPU Ulysses attention requires max_target_length "
+            f"({self.max_target_length}) to be divisible by context_parallel_size ({context_parallel_size})."
+        )
+      if self.num_query_heads % context_parallel_size != 0:
+        raise ValueError(
+            "TPU Ulysses attention requires num_query_heads "
+            f"({self.num_query_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+        )
+      if self.num_kv_heads == 1:
+        raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
+      if self.num_kv_heads % context_parallel_size != 0:
+        raise ValueError(
+            "TPU Ulysses attention requires num_kv_heads "
+            f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+        )
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.
@@ -3805,6 +3946,8 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
+    if self.use_sliced_mla_proj and (self.quantization or self.use_qwix_quantization):
+      raise ValueError("`use_sliced_mla_proj` is not supported with quantization.")
 
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
@@ -3905,14 +4048,16 @@ class MaxTextConfig(
 
     self._validate_check_vma_is_supported()
 
-    if self.use_te_comm_gemm_overlap:
-      self._validate_use_te_comm_gemm_overlap()
-
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
       self.decoder_block = DecoderBlockType(self.decoder_block.lower())
     if isinstance(self.shard_mode, str):
       self.shard_mode = ShardMode(self.shard_mode.lower())
+    if isinstance(self.te_comm_gemm_overlap, str):
+      self.te_comm_gemm_overlap = TeCommGemmOverlapPolicy(self.te_comm_gemm_overlap.lower())
+
+      if self.te_comm_gemm_overlap != TeCommGemmOverlapPolicy.DISABLED:
+        self._validate_te_comm_gemm_overlap()
 
     constant_bound_config = getattr(self, "constant_bound_config", None)
     if isinstance(constant_bound_config, str):
@@ -3933,6 +4078,7 @@ class MaxTextConfig(
 class RLConfig(
     LogitsAndLoss,
     Engram,
+    ManifoldConstrainedHyperConnections,
     RematAndOffload,
     Attention,
     Llama4Attention,
@@ -3942,9 +4088,32 @@ class RLConfig(
     Decoding,
     IciParallelism,
     DcnParallelism,
+    PipelineParallelism,
+    DilocoParams,
     HardwareAndMesh,
     ModelArchitecture,
+    MTP,
     MoBa,
+    # Advanced Architectures, Tuning, and Optimizers
+    Muon,
+    FineTuning,
+    Distillation,
+    # Datasets and Loading Compatibility
+    DatasetGeneral,
+    TfdsDataset,
+    HfDataset,
+    GrainDataset,
+    OlmoGrainDataset,
+    # Inference, Checkpointing, and Monitoring
+    EmergencyCheckpointing,
+    ElasticTraining,
+    InferenceServer,
+    InferenceBenchmark,
+    PrefixCaching,
+    HloDump,
+    Goodput,
+    GcpMonitoring,
+    ManagedMLDiagnostics,
     # Positional Embeddings
     PositionalEmbedding,
     Rope,
@@ -3971,9 +4140,12 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
-    # Debugging and Profiling
+    # Debugging, Profiling, and Telemetry
+    AOT,
     DevelopmentAndDebugging,
     Profiling,
+    Metrics,
+    Tensorboard,
     # For compatibility with trainer in post_train/rl
     RL,
     RLCluster,
@@ -3982,6 +4154,8 @@ class RLConfig(
     RLReward,
     RLSpecialTokens,
     VLLM,
+    TrainingLoop,
+    DerivedValues,
 ):
   """
   Configuration for Reinforcement Learning in MaxText.
@@ -4167,23 +4341,25 @@ class RLConfig(
 
     # Dynamically inject model dimensions.
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(self.global_parameter_scale)
-    object.__setattr__(self, "emb_dim", int((2**emb_scale) * self.base_emb_dim))
-    object.__setattr__(self, "num_query_heads", int((2**num_head_scale) * self.base_num_query_heads))
-    object.__setattr__(self, "num_kv_heads", int((2**num_head_scale) * self.base_num_kv_heads))
-    object.__setattr__(self, "mlp_dim", int((2**mlp_dim_scale) * self.base_mlp_dim))
-    object.__setattr__(self, "moe_mlp_dim", int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0)))
-    object.__setattr__(self, "num_decoder_layers", int((2**layer_scale) * self.base_num_decoder_layers))
+    self.emb_dim = int((2**emb_scale) * self.base_emb_dim)
+    self.num_query_heads = int((2**num_head_scale) * self.base_num_query_heads)
+    self.num_kv_heads = int((2**num_head_scale) * self.base_num_kv_heads)
+    self.mlp_dim = int((2**mlp_dim_scale) * self.base_mlp_dim)
+    self.moe_mlp_dim = int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0))
+    self.num_decoder_layers = int((2**layer_scale) * self.base_num_decoder_layers)
 
     # Mirror into internal MaxText fields for backward compatibility.
     train_micro_batch_size = getattr(self.dataset, "train_micro_batch_size", -1)
     batch_size = getattr(self.dataset, "batch_size", 1)
     if train_micro_batch_size <= 0:
       train_micro_batch_size = batch_size
-    object.__setattr__(self, "micro_batch_size_to_train_on", train_micro_batch_size)
+    self.micro_batch_size_to_train_on = train_micro_batch_size
+    self.steps = getattr(self, "train_steps", getattr(self, "num_batches", 10))
 
     if self.remat_policy == "custom":
       tensors = [
           "decoder_layer_input",
+          "indexer_cutoff_threshold",
           "context",
           "mlpwi",
           "moe_mlpwi_0",
@@ -4203,7 +4379,7 @@ class RLConfig(
           "attention_out",
           "out_proj",
       ]
-      object.__setattr__(self, "tensors_on_device", [t for t in tensors if getattr(self, t) == "device"])
-      object.__setattr__(self, "tensors_to_offload", [t for t in tensors if getattr(self, t) == "offload"])
+      self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
+      self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
     return self

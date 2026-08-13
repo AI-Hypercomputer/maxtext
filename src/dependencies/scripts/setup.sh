@@ -286,6 +286,9 @@ fi
 if [[ $MODE == "nightly" ]]; then
     install_maxtext_with_deps
 
+    # Install Flax HEAD to maintain compatibility with JAX nightly
+    python3 -m uv pip install -U --no-deps git+https://github.com/google/flax.git
+
     # Uninstall existing jax, jaxlib and libtpu
     python3 -m uv pip show jax && python3 -m uv pip uninstall jax
     python3 -m uv pip show jaxlib && python3 -m uv pip uninstall jaxlib

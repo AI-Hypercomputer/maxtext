@@ -37,6 +37,7 @@ class CompressedAttentionTest(unittest.TestCase):
             "qk_rope_head_dim=16",
             "v_head_dim=16",
             "qk_nope_head_dim=16",
+            "override_model_config=True",
         ]
     )
     self.mesh = Mesh(jax.devices(), ("data",))

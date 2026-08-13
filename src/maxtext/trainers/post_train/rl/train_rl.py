@@ -741,9 +741,13 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
 
   # Run evaluation before training
   if trainer_config.num_test_batches > 0:
-    # `rl_cluster.rollout.update_params()` is intentionally omitted prior to step 0
-    # because `RLCluster` initialization (`create_rl_components`) already syncs the actor model weights
-    # during setup. Skipping this redundant parameter transfer eliminates unnecessary weight resharding.
+    # Explicitly sync actor model weights to the rollout engine before Pre-RL evaluation.
+    # When resuming from an RL checkpoint (step > 0), the trainer restores RL checkpoint
+    # weights into actor_model after RLCluster initializes. Without this explicit sync,
+    # the rollout engine would evaluate using the base HuggingFace/SFT weights instead of
+    # the restored RL checkpoint weights. Calling this unconditionally ensures weight sync
+    # robustness across all initialization and restore workflows.
+    rl_cluster.rollout.update_params(nnx.state(actor_model, nnx.Param))
 
     (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
         trainer_config,
