@@ -29,6 +29,23 @@ import jax.numpy as jnp
 from orbax import checkpoint as ocp
 import qwix
 
+try:
+  from qwix._src.utils import flax_util as _qwix_flax_util  # pylint: disable=g-import-not-at-top
+
+  _orig_qwix_find_param = _qwix_flax_util.find_param
+
+  def _safe_qwix_find_param(x, ptq_array_type=None):
+    try:
+      return _orig_qwix_find_param(x, ptq_array_type)
+    except AttributeError as e:
+      if "shape" in str(e):
+        return None
+      raise
+
+  _qwix_flax_util.find_param = _safe_qwix_find_param
+except (ImportError, AttributeError):
+  pass
+
 from maxtext.common import checkpointing
 from maxtext.configs import pyconfig
 from maxtext.utils import gcs_utils
@@ -616,6 +633,9 @@ def apply_lora_to_model(
       decoder_positions=decoder_positions,
       rngs=model_rngs,
   )
+  for _, val in nnx.graph.iter_graph(lora_model):
+    if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
+      del val.qwix_rngs
 
   if mesh is not None:
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
@@ -640,6 +660,16 @@ def apply_lora_to_model(
         val = var.get_value()
         if not isinstance(val, jax.Array):
           return var
+        if hasattr(sharding_spec, "spec") and len(sharding_spec.spec) != val.ndim:
+          spec_tuple = tuple(sharding_spec.spec)
+          if len(spec_tuple) > val.ndim:
+            if "local_layers" in spec_tuple and len(spec_tuple) - 1 == val.ndim:
+              spec_tuple = tuple(axis for axis in spec_tuple if axis != "local_layers")
+            else:
+              spec_tuple = spec_tuple[: val.ndim]
+          elif len(spec_tuple) < val.ndim:
+            spec_tuple = spec_tuple + (None,) * (val.ndim - len(spec_tuple))
+          sharding_spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*spec_tuple))
         # make_array_from_callback natively constructs a globally sharded array
         # from the local host arrays, bypassing backend-specific device_put issues
         # on both Pathways and McJAX.

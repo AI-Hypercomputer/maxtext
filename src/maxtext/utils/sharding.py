@@ -635,6 +635,18 @@ def add_data_to_sharding(mesh, path, aval, sharding):
   """
   if not isinstance(sharding, jax.sharding.NamedSharding):
     raise AssertionError(f"Expected NamedSharding, found {sharding} of {type(sharding)=} at {jax.tree_util.keystr(path)}")
+
+  pspec = sharding.spec
+  if len(pspec) != len(aval.shape):
+    if len(pspec) > len(aval.shape):
+      if "local_layers" in pspec and len(pspec) - 1 == len(aval.shape):
+        pspec = tuple(axis for axis in pspec if axis != "local_layers")
+      else:
+        pspec = pspec[: len(aval.shape)]
+    else:
+      pspec = tuple(pspec) + (None,) * (len(aval.shape) - len(pspec))
+    sharding = jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*pspec))
+
   try:
     sharded_shape = sharding.shard_shape(aval.shape)
   except Exception as e:

@@ -1950,8 +1950,12 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
 
       def _make_abstract_leaf(leaf_a, leaf_s):
         leaf_s = _extract_primary_sharding(leaf_s)
-        if hasattr(leaf_s, "spec") and len(leaf_a.shape) != len(leaf_s.spec):
-          leaf_s = jax.sharding.NamedSharding(leaf_s.mesh, jax.sharding.PartitionSpec(*leaf_s.spec[: len(leaf_a.shape)]))
+        if hasattr(leaf_s, "spec") and len(leaf_s.spec) > len(leaf_a.shape):
+          if "local_layers" in leaf_s.spec and len(leaf_s.spec) - 1 == len(leaf_a.shape):
+            spec_tuple = tuple(axis for axis in leaf_s.spec if axis != "local_layers")
+          else:
+            spec_tuple = leaf_s.spec[: len(leaf_a.shape)]
+          leaf_s = jax.sharding.NamedSharding(leaf_s.mesh, jax.sharding.PartitionSpec(*spec_tuple))
         return jax.ShapeDtypeStruct(leaf_a.shape, leaf_a.dtype, sharding=leaf_s)
 
       if type(a_val) in (jax.Array, jax.ShapeDtypeStruct) or (hasattr(a_val, "shape") and not hasattr(a_val, "qvalue")):

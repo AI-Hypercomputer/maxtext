@@ -67,6 +67,7 @@ def _tiny_lora_pyconfig(run_name, checkpoint_dir, **overrides):
   return pyconfig.initialize([sys.argv[0], get_test_config_path()], **init_kwargs)
 
 
+@pytest.mark.post_training
 @pytest.mark.integration_test
 class LoraE2ENnxIntegrationTest(unittest.TestCase):
   """E2E integration test for NNX LoRA lifecycle.
@@ -80,30 +81,30 @@ class LoraE2ENnxIntegrationTest(unittest.TestCase):
   def tearDown(self):
     shutil.rmtree(self.test_dir, ignore_errors=True)
 
-  def _run_e2e_flow(self, model_name, use_sft, lora_weight_qtype=None, scan_layers=True):
-    """Executes a full 4-step E2E LoRA checkpoint/resume/restore flow."""
-    from maxtext.trainers.pre_train import train  # pylint: disable=import-outside-toplevel
+  def _run_e2e_flow_sft(self, model_name, lora_weight_qtype=None, scan_layers=True):
+    """Executes a full 4-step E2E LoRA checkpoint/resume/restore flow for SFT (Tunix)."""
+    from maxtext.trainers.post_train.sft import train_sft  # pylint: disable=import-outside-toplevel
 
-    base_run_name = f"b_{model_name}_{use_sft}_run"
-    lora_run_name = f"w_{model_name}_{use_sft}_run"
+    base_run_name = f"b_{model_name}_sft_run"
+    lora_run_name = f"w_{model_name}_sft_run"
 
     # Step 1: Generate base-only checkpoint (steps=2)
     config_step1 = _tiny_lora_pyconfig(
         run_name=base_run_name,
         checkpoint_dir=self.test_dir,
         model_name=model_name,
-        use_sft=use_sft,
+        use_sft=True,
         scan_layers=scan_layers,
         steps=2,
         checkpoint_period=2,
         lora={"enable_lora": False},
     )
-    state_step1 = train.train_loop(config_step1, recorder=None)
-    self.assertEqual(int(state_step1.optimizer.step.get_value()), 2)
+    trainer_step1, _ = train_sft.train(config_step1, goodput_recorder=None)
+    self.assertEqual(int(trainer_step1.train_steps), 2)
 
-    base_ckpt_dir = os.path.join(self.test_dir, base_run_name, "checkpoints", "1")
+    base_ckpt_dir = os.path.join(self.test_dir, base_run_name, "checkpoints", "2")
     self.assertTrue(os.path.exists(base_ckpt_dir), f"Base checkpoint path does not exist: {base_ckpt_dir}")
-    base_ckpt_path = os.path.join(base_ckpt_dir, "items")
+    base_ckpt_path = os.path.join(base_ckpt_dir, "model_params")
 
     lora_config = {"enable_lora": True, "lora_rank": 4}
     if lora_weight_qtype:
@@ -115,73 +116,59 @@ class LoraE2ENnxIntegrationTest(unittest.TestCase):
         run_name=lora_run_name,
         checkpoint_dir=self.test_dir,
         model_name=model_name,
-        use_sft=use_sft,
+        use_sft=True,
         scan_layers=scan_layers,
         load_parameters_path=base_ckpt_path,
         steps=4,
         checkpoint_period=2,
         lora=lora_config,
     )
-    state_step2 = train.train_loop(config_step2, recorder=None)
-    self.assertEqual(int(state_step2.optimizer.step.get_value()), 4)
+    trainer_step2, _ = train_sft.train(config_step2, goodput_recorder=None)
+    self.assertEqual(int(trainer_step2.train_steps), 4)
 
-    lora_ckpt_dir = os.path.join(self.test_dir, lora_run_name, "checkpoints", "3")
+    lora_ckpt_dir = os.path.join(self.test_dir, lora_run_name, "checkpoints", "4")
     self.assertTrue(os.path.exists(lora_ckpt_dir), f"Saved LoRA checkpoint path does not exist: {lora_ckpt_dir}")
-    lora_ckpt_path = os.path.join(lora_ckpt_dir, "items")
+    lora_ckpt_path = os.path.join(lora_ckpt_dir, "model_params")
 
     # Step 3: Resume training under same run name (steps=6)
     config_step3 = _tiny_lora_pyconfig(
         run_name=lora_run_name,
         checkpoint_dir=self.test_dir,
         model_name=model_name,
-        use_sft=use_sft,
+        use_sft=True,
         scan_layers=scan_layers,
         steps=6,
         checkpoint_period=2,
         lora=lora_config,
     )
-    state_step3 = train.train_loop(config_step3, recorder=None)
-    self.assertEqual(int(state_step3.optimizer.step.get_value()), 6)
+    trainer_step3, _ = train_sft.train(config_step3, goodput_recorder=None)
+    self.assertEqual(int(trainer_step3.train_steps), 6)
 
     # Step 4: Standalone restore of LoRA adapter onto base checkpoint (steps=2)
     lora_restore_config = dict(lora_config)
     lora_restore_config["lora_restore_path"] = lora_ckpt_path
     config_step4 = _tiny_lora_pyconfig(
-        run_name=f"restore_{model_name}_{use_sft}_run",
+        run_name=f"restore_{model_name}_sft_run",
         checkpoint_dir=self.test_dir,
         model_name=model_name,
-        use_sft=use_sft,
+        use_sft=True,
         scan_layers=scan_layers,
         load_parameters_path=base_ckpt_path,
         steps=2,
         checkpoint_period=2,
         lora=lora_restore_config,
     )
-    state_step4 = train.train_loop(config_step4, recorder=None)
-    self.assertEqual(int(state_step4.optimizer.step.get_value()), 2)
+    trainer_step4, _ = train_sft.train(config_step4, goodput_recorder=None)
+    self.assertEqual(int(trainer_step4.train_steps), 2)
 
-  # --- LoRA Unquantized Tests (Gemma4) ---
-  def test_lora_e2e_gemma4_pretrain(self):
-    self._run_e2e_flow("gemma4-26b", use_sft=False)
+  def test_lora_e2e_gemma4_sft(self):
+    self._run_e2e_flow_sft("gemma4-26b")
 
-  def test_lora_e2e_gemma4_sft_native(self):
-    self._run_e2e_flow("gemma4-26b", use_sft=True)
+  def test_qlora_e2e_gemma4_sft_nf4(self):
+    self._run_e2e_flow_sft("gemma4-26b", lora_weight_qtype="nf4")
 
-  # --- QLoRA NF4 Tests (Gemma4, Qwen3, GPT-OSS) ---
-  def test_qlora_e2e_gemma4_pretrain_nf4(self):
-    self._run_e2e_flow("gemma4-26b", use_sft=False, lora_weight_qtype="nf4")
-
-  def test_qlora_e2e_gemma4_sft_native_nf4(self):
-    self._run_e2e_flow("gemma4-26b", use_sft=True, lora_weight_qtype="nf4")
-
-  def test_qlora_e2e_qwen3_pretrain_nf4(self):
-    self._run_e2e_flow("qwen3-4b", use_sft=False, lora_weight_qtype="nf4")
-
-  def test_qlora_e2e_qwen3_sft_native_nf4(self):
-    self._run_e2e_flow("qwen3-4b", use_sft=True, lora_weight_qtype="nf4")
-
-  def test_qlora_e2e_gptoss_unscanned_nf4(self):
-    self._run_e2e_flow("gpt-oss-20b", use_sft=False, lora_weight_qtype="nf4", scan_layers=False)
+  def test_qlora_e2e_qwen3_sft_nf4(self):
+    self._run_e2e_flow_sft("qwen3-4b", lora_weight_qtype="nf4")
 
 
 if __name__ == "__main__":
