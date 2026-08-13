@@ -67,11 +67,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
     self._config = training_config
     self._mesh = mesh
-    self._init_rng = jax.random.PRNGKey(getattr(training_config, "init_weights_seed", 0))
+    self._init_rng = jax.random.PRNGKey(training_config.init_weights_seed)
     self._loss_fn: Callable[..., Any] | None = None
     self._gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = None
     self._compiled = False
-    if not getattr(training_config, "model_name", None):
+    if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     self._model = model_creation_utils.from_pretrained(
         config=self._config,
@@ -87,7 +87,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(
-        checkpoint_dir=getattr(self._config, "checkpoint_dir", getattr(self._config, "checkpoint_directory", "")),
+        checkpoint_dir=self._config.checkpoint_dir,
         config=self._config,
     )
     self._metrics_recorder = metrics_module.MetricsRecorder()
@@ -223,11 +223,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       micro_grads = jax.tree.map(lambda g: g * scale, micro_grads)
 
     micro_grads = jax.tree.map(
-        lambda x: (
-            x.astype(getattr(self._config, "grad_dtype", jnp.float32))
-            if hasattr(x, "dtype") and x.dtype == jnp.float32
-            else x
-        ),
+        lambda x: (x.astype(self._config.grad_dtype) if hasattr(x, "dtype") and x.dtype == jnp.float32 else x),
         micro_grads,
     )
 
@@ -248,11 +244,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             lambda g: g / micro_step_count,
             accumulated_grads,
         )
-      if getattr(self._config, "gradient_clipping_threshold", 0.0) > 0:
+      if self._config.gradient_clipping_threshold > 0:
         grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if hasattr(local_state, "apply_gradients"):
-        if getattr(self._config, "skip_step_on_spikes", False):
+        if self._config.skip_step_on_spikes:
           grad_norm = max_utils.l2norm_pytree(grads)
           local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
           opt_obj = getattr(local_state, "optimizer", self._optimizer)

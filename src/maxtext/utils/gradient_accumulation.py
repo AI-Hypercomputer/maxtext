@@ -177,9 +177,7 @@ def gradient_accumulation_loss_and_grad(
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
   divisor = (
-      config.gradient_accumulation_steps
-      if getattr(config, "use_tunix_gradient_accumulation", False)
-      else grad_and_loss["total_weights"]
+      config.gradient_accumulation_steps if config.use_tunix_gradient_accumulation else grad_and_loss["total_weights"]
   )
   raw_grads = jax.tree_util.tree_map(lambda arr: arr / divisor, raw_grads)
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr

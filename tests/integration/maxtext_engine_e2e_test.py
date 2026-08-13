@@ -25,6 +25,7 @@ import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
+from tests.utils.test_helpers import get_test_config_path
 import optax
 import pytest
 
@@ -100,20 +101,33 @@ class TrainingLoopRunner:
 class MaxTextTrainingEngineE2ETest(absltest.TestCase):
   """End-to-end MaxText training engine test."""
 
-  def setup_config(self, enable_checkpointing: bool = False):
-    """Sets up mock configuration for testing."""
-    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
-    mock_config.init_weights_seed = 42
-    mock_config.model_name = "llama3.1-8b"
-    mock_config.tensorboard_dir = "/tmp/tb_dir"
-    mock_config.run_name = "test_run"
-    mock_config.enable_tensorboard = False
+  def setup_config(self, enable_checkpointing: bool = False, **kwargs):
+    """Sets up a MaxText config via pyconfig.initialize."""
+    overrides = {
+        "model_name": "llama3.1-8b",
+        "run_name": "test_run",
+        "base_output_directory": self.create_tempdir().full_path,
+        "init_weights_seed": 42,
+        "micro_batch_size_to_train_on": 2,
+        "gradient_accumulation_steps": 1,
+        "enable_dropout": False,
+        "record_internal_nn_metrics": False,
+        "enable_tensorboard": False,
+        "tensorboard_dir": self.create_tempdir().full_path,
+        "skip_jax_distributed_system": True,
+        "enable_checkpointing": enable_checkpointing,
+    }
     if enable_checkpointing:
-      mock_config.checkpoint_directory = "/tmp/test_out/e2e_checkpoints"
-      mock_config.checkpoint_period = 2
-      mock_config.max_num_checkpoints_to_keep = 5
-      mock_config.async_checkpointing = True
-    return mock_config
+      overrides.update(
+          {
+              "checkpoint_dir": self.create_tempdir().full_path,
+              "checkpoint_period": 2,
+              "max_num_checkpoints_to_keep": 5,
+              "async_checkpointing": True,
+          }
+      )
+    overrides.update(kwargs)
+    return pyconfig.initialize([None, get_test_config_path()], **overrides)
 
   @mock.patch.object(maxtext_engine.train_utils, "create_training_optimizer")
   @mock.patch.object(maxtext_engine.checkpointing, "CheckpointManager")
