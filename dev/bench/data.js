@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786668550901,
+  "lastUpdate": 1786683896470,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -9710,6 +9710,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total GPU-UNIT Tests Duration",
             "value": 63.773999999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 11,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "htn",
+            "username": "huytransformer",
+            "email": "110962703+huytransformer@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "0998c01c1ab3841197ba7bf17f037e7f668261a7",
+          "message": "PR #4836: Add TPU USP context parallelism\n\nImported from GitHub PR https://github.com/AI-Hypercomputer/maxtext/pull/4836\n\n# Description\n\nThis PR introduces `context_parallel_strategy=usp` ([USP](https://arxiv.org/abs/2405.07719), Ulysses over ring). Follow up to #4687.\n\nCurrently does not support load balancing + sequence packing.\n\n# Tests\n\n`python3 -m pytest tests/unit/configs_value_test.py tests/unit/usp_attention_test.py tests/unit/usp_collective_test.py`\n\nPassed.\n\n`python3 -m pytest tests/unit/attention_test.py -k usp`\n\n3 passed.\n\n## Performance\n\nllama3-8b, v5p (64 chips), CP64, bf16, synthetic data, global batch 1, no load-balancing\n\nReporting median step time (s)\n\n|  | 64K | 128K | 256K |\n|---|---|---|---|\n| all-gather (CP64) | 1.31 | 4.03 | 14.33 |\n| ring (CP64) | 1.68 | 4.63 | 15.35 |\n| usp (16x4) | 1.31 | 4.02 | 13.92 |\n| usp (8x8) | 1.44 | 4.05 | 13.65 |\n| usp (32x2) | 1.65 | 4.52 | 14.72 |\n\nExample repro command:\n\n```\npython3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml model_name=llama3-8b dataset_type=synthetic enable_checkpointing=False steps=20 per_device_batch_size=0.015625 packing=False attention=flash use_tokamax_splash=True use_jax_splash=False allow_split_physical_axes=True max_target_length=65536 context_parallel_strategy=usp ici_context_parallelism=16 ici_context_ulysses_parallelism=4 context_parallel_load_balance=False run_name=usp16x4_65536 base_output_directory=<output dir>\n```\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\nCopybara import of the project:\n\n--\ne5c987dc7fdf70a6e266856eef47370f2ebc43c1 by continuousml <continuousml@gmail.com>:\n\nAdd TPU USP context parallelism\n\nMerging this change closes #4836\n\nCOPYBARA_INTEGRATE_REVIEW=https://github.com/AI-Hypercomputer/maxtext/pull/4836 from AI-Hypercomputer:htn-usp-cp e5c987dc7fdf70a6e266856eef47370f2ebc43c1\nPiperOrigin-RevId: 964446152",
+          "timestamp": "2026-08-14T03:29:55Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/0998c01c1ab3841197ba7bf17f037e7f668261a7"
+        },
+        "date": 1786683895598,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1597.1059999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 500.733,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 27,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 1967.0739999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 172,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 77.807,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 0.014,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 7,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 23.025000000000034,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 53,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 53.592999999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 63.909,
             "unit": "sec"
           },
           {
