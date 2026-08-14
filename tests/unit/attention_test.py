@@ -1943,13 +1943,13 @@ class AttentionTest(parameterized.TestCase):
       )
       self.assertLen(hlo_test_utils.collective_lines(hlo_text, "collective-permute"), 0)
 
-  def _usp_test_config(self, packing=False):
+  def _usp_test_config(self, packing=False, context_parallel_load_balance=False):
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
         attention="flash",
         context_parallel_strategy="usp",
-        context_parallel_load_balance=False,
+        context_parallel_load_balance=context_parallel_load_balance,
         ici_context_parallelism=2,
         ici_context_usp_ulysses_parallelism=2,
         use_tokamax_splash=True,
@@ -1959,14 +1959,16 @@ class AttentionTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "usp_2x2", "packing": False},
-      {"testcase_name": "usp_2x2_packed", "packing": True},
+      {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
+      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
+      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
+      {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_usp_context_parallel(self, packing):
+  def test_tpu_flash_attention_usp_context_parallel(self, context_parallel_load_balance, packing):
     """Test equivalence between dot_product and flash attention + USP context parallelism"""
 
-    cfg_cp = self._usp_test_config(packing=packing)
+    cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
     if packing:
@@ -1999,18 +2001,20 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
         msg="Logits from generic dot product and flash attention + USP context parallelism are not close. "
-        f"packing={packing}.",
+        f"context_parallel_load_balance={context_parallel_load_balance}, packing={packing}.",
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "usp_2x2", "packing": False},
-      {"testcase_name": "usp_2x2_packed", "packing": True},
+      {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
+      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
+      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
+      {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_usp_context_parallel_grad(self, packing):
+  def test_tpu_flash_attention_usp_context_parallel_grad(self, context_parallel_load_balance, packing):
     """Test input-gradient equivalence between dot_product and flash attention + USP context parallelism"""
 
-    cfg_cp = self._usp_test_config(packing=packing)
+    cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
     if packing:
@@ -2032,11 +2036,19 @@ class AttentionTest(parameterized.TestCase):
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
     def usp_loss(lnx):
+      if context_parallel_load_balance:
+        context_parallel_size = cfg_cp.ici_context_parallelism
+        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
+        usp_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
+        usp_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+      else:
+        usp_decoder_segment_ids = decoder_segment_ids
+        usp_decoder_positions = decoder_positions
       output, _ = attention_as_mha_flash_cp(
           lnx,
           lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
+          decoder_segment_ids=usp_decoder_segment_ids,
+          inputs_positions=usp_decoder_positions,
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
@@ -2051,7 +2063,7 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(generic_grad, usp_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
         msg="Input gradients from generic dot product and flash attention + USP context parallelism are not close. "
-        f"packing={packing}.",
+        f"context_parallel_load_balance={context_parallel_load_balance}, packing={packing}.",
     )
 
   @pytest.mark.tpu_only
