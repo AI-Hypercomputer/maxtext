@@ -14,11 +14,11 @@ If a step fails, the Overwatch Agent analyzes the divergence, attempts to fix th
    Inspects the structure of the Orbax/MaxText checkpoint to ensure all required files and layers are present in GCS.
    Script: [`inspect_checkpoint.py`](/src/maxtext/checkpoint_conversion/inspect_checkpoint.py)
 
-3. **Task C: Forward Pass Logit Verification** (WIP)
+3. **Task C: Forward Pass Logit Verification** (Complete)
    Runs the model on PyTorch and MaxText simultaneously and compares the intermediate layer outputs (using Flax `sow`) to catch the exact layer where a conversion bug exists.
    Script: `forward_pass_validator.py`
 
-4. **Task D: SFT & Decoding (Caching Logic)** (WIP)
+4. **Task D: SFT & Decoding (Caching Logic)** (Complete)
    *   **SFT**: Tests the backward pass by running training steps to ensure loss decreases without hitting NaNs.
    *   **Decoding Check**: Tests text generation and autoregressive caching logic (KV Cache) for new models.
    Script: `decode_validator.py`
@@ -66,7 +66,7 @@ python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/forward_compile_
   --scan_layers=true
 ```
 
-### Step 3: Forward Pass Logit Verification (WIP)
+### Step 3: Forward Pass Logit Verification (Complete)
 
 ```bash
 python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/forward_pass_validator.py \
@@ -77,7 +77,7 @@ python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/forward_pass_val
   --report_gcs_dir=gs://your-bucket/reports/
 ```
 
-### Step 4: Decoding (Caching Logic) Verification (WIP)
+### Step 4: Decoding (Caching Logic) Verification (Complete)
 
 ```bash
 python3 src/maxtext/experimental/agent/ckpt_validation_pipeline/decode_validator.py \
