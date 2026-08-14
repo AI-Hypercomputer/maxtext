@@ -16,6 +16,8 @@
 
 import argparse
 import json
+import traceback
+import os
 import sys
 import time
 import jax
@@ -149,7 +151,7 @@ if __name__ == "__main__":
     report["output_shape"] = str(_out_shape)
   except BaseException as e:  # pylint: disable=broad-exception-caught
     report["status"] = "FAILURE"
-    report["error_message"] = str(e) if str(e) else type(e).__name__
+    report["error_message"] = traceback.format_exc()
     _save_report(report)
     if isinstance(e, SystemExit):
       sys.exit(e.code)
