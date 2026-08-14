@@ -1,0 +1,277 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: JOBSET_NAME_PLACEHOLDER
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+    xpk.google.com/workload: JOBSET_NAME_PLACEHOLDER
+spec:
+  coordinator:
+    replicatedJob: pathways-head
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  failurePolicy:
+    maxRestarts: 0
+    restartStrategy: Recreate
+  replicatedJobs:
+  # Replicated Job 0: CPU Head Node (Resource Manager, Proxy Server, and Benchmark Client)
+  - name: pathways-head
+    replicas: 1
+    template:
+      metadata:
+        annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            labels:
+              xpk.google.com/workload: JOBSET_NAME_PLACEHOLDER
+              app: pathways-head
+          spec:
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            dnsConfig:
+              options:
+              - name: ndots
+                value: "1"
+            serviceAccountName: xpk-sa
+            priorityClassName: high
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            initContainers:
+              # Container 1: Pathways Resource Manager Sidecar
+              - name: pathways-rm
+                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:latest
+                imagePullPolicy: Always
+                args:
+                - --server_port=29001
+                - --gcs_scratch_location=gs://runner-maxtext-logs
+                - --node_type=resource_manager
+                - --instance_count=2
+                - --instance_type=tpuv5:2x2x1
+                - --enable_metrics_collection=true
+                env:
+                - name: REPLICATED_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+                - name: JOBSET_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+                - name: HOST_ADDRESS
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: TPU_SKIP_MDS_QUERY
+                  value: "true"
+                ports:
+                - containerPort: 29001
+                  protocol: TCP
+                - containerPort: 29002
+                  protocol: TCP
+                resources:
+                  limits:
+                    cpu: "8"
+                    memory: 32G
+                restartPolicy: Always
+
+              # Container 2: Pathways Proxy Server Sidecar
+              - name: pathways-proxy
+                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:latest
+                imagePullPolicy: Always
+                args:
+                - --server_port=29000
+                - --resource_manager_address=$(PATHWAYS_HEAD):29001
+                - --gcs_scratch_location=gs://runner-maxtext-logs
+                - --enable_metrics_collection=true
+                env:
+                - name: PATHWAYS_HEAD
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                ports:
+                - containerPort: 29000
+                  protocol: TCP
+                resources:
+                  limits:
+                    cpu: "32"
+                    memory: 150Gi
+                restartPolicy: Always
+
+            containers:
+              # Container 3: Main Benchmark Client
+              - name: jax-tpu
+                image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:raiden-bench-latest
+                imagePullPolicy: Always
+                env:
+                - name: PATHWAYS_HEAD
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: XCLOUD_ENVIRONMENT
+                  value: GCP
+                - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+                  value: python
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  set -e
+                  echo "=========================================================================="
+                  echo "[Main Client] Starting TPU Raiden 2-Slice Benchmark on Pathways..."
+                  echo "  Pathways Head   : ${PATHWAYS_HEAD}:29000"
+                  echo "=========================================================================="
+
+                  # Wait for Pathways Proxy Server to be ready on port 29000
+                  echo "[Main Client] Waiting for Pathways proxy server on port 29000..."
+                  until python3 -c "import socket; s = socket.socket(); s.connect(('${PATHWAYS_HEAD}', 29000)); s.close()" 2>/dev/null; do
+                    sleep 2
+                  done
+                  echo "[Main Client] Pathways proxy is ready!"
+
+                  export JAX_PLATFORMS=proxy
+                  export JAX_BACKEND_TARGET="grpc://${PATHWAYS_HEAD}:29000"
+                  export JAX_PROXY_TARGET="grpc://${PATHWAYS_HEAD}:29000"
+
+                  # Run Standalone Python Benchmark across 2 slices (8 TPU devices, 2B model)
+                  python3 -u /workspace/src/maxtext/experimental/weight_transfer/benchmark_pathways_raiden_2slice.py \
+                      --num_decoder_layers=18 \
+                      --hidden_dim=2048 \
+                      --mlp_dim=8192 \
+                      --vocab_size=256000 \
+                      --benchmark_iterations=3
+                resources:
+                  limits:
+                    cpu: "32"
+                    memory: 150Gi
+                  requests:
+                    cpu: "16"
+                    memory: 64Gi
+                volumeMounts:
+                - mountPath: /tmp
+                  name: shared-tmp
+            restartPolicy: Never
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+
+  # Replicated Job 1: 2 Slices of TPU v5p Workers (1 Pod per 4-chip Slice)
+  - name: worker
+    replicas: 2
+    template:
+      metadata:
+        annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+      spec:
+        backoffLimit: 4
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            labels:
+              xpk.google.com/workload: JOBSET_NAME_PLACEHOLDER
+              app: pathways-worker
+          spec:
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            dnsConfig:
+              options:
+              - name: ndots
+                value: "1"
+            serviceAccountName: xpk-sa
+            terminationGracePeriodSeconds: 30
+            priorityClassName: medium
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 2x2x1
+            containers:
+              - name: pathways-worker
+                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:latest
+                imagePullPolicy: Always
+                args:
+                - --server_port=29005
+                - --resource_manager_address=$(PATHWAYS_HEAD):29001
+                - --gcs_scratch_location=gs://runner-maxtext-logs
+                env:
+                - name: TPU_MIN_LOG_LEVEL
+                  value: "0"
+                - name: TF_CPP_MIN_LOG_LEVEL
+                  value: "0"
+                - name: XCLOUD_ENVIRONMENT
+                  value: GCP
+                - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                  value: "false"
+                - name: MEGASCALE_NUM_SLICES
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+                - name: JOBSET_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+                - name: REPLICATED_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+                - name: MEGASCALE_SLICE_ID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+                - name: PATHWAYS_HEAD
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: MEGASCALE_COORDINATOR_ADDRESS
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                ports:
+                - containerPort: 29005
+                  protocol: TCP
+                - containerPort: 29006
+                  protocol: TCP
+                - containerPort: 8471
+                  protocol: TCP
+                - containerPort: 8080
+                  protocol: TCP
+                resources:
+                  limits:
+                    google.com/tpu: "4"
+                  requests:
+                    google.com/tpu: "4"
+                volumeMounts:
+                - mountPath: /tmp
+                  name: shared-tmp
+            restartPolicy: OnFailure
+            tolerations:
+            - operator: "Exists"
+              key: google.com/tpu
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - pathways-head
+  suspend: false

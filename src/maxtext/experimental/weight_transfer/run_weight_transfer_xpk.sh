@@ -17,7 +17,7 @@
 
 set -e
 
-export PATH="/usr/local/google/home/mohitkhatwani/max_venv/bin:$PATH"
+export PATH="/usr/local/google/home/mohitkhatwani/.venv/bin:/usr/local/google/home/mohitkhatwani/max_venv/bin:$PATH"
 
 # Configurable environment variables with sensible defaults
 CLUSTER_NAME="${CLUSTER_NAME:-my-gke-cluster}"
@@ -231,8 +231,12 @@ if [ -n "${RESERVATION}" ]; then
 fi
 
 # Construct command to run inside container
-SCRIPT_NAME="${SCRIPT_NAME:-transfer_weights_raiden_simple.py}"
-COMMAND="export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python PYTHONUNBUFFERED=1 && JOB_NAME=\${JOBSET_NAME:-${WORKLOAD_NAME}} && SRC_HOST=\$(getent hosts \${JOB_NAME}-slice-job-0-0.\${JOB_NAME} | awk '{print \$1}') && DST_HOST=\$(getent hosts \${JOB_NAME}-slice-job-1-0.\${JOB_NAME} | awk '{print \$1}') && PYTHONPATH=/app/src:/app:\$PYTHONPATH python3 -u /app/src/maxtext/experimental/weight_transfer/${SCRIPT_NAME} --weight_size_mb=${WEIGHT_SIZE_MB} --num_layers=${NUM_LAYERS} --iterations=${ITERATIONS} --dest_port=29500 --source_ip=\${SRC_HOST:-\"0.0.0.0\"} --dest_ip=\${DST_HOST:-\"127.0.0.1\"}"
+SCRIPT_NAME="${SCRIPT_NAME:-run_multi_client_2slice.sh}"
+if [[ "${SCRIPT_NAME}" == *.sh ]]; then
+  COMMAND="export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python PYTHONUNBUFFERED=1 NUM_DECODER_LAYERS=${NUM_LAYERS} BENCHMARK_ITERATIONS=${ITERATIONS} && bash /app/src/maxtext/experimental/weight_transfer/${SCRIPT_NAME}"
+else
+  COMMAND="export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python PYTHONUNBUFFERED=1 && JOB_NAME=\${JOBSET_NAME:-${WORKLOAD_NAME}} && SRC_HOST=\$(getent hosts \${JOB_NAME}-slice-job-0-0.\${JOB_NAME} | awk '{print \$1}') && DST_HOST=\$(getent hosts \${JOB_NAME}-slice-job-1-0.\${JOB_NAME} | awk '{print \$1}') && PYTHONPATH=/app/src:/app:\$PYTHONPATH python3 -u /app/src/maxtext/experimental/weight_transfer/${SCRIPT_NAME} --weight_size_mb=${WEIGHT_SIZE_MB} --num_layers=${NUM_LAYERS} --iterations=${ITERATIONS} --dest_port=29500 --source_ip=\${SRC_HOST:-\"0.0.0.0\"} --dest_ip=\${DST_HOST:-\"127.0.0.1\"}"
+fi
 
 if [ -n "${PROFILE_DIR}" ]; then
   COMMAND="${COMMAND} --profile_dir=${PROFILE_DIR}"

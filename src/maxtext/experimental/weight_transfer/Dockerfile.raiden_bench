@@ -1,0 +1,12 @@
+FROM gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-rl:raiden-clean-0813
+
+WORKDIR /workspace
+
+# Copy repository source code into container
+COPY . /workspace/
+
+# Patch weight_synchronizer_ffi if present
+RUN sed -i 's/, out_memory_spaces=jax.memory.Space.Device//g' /usr/local/lib/python3.12/site-packages/tpu_raiden/frameworks/jax/weight_synchronizer_ffi.py 2>/dev/null || true
+
+# Set Python path
+ENV PYTHONPATH="/workspace:/workspace/src:${PYTHONPATH}"

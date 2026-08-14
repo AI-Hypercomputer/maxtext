@@ -51,8 +51,9 @@ if [[ "${SLICE_ID}" == "0" ]]; then
   python3 -u /app/src/maxtext/experimental/weight_transfer/transfer_weights_raiden_multi_client.py \
       --role=controller \
       --controller_port=29500 \
-      --iterations=${ITERATIONS:-5} \
-      --warmup_iterations=${WARMUP_ITERATIONS:-3} &
+      --num_decoder_layers=${NUM_DECODER_LAYERS:-26} \
+      --benchmark_iterations=${BENCHMARK_ITERATIONS:-3} \
+      --warmup_iterations=${WARMUP_ITERATIONS:-1} &
   CTRL_PID=$!
 
   # Wait for controller port to be open
@@ -64,10 +65,11 @@ if [[ "${SLICE_ID}" == "0" ]]; then
     sleep 1
   done
 
-  echo "=== [Slice 0] Starting Source Worker ==="
+  echo "=== [Slice 0] Starting Source Worker (Trainer Mesh) ==="
   python3 -u /app/src/maxtext/experimental/weight_transfer/transfer_weights_raiden_multi_client.py \
       --role=source \
       --controller_address="${CTRL_HOST}:29500" \
+      --num_decoder_layers=${NUM_DECODER_LAYERS:-26} \
       --local_ip="${SRC_HOST}"
   wait $CTRL_PID
 else
@@ -80,10 +82,11 @@ else
     sleep 1
   done
 
-  echo "=== [Slice 1] Starting Destination Worker ==="
+  echo "=== [Slice 1] Starting Destination Worker (Sampler Mesh) ==="
   python3 -u /app/src/maxtext/experimental/weight_transfer/transfer_weights_raiden_multi_client.py \
       --role=destination \
       --controller_address="${CTRL_HOST}:29500" \
+      --num_decoder_layers=${NUM_DECODER_LAYERS:-26} \
       --local_ip="${DST_HOST}" \
-      --verify=true
+      --verify_parity=true
 fi
