@@ -604,6 +604,108 @@ class ConfigTest(absltest.TestCase):
     config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "steps=1"])
 
     self.assertEqual(config.attention_type, "global")
+    self.assertEqual(config.training_objective, "causal_lm")
+    self.assertEqual(config.block_diffusion_mask_id, -1)
+
+  def test_block_diffusion_pretraining_config(self):
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "training_objective=block_diffusion",
+            "attention=dot_product",
+            "attention_type=block_diffusion",
+            "causal_block_size=7",
+            "block_diffusion_mask_id=100",
+            "block_diffusion_min_noise=0.05",
+            "vocab_size=256",
+            "max_target_length=2048",
+            "packing=False",
+            "dataset_type=hf",
+            "hf_path=parquet",
+            "hardware=cpu",
+        ]
+    )
+
+    self.assertEqual(config.training_objective, "block_diffusion")
+    self.assertEqual(config.block_diffusion_mask_id, 100)
+    self.assertEqual(config.block_diffusion_min_noise, 0.05)
+    self.assertEqual(config.block_diffusion_logit_alignment, "same_position")
+    self.assertEqual(config.block_diffusion_canvas_policy, "all_masked")
+
+  def test_block_diffusion_pretraining_rejects_incompatible_config(self):
+    base_overrides = {
+        "run_name": "test",
+        "steps": 1,
+        "training_objective": "block_diffusion",
+        "attention": "dot_product",
+        "attention_type": "block_diffusion",
+        "causal_block_size": 32,
+        "block_diffusion_mask_id": 100,
+        "block_diffusion_min_noise": 0.05,
+        "vocab_size": 256,
+        "max_target_length": 2048,
+        "packing": False,
+        "dataset_type": "hf",
+        "hf_path": "parquet",
+        "hardware": "cpu",
+    }
+    cases = (
+        ({"attention_type": "global"}, "attention_type='block_diffusion'"),
+        ({"block_diffusion_mask_id": -1}, "block_diffusion_mask_id"),
+        ({"block_diffusion_mask_id": 256}, "block_diffusion_mask_id"),
+        ({"block_diffusion_min_noise": 0.0}, "block_diffusion_min_noise"),
+        ({"packing": True}, "packing=False"),
+        ({"mtp_num_layers": 1}, "MTP"),
+        ({"num_vocab_tiling": 2}, "vocabulary tiling"),
+        ({"dataset_type": "grain"}, "dataset_type='hf'"),
+        ({"use_dpo": True}, "DPO"),
+        ({"use_sft": True}, "pre-training only"),
+        ({"use_multimodal": True}, "text-only"),
+        ({"block_diffusion_logit_alignment": "shifted"}, "seed_and_mask"),
+        ({"block_diffusion_canvas_policy": "seed_and_mask"}, "same_position/all_masked"),
+        (
+            {
+                "causal_block_size": 1,
+                "block_diffusion_logit_alignment": "shifted",
+                "block_diffusion_canvas_policy": "seed_and_mask",
+            },
+            "causal_block_size >= 2",
+        ),
+    )
+    for overrides, expected_regex in cases:
+      with self.subTest(overrides=overrides):
+        values = base_overrides | overrides
+        argv = ["", _BASE_CONFIG_PATH, *(f"{key}={value}" for key, value in values.items())]
+        with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
+          pyconfig.initialize(argv)
+
+  def test_shifted_block_diffusion_requires_seeded_canvas(self):
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "training_objective=block_diffusion",
+            "attention=dot_product",
+            "attention_type=block_diffusion",
+            "causal_block_size=8",
+            "block_diffusion_mask_id=100",
+            "block_diffusion_logit_alignment=shifted",
+            "block_diffusion_canvas_policy=seed_and_mask",
+            "vocab_size=256",
+            "packing=False",
+            "dataset_type=hf",
+            "hf_path=parquet",
+            "hardware=cpu",
+        ]
+    )
+
+    self.assertEqual(config.block_diffusion_logit_alignment, "shifted")
+    self.assertEqual(config.block_diffusion_canvas_policy, "seed_and_mask")
 
   @unittest.mock.patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_env_override(self):
