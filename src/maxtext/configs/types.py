@@ -884,6 +884,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  moe_quantize_token_all_gather: bool = Field(
+      False,
+      description="Whether to quantize token activations to FP8 before All-Gather across EP shards in Ring of Experts.",
+  )
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
       description=(

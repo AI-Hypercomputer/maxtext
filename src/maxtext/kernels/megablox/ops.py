@@ -25,6 +25,7 @@ from maxtext.kernels.megablox import backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.layers import quantizations
+from maxtext.utils import max_logging
 import qwix
 import qwix.pallas as qpl
 import tokamax
@@ -178,13 +179,16 @@ def _gmm_fwd(
   - rhs: [g, k, n] if transpose_rhs=False. [g, n, k] if transpose_rhs=True
   """
 
+  lhs_is_qarray = isinstance(lhs, qpl.QArray)
+  rhs_is_qarray = isinstance(rhs, qpl.QArray)
+
   # Quantize activation and weight
   if quantization_rule:
     # pyrefly: ignore[bad-assignment]
     lhs, rhs = _fwd_quantize_activation_and_weight(
         lhs, rhs, quantization_rule, use_gmm_v2, use_manual_quantization, transpose_rhs
     )
-
+  max_logging.info(f"before QAG: {rhs.shape=}, {lhs.shape=}, {group_sizes.shape=}")
   # Quantization All-Gather (QAG) for weight: only supported for following conditions
   if (
       use_tokamax_backend
@@ -196,6 +200,7 @@ def _gmm_fwd(
   ):
     # pyrefly: ignore[bad-assignment]
     rhs = _fwd_gather_weight(rhs, weight_gather_axes)
+  max_logging.info(f"after QAG: {rhs.shape=}, {lhs.shape=}, {group_sizes.shape=}")
 
   # Backend Execution Routing
   if use_tokamax_backend and not use_gmm_v2:
@@ -226,7 +231,7 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
-  return out, (lhs, rhs, group_sizes, group_offset, partial_sum)  # pyrefly: ignore[bad-return]
+  return out, (lhs, rhs, group_sizes, group_offset, partial_sum, lhs_is_qarray, rhs_is_qarray)  # pyrefly: ignore[bad-return]
 
 
 def _fwd_quantize_activation_and_weight(
@@ -382,14 +387,16 @@ def _fwd_run_tokamax_v2(
     rhs_operand = rhs_operand.qvalue
     rhs_scale = _fwd_prepare_rhs_scale(rhs, transpose_rhs=transpose_rhs)
 
+  lhs_operand = lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs
+
   custom_fwd_tiling = gmm_v2.TileSizes(
       tile_m=tiling[0],
       tile_k=tiling[1],
       tile_n=tiling[2],
   )
 
-  return gmm_v2.gmm_v2(
-      lhs=lhs,  # pyrefly: ignore[bad-argument-type]
+  out = gmm_v2.gmm_v2(
+      lhs=lhs_operand,  # pyrefly: ignore[bad-argument-type]
       rhs=rhs_operand,  # pyrefly: ignore[bad-argument-type]
       group_sizes=group_sizes,
       rhs_scale=rhs_scale,
@@ -397,8 +404,14 @@ def _fwd_run_tokamax_v2(
       preferred_element_type=preferred_element_type,
       partial_sum=partial_sum,
       group_offset=group_offset,
-      lhs_scale=_fwd_prepare_lhs_scale(quantization_rule),
+      lhs_scale=_fwd_prepare_lhs_scale(quantization_rule) if not isinstance(lhs, qpl.QArray) else None,
+      maybe_quantize_lhs=not isinstance(lhs, qpl.QArray),
   )
+
+  if isinstance(lhs, qpl.QArray):
+    out = out * (lhs.scale.squeeze() if lhs.scale.size == 1 else lhs.scale).astype(out.dtype)
+
+  return out
 
 
 def _fwd_run_megablox(
@@ -455,13 +468,21 @@ def _gmm_bwd(
         jnp.ndarray,
         jnp.ndarray | None,
         jnp.ndarray | None,
+        bool,
+        bool,
     ],
     grad: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray | None, jnp.ndarray | None]:
+) -> tuple[
+    jnp.ndarray | qpl.QArray,
+    jnp.ndarray | qpl.QArray,
+    None,
+    None,
+    jnp.ndarray | None,
+    jnp.ndarray | None,
+]:
   """Backward function for throughput GMM VJP."""
-  del preferred_element_type
-  lhs, rhs, group_sizes, group_offset, partial_sum_fwd = residual
-  num_actual_groups = rhs.shape[0]
+  residual_lhs, residual_rhs, group_sizes, group_offset, partial_sum_fwd, lhs_is_qarray, rhs_is_qarray = residual
+  num_actual_groups = residual_rhs.shape[0]
 
   # Jargon used here:
   #  - lhs: input activation in forward pass, possibly quantized.
@@ -474,7 +495,7 @@ def _gmm_bwd(
 
   # 1. Scale Application & QArray Unwrapping
   dlhs_dout, drhs_dout, lhs, rhs = _bwd_prepare_inputs(
-      grad, lhs, rhs, group_sizes, use_gmm_v2, transpose_rhs, quantization_rule
+      grad, residual_lhs, residual_rhs, group_sizes, use_gmm_v2, transpose_rhs, quantization_rule
   )
 
   # 2. Backward Pass Quantization
@@ -523,6 +544,22 @@ def _gmm_bwd(
   drhs = drhs.swapaxes(1, 2) if transpose_rhs else drhs
   dpartial_sum = grad if partial_sum_fwd is not None else None
   d_existing_out = None if use_tokamax_backend else grad
+
+  if lhs_is_qarray and isinstance(residual_lhs, qpl.QArray):
+    lhs_scale = (residual_lhs.scale.squeeze() if residual_lhs.scale.size == 1 else residual_lhs.scale).astype(dlhs.dtype)
+    dlhs = qpl.QArray(
+        qvalue=dlhs * lhs_scale,
+        scale=jnp.zeros_like(residual_lhs.scale),
+        zero_point=jnp.zeros_like(residual_lhs.zero_point) if residual_lhs.zero_point is not None else None,
+        qtype=residual_lhs.qtype,
+    )
+  if rhs_is_qarray and isinstance(residual_rhs, qpl.QArray):
+    drhs = qpl.QArray(
+        qvalue=drhs.astype(residual_rhs.qvalue.dtype) if drhs.dtype != residual_rhs.qvalue.dtype else drhs,
+        scale=jnp.zeros_like(residual_rhs.scale),
+        zero_point=jnp.zeros_like(residual_rhs.zero_point) if residual_rhs.zero_point is not None else None,
+        qtype=residual_rhs.qtype,
+    )
 
   return dlhs, drhs, None, None, d_existing_out, dpartial_sum
 
@@ -574,7 +611,7 @@ def _bwd_prepare_inputs(
   # Apply lhs.scale to drhs_dout, as axis m will disappear in drhs.
   if isinstance(lhs, qpl.QArray):
     # lhs - qvalue: [m, k] scale: [m, 1]
-    drhs_dout *= lhs.scale.astype(grad.dtype)
+    drhs_dout = drhs_dout * (lhs.scale.squeeze() if lhs.scale.size == 1 else lhs.scale).astype(grad.dtype)
     lhs = lhs.qvalue
 
   return dlhs_dout, drhs_dout, lhs, rhs
@@ -725,10 +762,11 @@ def _dlhs_run_tokamax_v2(
       tile_info=custom_dlhs_tiling,
       preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
+      maybe_quantize_lhs=not isinstance(dlhs_dout, qpl.QArray),
   )
 
   if isinstance(dlhs_dout, qpl.QArray):
-    dlhs *= dlhs_dout.scale.astype(dlhs.dtype)
+    dlhs = dlhs * (dlhs_dout.scale.squeeze() if dlhs_dout.scale.size == 1 else dlhs_dout.scale).astype(dlhs.dtype)
 
   return dlhs
 
