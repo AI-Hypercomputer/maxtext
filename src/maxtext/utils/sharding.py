@@ -452,6 +452,7 @@ def _get_nontrival_mesh_axes(mesh):
       "fsdp_transpose",
       "sequence",
       "context",
+      "context_usp_ulysses",
       "context_autoregressive",
       "tensor",
       "tensor_sequence",

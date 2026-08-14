@@ -66,6 +66,7 @@ from maxtext.inference.kvcache import KVQuant, KVTensor
 from maxtext.kernels.attention import jax_flash_attention
 from maxtext.kernels.attention import tokamax_ring_attention
 from maxtext.kernels.attention import ulysses_attention
+from maxtext.kernels.attention import usp_attention
 from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
@@ -702,12 +703,70 @@ class AttentionOp(nnx.Module):
           head_dim_q=1,
           head_dim_kv=1,
           ulysses_size=self.mesh.shape[context_axis],
+          attention_label="TPU Ulysses attention",
       )
       ulysses_attention.validate_dkv_sharding(
           axis_names_q=axis_names_q,
           axis_names_kv=axis_names_kv,
           dkv_dim_q=3,
           dkv_dim_kv=3,
+          attention_label="TPU Ulysses attention",
+      )
+    if self.attention_kernel == "flash" and usp_attention.is_context_parallel_usp_requested(self.config):
+      target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
+      if target_hardware != "tpu":
+        raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
+      if not self.config.use_tokamax_splash:
+        raise ValueError("TPU USP attention requires use_tokamax_splash=True.")
+      if self.config.use_jax_splash:
+        raise ValueError("TPU USP attention requires use_jax_splash=False.")
+      if self.attention_type != AttentionType.GLOBAL:
+        raise ValueError("TPU USP attention is initially supported only for global causal attention.")
+      if self.config.enable_dropout and self.dropout_rate > 0.0:
+        raise ValueError("TPU USP attention does not support dropout yet.")
+      if self.use_ragged_attention:
+        raise ValueError("TPU USP attention does not support ragged attention.")
+
+      ring_axis = self.config.context_sharding
+      ulysses_axis = self.config.ulysses_context_sharding
+      axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
+      axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
+      axis_names_kv = usp_attention.with_usp_sequence_axes(
+          axis_names_kv,
+          ring_axis,
+          ulysses_axis,
+          sequence_dim=2,
+      )
+      usp_attention.validate_usp_mesh_axes(
+          axis_names_q=axis_names_q,
+          axis_names_kv=axis_names_kv,
+          sequence_dim_q=2,
+          sequence_dim_kv=2,
+          mesh=self.mesh,
+          ring_axis=ring_axis,
+          ulysses_axis=ulysses_axis,
+      )
+      if self.mesh.shape[ring_axis] <= 1:
+        raise ValueError("TPU USP attention requires a context parallel mesh axis larger than one.")
+      if self.mesh.shape[ulysses_axis] <= 1:
+        raise ValueError("TPU USP attention requires a context ulysses parallel mesh axis larger than one.")
+      ulysses_attention.validate_head_sharding(
+          axis_names_q=axis_names_q,
+          axis_names_kv=axis_names_kv,
+          mesh=self.mesh,
+          num_query_heads=self.num_query_heads,
+          num_kv_heads=self.num_kv_heads,
+          head_dim_q=1,
+          head_dim_kv=1,
+          ulysses_size=self.mesh.shape[ulysses_axis],
+          attention_label="TPU USP attention",
+      )
+      ulysses_attention.validate_dkv_sharding(
+          axis_names_q=axis_names_q,
+          axis_names_kv=axis_names_kv,
+          dkv_dim_q=3,
+          dkv_dim_kv=3,
+          attention_label="TPU USP attention",
       )
 
     def maybe_create_nnx(einsum, *args):
@@ -1243,6 +1302,28 @@ class AttentionOp(nnx.Module):
         record_max_logits=record_max_logits,
     )
 
+  def _validate_tpu_usp_runtime(
+      self,
+      *,
+      model_mode: str,
+      previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
+      sinks: Array | None = None,
+      indexer_mask: Array | None = None,
+      use_ragged_attention: bool = False,
+      record_max_logits: bool = False,
+  ) -> None:
+    """Validates runtime constraints for the TPU USP path."""
+    usp_attention.validate_usp_runtime(
+        model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        sinks=sinks,
+        indexer_mask=indexer_mask,
+        use_ragged_attention=use_ragged_attention,
+        bidirectional_mask=bidirectional_mask,
+        record_max_logits=record_max_logits,
+    )
+
   def apply_attention(
       self,
       query: Array,
@@ -1278,6 +1359,11 @@ class AttentionOp(nnx.Module):
         raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
       if self.attention_kernel != "flash":
         raise ValueError("TPU Ulysses attention requires attention_kernel='flash'.")
+    if usp_attention.is_context_parallel_usp_requested(self.config):
+      if target_hardware != "tpu":
+        raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
+      if self.attention_kernel != "flash":
+        raise ValueError("TPU USP attention requires attention_kernel='flash'.")
 
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       if lengths is None:
@@ -1524,6 +1610,7 @@ class AttentionOp(nnx.Module):
 
     use_tokamax_ring = tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
     use_ulysses = ulysses_attention.is_context_parallel_ulysses_requested(self.config)
+    use_usp = usp_attention.is_context_parallel_usp_requested(self.config)
     cp_size = self.mesh.shape.get(self.config.context_sharding, 1)
     load_balanced_context_parallel = self.config.context_parallel_load_balance
     if use_tokamax_ring:
@@ -1538,6 +1625,16 @@ class AttentionOp(nnx.Module):
       )
     elif use_ulysses:
       self._validate_tpu_ulysses_runtime(
+          model_mode=model_mode,
+          previous_chunk=previous_chunk,
+          bidirectional_mask=bidirectional_mask,
+          sinks=sinks,
+          indexer_mask=indexer_mask,
+          use_ragged_attention=use_ragged_attention,
+          record_max_logits=record_max_logits,
+      )
+    elif use_usp:
+      self._validate_tpu_usp_runtime(
           model_mode=model_mode,
           previous_chunk=previous_chunk,
           bidirectional_mask=bidirectional_mask,
@@ -1594,6 +1691,27 @@ class AttentionOp(nnx.Module):
       segment_axis_names_kv = ulysses_attention.with_sequence_axis(
           segment_axis_names_kv,
           context_axis,
+          sequence_dim=1,
+      )
+    elif use_usp:
+      ring_axis = self.config.context_sharding
+      ulysses_axis = self.config.ulysses_context_sharding
+      segment_axis_names_q = usp_attention.with_usp_sequence_axes(
+          segment_axis_names_q,
+          ring_axis,
+          ulysses_axis,
+          sequence_dim=1,
+      )
+      axis_names_kv = usp_attention.with_usp_sequence_axes(
+          axis_names_kv,
+          ring_axis,
+          ulysses_axis,
+          sequence_dim=2,
+      )
+      segment_axis_names_kv = usp_attention.with_usp_sequence_axes(
+          segment_axis_names_kv,
+          ring_axis,
+          ulysses_axis,
           sequence_dim=1,
       )
 
@@ -1656,7 +1774,7 @@ class AttentionOp(nnx.Module):
         )
       return sa_config
 
-    if use_tokamax_ring:
+    if use_tokamax_ring or use_usp:
       sa_config, splash_kernel, segment_axis_names_splash_kernel = (
           tokamax_ring_attention.make_sharded_ring_attention_kernel(
               self.config,
@@ -1754,7 +1872,7 @@ class AttentionOp(nnx.Module):
           )
 
     max_logit_value = None
-    if not use_tokamax_ring and not use_ulysses and self.config.use_tokamax_splash:
+    if not use_tokamax_ring and not use_ulysses and not use_usp and self.config.use_tokamax_splash:
       # Create mask
       single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads
       if self.config.use_max_logit_estimate > 0:
@@ -1778,11 +1896,11 @@ class AttentionOp(nnx.Module):
       splash_kernel = wrap_tokamax_splash_kernel(single_head_mask)
       segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
       splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
-    elif not use_tokamax_ring and not use_ulysses and self.config.use_jax_splash:
+    elif not use_tokamax_ring and not use_ulysses and not use_usp and self.config.use_jax_splash:
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
       segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH,))
-    elif not use_tokamax_ring and not use_ulysses:
+    elif not use_tokamax_ring and not use_ulysses and not use_usp:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
 
@@ -1823,7 +1941,9 @@ class AttentionOp(nnx.Module):
     # sequence-sharded and K/V are replicated. For the Tokamax ring path Q, K,
     # V, and segment IDs are all sequence-sharded over the context axis.
     # For Ulysses Q/K/V are sequence-sharded at the boundary and head-sharded
-    # inside the local Splash call.
+    # inside the local Splash call. USP performs the same Ulysses exchange over
+    # its ulysses axis and runs the ring kernel over the ring axis within each
+    # head subset.
 
     if record_max_logits:
       # max_logits will share similar sharding as query but last dim is unrelated to model
@@ -1906,6 +2026,17 @@ class AttentionOp(nnx.Module):
             query, key, value, decoder_segment_ids_tuple, sinks
         )
         attention_output = ulysses_attention.inverse_ulysses_all_to_all(attention_output, context_axis)
+        return attention_output, None
+
+      if use_usp:
+        attention_output = usp_attention.call_usp_attention(
+            query,
+            key,
+            value,
+            decoder_segment_ids_q,
+            splash_kernel,
+            ulysses_axis,
+        )
         return attention_output, None
 
       # The load-balanced all-gather path restores K/V to contiguous order
