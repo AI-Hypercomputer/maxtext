@@ -517,10 +517,18 @@ def replicate_single_device_sharded_arrays(pytree):
 def restore_original_shardings(restored_pytree, original_abstract_pytree):
   """Puts restored state back onto the original abstract state shardings."""
   def _put(restored_leaf, abstract_leaf):
-    if isinstance(restored_leaf, jax.Array) and isinstance(
-        abstract_leaf, (jax.Array, jax.ShapeDtypeStruct)
-    ):
-      if restored_leaf.sharding != abstract_leaf.sharding:
+    if hasattr(restored_leaf, "sharding") and hasattr(abstract_leaf, "sharding"):
+      if restored_leaf.sharding != abstract_leaf.sharding or (
+          hasattr(restored_leaf.sharding, "memory_kind")
+          and hasattr(abstract_leaf.sharding, "memory_kind")
+          and restored_leaf.sharding.memory_kind != abstract_leaf.sharding.memory_kind
+      ):
+        if isinstance(restored_leaf, jax.ShapeDtypeStruct):
+          return jax.ShapeDtypeStruct(
+              restored_leaf.shape,
+              restored_leaf.dtype,
+              sharding=abstract_leaf.sharding,
+          )
         return jax.device_put(restored_leaf, abstract_leaf.sharding)
     return restored_leaf
 

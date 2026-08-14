@@ -24,6 +24,7 @@ import functools
 import os
 import sys
 import logging
+import time
 
 from absl import app
 import optax
@@ -970,8 +971,12 @@ def recover(
               "optimizer": nnx.to_pure_dict(nnx.state(active_state.optimizer)),
           }
           restored_dict = jax.device_put(active_dict, sharding_dict)
-          nnx.update(state.model, restored_dict["model"])
-          nnx.update(state.optimizer, restored_dict["optimizer"])
+          m_state = nnx.state(state.model)
+          nnx.replace_by_pure_dict(m_state, restored_dict["model"])
+          nnx.update(state.model, m_state)
+          opt_state = nnx.state(state.optimizer)
+          nnx.replace_by_pure_dict(opt_state, restored_dict["optimizer"])
+          nnx.update(state.optimizer, opt_state)
           restored_state = state
           restored_step = int(state.optimizer.step.value)
         _logger.info(
@@ -1006,8 +1011,18 @@ def recover(
           replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
           restored_dict = snapshot_mgr.load(replicated_abstract_dict)
           restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
-          nnx.update(state.model, restored_dict["model"])
-          nnx.update(state.optimizer, restored_dict["optimizer"])
+          merged = jax.tree.map(
+              lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
+              restored_dict,
+              abstract_dict,
+              is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+          )
+          m_state = nnx.state(state.model)
+          nnx.replace_by_pure_dict(m_state, merged["model"])
+          nnx.update(state.model, m_state)
+          opt_state = nnx.state(state.optimizer)
+          nnx.replace_by_pure_dict(opt_state, merged["optimizer"])
+          nnx.update(state.optimizer, opt_state)
           restored_state = state
 
         if metric_logger_instance is not None:
@@ -1043,10 +1058,14 @@ def recover(
       )
       break
 
-    except pathways_manager.ScaleUpSignalError as e:
+    except (pathways_manager.ScaleUpSignalError, jax.errors.JaxRuntimeError) as e:
+      if isinstance(e, jax.errors.JaxRuntimeError) and not elastic.is_error_due_to_slice_down(e):
+        raise
       _logger.info(
-          "ScaleUpSignalError caught during recovery: %s. Retrying recovery.", e
+          "Transient slice failure / scale event caught during recovery: %s. Retrying recovery.", e
       )
+      active_state = None
+      time.sleep(2)
 
 
 def train_loop(config, recorder, state=None):
