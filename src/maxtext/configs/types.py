@@ -1719,6 +1719,10 @@ class TrainingLoop(BaseModel):
       -1,
       description="Number of steps to run for each evaluation. -1 runs on entire eval split.",
   )
+  loss_is_preaveraged: bool = Field(
+      False,
+      description="Whether the evaluation hook receives a loss already averaged across evaluation batches.",
+  )
   target_eval_loss: float = Field(
       0.0,
       description="If set, training will stop early when this evaluation loss is reached.",
@@ -3727,8 +3731,6 @@ class MaxTextConfig(
         raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'`.")
       if self.use_dpo:
         raise ValueError("`training_objective='block_diffusion'` is not compatible with DPO.")
-      if self.use_sft:
-        raise ValueError("`training_objective='block_diffusion'` currently supports pre-training only.")
       if self.use_multimodal or self.use_audio:
         raise ValueError("`training_objective='block_diffusion'` currently supports text-only training.")
       valid_model_contracts = {

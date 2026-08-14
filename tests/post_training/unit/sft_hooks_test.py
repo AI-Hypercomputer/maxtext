@@ -14,6 +14,7 @@
 
 """Tests for training and data loading hooks for SFT"""
 
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -73,6 +74,42 @@ class SFTHooksTest(unittest.TestCase):
     batch = {"targets_segmentation": np.array([[1, 1, 0], [1, 0, 0]])}
     total_weights = training_hooks.get_total_weights(batch)
     self.assertEqual(total_weights, 3)
+
+  def test_sft_training_hooks_prefers_explicit_loss_mask(self):
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)
+    training_hooks = sft_hooks.SFTTrainingHooks(self.config, self.mesh, learning_rate_schedule, goodput_recorder=None)
+    batch = {
+        "targets_segmentation": np.ones((2, 4), dtype=np.int32),
+        "targets_loss_mask": np.array([[1, 0, 0, 0], [0, 1, 1, 0]], dtype=np.int32),
+    }
+
+    total_weights = training_hooks.get_total_weights(batch)
+
+    self.assertEqual(total_weights, 3)
+
+  def test_sft_training_hooks_falls_back_from_none_loss_mask(self):
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)
+    training_hooks = sft_hooks.SFTTrainingHooks(self.config, self.mesh, learning_rate_schedule, goodput_recorder=None)
+    batch = {
+        "targets_segmentation": np.array([[1, 1, 0], [1, 0, 0]]),
+        "targets_loss_mask": None,
+    }
+
+    total_weights = training_hooks.get_total_weights(batch)
+
+    self.assertEqual(total_weights, 3)
+
+  def test_preaveraged_eval_loss_is_config_driven(self):
+    training_hooks = object.__new__(sft_hooks.SFTTrainingHooks)
+
+    training_hooks.config = SimpleNamespace(loss_is_preaveraged=False, training_objective="causal_lm")
+    self.assertFalse(training_hooks.eval_loss_is_preaveraged())
+
+    training_hooks.config = SimpleNamespace(loss_is_preaveraged=True, training_objective="causal_lm")
+    self.assertTrue(training_hooks.eval_loss_is_preaveraged())
+
+    training_hooks.config = SimpleNamespace(loss_is_preaveraged=False, training_objective="block_diffusion")
+    self.assertTrue(training_hooks.eval_loss_is_preaveraged())
 
 
 if __name__ == "__main__":

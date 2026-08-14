@@ -20,7 +20,12 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from maxtext.input_pipeline.input_pipeline_utils import BlockDiffusionCorruption, compute_file_sharding, PadOrTrimToMaxLength
+from maxtext.input_pipeline.input_pipeline_utils import (
+    BlockDiffusionCorruption,
+    compute_file_sharding,
+    PadOrTrimToMaxLength,
+    SFTPromptMasking,
+)
 
 
 class BlockDiffusionPaddingTest(unittest.TestCase):
@@ -39,7 +44,15 @@ class BlockDiffusionPaddingTest(unittest.TestCase):
 
     self.assertEqual(
         tuple(field.name for field in dataclasses.fields(transform)),
-        ("block_size", "mask_id", "min_noise", "logit_alignment", "canvas_policy", "axis"),
+        (
+            "block_size",
+            "mask_id",
+            "min_noise",
+            "logit_alignment",
+            "canvas_policy",
+            "axis",
+            "completion_only",
+        ),
     )
     self.assertNotEqual(dataclasses.asdict(transform), dataclasses.asdict(other))
     self.assertIn("block_size=4", repr(transform))
@@ -112,6 +125,116 @@ class BlockDiffusionPaddingTest(unittest.TestCase):
           },
           np.random.default_rng(0),
       )
+
+
+class BlockDiffusionSFTInputTest(unittest.TestCase):
+  """Checks completion roles remain separate from corruption and validity."""
+
+  def _prepared_batch(self):
+    """Builds a block-aligned conversation with two completion spans."""
+    clean = SFTPromptMasking(
+        text_column_name="messages",
+        completion_only=True,
+        max_target_length=8,
+        unk_id=0,
+        training_objective="block_diffusion",
+    ).map(
+        {
+            "messages": [[11, 12], [21, 22], [31], [41]],
+            "is_prompt": [True, False, True, False],
+        }
+    )
+    return PadOrTrimToMaxLength(
+        max_length=8,
+        pad_id=7,
+        config=SimpleNamespace(training_objective="block_diffusion"),
+    ).map(clean)
+
+  def test_role_mask_preserves_clean_targets_and_padding(self):
+    batch = self._prepared_batch()
+
+    np.testing.assert_array_equal(batch["inputs"], batch["targets"])
+    np.testing.assert_array_equal(batch["completion_mask"], [0, 0, 1, 1, 0, 1, 0, 0])
+    np.testing.assert_array_equal(batch["targets_segmentation"], [1, 1, 1, 1, 1, 1, 0, 0])
+    self.assertNotIn("completion_mask_segmentation", batch)
+    self.assertNotIn("completion_mask_position", batch)
+
+  def test_completion_only_corruption_never_supervises_prompt(self):
+    batch = self._prepared_batch()
+    output = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        min_noise=1.0,
+        completion_only=True,
+        axis=0,
+    ).random_map(batch, np.random.default_rng(0))
+
+    completion = batch["completion_mask"] != 0
+    self.assertFalse(output["corruption_mask"][~completion].any())
+    self.assertFalse(output["targets_loss_mask"][~completion].any())
+    np.testing.assert_array_equal(output["targets"], batch["targets"])
+
+  def test_completion_only_corruption_requires_role_mask(self):
+    batch = self._prepared_batch()
+    del batch["completion_mask"]
+
+    with self.assertRaisesRegex(ValueError, "explicit completion_mask"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_none_role_mask(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = None
+
+    with self.assertRaisesRegex(ValueError, "non-None completion_mask"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_future_prompt_in_block(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = np.asarray([0, 0, 1, 1, 1, 0, 0, 0], dtype=np.int32)
+
+    with self.assertRaisesRegex(ValueError, "prompt token after a completion token"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_full_token_corruption_treats_none_role_mask_as_absent(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = None
+
+    output = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        min_noise=1.0,
+        axis=0,
+    ).random_map(batch, np.random.default_rng(0))
+
+    self.assertTrue(output["corruption_mask"][:6].all())
+    self.assertFalse(output["corruption_mask"][6:].any())
+
+  def test_causal_sft_contract_is_unchanged(self):
+    batch = SFTPromptMasking(
+        text_column_name="messages",
+        completion_only=True,
+        max_target_length=4,
+        unk_id=0,
+    ).map({"messages": [[11, 12], [21, 22]], "is_prompt": [True, False]})
+
+    np.testing.assert_array_equal(batch["inputs"], [11, 12, 21, 22])
+    np.testing.assert_array_equal(batch["targets"], [0, 0, 21, 22])
+    self.assertNotIn("completion_mask", batch)
 
 
 class ComputeFileShardingNormalCaseTest(unittest.TestCase):
