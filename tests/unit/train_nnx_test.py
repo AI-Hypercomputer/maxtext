@@ -26,6 +26,7 @@ import unittest
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.layers import nnx_scan
 import numpy as np
 from maxtext.common import train_state_nnx
 from maxtext.common.metric_logger import record_activation_metrics
@@ -109,6 +110,48 @@ class _TinyDecoderMoEBias(_TinyDecoder):
     return out
 
 
+from maxtext.layers.attention_mla import indexer_losses
+
+
+class _MockIndexerLayer(nnx.Module):
+
+  def __init__(self, rngs):
+    self.mock_val = nnx.Param(jnp.zeros(()))
+
+  def __call__(self, carry):
+    self.sow(indexer_losses, "indexer_loss", self.mock_val.get_value())
+    return carry
+
+
+class _TinyDecoderIndexerLoss(_TinyDecoder):
+  """_TinyDecoder that also sows indexer_loss via a scanned layer."""
+
+  def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
+    super().__init__(vocab_size, hidden, rngs)
+
+    self.layers = nnx_scan.create_scanned_layers(
+        _MockIndexerLayer,
+        length=2,
+        param_scan_axis=0,
+        metadata_axis_name="layer",
+        rngs=rngs,
+    )
+
+    # Overwrite the empty parameters generated with our mock test metrics!
+    _, params, other = nnx.split(self.layers, nnx.Param, ...)
+    params.mock_val.value = jnp.array([0.25, 0.75])
+    nnx.update(self.layers, params, other)
+
+  def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+    out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
+
+    def apply_fn(module, carry):
+      return module(carry)
+
+    nnx_scan.apply_scanned_layers(self.layers, carry=None, length=2, param_scan_axis=0, apply_fn=apply_fn)
+    return out
+
+
 def _make_data(batch=2, seq=4, vocab=8):
   return {
       "inputs": jnp.zeros((batch, seq), dtype=jnp.int32),
@@ -182,6 +225,25 @@ class TestLossFnNNX(unittest.TestCase):
     loss, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
     self.assertEqual(float(aux["xent_sum"]), 0.0)
     self.assertEqual(float(loss), 0.0)
+
+  def test_indexer_losses_harvested_and_injected_into_loss(self):
+    cfg = _Cfg()
+    cfg.use_indexer = True
+    cfg.indexer_sparse_training = True
+    cfg.indexer_loss_scaling_factor = 0.1
+    model = _TinyDecoderIndexerLoss(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    loss_without_indexer, _ = pre_train.loss_fn(
+        _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0)), cfg, data, None, None, is_train=True
+    )
+
+    loss, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
+    expected_indexer_loss = 0.5  # mean of 0.25 and 0.75
+
+    self.assertTrue(jnp.isfinite(loss))
+    self.assertAlmostEqual(float(aux["indexer_loss"]), expected_indexer_loss, places=5)
+    self.assertAlmostEqual(float(loss), float(loss_without_indexer) + expected_indexer_loss, places=5)
 
 
 class TestTrainStepNNX(unittest.TestCase):

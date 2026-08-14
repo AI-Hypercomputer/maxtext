@@ -101,10 +101,12 @@ class TokamaxRingAttentionTest(absltest.TestCase):
         self.q = q
         self.kv = kv
 
-    def kernel(q, k, v, segment_ids):
+    def kernel(q, k, v, segment_ids, sinks, indexer_mask):
       captured["segment_ids_type"] = type(segment_ids)
       captured["q_segment_shape"] = segment_ids.q.shape
       captured["kv_segment_shape"] = segment_ids.kv.shape
+      captured["sinks"] = sinks
+      captured["indexer_mask"] = indexer_mask
       return q + k + v
 
     query = jnp.ones((1, 2, 4, 2))
@@ -126,6 +128,70 @@ class TokamaxRingAttentionTest(absltest.TestCase):
     self.assertIs(captured["segment_ids_type"], RingSegmentIds)
     self.assertEqual(captured["q_segment_shape"], (4,))
     self.assertEqual(captured["kv_segment_shape"], (4,))
+    self.assertIsNone(captured["sinks"])
+    self.assertIsNone(captured["indexer_mask"])
+
+  def test_call_ring_attention_threads_indexer_mask_without_segment_ids(self):
+    captured = {}
+
+    def kernel(q, k, v, segment_ids, sinks, indexer_mask):
+      captured["has_indexer_mask"] = indexer_mask is not None
+      captured["indexer_mask_shape"] = indexer_mask.shape
+      return q + k + v
+
+    query = jnp.ones((2, 2, 4, 2))
+    key = jnp.ones((2, 2, 4, 2))
+    value = jnp.ones((2, 2, 4, 2))
+    indexer_mask = jnp.ones((2, 4, 4), dtype=jnp.bool_)
+
+    out = tokamax_ring_attention.call_ring_attention(
+        query,
+        key,
+        value,
+        None,
+        None,
+        kernel,
+        indexer_mask=indexer_mask,
+    )
+
+    self.assertEqual(out.shape, query.shape)
+    self.assertTrue(captured["has_indexer_mask"])
+    self.assertEqual(captured["indexer_mask_shape"], (4, 4))
+
+  def test_call_ring_attention_threads_indexer_mask_with_segment_ids(self):
+    captured = {}
+
+    class RingSegmentIds:
+
+      def __init__(self, q, kv):
+        self.q = q
+        self.kv = kv
+
+    def kernel(q, k, v, segment_ids, sinks, indexer_mask):
+      captured["segment_ids_type"] = type(segment_ids)
+      captured["indexer_mask_shape"] = indexer_mask.shape
+      return q + k + v
+
+    query = jnp.ones((2, 2, 4, 2))
+    key = jnp.ones((2, 2, 4, 2))
+    value = jnp.ones((2, 2, 4, 2))
+    segment_ids = jnp.ones((2, 4), dtype=jnp.int32)
+    indexer_mask = jnp.ones((2, 4, 4), dtype=jnp.bool_)
+
+    with mock.patch.object(tokamax_ring_attention.ring_attention_kernel, "SegmentIds", RingSegmentIds):
+      out = tokamax_ring_attention.call_ring_attention(
+          query,
+          key,
+          value,
+          segment_ids,
+          segment_ids,
+          kernel,
+          indexer_mask=indexer_mask,
+      )
+
+    self.assertEqual(out.shape, query.shape)
+    self.assertIs(captured["segment_ids_type"], RingSegmentIds)
+    self.assertEqual(captured["indexer_mask_shape"], (4, 4))
 
   def test_with_sequence_axis_preserves_partition_spec_type(self):
     spec = jax.sharding.PartitionSpec("data", None, None, "model")

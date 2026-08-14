@@ -664,7 +664,7 @@ class Attention(BaseModel):
       0,
       ge=0,
       description=(
-          "Chunk size over heads dimension for QK attention dot product in mla. "
+          "Chunk size over heads dimension for QK attention dot product in mla.  "
           "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
       ),
   )
@@ -2942,6 +2942,8 @@ class MaxTextConfig(
       raise ValueError("TPU USP attention requires use_tokamax_splash=True.")
     if self.use_jax_splash:
       raise ValueError("TPU USP attention requires use_jax_splash=False.")
+    if self.use_indexer:
+      raise ValueError("TPU USP attention does not support sparse indexer masks.")
     if self.attention_type != "global":
       raise ValueError("TPU USP attention is initially supported only for global causal attention.")
     if self.packing:
@@ -2952,8 +2954,6 @@ class MaxTextConfig(
       raise ValueError("TPU USP attention does not support ragged attention.")
     if self.attention_sink:
       raise ValueError("TPU USP attention does not support attention sinks.")
-    if self.use_indexer:
-      raise ValueError("TPU USP attention does not support sparse indexer masks.")
     if self.use_chunked_prefill:
       raise ValueError("TPU USP attention does not support chunked prefill yet.")
     if self.use_multimodal:
@@ -3639,7 +3639,13 @@ class MaxTextConfig(
             f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
             f"`indexer_n_heads` ({self.indexer_n_heads})."
         )
+
     if self.use_indexer:
+      if self.attention_type != AttentionType.MLA.value:
+        raise ValueError(
+            f"`use_indexer=True` requires `attention_type='{AttentionType.MLA.value}'`, since only the "
+            "MLA indexer produces this mask."
+        )
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
       supports_dot_product = self.attention == "dot_product"
@@ -3816,6 +3822,8 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention requires context_parallel_size > 1.")
       if self.context_sharding != "context":
         raise ValueError("TPU Tokamax ring attention requires context_sharding='context'.")
+      if self.use_indexer and self.dq_reduction_steps != 0:
+        raise ValueError("TPU Tokamax ring attention with sparse indexer mask only supports dq_reduction_steps=0.")
       if self.dq_reduction_steps not in (0, 3):
         raise ValueError("TPU Tokamax ring attention requires dq_reduction_steps to be 0 or 3.")
       if self.max_target_length % (context_parallel_size * context_parallel_size) != 0:
@@ -3844,8 +3852,6 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention does not support ragged attention.")
       if self.attention_sink:
         raise ValueError("TPU Tokamax ring attention does not support attention sinks.")
-      if self.use_indexer:
-        raise ValueError("TPU Tokamax ring attention does not support sparse indexer masks.")
       if self.use_chunked_prefill:
         raise ValueError("TPU Tokamax ring attention does not support chunked prefill yet.")
       if self.moba:
@@ -3883,6 +3889,8 @@ class MaxTextConfig(
         raise ValueError("TPU Ulysses attention requires use_tokamax_splash=True.")
       if self.use_jax_splash:
         raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
+      if self.use_indexer:
+        raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
       if self.attention_type != "global":
         raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
       if self.context_parallel_load_balance:
@@ -3895,8 +3903,6 @@ class MaxTextConfig(
         raise ValueError("TPU Ulysses attention does not support ragged attention.")
       if self.attention_sink:
         raise ValueError("TPU Ulysses attention does not support attention sinks.")
-      if self.use_indexer:
-        raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
       if self.use_chunked_prefill:
         raise ValueError("TPU Ulysses attention does not support chunked prefill yet.")
       if self.use_multimodal:
