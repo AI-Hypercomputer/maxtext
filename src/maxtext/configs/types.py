@@ -1750,6 +1750,30 @@ class ManifoldConstrainedHyperConnections(BaseModel):
           "Practical only for a small mhc_expansion_rate (e.g., k=4)."
       ),
   )
+  use_mhc_pallas_kernel: bool = Field(
+      False,
+      description=(
+          "Whether to use the Pallas TPU kernel implementation for"
+          " mHC-lite when running on TPU. Requires enable_mhc_lite=True."
+      ),
+  )
+  mhc_pallas_kernel_fwd_block_size: int = Field(
+      256,
+      description="Block size for forward pass of MHC Pallas kernel.",
+  )
+  mhc_pallas_kernel_bwd_block_size: int = Field(
+      128,
+      description=(
+          "Block size for backward pass of MHC Pallas kernel. Default of 128 is"
+          " optimal for TPU v7 memory constraints; 256 is optimal for TPU v6."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_mhc_kernel(self) -> "ManifoldConstrainedHyperConnections":
+    if self.use_mhc_pallas_kernel and not self.enable_mhc_lite:
+      raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
+    return self
 
 
 class DilocoParams(BaseModel):

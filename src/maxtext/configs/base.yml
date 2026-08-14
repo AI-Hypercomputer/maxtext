@@ -1339,6 +1339,15 @@ sinkhorn_iterations: 20
 #   the expensive sinkhorn iterations, the downside to this approach is that
 #   it is factorial in k.
 enable_mhc_lite: False
+# Whether to use the Pallas TPU kernel implementation for mHC-lite when running on TPU.
+use_mhc_pallas_kernel: False
+# Block size for forward pass of MHC Pallas kernel.
+mhc_pallas_kernel_fwd_block_size: 256
+# Block size for backward pass of MHC Pallas kernel.
+# The backward pass is more memory intensive, so we were running into OOMs with
+# TPU v7x if we go higher. For TPU v6 (Trillium), there is more VMEM, so 256
+# works and provides better results.
+mhc_pallas_kernel_bwd_block_size: 128
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
