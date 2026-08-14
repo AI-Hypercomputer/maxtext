@@ -871,6 +871,11 @@ def load_orbax_checkpoint(config) -> dict:
   for i, path in enumerate(paths):
     checkpoint_path = epath.Path(path)
     metadata = ckptr.metadata(checkpoint_path)
+    if metadata is None or metadata.item_metadata is None:
+      raise FileNotFoundError(
+          f"Checkpoint not found or metadata is empty at {checkpoint_path}. "
+          "Ensure upstream training completed successfully and saved checkpoints."
+      )
     checkpoint_tree = metadata.item_metadata.tree
     if isinstance(checkpoint_tree, dict):
       if "params" in checkpoint_tree:
