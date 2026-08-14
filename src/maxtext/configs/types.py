@@ -407,9 +407,13 @@ class EmergencyCheckpointing(BaseModel):
   )
   local_checkpoint_directory: PathStr = Field("", description="Local directory for emergency checkpoints.")
   local_checkpoint_period: NonNegativeInt = Field(0, description="Frequency (in steps) for local emergency checkpoints.")
-  multi_tier_checkpointing_backup_interval_minutes: NonNegativeInt = Field(
-      0,
+  multi_tier_checkpointing_backup_interval_minutes: PositiveInt | None = Field(
+      None,
       description="Interval in minutes to back up local checkpoints to persistent storage.",
+  )
+  multi_tier_checkpointing_backup_interval_steps: PositiveInt | None = Field(
+      None,
+      description="Interval in steps to back up local checkpoints to persistent storage.",
   )
   mtc_data_parallelism: int = Field(
       0,
@@ -3484,8 +3488,23 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_directory` must be set for multi-tier checkpointing.")
       if self.local_checkpoint_period <= 0:
         raise ValueError("`local_checkpoint_period` must be > 0 for multi-tier checkpointing.")
-      if self.multi_tier_checkpointing_backup_interval_minutes <= 0:
-        raise ValueError("`multi_tier_checkpointing_backup_interval_minutes` must be > 0.")
+      if (self.multi_tier_checkpointing_backup_interval_minutes is None) == (
+          self.multi_tier_checkpointing_backup_interval_steps is None
+      ):
+        raise ValueError(
+            "Exactly one of `multi_tier_checkpointing_backup_interval_minutes`"
+            " or `multi_tier_checkpointing_backup_interval_steps` must be"
+            " specified."
+        )
+      if (
+          self.multi_tier_checkpointing_backup_interval_steps is not None
+          and self.multi_tier_checkpointing_backup_interval_steps < self.local_checkpoint_period
+      ):
+        raise ValueError(
+            "`multi_tier_checkpointing_backup_interval_steps`"
+            f" ({self.multi_tier_checkpointing_backup_interval_steps}) must be"
+            f" >= `local_checkpoint_period` ({self.local_checkpoint_period})."
+        )
     if self.colocated_python_checkpointing and not self.enable_single_controller:
       raise ValueError("`colocated_python_checkpointing` is only supported with `enable_single_controller` set to True.")
     if self.enable_emergency_checkpoint:

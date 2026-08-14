@@ -481,9 +481,21 @@ base_output_directory: ""
 # enable_multi_tier_checkpointing=true local_checkpoint_directory="/local" local_checkpoint_period=20 multi_tier_checkpointing_backup_interval_minutes=20
 enable_multi_tier_checkpointing: false
 
-# The interval to backup local checkpoints to the persistent storage(GCS bucket) in minutes.
+# The interval to backup local checkpoints to the persistent storage
+# (GCS bucket) in minutes.
 # It should be a positive number when enabling multi-tier checkpointing.
-multi_tier_checkpointing_backup_interval_minutes: 0
+# Note: This parameter and `multi_tier_checkpointing_backup_interval_steps`
+# are mutually exclusive. Exactly one must be specified when enabling
+# multi-tier checkpointing.
+multi_tier_checkpointing_backup_interval_minutes: null
+
+# The interval to backup local checkpoints to the persistent storage
+# (GCS bucket) in steps.
+# It should be a positive number when enabling multi-tier checkpointing.
+# Note: This parameter and `multi_tier_checkpointing_backup_interval_minutes`
+# are mutually exclusive. Exactly one must be specified when enabling
+# multi-tier checkpointing.
+multi_tier_checkpointing_backup_interval_steps: null
 
 # Number of identical pipelines in job, should be equal to ICI data parallelism * DCN data parallelism.
 # It should be a positive number when enabling multi-tier checkpointing. If set to 0, it will be set to num of slices.
@@ -1359,4 +1371,3 @@ elastic_backup_kind: "snapshot"
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
-

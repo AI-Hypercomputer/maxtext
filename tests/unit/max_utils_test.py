@@ -399,6 +399,7 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
         "enable_multi_tier_checkpointing": False,
         "local_checkpoint_directory": "/tmp/ckpt",
         "multi_tier_checkpointing_backup_interval_minutes": 5,
+        "multi_tier_checkpointing_backup_interval_steps": None,
         "run_name": "test_run",
         "mtc_data_parallelism": 1,
         "num_slices": 2,
@@ -470,6 +471,7 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     mock_mtc.assert_called_once_with(
         local_checkpoint_directory=self._base_keys()["local_checkpoint_directory"],
         backup_interval_minutes=self._base_keys()["multi_tier_checkpointing_backup_interval_minutes"],
+        backup_interval_steps=self._base_keys()["multi_tier_checkpointing_backup_interval_steps"],
         run_name=self._base_keys()["run_name"],
         jax_initialization_timeout_seconds=self._base_keys()["jax_distributed_initialization_timeout"],
         data_parallelism=self._base_keys()["mtc_data_parallelism"],
@@ -485,6 +487,7 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     mock_mtc.assert_called_once_with(
         local_checkpoint_directory=self._base_keys()["local_checkpoint_directory"],
         backup_interval_minutes=self._base_keys()["multi_tier_checkpointing_backup_interval_minutes"],
+        backup_interval_steps=self._base_keys()["multi_tier_checkpointing_backup_interval_steps"],
         run_name=self._base_keys()["run_name"],
         jax_initialization_timeout_seconds=self._base_keys()["jax_distributed_initialization_timeout"],
         data_parallelism=self._base_keys()["mtc_data_parallelism"],
@@ -522,8 +525,50 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     mock_mtc.assert_called_once_with(
         local_checkpoint_directory=self._base_keys()["local_checkpoint_directory"],
         backup_interval_minutes=self._base_keys()["multi_tier_checkpointing_backup_interval_minutes"],
+        backup_interval_steps=self._base_keys()["multi_tier_checkpointing_backup_interval_steps"],
         run_name=self._base_keys()["run_name"],
         jax_initialization_timeout_seconds=self._base_keys()["jax_distributed_initialization_timeout"],
+        data_parallelism=1,
+        num_slices=1,
+        use_colocated_python=True,
+        devices=active_devices,
+    )
+
+  @mock.patch("maxtext.utils.max_utils.elastic_utils.single_controller_mtc_init_kwargs")
+  @mock.patch("maxtext.utils.max_utils.initialize_multi_tier_checkpointing")
+  @mock.patch("jax.distributed.initialize")
+  def test_single_controller_multi_tier_checkpointing_with_steps_override(
+      self, mock_init, mock_mtc, mock_mtc_init_kwargs
+  ):
+    active_devices = (
+        mock.Mock(slice_index=0),
+        mock.Mock(slice_index=0),
+    )
+    mock_mtc_init_kwargs.return_value = {
+        "data_parallelism": 1,
+        "num_slices": 1,
+        "devices": active_devices,
+    }
+    raw_keys = self._base_keys(
+        enable_single_controller=True,
+        enable_multi_tier_checkpointing=True,
+        elastic_enabled=True,
+        mtc_data_parallelism=0,
+        num_slices=2,
+        multi_tier_checkpointing_backup_interval_minutes=None,
+        multi_tier_checkpointing_backup_interval_steps=100,
+    )
+
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+
+    mock_init.assert_not_called()
+    mock_mtc_init_kwargs.assert_called_once_with(raw_keys)
+    mock_mtc.assert_called_once_with(
+        local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
+        backup_interval_minutes=None,
+        backup_interval_steps=100,
+        run_name=raw_keys["run_name"],
+        jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
         data_parallelism=1,
         num_slices=1,
         use_colocated_python=True,
