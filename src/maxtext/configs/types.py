@@ -957,6 +957,12 @@ class MoEGeneral(BaseModel):
       TEGroupedGemmQuantizationType.EMPTY,
       description="Quantization mode for TransformerEngine grouped GEMMs.",
   )
+  moe_quantize_token_all_gather: bool = Field(
+      False,
+      description=(
+          "Whether to quantize token activations to FP8 before All-Gather" " across EP shards in Ring of Experts."
+      ),
+  )
 
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
@@ -3543,6 +3549,32 @@ class MaxTextConfig(
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
         )
 
+  def validate_moe_quantize_token_all_gather(self):
+    """Validates that moe_quantize_token_all_gather is used with supported settings."""
+    if self.moe_quantize_token_all_gather:
+      if not self.sparse_matmul:
+        raise ValueError("moe_quantize_token_all_gather=True requires sparse_matmul=True.")
+      # Token quantized AG is implemented in Ring of Experts (roe_ag_and_route);
+      # standard EP uses ragged all-to-all where no token all-gather occurs.
+      if not self.use_ring_of_experts:
+        raise ValueError("moe_quantize_token_all_gather=True requires" " use_ring_of_experts=True.")
+      # Only Tokamax GMM v2 accepts QArray lhs (unwraps .qvalue and rescales
+      # output with .scale); other backends crash or drop activation scales.
+      if not self.use_gmm_v2:
+        raise ValueError("moe_quantize_token_all_gather=True requires use_gmm_v2=True.")
+      # Embedding chunking slices along the contracting dimension and re-executes
+      # routing collectives per chunk; not supported with token quantization.
+      if self.num_moe_emb_chunks > 0:
+        raise ValueError("moe_quantize_token_all_gather=True does not support" " num_moe_emb_chunks > 0.")
+      # Static/fixed scaling ensures uniform dequantization bounds across all
+      # gathered token slices without cross-shard dynamic scale synchronization.
+      if self.quantization == "" or not self.act_quantization_calibration_method.lower().startswith("fixed"):
+        raise ValueError(
+            "moe_quantize_token_all_gather=True requires quantization to be"
+            " specified and act_quantization_calibration_method to be fixed"
+            " (static scaling mode)."
+        )
+
   @staticmethod
   def _load_mesh_config_from_yaml(rule_value: str) -> dict:
     """Helper to load and parse custom mesh YAML configurations."""
@@ -4381,6 +4413,7 @@ class MaxTextConfig(
       self.validate_ragged_buffer_factor()
       self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
+    self.validate_moe_quantize_token_all_gather()
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:

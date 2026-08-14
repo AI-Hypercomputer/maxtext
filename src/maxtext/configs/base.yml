@@ -244,6 +244,7 @@ use_ring_of_experts: false # whether to use ring of experts for sparse matmul ex
 te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE layers
 te_ep_overflow_check_every_n_steps: 20 # host check interval for TE EP overflow when ragged_buffer_factor limits receive capacity
 te_gmm_quantization: "" # quantization mode for TE GMM matmuls; available options are te_no_quant and te_mxfp8; must be specified when te_moe_block is true
+moe_quantize_token_all_gather: false # whether to quantize token activations to FP8 before All-Gather across EP shards in Ring of Experts
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).

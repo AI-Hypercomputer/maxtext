@@ -132,6 +132,8 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `use_ring_of_experts` (experimental): This feature requires expert parallelism. If enabled, it replaces the standard two All-to-All communications with All-Gather in dispatch and Reduce-Scatter in collect. By gathering inputs across all shards, it allows for local routing and Top-K calculations, followed by result aggregation via Reduce-Scatter. This approach is particularly effective for models with a large Top-K, as it gathers activations before they are replicated k times to reduce communication.
 
+`moe_quantize_token_all_gather`: If enabled, quantizes token activations to FP8 prior to the Ring of Experts All-Gather across the EP mesh axis, reducing inter-chip communication volume by 2x. Requires `use_ring_of_experts=True`, `use_gmm_v2=True`, and static activation calibration. See [Quantization guide](quantization.md) for full pipeline details. Default is `False`.
+
 `moe_fsdp_use_two_stage_all_gather`: If enabled, split the All-Gather operation for MoE weights into two separate stages when using FSDP/FSDP-transpose sharding. This is preferred when 3D All-Gather support is unavailable.
 
 **MoE FSDP Sharding Strategies** (Note: At most one of the following three flags can be enabled at a time):
