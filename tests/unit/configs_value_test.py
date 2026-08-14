@@ -211,6 +211,32 @@ class ConfigTest(absltest.TestCase):
     self.assertTrue(config.context_parallel_load_balance)
     self.assertTrue(config.packing)
 
+  def test_tpu_tokamax_ring_config_validation_accepts_indexer(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_indexer=True",
+        "q_lora_rank=1",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.use_indexer)
+    self.assertEqual(config.attention_type, "mla")
+
   def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
     base_args = [
         "",
@@ -262,7 +288,6 @@ class ConfigTest(absltest.TestCase):
         ),
         (["use_ragged_attention=True"], [], "ragged attention"),
         (["attention_sink=True"], [], "attention sinks"),
-        (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
         (["use_chunked_prefill=True"], [], "chunked prefill"),
         (["moba=True"], [], "MoBA"),
         (["use_multimodal=True"], [], "multimodal"),
@@ -389,7 +414,7 @@ class ConfigTest(absltest.TestCase):
         (["context_sharding=expert"], [], "context_sharding"),
         (["use_ragged_attention=True"], [], "ragged attention"),
         (["attention_sink=True"], [], "attention sinks"),
-        (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
+        (["use_indexer=True", "attention_type=mla", "q_lora_rank=1"], [], "sparse indexer"),
         (["use_chunked_prefill=True"], [], "chunked prefill"),
         (["moba=True"], [], "MoBA"),
         (["use_multimodal=True"], [], "multimodal"),
@@ -483,7 +508,7 @@ class ConfigTest(absltest.TestCase):
         (["attention_type=mla"], [], "global causal attention"),
         (["use_ragged_attention=True"], [], "ragged attention"),
         (["attention_sink=True"], [], "attention sinks"),
-        (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
+        (["use_indexer=True", "attention_type=mla", "q_lora_rank=1"], [], "sparse indexer"),
         (["use_chunked_prefill=True"], [], "chunked prefill"),
         (["use_multimodal=True"], [], "multimodal"),
         (["dropout_rate=0.1"], [], "dropout"),
@@ -778,6 +803,7 @@ class ConfigTest(absltest.TestCase):
         _BASE_CONFIG_PATH,
         "run_name=test",
         "use_indexer=true",
+        "attention_type=mla",
         "q_lora_rank=1536",
         "attention=dot_product",
         "remat_policy=custom",
@@ -792,6 +818,7 @@ class ConfigTest(absltest.TestCase):
         _BASE_CONFIG_PATH,
         "run_name=test",
         "use_indexer=true",
+        "attention_type=mla",
         "q_lora_rank=1536",
         "attention=dot_product",
         "remat_policy=custom",

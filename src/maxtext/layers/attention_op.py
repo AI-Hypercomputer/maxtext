@@ -1270,6 +1270,12 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
   ) -> None:
     """Validates runtime constraints for the TPU Tokamax ring path."""
+    if getattr(self.config, "use_indexer", False) and indexer_mask is None:
+      raise ValueError(
+          "`indexer_mask` cannot be None when `use_indexer` is True. "
+          "Ring Attention drops its static causal mask when use_indexer is True, "
+          "so passing None would result in no causal masking."
+      )
     tokamax_ring_attention.validate_tokamax_ring_runtime(
         model_mode=model_mode,
         previous_chunk=previous_chunk,
@@ -1696,23 +1702,11 @@ class AttentionOp(nnx.Module):
     elif use_usp:
       ring_axis = self.config.context_sharding
       ulysses_axis = self.config.ulysses_context_sharding
-      segment_axis_names_q = usp_attention.with_usp_sequence_axes(
-          segment_axis_names_q,
-          ring_axis,
-          ulysses_axis,
-          sequence_dim=1,
-      )
       axis_names_kv = usp_attention.with_usp_sequence_axes(
           axis_names_kv,
           ring_axis,
           ulysses_axis,
           sequence_dim=2,
-      )
-      segment_axis_names_kv = usp_attention.with_usp_sequence_axes(
-          segment_axis_names_kv,
-          ring_axis,
-          ulysses_axis,
-          sequence_dim=1,
       )
 
     devices_in_data_fsdp = self.mesh.shape.get("data", 1) * self.mesh.shape.get("fsdp", 1)
@@ -1784,6 +1778,7 @@ class AttentionOp(nnx.Module):
               ring_axis=self.config.context_sharding,
               attn_logits_soft_cap=attn_logits_soft_cap,
               maybe_shard_with_pspec=self._maybe_shard_with_pspec,
+              mask=None,
           )
       )
     elif use_ulysses:
@@ -1999,6 +1994,7 @@ class AttentionOp(nnx.Module):
             decoder_segment_ids_q,
             decoder_segment_ids_kv,
             splash_kernel,
+            indexer_mask=indexer_mask,
         )
         return attention_output, None
 
@@ -2044,12 +2040,21 @@ class AttentionOp(nnx.Module):
       if cp_size > 1 and load_balanced_context_parallel:
         key = max_utils.reorder_sequence(tensor=key, cp_size=cp_size, seq_dim=2, to_contiguous=True)
         value = max_utils.reorder_sequence(tensor=value, cp_size=cp_size, seq_dim=2, to_contiguous=True)
+
         decoder_segment_ids_unpermuted = max_utils.reorder_sequence(
             tensor=decoder_segment_ids_kv,
             cp_size=cp_size,
             seq_dim=1,
             to_contiguous=True,
         )
+
+        if indexer_mask is not None:
+          indexer_mask = max_utils.reorder_sequence(
+              tensor=indexer_mask,
+              cp_size=cp_size,
+              seq_dim=2,
+              to_contiguous=True,
+          )
 
       if decoder_segment_ids_q is not None:
         if cp_size > 1 and load_balanced_context_parallel:

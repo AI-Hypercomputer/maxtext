@@ -53,6 +53,7 @@ from maxtext.utils import elastic_utils
 
 # pylint: disable=too-many-positional-arguments
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
+from maxtext.layers.attention_mla import indexer_losses
 from maxtext.common import checkpointing, profiler
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -148,6 +149,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # make its specific collection mutable so the MTPBlock can sow into it.
   if config.mtp_eval_target_module > 0 and not is_train:
     mutable_collections.append("mtp_acceptance")
+  if config.use_indexer and is_train:
+    mutable_collections.append("indexer_losses")
+
   sparsity_enabled = is_train and config.weight_sparsity_n and config.weight_sparsity_m
   if sparsity_enabled:
     mutable_collections.append("batch_stats")
@@ -243,6 +247,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       mtp_losses_state = nnx.pop(model, mtp_losses)
       mtp_acceptance_state = nnx.pop(model, mtp_acceptance)
 
+    indexer_losses_state = None
+    if config.use_indexer:
+      # Pop dedicated indexer_losses to harvest auxiliary KL loss and prevent model state PyTree mismatches.
+      indexer_losses_state = nnx.pop(model, indexer_losses)
+
     intermediates = nnx.pop(model, nnx.Intermediate)
     intermediate_outputs = intermediates.to_pure_dict()
 
@@ -251,6 +260,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     if mtp_losses_state is not None and mtp_acceptance_state is not None:
       intermediate_outputs["mtp_losses"] = mtp_losses_state.to_pure_dict()
       intermediate_outputs["mtp_acceptance"] = mtp_acceptance_state.to_pure_dict()
+
+    if indexer_losses_state is not None:
+      intermediate_outputs["indexer_losses"] = indexer_losses_state.to_pure_dict()
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
@@ -328,15 +340,16 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     mtp_loss = calculate_mtp_loss(intermediate_outputs, config)
     loss += mtp_loss
 
-  # get indexer loss
+  # Calculate and add auxiliary Indexer loss
   indexer_loss = 0.0
   if config.use_indexer and config.indexer_loss_scaling_factor > 0.0:
-    indexer_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "self_attention", "indexer_loss")
-    if indexer_losses:
-      indexer_loss = jnp.mean(jnp.concatenate(indexer_losses))
-      loss += indexer_loss
+    # Recursively collect per-layer indexer losses across all scanned transformer layers.
+    indexer_losses_list = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "indexer_loss")
+    if indexer_losses_list:
+      indexer_loss = jnp.mean(jnp.concatenate([jnp.atleast_1d(x) for x in indexer_losses_list]))
+      loss += indexer_loss  # Injects loss into scalar objective to drive backward gradients for indexer weights.
     else:
-      max_logging.debug("No indexer loss found.")
+      max_logging.debug("No Indexer loss found. Defaulting to 0.0.")
 
   # get MoE load balance loss
   moe_lb_loss = 0.0
