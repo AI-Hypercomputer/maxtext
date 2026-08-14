@@ -107,6 +107,8 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
 
   # 1 Validate: every maxtext state key must be covered by param map
   missing_keys = maxtext_state_keys - flattened_map_keys
+  print("Tid2 maxtext:", [k for k in maxtext_state_keys if "Tid2" in k])
+  print("Tid2 map:", [k for k in flattened_map_keys if "Tid2" in k])
   if missing_keys:
     hint = ""
     ckpt_has_scanned = any("scanned_blocks" in k for k in missing_keys)
@@ -477,6 +479,10 @@ def save_safetensor_file(
     state_dict = {k: v for k, v in state_dict.items() if v is not None}
     if "model.safetensors" in state_dict and isinstance(state_dict["model.safetensors"], dict):
       state_dict = state_dict["model.safetensors"]
+    state_dict = {
+        k: (np.ascontiguousarray(v) if isinstance(v, np.ndarray) else v)
+        for k, v in state_dict.items()
+    }
 
     if output_dir_final.startswith("gs://"):
       cloud_path = os.path.join(output_dir_final, file_name)
@@ -998,8 +1004,9 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
 def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   """Extract weights from Linen checkpoint structure.
 
-  Linen checkpoints have structure: {'params': {'decoder': {'decoder_norm': {'scale': array}}}}
-  This function flattens it to: {'params-decoder-decoder_norm-scale': array}
+  Handles multi-collection structures like:
+  {'params': {'decoder': ...}, 'Tid2EidVar': {'decoder': ...}}
+  as well as single collection trees: {'decoder': ...}
 
   Args:
     weights_dict: Linen checkpoint weights dictionary
@@ -1011,7 +1018,10 @@ def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
   for path_tuple, leaf_value in leaves_with_paths:
     path_keys = param_key_parts_from_path(path_tuple)
-    maxtext_param_key = "params-" + "-".join(path_keys)
+    if path_keys and (path_keys[0] == "params" or path_keys[0] == "Tid2EidVar" or path_keys[0].endswith("Var")):
+      maxtext_param_key = "-".join(path_keys)
+    else:
+      maxtext_param_key = "params-" + "-".join(path_keys)
     if not isinstance(leaf_value, (jax.Array, np.ndarray)):
       raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
     result[maxtext_param_key] = leaf_value
@@ -1051,13 +1061,13 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
       max_logging.log("Detected NNX-SFT checkpoint structure")
       return extract_nnx_weights(checkpoint_dict)
   else:
-    # Linen checkpoint: check if there's a nested 'params' key
+    # Linen checkpoint: pass multi-collection dictionary or single collection tree
     if isinstance(actual_weights_dict, dict) and "params" in actual_weights_dict:
-      actual_weights_dict = actual_weights_dict["params"]
-      max_logging.log("Detected Linen checkpoint structure")
+      max_logging.log("Detected Linen checkpoint structure (multi-collection)")
+      return extract_linen_weights(actual_weights_dict)
     else:
       max_logging.log("Detected Linen checkpoint structure (single params layer)")
-    return extract_linen_weights(actual_weights_dict)
+      return extract_linen_weights(actual_weights_dict)
 
 
 def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | None = None, dtype: str = "auto"):
@@ -1234,8 +1244,11 @@ def save_weights_to_checkpoint(
   if device_count > 1:
     jax_weights = shard_jax_weights(jax_weights, device_count, mem_info)
   else:
-    # If number of simulated devices is 1, SKIP sharding and SKIP jax conversion.
-    max_logging.log("Single device: Skip sharding")
+    # If number of simulated devices is 1, SKIP sharding but DO jax conversion.
+    import jax
+    import numpy as np
+    max_logging.log("Single device: Skip sharding, but convert to jax arrays")
+    jax_weights = jax.tree_util.tree_map(lambda x: jax.device_put(x) if isinstance(x, np.ndarray) else x, jax_weights)
 
   # Save checkpoint
   start = time.time()
@@ -1257,7 +1270,7 @@ def save_weights_to_checkpoint(
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
 
   state_new = train_state.TrainState(
-      step=step_number_to_save_new_ckpt, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+      step=step_number_to_save_new_ckpt, apply_fn=None, params=jax_weights if ("params" in jax_weights.keys() if isinstance(jax_weights, dict) else False) else {"params": jax_weights}, tx=None, opt_state={}  # type: ignore
   )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))

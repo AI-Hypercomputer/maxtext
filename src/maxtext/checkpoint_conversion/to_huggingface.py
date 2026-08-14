@@ -246,6 +246,12 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
       ("qk_rope_head_dim", "qk_rope_head_dim"),
       ("v_head_dim", "v_head_dim"),
       ("vocab_size", "vocab_size"),
+      ("hc_mult", "mhc_expansion_rate"),
+      ("num_hash_layers", "first_num_hash_layers"),
+      ("index_n_heads", "indexer_n_heads"),
+      ("index_head_dim", "indexer_head_dim"),
+      ("o_lora_rank", "o_lora_rank"),
+      ("o_groups", "o_groups"),
   ]
 
   if max_config.attention_type == "mla":
@@ -530,13 +536,15 @@ def main(argv: Sequence[str]) -> None:
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict(), config)
   param_map = mappings["param_mapping"]
   shape_map = mappings["shape_mapping"]  # HF target shapes
+  
+
   hook_fn_map = mappings["hook_fn_mapping"]
 
   # 4. Extract and transform weights for Linen/NNX-SFT/NNX-RL checkpoints
   maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
 
   # Validate that checkpoint keys match the parameter mapping
-  state_keys = {k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict}
+  state_keys = {k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict }
   filtered_map_keys = validate_and_filter_param_map_keys(param_map, state_keys)
 
   # When not converting a multimodal model, skip vision encoder weights even if

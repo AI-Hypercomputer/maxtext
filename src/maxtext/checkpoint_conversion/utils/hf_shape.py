@@ -576,9 +576,9 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
         shared_intermediate_size = moe_intermediate_size * n_shared_experts
         layer_mapping.update(
             {
-                f"{layer_prefix}.mlp.shared_experts.gate_proj.weight": [shared_intermediate_size, hidden_size],
-                f"{layer_prefix}.mlp.shared_experts.up_proj.weight": [shared_intermediate_size, hidden_size],
-                f"{layer_prefix}.mlp.shared_experts.down_proj.weight": [hidden_size, shared_intermediate_size],
+                f"{layer_prefix}.ffn.shared_experts.w1.weight": [shared_intermediate_size, hidden_size],
+                f"{layer_prefix}.ffn.shared_experts.w3.weight": [shared_intermediate_size, hidden_size],
+                f"{layer_prefix}.ffn.shared_experts.w2.weight": [hidden_size, shared_intermediate_size],
             }
         )
 
@@ -1165,105 +1165,89 @@ def QWEN3_VL_HF_WEIGHTS_TO_SHAPE(config):
 
 
 def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
-  """Returns a dictionary mapping HuggingFace weight names to shapes for DeepSeek V4."""
   hidden_size = config["hidden_size"]
   vocab_size = config["vocab_size"]
   num_hidden_layers = config["num_hidden_layers"]
   q_lora_rank = config.get("q_lora_rank", 1024)
   kv_lora_rank = config.get("kv_lora_rank", 512)
-  # MaxText scales o_lora_rank by o_groups to get o_a_out_features (8192)
   o_lora_rank = config.get("o_lora_rank", 1024) * config.get("o_groups", 8)
   num_attention_heads = config["num_attention_heads"]
   head_dim = config["head_dim"]
-
   moe_intermediate_size = config["moe_intermediate_size"]
   n_routed_experts = config["n_routed_experts"]
-
-  # Dynamic hyperparameters replacing hardcoded literals:
-  hc_mult = config.get("hc_mult", 4)
-  hc_dim = (2 * hc_mult) + (hc_mult**2)  # 2(4) + 16 = 24
-  num_hash_layers = config.get("num_hash_layers", 3)  # 3
-  index_n_heads = config.get("index_n_heads", 64)  # 64
-  index_head_dim = config.get("index_head_dim", 128)  # 128
+  hc_mult = config.get("hc_mult", config.get("mhc_expansion_rate", 4))
+  hc_dim = (2 * hc_mult) + (hc_mult**2)
+  num_hash_layers = config.get("num_hash_layers", config.get("first_num_hash_layers", 3))
+  index_n_heads = config.get("index_n_heads", config.get("indexer_n_heads", 64))
+  index_head_dim = config.get("index_head_dim", config.get("indexer_head_dim", 128))
 
   mapping = {
-      "model.embed_tokens.weight": [vocab_size, hidden_size],
-      "model.norm.weight": [hidden_size],
+      "embed.weight": [vocab_size, hidden_size],
+      "norm.weight": [hidden_size],
       "head.weight": [vocab_size, hidden_size],
-      "model.hc_head.hc_fn": [hc_mult, hidden_size * hc_mult],
-      "model.hc_head.hc_base": [hc_mult],
-      "model.hc_head.hc_scale": [1],
+      "hc_head_fn": [hc_mult, hidden_size * hc_mult],
+      "hc_head_base": [hc_mult],
+      "hc_head_scale": [1],
   }
 
   for layer_idx in range(num_hidden_layers):
-    layer_prefix = f"model.layers.{layer_idx}"
+    layer_prefix = f"layers.{layer_idx}"
     layer_mapping = {
-        f"{layer_prefix}.input_layernorm.weight": [hidden_size],
-        f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
-        f"{layer_prefix}.self_attn.q_a_proj.weight": [q_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.q_a_norm.weight": [q_lora_rank],
-        f"{layer_prefix}.self_attn.q_b_proj.weight": [num_attention_heads * head_dim, q_lora_rank],
-        f"{layer_prefix}.self_attn.kv_proj.weight": [kv_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.kv_norm.weight": [kv_lora_rank],
-        f"{layer_prefix}.self_attn.sinks": [num_attention_heads],
-        f"{layer_prefix}.self_attn.o_a_proj.weight": [o_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.o_b_proj.weight": [hidden_size, o_lora_rank],
-        # MHC
-        f"{layer_prefix}.attn_hc.fn": [hc_dim, hidden_size * hc_mult],
-        f"{layer_prefix}.attn_hc.base": [hc_dim],
-        f"{layer_prefix}.attn_hc.scale": [num_hash_layers],
-        f"{layer_prefix}.ffn_hc.fn": [hc_dim, hidden_size * hc_mult],
-        f"{layer_prefix}.ffn_hc.base": [hc_dim],
-        f"{layer_prefix}.ffn_hc.scale": [num_hash_layers],
-        # MLP / MoE Block
-        f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
-        f"{layer_prefix}.mlp.gate.e_score_correction_bias": [n_routed_experts],
-        f"{layer_prefix}.mlp.shared_experts.gate_proj.weight": [moe_intermediate_size, hidden_size],
-        f"{layer_prefix}.mlp.shared_experts.up_proj.weight": [moe_intermediate_size, hidden_size],
-        f"{layer_prefix}.mlp.shared_experts.down_proj.weight": [hidden_size, moe_intermediate_size],
+        f"{layer_prefix}.attn_norm.weight": [hidden_size],
+        f"{layer_prefix}.ffn_norm.weight": [hidden_size],
+        f"{layer_prefix}.attn.wq_a.weight": [q_lora_rank, hidden_size],
+        f"{layer_prefix}.attn.q_norm.weight": [q_lora_rank],
+        f"{layer_prefix}.attn.wq_b.weight": [num_attention_heads * head_dim, q_lora_rank],
+        f"{layer_prefix}.attn.wkv.weight": [config.get("num_key_value_heads", 1)*config.get("head_dim", 64), hidden_size],
+        f"{layer_prefix}.attn.kv_norm.weight": [head_dim],
+        f"{layer_prefix}.attn.attn_sink": [num_attention_heads],
+        f"{layer_prefix}.attn.wo_a.weight": [o_lora_rank, (num_attention_heads * head_dim) // config.get("o_groups", 8)],
+        f"{layer_prefix}.attn.wo_b.weight": [hidden_size, o_lora_rank],
+        f"{layer_prefix}.hc_attn_fn": [hc_dim, hidden_size * hc_mult],
+        f"{layer_prefix}.hc_attn_base": [hc_dim],
+        f"{layer_prefix}.hc_attn_scale": [num_hash_layers],
+        f"{layer_prefix}.hc_ffn_fn": [hc_dim, hidden_size * hc_mult],
+        f"{layer_prefix}.hc_ffn_base": [hc_dim],
+        f"{layer_prefix}.hc_ffn_scale": [num_hash_layers],
+        f"{layer_prefix}.ffn.gate.weight": [n_routed_experts, hidden_size],
+        f"{layer_prefix}.ffn.gate.bias": [n_routed_experts],
     }
+    if layer_idx < num_hash_layers:
+      layer_mapping[f"{layer_prefix}.ffn.gate.tid2eid"] = [vocab_size, config.get("num_experts_per_tok", 2)]
+    
+    # Compressor logic fixing the clash!
+    ratio = [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4][layer_idx] if layer_idx < 43 else 4
+    if ratio > 0:
+        if ratio == 4:
+            layer_mapping[f"{layer_prefix}.attn.compressor.wgate.weight"] = [2 * head_dim, hidden_size]
+            layer_mapping[f"{layer_prefix}.attn.compressor.wkv.weight"] = [2 * head_dim, hidden_size]
+            layer_mapping[f"{layer_prefix}.attn.compressor.norm.weight"] = [head_dim]
+            layer_mapping[f"{layer_prefix}.attn.compressor.ape"] = [ratio, 2 * head_dim]
+            
+            # Indexer (csa only)
+            layer_mapping[f"{layer_prefix}.attn.indexer.compressor.wgate.weight"] = [2 * index_head_dim, hidden_size]
+            layer_mapping[f"{layer_prefix}.attn.indexer.compressor.wkv.weight"] = [2 * index_head_dim, hidden_size]
+            layer_mapping[f"{layer_prefix}.attn.indexer.compressor.norm.weight"] = [index_head_dim]
+            layer_mapping[f"{layer_prefix}.attn.indexer.compressor.ape"] = [ratio, 2 * index_head_dim]
+            layer_mapping[f"{layer_prefix}.attn.indexer.weights_proj.weight"] = [index_n_heads, hidden_size]
+            layer_mapping[f"{layer_prefix}.attn.indexer.wq_b.weight"] = [index_n_heads * index_head_dim, q_lora_rank]
+        else:
+            layer_mapping[f"{layer_prefix}.attn.compressor.wgate.weight"] = [head_dim, hidden_size]
+            layer_mapping[f"{layer_prefix}.attn.compressor.wkv.weight"] = [head_dim, hidden_size]
+            layer_mapping[f"{layer_prefix}.attn.compressor.norm.weight"] = [head_dim]
+            layer_mapping[f"{layer_prefix}.attn.compressor.ape"] = [ratio, head_dim]
 
-    # Experts
-    for e in range(n_routed_experts):
-      layer_mapping[f"{layer_prefix}.mlp.experts.{e}.w1.weight"] = [moe_intermediate_size, hidden_size]
-      layer_mapping[f"{layer_prefix}.mlp.experts.{e}.w3.weight"] = [moe_intermediate_size, hidden_size]
-      layer_mapping[f"{layer_prefix}.mlp.experts.{e}.w2.weight"] = [hidden_size, moe_intermediate_size]
 
-    # Compressors
-    if layer_idx >= 2:
-      c_type = "csa" if (layer_idx % 2 == 0) else "hca"
-      if c_type == "csa":
-        layer_mapping.update(
-            {
-                f"{layer_prefix}.self_attn.compressor.kv_proj.weight": [1024, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.gate_proj.weight": [1024, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.position_bias": [4, 1024],
-                f"{layer_prefix}.self_attn.compressor.kv_norm.weight": [512],
-            }
-        )
-        layer_mapping.update(
-            {
-                f"{layer_prefix}.self_attn.compressor.indexer.gate_proj.weight": [256, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.indexer.kv_proj.weight": [256, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.indexer.q_b_proj.weight": [
-                    index_n_heads * index_head_dim,
-                    q_lora_rank,
-                ],
-                f"{layer_prefix}.self_attn.compressor.indexer.scorer.weights_proj.weight": [index_n_heads, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.indexer.position_bias": [4, 256],
-                f"{layer_prefix}.self_attn.compressor.indexer.kv_norm.weight": [128],
-            }
-        )
-      else:  # hca
-        layer_mapping.update(
-            {
-                f"{layer_prefix}.self_attn.compressor.kv_proj.weight": [512, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.gate_proj.weight": [512, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.position_bias": [128, 512],
-                f"{layer_prefix}.self_attn.compressor.kv_norm.weight": [512],
-            }
-        )
+    for exp_idx in range(n_routed_experts):
+        layer_mapping[f"{layer_prefix}.ffn.experts.{exp_idx}.w1.weight"] = [moe_intermediate_size, hidden_size]
+        layer_mapping[f"{layer_prefix}.ffn.experts.{exp_idx}.w2.weight"] = [hidden_size, moe_intermediate_size]
+        layer_mapping[f"{layer_prefix}.ffn.experts.{exp_idx}.w3.weight"] = [moe_intermediate_size, hidden_size]
+        
+    layer_mapping[f"{layer_prefix}.ffn.shared_experts.w1.weight"] = [moe_intermediate_size, hidden_size]
+    layer_mapping[f"{layer_prefix}.ffn.shared_experts.w3.weight"] = [moe_intermediate_size, hidden_size]
+    layer_mapping[f"{layer_prefix}.ffn.shared_experts.w2.weight"] = [hidden_size, moe_intermediate_size]
 
+        
     mapping.update(layer_mapping)
   return mapping
 

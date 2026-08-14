@@ -1641,7 +1641,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
           config.load_parameters_path,
-          unboxed_abstract_state.params,
+          unboxed_abstract_state if config.pure_nnx else unboxed_abstract_state.params,
           config.checkpoint_storage_concurrent_gb,
           config.checkpoint_storage_use_ocdbt,
           config.checkpoint_storage_use_zarr3,
