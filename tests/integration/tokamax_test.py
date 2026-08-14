@@ -38,15 +38,16 @@ class Train(parameterized.TestCase):
           "quantization": quantization,
           "use_gmm_v2": use_gmm_v2,
           "ici_expert_parallelism": ici_expert_parallelism,
+          "moe_quantize_token_all_gather": moe_quantize_token_all_gather,
       }
-      for base_name, quantization, use_gmm_v2, ici_expert_parallelism in [
-          ("tokamax_v1_bf16", "", False, 1),
-          ("tokamax_v1_fp8", "fp8", False, 1),  # not quantize gmm
-          ("tokamax_v1_fp8_full", "fp8_full", False, 1),  # quantize gmm
-          ("tokamax_v2_bf16", "", True, 1),
-          ("tokamax_v2_fp8_full", "fp8_full", True, 1),
-          ("tokamax_v2_bf16", "", True, 2),
-          ("tokamax_v2_fp8_full", "fp8_full", True, 2),
+      for base_name, quantization, use_gmm_v2, ici_expert_parallelism, moe_quantize_token_all_gather in [
+          ("tokamax_v1_bf16", "", False, 1, False),
+          ("tokamax_v1_fp8", "fp8_full", False, 1, False),
+          ("tokamax_v2_bf16", "", True, 1, False),
+          ("tokamax_v2_fp8", "fp8_full", True, 1, False),
+          ("tokamax_v2_bf16", "", True, 2, False),
+          ("tokamax_v2_fp8", "fp8_full", True, 2, False),
+          ("tokamax_v2_fp8_tag", "fp8_full", True, 2, True),
       ]
   )
   @pytest.mark.tpu_only
@@ -55,13 +56,14 @@ class Train(parameterized.TestCase):
       quantization: str,
       use_gmm_v2: bool,
       ici_expert_parallelism: int,
+      moe_quantize_token_all_gather: bool = False,
   ):
     """Smoke train with small config."""
     sharding_tolerance = 0.22 if ici_expert_parallelism > 1 else 2e-2
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
-        None,
+        "",
         get_test_config_path(),
         f"base_output_directory={test_tmpdir}",
         "run_name=test_smoke_train",
@@ -109,6 +111,7 @@ class Train(parameterized.TestCase):
         "use_tokamax_splash=False",
         # quantization
         f"quantization={quantization}",
+        f"moe_quantize_token_all_gather={moe_quantize_token_all_gather}",
         "use_qwix_quantization=True",
         "weight_quantization_calibration_method=fixed,-224,224",
         "act_quantization_calibration_method=fixed,-224,224",
