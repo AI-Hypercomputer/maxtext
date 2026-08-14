@@ -31,6 +31,7 @@ from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.sft import utils as sft_utils
 
 
 class DummyNNXModel(nnx.Module):
@@ -466,6 +467,59 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     metrics = t.get_metrics(clear_cache=True)
     self.assertIn("loss", metrics[0].weighted_metrics)
     self.assertIn("aux_stat", metrics[0].scalar_metrics)
+
+  def test_fwd_bwd_with_bare_weighted_metric(self):
+    """A loss may return a bare WeightedMetric, carrying no aux metrics."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload()
+
+    def _loss_fn(model, *args, **kwargs):
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+      )
+
+    t.with_loss_fn(_loss_fn)
+    t.fwd_bwd(payload)
+
+    # d(unreduced_sum)/dw is 8.0 per element, scaled by compute_scale() = 1/4.0.
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    metrics = t.get_metrics(clear_cache=True)
+    self.assertIn("loss", metrics[0].weighted_metrics)
+    self.assertAlmostEqual(float(metrics[0].weighted_metrics["loss"].compute().item()), 6.0, places=4)
+    # This form carries no aux, so nothing beyond the loss is recorded.
+    self.assertEmpty(metrics[0].scalar_metrics)
+
+  def test_fwd_bwd_with_tunix_spelled_loss_output(self):
+    """A loss written against Tunix's API behaves identically to the MaxText spelling.
+
+    `abstract_engine.LossOutput` re-exports `tunix.sft.utils.LossOutput`, so a Tunix
+    loss function such as `algo_core.grpo_loss_fn` is accepted by the same branch. The
+    expected values mirror `test_fwd_bwd_with_loss_output_and_aux_metrics`.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload()
+
+    def _tunix_loss_fn(model, *args, **kwargs):
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(
+              unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+          ),
+          aux_metrics={
+              "metric_a": sft_utils.WeightedMetric(unreduced_sum=jnp.array(12.0), denominator=jnp.array(3.0)),
+              "metric_b": jnp.array(0.42),
+          },
+      )
+
+    t.with_loss_fn(_tunix_loss_fn)
+    t.fwd_bwd(payload)
+
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    metrics = t.get_metrics(clear_cache=True)
+    self.assertIn("loss", metrics[0].weighted_metrics)
+    self.assertIn("metric_a", metrics[0].weighted_metrics)
+    self.assertIn("metric_b", metrics[0].scalar_metrics)
+    self.assertAlmostEqual(float(metrics[0].weighted_metrics["loss"].compute().item()), 6.0, places=4)
+    self.assertAlmostEqual(float(metrics[0].weighted_metrics["metric_a"].compute().item()), 4.0, places=4)
 
 
 if __name__ == "__main__":
