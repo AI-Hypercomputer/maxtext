@@ -254,20 +254,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
 
     grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
-    (loss_val, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
-    if isinstance(loss_out, abstract_engine.LossOutput):
-      scale = loss_out.primary_loss.compute_scale()
-      micro_grads = jax.tree.map(lambda g: g * scale, micro_grads)
+    # Every non-raising branch of `diff_wrapper` builds a LossOutput, so `loss_out` is
+    # always one and the gradient scaling below is unconditional. The value returned by
+    # `value_and_grad` is the unreduced sum that was differentiated, which
+    # `loss_out.primary_loss` already carries, so it is discarded here.
+    (_, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
+    scale = loss_out.primary_loss.compute_scale()
+    micro_grads = jax.tree.map(lambda g: g * scale, micro_grads)
 
     micro_grads = jax.tree.map(
         lambda x: (x.astype(self._config.grad_dtype) if hasattr(x, "dtype") and x.dtype == jnp.float32 else x),
         micro_grads,
     )
 
-    if isinstance(loss_out, abstract_engine.LossOutput):
-      return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads
-    else:
-      return loss_val, {}, new_rest, micro_grads
+    return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads
 
   def _update_kernel(self, state_pure, accumulated_grads, micro_step_count, mean_loss):
     """Applies accumulated gradients to update the NNX model state."""
