@@ -16,6 +16,7 @@
 
 import dataclasses
 import functools
+import inspect
 import os
 from typing import Any, Iterable, Optional, Tuple, Union, cast
 
@@ -70,6 +71,7 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
+from maxtext.utils import max_logging
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -1160,24 +1162,48 @@ class Attention(nnx.Module):
     # position. Only the donor writes the cache; shared layers read it as-is.
     update_kv_cache = not self.share_kv_layer
 
-    output, kv_cache = rpa_ops(
-        self.mesh,
-        query,
-        key,
-        value,
-        rpa_kv_cache,
-        md.seq_lens,
-        md.block_tables,
-        md.query_start_loc,
-        md.request_distribution,
-        self.sinks.astype(jnp.float32) if self.sinks is not None else None,
-        1.0,
-        attention_chunk_size,
-        q_scale,
-        k_scale,
-        v_scale,
-        update_kv_cache=update_kv_cache,
-    )
+    sig = inspect.signature(rpa_ops)
+    if "update_kv_cache" in sig.parameters:
+      output, kv_cache = rpa_ops(
+          self.mesh,
+          query,
+          key,
+          value,
+          rpa_kv_cache,
+          md.seq_lens,
+          md.block_tables,
+          md.query_start_loc,
+          md.request_distribution,
+          self.sinks.astype(jnp.float32) if self.sinks is not None else None,
+          1.0,
+          attention_chunk_size,
+          q_scale,
+          k_scale,
+          v_scale,
+          update_kv_cache=update_kv_cache,
+      )
+    else:
+      if not update_kv_cache:
+        max_logging.log(
+            "Warning: update_kv_cache=False requested but not supported by tpu_inference. KV cache might be updated anyway."
+        )
+      output, kv_cache = rpa_ops(
+          self.mesh,
+          query,
+          key,
+          value,
+          rpa_kv_cache,
+          md.seq_lens,
+          md.block_tables,
+          md.query_start_loc,
+          md.request_distribution,
+          self.sinks.astype(jnp.float32) if self.sinks is not None else None,
+          1.0,
+          attention_chunk_size,
+          q_scale,
+          k_scale,
+          v_scale,
+      )
     return output, kv_cache
 
   def __call__(
