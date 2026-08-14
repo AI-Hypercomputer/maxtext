@@ -50,21 +50,39 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self,
       training_config: pyconfig.HyperParameters,
       mesh: jax.sharding.Mesh | None = None,
+      wrap_with_tunix_adapter: bool = False,
+      tokenizer_pad_id: int | None = None,
   ) -> None:
     """Initializes the MaxText trainer state and sharded model.
 
     Args:
       training_config: MaxText HyperParameters configuration instance.
       mesh: Optional SPMD device mesh.
+      wrap_with_tunix_adapter: If True, wraps the model in `TunixMaxTextAdapter` so it accepts Tunix's
+        `model(input_tokens, positions=..., attention_mask=..., cache=...)` call signature and returns
+        `(logits, None)`. Required when driving this engine from a Tunix loss function.
+      tokenizer_pad_id: Tokenizer pad token id, forwarded to the adapter. Required when
+        `wrap_with_tunix_adapter` is True: without it the adapter passes `decoder_segment_ids=None`, MaxText
+        falls back to causal-only masking, and pad positions are attended to -- silently corrupting trainer
+        log-probs on every batch.
 
     Raises:
       TypeError: If training_config is not a pyconfig.HyperParameters instance.
-      ValueError: If training_config.model_name is not specified or empty.
+      ValueError: If training_config.model_name is not specified or empty, or if `wrap_with_tunix_adapter`
+        is requested without `tokenizer_pad_id` or without a `mesh`.
     """
     if not isinstance(training_config, pyconfig.HyperParameters):
       raise TypeError(
           "MaxTextTrainingEngine requires a pyconfig.HyperParameters instance," f" got {type(training_config).__name__}"
       )
+    if wrap_with_tunix_adapter:
+      if tokenizer_pad_id is None:
+        raise ValueError(
+            "wrap_with_tunix_adapter=True requires tokenizer_pad_id. Without it the adapter cannot build "
+            "decoder_segment_ids, so pad positions are attended to and trainer log-probs are silently wrong."
+        )
+      if mesh is None:
+        raise ValueError("wrap_with_tunix_adapter=True requires a mesh; the adapter is built under it.")
     self._config = training_config
     self._mesh = mesh
     self._init_rng = jax.random.PRNGKey(training_config.init_weights_seed)
@@ -73,17 +91,36 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled = False
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
-    self._model = model_creation_utils.from_pretrained(
+    model_or_model_mesh_pair = model_creation_utils.from_pretrained(
         config=self._config,
         mesh=self._mesh,
         model_mode=common_types.MODEL_MODE_TRAIN,
         rng_key=self._init_rng,
+        wrap_with_tunix_adapter=wrap_with_tunix_adapter,
+        tokenizer_pad_id=tokenizer_pad_id,
     )
+    # `from_pretrained` returns `(model, mesh)` when it had to derive the mesh itself, and just the model
+    # when one was supplied. Adopt the derived mesh so `self._model` is always a module and `compile()` can
+    # still build shardings.
+    if self._mesh is None:
+      self._model, self._mesh = model_or_model_mesh_pair
+    else:
+      self._model = model_or_model_mesh_pair
     self._state: Any = None
     self._accumulated_grads: Any = None
     self._micro_step_count = 0
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
-    self._learning_rate_schedule, self._optimizer = train_utils.create_training_optimizer(self._config, self._model)
+    # `create_training_optimizer` returns a raw optax GradientTransformation. `TrainStateNNX.apply_gradients`
+    # calls `optimizer.update(model, grads)`, which is the nnx.Optimizer signature, and
+    # `checkpointing.CheckpointState` expects an nnx.Optimizer too, so wrap it here. Mirrors the `wrt`
+    # selection in `create_train_state_fn` inside `train_utils.setup_train_loop`.
+    self._learning_rate_schedule, tx = train_utils.create_training_optimizer(self._config, self._model)
+    wrt = (
+        getattr(nnx, "LoRAParam", nnx.Param)
+        if getattr(getattr(self._config, "lora", None), "enable_lora", False)
+        else nnx.Param
+    )
+    self._optimizer = nnx.Optimizer(self._model, tx, wrt=wrt)
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(
