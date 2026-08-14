@@ -93,6 +93,17 @@ def _get_training_objective_transform(
   return None
 
 
+def add_default_prompt_if_missing(dataset, text_columns, config):
+  """Inject default prompt if prompt column is missing in dataset (e.g. COCO captioning)."""
+  prompt_col = text_columns[0]
+  # Check if features is None (e.g. streaming IterableDataset) or prompt column is absent
+  features = getattr(dataset, "features", None) or getattr(dataset, "column_names", None)
+  # If so, populate each example with default_prompt
+  if features is None or prompt_col not in features:
+    dataset = dataset.map(lambda ex: {**ex, prompt_col: config.default_prompt})
+  return dataset
+
+
 def vision_sft_preprocessing_pipeline(
     dataset,
     config,
@@ -139,6 +150,8 @@ def vision_sft_preprocessing_pipeline(
         remove_columns=image_column,  # Drop the original image columns
     )
     image_column = "images"
+
+  dataset = add_default_prompt_if_missing(dataset, text_columns, config)
 
   dataset = dataset.select_columns(text_columns + [image_column])
   if image_column != "images":

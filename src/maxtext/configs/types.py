@@ -1403,6 +1403,10 @@ class DatasetGeneral(BaseModel):
   train_image_column: str | list[str] = Field("image", description="Column name(s) for images in the training data.")
   eval_data_columns: list[str] = Field(["text"], description="Column(s) to use from the evaluation data.")
   eval_image_column: str | list[str] = Field("image", description="Column name(s) for images in evaluation data.")
+  default_prompt: str = Field(
+      "",
+      description="Default prompt injected into the dataset when the prompt column is missing.",
+  )
   packing: bool = Field(
       True,
       description="Whether to pack multiple short examples into a single sequence.",

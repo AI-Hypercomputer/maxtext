@@ -736,6 +736,7 @@ train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected
 train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
+default_prompt: ''
 packing: true
 num_epoch: 1
 generate_padding_batch_train: false
