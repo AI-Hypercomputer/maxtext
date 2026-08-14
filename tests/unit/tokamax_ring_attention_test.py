@@ -282,6 +282,7 @@ class TokamaxRingAttentionTest(absltest.TestCase):
         use_splash_scheduler=False,
         ring_scan_unroll=1,
         use_max_logit_estimate=-1,
+        sa_bwd_dkv_megacore=False,
     )
     devices = np.asarray(jax.devices()[:2]).reshape(1, 2)
     # The ring axis is deliberately not named "context" so that the string
