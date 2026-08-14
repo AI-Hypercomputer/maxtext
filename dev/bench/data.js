@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786655164986,
+  "lastUpdate": 1786668550901,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -9623,6 +9623,98 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 167,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Jackson Zhao",
+            "username": "jaonzo",
+            "email": "jacksonzhao@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "916aff2726574522858672b1da87617140158b46",
+          "message": "Reject KV head counts that cannot be sharded across the tensor-parallel mesh.\n\nAttention heads are atomic under tensor parallelism, so the per-layer KV head\ncount has to be divisible by the combined size of the mesh axes that\n`logical_axis_rules` maps the `kv_heads` logical axis onto (by default tensor x\ntensor_sequence x autoregressive).\n\nPreviously an over-sharded mesh -- for example gemma4-26b, whose global\nattention layers use `global_num_kv_heads: 2`, with `ici_tensor_parallelism=4`\n-- failed much later with an opaque XLA divisibility error, or silently left the\nkey/value projection unsharded. `Attention.init_kv_w` now raises a `ValueError`\nnaming the head count, the shard count, the mesh axes responsible, and how to\nfix it.\n\nPiperOrigin-RevId: 964369769",
+          "timestamp": "2026-08-13T23:56:30Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/916aff2726574522858672b1da87617140158b46"
+        },
+        "date": 1786668550313,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1593.1399999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 501.2759999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 27,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 1926.1159999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 169,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 77.571,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 21.66500000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 53,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 53.161,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 63.773999999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 11,
             "unit": "count"
           }
         ]
