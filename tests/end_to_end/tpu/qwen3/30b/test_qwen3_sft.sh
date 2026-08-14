@@ -55,7 +55,9 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     max_target_length=16 \
     weight_dtype=bfloat16 \
     dtype=bfloat16 \
+    ici_expert_parallelism=8 \
     opt_type=sgd
+
 
 # Step 3: Run inference on the checkpoint produced by the SFT run
 python3 -m maxtext.inference.vllm_decode \
