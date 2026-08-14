@@ -452,12 +452,11 @@ class NNXDecoder(nnx.Module):
     config = self.config
 
     if self.is_gemma4_small:
-      if getattr(config, "using_pipeline_parallelism", False):
-        raise ValueError("gemma4_small (Gemma4 E2B/E4B) does not support pipeline parallelism.")
-      if getattr(config, "scan_layers", False):
-        self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
-      else:
-        self._init_gemma4_small_layers(rngs)
+      # Gemma4 E2B/E4B: per-layer-index KV-share donor threading and a distinct attention_type
+      # per layer are not expressible inside nn.scan; pipeline parallelism is also unsupported.
+      if getattr(config, "using_pipeline_parallelism", False) or getattr(config, "scan_layers", False):
+        raise ValueError("gemma4_small (Gemma4 E2B/E4B) does not support pipeline parallelism or scan_layers.")
+      self._init_gemma4_small_layers(rngs)
     elif getattr(config, "using_pipeline_parallelism", False):
       self._init_pipeline_layers(decoder_block_classes, rngs, mesh)
     elif getattr(config, "scan_layers", False):
@@ -926,7 +925,6 @@ class NNXDecoder(nnx.Module):
       kv_caches_stacked=None,
       skip_block_remat: bool = False,
       unroll: int = 1,
-      metadata_axis_name: str = "layers",
       **kwargs,
   ):
     """Runs the layer stack using nnx.scan.
@@ -949,10 +947,6 @@ class NNXDecoder(nnx.Module):
         e.g. per-layer) remat internally, to avoid double rematerialization.
       unroll: Number of scan iterations to unroll into straight-line code
         (forwarded to jax.lax.scan). unroll >= length fully unrolls the loop.
-      metadata_axis_name: The name of the scan axis used during layer initialization.
-        This must perfectly match the string passed to `_create_scanned_layers`
-        (e.g., "layers", "scanned_blocks") to prevent strict JAX `pjit` PyTree
-        metadata mismatch errors when using custom `nnx.Variable` types (like `MoEBiasVar`).
       **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
 
     Returns:
@@ -1080,7 +1074,7 @@ class NNXDecoder(nnx.Module):
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
       # in the sharding metadata. jax.lax.scan emits it at position 0.
-      scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, metadata_axis_name)
+      scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, "layers")
 
       returned_kv_stacked = None
 
@@ -1115,7 +1109,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.GEMMA2: [gemma2.Gemma2DecoderLayer],
         DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],
         DecoderBlockType.GEMMA4: get_scannable(gemma4.Gemma4DecoderLayer, gemma4.Gemma4ScannableBlock),
-        DecoderBlockType.GEMMA4_SMALL: get_scannable(gemma4_small.Gemma4SmallDecoderLayer, gemma4_small.Gemma4SmallScannableBlockToLinen),
+        DecoderBlockType.GEMMA4_SMALL: [gemma4_small.Gemma4SmallDecoderLayer],
         DecoderBlockType.GPT3: [gpt3.Gpt3DecoderLayer],
         DecoderBlockType.QWEN2: [qwen2.Qwen2DecoderLayer],
         DecoderBlockType.QWEN3: [qwen3.Qwen3DecoderLayer],
@@ -1151,8 +1145,6 @@ class NNXDecoder(nnx.Module):
         "mlpwi_1",
         "mlpwi",
         "mlpwo",
-        "per_layer_input_gate",
-        "per_layer_projection",
     ]
     if with_context:
       names.append("context")
@@ -1749,7 +1741,7 @@ class NNXDecoder(nnx.Module):
                   kv_caches[kv_idx] = out[1]
 
     else:
-      if self.is_gemma4_small and not cfg.scan_layers:
+      if self.is_gemma4_small:
         y, kv_caches = self._apply_gemma4_small_layers(
             y,
             decoder_input_tokens,
@@ -1857,13 +1849,6 @@ class NNXDecoder(nnx.Module):
           )
         elif self.is_gemma4:
           y = self._apply_gemma4_scanned_blocks(
-              y,
-              layer_args,
-              layer_kwargs,
-              kv_caches=kv_caches,
-          )
-        elif self.is_gemma4_small:
-          y = self._apply_gemma4_small_scanned_blocks(
               y,
               layer_args,
               layer_kwargs,
@@ -2068,7 +2053,6 @@ class NNXDecoder(nnx.Module):
           deterministic,
           model_mode,
           length=num_full_blocks,
-          metadata_axis_name="scanned_blocks",
           **layer_call_kwargs,
       )
 
@@ -2230,92 +2214,6 @@ class NNXDecoder(nnx.Module):
 
     return y
 
-  
-  def _apply_gemma4_small_scanned_blocks(
-      self,
-      y,
-      layer_args,
-      layer_kwargs,
-      kv_caches=None,
-  ):
-    cfg = self.config
-    import maxtext.utils.maxtext_utils as maxtext_utils
-    import jax
-    from flax import nnx
-
-    pattern = gemma4_small.get_attention_pattern(cfg.model_name)
-    attention_pattern_length = len(pattern)
-    scan_length = cfg.num_decoder_layers // attention_pattern_length
-
-    block_unroll = max(1, scan_length)
-    if scan_length > 0:
-      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(
-          kv_caches, scan_length, attention_pattern_length, stack=False
-      )
-      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
-          self.scanned_blocks,
-          y,
-          *layer_args,
-          length=scan_length,
-          kv_caches_stacked=grouped_kv_caches,
-          skip_block_remat=True,
-          unroll=block_unroll,
-          **layer_kwargs,
-      )
-      maxtext_utils.update_kv_caches_after_scan(
-          kv_caches, grouped_kv_caches, scan_length, attention_pattern_length, stacked=False
-      )
-
-    num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
-    if num_remaining_layers > 0:
-      policy = self.get_remat_policy()
-      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
-
-      remainder_kv = None
-      if kv_caches is not None:
-        start_idx = scan_length * attention_pattern_length
-        remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
-
-      if cfg.use_qwix_quantization or getattr(cfg, 'lora', None) and getattr(cfg.lora, 'lora_weight_qtype', None):
-        call_kwargs = dict(layer_kwargs)
-        if remainder_kv is not None:
-          call_kwargs["kv_cache"] = remainder_kv
-        out_res = self.layers_remainder(y, *layer_args, **call_kwargs)
-        if isinstance(out_res, tuple):
-          y = out_res[0]
-          updated_remainder_kv = out_res[1] if len(out_res) > 1 else None
-        else:
-          y = out_res
-          updated_remainder_kv = None
-      else:
-        def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
-          merged_layer = nnx.merge(graphdef, state_in)
-          call_kwargs = dict(layer_kwargs)
-          if kv_in is not None:
-            call_kwargs["kv_cache"] = kv_in
-          out_res = merged_layer(y_in, *layer_args, **call_kwargs)
-          if isinstance(out_res, tuple):
-            out_y = out_res[0]
-            out_kv = out_res[1] if len(out_res) > 1 else None
-          else:
-            out_y = out_res
-            out_kv = None
-          nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
-          return out_y, out_kv, nnx.state(merged_layer)
-
-        checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
-
-        graphdef, state = nnx.split(self.layers_remainder)
-        y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
-        nnx.update(self.layers_remainder, new_state)
-
-      if kv_caches is not None and updated_remainder_kv is not None:
-        start_idx = scan_length * attention_pattern_length
-        for offset, updated_item in enumerate(updated_remainder_kv):
-          kv_caches[start_idx + offset] = updated_item
-
-    return y
-
   def _apply_gemma4_small_layers(
       self,
       y,
@@ -2340,11 +2238,8 @@ class NNXDecoder(nnx.Module):
 
     layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
     num_kv_shared = cfg.num_kv_shared_layers
-    import jax
-    from flax import nnx
-    import maxtext.utils.maxtext_utils as maxtext_utils
     shared_kv_states: dict[int, tuple[jax.Array, jax.Array]] = {}
-    
+    # tpu-inference allocates one kv_caches slot per non-shared layer; KV-shared layers reuse the donor's slot.
     cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, num_kv_shared)
 
     for lyr in range(cfg.num_decoder_layers):
@@ -2362,20 +2257,51 @@ class NNXDecoder(nnx.Module):
           )
         shared_key, shared_value = shared_kv_states[donor_idx]
 
+      # -------------------------------------------------------------------------------------
+      # START ANNOTATED FIX (Gemma 4 Small OOM Rematerialization Boundary)
+      # -------------------------------------------------------------------------------------
+      # DIFFERENCE FROM BEFORE:
+      # Originally, this was just: `y, kv_cache = layer(y, ...)` followed by `if is_donor: donor_k, donor_v = layer.compute_shared_kv(...)`
+      # Because there was no jax.lax.scan or jax.checkpoint wrapper around those actions natively, the Python loop freely 
+      # unrolled 35 back-to-back layer calls into XLA. XLA's Loop-Invariant Code Motion (LICM) and aggressive scheduling 
+      # co-scheduled them all at once in HBM, blowing past 400GB.
+      
       extract_donor_kv = is_donor
-
       ple_slice = per_layer_inputs[..., lyr, :] if per_layer_inputs is not None else None
 
       cache_idx = cache_index_of[lyr]
       kv_cache = kv_caches[cache_idx] if kv_caches is not None else None
 
-      graphdef_l, state_l = nnx.split(layer)
+      from jax.experimental import xla_metadata
+      
+      # -------------------------------------------------------------------------------------
+      # STEP 1: NNX State Splitting (Sinking State to Explicit Loop Carries)
+      # SAME AS GEMMA 4 MAIN: This is exactly what `_scan_global_layer` in gemma4.py does.
+      # Because JAX optimizations are functional, we cannot let the `layer` (an object) implicitly capture its
+      # own massive parameter weights (4.5GB arrays) inside the closure below. If it does, XLA will hoist those 
+      # constant captures out of the loop and keep them alive forever.
+      # nnx.split safely tears the object into raw, pure PyTree states.
+      #   - `graphdef_l`: The pythonic class skeleton (no tensors).
+      #   - `intermediate_l`: Ephemeral layer activations/metrics (these don't loop, they are newly emitted each step).
+      #   - `other_l`: The massive persistent weights/params (these MUST be explicitly carried iteratively to block LICM).
+      graphdef_l, intermediate_l, other_l = nnx.split(layer, nnx.Intermediate, ...)
+      
+      # We add a leading dimension `[None]` artificially because `jax.lax.scan` demands iterables (`xs`) 
+      # to have a leading batch/sequence dimension. Since `length=1`, its batch dimension is 1.
+      intermediate_xs = jax.tree.map(lambda x: x[None], intermediate_l)
 
-      def pure_layer_fn(graphdef_in, state_in, y_in, kv_c):
-        l_merged = nnx.merge(graphdef_in, state_in)
+      # -------------------------------------------------------------------------------------
+      # STEP 2: The Rematerializable Closure Wrapper
+      # DIFFERENCE FROM BEFORE: We encase BOTH the forward pass AND the KV extraction inside this closure.
+      # If we left KV extraction outside, the JAX remat boundary wouldn't cover it, anchoring the VRAM anyway!
+      def scan_body(carry, intermediate_slice):
+        y_c, other_c, kv_c = carry
+        
+        # We put the layer back together natively for the forward pass using the explicitly looped state `other_c`.
+        l_merged = nnx.merge(graphdef_l, intermediate_slice, other_c)
 
         out = l_merged(
-            y_in,
+            y_c,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
@@ -2385,10 +2311,9 @@ class NNXDecoder(nnx.Module):
             bidirectional_mask=bidirectional_mask_value,
             kv_cache=kv_c,
             attention_metadata=attention_metadata,
-            per_layer_input=ple_slice,
+            per_layer_input=ple_slice, 
             shared_key=shared_key,
             shared_value=shared_value,
-            extract_donor_kv=False,
         )
         if isinstance(out, tuple):
           new_y = out[0]
@@ -2398,12 +2323,22 @@ class NNXDecoder(nnx.Module):
           new_kv = None
 
         donor_kv_out = ()
+        # DIFFERENCE FROM GEMMA 4 MAIN: Main Gemma 4 does not perform heterogeneous donor logic in its 
+        # scanned block. Gemma 4 small HAS to extract KVs here perfectly encapsulated behind the boundary.
         if is_donor:
-          donor_k, donor_v = l_merged.compute_shared_kv(y_in, decoder_positions)
+          donor_k, donor_v = l_merged.compute_shared_kv(y_c, decoder_positions)
           donor_kv_out = (donor_k, donor_v)
-        
-        return new_y, new_kv, donor_kv_out, nnx.state(l_merged)
 
+        # Break the state back apart using nnx.split so the return signature is functionally pure for the scan algorithm.
+        _, new_intermediate, new_other = nnx.split(l_merged, nnx.Intermediate, ...)
+        
+        # Returns: (Loop Carries / Next State), (Outputs we want stacked/returned)
+        return (new_y, new_other, new_kv), (new_intermediate, donor_kv_out)
+
+      # -------------------------------------------------------------------------------------
+      # STEP 3: Applying Checkpoint Policies
+      # SAME AS GEMMA 4 MAIN: MaxText policies ("minimal", "full") determine which tensors to drop.
+      # Wrapping `scan_body` directly with `jax.checkpoint` guarantees the massive MLPs are thrown away mid-flight.
       global_remat_policy = self.get_remat_policy()
       offload_names = maxtext_utils.get_save_and_offload_names(cfg)
       if offload_names[0] or offload_names[1]:
@@ -2411,25 +2346,41 @@ class NNXDecoder(nnx.Module):
         global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
 
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
-      
-      if cfg.remat_policy != "none":
-        run_global_layer = jax.checkpoint(
-            pure_layer_fn,
-            policy=global_remat_policy,
-            prevent_cse=prevent_cse,
+      run_global_layer = jax.checkpoint(
+          scan_body,
+          policy=global_remat_policy,
+          prevent_cse=prevent_cse,
+      )
+
+      # -------------------------------------------------------------------------------------
+      # STEP 4: The Sentinel length=1 Scan execution
+      # SAME AS GEMMA 4 MAIN: This is the critical trick. XLA optimizes `for` loops by flattening them.
+      # But `jax.lax.scan` guarantees a temporal looping block. By passing xla_metadata prohibiting trip-count-one 
+      # simplifications, we intentionally trick XLA. XLA thinks "I must execute this block algorithmically" instead 
+      # of globally, completely blinding it to the fact that it could co-schedule this layer with the next one!
+      with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+        (y, final_other, updated_kv_cache), (stacked_intermediate, stacked_donor_kv) = jax.lax.scan(
+            run_global_layer,
+            (y, other_l, kv_cache), # <--- Explicitly threading the massive PyTree `other_l` to block LICM
+            intermediate_xs,
+            length=1,
         )
-      else:
-        run_global_layer = pure_layer_fn
 
-      y, updated_kv_cache, donor_kv_out, new_state = run_global_layer(graphdef_l, state_l, y, kv_cache)
-      
-      nnx.update(layer, new_state)
+      # Re-apply the post-computation intermediates back onto our overarching python `layer` object so 
+      # standard metrics (like loss) can read from it downstream.
+      intermediate_state = jax.tree.map(lambda x: x[0], stacked_intermediate)
+      nnx.update(layer, final_other, intermediate_state)
 
-      if is_donor and donor_kv_out:
-        shared_kv_states[lyr] = donor_kv_out
+      if is_donor and stacked_donor_kv:
+        donor_kv = jax.tree.map(lambda x: x[0], stacked_donor_kv)
+        shared_kv_states[lyr] = donor_kv
+        shared_key, shared_value = donor_kv
 
       if kv_caches is not None and updated_kv_cache is not None:
         kv_caches[cache_idx] = updated_kv_cache
+      # -------------------------------------------------------------------------------------
+      # END ANNOTATED FIX
+      # -------------------------------------------------------------------------------------
 
     return y, kv_caches
 

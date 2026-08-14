@@ -1,0 +1,1258 @@
+I0813 17:18:00.731737       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_train_step
+I0813 17:18:52.897274       7 deepsea_compiler_hlo_passes.cc:5223] XLA::TPU HLO PostOptimizationPipeline
+I0813 17:19:27.856775       7 latency_hiding_scheduler.cc:4328] [latency-hiding-scheduler] LatencyHidingScheduler current memory usage: 15907101312 bytes. Current limit: 144565499904
+W0813 17:19:37.521903       7 barrier_assignment.cc:649] Number of unique slow barriers: 1
+W0813 17:19:37.521927       7 barrier_assignment.cc:651] Number of times slow barrier appeared: 6
+I0813 17:19:39.146481       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_train_step
+W0813 17:19:42.431679       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.482, operand 8)]; Additional params: []
+W0813 17:19:42.431707       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.482, operand 9)]; Additional params: []
+W0813 17:19:42.431784       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.483, operand 3)]; Additional params: []
+W0813 17:19:42.431786       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.483, operand 4)]; Additional params: []
+W0813 17:19:42.431907       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.484, operand 7)]; Additional params: []
+W0813 17:19:42.431915       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.484, operand 8)]; Additional params: []
+W0813 17:19:42.431982       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.485, operand 2)]; Additional params: []
+W0813 17:19:42.431987       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.485, operand 3)]; Additional params: []
+W0813 17:19:42.432117       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.486, operand 8)]; Additional params: []
+W0813 17:19:42.432121       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.486, operand 9)]; Additional params: []
+W0813 17:19:42.432195       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.487, operand 3)]; Additional params: []
+W0813 17:19:42.432199       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.487, operand 4)]; Additional params: []
+W0813 17:19:42.432319       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.488, operand 8)]; Additional params: []
+W0813 17:19:42.432323       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.488, operand 9)]; Additional params: []
+W0813 17:19:42.432394       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.489, operand 3)]; Additional params: []
+W0813 17:19:42.432397       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.489, operand 4)]; Additional params: []
+W0813 17:19:42.432542       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.490, operand 8)]; Additional params: []
+W0813 17:19:42.432546       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.490, operand 9)]; Additional params: []
+W0813 17:19:42.432612       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.491, operand 3)]; Additional params: []
+W0813 17:19:42.432616       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.491, operand 4)]; Additional params: []
+W0813 17:19:42.432736       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.492, operand 8)]; Additional params: []
+W0813 17:19:42.432740       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.492, operand 9)]; Additional params: []
+W0813 17:19:42.432805       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.493, operand 3)]; Additional params: []
+W0813 17:19:42.432808       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.493, operand 4)]; Additional params: []
+W0813 17:19:42.435637       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.360, operand 0)]; Additional params: []
+W0813 17:19:42.435647       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.360, operand 4)]; Additional params: []
+W0813 17:19:42.435648       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.360, operand 5)]; Additional params: []
+W0813 17:19:42.435650       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.360, operand 11)]; Additional params: []
+W0813 17:19:42.435651       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.360, operand 10)]; Additional params: []
+W0813 17:19:42.435755       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.361, operand 0)]; Additional params: []
+W0813 17:19:42.435760       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.361, operand 4)]; Additional params: []
+W0813 17:19:42.435761       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.361, operand 5)]; Additional params: []
+W0813 17:19:42.435762       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.361, operand 11)]; Additional params: []
+W0813 17:19:42.435764       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.361, operand 10)]; Additional params: []
+W0813 17:19:42.435877       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.362, operand 0)]; Additional params: []
+W0813 17:19:42.435881       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.362, operand 4)]; Additional params: []
+W0813 17:19:42.435883       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.362, operand 5)]; Additional params: []
+W0813 17:19:42.435884       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.362, operand 11)]; Additional params: []
+W0813 17:19:42.435886       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.362, operand 10)]; Additional params: []
+W0813 17:19:42.435997       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.363, operand 0)]; Additional params: []
+W0813 17:19:42.436002       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.363, operand 4)]; Additional params: []
+W0813 17:19:42.436004       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.363, operand 5)]; Additional params: []
+W0813 17:19:42.436005       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.363, operand 11)]; Additional params: []
+W0813 17:19:42.436006       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.363, operand 10)]; Additional params: []
+W0813 17:19:42.436124       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.289, operand 0)]; Additional params: []
+W0813 17:19:42.436129       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.289, operand 3)]; Additional params: []
+W0813 17:19:42.436130       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.289, operand 4)]; Additional params: []
+W0813 17:19:42.436132       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.289, operand 10)]; Additional params: []
+W0813 17:19:42.436133       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.289, operand 11)]; Additional params: []
+W0813 17:19:42.436134       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.289, operand 9)]; Additional params: []
+W0813 17:19:42.436238       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.364, operand 0)]; Additional params: []
+W0813 17:19:42.436242       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.364, operand 4)]; Additional params: []
+W0813 17:19:42.436244       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.364, operand 5)]; Additional params: []
+W0813 17:19:42.436245       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.364, operand 11)]; Additional params: []
+W0813 17:19:42.436247       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.364, operand 10)]; Additional params: []
+W0813 17:19:42.436355       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.365, operand 0)]; Additional params: []
+W0813 17:19:42.436360       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.365, operand 4)]; Additional params: []
+W0813 17:19:42.436361       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.365, operand 5)]; Additional params: []
+W0813 17:19:42.436362       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.365, operand 11)]; Additional params: []
+W0813 17:19:42.436364       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.365, operand 10)]; Additional params: []
+W0813 17:19:42.436469       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.366, operand 0)]; Additional params: []
+W0813 17:19:42.436473       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.366, operand 4)]; Additional params: []
+W0813 17:19:42.436474       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.366, operand 5)]; Additional params: []
+W0813 17:19:42.436475       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.366, operand 11)]; Additional params: []
+W0813 17:19:42.436477       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.366, operand 10)]; Additional params: []
+W0813 17:19:42.436580       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.367, operand 0)]; Additional params: []
+W0813 17:19:42.436584       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.367, operand 4)]; Additional params: []
+W0813 17:19:42.436585       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.367, operand 5)]; Additional params: []
+W0813 17:19:42.436587       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.367, operand 11)]; Additional params: []
+W0813 17:19:42.436589       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.367, operand 10)]; Additional params: []
+W0813 17:19:42.436688       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.298, operand 0)]; Additional params: []
+W0813 17:19:42.436692       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.298, operand 3)]; Additional params: []
+W0813 17:19:42.436693       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.298, operand 4)]; Additional params: []
+W0813 17:19:42.436695       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.298, operand 10)]; Additional params: []
+W0813 17:19:42.436696       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.298, operand 11)]; Additional params: []
+W0813 17:19:42.436697       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.298, operand 9)]; Additional params: []
+W0813 17:19:42.436800       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.368, operand 0)]; Additional params: []
+W0813 17:19:42.436804       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.368, operand 4)]; Additional params: []
+W0813 17:19:42.436806       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.368, operand 5)]; Additional params: []
+W0813 17:19:42.436807       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.368, operand 11)]; Additional params: []
+W0813 17:19:42.436809       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.368, operand 10)]; Additional params: []
+W0813 17:19:42.436911       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.369, operand 0)]; Additional params: []
+W0813 17:19:42.436915       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.369, operand 4)]; Additional params: []
+W0813 17:19:42.436917       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.369, operand 5)]; Additional params: []
+W0813 17:19:42.436919       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.369, operand 11)]; Additional params: []
+W0813 17:19:42.436921       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.369, operand 10)]; Additional params: []
+W0813 17:19:42.437036       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.370, operand 0)]; Additional params: []
+W0813 17:19:42.437041       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.370, operand 4)]; Additional params: []
+W0813 17:19:42.437042       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.370, operand 5)]; Additional params: []
+W0813 17:19:42.437043       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.370, operand 11)]; Additional params: []
+W0813 17:19:42.437045       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.370, operand 10)]; Additional params: []
+W0813 17:19:42.437164       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.371, operand 0)]; Additional params: []
+W0813 17:19:42.437168       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.371, operand 4)]; Additional params: []
+W0813 17:19:42.437170       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.371, operand 5)]; Additional params: []
+W0813 17:19:42.437171       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.371, operand 11)]; Additional params: []
+W0813 17:19:42.437173       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.371, operand 8)]; Additional params: []
+W0813 17:19:42.437174       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.371, operand 10)]; Additional params: []
+W0813 17:19:42.437274       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.307, operand 0)]; Additional params: []
+W0813 17:19:42.437278       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.307, operand 3)]; Additional params: []
+W0813 17:19:42.437280       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.307, operand 4)]; Additional params: []
+W0813 17:19:42.437281       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.307, operand 10)]; Additional params: []
+W0813 17:19:42.437282       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.307, operand 11)]; Additional params: []
+W0813 17:19:42.437283       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.307, operand 9)]; Additional params: []
+W0813 17:19:42.437285       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.307, operand 7)]; Additional params: []
+W0813 17:19:42.437384       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.372, operand 0)]; Additional params: []
+W0813 17:19:42.437388       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.372, operand 4)]; Additional params: []
+W0813 17:19:42.437390       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.372, operand 5)]; Additional params: []
+W0813 17:19:42.437391       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.372, operand 11)]; Additional params: []
+W0813 17:19:42.437393       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.372, operand 10)]; Additional params: []
+W0813 17:19:42.437512       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.373, operand 0)]; Additional params: []
+W0813 17:19:42.437516       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.373, operand 4)]; Additional params: []
+W0813 17:19:42.437517       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.373, operand 5)]; Additional params: []
+W0813 17:19:42.437519       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.373, operand 11)]; Additional params: []
+W0813 17:19:42.437521       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.373, operand 10)]; Additional params: []
+W0813 17:19:42.437631       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.374, operand 0)]; Additional params: []
+W0813 17:19:42.437636       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.374, operand 4)]; Additional params: []
+W0813 17:19:42.437638       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.374, operand 5)]; Additional params: []
+W0813 17:19:42.437639       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.374, operand 11)]; Additional params: []
+W0813 17:19:42.437641       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.374, operand 10)]; Additional params: []
+W0813 17:19:42.437753       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.375, operand 0)]; Additional params: []
+W0813 17:19:42.437758       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.375, operand 4)]; Additional params: []
+W0813 17:19:42.437759       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.375, operand 5)]; Additional params: []
+W0813 17:19:42.437761       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.375, operand 11)]; Additional params: []
+W0813 17:19:42.437763       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.375, operand 10)]; Additional params: []
+W0813 17:19:42.437871       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.316, operand 0)]; Additional params: []
+W0813 17:19:42.437876       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.316, operand 3)]; Additional params: []
+W0813 17:19:42.437877       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.316, operand 4)]; Additional params: []
+W0813 17:19:42.437879       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.316, operand 10)]; Additional params: []
+W0813 17:19:42.437880       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.316, operand 11)]; Additional params: []
+W0813 17:19:42.437882       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.316, operand 9)]; Additional params: []
+W0813 17:19:42.438018       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.376, operand 0)]; Additional params: []
+W0813 17:19:42.438024       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.376, operand 4)]; Additional params: []
+W0813 17:19:42.438025       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.376, operand 5)]; Additional params: []
+W0813 17:19:42.438027       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.376, operand 11)]; Additional params: []
+W0813 17:19:42.438029       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.376, operand 10)]; Additional params: []
+W0813 17:19:42.438141       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.377, operand 0)]; Additional params: []
+W0813 17:19:42.438146       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.377, operand 4)]; Additional params: []
+W0813 17:19:42.438147       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.377, operand 5)]; Additional params: []
+W0813 17:19:42.438149       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.377, operand 11)]; Additional params: []
+W0813 17:19:42.438151       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.377, operand 10)]; Additional params: []
+W0813 17:19:42.438257       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.378, operand 0)]; Additional params: []
+W0813 17:19:42.438262       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.378, operand 4)]; Additional params: []
+W0813 17:19:42.438263       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.378, operand 5)]; Additional params: []
+W0813 17:19:42.438265       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.378, operand 11)]; Additional params: []
+W0813 17:19:42.438267       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.378, operand 10)]; Additional params: []
+W0813 17:19:42.438382       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.379, operand 0)]; Additional params: []
+W0813 17:19:42.438387       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.379, operand 4)]; Additional params: []
+W0813 17:19:42.438388       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.379, operand 5)]; Additional params: []
+W0813 17:19:42.438390       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.379, operand 11)]; Additional params: []
+W0813 17:19:42.438392       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.379, operand 10)]; Additional params: []
+W0813 17:19:42.438496       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.321, operand 0)]; Additional params: []
+W0813 17:19:42.438500       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.321, operand 3)]; Additional params: []
+W0813 17:19:42.438501       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.321, operand 4)]; Additional params: []
+W0813 17:19:42.438503       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.321, operand 10)]; Additional params: []
+W0813 17:19:42.438505       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.321, operand 11)]; Additional params: []
+W0813 17:19:42.438507       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.321, operand 9)]; Additional params: []
+W0813 17:19:42.438614       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.380, operand 0)]; Additional params: []
+W0813 17:19:42.438618       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.380, operand 4)]; Additional params: []
+W0813 17:19:42.438619       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.380, operand 5)]; Additional params: []
+W0813 17:19:42.438621       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.380, operand 11)]; Additional params: []
+W0813 17:19:42.438623       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.380, operand 10)]; Additional params: []
+W0813 17:19:42.438729       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.381, operand 0)]; Additional params: []
+W0813 17:19:42.438734       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.381, operand 4)]; Additional params: []
+W0813 17:19:42.438735       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.381, operand 5)]; Additional params: []
+W0813 17:19:42.438737       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.381, operand 11)]; Additional params: []
+W0813 17:19:42.438739       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.381, operand 10)]; Additional params: []
+W0813 17:19:42.438850       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.382, operand 0)]; Additional params: []
+W0813 17:19:42.438854       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.382, operand 4)]; Additional params: []
+W0813 17:19:42.438856       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.382, operand 5)]; Additional params: []
+W0813 17:19:42.438857       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.382, operand 11)]; Additional params: []
+W0813 17:19:42.438859       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.382, operand 10)]; Additional params: []
+W0813 17:19:42.438978       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.383, operand 0)]; Additional params: []
+W0813 17:19:42.438984       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.383, operand 4)]; Additional params: []
+W0813 17:19:42.438985       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.383, operand 5)]; Additional params: []
+W0813 17:19:42.438987       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.383, operand 11)]; Additional params: []
+W0813 17:19:42.438988       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.383, operand 10)]; Additional params: []
+W0813 17:19:42.439096       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.326, operand 0)]; Additional params: []
+W0813 17:19:42.439101       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.326, operand 3)]; Additional params: []
+W0813 17:19:42.439102       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.326, operand 4)]; Additional params: []
+W0813 17:19:42.439104       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.326, operand 10)]; Additional params: []
+W0813 17:19:42.439105       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.326, operand 11)]; Additional params: []
+W0813 17:19:42.439107       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.326, operand 9)]; Additional params: []
+W0813 17:19:42.439216       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.384, operand 0)]; Additional params: []
+W0813 17:19:42.439220       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.384, operand 4)]; Additional params: []
+W0813 17:19:42.439222       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.384, operand 5)]; Additional params: []
+W0813 17:19:42.439223       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.384, operand 11)]; Additional params: []
+W0813 17:19:42.439225       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.384, operand 10)]; Additional params: []
+W0813 17:19:42.439335       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.385, operand 0)]; Additional params: []
+W0813 17:19:42.439340       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.385, operand 4)]; Additional params: []
+W0813 17:19:42.439342       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.385, operand 5)]; Additional params: []
+W0813 17:19:42.439343       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.385, operand 11)]; Additional params: []
+W0813 17:19:42.439345       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.385, operand 10)]; Additional params: []
+W0813 17:19:42.439451       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.386, operand 0)]; Additional params: []
+W0813 17:19:42.439455       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.386, operand 4)]; Additional params: []
+W0813 17:19:42.439457       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.386, operand 5)]; Additional params: []
+W0813 17:19:42.439458       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.386, operand 11)]; Additional params: []
+W0813 17:19:42.439460       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.386, operand 10)]; Additional params: []
+W0813 17:19:42.439566       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.387, operand 0)]; Additional params: []
+W0813 17:19:42.439570       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.387, operand 4)]; Additional params: []
+W0813 17:19:42.439572       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.387, operand 5)]; Additional params: []
+W0813 17:19:42.439573       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.387, operand 11)]; Additional params: []
+W0813 17:19:42.439577       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.387, operand 10)]; Additional params: []
+W0813 17:19:42.439683       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.331, operand 0)]; Additional params: []
+W0813 17:19:42.439688       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.331, operand 3)]; Additional params: []
+W0813 17:19:42.439689       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.331, operand 4)]; Additional params: []
+W0813 17:19:42.439691       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.331, operand 10)]; Additional params: []
+W0813 17:19:42.439692       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.331, operand 11)]; Additional params: []
+W0813 17:19:42.439694       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.331, operand 9)]; Additional params: []
+W0813 17:19:42.439832       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.454, operand 7)]; Additional params: []
+W0813 17:19:42.439836       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.454, operand 8)]; Additional params: []
+W0813 17:19:42.439905       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.455, operand 2)]; Additional params: []
+W0813 17:19:42.439909       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.455, operand 3)]; Additional params: []
+W0813 17:19:42.440050       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.456, operand 8)]; Additional params: []
+W0813 17:19:42.440054       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.456, operand 9)]; Additional params: []
+W0813 17:19:42.440130       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.457, operand 3)]; Additional params: []
+W0813 17:19:42.440134       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.457, operand 4)]; Additional params: []
+W0813 17:19:42.440260       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.458, operand 8)]; Additional params: []
+W0813 17:19:42.440264       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.458, operand 9)]; Additional params: []
+W0813 17:19:42.440342       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.459, operand 3)]; Additional params: []
+W0813 17:19:42.440346       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.459, operand 4)]; Additional params: []
+W0813 17:19:42.440473       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.460, operand 8)]; Additional params: []
+W0813 17:19:42.440477       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.460, operand 9)]; Additional params: []
+W0813 17:19:42.440552       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.461, operand 3)]; Additional params: []
+W0813 17:19:42.440556       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.461, operand 4)]; Additional params: []
+W0813 17:19:42.440685       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.462, operand 8)]; Additional params: []
+W0813 17:19:42.440689       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.462, operand 9)]; Additional params: []
+W0813 17:19:42.440763       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.463, operand 3)]; Additional params: []
+W0813 17:19:42.440767       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.463, operand 4)]; Additional params: []
+W0813 17:19:42.440887       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.464, operand 7)]; Additional params: []
+W0813 17:19:42.440891       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.464, operand 8)]; Additional params: []
+W0813 17:19:42.440977       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.465, operand 2)]; Additional params: []
+W0813 17:19:42.440982       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.465, operand 3)]; Additional params: []
+W0813 17:19:42.441113       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.466, operand 8)]; Additional params: []
+W0813 17:19:42.441117       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.466, operand 9)]; Additional params: []
+W0813 17:19:42.441191       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.467, operand 3)]; Additional params: []
+W0813 17:19:42.441195       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.467, operand 4)]; Additional params: []
+W0813 17:19:42.441326       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.468, operand 8)]; Additional params: []
+W0813 17:19:42.441330       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.468, operand 9)]; Additional params: []
+W0813 17:19:42.441405       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.469, operand 3)]; Additional params: []
+W0813 17:19:42.441409       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.469, operand 4)]; Additional params: []
+W0813 17:19:42.441535       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.470, operand 8)]; Additional params: []
+W0813 17:19:42.441539       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.470, operand 9)]; Additional params: []
+W0813 17:19:42.441613       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.471, operand 3)]; Additional params: []
+W0813 17:19:42.441617       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.471, operand 4)]; Additional params: []
+W0813 17:19:42.441742       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.472, operand 8)]; Additional params: []
+W0813 17:19:42.441746       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.472, operand 9)]; Additional params: []
+W0813 17:19:42.441820       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.473, operand 3)]; Additional params: []
+W0813 17:19:42.441824       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.473, operand 4)]; Additional params: []
+W0813 17:19:42.441943       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.474, operand 7)]; Additional params: []
+W0813 17:19:42.441947       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.474, operand 8)]; Additional params: []
+W0813 17:19:42.442022       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.475, operand 2)]; Additional params: []
+W0813 17:19:42.442026       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.475, operand 3)]; Additional params: []
+W0813 17:19:42.442150       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.476, operand 8)]; Additional params: []
+W0813 17:19:42.442154       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.476, operand 9)]; Additional params: []
+W0813 17:19:42.442229       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.477, operand 3)]; Additional params: []
+W0813 17:19:42.442233       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.477, operand 4)]; Additional params: []
+W0813 17:19:42.442362       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.478, operand 8)]; Additional params: []
+W0813 17:19:42.442366       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.478, operand 9)]; Additional params: []
+W0813 17:19:42.442441       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.479, operand 3)]; Additional params: []
+W0813 17:19:42.442445       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.479, operand 4)]; Additional params: []
+W0813 17:19:42.442568       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.480, operand 8)]; Additional params: []
+W0813 17:19:42.442571       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.480, operand 9)]; Additional params: []
+W0813 17:19:42.442644       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.481, operand 3)]; Additional params: []
+W0813 17:19:42.442648       7 tpu_custom_call_memory_space_policy.cc:357] Param aliases with a while loop. Thus we cannot color it. Param:  Local params: [Input(pallas_call.481, operand 4)]; Additional params: []
+I0813 17:19:45.934503       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 3m7.03870547525s
+I0813 17:19:47.470747    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:19:47.475656    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:19:47.475750    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:20:06.503843    4353 sparse_core_compiler.cc:643] SparseCore compilation: num_computations = 1
+I0813 17:20:06.522219    4350 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:06.605173    4353 sparse_core_compiler.cc:643] SparseCore compilation: num_computations = 1
+I0813 17:20:11.721787    4353 sparse_core_compiler.cc:643] SparseCore compilation: num_computations = 481
+I0813 17:20:13.027583    5242 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.027665    5238 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.027595    5233 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.027702    5239 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.027724    5226 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.027744    5214 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.028012    5237 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.028054    5212 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.028095    5257 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.028129    5250 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.028514    5185 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.029139    5309 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.029220    5357 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.029665    5259 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.029787    5362 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.031026    5222 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.032417    5353 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.034032    5210 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.034473    5199 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.037263    5369 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.040419    5373 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.041568    5205 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.046896    5240 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.047601    5245 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.052106    5241 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.053498    5217 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.054020    5187 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.054151    5194 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.055319    5191 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.058111    5350 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.061026    5208 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.061534    5227 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.061826    5243 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.064583    5196 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.068149    5267 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.068405    5179 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.069264    5190 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.070106    5184 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.072688    5200 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.072974    5365 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.074633    5291 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.074681    5182 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.077413    5248 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.079560    5225 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.079868    5223 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.079974    5203 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.080556    5310 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.081041    5280 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.081165    5219 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.081777    5335 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.081824    5193 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.082945    5278 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.083452    4278 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.083474    5229 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.084162    5366 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.085206    5318 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.085377    5368 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.086194    5206 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.086901    5231 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.088873    5181 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.089270    5183 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.089312    5319 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.089683    5189 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.090458    5195 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.091981    5177 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.093426    5186 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.093584    5322 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.093990    5304 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.094020    5209 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.095388    5253 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.095827    5336 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.095855    5265 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.096258    5279 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.097865    5234 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.099070    5392 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.099144    5324 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.099367    5298 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.099403    5381 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.099891    5216 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.100281    5359 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.100488    5346 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.101308    5178 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.101487    5306 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.101697    5284 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.101820    5232 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.102118    5361 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.102158    5277 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.102259    5198 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.102294    5218 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.102332    5261 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.103152    5367 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.103347    5308 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.103460    5252 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.104604    5255 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.104845    5230 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.104888    5372 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.106654    5188 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.107493    5332 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.109699    5244 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.109910    5388 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.109940    5204 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.110003    5355 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.110160    5192 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.110246    5301 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.110748    5271 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.110915    5337 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.111166    5176 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.111497    5305 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.112549    5272 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.112579    5213 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.112614    5379 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.113452    5275 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.113752    5325 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.114144    5276 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.114211    5351 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.114350    5299 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.114646    5273 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.114809    5341 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.114915    5386 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.115261    5328 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.115495    5344 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.115713    5342 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.115756    5286 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.115813    5249 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.116337    5343 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.116476    5387 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.116669    5395 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.117196    5251 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.117279    5281 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.117545    5258 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.118016    5220 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.118431    5349 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.119107    5268 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.119752    5254 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.119887    5263 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.120634    5295 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.121038    5371 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.121083    5382 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.121542    5317 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.122468    5389 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.122611    5396 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.123092    5393 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.123223    5340 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.123625    5378 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.123724    5294 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.125153    5246 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.125991    5370 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.126099    5202 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.126345    5354 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.126444    5391 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.126550    5235 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.127173    5383 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.127464    5320 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.127509    5207 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.127737    5307 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.128021    5316 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.128176    5264 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.128230    5326 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.129206    5270 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.129366    5360 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.129841    5334 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.130275    5313 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.130326    5352 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.131011    5312 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.131059    5348 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.131184    5236 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.131276    5358 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.131447    5269 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.131633    5302 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.131834    5260 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.131868    5356 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.131911    5331 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.132102    5224 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.132148    5390 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.132508    4226 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.132723    5197 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.132763    5215 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.133135    5323 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.133178    5201 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.133299    5256 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.133486    5300 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.133614    5221 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.135049    5374 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.135179    5380 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.135258    5211 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.135547    5297 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.136488    5228 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.136845    5364 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.137455    5282 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.138322    5180 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.138586    5293 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.139539    5288 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.139875    5327 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.140144    5315 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.140154    5296 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.140349    5287 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.140529    5363 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.141421    5274 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.141556    5266 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.141597    5339 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.142034    5247 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.142614    5329 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.142675    5314 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.143118    5376 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.143573    5347 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.143621    5285 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.143990    5290 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.144053    5311 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.144750    5330 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.145363    5283 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.145691    5385 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.145947    5262 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.147900    5338 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.148058    5333 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.150983    5289 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.152709    5292 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.152769    5345 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.153271    5321 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.153509    5377 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.153555    5384 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.153605    5375 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.153665    5303 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.154198    5394 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.166620    5398 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.181279    5399 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.310995    5400 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.313891    5401 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+W0813 17:20:13.320247    5399 vectorizing_emitter.cc:968] Using experimental vectorizing shape: INVALID_ARGUMENT: Vectorizing shape must be 1D.
+=== Source Location Trace: ===
+third_party/tensorflow/compiler/xla/util.h:303
+platforms/xla/sparse_core/lowering_util.cc:9604
+W0813 17:20:13.320277    5399 lowering_util.cc:6417] Treat tiling T(256,x) as T(256,x)
+W0813 17:20:13.320286    5399 lowering_util.cc:6417] Treat tiling T(128,x) as T(128,x)
+I0813 17:20:13.321077    5402 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.322757    5404 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+W0813 17:20:13.322754    5280 vectorizing_emitter.cc:968] Using experimental vectorizing shape: INVALID_ARGUMENT: Vectorizing shape must be 1D.
+=== Source Location Trace: ===
+third_party/tensorflow/compiler/xla/util.h:303
+platforms/xla/sparse_core/lowering_util.cc:9604
+W0813 17:20:13.322807    5280 lowering_util.cc:6417] Treat tiling T(256,x) as T(256,x)
+I0813 17:20:13.325075    5403 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.572805    5405 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.595818    5407 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.598820    5406 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:13.600075    5408 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:20:24.995990    5234 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:24.996253    5234 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:24.999610    5343 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:24.999785    5343 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.006927    5248 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.007188    5248 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.010910    5341 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.011207    5341 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.012000    5382 llo_loop.cc:101] [copy.6319] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+I0813 17:20:25.013501    5256 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.013754    5256 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.014673    5272 llo_loop.cc:101] [slice_negate_fusion.33] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+I0813 17:20:25.015570    5331 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.015575    5234 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.015815    5331 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.015836    5234 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.023030    5358 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.023264    5358 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.025752    5382 llo_loop.cc:101] [copy.6319] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+I0813 17:20:25.028546    5331 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.028567    5272 llo_loop.cc:101] [slice_negate_fusion.33] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+I0813 17:20:25.028803    5331 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.063309    5382 llo_loop.cc:101] [copy.6319] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.066333    5272 llo_loop.cc:101] [slice_negate_fusion.33] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.077903    5382 llo_loop.cc:101] [copy.6319] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+I0813 17:20:25.078414    5208 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.078688    5208 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.081976    5272 llo_loop.cc:101] [slice_negate_fusion.33] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+I0813 17:20:25.095244    5363 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.095563    5363 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.122820    5272 llo_loop.cc:101] [slice_negate_fusion.33] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.138826    5272 llo_loop.cc:101] [slice_negate_fusion.33] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+I0813 17:20:25.152321    5224 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.152591    5224 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.154653    5341 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.154741    5208 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.154922    5341 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.155023    5208 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.155371    5355 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.155598    5355 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.155641    5369 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.155913    5369 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.156146    5330 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.156430    5330 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.159613    5355 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.159855    5355 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.159862    5269 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.160098    5269 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.160329    5269 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.160420    5355 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.160427    5269 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.160521    5355 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.161832    5294 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.162099    5294 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.162342    5294 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.162532    5294 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.162552    5178 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.162745    5178 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.162934    5178 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.163215    5178 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.179532    5272 llo_loop.cc:101] [slice_negate_fusion.33] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.195319    5272 llo_loop.cc:101] [slice_negate_fusion.33] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+I0813 17:20:25.270820    5271 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.271671    5271 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.275592    5217 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.277193    5217 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.278927    5182 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.279199    5182 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.292221    5399 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.292506    5399 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.324171    5332 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.324469    5332 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.335005    5344 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.335226    5321 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.335459    5321 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.335574    5344 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.335701    5321 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.335782    5344 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.335783    5336 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.335857    5344 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.336068    5336 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.335793    5321 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.377017    5330 llo_loop.cc:101] [fusion.17847] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.393082    5330 llo_loop.cc:101] [fusion.17847] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.434718    5330 llo_loop.cc:101] [fusion.17847] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.450858    5330 llo_loop.cc:101] [fusion.17847] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.470934    5277 llo_loop.cc:101] [copy.6481] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.486636    5277 llo_loop.cc:101] [copy.6481] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.493056    5330 llo_loop.cc:101] [fusion.17847] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+I0813 17:20:25.496457    5385 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.497105    5385 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.498623    5213 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+I0813 17:20:25.498813    5213 fusion_emitter.cc:1512] Setting dynamic base bound to 0
+W0813 17:20:25.508742    5330 llo_loop.cc:101] [fusion.17847] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.527729    5277 llo_loop.cc:101] [copy.6481] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.543332    5277 llo_loop.cc:101] [copy.6481] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.550386    5330 llo_loop.cc:101] [fusion.17847] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:25.569530    5330 llo_loop.cc:101] [fusion.17847] 0-iteration loop inserted, body will not be executed: start=0, step=1, limit=0
+W0813 17:20:28.518390    5387 lowering_emitter.cc:6166] Successful retry compilation of multiply_reduce_fusion.184 after retry_count=1 
+W0813 17:20:28.518426    5387 lowering_emitter.cc:6166] HLO:
+W0813 17:20:28.518428    5387 lowering_emitter.cc:6166] multiply_reduce_fusion.184 = (f32[]{:T(128)}, f32[12288,192]{0,1:T(8,128)}, f32[12288,192]{0,1:T(8,128)}, f32[12288,192]{0,1:T(8,128)}, f32[]{:T(128)}, /*index=5*/f32[]{:T(128)}, f32[]{:T(128)}, f32[12288,192]{0,1:T(8,128)}, f32[12288,192]{0,1:T(8,128)}, f32[12288,192]{0,1:T(8,128)}) fusion(param.3042, sub.446, sub.445, mul_jit_train_step_.14, param.3643, get-tuple-element.28767, sqrt.542, lt.283, param.3642, get-tuple-element.28753, param.3028, param.3609, param.3608), kind=kLoop, calls=
+W0813 17:20:28.518430    5387 lowering_emitter.cc:6166] {
+W0813 17:20:28.518431    5387 lowering_emitter.cc:6166]   param_0.76813 = f32[12288,192]{0,1:T(8,128)} parameter(0)
+W0813 17:20:28.518432    5387 lowering_emitter.cc:6166]   param_3.51595 = f32[]{:T(128)} parameter(3)
+W0813 17:20:28.518433    5387 lowering_emitter.cc:6166]   mul.75706.clone.1 = f32[12288,192]{0,1:T(8,128)} broadcast(param_3.51595), dimensions={}
+W0813 17:20:28.518434    5387 lowering_emitter.cc:6166]   param_7.9075 = pred[]{:T(512)} parameter(7)
+W0813 17:20:28.518435    5387 lowering_emitter.cc:6166]   select_n.10631.clone.1 = pred[12288,192]{0,1:T(8,128)(4,1)} broadcast(param_7.9075), dimensions={}
+W0813 17:20:28.518436    5387 lowering_emitter.cc:6166]   param_5.20032 = f32[12288,192]{0,1:T(8,128)} parameter(5)
+W0813 17:20:28.518437    5387 lowering_emitter.cc:6166]   param_6.14408 = f32[]{:T(128)} parameter(6)
+W0813 17:20:28.518438    5387 lowering_emitter.cc:6166]   div.29267.clone.1 = f32[12288,192]{0,1:T(8,128)} broadcast(param_6.14408), dimensions={}
+W0813 17:20:28.518439    5387 lowering_emitter.cc:6166]   div.29266.clone.1 = f32[12288,192]{0,1:T(8,128)} divide(param_5.20032, div.29267.clone.1)
+W0813 17:20:28.518440    5387 lowering_emitter.cc:6166]   select_n.10630.clone.1 = f32[12288,192]{0,1:T(8,128)} select(select_n.10631.clone.1, param_5.20032, div.29266.clone.1)
+W0813 17:20:28.518441    5387 lowering_emitter.cc:6166]   constant.9754.clone.1875.clone.1 = f32[]{:T(128)} constant(0.1)
+W0813 17:20:28.518442    5387 lowering_emitter.cc:6166]   broadcast.30016.clone.1 = f32[12288,192]{0,1:T(8,128)} broadcast(constant.9754.clone.1875.clone.1), dimensions={}
+W0813 17:20:28.518443    5387 lowering_emitter.cc:6166]   mul.75710.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(select_n.10630.clone.1, broadcast.30016.clone.1)
+W0813 17:20:28.518443    5387 lowering_emitter.cc:6166]   param_8.6213 = f32[12288,192]{0,1:T(8,128)} parameter(8)
+W0813 17:20:28.518444    5387 lowering_emitter.cc:6166]   constant.9755.clone.938.clone.1 = f32[]{:T(128)} constant(0.9)
+W0813 17:20:28.518445    5387 lowering_emitter.cc:6166]   broadcast.30015.clone.1 = f32[12288,192]{0,1:T(8,128)} broadcast(constant.9755.clone.938.clone.1), dimensions={}
+W0813 17:20:28.518446    5387 lowering_emitter.cc:6166]   mul.75709.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(param_8.6213, broadcast.30015.clone.1)
+W0813 17:20:28.518447    5387 lowering_emitter.cc:6166]   add.53820.clone.1 = f32[12288,192]{0,1:T(8,128)} add(mul.75710.clone.1, mul.75709.clone.1)
+W0813 17:20:28.518448    5387 lowering_emitter.cc:6166]   param_2.67917 = f32[]{:T(128)} parameter(2)
+W0813 17:20:28.518449    5387 lowering_emitter.cc:6166]   div.29263.clone.1 = f32[12288,192]{0,1:T(8,128)} broadcast(param_2.67917), dimensions={}
+W0813 17:20:28.518450    5387 lowering_emitter.cc:6166]   integer_pow.10731.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(select_n.10630.clone.1, select_n.10630.clone.1)
+W0813 17:20:28.518451    5387 lowering_emitter.cc:6166]   constant.9758.clone.938.clone.1 = f32[]{:T(128)} constant(0.05)
+W0813 17:20:28.518452    5387 lowering_emitter.cc:6166]   broadcast.30014.clone.1 = f32[12288,192]{0,1:T(8,128)} broadcast(constant.9758.clone.938.clone.1), dimensions={}
+W0813 17:20:28.518452    5387 lowering_emitter.cc:6166]   mul.75708.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(integer_pow.10731.clone.1, broadcast.30014.clone.1)
+W0813 17:20:28.518456    5387 lowering_emitter.cc:6166]   param_4.28749 = f32[12288,192]{0,1:T(8,128)} parameter(4)
+W0813 17:20:28.518457    5387 lowering_emitter.cc:6166]   constant.9759.clone.938.clone.1 = f32[]{:T(128)} constant(0.95)
+W0813 17:20:28.518458    5387 lowering_emitter.cc:6166]   broadcast.30013.clone.1 = f32[12288,192]{0,1:T(8,128)} broadcast(constant.9759.clone.938.clone.1), dimensions={}
+W0813 17:20:28.518459    5387 lowering_emitter.cc:6166]   mul.75707.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(param_4.28749, broadcast.30013.clone.1)
+W0813 17:20:28.518460    5387 lowering_emitter.cc:6166]   add.53819.clone.1 = f32[12288,192]{0,1:T(8,128)} add(mul.75708.clone.1, mul.75707.clone.1)
+W0813 17:20:28.518461    5387 lowering_emitter.cc:6166]   param_1.88835 = f32[]{:T(128)} parameter(1)
+W0813 17:20:28.518462    5387 lowering_emitter.cc:6166]   div.29262.clone.1 = f32[12288,192]{0,1:T(8,128)} broadcast(param_1.88835), dimensions={}
+W0813 17:20:28.518463    5387 lowering_emitter.cc:6166]   div.29261.clone.1 = f32[12288,192]{0,1:T(8,128)} divide(add.53819.clone.1, div.29262.clone.1)
+W0813 17:20:28.518464    5387 lowering_emitter.cc:6166]   sqrt.2567.clone.1 = f32[12288,192]{0,1:T(8,128)} sqrt(div.29261.clone.1)
+W0813 17:20:28.518465    5387 lowering_emitter.cc:6166]   constant.9749.clone.938.clone.1 = f32[]{:T(128)} constant(1e-08)
+W0813 17:20:28.518466    5387 lowering_emitter.cc:6166]   broadcast.30011.clone.1 = f32[12288,192]{0,1:T(8,128)} broadcast(constant.9749.clone.938.clone.1), dimensions={}
+W0813 17:20:28.518467    5387 lowering_emitter.cc:6166]   add.53818.clone.1 = f32[12288,192]{0,1:T(8,128)} add(sqrt.2567.clone.1, broadcast.30011.clone.1)
+W0813 17:20:28.518467    5387 lowering_emitter.cc:6166]   multiply.15411.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(div.29263.clone.1, add.53818.clone.1)
+W0813 17:20:28.518468    5387 lowering_emitter.cc:6166]   div.29260.clone.1 = f32[12288,192]{0,1:T(8,128)} divide(add.53820.clone.1, multiply.15411.clone.1)
+W0813 17:20:28.518469    5387 lowering_emitter.cc:6166]   mul.75705.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(param_0.76813, broadcast.30016.clone.1)
+W0813 17:20:28.518470    5387 lowering_emitter.cc:6166]   add.53817.clone.1 = f32[12288,192]{0,1:T(8,128)} add(div.29260.clone.1, mul.75705.clone.1)
+W0813 17:20:28.518471    5387 lowering_emitter.cc:6166]   mul.75704.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(mul.75706.clone.1, add.53817.clone.1)
+W0813 17:20:28.518472    5387 lowering_emitter.cc:6166]   add.53816.clone.1 = f32[12288,192]{0,1:T(8,128)} add(param_0.76813, mul.75704.clone.1)
+W0813 17:20:28.518473    5387 lowering_emitter.cc:6166]   square.7218 = f32[12288,192]{0,1:T(8,128)} multiply(add.53816.clone.1, add.53816.clone.1)
+W0813 17:20:28.518474    5387 lowering_emitter.cc:6166]   constant.9730.clone.278 = f32[]{:T(128)} constant(0)
+W0813 17:20:28.518475    5387 lowering_emitter.cc:6166]   reduce.5003 = f32[]{:T(128)} reduce(square.7218, constant.9730.clone.278), dimensions={0,1}, to_apply=
+W0813 17:20:28.518476    5387 lowering_emitter.cc:6166]   {
+W0813 17:20:28.518477    5387 lowering_emitter.cc:6166]     reduce_sum.14901 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.518478    5387 lowering_emitter.cc:6166]     reduce_sum.14902 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.518479    5387 lowering_emitter.cc:6166]     ROOT reduce_sum.14903 = f32[]{:T(128)} add(reduce_sum.14901, reduce_sum.14902), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:28.518480    5387 lowering_emitter.cc:6166]   }
+W0813 17:20:28.518482    5387 lowering_emitter.cc:6166]   reduce.5123.clone.1 = f32[]{:T(128)} reduce(integer_pow.10731.clone.1, constant.9730.clone.278), dimensions={0,1}, to_apply=
+W0813 17:20:28.518484    5387 lowering_emitter.cc:6166]   {
+W0813 17:20:28.518485    5387 lowering_emitter.cc:6166]     reduce_sum.12214 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.518486    5387 lowering_emitter.cc:6166]     reduce_sum.12215 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.518487    5387 lowering_emitter.cc:6166]     ROOT reduce_sum.12216 = f32[]{:T(128)} add(reduce_sum.12214, reduce_sum.12215), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:28.518488    5387 lowering_emitter.cc:6166]   }
+W0813 17:20:28.518488    5387 lowering_emitter.cc:6166]   param_9.4533 = f32[12288,192]{0,1:T(8,128)} parameter(9)
+W0813 17:20:28.518489    5387 lowering_emitter.cc:6166]   div.25242.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} divide(param_9.4533, div.29267.clone.1)
+W0813 17:20:28.518490    5387 lowering_emitter.cc:6166]   select_n.8342.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} select(select_n.10631.clone.1, param_9.4533, div.25242.clone.1.clone.1)
+W0813 17:20:28.518491    5387 lowering_emitter.cc:6166]   integer_pow.9407.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(select_n.8342.clone.1.clone.1, select_n.8342.clone.1.clone.1)
+W0813 17:20:28.518492    5387 lowering_emitter.cc:6166]   reduce.5126.clone.1.clone.1 = f32[]{:T(128)} reduce(integer_pow.9407.clone.1.clone.1, constant.9730.clone.278), dimensions={0,1}, to_apply=
+W0813 17:20:28.518493    5387 lowering_emitter.cc:6166]   {
+W0813 17:20:28.518494    5387 lowering_emitter.cc:6166]     reduce_sum.12145 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.518495    5387 lowering_emitter.cc:6166]     reduce_sum.12146 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.518496    5387 lowering_emitter.cc:6166]     ROOT reduce_sum.12150 = f32[]{:T(128)} add(reduce_sum.12145, reduce_sum.12146), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:28.518497    5387 lowering_emitter.cc:6166]   }
+W0813 17:20:28.518497    5387 lowering_emitter.cc:6166]   param_10.4546 = f32[12288,192]{0,1:T(8,128)} parameter(10)
+W0813 17:20:28.518498    5387 lowering_emitter.cc:6166]   mul.75759.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(select_n.8342.clone.1.clone.1, broadcast.30016.clone.1)
+W0813 17:20:28.518499    5387 lowering_emitter.cc:6166]   param_12.1582 = f32[12288,192]{0,1:T(8,128)} parameter(12)
+W0813 17:20:28.518500    5387 lowering_emitter.cc:6166]   mul.75758.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(param_12.1582, broadcast.30015.clone.1)
+W0813 17:20:28.518501    5387 lowering_emitter.cc:6166]   add.53855.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} add(mul.75759.clone.1.clone.1, mul.75758.clone.1.clone.1)
+W0813 17:20:28.518502    5387 lowering_emitter.cc:6166]   mul.75757.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(integer_pow.9407.clone.1.clone.1, broadcast.30014.clone.1)
+W0813 17:20:28.518504    5387 lowering_emitter.cc:6166]   param_11.4467 = f32[12288,192]{0,1:T(8,128)} parameter(11)
+W0813 17:20:28.518514    5387 lowering_emitter.cc:6166]   mul.75756.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(param_11.4467, broadcast.30013.clone.1)
+W0813 17:20:28.518515    5387 lowering_emitter.cc:6166]   add.53854.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} add(mul.75757.clone.1.clone.1, mul.75756.clone.1.clone.1)
+W0813 17:20:28.518516    5387 lowering_emitter.cc:6166]   div.29317.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} divide(add.53854.clone.1.clone.1, div.29262.clone.1)
+W0813 17:20:28.518517    5387 lowering_emitter.cc:6166]   sqrt.2574.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} sqrt(div.29317.clone.1.clone.1)
+W0813 17:20:28.518517    5387 lowering_emitter.cc:6166]   add.53853.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} add(sqrt.2574.clone.1.clone.1, broadcast.30011.clone.1)
+W0813 17:20:28.518518    5387 lowering_emitter.cc:6166]   multiply.15418.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(div.29263.clone.1, add.53853.clone.1.clone.1)
+W0813 17:20:28.518519    5387 lowering_emitter.cc:6166]   div.29316.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} divide(add.53855.clone.1.clone.1, multiply.15418.clone.1.clone.1)
+W0813 17:20:28.518520    5387 lowering_emitter.cc:6166]   mul.75754.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(param_10.4546, broadcast.30016.clone.1)
+W0813 17:20:28.518521    5387 lowering_emitter.cc:6166]   add.53852.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} add(div.29316.clone.1.clone.1, mul.75754.clone.1.clone.1)
+W0813 17:20:28.518522    5387 lowering_emitter.cc:6166]   mul.75753.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(mul.75706.clone.1, add.53852.clone.1.clone.1)
+W0813 17:20:28.518523    5387 lowering_emitter.cc:6166]   add.53851.clone.1.clone.1 = f32[12288,192]{0,1:T(8,128)} add(param_10.4546, mul.75753.clone.1.clone.1)
+W0813 17:20:28.518524    5387 lowering_emitter.cc:6166]   square.7221.clone.1 = f32[12288,192]{0,1:T(8,128)} multiply(add.53851.clone.1.clone.1, add.53851.clone.1.clone.1)
+W0813 17:20:28.518525    5387 lowering_emitter.cc:6166]   reduce.5006.clone.1 = f32[]{:T(128)} reduce(square.7221.clone.1, constant.9730.clone.278), dimensions={0,1}, to_apply=
+W0813 17:20:28.518526    5387 lowering_emitter.cc:6166]   {
+W0813 17:20:28.518527    5387 lowering_emitter.cc:6166]     reduce_sum.14832 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.518528    5387 lowering_emitter.cc:6166]     reduce_sum.14833 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.518529    5387 lowering_emitter.cc:6166]     ROOT reduce_sum.14834 = f32[]{:T(128)} add(reduce_sum.14832, reduce_sum.14833), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:28.518530    5387 lowering_emitter.cc:6166]   }
+W0813 17:20:28.518532    5387 lowering_emitter.cc:6166]   ROOT tuple.11592 = (f32[]{:T(128)}, f32[12288,192]{0,1:T(8,128)}, f32[12288,192]{0,1:T(8,128)}, f32[12288,192]{0,1:T(8,128)}, f32[]{:T(128)}, /*index=5*/f32[]{:T(128)}, f32[]{:T(128)}, f32[12288,192]{0,1:T(8,128)}, f32[12288,192]{0,1:T(8,128)}, f32[12288,192]{0,1:T(8,128)}) tuple(reduce.5003, add.53816.clone.1, add.53819.clone.1, add.53820.clone.1, reduce.5123.clone.1, reduce.5126.clone.1.clone.1, reduce.5006.clone.1, add.53851.clone.1.clone.1, add.53854.clone.1.clone.1, add.53855.clone.1.clone.1)
+W0813 17:20:28.518533    5387 lowering_emitter.cc:6166] }, backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"fusion_formation_source":{"fusion_creating_compiler_pass":"TpuAdvancedMOF","fusion_id":"42"},"aliasing_operands":{"lists":[{"indices":["0","14"]},{"indices":["4","15"]},{"indices":["8","16"]},{"indices":["10","20"]},{"indices":["11","21"]},{"indices":["12","22"]}]}}
+W0813 17:20:28.754078    5189 lowering_emitter.cc:6166] Successful retry compilation of multiply_reduce_fusion.188 after retry_count=1 
+W0813 17:20:28.754109    5189 lowering_emitter.cc:6166] HLO:
+W0813 17:20:28.754111    5189 lowering_emitter.cc:6166] multiply_reduce_fusion.188 = (f32[]{:T(128)}, f32[192,12288]{1,0:T(8,128)}, f32[192,12288]{1,0:T(8,128)}, f32[192,12288]{1,0:T(8,128)}, f32[]{:T(128)}, /*index=5*/f32[]{:T(128)}, f32[]{:T(128)}, f32[192,12288]{1,0:T(8,128)}, f32[192,12288]{1,0:T(8,128)}, f32[192,12288]{1,0:T(8,128)}) fusion(param.3027, sub.446, sub.445, mul_jit_train_step_.14, param.3607, get-tuple-element.28752, sqrt.542, lt.283, param.3606, get-tuple-element.28751, param.3026, param.3605, param.3604), kind=kLoop, calls=
+W0813 17:20:28.754113    5189 lowering_emitter.cc:6166] {
+W0813 17:20:28.754114    5189 lowering_emitter.cc:6166]   param_0.76814 = f32[192,12288]{1,0:T(8,128)} parameter(0)
+W0813 17:20:28.754115    5189 lowering_emitter.cc:6166]   param_3.51596 = f32[]{:T(128)} parameter(3)
+W0813 17:20:28.754117    5189 lowering_emitter.cc:6166]   mul.75762.clone.1 = f32[192,12288]{1,0:T(8,128)} broadcast(param_3.51596), dimensions={}
+W0813 17:20:28.754118    5189 lowering_emitter.cc:6166]   param_7.9076 = pred[]{:T(512)} parameter(7)
+W0813 17:20:28.754119    5189 lowering_emitter.cc:6166]   select_n.10663.clone.1 = pred[192,12288]{1,0:T(8,128)(4,1)} broadcast(param_7.9076), dimensions={}
+W0813 17:20:28.754120    5189 lowering_emitter.cc:6166]   param_5.20033 = f32[192,12288]{1,0:T(8,128)} parameter(5)
+W0813 17:20:28.754122    5189 lowering_emitter.cc:6166]   param_6.14409 = f32[]{:T(128)} parameter(6)
+W0813 17:20:28.754123    5189 lowering_emitter.cc:6166]   div.29331.clone.1 = f32[192,12288]{1,0:T(8,128)} broadcast(param_6.14409), dimensions={}
+W0813 17:20:28.754124    5189 lowering_emitter.cc:6166]   div.29330.clone.1 = f32[192,12288]{1,0:T(8,128)} divide(param_5.20033, div.29331.clone.1)
+W0813 17:20:28.754125    5189 lowering_emitter.cc:6166]   select_n.10662.clone.1 = f32[192,12288]{1,0:T(8,128)} select(select_n.10663.clone.1, param_5.20033, div.29330.clone.1)
+W0813 17:20:28.754126    5189 lowering_emitter.cc:6166]   constant.9754.clone.1891.clone.1 = f32[]{:T(128)} constant(0.1)
+W0813 17:20:28.754127    5189 lowering_emitter.cc:6166]   broadcast.30064.clone.1 = f32[192,12288]{1,0:T(8,128)} broadcast(constant.9754.clone.1891.clone.1), dimensions={}
+W0813 17:20:28.754128    5189 lowering_emitter.cc:6166]   mul.75766.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(select_n.10662.clone.1, broadcast.30064.clone.1)
+W0813 17:20:28.754129    5189 lowering_emitter.cc:6166]   param_8.6214 = f32[192,12288]{1,0:T(8,128)} parameter(8)
+W0813 17:20:28.754130    5189 lowering_emitter.cc:6166]   constant.9755.clone.946.clone.1 = f32[]{:T(128)} constant(0.9)
+W0813 17:20:28.754131    5189 lowering_emitter.cc:6166]   broadcast.30063.clone.1 = f32[192,12288]{1,0:T(8,128)} broadcast(constant.9755.clone.946.clone.1), dimensions={}
+W0813 17:20:28.754132    5189 lowering_emitter.cc:6166]   mul.75765.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(param_8.6214, broadcast.30063.clone.1)
+W0813 17:20:28.754132    5189 lowering_emitter.cc:6166]   add.53860.clone.1 = f32[192,12288]{1,0:T(8,128)} add(mul.75766.clone.1, mul.75765.clone.1)
+W0813 17:20:28.754133    5189 lowering_emitter.cc:6166]   param_2.67918 = f32[]{:T(128)} parameter(2)
+W0813 17:20:28.754135    5189 lowering_emitter.cc:6166]   div.29327.clone.1 = f32[192,12288]{1,0:T(8,128)} broadcast(param_2.67918), dimensions={}
+W0813 17:20:28.754136    5189 lowering_emitter.cc:6166]   integer_pow.10739.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(select_n.10662.clone.1, select_n.10662.clone.1)
+W0813 17:20:28.754137    5189 lowering_emitter.cc:6166]   constant.9758.clone.946.clone.1 = f32[]{:T(128)} constant(0.05)
+W0813 17:20:28.754137    5189 lowering_emitter.cc:6166]   broadcast.30062.clone.1 = f32[192,12288]{1,0:T(8,128)} broadcast(constant.9758.clone.946.clone.1), dimensions={}
+W0813 17:20:28.754138    5189 lowering_emitter.cc:6166]   mul.75764.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(integer_pow.10739.clone.1, broadcast.30062.clone.1)
+W0813 17:20:28.754143    5189 lowering_emitter.cc:6166]   param_4.28750 = f32[192,12288]{1,0:T(8,128)} parameter(4)
+W0813 17:20:28.754144    5189 lowering_emitter.cc:6166]   constant.9759.clone.946.clone.1 = f32[]{:T(128)} constant(0.95)
+W0813 17:20:28.754145    5189 lowering_emitter.cc:6166]   broadcast.30061.clone.1 = f32[192,12288]{1,0:T(8,128)} broadcast(constant.9759.clone.946.clone.1), dimensions={}
+W0813 17:20:28.754146    5189 lowering_emitter.cc:6166]   mul.75763.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(param_4.28750, broadcast.30061.clone.1)
+W0813 17:20:28.754147    5189 lowering_emitter.cc:6166]   add.53859.clone.1 = f32[192,12288]{1,0:T(8,128)} add(mul.75764.clone.1, mul.75763.clone.1)
+W0813 17:20:28.754148    5189 lowering_emitter.cc:6166]   param_1.88836 = f32[]{:T(128)} parameter(1)
+W0813 17:20:28.754150    5189 lowering_emitter.cc:6166]   div.29326.clone.1 = f32[192,12288]{1,0:T(8,128)} broadcast(param_1.88836), dimensions={}
+W0813 17:20:28.754151    5189 lowering_emitter.cc:6166]   div.29325.clone.1 = f32[192,12288]{1,0:T(8,128)} divide(add.53859.clone.1, div.29326.clone.1)
+W0813 17:20:28.754152    5189 lowering_emitter.cc:6166]   sqrt.2575.clone.1 = f32[192,12288]{1,0:T(8,128)} sqrt(div.29325.clone.1)
+W0813 17:20:28.754153    5189 lowering_emitter.cc:6166]   constant.9749.clone.946.clone.1 = f32[]{:T(128)} constant(1e-08)
+W0813 17:20:28.754154    5189 lowering_emitter.cc:6166]   broadcast.30059.clone.1 = f32[192,12288]{1,0:T(8,128)} broadcast(constant.9749.clone.946.clone.1), dimensions={}
+W0813 17:20:28.754154    5189 lowering_emitter.cc:6166]   add.53858.clone.1 = f32[192,12288]{1,0:T(8,128)} add(sqrt.2575.clone.1, broadcast.30059.clone.1)
+W0813 17:20:28.754155    5189 lowering_emitter.cc:6166]   multiply.15419.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(div.29327.clone.1, add.53858.clone.1)
+W0813 17:20:28.754156    5189 lowering_emitter.cc:6166]   div.29324.clone.1 = f32[192,12288]{1,0:T(8,128)} divide(add.53860.clone.1, multiply.15419.clone.1)
+W0813 17:20:28.754157    5189 lowering_emitter.cc:6166]   mul.75761.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(param_0.76814, broadcast.30064.clone.1)
+W0813 17:20:28.754158    5189 lowering_emitter.cc:6166]   add.53857.clone.1 = f32[192,12288]{1,0:T(8,128)} add(div.29324.clone.1, mul.75761.clone.1)
+W0813 17:20:28.754159    5189 lowering_emitter.cc:6166]   mul.75760.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(mul.75762.clone.1, add.53857.clone.1)
+W0813 17:20:28.754160    5189 lowering_emitter.cc:6166]   add.53856.clone.1 = f32[192,12288]{1,0:T(8,128)} add(param_0.76814, mul.75760.clone.1)
+W0813 17:20:28.754161    5189 lowering_emitter.cc:6166]   square.7222 = f32[192,12288]{1,0:T(8,128)} multiply(add.53856.clone.1, add.53856.clone.1)
+W0813 17:20:28.754162    5189 lowering_emitter.cc:6166]   constant.9730.clone.279 = f32[]{:T(128)} constant(0)
+W0813 17:20:28.754163    5189 lowering_emitter.cc:6166]   reduce.5007 = f32[]{:T(128)} reduce(square.7222, constant.9730.clone.279), dimensions={0,1}, to_apply=
+W0813 17:20:28.754164    5189 lowering_emitter.cc:6166]   {
+W0813 17:20:28.754165    5189 lowering_emitter.cc:6166]     reduce_sum.14826 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.754166    5189 lowering_emitter.cc:6166]     reduce_sum.14827 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.754167    5189 lowering_emitter.cc:6166]     ROOT reduce_sum.14831 = f32[]{:T(128)} add(reduce_sum.14826, reduce_sum.14827), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:28.754169    5189 lowering_emitter.cc:6166]   }
+W0813 17:20:28.754170    5189 lowering_emitter.cc:6166]   reduce.5127.clone.1 = f32[]{:T(128)} reduce(integer_pow.10739.clone.1, constant.9730.clone.279), dimensions={0,1}, to_apply=
+W0813 17:20:28.754179    5189 lowering_emitter.cc:6166]   {
+W0813 17:20:28.754180    5189 lowering_emitter.cc:6166]     reduce_sum.12139 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.754181    5189 lowering_emitter.cc:6166]     reduce_sum.12143 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.754183    5189 lowering_emitter.cc:6166]     ROOT reduce_sum.12144 = f32[]{:T(128)} add(reduce_sum.12139, reduce_sum.12143), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:28.754184    5189 lowering_emitter.cc:6166]   }
+W0813 17:20:28.754185    5189 lowering_emitter.cc:6166]   param_9.4534 = f32[192,12288]{1,0:T(8,128)} parameter(9)
+W0813 17:20:28.754186    5189 lowering_emitter.cc:6166]   div.25218.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} divide(param_9.4534, div.29331.clone.1)
+W0813 17:20:28.754187    5189 lowering_emitter.cc:6166]   select_n.8318.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} select(select_n.10663.clone.1, param_9.4534, div.25218.clone.1.clone.1)
+W0813 17:20:28.754188    5189 lowering_emitter.cc:6166]   integer_pow.9411.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(select_n.8318.clone.1.clone.1, select_n.8318.clone.1.clone.1)
+W0813 17:20:28.754189    5189 lowering_emitter.cc:6166]   reduce.5128.clone.1.clone.1 = f32[]{:T(128)} reduce(integer_pow.9411.clone.1.clone.1, constant.9730.clone.279), dimensions={0,1}, to_apply=
+W0813 17:20:28.754190    5189 lowering_emitter.cc:6166]   {
+W0813 17:20:28.754191    5189 lowering_emitter.cc:6166]     reduce_sum.12136 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.754193    5189 lowering_emitter.cc:6166]     reduce_sum.12137 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.754194    5189 lowering_emitter.cc:6166]     ROOT reduce_sum.12138 = f32[]{:T(128)} add(reduce_sum.12136, reduce_sum.12137), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:28.754195    5189 lowering_emitter.cc:6166]   }
+W0813 17:20:28.754196    5189 lowering_emitter.cc:6166]   param_10.4547 = f32[192,12288]{1,0:T(8,128)} parameter(10)
+W0813 17:20:28.754197    5189 lowering_emitter.cc:6166]   mul.75773.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(select_n.8318.clone.1.clone.1, broadcast.30064.clone.1)
+W0813 17:20:28.754199    5189 lowering_emitter.cc:6166]   param_12.1583 = f32[192,12288]{1,0:T(8,128)} parameter(12)
+W0813 17:20:28.754200    5189 lowering_emitter.cc:6166]   mul.75772.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(param_12.1583, broadcast.30063.clone.1)
+W0813 17:20:28.754202    5189 lowering_emitter.cc:6166]   add.53865.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} add(mul.75773.clone.1.clone.1, mul.75772.clone.1.clone.1)
+W0813 17:20:28.754204    5189 lowering_emitter.cc:6166]   mul.75771.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(integer_pow.9411.clone.1.clone.1, broadcast.30062.clone.1)
+W0813 17:20:28.754206    5189 lowering_emitter.cc:6166]   param_11.4468 = f32[192,12288]{1,0:T(8,128)} parameter(11)
+W0813 17:20:28.754207    5189 lowering_emitter.cc:6166]   mul.75770.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(param_11.4468, broadcast.30061.clone.1)
+W0813 17:20:28.754208    5189 lowering_emitter.cc:6166]   add.53864.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} add(mul.75771.clone.1.clone.1, mul.75770.clone.1.clone.1)
+W0813 17:20:28.754209    5189 lowering_emitter.cc:6166]   div.29333.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} divide(add.53864.clone.1.clone.1, div.29326.clone.1)
+W0813 17:20:28.754210    5189 lowering_emitter.cc:6166]   sqrt.2576.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} sqrt(div.29333.clone.1.clone.1)
+W0813 17:20:28.754212    5189 lowering_emitter.cc:6166]   add.53863.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} add(sqrt.2576.clone.1.clone.1, broadcast.30059.clone.1)
+W0813 17:20:28.754213    5189 lowering_emitter.cc:6166]   multiply.15420.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(div.29327.clone.1, add.53863.clone.1.clone.1)
+W0813 17:20:28.754214    5189 lowering_emitter.cc:6166]   div.29332.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} divide(add.53865.clone.1.clone.1, multiply.15420.clone.1.clone.1)
+W0813 17:20:28.754216    5189 lowering_emitter.cc:6166]   mul.75768.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(param_10.4547, broadcast.30064.clone.1)
+W0813 17:20:28.754218    5189 lowering_emitter.cc:6166]   add.53862.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} add(div.29332.clone.1.clone.1, mul.75768.clone.1.clone.1)
+W0813 17:20:28.754219    5189 lowering_emitter.cc:6166]   mul.75767.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(mul.75762.clone.1, add.53862.clone.1.clone.1)
+W0813 17:20:28.754221    5189 lowering_emitter.cc:6166]   add.53861.clone.1.clone.1 = f32[192,12288]{1,0:T(8,128)} add(param_10.4547, mul.75767.clone.1.clone.1)
+W0813 17:20:28.754222    5189 lowering_emitter.cc:6166]   square.7223.clone.1 = f32[192,12288]{1,0:T(8,128)} multiply(add.53861.clone.1.clone.1, add.53861.clone.1.clone.1)
+W0813 17:20:28.754223    5189 lowering_emitter.cc:6166]   reduce.5008.clone.1 = f32[]{:T(128)} reduce(square.7223.clone.1, constant.9730.clone.279), dimensions={0,1}, to_apply=
+W0813 17:20:28.754225    5189 lowering_emitter.cc:6166]   {
+W0813 17:20:28.754226    5189 lowering_emitter.cc:6166]     reduce_sum.14820 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.754227    5189 lowering_emitter.cc:6166]     reduce_sum.14824 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:28.754229    5189 lowering_emitter.cc:6166]     ROOT reduce_sum.14825 = f32[]{:T(128)} add(reduce_sum.14820, reduce_sum.14824), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:28.754231    5189 lowering_emitter.cc:6166]   }
+W0813 17:20:28.754233    5189 lowering_emitter.cc:6166]   ROOT tuple.11602 = (f32[]{:T(128)}, f32[192,12288]{1,0:T(8,128)}, f32[192,12288]{1,0:T(8,128)}, f32[192,12288]{1,0:T(8,128)}, f32[]{:T(128)}, /*index=5*/f32[]{:T(128)}, f32[]{:T(128)}, f32[192,12288]{1,0:T(8,128)}, f32[192,12288]{1,0:T(8,128)}, f32[192,12288]{1,0:T(8,128)}) tuple(reduce.5007, add.53856.clone.1, add.53859.clone.1, add.53860.clone.1, reduce.5127.clone.1, reduce.5128.clone.1.clone.1, reduce.5008.clone.1, add.53861.clone.1.clone.1, add.53864.clone.1.clone.1, add.53865.clone.1.clone.1)
+W0813 17:20:28.754234    5189 lowering_emitter.cc:6166] }, backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"fusion_formation_source":{"fusion_creating_compiler_pass":"TpuAdvancedMOF","fusion_id":"42"},"aliasing_operands":{"lists":[{"indices":["0","14"]},{"indices":["4","15"]},{"indices":["8","16"]},{"indices":["10","20"]},{"indices":["11","21"]},{"indices":["12","22"]}]}}
+W0813 17:20:31.288250    5245 lowering_emitter.cc:6166] Successful retry compilation of multiply_reduce_fusion.124 after retry_count=3 
+W0813 17:20:31.288278    5245 lowering_emitter.cc:6166] HLO:
+W0813 17:20:31.288280    5245 lowering_emitter.cc:6166] multiply_reduce_fusion.124 = (f32[]{:T(128)}, f32[262144,1120]{1,0:T(8,128)}, f32[262144,1120]{1,0:T(8,128)}, f32[262144,1120]{1,0:T(8,128)}, f32[]{:T(128)}) fusion(copy.6624, sub.446, sub.445, mul_jit_train_step_.14, copy.6622, sqrt.542, scatter_custom_fusion, lt.283, copy.6621), kind=kLoop, calls=
+W0813 17:20:31.288281    5245 lowering_emitter.cc:6166] {
+W0813 17:20:31.288282    5245 lowering_emitter.cc:6166]   param_0.76618 = f32[262144,1120]{1,0:T(8,128)} parameter(0)
+W0813 17:20:31.288283    5245 lowering_emitter.cc:6166]   param_3.51400 = f32[]{:T(128)} parameter(3)
+W0813 17:20:31.288284    5245 lowering_emitter.cc:6166]   mul.72941.clone.1 = f32[262144,1120]{1,0:T(8,128)} broadcast(param_3.51400), dimensions={}
+W0813 17:20:31.288284    5245 lowering_emitter.cc:6166]   param_7.8880 = pred[]{:T(512)} parameter(7)
+W0813 17:20:31.288285    5245 lowering_emitter.cc:6166]   select_n.9167.clone.1 = pred[262144,1120]{1,0:T(8,128)(4,1)} broadcast(param_7.8880), dimensions={}
+W0813 17:20:31.288286    5245 lowering_emitter.cc:6166]   param_6.14213 = bf16[262144,1120]{1,0:T(8,128)(2,1)} parameter(6)
+W0813 17:20:31.288287    5245 lowering_emitter.cc:6166]   convert_element_type.37938.clone.1 = f32[262144,1120]{1,0:T(8,128)} convert(param_6.14213)
+W0813 17:20:31.288287    5245 lowering_emitter.cc:6166]   param_5.19837 = f32[]{:T(128)} parameter(5)
+W0813 17:20:31.288288    5245 lowering_emitter.cc:6166]   div.26227.clone.1 = f32[262144,1120]{1,0:T(8,128)} broadcast(param_5.19837), dimensions={}
+W0813 17:20:31.288289    5245 lowering_emitter.cc:6166]   div.26226.clone.1 = f32[262144,1120]{1,0:T(8,128)} divide(convert_element_type.37938.clone.1, div.26227.clone.1)
+W0813 17:20:31.288290    5245 lowering_emitter.cc:6166]   select_n.9166.clone.1 = f32[262144,1120]{1,0:T(8,128)} select(select_n.9167.clone.1, convert_element_type.37938.clone.1, div.26226.clone.1)
+W0813 17:20:31.288290    5245 lowering_emitter.cc:6166]   constant.9754.clone.1087.clone.1 = f32[]{:T(128)} constant(0.1)
+W0813 17:20:31.288291    5245 lowering_emitter.cc:6166]   broadcast.27652.clone.1 = f32[262144,1120]{1,0:T(8,128)} broadcast(constant.9754.clone.1087.clone.1), dimensions={}
+W0813 17:20:31.288292    5245 lowering_emitter.cc:6166]   mul.72947.clone.1 = f32[262144,1120]{1,0:T(8,128)} multiply(select_n.9166.clone.1, broadcast.27652.clone.1)
+W0813 17:20:31.288293    5245 lowering_emitter.cc:6166]   param_8.6018 = f32[262144,1120]{1,0:T(8,128)} parameter(8)
+W0813 17:20:31.288293    5245 lowering_emitter.cc:6166]   constant.9755.clone.544.clone.1 = f32[]{:T(128)} constant(0.9)
+W0813 17:20:31.288294    5245 lowering_emitter.cc:6166]   mul.72948.clone.1 = f32[262144,1120]{1,0:T(8,128)} broadcast(constant.9755.clone.544.clone.1), dimensions={}
+W0813 17:20:31.288295    5245 lowering_emitter.cc:6166]   mul.72946.clone.1 = f32[262144,1120]{1,0:T(8,128)} multiply(param_8.6018, mul.72948.clone.1)
+W0813 17:20:31.288295    5245 lowering_emitter.cc:6166]   add.51850.clone.1 = f32[262144,1120]{1,0:T(8,128)} add(mul.72947.clone.1, mul.72946.clone.1)
+W0813 17:20:31.288296    5245 lowering_emitter.cc:6166]   param_2.67722 = f32[]{:T(128)} parameter(2)
+W0813 17:20:31.288297    5245 lowering_emitter.cc:6166]   div.26223.clone.1 = f32[262144,1120]{1,0:T(8,128)} broadcast(param_2.67722), dimensions={}
+W0813 17:20:31.288297    5245 lowering_emitter.cc:6166]   integer_pow.10337.clone.1 = f32[262144,1120]{1,0:T(8,128)} multiply(select_n.9166.clone.1, select_n.9166.clone.1)
+W0813 17:20:31.288298    5245 lowering_emitter.cc:6166]   constant.9758.clone.544.clone.1 = f32[]{:T(128)} constant(0.05)
+W0813 17:20:31.288299    5245 lowering_emitter.cc:6166]   mul.72945.clone.1 = f32[262144,1120]{1,0:T(8,128)} broadcast(constant.9758.clone.544.clone.1), dimensions={}
+W0813 17:20:31.288299    5245 lowering_emitter.cc:6166]   mul.72943.clone.1 = f32[262144,1120]{1,0:T(8,128)} multiply(integer_pow.10337.clone.1, mul.72945.clone.1)
+W0813 17:20:31.288303    5245 lowering_emitter.cc:6166]   param_4.28554 = f32[262144,1120]{1,0:T(8,128)} parameter(4)
+W0813 17:20:31.288304    5245 lowering_emitter.cc:6166]   constant.9759.clone.544.clone.1 = f32[]{:T(128)} constant(0.95)
+W0813 17:20:31.288305    5245 lowering_emitter.cc:6166]   mul.72944.clone.1 = f32[262144,1120]{1,0:T(8,128)} broadcast(constant.9759.clone.544.clone.1), dimensions={}
+W0813 17:20:31.288306    5245 lowering_emitter.cc:6166]   mul.72942.clone.1 = f32[262144,1120]{1,0:T(8,128)} multiply(param_4.28554, mul.72944.clone.1)
+W0813 17:20:31.288306    5245 lowering_emitter.cc:6166]   add.51849.clone.1 = f32[262144,1120]{1,0:T(8,128)} add(mul.72943.clone.1, mul.72942.clone.1)
+W0813 17:20:31.288307    5245 lowering_emitter.cc:6166]   param_1.88640 = f32[]{:T(128)} parameter(1)
+W0813 17:20:31.288308    5245 lowering_emitter.cc:6166]   div.26222.clone.1 = f32[262144,1120]{1,0:T(8,128)} broadcast(param_1.88640), dimensions={}
+W0813 17:20:31.288309    5245 lowering_emitter.cc:6166]   div.26221.clone.1 = f32[262144,1120]{1,0:T(8,128)} divide(add.51849.clone.1, div.26222.clone.1)
+W0813 17:20:31.288309    5245 lowering_emitter.cc:6166]   sqrt.2173.clone.1 = f32[262144,1120]{1,0:T(8,128)} sqrt(div.26221.clone.1)
+W0813 17:20:31.288310    5245 lowering_emitter.cc:6166]   constant.9749.clone.544.clone.1 = f32[]{:T(128)} constant(1e-08)
+W0813 17:20:31.288311    5245 lowering_emitter.cc:6166]   add.51848.clone.1 = f32[262144,1120]{1,0:T(8,128)} broadcast(constant.9749.clone.544.clone.1), dimensions={}
+W0813 17:20:31.288311    5245 lowering_emitter.cc:6166]   add.51847.clone.1 = f32[262144,1120]{1,0:T(8,128)} add(sqrt.2173.clone.1, add.51848.clone.1)
+W0813 17:20:31.288312    5245 lowering_emitter.cc:6166]   multiply.15017.clone.1 = f32[262144,1120]{1,0:T(8,128)} multiply(div.26223.clone.1, add.51847.clone.1)
+W0813 17:20:31.288313    5245 lowering_emitter.cc:6166]   div.26220.clone.1 = f32[262144,1120]{1,0:T(8,128)} divide(add.51850.clone.1, multiply.15017.clone.1)
+W0813 17:20:31.288313    5245 lowering_emitter.cc:6166]   mul.72940.clone.1 = f32[262144,1120]{1,0:T(8,128)} multiply(param_0.76618, broadcast.27652.clone.1)
+W0813 17:20:31.288314    5245 lowering_emitter.cc:6166]   add.51846.clone.1 = f32[262144,1120]{1,0:T(8,128)} add(div.26220.clone.1, mul.72940.clone.1)
+W0813 17:20:31.288315    5245 lowering_emitter.cc:6166]   mul.72939.clone.1 = f32[262144,1120]{1,0:T(8,128)} multiply(mul.72941.clone.1, add.51846.clone.1)
+W0813 17:20:31.288316    5245 lowering_emitter.cc:6166]   add.51845.clone.1 = f32[262144,1120]{1,0:T(8,128)} add(param_0.76618, mul.72939.clone.1)
+W0813 17:20:31.288316    5245 lowering_emitter.cc:6166]   square.7161 = f32[262144,1120]{1,0:T(8,128)} multiply(add.51845.clone.1, add.51845.clone.1)
+W0813 17:20:31.288317    5245 lowering_emitter.cc:6166]   constant.9730.clone.83 = f32[]{:T(128)} constant(0)
+W0813 17:20:31.288318    5245 lowering_emitter.cc:6166]   reduce.4941 = f32[]{:T(128)} reduce(square.7161, constant.9730.clone.83), dimensions={0,1}, to_apply=
+W0813 17:20:31.288318    5245 lowering_emitter.cc:6166]   {
+W0813 17:20:31.288319    5245 lowering_emitter.cc:6166]     reduce_sum.16843 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:31.288320    5245 lowering_emitter.cc:6166]     reduce_sum.16875 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:31.288321    5245 lowering_emitter.cc:6166]     ROOT reduce_sum.16876 = f32[]{:T(128)} add(reduce_sum.16843, reduce_sum.16875), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:31.288322    5245 lowering_emitter.cc:6166]   }
+W0813 17:20:31.288323    5245 lowering_emitter.cc:6166]   reduce.4942.clone.1 = f32[]{:T(128)} reduce(integer_pow.10337.clone.1, constant.9730.clone.83), dimensions={0,1}, to_apply=
+W0813 17:20:31.288324    5245 lowering_emitter.cc:6166]   {
+W0813 17:20:31.288324    5245 lowering_emitter.cc:6166]     reduce_sum.14173 = f32[]{:T(128)} parameter(0), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:31.288325    5245 lowering_emitter.cc:6166]     reduce_sum.14174 = f32[]{:T(128)} parameter(1), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[]}
+W0813 17:20:31.288326    5245 lowering_emitter.cc:6166]     ROOT reduce_sum.14175 = f32[]{:T(128)} add(reduce_sum.14173, reduce_sum.14174), backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","2"]}]}}
+W0813 17:20:31.288350    5245 lowering_emitter.cc:6166]   }
+W0813 17:20:31.288353    5245 lowering_emitter.cc:6166]   ROOT tuple.10993 = (f32[]{:T(128)}, f32[262144,1120]{1,0:T(8,128)}, f32[262144,1120]{1,0:T(8,128)}, f32[262144,1120]{1,0:T(8,128)}, f32[]{:T(128)}) tuple(reduce.4941, add.51845.clone.1, add.51849.clone.1, add.51850.clone.1, reduce.4942.clone.1)
+W0813 17:20:31.288354    5245 lowering_emitter.cc:6166] }, backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"65367246"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[{"indices":["0","10"]},{"indices":["4","12"]},{"indices":["8","11"]}]}}
+W0813 17:20:31.774109    5313 lowering_emitter.cc:6166] Successful retry compilation of fusion.15167 after retry_count=2 
+W0813 17:20:31.774134    5313 lowering_emitter.cc:6166] HLO:
+W0813 17:20:31.774136    5313 lowering_emitter.cc:6166] fusion.15167 = (bf16[2,8192,256]{2,1,0:T(16,128)(2,1)}, bf16[2,8192,256]{2,1,0:T(16,128)(2,1)}) fusion(get-tuple-element.139544, multiply_add_fusion.153, all-gather.1941.cloned.1.call-done), kind=kOutput, calls=
+W0813 17:20:31.774137    5313 lowering_emitter.cc:6166] {
+W0813 17:20:31.774138    5313 lowering_emitter.cc:6166]   param_1.88000 = bf16[2,8192,1536]{1,2,0:T(16,128)(2,1)} parameter(1)
+W0813 17:20:31.774139    5313 lowering_emitter.cc:6166]   fusion.18003 = bf16[2,8192,1536]{1,2,0:T(8,128)(2,1)} fusion(param_1.88000), kind=kLoop, calls=
+W0813 17:20:31.774140    5313 lowering_emitter.cc:6166]   {
+W0813 17:20:31.774140    5313 lowering_emitter.cc:6166]     bitcast_input.128 = bf16[2,8192,1536]{1,2,0:T(16,128)(2,1)} parameter(0)
+W0813 17:20:31.774141    5313 lowering_emitter.cc:6166]     fusion.30650 = bf16[2,8192,1536]{1,2,0:T(8,128)(2,1)} fusion(bitcast_input.128), kind=kLoop, output_to_operand_aliasing={{}: (0, {})}, calls=
+W0813 17:20:31.774142    5313 lowering_emitter.cc:6166]     {
+W0813 17:20:31.774143    5313 lowering_emitter.cc:6166]       input.5093 = bf16[2,8192,1536]{1,2,0:T(16,128)(2,1)} parameter(0)
+W0813 17:20:31.774143    5313 lowering_emitter.cc:6166]       ROOT copy.31336 = bf16[2,8192,1536]{1,2,0:T(8,128)(2,1)} copy(input.5093)
+W0813 17:20:31.774144    5313 lowering_emitter.cc:6166]     }
+W0813 17:20:31.774145    5313 lowering_emitter.cc:6166]     ROOT bitcast.28875 = bf16[2,8192,1536]{1,2,0:T(8,128)(2,1)} bitcast(fusion.30650)
+W0813 17:20:31.774145    5313 lowering_emitter.cc:6166]   }
+W0813 17:20:31.774146    5313 lowering_emitter.cc:6166]   param_2.66860 = bf16[1536,256]{1,0:T(16,128)(2,1)} parameter(2)
+W0813 17:20:31.774147    5313 lowering_emitter.cc:6166]   fusion.15159.clone.1 = bf16[1536,256,1]{1,0,2:T(8,128)(2,1)} fusion(param_2.66860), kind=kLoop, calls=
+W0813 17:20:31.774147    5313 lowering_emitter.cc:6166]   {
+W0813 17:20:31.774148    5313 lowering_emitter.cc:6166]     param_0.75589 = bf16[1536,256]{1,0:T(16,128)(2,1)} parameter(0)
+W0813 17:20:31.774149    5313 lowering_emitter.cc:6166]     fusion.30651 = bf16[1536,256]{1,0:T(8,128)(2,1)} fusion(param_0.75589), kind=kLoop, output_to_operand_aliasing={{}: (0, {})}, calls=
+W0813 17:20:31.774149    5313 lowering_emitter.cc:6166]     {
+W0813 17:20:31.774150    5313 lowering_emitter.cc:6166]       input.5094 = bf16[1536,256]{1,0:T(16,128)(2,1)} parameter(0)
+W0813 17:20:31.774151    5313 lowering_emitter.cc:6166]       ROOT copy.31337 = bf16[1536,256]{1,0:T(8,128)(2,1)} copy(input.5094)
+W0813 17:20:31.774152    5313 lowering_emitter.cc:6166]     }
+W0813 17:20:31.774152    5313 lowering_emitter.cc:6166]     ROOT bitcast.28100 = bf16[1536,256,1]{1,0,2:T(8,128)(2,1)} bitcast(fusion.30651), frontend_attributes={is_spmd_generated="true",skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774153    5313 lowering_emitter.cc:6166]   }, frontend_attributes={is_spmd_generated="true",skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774154    5313 lowering_emitter.cc:6166]   convolution.4915.clone.1 = bf16[2,8192,256]{2,1,0:T(8,128)(2,1)} convolution(fusion.18003, fusion.15159.clone.1), window={size=1}, dim_labels=0bf_io0->0bf, frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774154    5313 lowering_emitter.cc:6166]   convert_element_type.31614 = f32[2,8192,256]{2,1,0:T(8,128)} convert(convolution.4915.clone.1), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774155    5313 lowering_emitter.cc:6166]   integer_pow.7513 = f32[2,8192,256]{2,1,0:T(8,128)} multiply(convert_element_type.31614, convert_element_type.31614)
+W0813 17:20:31.774156    5313 lowering_emitter.cc:6166]   integer_pow.7512 = f32[2,8192,256]{2,1,0:T(8,128)} multiply(integer_pow.7513, convert_element_type.31614), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774159    5313 lowering_emitter.cc:6166]   constant.9077.clone.7 = f32[]{:T(128)} constant(0.044715)
+W0813 17:20:31.774160    5313 lowering_emitter.cc:6166]   closed_call.5995 = f32[2,8192,256]{2,1,0:T(8,128)} broadcast(constant.9077.clone.7), dimensions={}
+W0813 17:20:31.774161    5313 lowering_emitter.cc:6166]   mul.60096 = f32[2,8192,256]{2,1,0:T(8,128)} multiply(integer_pow.7512, closed_call.5995), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774161    5313 lowering_emitter.cc:6166]   add.46631 = f32[2,8192,256]{2,1,0:T(8,128)} add(convert_element_type.31614, mul.60096), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774162    5313 lowering_emitter.cc:6166]   constant.9078.clone.7 = f32[]{:T(128)} constant(0.797884583)
+W0813 17:20:31.774163    5313 lowering_emitter.cc:6166]   closed_call.5994 = f32[2,8192,256]{2,1,0:T(8,128)} broadcast(constant.9078.clone.7), dimensions={}
+W0813 17:20:31.774164    5313 lowering_emitter.cc:6166]   mul.60095 = f32[2,8192,256]{2,1,0:T(8,128)} multiply(add.46631, closed_call.5994), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774164    5313 lowering_emitter.cc:6166]   tanh.1939 = f32[2,8192,256]{2,1,0:T(8,128)} tanh(mul.60095), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774165    5313 lowering_emitter.cc:6166]   constant.9079.clone.7 = f32[]{:T(128)} constant(1)
+W0813 17:20:31.774166    5313 lowering_emitter.cc:6166]   closed_call.5993 = f32[2,8192,256]{2,1,0:T(8,128)} broadcast(constant.9079.clone.7), dimensions={}
+W0813 17:20:31.774166    5313 lowering_emitter.cc:6166]   add.46630 = f32[2,8192,256]{2,1,0:T(8,128)} add(tanh.1939, closed_call.5993), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774167    5313 lowering_emitter.cc:6166]   constant.9080.clone.7 = f32[]{:T(128)} constant(0.5)
+W0813 17:20:31.774168    5313 lowering_emitter.cc:6166]   closed_call.5992 = f32[2,8192,256]{2,1,0:T(8,128)} broadcast(constant.9080.clone.7), dimensions={}
+W0813 17:20:31.774169    5313 lowering_emitter.cc:6166]   mul.60094 = f32[2,8192,256]{2,1,0:T(8,128)} multiply(add.46630, closed_call.5992), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774169    5313 lowering_emitter.cc:6166]   mul.60093 = f32[2,8192,256]{2,1,0:T(8,128)} multiply(convert_element_type.31614, mul.60094), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774170    5313 lowering_emitter.cc:6166]   convert_element_type.31613 = bf16[2,8192,256]{2,1,0:T(8,128)(2,1)} convert(mul.60093), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774173    5313 lowering_emitter.cc:6166]   param_0.50879 = bf16[2,8192,256]{2,1,0:T(16,128)(2,1)} parameter(0)
+W0813 17:20:31.774174    5313 lowering_emitter.cc:6166]   fusion.30649 = bf16[2,8192,256]{2,1,0:T(8,128)(2,1)} fusion(param_0.50879), kind=kLoop, output_to_operand_aliasing={{}: (0, {})}, calls=
+W0813 17:20:31.774175    5313 lowering_emitter.cc:6166]   {
+W0813 17:20:31.774175    5313 lowering_emitter.cc:6166]     input.5092 = bf16[2,8192,256]{2,1,0:T(16,128)(2,1)} parameter(0)
+W0813 17:20:31.774176    5313 lowering_emitter.cc:6166]     ROOT copy.31335 = bf16[2,8192,256]{2,1,0:T(8,128)(2,1)} copy(input.5092)
+W0813 17:20:31.774177    5313 lowering_emitter.cc:6166]   }
+W0813 17:20:31.774177    5313 lowering_emitter.cc:6166]   mul.60088 = bf16[2,8192,256]{2,1,0:T(8,128)(2,1)} multiply(convert_element_type.31613, fusion.30649), frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}
+W0813 17:20:31.774178    5313 lowering_emitter.cc:6166]   copy.31338 = bf16[2,8192,256]{2,1,0:T(16,128)(2,1)} copy(mul.60088)
+W0813 17:20:31.774179    5313 lowering_emitter.cc:6166]   copy.31339 = bf16[2,8192,256]{2,1,0:T(16,128)(2,1)} copy(convolution.4915.clone.1)
+W0813 17:20:31.774180    5313 lowering_emitter.cc:6166]   ROOT tuple.10479 = (bf16[2,8192,256]{2,1,0:T(16,128)(2,1)}, bf16[2,8192,256]{2,1,0:T(16,128)(2,1)}) tuple(copy.31338, copy.31339)
+W0813 17:20:31.774181    5313 lowering_emitter.cc:6166] }, frontend_attributes={skip-simplify-while-loops_trip-count-one="true"}, backend_config={"flag_configs":[],"scoped_memory_configs":[{"memory_space":"1","offset":"0","size":"67043328"}],"used_scoped_memory_configs":[],"aliasing_operands":{"lists":[]}}
+I0813 17:20:57.268906    5157 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 1m10.9741573005s
+I0813 17:21:04.529251    5157 deepsea_compiler_backend.cc:1772] final program bundle count: 2,311,514 note this count does not reflect cycles spent executing delays.
+I0813 17:21:06.441970    5157 deepsea_compiler_backend.cc:1962] Program divided into 609 overlays with HLO functions (145.18M).
+I0813 17:21:06.501232    5157 deepsea_compiler_backend.cc:2128] XLA::TPU module name: jit_train_step
+I0813 17:21:06.501245    5157 deepsea_compiler_backend.cc:2130] XLA::TPU program HBM usage: 14.10G / 94.74G
+I0813 17:21:06.501249    5157 deepsea_compiler_backend.cc:2142] XLA::TPU SparseCore program stack usage: 96.0K
+I0813 17:21:06.501251    5157 deepsea_compiler_backend.cc:2163] XLA::TPU program VMEM usage: 63.94M / 64.00M
+I0813 17:21:06.501258    5157 deepsea_compiler_backend.cc:2174] Total hbm usage >= 20.84G:
+    reserved        268.00M 
+    program          14.10G 
+    arguments         6.47G 
+
+Output size 6.47G; shares 6.47G with arguments.
+
+Total host usage >= 0B:
+    reserved             0B 
+    program         unknown size 
+    arguments            0B 
+
+Output size 0B; shares 0B with arguments.
+
+I0813 17:21:06.501353    5157 deepsea_compiler_backend.cc:2178] Program sflag requirement 848B:
+    reserved           204B
+    scoped             524B
+    HLO temp           120B (100.0% utilization: Unpadded (120B) Padded (120B), 0.0% fragmentation (0B))
+Program sparse_core_sequencer_sflag requirement 36B:
+    reserved            36B
+Program sparse_core_tile_sflag requirement 4B:
+    reserved             4B
+Program hbm requirement 14.10G:
+    reserved        120.05M
+    global          173.83M
+    scoped           416.5K
+    HLO temp         13.67G (99.0% utilization: Unpadded (9.21G) Padded (9.30G), 32.0% fragmentation (4.37G))
+    overlays        145.18M
+Program vmem requirement 63.94M:
+    HLO temp         63.94M (0.0% utilization: Unpadded (0B) Padded (0B), 100.0% fragmentation (63.94M))
+Program smem requirement 18.8K:
+    global             628B
+    scoped            18.2K
+Program host requirement 0B:
+I0813 17:21:06.501356    5157 deepsea_compiler_backend.cc:2186] XLA::TPU program SMEM usage: 27.9K / 1.00M (1850 parameters)
+I0813 17:21:06.837809    5157 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 9.56875278625s
+I0813 17:21:08.115185    5157 isa_program_util_common.cc:373] (HLO module jit_train_step): Executable fingerprint:b69143e8452df2a8b66105b4b5f1b764c638248901dfe06ef7ffe0a9eaa2f521
+I0813 17:21:08.115212    5157 isa_program_util_common.cc:377] (HLO module jit_train_step): Executable fingerprint (including data segments):b69159e86420fccc500f39fe08b794a760bea21d927db9b3c6469c5d7f450c19
+I0813 17:21:08.115214    5157 isa_program_util_common.cc:380] (HLO module jit_train_step): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:21:08.115774       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 4m30.632313202s
+I0813 17:21:08.115813       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:21:08.598897       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:21:13.087050 139997125380992 max_utils.py:818] Total estimated memory size: 24.5 GB, estimated output size: 6.5 GB, estimated temp size: 18.0 GB, estimated argument size: 6.5 GB, Estimated host temp size: 0.0 GB.
+I0813 17:21:13.087207 139997125380992 max_utils.py:824] Note that compiler could over-estimate the HBM usage.
+I0813 17:21:13.109903 139997125380992 metric_logger.py:365] number parameters: 4.629 billion
+W0813 17:21:17.173202    5462 tpu_spmd_partitioner.cc:459] Collective matmul V1 is enabled. Please consider migrating to V2 since V1 will be deprecated soon. You can enable V2 by setting xla_tpu_all_gather_collective_matmul_mode=post_spmd and xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd.
+I0813 17:21:27.782733    5462 shardy_xla_pass.cc:351] Using Shardy output directory: gs://mdonati-uscentral1/maxtext-logs//HLO_dumps/gemmae2b-recipe-af-full/shardy/module_5417.jit_raw_generate_synthetic_data
+I0813 17:21:31.301340       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_raw_generate_synthetic_data
+I0813 17:21:47.538349       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_raw_generate_synthetic_data
+I0813 17:21:48.058634       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 32.284342513s
+I0813 17:21:48.451363    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:21:48.451879    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:21:48.451919    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:21:50.518205    5707 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 2.45803845175s
+I0813 17:21:50.834109    5707 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 315.7716965ms
+I0813 17:21:50.834391    5707 isa_program_util_common.cc:373] (HLO module jit_raw_generate_synthetic_data): Executable fingerprint:6a744d7180cd19fcd7b1067e04b9c74bba539ae6ce0c3429292dc3fe53535b84
+I0813 17:21:50.834394    5707 isa_program_util_common.cc:377] (HLO module jit_raw_generate_synthetic_data): Executable fingerprint (including data segments):ffe03655bb60a462841e5867c49dfa1442b7fbbb31d9c1899796e357bcbe942a
+I0813 17:21:50.834396    5707 isa_program_util_common.cc:380] (HLO module jit_raw_generate_synthetic_data): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:21:50.834725       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 36.220011067s
+I0813 17:21:50.834794       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:21:50.835988       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:21:55.908485       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit__multi_slice
+I0813 17:22:01.318386       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit__multi_slice
+I0813 17:22:01.877820       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 9.30985471975s
+I0813 17:22:02.151845    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:22:02.152445    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:22:02.152491    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:22:03.985106    5944 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 2.10616027575s
+I0813 17:22:04.308532    5944 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 323.29866075ms
+I0813 17:22:04.308759    5944 isa_program_util_common.cc:373] (HLO module jit__multi_slice): Executable fingerprint:9d662331577824e6cd68d277e5b1034b2e842e7e301076154b6df69c33824ac0
+I0813 17:22:04.308763    5944 isa_program_util_common.cc:377] (HLO module jit__multi_slice): Executable fingerprint (including data segments):e63719798c6917a213e596f99179493459596357d3462dcb91cd1bf562a683ab
+I0813 17:22:04.308765    5944 isa_program_util_common.cc:380] (HLO module jit__multi_slice): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:22:04.308979       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 12.8798775305s
+I0813 17:22:04.309043       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:22:04.310003       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:22:09.327452       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit__multi_slice
+I0813 17:22:15.367783       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit__multi_slice
+I0813 17:22:15.925147       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 9.88559339925s
+I0813 17:22:16.224810    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:22:16.225329    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:22:16.225369    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:22:17.888611    6190 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 1.96250280325s
+I0813 17:22:18.238358    6190 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 349.64813675ms
+I0813 17:22:18.238588    6190 isa_program_util_common.cc:373] (HLO module jit__multi_slice): Executable fingerprint:b24a5e5730be3074198fac613bfa67bfee4c5d5df4edaf75273016200b8dce04
+I0813 17:22:18.238592    6190 isa_program_util_common.cc:377] (HLO module jit__multi_slice): Executable fingerprint (including data segments):ed894c0255d19a452aa3561eb626294617b0c6b544b6b708683c72fc3cbd8005
+I0813 17:22:18.238593    6190 isa_program_util_common.cc:380] (HLO module jit__multi_slice): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:22:18.238902       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 13.3491199215s
+I0813 17:22:18.238954       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:22:18.239714       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:22:29.307511       7 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+I0813 17:22:30.449294 139997125380992 max_utils.py:777] 
+Memstats: After params initialized:
+I0813 17:22:30.449463 139997125380992 max_utils.py:783] 	Using (GB) 6.9 / 94.74 (7.283091%) on TPU_0(process=0,(0,0,0,0))
+I0813 17:22:30.449501 139997125380992 max_utils.py:783] 	Using (GB) 6.9 / 94.74 (7.283091%) on TPU_1(process=0,(0,0,0,1))
+I0813 17:22:30.449530 139997125380992 max_utils.py:783] 	Using (GB) 6.9 / 94.74 (7.283091%) on TPU_4(process=0,(0,1,0,0))
+I0813 17:22:30.449555 139997125380992 max_utils.py:783] 	Using (GB) 6.9 / 94.74 (7.283091%) on TPU_5(process=0,(0,1,0,1))
+I0813 17:22:35.390794       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_clip
+I0813 17:22:40.362394       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_clip
+I0813 17:22:40.877680       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 8.7159709005s
+I0813 17:22:41.235521    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:22:41.236020    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:22:41.236058    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:22:42.903401    6485 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 2.02492125275s
+I0813 17:22:43.292654    6485 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 389.1392165ms
+I0813 17:22:43.292842    6485 isa_program_util_common.cc:373] (HLO module jit_clip): Executable fingerprint:127114a26232fa3ba01602d708e0adf85bd7a8cd8a6418ad83815a49de792e81
+I0813 17:22:43.292845    6485 isa_program_util_common.cc:377] (HLO module jit_clip): Executable fingerprint (including data segments):523e8ea51126cefc41ff025f8dcbad297e87389a9e6b5407d2c480c6f5f637e5
+I0813 17:22:43.292847    6485 isa_program_util_common.cc:380] (HLO module jit_clip): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:22:43.293050       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 12.2622550115s
+I0813 17:22:43.293068       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:22:43.293591       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:22:48.286067       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_true_divide
+I0813 17:22:53.435845       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_true_divide
+I0813 17:22:53.908217       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 8.869445127s
+I0813 17:22:54.238157    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:22:54.238652    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:22:54.238690    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:22:55.817423    6723 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 1.9086213485s
+I0813 17:22:56.130565    6723 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 313.02789175ms
+I0813 17:22:56.130746    6723 isa_program_util_common.cc:373] (HLO module jit_true_divide): Executable fingerprint:008a61c1cf13ee8cbe4fea37678e45baed38fd19306c386e93a73742dc5d0172
+I0813 17:22:56.130749    6723 isa_program_util_common.cc:377] (HLO module jit_true_divide): Executable fingerprint (including data segments):27c697d225df88ba5efbf44e813314292109b4b36c5488f3d2480c1da38665ff
+I0813 17:22:56.130751    6723 isa_program_util_common.cc:380] (HLO module jit_true_divide): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:22:56.130922       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 12.2667506945s
+I0813 17:22:56.130937       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:22:56.131390       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:23:01.073728       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_subtract
+I0813 17:23:06.023736       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_subtract
+I0813 17:23:06.507090       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 8.75665907725s
+I0813 17:23:06.810520    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:23:06.811025    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:23:06.811064    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:23:08.383141    6966 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 1.87555457025s
+I0813 17:23:08.744528    6966 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 361.28461075ms
+I0813 17:23:08.744738    6966 isa_program_util_common.cc:373] (HLO module jit_subtract): Executable fingerprint:47341bd1ea83415872efbdf0f8a66ef7e9a9077431fcee8553b85fc537480ae1
+I0813 17:23:08.744742    6966 isa_program_util_common.cc:377] (HLO module jit_subtract): Executable fingerprint (including data segments):d22d6ca3f37cfd3f669e60b47d11cf1e5d7dc2e6da050898716fd3e65f7b533d
+I0813 17:23:08.744744    6966 isa_program_util_common.cc:380] (HLO module jit_subtract): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:23:08.744915       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 12.05080574425s
+I0813 17:23:08.744934       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:23:08.745467       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:23:13.830065       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_integer_pow
+I0813 17:23:19.074314       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_integer_pow
+I0813 17:23:19.634648       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 9.15882657125s
+I0813 17:23:20.043104    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:23:20.043636    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:23:20.043681    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:23:21.655736    7203 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 2.02048022s
+I0813 17:23:21.999523    7203 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 343.69504825ms
+I0813 17:23:21.999699    7203 isa_program_util_common.cc:373] (HLO module jit_integer_pow): Executable fingerprint:247e86435e78e9e1c68474c245f0fdd70857d35e856ac79dde766f8392622e63
+I0813 17:23:21.999702    7203 isa_program_util_common.cc:377] (HLO module jit_integer_pow): Executable fingerprint (including data segments):61ca80c4d222d3975dcb529b3d9ec05980e3074190cd1dcca87ba910dadf439d
+I0813 17:23:21.999704    7203 isa_program_util_common.cc:380] (HLO module jit_integer_pow): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:23:21.999869       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 12.644811s
+I0813 17:23:21.999886       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:23:22.000323       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:23:26.821342       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_multiply
+I0813 17:23:32.084805       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_multiply
+I0813 17:23:32.624192       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 8.97114979375s
+I0813 17:23:32.926093    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:23:32.926634    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:23:32.926676    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:23:34.508875    7443 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 1.88408032675s
+I0813 17:23:34.811481    7443 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 302.48691625ms
+I0813 17:23:34.811666    7443 isa_program_util_common.cc:373] (HLO module jit_multiply): Executable fingerprint:33287e58f9a66ce9183bd93ad3273d3892ccb5fc60acfe3f9f4ac26b75bd4e09
+I0813 17:23:34.811670    7443 isa_program_util_common.cc:377] (HLO module jit_multiply): Executable fingerprint (including data segments):d7ebbaef3a8fedd43ac4068604b2894cf8aeb910124c1bbdf63328a246fdc6ea
+I0813 17:23:34.811672    7443 isa_program_util_common.cc:380] (HLO module jit_multiply): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:23:34.812024       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 12.298249603s
+I0813 17:23:34.812043       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:23:34.812546       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:23:39.738575       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_add
+I0813 17:23:44.817879       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_add
+I0813 17:23:45.326509       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 8.847650824s
+I0813 17:23:45.729332    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:23:45.729842    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:23:45.729881    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:23:47.282610    7678 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 1.95537427575s
+I0813 17:23:47.598338    7678 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 315.646394ms
+I0813 17:23:47.598527    7678 isa_program_util_common.cc:373] (HLO module jit_add): Executable fingerprint:79109d289f64c2c9deedd9e0eb849113fd0332b9115875b5c3f53f4b1a14e1b1
+I0813 17:23:47.598531    7678 isa_program_util_common.cc:377] (HLO module jit_add): Executable fingerprint (including data segments):51dd23683029d145f646a51b9a3ca388ef894e8e4839f2fbcf32ea71fca02e77
+I0813 17:23:47.598532    7678 isa_program_util_common.cc:380] (HLO module jit_add): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:23:47.598860       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 12.23452959225s
+I0813 17:23:47.598882       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:23:47.599453       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:23:52.272629       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_cos
+I0813 17:23:57.166367       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_cos
+I0813 17:23:57.614876       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 8.38769041175s
+I0813 17:23:57.964239    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:23:57.964732    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:23:57.964772    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:23:59.458637    7914 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 1.84303713525s
+I0813 17:23:59.755364    7914 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 296.617798ms
+I0813 17:23:59.755559    7914 isa_program_util_common.cc:373] (HLO module jit_cos): Executable fingerprint:e92e45ee66ef6e24e7888f346e9b97c5d9a0b7315627b867778750819ae5a497
+I0813 17:23:59.755562    7914 isa_program_util_common.cc:377] (HLO module jit_cos): Executable fingerprint (including data segments):04877701fe77a0670d685c299517fe77931292eca562a94d56dc6db4b82cf247
+I0813 17:23:59.755564    7914 isa_program_util_common.cc:380] (HLO module jit_cos): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:23:59.755878       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 11.64064438075s
+I0813 17:23:59.755915       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:23:59.756468       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:24:04.806789       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit_add
+I0813 17:24:10.140726       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit_add
+I0813 17:24:10.725946       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 9.36320740725s
+I0813 17:24:11.079730    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:24:11.080230    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:24:11.080276    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:24:12.703292    8156 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 1.97679347175s
+I0813 17:24:13.009432    8156 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 306.04476075ms
+I0813 17:24:13.009616    8156 isa_program_util_common.cc:373] (HLO module jit_add): Executable fingerprint:a076750e91190f41ba8ec9eba39e36bc2e4d307e310f4bcc8842fbab4dbef729
+I0813 17:24:13.009619    8156 isa_program_util_common.cc:377] (HLO module jit_add): Executable fingerprint (including data segments):f764db12a8660e0bbd8b5c4349ab6a84cb672f4b24ad062681c0dd37a2a7fbc1
+I0813 17:24:13.009620    8156 isa_program_util_common.cc:380] (HLO module jit_add): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:24:13.009974       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 12.75943188625s
+I0813 17:24:13.009998       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:24:13.010535       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:24:18.448994       7 deepsea_compiler_hlo_passes.cc:6113] xla_tpu_impure_hlo_parallel_compile is DISABLED. jit__where
+I0813 17:24:23.631704       7 tpu_plumb_vmem_info.cc:666] scavenging_mode: 3 for module: jit__where
+I0813 17:24:24.143087       7 deepsea_compiler_hlo_passes.cc:6396] HLO_PASSES stage duration: 9.17422281675s
+I0813 17:24:24.450472    1468 tpu_chip_config.cc:367] Resolved chip config alias default->megachip for 6acc60406, 
+E0813 17:24:24.450993    1468 memory_space_assignment_util.cc:607] INVALID_ARGUMENT: 67108864 bytes of scoped Vmem requested (via TpuCompilationEnvironment field xla_tpu_scoped_vmem_limit_kib), but the max valid bytes is 67043328. See go/scoped-vmem for more details.
+=== Source Location Trace: ===
+platforms/xla/service/jellyfish/memory_space_assignment_util.cc:170
+I0813 17:24:24.451035    1468 memory_space_assignment_util.cc:617] MSA Vmem breakdown: default scoped vmem (from flag): 67043328; does_msa_directly_allocate_scoped_vmem: T; bytes_for_msa_to_allocate: 67043328
+I0813 17:24:26.092220    8391 deepsea_compiler_base.cc:4011] BACKEND_PASSES stage duration: 1.94836672875s
+I0813 17:24:26.396996    8391 deepsea_compiler_backend.cc:1487] CODE_GENERATION stage duration: 304.6848795ms
+I0813 17:24:26.397177    8391 isa_program_util_common.cc:373] (HLO module jit__where): Executable fingerprint:142348cc95f21b8a3a45b26f72a1459797ad9d4ca592b3add28cfcd3de7c9668
+I0813 17:24:26.397179    8391 isa_program_util_common.cc:377] (HLO module jit__where): Executable fingerprint (including data segments):bd68a8a94a07fc5375125c85ad7ba06143046a6006314a0b46ae4666b3294b78
+I0813 17:24:26.397181    8391 isa_program_util_common.cc:380] (HLO module jit__where): Host transfer fingerprint:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+I0813 17:24:26.397545       7 deepsea_compiler_base.cc:989] END_TO_END stage duration: 12.79794985575s
+I0813 17:24:26.397568       7 deepsea_compiler_base.cc:990] Note that END_TO_END duration also includes time outside of HLO_PASSES, BACKEND_PASSES, and CODE_GENERATION
+I0813 17:24:26.398144       7 tpu_pjrt_executable.cc:609] Source URI is : googlefile:/google_src/files/948136882/depot/g3     
+I0813 17:24:26.422194 139997125380992 metric_logger.py:226] completed step: 0, seconds: 76.544, TFLOP/s/device: 3.302, Tokens/s/device: 214.046, total_weights: 131072, loss: 12.978, lm_loss: 12.978, perplexity: 432998.625
+I0813 17:24:26.424095 139997125380992 metric_logger.py:333] To see full metrics 'tensorboard --logdir=/app/maxtext_output/gemmae2b-recipe-af-full/tensorboard/'
+I0813 17:24:27.193570 139997125380992 metric_logger.py:226] completed step: 1, seconds: 115.972, TFLOP/s/device: 2.180, Tokens/s/device: 141.276, total_weights: 131072, loss: 12.978, lm_loss: 12.978, perplexity: 432998.625
+I0813 17:24:27.976907 139997125380992 metric_logger.py:226] completed step: 2, seconds: 0.026, TFLOP/s/device: 9879.734, Tokens/s/device: 640400.250, total_weights: 131072, loss: 12.977, lm_loss: 12.977, perplexity: 432360.219
+I0813 17:24:28.760189 139997125380992 metric_logger.py:226] completed step: 3, seconds: 0.769, TFLOP/s/device: 328.634, Tokens/s/device: 21301.907, total_weights: 131072, loss: 12.976, lm_loss: 12.976, perplexity: 432076.250
+I0813 17:24:29.551257       7 profiler_session.cc:121] Profiler session initializing.
+I0813 17:24:29.551282       7 profiler_session.cc:136] Profiler session started.
+I0813 17:24:29.551650       7 xprof_profiler.cc:340] CreateGrpcTslProfiler with host_tracer_level=2
+I0813 17:24:29.624463    1468 tpu_vxc_driver.cc:3016] ReadGlobalTimeCounter returning real data
+W0813 17:24:29.625386    5241 gfc_configs.cc:136]  Overriding tracemark filters for GFC to 0..max. See b/394884361.
+W0813 17:24:29.625410    5241 gfc_configs.cc:136]  Overriding tracemark filters for GFC to 0..max. See b/394884361.
+W0813 17:24:29.625680    1468 gfc_configs.cc:136]  Overriding tracemark filters for GFC to 0..max. See b/394884361.
+W0813 17:24:29.625695    1468 gfc_configs.cc:136]  Overriding tracemark filters for GFC to 0..max. See b/394884361.
+I0813 17:24:29.662817    1468 latent_see.cc:155] Latent-see collection enabling
+I0813 17:24:29.685830 139997125380992 metric_logger.py:226] completed step: 4, seconds: 0.781, TFLOP/s/device: 323.705, Tokens/s/device: 20982.397, total_weights: 131072, loss: 12.980, lm_loss: 12.980, perplexity: 433495.812
+I0813 17:24:30.262924    1468 latent_see.cc:159] Latent-see collection recording
+I0813 17:24:30.454060 139997125380992 metric_logger.py:226] completed step: 5, seconds: 1.688, TFLOP/s/device: 149.715, Tokens/s/device: 9704.442, total_weights: 131072, loss: 12.981, lm_loss: 12.981, perplexity: 434009.625
+I0813 17:24:32.032178       7 profiler_session.cc:84] Profiler session collecting data.
+I0813 17:24:32.589706    1468 latent_see.cc:169] Latent-see collection stopping
+I0813 17:24:32.589941    1468 latent_see.cc:175] Latent-see collection stopped: processing 0 bins
+I0813 17:24:32.589948    1468 latent_see.cc:237] Latent-see collection complete
+I0813 17:24:36.045214       7 timer.cc:51] ConvertTpuTraceToXPlane: 2568.93 ms (elapsed)
+I0813 17:24:37.098629       7 xplane_hlo_fixer.cc:117] XProf HLO fixer triggered for metadata plane.
+I0813 17:24:40.660380       7 save_profile.cc:239] Collecting XSpace to repository: /app/maxtext_output/gemmae2b-recipe-af-full/tensorboard/plugins/profile/2026_08_13_17_24_40/gke-tpu-092584d6-2915.xplane.pb
+I0813 17:24:45.147087       7 save_profile.cc:212] Creating directory: /app/maxtext_output/gemmae2b-recipe-af-full/tensorboard/plugins/profile/2026_08_13_17_24_40
+
+I0813 17:24:49.350565       7 save_profile.cc:218] Dumped gzipped tool data for trace.json.gz to /app/maxtext_output/gemmae2b-recipe-af-full/tensorboard/plugins/profile/2026_08_13_17_24_40/gke-tpu-092584d6-2915.trace.json.gz
+I0813 17:24:51.483379       7 profiler_session.cc:167] Profiler session tear down.
+I0813 17:24:51.489861 139997125380992 metric_logger.py:226] completed step: 6, seconds: 0.029, TFLOP/s/device: 8655.975, Tokens/s/device: 561076.675, total_weights: 131072, loss: 12.978, lm_loss: 12.978, perplexity: 432824.625
+I0813 17:24:51.526768 139997125380992 metric_logger.py:226] completed step: 7, seconds: 0.770, TFLOP/s/device: 328.072, Tokens/s/device: 21265.522, total_weights: 131072, loss: 12.982, lm_loss: 12.982, perplexity: 434466.594
+I0813 17:24:52.296645 139997125380992 metric_logger.py:226] completed step: 8, seconds: 21.042, TFLOP/s/device: 12.013, Tokens/s/device: 778.648, total_weights: 131072, loss: 12.979, lm_loss: 12.979, perplexity: 433031.250
+I0813 17:24:53.080393 139997125380992 metric_logger.py:226] completed step: 9, seconds: 0.029, TFLOP/s/device: 8777.107, Tokens/s/device: 568928.398, total_weights: 131072, loss: 12.975, lm_loss: 12.975, perplexity: 431519.625
+I0813 17:24:53.863534 139997125380992 metric_logger.py:226] completed step: 10, seconds: 0.764, TFLOP/s/device: 330.637, Tokens/s/device: 21431.730, total_weights: 131072, loss: 12.976, lm_loss: 12.976, perplexity: 431848.375
+I0813 17:24:54.647490 139997125380992 metric_logger.py:226] completed step: 11, seconds: 0.783, TFLOP/s/device: 322.803, Tokens/s/device: 20923.981, total_weights: 131072, loss: 12.977, lm_loss: 12.977, perplexity: 432356.812
+I0813 17:24:55.431126 139997125380992 metric_logger.py:226] completed step: 12, seconds: 0.782, TFLOP/s/device: 323.148, Tokens/s/device: 20946.344, total_weights: 131072, loss: 12.976, lm_loss: 12.976, perplexity: 431849.500
+I0813 17:24:56.214539 139997125380992 metric_logger.py:226] completed step: 13, seconds: 0.783, TFLOP/s/device: 322.641, Tokens/s/device: 20913.484, total_weights: 131072, loss: 12.973, lm_loss: 12.973, perplexity: 430686.938
+I0813 17:24:56.997523 139997125380992 metric_logger.py:226] completed step: 14, seconds: 0.783, TFLOP/s/device: 322.634, Tokens/s/device: 20913.030, total_weights: 131072, loss: 12.975, lm_loss: 12.975, perplexity: 431553.875
+I0813 17:24:57.781047 139997125380992 metric_logger.py:226] completed step: 15, seconds: 0.785, TFLOP/s/device: 321.910, Tokens/s/device: 20866.075, total_weights: 131072, loss: 12.972, lm_loss: 12.972, perplexity: 430123.594
+I0813 17:24:58.565269 139997125380992 metric_logger.py:226] completed step: 16, seconds: 0.783, TFLOP/s/device: 322.995, Tokens/s/device: 20936.387, total_weights: 131072, loss: 12.976, lm_loss: 12.976, perplexity: 431714.781
+I0813 17:24:59.349541 139997125380992 metric_logger.py:226] completed step: 17, seconds: 0.783, TFLOP/s/device: 322.948, Tokens/s/device: 20933.338, total_weights: 131072, loss: 12.972, lm_loss: 12.972, perplexity: 430392.656
+I0813 17:25:00.133513 139997125380992 metric_logger.py:226] completed step: 18, seconds: 0.784, TFLOP/s/device: 322.219, Tokens/s/device: 20886.078, total_weights: 131072, loss: 12.973, lm_loss: 12.973, perplexity: 430712.562
+I0813 17:25:00.917428 139997125380992 metric_logger.py:226] completed step: 19, seconds: 0.785, TFLOP/s/device: 321.938, Tokens/s/device: 20867.855, total_weights: 131072, loss: 12.975, lm_loss: 12.975, perplexity: 431574.969
+I0813 17:25:01.700864 139997125380992 metric_logger.py:226] completed step: 20, seconds: 0.783, TFLOP/s/device: 322.762, Tokens/s/device: 20921.309, total_weights: 131072, loss: 12.974, lm_loss: 12.974, perplexity: 430859.500
+I0813 17:25:02.485304 139997125380992 metric_logger.py:226] completed step: 21, seconds: 0.784, TFLOP/s/device: 322.581, Tokens/s/device: 20909.561, total_weights: 131072, loss: 12.974, lm_loss: 12.974, perplexity: 431122.188
+I0813 17:25:03.268620 139997125380992 metric_logger.py:226] completed step: 22, seconds: 0.784, TFLOP/s/device: 322.334, Tokens/s/device: 20893.562, total_weights: 131072, loss: 12.972, lm_loss: 12.972, perplexity: 430017.281
+I0813 17:25:04.052492 139997125380992 metric_logger.py:226] completed step: 23, seconds: 0.783, TFLOP/s/device: 322.628, Tokens/s/device: 20912.603, total_weights: 131072, loss: 12.974, lm_loss: 12.974, perplexity: 431044.094
+I0813 17:25:04.836481 139997125380992 metric_logger.py:226] completed step: 24, seconds: 0.783, TFLOP/s/device: 322.830, Tokens/s/device: 20925.691, total_weights: 131072, loss: 12.974, lm_loss: 12.974, perplexity: 430971.750
+I0813 17:25:05.620599 139997125380992 metric_logger.py:226] completed step: 25, seconds: 0.786, TFLOP/s/device: 321.401, Tokens/s/device: 20833.068, total_weights: 131072, loss: 12.970, lm_loss: 12.970, perplexity: 429454.250
+I0813 17:25:06.404454 139997125380992 metric_logger.py:226] completed step: 26, seconds: 0.782, TFLOP/s/device: 323.029, Tokens/s/device: 20938.581, total_weights: 131072, loss: 12.971, lm_loss: 12.971, perplexity: 429805.844
+I0813 17:25:07.188394 139997125380992 metric_logger.py:226] completed step: 27, seconds: 0.784, TFLOP/s/device: 322.360, Tokens/s/device: 20895.267, total_weights: 131072, loss: 12.975, lm_loss: 12.975, perplexity: 431446.062
+I0813 17:25:07.972580 139997125380992 metric_logger.py:226] completed step: 28, seconds: 0.783, TFLOP/s/device: 322.931, Tokens/s/device: 20932.241, total_weights: 131072, loss: 12.972, lm_loss: 12.972, perplexity: 430218.594
+I0813 17:25:08.756472 139997125380992 metric_logger.py:226] completed step: 29, seconds: 0.785, TFLOP/s/device: 322.164, Tokens/s/device: 20882.564, total_weights: 131072, loss: 12.967, lm_loss: 12.967, perplexity: 428105.656
+Per train step:
+ Total TFLOPs: 252.76 
+ split as 88.65% learnable weight flops and 11.35% attention flops
+I0813 17:25:11.702284       7 allocator_stats_reporter.cc:147] Stopping AllocatorStatsReporter. Reporting one last time first.
+I0813 17:25:11.705108     776 tpu_diagnostic_coordinator.cc:351] TpuStallWorker thread exiting.
+I0813 17:25:11.706161       7 tpunetd_client.cc:408] Session master stopping the session...
+I0813 17:25:11.707521     696 session_worker_service.cc:115] Session master notifies the worker to disconnect from session 7aead978bde48361
+I0813 17:25:11.707999       7 tpunetd_client.cc:410] Session master stopped the session.
+I0813 17:25:11.708022       7 tpunetd_client.cc:415] Session manager stopping the session...
+I0813 17:25:11.709835    1468 broadcast_barrier.cc:132] All instances are ready for PRE_STOP_SESSION_BARRIER, broadcasting notification...
+I0813 17:25:11.812704       7 tpunetd_client.cc:417] Session manager stopped the session.
+I0813 17:25:13.522767     280 async_driver.cc:1164] [/dev/vfio/5 tpu535:pe0:0] vf_id:0 Driver closed.
+I0813 17:25:13.558391    8458 async_driver.cc:1164] [/dev/vfio/4 tpu535:pe0:1] vf_id:0 Driver closed.
+I0813 17:25:14.386948    8433 cachednslookup.cc:392] TTL not found in response, not caching response
+XPK End: Thu Aug 13 17:25:20 UTC 2026
+EXIT_CODE=0

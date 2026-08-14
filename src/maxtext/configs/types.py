@@ -3562,11 +3562,12 @@ class MaxTextConfig(
       self.validate_ragged_buffer_factor()
     self.validate_num_moe_emb_chunks()
 
-    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
-    if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
-      raise ValueError(
-          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
-      )
+    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing natively inside Gemma4SmallScannableBlock
+    # (Previously it was incompatible, but has been upgraded to support it).
+    # if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
+    #   raise ValueError(
+    #       f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
+    #   )
     if self.use_multimodal:
       # Gemma 4 small (E2B / E4B) only supports text for now; multimodal
       # support is pending clipped-linears in the vision encoder.
