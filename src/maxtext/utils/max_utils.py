@@ -252,6 +252,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
       initialize_multi_tier_checkpointing(
           local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
           backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
+          backup_interval_steps=raw_keys["multi_tier_checkpointing_backup_interval_steps"],
           run_name=raw_keys["run_name"],
           jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
           use_colocated_python=True,
@@ -298,6 +299,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     initialize_multi_tier_checkpointing(
         local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
         backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
+        backup_interval_steps=raw_keys["multi_tier_checkpointing_backup_interval_steps"],
         run_name=raw_keys["run_name"],
         jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
         data_parallelism=raw_keys["mtc_data_parallelism"],
@@ -957,6 +959,8 @@ def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu
       "targets_position",
       "inputs_segmentation",
       "targets_segmentation",
+      "corruption_mask",
+      "targets_loss_mask",
   }
 
   if hardware in ("gpu", "gpu_multiprocess"):

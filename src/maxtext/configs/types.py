@@ -102,6 +102,14 @@ class QuantizationType(str, Enum):
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
 
 
+class TeCommGemmOverlapPolicy(str, Enum):
+  """Transformer Engine collective GEMM overlap scope."""
+
+  DISABLED = "disabled"
+  MLP = "mlp"
+  FULL = "full"
+
+
 class KvQuantAxis(str, Enum):
   """Axes to quantize over for the Key-Value cache."""
 
@@ -399,9 +407,13 @@ class EmergencyCheckpointing(BaseModel):
   )
   local_checkpoint_directory: PathStr = Field("", description="Local directory for emergency checkpoints.")
   local_checkpoint_period: NonNegativeInt = Field(0, description="Frequency (in steps) for local emergency checkpoints.")
-  multi_tier_checkpointing_backup_interval_minutes: NonNegativeInt = Field(
-      0,
+  multi_tier_checkpointing_backup_interval_minutes: PositiveInt | None = Field(
+      None,
       description="Interval in minutes to back up local checkpoints to persistent storage.",
+  )
+  multi_tier_checkpointing_backup_interval_steps: PositiveInt | None = Field(
+      None,
+      description="Interval in steps to back up local checkpoints to persistent storage.",
   )
   mtc_data_parallelism: int = Field(
       0,
@@ -483,8 +495,13 @@ class Quantization(BaseModel):
       50,
       description=("The first number of steps before updating the sparsity masks."),
   )
-  use_te_comm_gemm_overlap: bool = Field(
-      False, description="If True, uses Transformer Engine's collective GEMM overlap algorithm."
+  te_comm_gemm_overlap: str = Field(
+      TeCommGemmOverlapPolicy.DISABLED.value,
+      description=(
+          "Transformer Engine collective GEMM overlap policy. "
+          "'disabled' disables overlap; 'mlp' overlaps MLP up/down projections; "
+          "'full' also overlaps attention QKV and output projections."
+      ),
   )
 
 
@@ -647,7 +664,7 @@ class Attention(BaseModel):
       0,
       ge=0,
       description=(
-          "Chunk size over heads dimension for QK attention dot product in mla. "
+          "Chunk size over heads dimension for QK attention dot product in mla.  "
           "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
       ),
   )
@@ -1084,6 +1101,7 @@ class HardwareAndMesh(BaseModel):
           "fsdp_transpose",
           "sequence",
           "context",
+          "context_usp_ulysses",
           "context_autoregressive",
           "tensor",
           "tensor_sequence",
@@ -1105,7 +1123,7 @@ class HardwareAndMesh(BaseModel):
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
   context_parallel_strategy: str = Field(
       "all_gather",
-      description="Strategy for context parallelism ('all_gather', 'ring', or 'ulysses').",
+      description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
   )
   context_parallel_reorder_strategy: ReorderStrategy = Field(
       ReorderStrategy.AUTO,
@@ -1159,6 +1177,13 @@ class LayoutAndSharding(BaseModel):
   )
   data_sharding: Any = Field([], description="Sharding for input data.")
   context_sharding: str = Field("context", description="Physical axis name for context parallelism.")
+  ulysses_context_sharding: str = Field(
+      "context_usp_ulysses",
+      description=(
+          "Physical axis name for the Ulysses head exchange under context_parallel_strategy='usp'. "
+          "context_sharding names the ring dimension; this names the all-to-all dimension."
+      ),
+  )
   input_data_sharding_logical_axes: list[str] = Field(
       ["activation_embed_and_logits_batch", "activation_norm_length"],
       description="Logical axes for sharding input data.",
@@ -1196,6 +1221,9 @@ class DcnParallelism(BaseModel):
   dcn_fsdp_transpose_parallelism: int = Field(1, description="DCN axis for FSDP transpose.")
   dcn_sequence_parallelism: int = Field(1, description="DCN axis for sequence parallelism (not recommended).")
   dcn_context_parallelism: int = Field(1, description="DCN axis for context parallelism.")
+  dcn_context_usp_ulysses_parallelism: int = Field(
+      1, description="DCN axis for the Ulysses dimension of USP context parallelism."
+  )
   dcn_context_autoregressive_parallelism: int = Field(1, description="DCN axis for context autoregressive parallelism.")
   dcn_tensor_parallelism: int = Field(1, description="DCN axis for tensor parallelism (not recommended).")
   dcn_tensor_sequence_parallelism: int = Field(
@@ -1215,6 +1243,9 @@ class IciParallelism(BaseModel):
   ici_fsdp_transpose_parallelism: int = Field(1, description="ICI axis for FSDP transpose.")
   ici_sequence_parallelism: int = Field(1, description="ICI axis for sequence parallelism.")
   ici_context_parallelism: int = Field(1, description="ICI axis for context parallelism.")
+  ici_context_usp_ulysses_parallelism: int = Field(
+      1, description="ICI axis for the Ulysses dimension of USP context parallelism."
+  )
   ici_context_autoregressive_parallelism: int = Field(1, description="ICI axis for context autoregressive parallelism.")
   ici_tensor_parallelism: int = Field(1, description="ICI axis for tensor parallelism.")
   ici_tensor_sequence_parallelism: int = Field(1, description="ICI axis for tensor sequence parallelism.")
@@ -1647,6 +1678,28 @@ class Distillation(BaseModel):
 class TrainingLoop(BaseModel):
   """Configuration for the main training loop, evaluation, and reproducibility."""
 
+  training_objective: Literal["causal_lm", "block_diffusion"] = Field(
+      "causal_lm",
+      description="The token-prediction objective used to prepare targets and compute loss.",
+  )
+  block_diffusion_mask_id: int = Field(
+      -1,
+      description="The tokenizer mask-token id required by the block-diffusion training objective.",
+  )
+  block_diffusion_min_noise: float = Field(
+      1.0e-3,
+      gt=0.0,
+      le=1.0,
+      description="The minimum corruption probability sampled independently for each block.",
+  )
+  block_diffusion_logit_alignment: Literal["same_position", "shifted"] = Field(
+      "same_position",
+      description="How model logits align to clean target-token positions.",
+  )
+  block_diffusion_canvas_policy: Literal["all_masked", "seed_and_mask"] = Field(
+      "all_masked",
+      description="Whether every block is fully maskable or begins with a clean anchor token.",
+  )
   steps: int = Field(
       150_001,
       ge=-1,
@@ -1677,6 +1730,7 @@ class TrainingLoop(BaseModel):
   enable_data_shuffling: bool = Field(True, description="Enables shuffling of the training data.")
   data_shuffle_seed: int = Field(0, description="Seed for data shuffling.")
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
+  max_inflight_computations: int = Field(2, description="Maximum number of inflight computations on device.")
 
 
 class ManifoldConstrainedHyperConnections(BaseModel):
@@ -2841,8 +2895,8 @@ class MaxTextConfig(
           "  2. Ragged sort with ring of experts (use_ring_of_experts=True AND use_ragged_sort=True)"
       )
 
-  def _validate_use_te_comm_gemm_overlap(self):
-    """Validates that use_te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
+  def _validate_te_comm_gemm_overlap(self):
+    """Validates that te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
     te_has_distributed_env = jax.local_device_count() == 1 and jax.distributed.is_initialized()
 
     if self.hardware != "gpu_multiprocess" or not te_has_distributed_env:
@@ -2859,6 +2913,100 @@ class MaxTextConfig(
     if not self.quantization.startswith("te_"):
       raise ValueError(
           "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
+      )
+
+  def _validate_usp_context_parallelism(self):
+    """Validates the USP (Ulysses over ring) context parallelism configuration."""
+    if self.context_parallel_strategy != "usp":
+      if self.ici_context_usp_ulysses_parallelism != 1 or self.dcn_context_usp_ulysses_parallelism != 1:
+        raise ValueError(
+            "ici/dcn_context_usp_ulysses_parallelism was specified, but is only supported when "
+            "context_parallel_strategy='usp'."
+        )
+      return
+    if self.hardware != "tpu":
+      raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
+    if self.context_sharding != "context":
+      raise ValueError("TPU USP attention requires context_sharding='context'.")
+    usp_sequence_axes = (self.context_sharding, self.ulysses_context_sharding)
+    for usp_axis in usp_sequence_axes:
+      if usp_axis not in self.mesh_axes:
+        raise ValueError(f"TPU USP attention requires mesh axis '{usp_axis}' in mesh_axes.")
+    if infer_cp_axes(self.logical_axis_rules) != usp_sequence_axes:
+      raise ValueError(
+          f"TPU USP attention requires activation_length to map to {usp_sequence_axes} in logical_axis_rules."
+      )
+    if infer_cp_axes(self.logical_axis_rules_for_eval) != usp_sequence_axes:
+      raise ValueError(
+          f"TPU USP attention requires activation_length to map to {usp_sequence_axes} in logical_axis_rules_for_eval."
+      )
+    usp_ring_size = self.ici_context_parallelism
+    usp_ulysses_size = self.ici_context_usp_ulysses_parallelism
+    if (
+        usp_ring_size <= 0
+        or usp_ulysses_size <= 0
+        or self.dcn_context_parallelism <= 0
+        or self.dcn_context_usp_ulysses_parallelism <= 0
+    ):
+      raise ValueError(
+          "TPU USP attention requires explicit positive ici/dcn context parallelism values; "
+          "inferred (-1) sizes are not supported."
+      )
+    if usp_ring_size <= 1:
+      raise ValueError("TPU USP attention requires ici_context_parallelism > 1 for the ring dimension.")
+    if usp_ulysses_size <= 1:
+      raise ValueError("TPU USP attention requires ici_context_usp_ulysses_parallelism > 1 for the Ulysses dimension.")
+    if self.dcn_context_parallelism != 1 or self.dcn_context_usp_ulysses_parallelism != 1:
+      raise ValueError("TPU USP attention does not support dcn context parallelism yet.")
+    if self.attention != "flash":
+      raise ValueError("TPU USP attention requires attention=flash.")
+    if not self.use_tokamax_splash:
+      raise ValueError("TPU USP attention requires use_tokamax_splash=True.")
+    if self.use_jax_splash:
+      raise ValueError("TPU USP attention requires use_jax_splash=False.")
+    if self.use_indexer:
+      raise ValueError("TPU USP attention does not support sparse indexer masks.")
+    if self.attention_type != "global":
+      raise ValueError("TPU USP attention is initially supported only for global causal attention.")
+    if self.context_parallel_load_balance:
+      raise ValueError("TPU USP attention does not support context_parallel_load_balance=True.")
+    if self.use_ragged_attention:
+      raise ValueError("TPU USP attention does not support ragged attention.")
+    if self.attention_sink:
+      raise ValueError("TPU USP attention does not support attention sinks.")
+    if self.use_chunked_prefill:
+      raise ValueError("TPU USP attention does not support chunked prefill yet.")
+    if self.use_multimodal:
+      raise ValueError("TPU USP attention does not support multimodal attention.")
+    if self.enable_dropout and self.dropout_rate > 0.0:
+      raise ValueError("TPU USP attention does not support dropout yet.")
+    if self.dq_reduction_steps not in (0, 3):
+      raise ValueError("TPU USP attention requires dq_reduction_steps to be 0 or 3.")
+    if self.use_qk_clip:
+      raise ValueError("TPU USP attention does not support QK-Clip statistics yet.")
+    if self.mtp_num_layers > 0:
+      raise ValueError("TPU USP attention does not support multi-token prediction (mtp_num_layers > 0) yet.")
+    if self.sa_bwd_dkv_megacore:
+      raise ValueError("TPU USP attention does not support sa_bwd_dkv_megacore yet.")
+    if self.max_target_length % (usp_ring_size * usp_ulysses_size) != 0:
+      raise ValueError(
+          "TPU USP attention requires max_target_length "
+          f"({self.max_target_length}) to be divisible by the total context parallelism "
+          f"({usp_ring_size * usp_ulysses_size})."
+      )
+    if self.max_target_length % (usp_ring_size * usp_ring_size) != 0:
+      raise ValueError("TPU USP attention requires max_target_length to be divisible by ici_context_parallelism squared.")
+    if self.num_query_heads % usp_ulysses_size != 0:
+      raise ValueError(
+          "TPU USP attention requires num_query_heads "
+          f"({self.num_query_heads}) to be divisible by ici_context_usp_ulysses_parallelism ({usp_ulysses_size})."
+      )
+    if self.num_kv_heads == 1:
+      raise ValueError("TPU USP attention does not support MQA with ici_context_usp_ulysses_parallelism > 1.")
+    if self.num_kv_heads % usp_ulysses_size != 0:
+      raise ValueError(
+          "TPU USP attention requires num_kv_heads "
+          f"({self.num_kv_heads}) to be divisible by ici_context_usp_ulysses_parallelism ({usp_ulysses_size})."
       )
 
   def validate_num_moe_emb_chunks(self):
@@ -3470,8 +3618,23 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_directory` must be set for multi-tier checkpointing.")
       if self.local_checkpoint_period <= 0:
         raise ValueError("`local_checkpoint_period` must be > 0 for multi-tier checkpointing.")
-      if self.multi_tier_checkpointing_backup_interval_minutes <= 0:
-        raise ValueError("`multi_tier_checkpointing_backup_interval_minutes` must be > 0.")
+      if (self.multi_tier_checkpointing_backup_interval_minutes is None) == (
+          self.multi_tier_checkpointing_backup_interval_steps is None
+      ):
+        raise ValueError(
+            "Exactly one of `multi_tier_checkpointing_backup_interval_minutes`"
+            " or `multi_tier_checkpointing_backup_interval_steps` must be"
+            " specified."
+        )
+      if (
+          self.multi_tier_checkpointing_backup_interval_steps is not None
+          and self.multi_tier_checkpointing_backup_interval_steps < self.local_checkpoint_period
+      ):
+        raise ValueError(
+            "`multi_tier_checkpointing_backup_interval_steps`"
+            f" ({self.multi_tier_checkpointing_backup_interval_steps}) must be"
+            f" >= `local_checkpoint_period` ({self.local_checkpoint_period})."
+        )
     if self.colocated_python_checkpointing and not self.enable_single_controller:
       raise ValueError("`colocated_python_checkpointing` is only supported with `enable_single_controller` set to True.")
     if self.enable_emergency_checkpoint:
@@ -3482,12 +3645,16 @@ class MaxTextConfig(
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
     if self.decoder_block == DecoderBlockType.DEEPSEEK4:
-      supports_dot_product = self.attention in ("dot_product", "autoselected")
-      supports_flash_splash = self.attention in ("flash", "autoselected") and self.use_tokamax_splash
-      if not (supports_dot_product or supports_flash_splash):
-        raise ValueError(
-            "DeepSeek4 is only supported with `dot_product` attention or `flash` attention with `use_tokamax_splash=True`."
-        )
+      match (self.attention, self.use_tokamax_splash):
+        case ("dot_product" | "autoselected", _):
+          pass
+        case ("flash" | "autoselected", True):
+          pass
+        case _:
+          raise ValueError(
+              "DeepSeek4 is only supported with `dot_product` attention or `flash` attention "
+              "with `use_tokamax_splash=True`."
+          )
     if self.mla_qk_head_chunk_size > 0:
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(
@@ -3501,7 +3668,13 @@ class MaxTextConfig(
             f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
             f"`indexer_n_heads` ({self.indexer_n_heads})."
         )
+
     if self.use_indexer:
+      if self.attention_type != AttentionType.MLA.value:
+        raise ValueError(
+            f"`use_indexer=True` requires `attention_type='{AttentionType.MLA.value}'`, since only the "
+            "MLA indexer produces this mask."
+        )
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
       supports_dot_product = self.attention in ("dot_product", "autoselected")
@@ -3542,6 +3715,41 @@ class MaxTextConfig(
             "Block-diffusion attention with attention='autoselected' or attention='flash' requires hardware='tpu'; "
             "use attention='dot_product' on other hardware."
         )
+    if self.training_objective == "block_diffusion":
+      if self.attention_type != AttentionType.BLOCK_DIFFUSION.value:
+        raise ValueError("`training_objective='block_diffusion'` requires `attention_type='block_diffusion'`.")
+      if self.block_diffusion_mask_id < 0 or self.block_diffusion_mask_id >= self.vocab_size:
+        raise ValueError(
+            f"`block_diffusion_mask_id` ({self.block_diffusion_mask_id}) must satisfy "
+            f"0 <= block_diffusion_mask_id < vocab_size ({self.vocab_size})."
+        )
+      # Block-diffusion attention validation above rejects packing first.
+      if self.packing:  # pragma: no cover
+        raise ValueError("`training_objective='block_diffusion'` requires `packing=False`.")
+      if self.mtp_num_layers > 0:
+        raise ValueError("`training_objective='block_diffusion'` is not compatible with MTP.")
+      if self.num_vocab_tiling > 1:
+        raise ValueError("`training_objective='block_diffusion'` is not compatible with vocabulary tiling.")
+      if self.dataset_type != "hf":
+        raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'`.")
+      if self.use_dpo:
+        raise ValueError("`training_objective='block_diffusion'` is not compatible with DPO.")
+      if self.use_sft:
+        raise ValueError("`training_objective='block_diffusion'` currently supports pre-training only.")
+      if self.use_multimodal or self.use_audio:
+        raise ValueError("`training_objective='block_diffusion'` currently supports text-only training.")
+      valid_model_contracts = {
+          ("same_position", "all_masked"),
+          ("shifted", "seed_and_mask"),
+      }
+      model_contract = (self.block_diffusion_logit_alignment, self.block_diffusion_canvas_policy)
+      if model_contract not in valid_model_contracts:
+        raise ValueError(
+            "Block-diffusion training supports only `same_position/all_masked` or `shifted/seed_and_mask`; "
+            f"received `{model_contract[0]}/{model_contract[1]}`."
+        )
+      if self.block_diffusion_canvas_policy == "seed_and_mask" and self.causal_block_size < 2:
+        raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
     if (
@@ -3649,6 +3857,8 @@ class MaxTextConfig(
         )
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
+    if self.ulysses_context_sharding != "context_usp_ulysses":
+      raise ValueError(f"Assigned ulysses_context_sharding {self.ulysses_context_sharding} is not supported.")
     if (
         self.per_device_batch_size > 0
         and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
@@ -3658,8 +3868,8 @@ class MaxTextConfig(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
     context_parallel_strategy = self.context_parallel_strategy.lower()
-    if context_parallel_strategy not in ("all_gather", "ring", "ulysses"):
-      raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', or 'ulysses'.")
+    if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
+      raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', 'ulysses', or 'usp'.")
     self.context_parallel_strategy = context_parallel_strategy
     if (
         context_parallel_strategy == "ring"
@@ -3676,6 +3886,8 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention requires context_parallel_size > 1.")
       if self.context_sharding != "context":
         raise ValueError("TPU Tokamax ring attention requires context_sharding='context'.")
+      if self.use_indexer and self.dq_reduction_steps != 0:
+        raise ValueError("TPU Tokamax ring attention with sparse indexer mask only supports dq_reduction_steps=0.")
       if self.dq_reduction_steps not in (0, 3):
         raise ValueError("TPU Tokamax ring attention requires dq_reduction_steps to be 0 or 3.")
       if self.max_target_length % (context_parallel_size * context_parallel_size) != 0:
@@ -3704,8 +3916,6 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention does not support ragged attention.")
       if self.attention_sink:
         raise ValueError("TPU Tokamax ring attention does not support attention sinks.")
-      if self.use_indexer:
-        raise ValueError("TPU Tokamax ring attention does not support sparse indexer masks.")
       if self.use_chunked_prefill:
         raise ValueError("TPU Tokamax ring attention does not support chunked prefill yet.")
       if self.moba:
@@ -3716,10 +3926,10 @@ class MaxTextConfig(
         raise ValueError("TPU Tokamax ring attention does not support QK-Clip statistics yet.")
       if self.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
-    if context_parallel_strategy != "ring" and self.ring_scan_unroll != 1:
+    if context_parallel_strategy not in ("ring", "usp") and self.ring_scan_unroll != 1:
       raise ValueError(
           f"ring_scan_unroll={self.ring_scan_unroll} was specified, but is only supported when "
-          "context_parallel_strategy='ring'."
+          "context_parallel_strategy='ring' or 'usp'."
       )
     if context_parallel_strategy == "ulysses":
       if self.hardware != "tpu":
@@ -3743,6 +3953,8 @@ class MaxTextConfig(
         raise ValueError("TPU Ulysses attention requires use_tokamax_splash=True.")
       if self.use_jax_splash:
         raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
+      if self.use_indexer:
+        raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
       if self.attention_type != "global":
         raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
       if self.context_parallel_load_balance:
@@ -3755,8 +3967,6 @@ class MaxTextConfig(
         raise ValueError("TPU Ulysses attention does not support ragged attention.")
       if self.attention_sink:
         raise ValueError("TPU Ulysses attention does not support attention sinks.")
-      if self.use_indexer:
-        raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
       if self.use_chunked_prefill:
         raise ValueError("TPU Ulysses attention does not support chunked prefill yet.")
       if self.use_multimodal:
@@ -3784,6 +3994,7 @@ class MaxTextConfig(
             "TPU Ulysses attention requires num_kv_heads "
             f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
+    self._validate_usp_context_parallelism()
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.
@@ -3806,6 +4017,7 @@ class MaxTextConfig(
         * self.dcn_fsdp_transpose_parallelism
         * self.dcn_sequence_parallelism
         * self.dcn_context_parallelism
+        * self.dcn_context_usp_ulysses_parallelism
         * self.dcn_tensor_parallelism
         * self.dcn_tensor_sequence_parallelism
         * self.dcn_expert_parallelism
@@ -3980,6 +4192,7 @@ class MaxTextConfig(
         "fsdp_transpose": self.ici_fsdp_transpose_parallelism,
         "sequence": self.ici_sequence_parallelism,
         "context": self.ici_context_parallelism,
+        "context_usp_ulysses": self.ici_context_usp_ulysses_parallelism,
         "context_autoregressive": self.ici_context_autoregressive_parallelism,
         "tensor": self.ici_tensor_parallelism,
         "tensor_sequence": self.ici_tensor_sequence_parallelism,
@@ -3999,6 +4212,7 @@ class MaxTextConfig(
         "fsdp_transpose": self.dcn_fsdp_transpose_parallelism,
         "sequence": self.dcn_sequence_parallelism,
         "context": self.dcn_context_parallelism,
+        "context_usp_ulysses": self.dcn_context_usp_ulysses_parallelism,
         "context_autoregressive": self.dcn_context_autoregressive_parallelism,
         "tensor": self.dcn_tensor_parallelism,
         "tensor_sequence": self.dcn_tensor_sequence_parallelism,
@@ -4040,14 +4254,16 @@ class MaxTextConfig(
 
     self._validate_check_vma_is_supported()
 
-    if self.use_te_comm_gemm_overlap:
-      self._validate_use_te_comm_gemm_overlap()
-
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
       self.decoder_block = DecoderBlockType(self.decoder_block.lower())
     if isinstance(self.shard_mode, str):
       self.shard_mode = ShardMode(self.shard_mode.lower())
+    if isinstance(self.te_comm_gemm_overlap, str):
+      self.te_comm_gemm_overlap = TeCommGemmOverlapPolicy(self.te_comm_gemm_overlap.lower())
+
+      if self.te_comm_gemm_overlap != TeCommGemmOverlapPolicy.DISABLED:
+        self._validate_te_comm_gemm_overlap()
 
     constant_bound_config = getattr(self, "constant_bound_config", None)
     if isinstance(constant_bound_config, str):

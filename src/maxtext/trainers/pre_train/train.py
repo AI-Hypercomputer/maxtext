@@ -45,12 +45,15 @@ from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
+from maxtext.configs.types import TeCommGemmOverlapPolicy
+from maxtext.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
 from maxtext.utils.globals import EPS
 from maxtext.utils import elastic_utils
 # Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
+from maxtext.layers.attention_mla import indexer_losses
 from maxtext.common import checkpointing, profiler
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -107,6 +110,22 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     loss: average loss
     aux: a dictionary including intermediate_outputs, xent_sum, and total_weights
   """
+  is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
+  if getattr(config, "attention_type", "global") == "block_diffusion" and not is_block_diffusion:
+    raise ValueError(
+        "Block-diffusion attention requires target-aligned block-diffusion losses; "
+        "causal next-token labels would leak within a bidirectional block."
+    )
+  if is_block_diffusion:
+    required_masks = {"corruption_mask", "targets_loss_mask"}
+    missing_masks = required_masks - data.keys()
+    if missing_masks:
+      raise ValueError(f"Block-diffusion loss requires explicit batch masks; missing {sorted(missing_masks)}")
+    target_shape = data["targets"].shape
+    for mask_name in required_masks:
+      if data[mask_name].shape != target_shape:
+        raise ValueError(f"{mask_name} must match targets shape; got {data[mask_name].shape} and {target_shape}")
+
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
@@ -114,6 +133,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
+  if is_block_diffusion:
+    targets_loss_mask = (data["targets_loss_mask"] != 0) & (data["targets_segmentation"] != 0)
+    target_positions = data.get("targets_position", data["inputs_position"])
+  else:
+    targets_loss_mask = None
+    target_positions = None
   mutable_collections = ["intermediates"]
   if config.mtp_num_layers > 0 and is_train:
     # The single model.apply call now triggers the entire chain if MTP is enabled:
@@ -124,6 +149,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # make its specific collection mutable so the MTPBlock can sow into it.
   if config.mtp_eval_target_module > 0 and not is_train:
     mutable_collections.append("mtp_acceptance")
+  if config.use_indexer and is_train:
+    mutable_collections.append("indexer_losses")
+
   sparsity_enabled = is_train and config.weight_sparsity_n and config.weight_sparsity_m
   if sparsity_enabled:
     mutable_collections.append("batch_stats")
@@ -165,6 +193,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
       xent_sum, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
     else:
+      if is_block_diffusion:
+        logits = block_diffusion_target_alignment.align_logits_to_targets(
+            logits,
+            config.block_diffusion_logit_alignment,
+            target_positions,
+            data["targets_segmentation"] != 0,
+        )
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
@@ -183,9 +218,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           debug_sharding=config.debug_sharding,
       )
 
-      # Mask out paddings at the end of each example.
-      xent = xent * (data["targets_segmentation"] != 0)
-      z_loss = z_loss * (data["targets_segmentation"] != 0)
+      if is_block_diffusion:
+        xent = xent * targets_loss_mask
+        z_loss = z_loss * targets_loss_mask
+      else:
+        xent = xent * (data["targets_segmentation"] != 0)
+        z_loss = z_loss * (data["targets_segmentation"] != 0)
 
       xent_sum = jnp.sum(xent)
       total_z_loss = jnp.sum(z_loss)
@@ -209,6 +247,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       mtp_losses_state = nnx.pop(model, mtp_losses)
       mtp_acceptance_state = nnx.pop(model, mtp_acceptance)
 
+    indexer_losses_state = None
+    if config.use_indexer:
+      # Pop dedicated indexer_losses to harvest auxiliary KL loss and prevent model state PyTree mismatches.
+      indexer_losses_state = nnx.pop(model, indexer_losses)
+
     intermediates = nnx.pop(model, nnx.Intermediate)
     intermediate_outputs = intermediates.to_pure_dict()
 
@@ -217,6 +260,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     if mtp_losses_state is not None and mtp_acceptance_state is not None:
       intermediate_outputs["mtp_losses"] = mtp_losses_state.to_pure_dict()
       intermediate_outputs["mtp_acceptance"] = mtp_acceptance_state.to_pure_dict()
+
+    if indexer_losses_state is not None:
+      intermediate_outputs["indexer_losses"] = indexer_losses_state.to_pure_dict()
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
@@ -228,6 +274,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
       xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
     else:
+      if is_block_diffusion:
+        logits = block_diffusion_target_alignment.align_logits_to_targets(
+            logits,
+            config.block_diffusion_logit_alignment,
+            target_positions,
+            data["targets_segmentation"] != 0,
+        )
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
@@ -246,14 +299,21 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           debug_sharding=config.debug_sharding,
       )
 
-      # Mask out paddings at the end of each example.
-      xent = xent * (data["targets_segmentation"] != 0)
-      z_loss = z_loss * (data["targets_segmentation"] != 0)
+      if is_block_diffusion:
+        xent = xent * targets_loss_mask
+        z_loss = z_loss * targets_loss_mask
+      else:
+        xent = xent * (data["targets_segmentation"] != 0)
+        z_loss = z_loss * (data["targets_segmentation"] != 0)
 
       xent_sum = jnp.sum(xent)
       total_z_loss = jnp.sum(z_loss)
 
-  total_weights = jnp.sum(data["targets_segmentation"] != 0)
+  if is_block_diffusion:
+    assert targets_loss_mask is not None
+    total_weights = jnp.sum(targets_loss_mask)
+  else:
+    total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide xent_sum
   # by total_weights and then multiply the computed gradient by total_weights,
   # since it's equivalent to computing the gradient from xent_sum.
@@ -280,15 +340,16 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     mtp_loss = calculate_mtp_loss(intermediate_outputs, config)
     loss += mtp_loss
 
-  # get indexer loss
+  # Calculate and add auxiliary Indexer loss
   indexer_loss = 0.0
   if config.use_indexer and config.indexer_loss_scaling_factor > 0.0:
-    indexer_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "self_attention", "indexer_loss")
-    if indexer_losses:
-      indexer_loss = jnp.mean(jnp.concatenate(indexer_losses))
-      loss += indexer_loss
+    # Recursively collect per-layer indexer losses across all scanned transformer layers.
+    indexer_losses_list = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "indexer_loss")
+    if indexer_losses_list:
+      indexer_loss = jnp.mean(jnp.concatenate([jnp.atleast_1d(x) for x in indexer_losses_list]))
+      loss += indexer_loss  # Injects loss into scalar objective to drive backward gradients for indexer weights.
     else:
-      max_logging.debug("No indexer loss found.")
+      max_logging.debug("No Indexer loss found. Defaulting to 0.0.")
 
   # get MoE load balance loss
   moe_lb_loss = 0.0
@@ -357,6 +418,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     new_state: Updated Linen TrainState or NNX pure State.
     metrics: Dictionary of model metrics such as loss, training rate, etc.
   """
+  # pylint: disable=too-many-nested-blocks
   # --- Per-path initialization ---
   if isinstance(model, nn.Module):
     params = state.params
@@ -562,6 +624,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     new_state = state
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
+    # pylint: disable=too-many-nested-blocks
     if config.routed_bias and config.routed_bias_update_rate > 0.0:
       if config.model_name.startswith("deepseek4"):
         max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
@@ -998,7 +1061,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.use_te_comm_gemm_overlap:
+  if config.te_comm_gemm_overlap != TeCommGemmOverlapPolicy.DISABLED:
     max_utils.bootstrap_transformer_engine_cgemm(config)
 
   # Create the Goodput recorder

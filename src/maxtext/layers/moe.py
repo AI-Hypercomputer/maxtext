@@ -42,8 +42,8 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec, get_logical_axis_rules
+from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec, logical_to_mesh_axes
+from maxtext.utils.sharding import get_logical_axis_rules, remove_expert_from_partition_spec, remove_mesh_axes_from_partition_spec
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -746,6 +746,12 @@ class RoutedMoE(nnx.Module):
       # Normalization of router weights (e.g. used by Qwen3, Gemma4).
       if self.config.norm_topk_prob:
         top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
+
+      if self.per_expert_scale is not None and not (
+          self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
+      ):
+        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
+        top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
     return top_k_weights, top_k_indices
 
@@ -1536,7 +1542,9 @@ class RoutedMoE(nnx.Module):
             group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=bool(self.config.quantization) and self.config.use_qwix_quantization,
+            # Only "fp8_full" quantizes GMM; other schemes (e.g. "fp8", "int8")
+            # do not define a GMM quantization rule.
+            use_qwix_quantization=bool(self.config.quantization == "fp8_full") and self.config.use_qwix_quantization,
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,
@@ -1628,6 +1636,10 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
+        # Update kernel pspec for FSDP AG
+        w0_pspec = remove_mesh_axes_from_partition_spec(w0_pspec, ("fsdp",))
+        w1_pspec = remove_mesh_axes_from_partition_spec(w1_pspec, ("fsdp",))
+        wo_pspec = remove_mesh_axes_from_partition_spec(wo_pspec, ("fsdp",))
       return (
           batch_logical_axis,
           input_partition_pspec,

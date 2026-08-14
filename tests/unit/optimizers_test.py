@@ -260,22 +260,7 @@ _DEEPSEEK4_MLP = {
     },
 }
 
-_DEEPSEEK4_MLP_SCANNED = {
-    "MoeBlock_0": {
-        "gate": {
-            "bias": None,
-            "kernel": mdn(reduction_axis=(0,), output_axis=(-1,)),
-        },
-        "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
-        "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
-        "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
-    },
-    "shared_experts": {
-        "wi_0": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-        "wi_1": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-        "wo": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
-    },
-}
+_DEEPSEEK4_MLP_SCANNED = _DEEPSEEK4_MLP
 
 _DEEPSEEK4_ATTN_BASIC = {
     "kv_norm": {"scale": None},
@@ -399,7 +384,7 @@ class MuonDimensionTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("deepseek2-16b", "deepseek2-16b", DEEPSEEK2_DIMENSION_NUMBER),
       ("deepseek3-671b", "deepseek3-671b", DEEPSEEK3_DIMENSION_NUMBER),
-      # ("deepseek4-284b", "deepseek4-284b", DEEPSEEK4_DIMENSION_NUMBER),  # TODO(b/544531325): Re-enable once pure_nnx config issue is resolved.
+      ("deepseek4-284b", "deepseek4-284b", DEEPSEEK4_DIMENSION_NUMBER),
       ("kimi-k2-1t", "kimi-k2-1t", DEEPSEEK3_DIMENSION_NUMBER),
       ("llama2-7b", "llama2-7b", LLAMA2_DIMENSION_NUMBER),
       ("llama3-8b", "llama3-8b", LLAMA2_DIMENSION_NUMBER),
@@ -414,7 +399,8 @@ class MuonDimensionTest(parameterized.TestCase):
     Initializes the specified MaxText model and asserts that the generated
     Muon dimension numbers match the hardcoded reference.
     """
-    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, pure_nnx=False)
+    is_pure_nnx = model_name in {"deepseek4-284b"}
+    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, pure_nnx=is_pure_nnx)
     if "params" in expected_output and "params" in actual_output:
       self.assertEqual(actual_output["params"], expected_output["params"])
     else:

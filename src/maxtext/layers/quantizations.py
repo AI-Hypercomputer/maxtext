@@ -46,8 +46,24 @@ try:
   from qwix._src.utils import flax_util
 except ImportError:
   from qwix._src import flax_util  # pytype: disable=import-error
+
+try:
+  _orig_find_param = flax_util.find_param
+
+  def _safe_find_param(x, ptq_array_type=None):
+    try:
+      return _orig_find_param(x, ptq_array_type)
+    except AttributeError as e:
+      if "shape" in str(e):
+        return None
+      raise
+
+  flax_util.find_param = _safe_find_param
+except (NameError, AttributeError):
+  pass
 from maxtext.layers import nnx_wrappers
 
+from maxtext.configs.types import TeCommGemmOverlapPolicy
 from maxtext.common.common_types import DType, Config
 from maxtext.inference.kvcache import KVQuant
 
@@ -887,6 +903,9 @@ def maybe_quantize_model(model, config):
         nnx.pop(model, nnx.Intermediate)
       else:
         model = qwix.quantize_model(model, quantization_provider)
+      for _, val in nnx.graph.iter_graph(model):
+        if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
+          del val.qwix_rngs
   return model
 
 
@@ -985,7 +1004,7 @@ class TransformerEngineQuantization(Quantization):
 
     self._recipe = TransformerEngineQuantization._get_recipe(config.quantization)
 
-    self._perform_collective_gemm = config.use_te_comm_gemm_overlap
+    self._te_comm_gemm_overlap_policy = config.te_comm_gemm_overlap
 
   def __hash__(self):
     return hash((self.quant_mode, self._recipe))
@@ -1058,6 +1077,7 @@ class TransformerEngineQuantization(Quantization):
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     default_recipe = self._recipe
+    overlap_policy = self._te_comm_gemm_overlap_policy
 
     class TEWrapper(transformer_engine.jax.flax.module.TransformerEngineBase):
       """Wrapper module for TransformerEngine quantization."""
@@ -1082,12 +1102,21 @@ class TransformerEngineQuantization(Quantization):
 
       def generate_collective_op_set(self, mesh_axes: Tuple[str, ...] = ()):
         """Inspect the kernel's mesh axes to determine the type of collective operation to use for collective GEMM."""
+        if overlap_policy == TeCommGemmOverlapPolicy.DISABLED:
+          return tex.noop_collective_op_set
 
         if len(mesh_axes) >= 1:
+          # CGEMM in MLP layer (up projection, down projection)
           if mesh_axes[0] == "embed" and mesh_axes[-1] == "mlp":
             return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
           elif mesh_axes[0] == "mlp" and mesh_axes[-1] == "embed":
             return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
+          elif overlap_policy == TeCommGemmOverlapPolicy.FULL:
+            # CGEMM also in Attention layer (QKV projection, output projection)
+            if mesh_axes[0] == "embed" and mesh_axes[-1].startswith("kv"):
+              return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
+            elif mesh_axes[0] == "heads" and mesh_axes[-1] == "embed":
+              return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
 
         return tex.noop_collective_op_set
 
@@ -1110,7 +1139,9 @@ class TransformerEngineQuantization(Quantization):
 
       quantizer_set = generate_quantizer_set()
       collective_op_set = (
-          generate_collective_op_set(mesh_axes) if self._perform_collective_gemm else tex.noop_collective_op_set
+          generate_collective_op_set(mesh_axes)
+          if self._te_comm_gemm_overlap_policy != TeCommGemmOverlapPolicy.DISABLED
+          else tex.noop_collective_op_set
       )
       return transformer_engine.jax.dense.dense(
           x,

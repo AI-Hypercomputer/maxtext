@@ -32,8 +32,7 @@ class InflightThrottler:
     Args:
       config: The training configuration.
     """
-    max_inflight = getattr(config, "max_inflight_computations", 2)
-    self._inflight_queue = queue.Queue[Any](maxsize=max_inflight)
+    self._inflight_queue = queue.Queue[Any](maxsize=config.max_inflight_computations)
     self._metrics_logger = metrics_module.MetricsLogger(config=config)
 
   def add_computation(self, computation: Any, metrics: abstract_engine.MetricsBuffer | None) -> None:

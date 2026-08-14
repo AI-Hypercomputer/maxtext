@@ -18,7 +18,9 @@
 
 [![MaxText Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml/badge.svg)](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml?query=event%3Aschedule)
 
-> **_NOTE:_** We recommend running MaxText with Python 3.12, as it is our primary supported version. Other Python versions may encounter compatibility issues.
+> **_NOTE:_** We recommend customers use the latest [PyPI release](https://pypi.org/project/maxtext/) (see [installation guide](docs/install_maxtext.md)) or corresponding [pre-built container images](docs/tutorials/build_maxtext.md#pre-built-maxtext-docker-images), while the `main` branch is not expected to be production-ready.
+>
+> We recommend running MaxText with Python 3.12, as it is our primary supported version. Other Python versions may encounter compatibility issues.
 
 MaxText is a high performance, highly scalable, open-source LLM library and reference implementation written in pure Python/[JAX](https://docs.jax.dev/en/latest/jax-101.html) and targeting Google Cloud TPUs and GPUs for training.
 

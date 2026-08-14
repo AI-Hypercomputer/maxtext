@@ -67,11 +67,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
     self._config = training_config
     self._mesh = mesh
-    self._init_rng = jax.random.PRNGKey(getattr(training_config, "init_weights_seed", 0))
+    self._init_rng = jax.random.PRNGKey(training_config.init_weights_seed)
     self._loss_fn: Callable[..., Any] | None = None
     self._gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = None
     self._compiled = False
-    if not getattr(training_config, "model_name", None):
+    if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     self._model = model_creation_utils.from_pretrained(
         config=self._config,
@@ -82,12 +82,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._state: Any = None
     self._accumulated_grads: Any = None
     self._micro_step_count = 0
-    self._cached_losses: list[jax.Array] = []
+    self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
     self._learning_rate_schedule, self._optimizer = train_utils.create_training_optimizer(self._config, self._model)
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(
-        checkpoint_dir=getattr(self._config, "checkpoint_dir", getattr(self._config, "checkpoint_directory", "")),
+        checkpoint_dir=self._config.checkpoint_dir,
         config=self._config,
     )
     self._metrics_recorder = metrics_module.MetricsRecorder()
@@ -177,21 +177,60 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     def diff_wrapper(p, r, b):
       mdl = nnx.merge(self._model_graphdef, p, r, copy=True)
-      loss, aux = loss_callable(mdl, self._config, b, None, None, is_train=True)
+      out = loss_callable(mdl, self._config, b, None, None, is_train=True)
       _, _, new_r = nnx.split(mdl, nnx.Param, ...)
-      return loss, (aux, new_r)
+
+      if isinstance(out, abstract_engine.LossOutput):
+        return out.primary_loss.unreduced_sum, (out, new_r)
+      elif isinstance(out, abstract_engine.WeightedMetric):
+        loss_out = abstract_engine.LossOutput(
+            primary_loss=out,
+            aux_metrics={},
+        )
+        return out.unreduced_sum, (loss_out, new_r)
+      elif isinstance(out, (tuple, list)) and len(out) == 2:
+        loss_val, aux = out
+        if isinstance(loss_val, abstract_engine.WeightedMetric):
+          primary_loss = loss_val
+        elif isinstance(aux, dict) and "xent_sum" in aux and "total_weights" in aux:
+          primary_loss = abstract_engine.WeightedMetric(
+              unreduced_sum=aux["xent_sum"],
+              denominator=aux["total_weights"],
+          )
+        else:
+          raise TypeError(
+              f"Cannot construct WeightedMetric from 2-tuple loss return with elements "
+              f"of type ({type(loss_val).__name__}, {type(aux).__name__}). Expected first element to be a "
+              "WeightedMetric, or second element to be a dict containing 'xent_sum' and 'total_weights'."
+          )
+
+        loss_out = abstract_engine.LossOutput(
+            primary_loss=primary_loss,
+            aux_metrics=aux if isinstance(aux, dict) else {},
+        )
+        return primary_loss.unreduced_sum, (loss_out, new_r)
+      else:
+        raise TypeError(
+            f"Unsupported return type from loss function: {type(out)}. "
+            "Expected abstract_engine.LossOutput, abstract_engine.WeightedMetric, "
+            "or a 2-element tuple/list: (loss, aux_metrics)."
+        )
 
     grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
-    (loss, (aux, new_rest)), micro_grads = grad_func(params, rest, batch)
+    (loss_val, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
+    if isinstance(loss_out, abstract_engine.LossOutput):
+      scale = loss_out.primary_loss.compute_scale()
+      micro_grads = jax.tree.map(lambda g: g * scale, micro_grads)
+
     micro_grads = jax.tree.map(
-        lambda x: (
-            x.astype(getattr(self._config, "grad_dtype", jnp.float32))
-            if hasattr(x, "dtype") and x.dtype == jnp.float32
-            else x
-        ),
+        lambda x: (x.astype(self._config.grad_dtype) if hasattr(x, "dtype") and x.dtype == jnp.float32 else x),
         micro_grads,
     )
-    return loss, aux, new_rest, micro_grads
+
+    if isinstance(loss_out, abstract_engine.LossOutput):
+      return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads
+    else:
+      return loss_val, {}, new_rest, micro_grads
 
   def _update_kernel(self, state_pure, accumulated_grads, micro_step_count, mean_loss):
     """Applies accumulated gradients to update the NNX model state."""
@@ -205,11 +244,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             lambda g: g / micro_step_count,
             accumulated_grads,
         )
-      if getattr(self._config, "gradient_clipping_threshold", 0.0) > 0:
+      if self._config.gradient_clipping_threshold > 0:
         grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if hasattr(local_state, "apply_gradients"):
-        if getattr(self._config, "skip_step_on_spikes", False):
+        if self._config.skip_step_on_spikes:
           grad_norm = max_utils.l2norm_pytree(grads)
           local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
           opt_obj = getattr(local_state, "optimizer", self._optimizer)
@@ -326,9 +365,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # the update step.
     self._throttler.add_computation(computation=loss, metrics=None)
 
-    if loss is not None:
-      # TODO(mazumdera): This needs to be modified to become
-      # if isinstance(loss, abstract_engine.WeightedMetric):
+    if isinstance(loss, abstract_engine.WeightedMetric):
       self.record_metrics("loss", loss)
 
     # Record auxiliary metrics.
@@ -364,7 +401,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
     self._state_graphdef, state_pure = nnx.split(self._state)
 
-    mean_loss = jnp.mean(jnp.array(self._cached_losses)) if self._cached_losses else jnp.array(0.0)
+    if self._cached_losses:
+      loss_values = [l.compute() if isinstance(l, abstract_engine.WeightedMetric) else l for l in self._cached_losses]
+      mean_loss = jnp.mean(jnp.stack(loss_values)) if len(loss_values) > 1 else loss_values[0]
+    else:
+      mean_loss = jnp.array(0.0)
     if self._compiled and hasattr(self, "_compiled_update"):
       new_state_pure, grad_norm, is_skipped = self._compiled_update(
           state_pure, self._accumulated_grads, self._micro_step_count, mean_loss

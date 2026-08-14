@@ -78,6 +78,10 @@ from maxtext.utils.globals import EPS
 PLACEHOLDER_SEQ_LEN = 1
 
 
+class indexer_losses(nnx.Variable):  # pylint: disable=invalid-name,abstract-method
+  """Variable type for storing Indexer loss components -> bypasses nnx.Intermediate scan filters."""
+
+
 class Indexer(nnx.Module):
   """Indexer for DeepSeek Sparse Attention (DSA).
 
@@ -361,7 +365,7 @@ class Indexer(nnx.Module):
 
     # NOTE: If the total available sequence length <= topk, indexer always selects all tokens.
     if k.shape[1] <= self.indexer_topk:
-      return None, None, None
+      return attention_mask, cached_s, attention_mask
 
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q)
@@ -1287,7 +1291,13 @@ class MLA(Attention):
     if self.use_indexer:
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
       attention_mask = self.attention_op.generate_attention_mask(
-          query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
+          query,
+          key,
+          decoder_segment_ids,
+          model_mode,
+          previous_chunk,
+          bidirectional_mask,
+          segment_positions=inputs_positions,
       )
       if attention_mask is not None:
         attention_mask = attention_mask.squeeze(axis=(1, 2))
@@ -1314,7 +1324,7 @@ class MLA(Attention):
             sparse_loss=self.config.indexer_sparse_training,
             scaling_factor=self.config.indexer_loss_scaling_factor,
         )
-        self.indexer_loss = nnx.Intermediate(indexer_loss)
+        self.indexer_loss = indexer_losses(indexer_loss)
 
     # Check if we need QK Clip stats
     use_qk_clip = self.model_mode == MODEL_MODE_TRAIN and self.config.use_qk_clip

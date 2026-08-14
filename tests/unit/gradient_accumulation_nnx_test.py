@@ -14,6 +14,8 @@
 
 """Unit tests for the NNX branch of gradient_accumulation_loss_and_grad."""
 
+# pylint: disable=too-many-positional-arguments
+
 import unittest
 from dataclasses import dataclass
 
@@ -30,10 +32,13 @@ from maxtext.utils import gradient_accumulation
 @dataclass
 class _Cfg:
   gradient_accumulation_steps: int = 2
+  use_tunix_gradient_accumulation: bool = False
   shard_optimizer_over_data: bool = False
   shard_mode: int = ShardMode.AUTO
   ici_data_parallelism: int = 1
   debug_sharding: bool = False
+  training_objective: str = "causal_lm"
+  use_tunix_gradient_accumulation: bool = False
 
 
 class _TinyNNX(nnx.Module):
@@ -64,7 +69,27 @@ def _fake_loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "indexer_loss": jnp.array(0.0),
       "mtp_loss": jnp.array(0.0),
   }
-  return xent_sum / total_weights, aux
+  return xent_sum, aux
+
+
+def _zero_weight_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+  """Produces model-dependent sums with a zero token denominator."""
+  del config, dropout_rng, params, is_train
+  xent_sum = jnp.sum(model(data["inputs"]) ** 2) + 1.0
+  aux = {
+      "xent_sum": xent_sum,
+      "total_weights": jnp.array(0.0),
+      "moe_lb_loss": jnp.array(0.0),
+      "indexer_loss": jnp.array(0.0),
+      "mtp_loss": jnp.array(0.0),
+  }
+  return xent_sum, aux
+
+
+def _normalized_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+  """Produces the per-microbatch normalized loss used by Tunix accumulation."""
+  xent_sum, aux = _fake_loss_fn(model, config, data, dropout_rng, params, is_train=is_train)
+  return xent_sum / aux["total_weights"], aux
 
 
 class TestGradientAccumulationNNX(unittest.TestCase):
@@ -114,6 +139,55 @@ class TestGradientAccumulationNNX(unittest.TestCase):
     for g in grad_leaves:
       self.assertTrue(jnp.all(jnp.isfinite(g)))
 
+  def test_positive_weights_match_direct_causal_batch(self):
+    """The guarded denominator preserves ordinary causal accumulation."""
+    kernel = self.model.linear.kernel.get_value()
+    bias = self.model.linear.bias.get_value()
+
+    def direct_loss(kernel, bias):
+      predictions = self.data["inputs"] @ kernel + bias
+      return jnp.mean((predictions - self.data["targets"]) ** 2)
+
+    expected_loss, expected_grads = jax.value_and_grad(direct_loss, argnums=(0, 1))(kernel, bias)
+    loss, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _fake_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+
+    np.testing.assert_allclose(loss, expected_loss, rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
+
+  def test_tunix_block_diffusion_uses_accumulation_step_divisor(self):
+    self.cfg.training_objective = "block_diffusion"
+    self.cfg.use_tunix_gradient_accumulation = True
+    kernel = self.model.linear.kernel.get_value()
+    bias = self.model.linear.bias.get_value()
+
+    def direct_loss(kernel, bias):
+      predictions = self.data["inputs"] @ kernel + bias
+      return jnp.mean((predictions - self.data["targets"]) ** 2)
+
+    expected_loss, expected_grads = jax.value_and_grad(direct_loss, argnums=(0, 1))(kernel, bias)
+    loss, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _normalized_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+
+    np.testing.assert_allclose(loss, expected_loss, rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
+
   def test_nnx_path_updates_model_rest_state_after_scan(self):
     """After accumulation, nnx.update is called on the model with the rest_state from the scan.
 
@@ -150,6 +224,30 @@ class TestGradientAccumulationNNX(unittest.TestCase):
     self.assertTrue(jnp.isfinite(loss))
     for g in jax.tree.leaves(raw_grads):
       self.assertTrue(jnp.all(jnp.isfinite(g)))
+
+  def test_zero_total_weights_returns_zero_loss_and_gradients(self):
+    for training_objective in ("causal_lm", "block_diffusion"):
+      for use_tunix_gradient_accumulation in (False, True):
+        with self.subTest(
+            training_objective=training_objective,
+            use_tunix_gradient_accumulation=use_tunix_gradient_accumulation,
+        ):
+          self.cfg.training_objective = training_objective
+          self.cfg.use_tunix_gradient_accumulation = use_tunix_gradient_accumulation
+          loss, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+              _zero_weight_loss_fn,
+              self.cfg,
+              self.model,
+              params=None,
+              params_shardings=self._params_shardings(),
+              data=self.data,
+              dropout_rng=None,
+          )
+
+          self.assertEqual(float(loss), 0.0)
+          for gradient in jax.tree.leaves(raw_grads):
+            self.assertTrue(jnp.all(jnp.isfinite(gradient)))
+            self.assertTrue(jnp.all(gradient == 0))
 
 
 if __name__ == "__main__":

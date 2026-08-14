@@ -141,6 +141,12 @@ class LoraUtilsTest(unittest.TestCase):
     self.assertEqual(tokens.shape, (1, 1))
     self.assertEqual(positions.shape, (1, 1))
 
+    mock_mesh = mock.MagicMock()
+    mock_mesh.shape = {"data": 2, "fsdp": 16, "tensor_sequence": 4}
+    tokens, positions = lora_utils._prepare_dummy_inputs(mock_mesh)
+    self.assertEqual(tokens.shape, (32, 4))
+    self.assertEqual(positions.shape, (32, 4))
+
   def test_verify_lora_parameters_success(self):
     """Test verification of LoRA parameters with matches and enabled LoRA."""
     mock_model = mock.MagicMock()

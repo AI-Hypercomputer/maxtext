@@ -54,9 +54,9 @@ class CheckpointManager:
       self._checkpoint_manager = ocp.CheckpointManager(
           directory=checkpoint_dir,
           options=ocp.CheckpointManagerOptions(
-              save_interval_steps=getattr(config, "checkpoint_period", 1),
-              max_to_keep=getattr(config, "max_num_checkpoints_to_keep", None),
-              enable_async_checkpointing=getattr(config, "async_checkpointing", True),
+              save_interval_steps=config.checkpoint_period,
+              max_to_keep=config.max_num_checkpoints_to_keep,
+              enable_async_checkpointing=config.async_checkpointing,
           ),
       )
 

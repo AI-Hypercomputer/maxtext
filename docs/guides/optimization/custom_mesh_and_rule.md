@@ -55,6 +55,10 @@ Similar in philosophy to `ep-as-cp.yml`, this configuration explicitly includes 
 
 Different with the rule in `base.yml`, this rule configures expert physical axis to function as data parallelism rather than FSDP. This removes the constraint where FSDPxEP is limited by specific model dimensions, particularly for small tensors such as attention projections. Ultimately, this change benefits large-scale training.
 
+### `shard-exp-on-fsdp`
+
+When enabled, this shards the expert dimension of the MoE weights across the FSDP axis. It requires `num_experts` to be a multiple of FSDP rank and is particularly useful when using the Muon optimizer.
+
 ### `pipeline-large-moe.yml`
 
 Designed specifically to optimize pipeline parallelism for extremely large-scale MoE jobs (such as DeepSeek models). It defines the physical axes: `data`, `stage`, `fsdp`, `tensor`, `context`, and `expert`. To prevent dimension limit errors, it intentionally disables expert weight sharding on the (typically small) `q_lora` dimension. Furthermore, tensor and expert parallelism are strictly preserved to support advanced pipelining features like `pipeline_fsdp_ag_one` and `pipeline_fsdp_ag_per_repeat`.

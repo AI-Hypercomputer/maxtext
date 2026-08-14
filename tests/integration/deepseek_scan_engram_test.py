@@ -14,7 +14,6 @@
 
 """Unit tests for DeepSeek Engram across scanned decoder layers."""
 
-import gc
 import os
 import unittest
 from unittest.mock import patch
@@ -164,8 +163,6 @@ class TestDeepSeekScanEngram(unittest.TestCase):
     del variables
     del params
     del decoder
-    jax.clear_caches()
-    gc.collect()
 
   @pytest.mark.tpu_only
   @patch("transformers.AutoTokenizer.from_pretrained")
