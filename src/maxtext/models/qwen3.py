@@ -34,6 +34,7 @@ from flax import nnx
 from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.common.common_types import KV_BATCH, KV_HEAD
 from maxtext.utils.sharding import logical_to_mesh_axes, get_logical_axis_rules
+from maxtext.utils.sharding import logical_to_mesh_axes, get_logical_axis_rules
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -180,6 +181,54 @@ def naive_jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
+@jax.custom_vjp
+def invert_unit_lower_triangular_log_depth(S):
+  """
+  Computes (I + S)^-1 for a strictly lower triangular matrix S
+  using log-depth exact finite Neumann series evaluated by repeated squaring.
+
+  This is highly optimized for TPUs/GPUs and replaces
+  jax.scipy.linalg.solve_triangular for chunkwise linear attention.
+  """
+  chunk_size = S.shape[-1]
+
+  # Ensure S is strictly lower triangular (zero out diagonal and upper half)
+  # This guarantees mathematical correctness and stability
+  S_strict = jnp.tril(S, k=-1)
+
+  # Base identity matrix
+  identity = jnp.eye(chunk_size, dtype=S.dtype)
+
+  # Initial approximation and error term
+  A = identity - S_strict
+  E = jnp.tril(jnp.matmul(S_strict, S_strict, precision=jax.lax.Precision.HIGHEST), k=-1)
+
+  # Log-depth Taylor series exact computation
+  steps = int(math.ceil(math.log2(chunk_size)))
+  for _ in range(steps - 1):
+    # Update inverse and error using batched matmuls
+    A = jnp.tril(A + jnp.matmul(A, E, precision=jax.lax.Precision.HIGHEST))
+    E = jnp.tril(jnp.matmul(E, E, precision=jax.lax.Precision.HIGHEST), k=-1)
+
+  return A
+
+@functools.partial(jax.named_call, name="invert_triangular_fwd")
+def _invert_unit_lower_triangular_log_depth_fwd(S):
+  A = invert_unit_lower_triangular_log_depth(S)
+  return A, A
+
+@functools.partial(jax.named_call, name="invert_triangular_bwd")
+def _invert_unit_lower_triangular_log_depth_bwd(res, g):
+  A = res
+  grad_S_tmp = jnp.matmul(A.swapaxes(-1, -2), g, precision=jax.lax.Precision.HIGHEST)
+  grad_S = jnp.tril(-jnp.matmul(grad_S_tmp, A.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST), k=-1)
+  return (grad_S,)
+
+invert_unit_lower_triangular_log_depth.defvjp(
+    _invert_unit_lower_triangular_log_depth_fwd, _invert_unit_lower_triangular_log_depth_bwd
+)
+
+
 def jax_chunk_gated_delta_rule(
     query: Array,
     key: Array,
@@ -265,10 +314,7 @@ def jax_chunk_gated_delta_rule(
   S = jnp.where(mask, S, 0.0)
 
   # Inversion (A) - Strictly float32
-  identity = jnp.eye(chunk_size, dtype=jnp.float32)
-  identity_broadcasted = jnp.broadcast_to(identity, S.shape)
-
-  A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+  A = invert_unit_lower_triangular_log_depth(S)
 
   # 5. WY Factors
   v_beta = v_c * beta_c[..., None]
@@ -612,7 +658,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
     mixed_qkvz = qkvz.reshape(new_shape_qkvz)
     if self.mesh is not None:
-      logical_rules = get_logical_axis_rules()
+      logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
       qkvz_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
       mixed_qkvz = jax.lax.with_sharding_constraint(mixed_qkvz, qkvz_sharding)
@@ -658,11 +704,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # vLLM PAGED STATE PATH: use tpu_inference fused conv + ragged delta-rule.
       # =========================================================================
       try:
-        from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        # pylint: disable=import-outside-toplevel
+        # pytype: disable=import-error
+        from tpu_inference.layers.common.gdn_attention import GdnAttentionConfig, run_jax_gdn_attention  # pylint: disable=import-outside-toplevel
+        from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import RaggedGatedDeltaRuleImpl  # pylint: disable=import-outside-toplevel
+        from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel
+        from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding  # pylint: disable=import-outside-toplevel
+        from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel
+        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel
       except ImportError as e:
         raise ImportError(
             "GDN attention kernel require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
@@ -702,6 +751,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       conv_state_paged, recurrent_state_paged = kv_cache
 
+      # Use REF impl (pure JAX) to avoid Mosaic kernel compilation issues.
+      gdn_config = GdnAttentionConfig(ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF)
+
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
           b_flat,
@@ -712,20 +764,22 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           None,  # conv_bias: MaxText conv1d uses use_bias=False.
           jnp.asarray(self.A_log[...], dtype=cfg.dtype),
           jnp.asarray(self.dt_bias[...], dtype=cfg.dtype),
-          attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
-          attention_metadata.query_start_loc,  # pyrefly: ignore[missing-attribute]
-          attention_metadata.request_distribution,  # pyrefly: ignore[missing-attribute]
-          attention_metadata.seq_lens,  # pyrefly: ignore[missing-attribute]
+          attention_metadata.mamba_state_indices.astype(jnp.int32),
+          attention_metadata.query_start_loc,
+          attention_metadata.request_distribution,
+          attention_metadata.seq_lens,
           self.num_k_heads,
           self.num_v_heads,
           self.head_k_dim,
           self.head_v_dim,
           cfg.gdn_conv_kernel_dim,
           mesh=self.mesh,
+          config=gdn_config,
       )
 
       # Reshape GDN output and apply gated norm + out projection.
       gdn_output = gdn_output.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+      gdn_output = checkpoint_name(gdn_output, "context")
       gated_output = self.norm(gdn_output, z)
       gated_output = gated_output.reshape(batch, seq_len, -1)
       output = self.out_proj(gated_output)
@@ -835,12 +889,122 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           value,
           g,
           beta,
-          initial_state=recurrent_state,  # pyrefly: ignore[bad-argument-type]
+          initial_state=recurrent_state,
+          use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+          compute_dtype=cfg.dtype,
+      )
+    elif getattr(cfg, "use_gdn_kernel", False) and getattr(cfg, "use_hybrid_gdn", False):
+      from maxtext.models.hybrid_gdn import hybrid_fused_conv1d_gdn
+
+      if self.mesh is not None:
+        logical_rules = get_logical_axis_rules()
+        batch_pspec3 = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
+        batch_pspec4 = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=self.mesh, rules=logical_rules)
+        none_pspec3 = logical_to_mesh_axes((None, None, None), mesh=self.mesh, rules=logical_rules)
+        none_pspec1 = logical_to_mesh_axes((None,), mesh=self.mesh, rules=logical_rules)
+
+        recurrent_state_arg = (
+            recurrent_state
+            if recurrent_state is not None
+            else jnp.zeros((batch, self.num_v_heads, self.head_k_dim, self.head_v_dim), dtype=cfg.dtype)
+        )
+        conv_state_arg = (
+            conv_state
+            if conv_state is not None
+            else jnp.zeros((batch, self.config.gdn_conv_kernel_dim - 1, qkv.shape[-1]), dtype=cfg.dtype)
+        )
+        conv_bias_arg = (
+            self.conv1d.bias.value
+            if hasattr(self.conv1d, "bias") and self.conv1d.bias is not None
+            else jnp.zeros((qkv.shape[-1],), dtype=cfg.dtype)
+        )
+
+        @functools.partial(
+            jax.shard_map,
+            mesh=self.mesh,
+            in_specs=(
+                batch_pspec3,  # qkv
+                batch_pspec3,  # b
+                batch_pspec3,  # a
+                none_pspec3,   # conv_weight
+                none_pspec1,   # conv_bias
+                none_pspec1,   # a_log
+                none_pspec1,   # dt_bias
+                batch_pspec3,  # conv_state
+                batch_pspec4,  # recurrent_state
+            ),
+            out_specs=(
+                batch_pspec4,  # core_attn_out
+                (batch_pspec3, batch_pspec4),  # (next_conv_state, next_recurrent_state)
+            ),
+            check_vma=False,
+        )
+        def shard_mapped_hybrid_gdn(qkv_val, b_val, a_val, cw_val, cb_val, alog_val, dt_val, cs_val, rs_val):
+          return hybrid_fused_conv1d_gdn(
+              qkv=qkv_val,
+              b=b_val,
+              a=a_val,
+              conv_weight=cw_val,
+              conv_bias=cb_val,
+              a_log=alog_val,
+              dt_bias=dt_val,
+              conv_state=cs_val,
+              recurrent_state=rs_val,
+              num_k_heads=self.num_k_heads,
+              num_v_heads=self.num_v_heads,
+              head_k_dim=self.head_k_dim,
+              head_v_dim=self.head_v_dim,
+              conv_kernel_size=self.config.gdn_conv_kernel_dim,
+              chunk_size=self.config.gdn_chunk_size,
+              use_qk_norm_in_gdn=self.config.use_qk_norm_in_gdn,
+              compute_dtype=self.config.dtype,
+          )
+
+        core_attn_out, (next_conv_state, next_recurrent_state) = shard_mapped_hybrid_gdn(
+            qkv,
+            b,
+            a,
+            self.conv1d.kernel.value,
+            conv_bias_arg,
+            self.A_log[...],
+            self.dt_bias[...],
+            conv_state_arg,
+            recurrent_state_arg,
+        )
+      else:
+        core_attn_out, (next_conv_state, next_recurrent_state) = hybrid_fused_conv1d_gdn(
+            qkv=qkv,
+            b=b,
+            a=a,
+            conv_weight=self.conv1d.kernel.value,
+            conv_bias=None,
+            a_log=self.A_log[...],
+            dt_bias=self.dt_bias[...],
+            conv_state=conv_state,
+            recurrent_state=recurrent_state,
+            num_k_heads=self.num_k_heads,
+            num_v_heads=self.num_v_heads,
+            head_k_dim=self.head_k_dim,
+            head_v_dim=self.head_v_dim,
+            conv_kernel_size=self.config.gdn_conv_kernel_dim,
+            chunk_size=self.config.gdn_chunk_size,
+            use_qk_norm_in_gdn=self.config.use_qk_norm_in_gdn,
+            compute_dtype=self.config.dtype,
+        )
+    elif getattr(cfg, "use_gdn_kernel", False):
+      core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
+          query,
+          key,
+          value,
+          g,
+          beta,
+          chunk_size=cfg.gdn_chunk_size,
+          initial_state=recurrent_state,
           use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
           compute_dtype=cfg.dtype,
       )
     elif self.mesh is not None:
-      logical_rules = get_logical_axis_rules()
+      logical_rules = self.config.logical_axis_rules
       recurrent_state_arg = (
           recurrent_state
           if recurrent_state is not None
@@ -897,7 +1061,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       assert next_conv_state is not None
       assert next_recurrent_state is not None
-      if next_conv_state.shape[0] != orig_cache_batch:  # pyrefly: ignore[unbound-name]
+      if next_conv_state.shape[0] != orig_cache_batch:
         if next_conv_state.shape[0] == 1:
           next_conv_state = jnp.broadcast_to(next_conv_state, (orig_cache_batch,) + next_conv_state.shape[1:])
           next_recurrent_state = jnp.broadcast_to(
@@ -912,7 +1076,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           next_recurrent_state = next_recurrent_state[:orig_cache_batch]
 
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
-      active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
+      active_cache.update_gdn_states(next_recurrent_state, next_conv_state)
+
+    core_attn_out = checkpoint_name(core_attn_out, "context")
 
     # =========================================================================
     # STEP D: Final Output Stage
@@ -948,12 +1114,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         value_heads=self.num_v_heads,
         key_head_size=self.head_k_dim,
         value_head_size=self.head_v_dim,
-        dtype=self.dtype,  # pyrefly: ignore[missing-attribute]
+        dtype=self.dtype,
         is_gdn=True,
         conv_kernel_size=conv_kernel_size,
         conv_dim=conv_dim,
-        model_mode=self.model_mode,  # pyrefly: ignore[missing-attribute]
-        rngs=self.rngs,  # pyrefly: ignore[missing-attribute]
+        model_mode=self.model_mode,
+        rngs=self.rngs,
     )
 
 
