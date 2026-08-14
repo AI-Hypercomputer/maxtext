@@ -498,14 +498,21 @@ def assert_step_parity(
       and float(np.mean(metrics_baseline["scalar"]["learning/lm_loss"])) != 0.0
   ):
     loss_baseline = float(np.mean(metrics_baseline["scalar"]["learning/lm_loss"]))
-  loss_engine = float(
-      np.mean(
-          metrics_engine_buf.scalar_metrics.get(
-              "learning/loss",
-              metrics_engine_buf.scalar_metrics.get("loss", 0.0),
-          )
-      )
-  )
+  # The engine records its primary loss as a WeightedMetric (unreduced sum + denominator) in
+  # `weighted_metrics`, so it never lands in `scalar_metrics`. Reduce it here; fall back to
+  # `scalar_metrics` for losses that were recorded as plain scalars.
+  loss_engine_weighted = metrics_engine_buf.weighted_metrics.get("loss")
+  if loss_engine_weighted is not None:
+    loss_engine = float(np.mean(_to_numpy(loss_engine_weighted.compute())))
+  else:
+    loss_engine = float(
+        np.mean(
+            metrics_engine_buf.scalar_metrics.get(
+                "learning/loss",
+                metrics_engine_buf.scalar_metrics.get("loss", 0.0),
+            )
+        )
+    )
   is_16_bit_model = any(hasattr(v, "dtype") and str(v.dtype) in ("bfloat16", "float16") for v in state_b_leaves)
   # Cross-entropy loss across large vocabularies (e.g. 151,936 tokens for Llama-3.1-8B)
   # sums exponential terms; when weights drift by ~1e-5 across multi-step IEEE-754 accumulation,
