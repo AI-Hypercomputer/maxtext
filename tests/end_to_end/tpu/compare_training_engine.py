@@ -420,6 +420,18 @@ def verification_harness(
   state_graphdef, state_pure = nnx.split(ts_baseline)
 
   engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+  # Check what __init__ built before the injections below throw it away. create_training_optimizer
+  # returns a raw optax GradientTransformation, but TrainStateNNX.apply_gradients and
+  # checkpointing.CheckpointState both require an nnx.Optimizer, so a constructor that skips the
+  # wrap yields an engine that cannot train or checkpoint. The overwrites below are what let that
+  # regression ship unnoticed; this assert is the tripwire.
+  assert isinstance(engine.optimizer, nnx.Optimizer), (
+      "MaxTextTrainingEngine.__init__ must build an nnx.Optimizer, got "
+      f"{type(engine.optimizer).__name__}"
+  )
+  # The engine's own model/optimizer are replaced here because the "default" path compares against
+  # a hand-written TinyDecoder, which from_pretrained would never produce. Weight-level coverage of
+  # the constructor therefore has to live outside this harness.
   engine.model = model_e
   engine.optimizer = opt_e
   engine.state = train_state_nnx.TrainStateNNX(model_e, opt_e)
