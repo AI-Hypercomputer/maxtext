@@ -119,7 +119,7 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
     in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
     out_shardings = (state_mesh_shardings, None)  # State, metrics
     static_argnums = ()  # We partial out the static argnums of model and config
-    if hasattr(config, "donate_train_state") and not config.donate_train_state:
+    if (hasattr(config, "donate_train_state") and not config.donate_train_state) or getattr(config, "enable_non_spmd_diloco", False):
       donate_argnums = ()
     else:
       donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.

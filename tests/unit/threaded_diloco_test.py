@@ -32,7 +32,13 @@ import jax.numpy as jnp
 import optax
 
 from maxtext.configs import pyconfig
-from maxtext.trainers.diloco.threaded_diloco import make_learner_config, make_step_fns, _slice_global_mesh_to_submesh, _get_apply_outer_step_flat_jit
+from maxtext.trainers.diloco.threaded_diloco import (
+    make_learner_config,
+    make_step_fns,
+    _slice_global_mesh_to_submesh,
+    _get_apply_outer_step_flat_jit,
+    _extract_scalar_metrics,
+)
 from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager
 from maxtext.trainers.diloco.fragmenter import FragmentedTreeManipulator
 from maxtext.utils.mesh_utils import stack_across_meshes_pytree
@@ -610,6 +616,39 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
     )
     self.assertEqual(sliced_2d.shape, (4,))
     np.testing.assert_allclose(np.array(sliced_2d), 2.0)
+
+  def test_extract_scalar_metrics_packed(self):
+    mock_metrics = {
+        "scalar": {
+            "learning/loss": jnp.array(2.345),
+            "learning/grad_norm": jnp.array([1.0, 3.0]),
+            "learning/raw_grad_norm": jnp.array(0.789),
+            "learning/current_learning_rate": 0.001,
+            "perf/step_time_seconds": 1.25,
+            "int_metric": 42,
+        },
+        "scalars": {},
+    }
+    extracted = _extract_scalar_metrics(mock_metrics)
+    self.assertIsInstance(extracted, dict)
+    self.assertAlmostEqual(extracted["scalar"]["learning/loss"], 2.345, places=3)
+    self.assertAlmostEqual(extracted["scalar"]["learning/grad_norm"], 2.0, places=3)
+    self.assertAlmostEqual(extracted["scalar"]["learning/raw_grad_norm"], 0.789, places=3)
+    self.assertAlmostEqual(extracted["scalar"]["learning/current_learning_rate"], 0.001, places=5)
+    self.assertAlmostEqual(extracted["scalar"]["perf/step_time_seconds"], 1.25, places=3)
+    for k, v in extracted["scalar"].items():
+      self.assertIsInstance(v, float)
+
+    # Test extraction with sharded arrays under active mesh context
+    devices = jax.devices()[:4]
+    mesh = jax.sharding.Mesh(np.array(devices), ("model",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("model"))
+    with jax.set_mesh(mesh):
+      sharded_arr = jax.device_put(jnp.ones(4), sharding)
+      sharded_metrics = {"scalar": {"loss": sharded_arr}}
+      extracted_sharded = _extract_scalar_metrics(sharded_metrics)
+      self.assertAlmostEqual(extracted_sharded["scalar"]["loss"], 1.0, places=3)
+      self.assertIsInstance(extracted_sharded["scalar"]["loss"], float)
 
 
 if __name__ == "__main__":

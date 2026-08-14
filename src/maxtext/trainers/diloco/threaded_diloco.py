@@ -109,61 +109,74 @@ def _slice_global_mesh_to_submesh(
       else:
         target_spec = target_sharding.spec if hasattr(target_sharding, "spec") else jax.sharding.PartitionSpec()
       target_named_sharding = jax.sharding.NamedSharding(submesh, target_spec)
-      if hasattr(leaf, "addressable_shards") and leaf.addressable_shards:
-        start_idx = learner_idx * num_devices_per_mesh
-        end_idx = start_idx + num_devices_per_mesh
-        tpu_devices = list(submesh.devices.flat)
-        if len(target_shape) == 3:
-          # Scanned 3D layer weight: transpose axes 0 and 1 on CPU to match XLA {2, 1, 0} memory order
-          tpu_shards = []
-          for shard_idx, shard in enumerate(leaf.addressable_shards[start_idx:end_idx]):
-            s = shard.data
-            while s.ndim > len(target_shape) and s.shape[0] == 1:
-              s = s.reshape(s.shape[1:])
-            s_t = jnp.swapaxes(s, 0, 1)
-            tpu_shards.append(jax.device_put(s_t, tpu_devices[shard_idx]))
-          shape_t = (target_shape[1], target_shape[0], target_shape[2])
-          spec = target_named_sharding.spec
-          spec_t = jax.sharding.PartitionSpec(
-              spec[1] if len(spec) > 1 else None,
-              spec[0] if len(spec) > 0 else None,
-              spec[2] if len(spec) > 2 else None,
-          )
-          sharding_t = jax.sharding.NamedSharding(submesh, spec_t)
-          tpu_arr_t = jax.make_array_from_single_device_arrays(shape_t, sharding_t, tpu_shards)
-          return jnp.swapaxes(tpu_arr_t, 0, 1)
-        elif len(target_shape) == 2 and target_shape[1] == 36:
-          # Scanned 2D layer weight (e.g. layer norm / bias): transpose axes 0 and 1 on CPU to match XLA {1, 0} memory order
-          tpu_shards = []
-          for shard_idx, shard in enumerate(leaf.addressable_shards[start_idx:end_idx]):
-            s = shard.data
-            while s.ndim > len(target_shape) and s.shape[0] == 1:
-              s = s.reshape(s.shape[1:])
-            s_t = jnp.swapaxes(s, 0, 1)
-            tpu_shards.append(jax.device_put(s_t, tpu_devices[shard_idx]))
-          shape_t = (target_shape[1], target_shape[0])
-          spec = target_named_sharding.spec
-          spec_t = jax.sharding.PartitionSpec(
-              spec[1] if len(spec) > 1 else None,
-              spec[0] if len(spec) > 0 else None,
-          )
-          sharding_t = jax.sharding.NamedSharding(submesh, spec_t)
-          tpu_arr_t = jax.make_array_from_single_device_arrays(shape_t, sharding_t, tpu_shards)
-          return jnp.swapaxes(tpu_arr_t, 0, 1)
-        else:
-          tpu_shards = []
-          for shard_idx, shard in enumerate(leaf.addressable_shards[start_idx:end_idx]):
-            s = shard.data
-            while s.ndim > len(target_shape) and s.shape[0] == 1:
-              s = s.reshape(s.shape[1:])
-            tpu_shards.append(jax.device_put(s, tpu_devices[shard_idx]))
-          return jax.make_array_from_single_device_arrays(target_shape, target_named_sharding, tpu_shards)
-      else:
-        with jax.set_mesh(leaf.sharding.mesh if hasattr(leaf, "sharding") and leaf.sharding.mesh is not None else None):
-          sliced_leaf = leaf[learner_idx]
-        return _normalize_to_null_layout(jax.device_put(sliced_leaf, target_sharding))
 
-    return _normalize_to_null_layout(jax.device_put(leaf, target_sharding))
+      if hasattr(leaf, "addressable_shards") and leaf.addressable_shards:
+        num_shards = len(leaf.addressable_shards)
+        if num_shards == num_learners:
+          # Syncer array on CPU mesh (1 shard per learner/slice)
+          s = np.asarray(leaf.addressable_shards[learner_idx].data)
+          while s.ndim > len(target_shape) and s.shape[0] == 1:
+            s = s.reshape(s.shape[1:])
+          with jax.set_mesh(submesh):
+            return jax.device_put(s, target_named_sharding)
+        elif num_shards >= (learner_idx + 1) * num_devices_per_mesh:
+          # Array with per-device TPU shards
+          start_idx = learner_idx * num_devices_per_mesh
+          end_idx = start_idx + num_devices_per_mesh
+          tpu_devices = list(submesh.devices.flat)
+          if len(target_shape) == 3:
+            tpu_shards = []
+            for shard_idx, shard in enumerate(leaf.addressable_shards[start_idx:end_idx]):
+              s = shard.data
+              while s.ndim > len(target_shape) and s.shape[0] == 1:
+                s = s.reshape(s.shape[1:])
+              s_t = jnp.swapaxes(s, 0, 1)
+              tpu_shards.append(jax.device_put(s_t, tpu_devices[shard_idx]))
+            shape_t = (target_shape[1], target_shape[0], target_shape[2])
+            spec = target_named_sharding.spec
+            spec_t = jax.sharding.PartitionSpec(
+                spec[1] if len(spec) > 1 else None,
+                spec[0] if len(spec) > 0 else None,
+                spec[2] if len(spec) > 2 else None,
+            )
+            sharding_t = jax.sharding.NamedSharding(submesh, spec_t)
+            tpu_arr_t = jax.make_array_from_single_device_arrays(shape_t, sharding_t, tpu_shards)
+            return jnp.swapaxes(tpu_arr_t, 0, 1)
+          elif len(target_shape) == 2 and target_shape[1] == 36:
+            tpu_shards = []
+            for shard_idx, shard in enumerate(leaf.addressable_shards[start_idx:end_idx]):
+              s = shard.data
+              while s.ndim > len(target_shape) and s.shape[0] == 1:
+                s = s.reshape(s.shape[1:])
+              s_t = jnp.swapaxes(s, 0, 1)
+              tpu_shards.append(jax.device_put(s_t, tpu_devices[shard_idx]))
+            shape_t = (target_shape[1], target_shape[0])
+            spec = target_named_sharding.spec
+            spec_t = jax.sharding.PartitionSpec(
+                spec[1] if len(spec) > 1 else None,
+                spec[0] if len(spec) > 0 else None,
+            )
+            sharding_t = jax.sharding.NamedSharding(submesh, spec_t)
+            tpu_arr_t = jax.make_array_from_single_device_arrays(shape_t, sharding_t, tpu_shards)
+            return jnp.swapaxes(tpu_arr_t, 0, 1)
+          else:
+            tpu_shards = []
+            for shard_idx, shard in enumerate(leaf.addressable_shards[start_idx:end_idx]):
+              s = shard.data
+              while s.ndim > len(target_shape) and s.shape[0] == 1:
+                s = s.reshape(s.shape[1:])
+              tpu_shards.append(jax.device_put(s, tpu_devices[shard_idx]))
+            return jax.make_array_from_single_device_arrays(target_shape, target_named_sharding, tpu_shards)
+
+      # Fallback for arrays without addressable_shards
+      s = np.asarray(leaf[learner_idx])
+      while s.ndim > len(target_shape) and s.shape[0] == 1:
+        s = s.reshape(s.shape[1:])
+      with jax.set_mesh(submesh):
+        return jax.device_put(s, target_named_sharding)
+
+    with jax.set_mesh(submesh):
+      return jax.device_put(leaf, target_sharding)
 
   if target_shapes is not None:
     return jax.tree_util.tree_map(_slice_leaf, tree, target_shardings, target_shapes)
@@ -199,32 +212,52 @@ def get_first_step(model, state):
     return 0
   except Exception as e:
     max_logging.log(f"get_first_step encountered exception reading step, defaulting to 0: {e}")
-    return 0
+_fold_in_jit = jax.jit(jax.random.fold_in)
+
+
+@functools.partial(jax.jit, static_argnames=("manipulator", "frag_idx"))
+def _extract_fragment_jit(params, manipulator, frag_idx: int):
+  """Extracts and materializes a fragment on TPU in a single fused XLA dispatch."""
+  return manipulator.get_flat_fragment(params, frag_idx)
 
 
 def _extract_scalar_metrics(tree):
-  """Extracts Python scalar numbers from a JAX metric PyTree safely while inside mesh context."""
+  """Extracts Python scalar numbers from a JAX metric PyTree safely while inside mesh context.
 
-  def _leaf_to_scalar(x):
-    try:
-      if isinstance(x, jax.Array):
-        if hasattr(x, "is_deleted") and x.is_deleted():
-          return 0.0
-        if hasattr(x, "addressable_shards") and len(x.addressable_shards) > 0:
-          s = x.addressable_shards[0].data
-          val = jax.device_get(s)
-        else:
-          val = jax.device_get(x)
-        if isinstance(val, np.ndarray):
-          return float(val.mean())
-        return float(val)
-      elif isinstance(x, (np.ndarray, np.generic)):
-        return float(x.mean())
-      return x
-    except Exception:
-      return 0.0
+  Packs all device JAX array leaves into a single 1D tensor to perform a single
+  batched D2H transfer over gRPC (inspired by jax_pack).
+  """
+  try:
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    if not leaves:
+      return tree
 
-  return jax.tree_util.tree_map(_leaf_to_scalar, tree)
+    jax_indices = []
+    jax_scalars = []
+    result_leaves = list(leaves)
+
+    for i, leaf in enumerate(leaves):
+      if isinstance(leaf, jax.Array):
+        s_mean = jnp.mean(leaf).astype(jnp.float32)
+        jax_indices.append(i)
+        jax_scalars.append(jnp.reshape(s_mean, (1,)))
+      elif isinstance(leaf, (np.ndarray, np.generic)):
+        result_leaves[i] = float(leaf.mean())
+      elif isinstance(leaf, (int, float)):
+        result_leaves[i] = float(leaf)
+      else:
+        result_leaves[i] = leaf
+
+    if jax_scalars:
+      packed_device = jnp.concatenate(jax_scalars)
+      packed_host = jax.device_get(packed_device)
+      for idx, scalar_val in zip(jax_indices, packed_host):
+        result_leaves[idx] = float(scalar_val)
+
+    return jax.tree_util.tree_unflatten(treedef, result_leaves)
+  except Exception as e:
+    max_logging.log(f"Error in _extract_scalar_metrics: {e}")
+    return tree
 
 
 def make_learner_config(config, learner_idx, num_learners):
@@ -277,11 +310,7 @@ def get_abstract_syncer_state(config, local_cpu_mesh):
           nesterov=True,
       )
 
-      @jax.jit
-      def init_opt(p):
-        return outer_optimizer.init(p)
-
-      abstract_opt_state = init_opt.eval_shape(abstract_params)
+      abstract_opt_state = jax.eval_shape(outer_optimizer.init, abstract_params)
   else:
     model = model_creation_utils.from_config(config, mesh=local_cpu_mesh)
     abstract_vars = maxtext_utils.get_abstract_param(model, config)
@@ -292,11 +321,9 @@ def get_abstract_syncer_state(config, local_cpu_mesh):
         params_logical_annotations, local_cpu_mesh, config.logical_axis_rules
     )
 
-    @jax.jit
-    def dummy_init():
-      return abstract_params
-
-    abstract_params = jax.jit(dummy_init, out_shardings=params_mesh_shardings).eval_shape()
+    abstract_params = jax.eval_shape(
+        jax.jit(lambda: abstract_params, out_shardings=params_mesh_shardings)
+    )
 
     outer_optimizer = optax.sgd(
         learning_rate=config.diloco_outer_lr,
@@ -304,12 +331,10 @@ def get_abstract_syncer_state(config, local_cpu_mesh):
         nesterov=True,
     )
 
-    @jax.jit
-    def init_opt(p):
-      return outer_optimizer.init(p)
-
     opt_state_shardings = (optax.TraceState(trace=params_mesh_shardings), optax.EmptyState())
-    abstract_opt_state = jax.jit(init_opt, out_shardings=opt_state_shardings).eval_shape(abstract_params)
+    abstract_opt_state = jax.eval_shape(
+        jax.jit(outer_optimizer.init, out_shardings=opt_state_shardings), abstract_params
+    )
 
   return abstract_params, abstract_opt_state
 
@@ -410,11 +435,6 @@ def _run_learner_loop(
     )
     metric_logger_instance.write_setup_info_to_tensorboard(params_template)
 
-    def p_mix_frags(i_frag, o_frag):
-      if alpha == 0.0:
-        return o_frag
-      return jax.tree_util.tree_map(lambda x, y: alpha * x + (1.0 - alpha) * y, i_frag, o_frag)
-
     try:
       last_step_completion = datetime.datetime.now()
       for step in range(start_step, learner_config.steps):
@@ -427,7 +447,7 @@ def _run_learner_loop(
         with jax.profiler.StepTraceAnnotation(f"train_learner_{learner_idx}", step_num=step):
           example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
           if isinstance(model, nn.Module):
-            step_rng_args = (jax.jit(jax.random.fold_in)(init_rng, step),)
+            step_rng_args = (_fold_in_jit(init_rng, step),)
           else:
             step_rng_args = ()
 
@@ -448,11 +468,7 @@ def _run_learner_loop(
             frag_idx = (completed_step % period) // steps_between_syncs_plus_1
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-              frag_data = manipulator.get_flat_fragment(params, frag_idx)
-              frag_data = jax.tree_util.tree_map(
-                  lambda leaf: jnp.copy(leaf) if isinstance(leaf, jax.Array) else leaf,
-                  frag_data,
-              )
+              frag_data = _extract_fragment_jit(params, manipulator, frag_idx)
               frag_data = jax.block_until_ready(frag_data)
             transport.send_to_syncer_async(completed_step, frag_idx, frag_data)
 
