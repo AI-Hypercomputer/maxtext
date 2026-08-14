@@ -164,7 +164,13 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
         optimizer.update(model, grads)
         grad_norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads))
       else:
-        grad_accumulator.add(grads)
+        if isinstance(grads, nnx.State) or hasattr(grads, "to_pure_dict"):
+          acc_input_grads = grads.to_pure_dict()
+        elif isinstance(grads, dict):
+          acc_input_grads = dict(grads)
+        else:
+          acc_input_grads = grads
+        grad_accumulator.add(acc_input_grads)
 
         def apply_updates(model, optimizer, grad_accumulator):
           acc_grads = grad_accumulator.get()
