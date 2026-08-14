@@ -126,7 +126,10 @@ def _run_tokamax_fused_fwd(
         )
 
     # When on TPU, invoke Tokamax GDN v3 fused_conv1d_gdn kernel
-    from tokamax._src.ops.experimental.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+    try:
+        from tokamax._src.ops.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+    except ImportError:
+        from tokamax._src.ops.experimental.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
     batch_size, seq_len, dim_size = qkv.shape
     num_seqs = batch_size
 
