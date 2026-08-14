@@ -466,6 +466,28 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(types.infer_cp_axes(config.logical_axis_rules), ("context", "context_usp_ulysses"))
     self.assertEqual(types.infer_cp_axes(config.logical_axis_rules_for_eval), ("context", "context_usp_ulysses"))
 
+  def test_tpu_usp_config_validation_accepts_packing(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=usp",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "ici_context_usp_ulysses_parallelism=2",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.packing)
+
   def test_context_usp_ulysses_parallelism_requires_usp(self):
     argv = [
         "",
@@ -501,7 +523,6 @@ class ConfigTest(absltest.TestCase):
     ]
     cases = [
         (["context_parallel_load_balance=True"], ["context_parallel_load_balance=False"], "load_balance"),
-        (["packing=True", "dataset_type=tfds"], ["packing=False", "dataset_type=synthetic"], "packing"),
         (["attention=dot_product"], ["attention=flash"], "attention=flash"),
         (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
         (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),
