@@ -548,9 +548,17 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
-      restore_target = (
-          train_state_nnx.to_checkpoint_dict(abstract_unboxed_pre_state) if is_nnx else abstract_unboxed_pre_state
-      )
+      is_diloco = bool(maxtext_config and getattr(maxtext_config, "enable_diloco", False))
+
+      if is_diloco:
+        restore_target = diloco_checkpoint_utils.to_diloco_checkpoint_dict(
+            abstract_unboxed_pre_state, config=maxtext_config
+        )
+      elif is_nnx:
+        restore_target = train_state_nnx.to_checkpoint_dict(abstract_unboxed_pre_state)
+      else:
+        restore_target = abstract_unboxed_pre_state
+
       if maxtext_config and getattr(getattr(maxtext_config, "lora", None), "enable_lora", False):
         restore_target = _filter_lora_trainable_state(restore_target)
       restore_args = jax.tree_util.tree_map(map_to_pspec, restore_target)
@@ -572,7 +580,11 @@ def load_state_if_possible(
             ),
         ):
           restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
-          if is_nnx:
+          if is_diloco:
+            restored = diloco_checkpoint_utils.from_diloco_checkpoint_dict(
+                restored, abstract_unboxed_pre_state, config=maxtext_config
+            )
+          elif is_nnx:
             restored = _restored_linen_to_nnx(restored, abstract_unboxed_pre_state, config=maxtext_config)
           return (
               restored,
@@ -597,7 +609,12 @@ def load_state_if_possible(
               checkpoint_args,
               expansion_factor_real_data,
           )
-          if is_nnx:
+          if is_diloco:
+            restored_items = diloco_checkpoint_utils.from_diloco_checkpoint_dict(
+                restored["items"], abstract_unboxed_pre_state, config=maxtext_config
+            )
+            restored = {"items": restored_items}
+          elif is_nnx:
             restored_items = _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state, config=maxtext_config)
             restored = {"items": restored_items}
           return (restored, iterator)
@@ -605,7 +622,12 @@ def load_state_if_possible(
         # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
         case _:
           restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
-          if is_nnx:
+          if is_diloco:
+            restored_items = diloco_checkpoint_utils.from_diloco_checkpoint_dict(
+                restored["items"], abstract_unboxed_pre_state, config=maxtext_config
+            )
+            restored = {"items": restored_items}
+          elif is_nnx:
             restored_items = _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state, config=maxtext_config)
             restored = {"items": restored_items}
           return (restored, None)
