@@ -3646,9 +3646,9 @@ class MaxTextConfig(
       raise ValueError("MoBA is only supported with dot_product attention.")
     if self.decoder_block == DecoderBlockType.DEEPSEEK4:
       match (self.attention, self.use_tokamax_splash):
-        case ("dot_product" | "autoselected", _):
+        case ("dot_product", _):
           pass
-        case ("flash" | "autoselected", True):
+        case ("flash", True):
           pass
         case _:
           raise ValueError(
@@ -3677,10 +3677,10 @@ class MaxTextConfig(
         )
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
-      supports_dot_product = self.attention in ("dot_product", "autoselected")
-      supports_flash_splash = self.attention in ("flash", "autoselected") and self.use_tokamax_splash
+      supports_dot_product = self.attention == "dot_product"
+      supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
       if not (supports_dot_product or supports_flash_splash):
-        raise NotImplementedError(
+        raise ValueError(
             "Sparse indexer is only supported with dot_product attention or flash attention with tokamax splash."
         )
       if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:

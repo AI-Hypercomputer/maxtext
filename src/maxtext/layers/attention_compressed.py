@@ -89,7 +89,16 @@ def csa_overlap_pooling(
     is_same_doc: Boolean tensor indicating if a window belongs to the same document as its predecessor.
 
   Returns:
-    Tuple of (compressed, next_prior_kv, next_prior_gate).
+    Tuple of (compressed, next_prior_kv, next_prior_gate):
+      - compressed: The pooled overlapping states. Shape: `[batch, n_windows, head_dim]`.
+      - next_prior_kv: Updated KV prior for the next window.
+      - next_prior_gate: Updated gate prior for the next window.
+
+  Shape Transformations:
+    1. Split: `[batch, n_windows, compress_rate, 2 * head_dim]` -> 2x `[batch, n_windows, compress_rate, head_dim]`
+    2. Shift: Ca shifted forward by one window (prepending cache prior if available).
+    3. Concat (Ca + Cb): -> `[batch, n_windows, 2 * compress_rate, head_dim]`
+    4. Gating & Sum: -> `[batch, n_windows, head_dim]`
   """
   # D2 is 2 * head_dim
   B, _, C, D2 = chunk_kv.shape

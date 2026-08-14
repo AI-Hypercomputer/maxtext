@@ -57,7 +57,6 @@ log_moe_bias_norms: false
 
 # --- Attention configuration ---
 attention_type: 'compressed'
-use_tokamax_splash: true
 q_lora_rank: 16
 o_groups: 4
 o_lora_rank: 16
