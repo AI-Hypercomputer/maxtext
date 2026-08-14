@@ -42,16 +42,16 @@ def compute_cosine_similarity(arr1: Any, arr2: Any) -> float:
     a = np.ravel(np.asarray(arr1, dtype=np.float32))
     b = np.ravel(np.asarray(arr2, dtype=np.float32))
     if a.size != b.size:
-      return 0.0
+      return None
     if a.size == 0:
-      return 0.0
+      return None
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
     if norm_a == 0 or norm_b == 0:
-      return 0.0
+      return None
     return float(np.dot(a, b) / (norm_a * norm_b))
   except Exception:  # pylint: disable=broad-exception-caught
-    return 0.0
+    return None
 
 
 def analyze_layer_divergence(

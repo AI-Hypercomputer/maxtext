@@ -702,7 +702,7 @@ def main(config, test_args):  # pylint: disable=W0621
           max_logging.log("--- DUMPING HF INTERMEDIATE ACTIVATIONS ---")
           max_logging.log(f"Number of layers extracted: {len(hf_outputs.hidden_states)}")
           for i, layer_tensor in enumerate(hf_outputs.hidden_states):
-            max_logging.log(f"HF Layer {i} Shape: {layer_tensor.shape}, IsFinite: {torch.isfinite(layer_tensor).all()}, Norm: {torch.norm(layer_tensor, p=2).item():.4f}")
+            max_logging.log(f"HF Layer {i} Shape: {layer_tensor.shape}, IsFinite: {torch.isfinite(layer_tensor).all()}, IsFinite: {torch.isfinite(layer_tensor).all()}, Norm: {torch.norm(layer_tensor, p=2).item():.4f}")
           max_logging.log("-------------------------------------------")
 
       # --- MaxText Forward Pass ---
