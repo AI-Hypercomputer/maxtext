@@ -2038,7 +2038,6 @@ class AttentionTest(parameterized.TestCase):
         msg="Input gradients from generic dot product and flash attention + USP context parallelism are not close.",
     )
 
-  @pytest.mark.skip(reason="Temporarily skipped due to USP HLO regression")
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_usp_hlo_uses_all_to_all_and_permute(self):
     """Checks compiled TPU USP attention HLO uses all-to-all and collective-permute."""
@@ -2086,9 +2085,13 @@ class AttentionTest(parameterized.TestCase):
         )
         hlo_texts.append(lowered.compile().as_text())
 
-    ring_local_sequence_length = cfg_cp.max_target_length // cfg_cp.ici_context_parallelism
-    sequence_lengths = (cfg_cp.max_target_length, ring_local_sequence_length)
-    for hlo_text in hlo_texts:
+    full_sequence_length = cfg_cp.max_target_length
+    ring_local_sequence_length = full_sequence_length // cfg_cp.ici_context_parallelism
+    # The gradient program legitimately all-gathers the shared input's gradient
+    # over the Ulysses axis, so the ring-local length is only checked in the
+    # forward program.
+    sequence_lengths_per_program = ((full_sequence_length, ring_local_sequence_length), (full_sequence_length,))
+    for hlo_text, sequence_lengths in zip(hlo_texts, sequence_lengths_per_program):
       self.assertGreater(len(hlo_test_utils.collective_lines(hlo_text, "all-to-all")), 0)
       self.assertGreater(len(hlo_test_utils.collective_lines(hlo_text, "collective-permute")), 0)
       self.assertLen(hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, sequence_lengths), 0)
@@ -2101,7 +2104,7 @@ class AttentionTest(parameterized.TestCase):
           0,
       )
       self.assertLen(
-          hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, (cfg_cp.max_target_length,), dtypes=("s32",)), 0
+          hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, (full_sequence_length,), dtypes=("s32",)), 0
       )
 
   @pytest.mark.tpu_only
