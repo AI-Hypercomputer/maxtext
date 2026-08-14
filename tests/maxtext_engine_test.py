@@ -26,6 +26,7 @@ import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
+from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
@@ -49,24 +50,31 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
   def setUp(self):
     """Sets up test dependencies and mocks."""
     super().setUp()
+    self.mock_config = self.setup_config()
+    dummy_mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(self.mock_config), self.mock_config.mesh_axes)
     dummy_model = DummyNNXModel()
-    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    # `create_training_optimizer` returns `(schedule, tx)` where `tx` is a raw optax
+    # GradientTransformation; the engine wraps it in an nnx.Optimizer itself. Returning
+    # an already-wrapped nnx.Optimizer here would make the engine wrap it twice.
     patcher = mock.patch.object(
         maxtext_engine.train_utils,
         "create_training_optimizer",
-        return_value=(lambda step: jnp.array(0.001), dummy_opt),
+        return_value=(lambda step: jnp.array(0.001), optax.sgd(0.01)),
     )
     self.addCleanup(patcher.stop)
     patcher.start()
 
+    # These tests always construct the engine without a mesh, and `from_pretrained`
+    # returns `(model, model.mesh)` in that case -- it enters `with mesh:` before
+    # returning, so the mesh it hands back is never None. (It returns a bare model
+    # only when the caller supplies a mesh, which no test here does.)
     from_pretrained_patcher = mock.patch.object(
         maxtext_engine.model_creation_utils,
         "from_pretrained",
-        return_value=dummy_model,
+        return_value=(dummy_model, dummy_mesh),
     )
     self.addCleanup(from_pretrained_patcher.stop)
     self.mock_from_pretrained = from_pretrained_patcher.start()
-    self.mock_config = self.setup_config()
 
   def setup_config(self, enable_checkpointing: bool = False, **kwargs):
     """Sets up a MaxText config via pyconfig.initialize."""
