@@ -119,7 +119,8 @@ jobs:
           "gpu-integration": "cuda12",
           "cpu-unit": "cpu",
           "cpu-integration": "cpu",
-          "cpu-post-training-unit": "cpu"
+          "cpu-post-training-unit": "cpu",
+          "cpu-post-training-integration": "cpu"
         }')[inputs.flavor] }}
 
       device_name: >-
@@ -136,7 +137,8 @@ jobs:
           "gpu-integration": "a100-40gb-4",
           "cpu-unit": "X64",
           "cpu-integration": "X64",
-          "cpu-post-training-unit": "X64"
+          "cpu-post-training-unit": "X64",
+          "cpu-post-training-integration": "X64"
         }')[inputs.flavor] }}
 
       cloud_runner: >-
@@ -153,7 +155,8 @@ jobs:
           "gpu-integration": "linux-x86-a2-48-a100-4gpu",
           "cpu-unit": "linux-x86-n2-32",
           "cpu-integration": "linux-x86-n2-32",
-          "cpu-post-training-unit": "linux-x86-n2-32"
+          "cpu-post-training-unit": "linux-x86-n2-32",
+          "cpu-post-training-integration": "linux-x86-n2-32"
         }')[inputs.flavor] }}
       # Pytest Marker Mapping
       pytest_marker: >-
@@ -170,7 +173,8 @@ jobs:
             "gpu-integration": "not cpu_only and not tpu_only and integration_test and not post_training",
             "cpu-unit": "cpu_only and not post_training and not integration_test",
             "cpu-integration": "cpu_only and not post_training and integration_test",
-            "cpu-post-training-unit": "cpu_only and post_training"
+            "cpu-post-training-unit": "cpu_only and post_training",
+            "cpu-post-training-integration": "cpu_only and post_training and integration_test"
           }')[inputs.flavor] }}
 
       pytest_addopts: >-
@@ -187,7 +191,8 @@ jobs:
             "gpu-integration": "",
             "cpu-unit": "",
             "cpu-integration": "",
-            "cpu-post-training-unit": "tests/post_training/unit tests/unit"
+            "cpu-post-training-unit": "tests/post_training/unit tests/unit",
+            "cpu-post-training-integration": "tests/post_training/integration"
           }')[inputs.flavor] }}
 
       pytest_extra_args: >-
@@ -204,7 +209,8 @@ jobs:
             "gpu-integration": "--ignore=tests/post_training",
             "cpu-unit": "--ignore=tests/post_training",
             "cpu-integration": "--ignore=tests/post_training",
-            "cpu-post-training-unit": ""
+            "cpu-post-training-unit": "",
+            "cpu-post-training-integration": ""
           }')[inputs.flavor] }}
 
       # Resource Scaling

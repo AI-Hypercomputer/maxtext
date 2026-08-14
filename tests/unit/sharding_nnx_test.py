@@ -284,11 +284,12 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
         ("embed", "fsdp"),
         ("mlp", "fsdp"),
     )
+    v = nnx.Param(
+        jnp.zeros((3, 4)),
+        out_sharding=("embed", "mlp"),
+        eager_sharding=False,
+    )
     with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(rules):
-      v = nnx.Param(
-          jnp.zeros((3, 4)),
-          out_sharding=("embed", "mlp"),
-      )
       out = self._run(self._build_state(w=v))
       result_sharding = out["w"].get_value()
       self.assertIsInstance(result_sharding, NamedSharding)
@@ -305,11 +306,12 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
         ("mlp", "fsdp"),
         ("mlp", "stage"),
     )
+    v = nnx.Param(
+        jnp.zeros((3, 4)),
+        out_sharding=("embed", "mlp"),
+        eager_sharding=False,
+    )
     with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(rules):
-      v = nnx.Param(
-          jnp.zeros((3, 4)),
-          out_sharding=("embed", "mlp"),
-      )
       out = self._run(self._build_state(w=v))
       result_sharding = out["w"].get_value()
       self.assertIsInstance(result_sharding, NamedSharding)
@@ -327,6 +329,7 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
           jnp.zeros((3,)),
           out_sharding=("embed",),
           sharding_rules=(("embed", "fsdp"),),
+          eager_sharding=False,
       )
     out = self._run(self._build_state(w=v))
     result_sharding = out["w"].get_value()
@@ -354,13 +357,14 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
     # Local rules map 'embed' to 'stage'. Context rules map 'embed' to 'fsdp'.
     # Because local rules come first, 'embed' should resolve to 'stage'.
     context_rules = (("embed", "fsdp"),)
+    v = nnx.Param(
+        jnp.zeros((3,)),
+        out_sharding=("embed",),
+        sharding_rules=(("embed", "stage"),),
+        eager_sharding=False,
+    )
     with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(context_rules):
-      v = nnx.Param(
-          jnp.zeros((3,)),
-          out_sharding=("embed",),
-          sharding_rules=(("embed", "stage"),),
-      )
-    out = self._run(self._build_state(w=v))
+      out = self._run(self._build_state(w=v))
     result_sharding = out["w"].get_value()
     self.assertEqual(result_sharding.spec, PartitionSpec("stage"))
 

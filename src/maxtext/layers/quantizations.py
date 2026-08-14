@@ -46,6 +46,21 @@ try:
   from qwix._src.utils import flax_util
 except ImportError:
   from qwix._src import flax_util  # pytype: disable=import-error
+
+try:
+  _orig_find_param = flax_util.find_param
+
+  def _safe_find_param(x, ptq_array_type=None):
+    try:
+      return _orig_find_param(x, ptq_array_type)
+    except AttributeError as e:
+      if "shape" in str(e):
+        return None
+      raise
+
+  flax_util.find_param = _safe_find_param
+except (NameError, AttributeError):
+  pass
 from maxtext.layers import nnx_wrappers
 
 from maxtext.configs.types import TeCommGemmOverlapPolicy
@@ -888,6 +903,9 @@ def maybe_quantize_model(model, config):
         nnx.pop(model, nnx.Intermediate)
       else:
         model = qwix.quantize_model(model, quantization_provider)
+      for _, val in nnx.graph.iter_graph(model):
+        if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
+          del val.qwix_rngs
   return model
 
 

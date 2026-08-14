@@ -168,7 +168,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [tpu-post-training-unit]
+        flavor: [tpu-post-training-unit, tpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
@@ -241,7 +241,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu-post-training-unit]
+        flavor: [cpu-post-training-unit, cpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
