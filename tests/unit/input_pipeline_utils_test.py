@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from maxtext.input_pipeline.input_pipeline_utils import BlockDiffusionCorruption, compute_file_sharding, PadOrTrimToMaxLength
+from maxtext.multimodal import utils as mm_utils
 
 
 class BlockDiffusionPaddingTest(unittest.TestCase):
@@ -200,6 +201,29 @@ class ComputeFileShardingUndersizedCaseTest(unittest.TestCase):
     # 2 files, 3 hosts: file 1 has only one reader (host 1) → no row split needed
     _, _, row_shard = compute_file_sharding(2, host_index=1, host_count=3)
     self.assertIsNone(row_shard)
+
+
+class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
+  """Unit tests for PadOrTrimToMaxLength image padding behaviors."""
+
+  def test_qwen_vision_padding_bypass_and_validation(self):
+    dummy_output = mm_utils.PreprocessorOutput(pixel_values=np.zeros((1, 3, 224, 224)), num_images=1)
+
+    # Registered Qwen vision models bypass image padding
+    for vb in ["qwen3_vl", "qwen3_omni", "qwen3_5"]:
+      transform = PadOrTrimToMaxLength(max_length=128, pad_id=0, config=SimpleNamespace(vision_encoder_block=vb))
+      self.assertIs(transform._pad_image_and_mask(dummy_output), dummy_output)  # pylint: disable=protected-access
+
+    # Unregistered Qwen model raises ValueError
+    unreg_transform = PadOrTrimToMaxLength(
+        max_length=128, pad_id=0, config=SimpleNamespace(vision_encoder_block="unregistered", model_name="qwen3-future")
+    )
+    with self.assertRaisesRegex(ValueError, "registered in `PadOrTrimToMaxLength`"):
+      unreg_transform._pad_image_and_mask(dummy_output)  # pylint: disable=protected-access
+
+    # None pixel_values raises ValueError
+    with self.assertRaisesRegex(ValueError, "must have pixel_values"):
+      unreg_transform._pad_image_and_mask(mm_utils.PreprocessorOutput(pixel_values=None))  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":
