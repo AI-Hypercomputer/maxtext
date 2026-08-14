@@ -130,8 +130,15 @@ def maybe_shard_with_name(
 
 
 def maybe_shard_with_pspec(
-    inputs, pspec: jax.sharding.PartitionSpec | None, mesh, shard_mode, debug_sharding=False, extra_stack_level=0
+    inputs,
+    pspec: jax.sharding.PartitionSpec | None,
+    mesh,
+    shard_mode,
+    debug_sharding=False,
+    extra_stack_level=0,
+    logical_axes=None,
 ):
+  """Apply a physical sharding constraint while preserving logical-axis debug metadata."""
   if pspec is None:
     return None
   sharding = NamedSharding(mesh, pspec)
@@ -141,6 +148,7 @@ def maybe_shard_with_pspec(
       shard_mode=shard_mode,
       debug_sharding=debug_sharding,
       extra_stack_level=extra_stack_level + 1,
+      logical_axes=logical_axes,
   )
 
 
@@ -976,6 +984,79 @@ def remove_mesh_axes_from_partition_spec(pspec, axes_to_remove, dims=None):
     else:
       raise ValueError(f"Unsupported axis type: {type(axis)}")
   return jax.sharding.PartitionSpec(*new_spec)
+
+
+def remove_incompatible_mesh_axes_from_partition_spec(
+    pspec,
+    shape,
+    mesh,
+    dims=None,
+    *,
+    allow_remove_axes=False,
+):
+  """Replicate tensor dimensions that cannot be evenly sharded by their mesh axes.
+
+  `shard_map` requires every tensor dimension to be evenly divisible by the
+  product of the mesh axes assigned to that dimension. By default, an
+  incompatible specification raises an error. Callers that can safely
+  replicate the checked dimension may opt into removing its mesh axes.
+
+  Args:
+    pspec: Physical PartitionSpec to make compatible with `shape`.
+    shape: Global tensor shape described by `pspec`.
+    mesh: Device mesh containing the physical axes referenced by `pspec`.
+    dims: Dim indices to check; `None` (the default) checks every dim. Negative
+      indices follow normal Python indexing rules.
+    allow_remove_axes: Whether an incompatible checked dimension may be
+      replicated by removing its assigned mesh axes. Defaults to `False` so a
+      sharding configuration cannot silently fall back.
+
+  Returns:
+    A PartitionSpec whose checked dimensions are evenly shardable.
+  """
+  if len(pspec) > len(shape):
+    raise ValueError(f"PartitionSpec rank {len(pspec)} exceeds tensor rank {len(shape)}")
+
+  if dims is None:
+    dims_to_check = None
+  else:
+    rank = len(shape)
+    dims_to_check = set()
+    for dim in dims:
+      normalized_dim = dim + rank if dim < 0 else dim
+      if normalized_dim < 0 or normalized_dim >= rank:
+        raise ValueError(f"Dimension index {dim} is out of bounds for tensor rank {rank}")
+      dims_to_check.add(normalized_dim)
+
+  compatible_pspec = pspec
+  for dim, (dim_size, partition) in enumerate(zip(shape, pspec)):
+    if (dims_to_check is not None and dim not in dims_to_check) or partition is None or partition == P.UNCONSTRAINED:
+      continue
+
+    if isinstance(partition, str):
+      mesh_axes = (partition,)
+    elif isinstance(partition, (list, tuple)):
+      mesh_axes = tuple(partition)
+    else:
+      raise ValueError(f"Unsupported axis type: {type(partition)}")
+
+    shard_count = 1
+    for mesh_axis in mesh_axes:
+      shard_count *= mesh.shape[mesh_axis]
+    if dim_size % shard_count:
+      if not allow_remove_axes:
+        raise ValueError(
+            f"Tensor dimension {dim} with size {dim_size} is not evenly divisible by "
+            f"{shard_count} shards from mesh axes {mesh_axes}. Pass "
+            "allow_remove_axes=True only when replicating this dimension is safe."
+        )
+      compatible_pspec = remove_mesh_axes_from_partition_spec(
+          compatible_pspec,
+          mesh_axes,
+          dims=(dim,),
+      )
+
+  return compatible_pspec
 
 
 def remove_mesh_axes_from_sharding(sharding_tree, axes_to_remove):

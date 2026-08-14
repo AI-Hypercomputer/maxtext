@@ -2528,6 +2528,10 @@ class RLSpecialTokens(BaseModel):
 
   reasoning_start_token: str = Field("<reasoning>", description="Token to mark the beginning of a reasoning section.")
   reasoning_end_token: str = Field("</reasoning>", description="Token to mark the end of a reasoning section.")
+  reasoning_start_token_in_prompt: bool = Field(
+      False,
+      description="Whether the chat template prefilled the reasoning start token, so it is absent from the completion.",
+  )
   solution_start_token: str = Field("<answer>", description="Token to mark the beginning of a solution section.")
   solution_end_token: str = Field("</answer>", description="Token to mark the end of a solution section.")
 
@@ -4286,6 +4290,7 @@ class RLConfig(
     LayoutAndSharding,
     InferenceLayout,
     InferenceGeneral,
+    PrefixCaching,
     Decoding,
     IciParallelism,
     DcnParallelism,
@@ -4310,7 +4315,6 @@ class RLConfig(
     ElasticTraining,
     InferenceServer,
     InferenceBenchmark,
-    PrefixCaching,
     HloDump,
     Goodput,
     GcpMonitoring,

@@ -33,7 +33,11 @@ from flax import nnx
 
 from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.common.common_types import KV_BATCH, KV_HEAD
-from maxtext.utils.sharding import logical_to_mesh_axes, get_logical_axis_rules
+from maxtext.utils.sharding import (
+    get_logical_axis_rules,
+    logical_to_mesh_axes,
+    remove_incompatible_mesh_axes_from_partition_spec,
+)
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -614,6 +618,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     if self.mesh is not None:
       logical_rules = get_logical_axis_rules()
       qkvz_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
+      # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
+      qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+          qkvz_pspec,
+          mixed_qkvz.shape,
+          self.mesh,
+          dims=(0,),
+          allow_remove_axes=True,
+      )
       qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
       mixed_qkvz = jax.lax.with_sharding_constraint(mixed_qkvz, qkvz_sharding)
 
@@ -660,7 +672,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       try:
         from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from tpu_inference.layers.common.utils import (  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+            reorder_concatenated_tensor_for_sharding,
+            truncate_sharded_tensor,
+        )
         from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
       except ImportError as e:
@@ -702,6 +717,26 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       conv_state_paged, recurrent_state_paged = kv_cache
 
+      # Compile against the active request bucket rather than the runner's
+      # maximum-size metadata buffers.
+      dp_size = get_mesh_shape_product(self.mesh, attn_data)
+      padded_num_reqs_per_dp = attention_metadata.padded_num_reqs // dp_size  # pyrefly: ignore[missing-attribute]
+      state_indices = truncate_sharded_tensor(
+          attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
+          padded_num_reqs_per_dp,
+          dp_size,
+      )
+      query_start_loc = truncate_sharded_tensor(
+          attention_metadata.query_start_loc,  # pyrefly: ignore[missing-attribute]
+          padded_num_reqs_per_dp + 1,
+          dp_size,
+      )
+      seq_lens = truncate_sharded_tensor(
+          attention_metadata.seq_lens,  # pyrefly: ignore[missing-attribute]
+          padded_num_reqs_per_dp,
+          dp_size,
+      )
+
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
           b_flat,
@@ -712,10 +747,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           None,  # conv_bias: MaxText conv1d uses use_bias=False.
           jnp.asarray(self.A_log[...], dtype=cfg.dtype),
           jnp.asarray(self.dt_bias[...], dtype=cfg.dtype),
-          attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
-          attention_metadata.query_start_loc,  # pyrefly: ignore[missing-attribute]
+          state_indices,
+          query_start_loc,
           attention_metadata.request_distribution,  # pyrefly: ignore[missing-attribute]
-          attention_metadata.seq_lens,  # pyrefly: ignore[missing-attribute]
+          seq_lens,
           self.num_k_heads,
           self.num_v_heads,
           self.head_k_dim,
@@ -849,6 +884,28 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       qkv_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       g_beta_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD), mesh=self.mesh, rules=logical_rules)
       state_pspec = logical_to_mesh_axes((KV_BATCH, KV_HEAD, None, None), mesh=self.mesh, rules=logical_rules)
+      # Keep every shard_map input/output batch spec consistent when replication is required.
+      qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+          qkv_pspec,
+          query.shape,
+          self.mesh,
+          dims=(0,),
+          allow_remove_axes=True,
+      )
+      g_beta_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+          g_beta_pspec,
+          g.shape,
+          self.mesh,
+          dims=(0,),
+          allow_remove_axes=True,
+      )
+      state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+          state_pspec,
+          recurrent_state_arg.shape,
+          self.mesh,
+          dims=(0,),
+          allow_remove_axes=True,
+      )
 
       @functools.partial(
           jax.shard_map,
