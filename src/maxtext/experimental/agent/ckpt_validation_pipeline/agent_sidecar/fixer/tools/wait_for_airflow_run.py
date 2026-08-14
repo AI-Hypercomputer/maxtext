@@ -24,9 +24,7 @@ import google.auth
 import google.auth.transport.requests
 import requests
 
-AIRFLOW_URL = os.environ.get(
-    "AIRFLOW_WEBSERVER_URL", "https://4bae0a6de8f94e92aa8ee3a6ffc8b278-dot-us-central1.composer.googleusercontent.com"
-).rstrip("/")
+AIRFLOW_URL = os.environ["AIRFLOW_WEBSERVER_URL"].rstrip("/")
 TERMINAL_STATES = {"success", "failed"}
 
 
@@ -44,8 +42,6 @@ def wait_for_run(dag_id: str, dag_run_id: str, timeout_seconds: int, poll_second
       )
       if response.status_code != 200:
         if response.status_code in {502, 503, 504}:
-          import time
-
           time.sleep(poll_seconds)
           continue
         raise RuntimeError(f"Airflow status failed ({response.status_code}): {response.text}")
@@ -72,5 +68,5 @@ if __name__ == "__main__":
   try:
     wait_for_run(args.dag_id, args.dag_run_id, args.timeout_seconds, args.poll_seconds)
   except Exception as exc:  # pylint: disable=broad-exception-caught
-    print(json.dumps({"ok": False, "error": str(exc)}))
+    print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
     sys.exit(1)

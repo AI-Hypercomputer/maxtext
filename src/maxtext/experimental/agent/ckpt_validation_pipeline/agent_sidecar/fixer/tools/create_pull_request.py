@@ -105,13 +105,11 @@ def main():
         f"Successfully opened Pull Request targeting '{args.base}' from head '{fork_branch}'.\nSTDOUT: {pr_res.stdout}\nSTDERR: {pr_res.stderr}"
     )
   except subprocess.CalledProcessError as e:
-    print(f"Note: gh pr create failed (code {e.returncode}):\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}")
-    print(f"Successfully created forked branch '{fork_branch}' and committed fix locally.")
-    print(f"PR Title: {title}\nPR Body: {body}")
+    print(f"Failed to create PR: gh pr create returned code {e.returncode}:\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}", file=sys.stderr)
+    sys.exit(1)
   except Exception as e:
-    print(f"Note: gh CLI or remote push could not authenticate in serverless mode ({e}).")
-    print(f"Successfully created forked branch '{fork_branch}' and committed fix locally.")
-    print(f"PR Title: {title}\nPR Body: {body}")
+    print(f"Failed to create PR. Note: gh CLI or remote push could not authenticate in serverless mode ({e}).", file=sys.stderr)
+    sys.exit(1)
 
 
 if __name__ == "__main__":
