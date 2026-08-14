@@ -28,6 +28,7 @@ BRANCH_PREFIX = "fix-validation-pipeline-"
 
 def prune_abandoned_branches(days: int, dry_run: bool = False):
   """Finds and prunes remote git branches matching fix-validation-pipeline-* older than `days`."""
+  subprocess.run(["git", "fetch", "--all", "--prune"], check=True)
   logger.info("Scanning for remote branches matching prefix '%s' older than %s days...", BRANCH_PREFIX, days)
 
   try:

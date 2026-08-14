@@ -19,9 +19,7 @@ import os
 from datetime import datetime, timezone
 from google.cloud import storage
 
-DATA_DIR = os.environ.get("ANTIGRAVITY_EXECUTABLE_DATA_DIR", "./data")
-GCS_BUCKET_NAME = "maxtext-validation-agent-reports"
-STATE_BLOB_NAME = "retry_state.json"
+GCS_BUCKET_NAME = os.environ.get("GCS_REPORTS_BUCKET", "maxtext-validation-agent-reports")
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
 
 

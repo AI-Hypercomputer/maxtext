@@ -36,7 +36,7 @@ def check_for_failures(expected_run_name=None):
   try:
     client = storage.Client()
     bucket = client.bucket(GCS_BUCKET_NAME)
-    blobs = list(bucket.list_blobs())
+    blobs = bucket.list_blobs()
 
     # Filter for unhandled json reports (we want the detailed validator reports, NOT airflow direct triggers)
     valid_blobs = [

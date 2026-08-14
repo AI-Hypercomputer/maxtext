@@ -703,9 +703,9 @@ def main(config, test_args):  # pylint: disable=W0621
           max_logging.log(f"Number of layers extracted: {len(hf_outputs.hidden_states)}")
           for i, layer_tensor in enumerate(hf_outputs.hidden_states):
 <<<<<<< HEAD
-            max_logging.log(f"HF Layer {i} Shape: {layer_tensor.shape}, IsFinite: {torch.isfinite(layer_tensor).all()}, IsFinite: {torch.isfinite(layer_tensor).all()}, IsFinite: {torch.isfinite(layer_tensor).all()}, Norm: {torch.norm(layer_tensor, p=2).item():.4f}")
+            max_logging.log(f"HF Layer {i} Shape: {layer_tensor.shape}, IsFinite: {torch.isfinite(layer_tensor).all()}, IsFinite: {torch.isfinite(layer_tensor).all()}, IsFinite: {torch.isfinite(layer_tensor).all()}, IsFinite: {torch.isfinite(layer_tensor).all()}, Norm: {torch.norm(layer_tensor, p=2).item():.4f}")
 =======
-            max_logging.log(f"HF Layer {i} Shape: {layer_tensor.shape}, IsFinite: {torch.isfinite(layer_tensor).all()}, Norm: {torch.norm(layer_tensor.to(torch.float32), p=2).item():.4f}")
+            max_logging.log(f"HF Layer {i} Shape: {layer_tensor.shape}, IsFinite: {torch.isfinite(layer_tensor).all()}, IsFinite: {torch.isfinite(layer_tensor).all()}, Norm: {torch.norm(layer_tensor.to(torch.float32), p=2).item():.4f}")
 >>>>>>> 2ab776dba (fix(validation): streamline decoding and stream popen outputs)
           max_logging.log("-------------------------------------------")
 

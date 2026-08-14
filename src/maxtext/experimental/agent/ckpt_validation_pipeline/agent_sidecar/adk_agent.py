@@ -1,3 +1,16 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import os
 import time
 import subprocess
@@ -468,7 +481,7 @@ def run_agent_workflow(context: dict, failure_log: str):
           f"1. Did the Fixer hallucinate non-existent JAX/NNX APIs or edit irrelevant files?\n"
           f"2. Are there syntactic regressions (pyink/pylint/SyntaxError)?\n"
           f"3. If valid, respond with 'VALID_FIX'. Otherwise, output a specific correction prompt for the Fixer.\n\n"
-          f"Fixer Output:\n{fixer_response_text[:2000]}"
+          f"Fixer Output:\n{fixer_response_text[:5000]}"
       )
       audit_res = _send_message_with_retry(overseer_guard_chat, overseer_audit_prompt).text.strip()
       if "VALID_FIX" not in audit_res or "SyntaxError" in fixer_response_text:

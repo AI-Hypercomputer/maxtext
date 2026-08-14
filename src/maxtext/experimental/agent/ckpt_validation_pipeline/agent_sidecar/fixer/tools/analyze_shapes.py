@@ -20,29 +20,40 @@ import sys
 
 
 def main():
-  parser = argparse.ArgumentParser(description="Run inspect_checkpoint locally.")
-  parser.add_argument("--mode", type=str, required=False, default="maxtext", choices=["hf", "maxtext", "orbax"])
-  parser.add_argument("--model", type=str, required=False, default=None, help="MaxText model name")
-  parser.add_argument("--run_id", type=str, required=False, default=None, help="Run ID")
-  args, unknown = parser.parse_known_args()
+    parser = argparse.ArgumentParser(description="Run inspect_checkpoint locally.")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        required=False,
+        default="maxtext",
+        choices=["hf", "maxtext", "orbax"],
+    )
+    parser.add_argument(
+        "--model", type=str, required=False, default=None, help="MaxText model name"
+    )
+    parser.add_argument(
+        "--run_id", type=str, required=False, default=None, help="Run ID"
+    )
+    args, unknown = parser.parse_known_args()
 
-  import os
+    import os
 
-  script_path = "/app/src/maxtext/checkpoint_conversion/inspect_checkpoint.py"
-  if not os.path.exists(script_path):
-    script_path = "src/maxtext/checkpoint_conversion/inspect_checkpoint.py"
+    script_path = "/app/src/maxtext/checkpoint_conversion/inspect_checkpoint.py"
+    if not os.path.exists(script_path):
+        script_path = "src/maxtext/checkpoint_conversion/inspect_checkpoint.py"
 
-  cmd = ["python3", script_path, args.mode]
-  if args.model:
-    cmd.append(f"model_name={args.model}")
-  cmd.extend(unknown)
+    cmd = ["python3", script_path, args.mode]
+    if args.model:
+        cmd.append(f"model_name={args.model}")
+    cmd.extend(unknown)
 
-  try:
-    subprocess.run(cmd, check=True)
-  except subprocess.CalledProcessError as e:
-    print(f"Error: inspect_checkpoint.py failed with return code {e.returncode}")
-    sys.exit(e.returncode)
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"Error: inspect_checkpoint.py failed with return code {e.returncode}")
+        sys.exit(e.returncode)
 
 
 if __name__ == "__main__":
-  main()
+    main()

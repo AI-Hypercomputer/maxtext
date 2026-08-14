@@ -22,7 +22,7 @@
    - Are the Analyst and Fixer repeatedly proposing the same failed code patch across attempts?
    - Is the Fixer editing a file that is irrelevant to the Airflow/XPK exception?
    - Did the Fixer hallucinate non-existent JAX or NNX APIs?
-3. Synthesize a corrective intervention:
+3. Synthesize a corrective intervention. (If they are doing a great job, simply output "Proceed as normal" or "None").
    - Output a clear, highly constrained instruction that breaks the loop.
    - For example: "DO NOT edit `normalizations.py`. The failure is a JAX remat array deletion; apply override `remat_policy=none` instead."
    - Or: "Attempt #1 and #2 failed because axis 1 was flipped. Try inspecting residual connection scaling in `decoders.py`."

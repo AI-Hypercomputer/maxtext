@@ -20,7 +20,6 @@
 * Target Model: `{model_name}`
 * Pipeline Run ID: `{run_id}`
 * User Branch: `{maxtext_branch}`
-* PyTorch Reference Code URL: `{hf_ref_code_url}`
 * PyTorch Reference Config URL: `{hf_config_url}`
 * Airflow DAG: `{airflow_dag_id}`
 * Failed Task: `{airflow_task_id}`

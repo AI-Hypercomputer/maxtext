@@ -37,7 +37,7 @@
      - A summary of the actions taken by the agents.
      - A link to the generated Pull Request.
      and then a message like the below:
-     Pipeline Successful: The <Model Name> model is validated and ready!
+     Pipeline Successful: The {model_name} model is validated and ready!
      Note: I encountered a <Error Type> error during execution, but I successfully auto-patched the MaxText codebase to fix it.
      Quick Links: 🔗Review my pull request here (<URL>) 🔗View Successful Airflow Log 🔗View detailed report(s)
 5. Notify the Meta-Agent that the pipeline has succeeded and the report is ready.
