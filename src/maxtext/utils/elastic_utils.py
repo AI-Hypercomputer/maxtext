@@ -173,7 +173,7 @@ def ensure_elastic_manager_initialized(config):
     timeout = config.elastic_timeout_seconds
     max_logging.log(f"[*] Waiting for {min_slices} slices to be active before initializing config...")
     all_active_slices = elastic.wait_for_slices(
-        slice_count=len(slice_to_devices),  # Temporary for tests, min_slices,
+        slice_count=min_slices,
         slice_to_devices=slice_to_devices,
         timeout=timeout,
     )
