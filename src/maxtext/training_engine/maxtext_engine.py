@@ -227,7 +227,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return self
 
   def with_gen_model_input_fn(self, gen_model_input_fn: Callable[[Any], dict[str, Any]]) -> "MaxTextTrainingEngine":
-    """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
+    """Sets the last-mile adapter mapping a payload to the loss fn's kwargs.
+
+    Setting one also selects how the loss is invoked. With an adapter, the loss is called
+    as `loss_fn(model, **gen_model_input_fn(payload))` -- Tunix's convention, and what this
+    adapter's return value has always been documented to be. Without one, it is called
+    MaxText's way, `loss_fn(model, config, data, dropout_rng, params, is_train=True)`,
+    which is what `maxtext_train.loss_fn` expects.
+
+    Args:
+      gen_model_input_fn: Maps a payload to a dict of loss-fn keyword arguments.
+
+    Returns:
+      self, for chaining.
+    """
     self._gen_model_input_fn = gen_model_input_fn
     return self
 
@@ -237,7 +250,21 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     def diff_wrapper(p, r, b):
       mdl = nnx.merge(self._model_graphdef, p, r, copy=True)
-      out = loss_callable(mdl, self._config, b, None, None, is_train=True)
+      if self._gen_model_input_fn is not None:
+        # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
+        # `with_gen_model_input_fn` -- so its output is unpacked rather than passed as the
+        # positional `data`. This is how Tunix invokes losses
+        # (`loss_fn(model, **gen_model_input_fn(payload))`), which lets a Tunix loss such
+        # as `algo_core.grpo_loss_fn` be used with no adapter.
+        if not isinstance(b, dict):
+          raise TypeError(
+              "gen_model_input_fn must return a dict of loss-fn keyword arguments, got "
+              f"{type(b).__name__}."
+          )
+        out = loss_callable(mdl, **b)
+      else:
+        # No adapter set: the loss is a MaxText one, called MaxText's way.
+        out = loss_callable(mdl, self._config, b, None, None, is_train=True)
       _, _, new_r = nnx.split(mdl, nnx.Param, ...)
 
       if isinstance(out, abstract_engine.LossOutput):

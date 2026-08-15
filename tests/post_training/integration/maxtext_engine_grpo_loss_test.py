@@ -161,57 +161,6 @@ def _train_example(
   )
 
 
-def use_tunix_grpo_loss_function(engine, algo_config, pad_id, eos_id):
-  """Configures the engine to use Tunix's GRPO loss function.
-
-  The mirror image of `use_maxtext_loss_function` in
-  `trainers/post_train/sft/train_sft.py`: that one adapts MaxText's loss for a Tunix
-  trainer, this one adapts a Tunix loss for MaxText's engine.
-
-  A wrapper is needed because the two call conventions differ. The engine invokes the loss
-  the way MaxText does::
-
-      loss(model, config, data, dropout_rng, params, is_train=True)
-
-  while Tunix's is::
-
-      grpo_loss_fn(model, train_example, algo_config, pad_id, eos_id, **kwargs)
-
-  Passed straight to `with_loss_fn`, `train_example` would bind to MaxText's config and
-  `pad_id`/`eos_id` to None.
-
-  Args:
-    engine: The MaxTextTrainingEngine instance.
-    algo_config: The GRPO algorithm config.
-    pad_id: Tokenizer pad token id.
-    eos_id: Tokenizer eos token id.
-
-  Returns:
-    The engine configured with Tunix's GRPO loss function.
-  """
-
-  def loss_func(model, config, data, dropout_rng, params, is_train=True):
-    del config, dropout_rng, params, is_train
-    return algo_core.grpo_loss_fn(
-        model,
-        data["train_example"],
-        data["algo_config"],
-        data["pad_id"],
-        data["eos_id"],
-    )
-
-  def gen_model_input_fn(payload):
-    return {
-        "train_example": payload,
-        "algo_config": algo_config,
-        "pad_id": pad_id,
-        "eos_id": eos_id,
-    }
-
-  # Both setters return self, so this chains the way Tunix's own trainer API does.
-  return engine.with_loss_fn(loss_func, has_aux=True).with_gen_model_input_fn(gen_model_input_fn)
-
-
 def _param_leaves(model) -> list[jax.Array]:
   return jax.tree.leaves(nnx.to_pure_dict(nnx.state(model, nnx.Param)))
 
@@ -234,7 +183,18 @@ class MaxTextEngineGrpoLossTest(absltest.TestCase):
     )
     self.assertEqual(type(engine.model).__name__, "TunixMaxTextAdapter")
 
-    returned = use_tunix_grpo_loss_function(engine, algo_config, _PAD_ID, _EOS_ID)
+    # Tunix's loss is used directly, with no adapter closure. Setting a gen_model_input_fn
+    # tells the engine to invoke the loss Tunix's way, `loss_fn(model, **inputs)`, and the
+    # dict below is already exactly grpo_loss_fn's keyword arguments -- which is what the
+    # orchestrator's own `_grpo_model_input` produces in the real pipeline.
+    returned = engine.with_loss_fn(algo_core.grpo_loss_fn, has_aux=True).with_gen_model_input_fn(
+        lambda payload: {
+            "train_example": payload,
+            "algo_config": algo_config,
+            "pad_id": _PAD_ID,
+            "eos_id": _EOS_ID,
+        }
+    )
     self.assertIs(returned, engine)
 
     payload = _train_example(engine.model, algo_config)

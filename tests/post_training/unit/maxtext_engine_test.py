@@ -475,6 +475,58 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("loss", metrics.weighted_metrics)
     self.assertIn("aux_stat", metrics.scalar_metrics)
 
+  def test_gen_model_input_fn_selects_the_tunix_call_convention(self):
+    """With an adapter set, the loss is called `loss_fn(model, **inputs)`.
+
+    That is Tunix's convention and what `with_gen_model_input_fn` has always documented
+    its return value to be, so a Tunix loss needs no adapter closure.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    seen = {}
+
+    def _loss_fn(model, **kwargs):
+      seen.update(kwargs)
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+      )
+
+    t.with_loss_fn(_loss_fn)
+    t.with_gen_model_input_fn(lambda payload: {"alpha": jnp.array(1.0), "beta": jnp.array(2.0)})
+    t.fwd_bwd(DummyPayload())
+
+    # Arrived by keyword, under the names the adapter chose.
+    self.assertEqual(sorted(seen), ["alpha", "beta"])
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+
+  def test_without_gen_model_input_fn_the_maxtext_convention_is_kept(self):
+    """With no adapter, the loss still gets MaxText's positional signature."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    seen = {}
+
+    def _loss_fn(model, config, data, dropout_rng, params, is_train=True):
+      seen.update(config=config, data=data, dropout_rng=dropout_rng, params=params, is_train=is_train)
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+      )
+
+    t.with_loss_fn(_loss_fn)
+    t.fwd_bwd(DummyPayload())
+
+    self.assertIs(seen["config"], self.mock_config)
+    self.assertIsNone(seen["dropout_rng"])
+    self.assertIsNone(seen["params"])
+    self.assertTrue(seen["is_train"])
+    # The payload's fields are auto-extracted into the positional `data`.
+    self.assertIn("token_ids", seen["data"])
+
+  def test_gen_model_input_fn_returning_a_non_dict_raises(self):
+    """The adapter's contract is a dict of kwargs; anything else fails clearly."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(lambda model, **kwargs: abstract_engine.WeightedMetric(jnp.array(1.0), jnp.array(1.0)))
+    t.with_gen_model_input_fn(lambda payload: payload)
+    with self.assertRaisesRegex(TypeError, "must return a dict of loss-fn keyword arguments"):
+      t.fwd_bwd(DummyPayload())
+
   def test_conforms_to_tunix_abstract_trainer(self):
     """Every method Tunix's AbstractTrainer requires exists on the engine.
 
