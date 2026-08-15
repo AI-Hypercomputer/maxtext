@@ -56,11 +56,22 @@ import jax
 # `tunix.experimental.metrics.metrics` -- the latter declares a same-named class
 # whose `compute()` and `compute_scale()` raise NotImplementedError.
 #
-# The redundant-alias form (`X as X`) marks these as intentional re-exports so
-# linters do not flag them as unused imports.
-from tunix.experimental.common.datatypes import TrainerPayload as TrainerPayload
-from tunix.sft.utils import LossOutput as LossOutput
-from tunix.sft.utils import WeightedMetric as WeightedMetric
+# `__all__` below declares them part of this module's public surface, which is what
+# keeps pylint from reporting them as unused imports. Do not use the redundant-alias
+# form (`X as X`) instead: MaxText's pylint config does not recognise that convention
+# and reports `C0414 useless-import-alias` for every one of them.
+from tunix.experimental.common.datatypes import TrainerPayload
+from tunix.sft.utils import LossOutput
+from tunix.sft.utils import WeightedMetric
+
+__all__ = [
+    "AbstractTrainingEngine",
+    "LossOutput",
+    "MetricsBuffer",
+    "TrainerPayload",
+    "TrainingConfig",
+    "WeightedMetric",
+]
 
 
 @flax.struct.dataclass
