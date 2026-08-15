@@ -604,8 +604,12 @@ def verify_parity_with_train_py(
 
       ctx.engine.fwd_bwd(payload)
       ctx.engine.update()
-      metrics_list = ctx.engine.get_metrics(clear_cache=True)
-      metrics_e_buf = metrics_list[-1] if metrics_list else abstract_engine.MetricsBuffer(id=step)
+      metrics_e_buf = ctx.engine.get_metrics(clear_cache=True)
+      # Fail rather than comparing against the empty buffer: an empty stand-in is what let
+      # a step that recorded nothing compare as loss=0.0 instead of failing.
+      assert (
+          metrics_e_buf.id != maxtext_engine.EMPTY_METRICS_BUFFER_ID
+      ), f"engine recorded no metrics at step {step}"
       assert_step_parity(step, ctx.ts_baseline, ctx.engine.state, metrics_b, metrics_e_buf)
 
 
@@ -647,8 +651,12 @@ def verify_auxiliary_metrics_and_telemetry_parity(
 
       ctx.engine.fwd_bwd(payload)
       ctx.engine.update()
-      metrics_list = ctx.engine.get_metrics(clear_cache=True)
-      metrics_e_buf = metrics_list[-1] if metrics_list else abstract_engine.MetricsBuffer(id=step)
+      metrics_e_buf = ctx.engine.get_metrics(clear_cache=True)
+      # Fail rather than comparing against the empty buffer: an empty stand-in is what let
+      # a step that recorded nothing compare as loss=0.0 instead of failing.
+      assert (
+          metrics_e_buf.id != maxtext_engine.EMPTY_METRICS_BUFFER_ID
+      ), f"engine recorded no metrics at step {step}"
       assert_step_parity(
           step,
           ctx.ts_baseline,
@@ -743,8 +751,12 @@ def verify_gradient_accumulation_parity(
         raise ParityVerificationError(f"Step {step}: Expected accumulated_grads to be non-None before" " update()")
 
       ctx.engine.update()
-      metrics_list = ctx.engine.get_metrics(clear_cache=True)
-      metrics_e_buf = metrics_list[-1] if metrics_list else abstract_engine.MetricsBuffer(id=step)
+      metrics_e_buf = ctx.engine.get_metrics(clear_cache=True)
+      # Fail rather than comparing against the empty buffer: an empty stand-in is what let
+      # a step that recorded nothing compare as loss=0.0 instead of failing.
+      assert (
+          metrics_e_buf.id != maxtext_engine.EMPTY_METRICS_BUFFER_ID
+      ), f"engine recorded no metrics at step {step}"
 
       if ctx.engine.micro_step_count != 0:
         raise ParityVerificationError(

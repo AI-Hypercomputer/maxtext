@@ -43,6 +43,12 @@ from maxtext.utils import sharding
 from maxtext.utils import train_utils
 
 
+# `id` of the empty buffer `get_metrics` returns when no metrics have been recorded.
+# Mirrors Tunix's `PeftTrainer.get_metrics`, which returns `MetricsBuffer(id=-1)` in the
+# same situation. Real buffers are identified by their train step, so this cannot collide.
+EMPTY_METRICS_BUFFER_ID = -1
+
+
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   """Concrete trainer wrapping MaxText single-step SPMD execution for NNX models."""
 
@@ -539,7 +545,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         checkpoint_state=checkpointing.CheckpointState(
             model=self.model,
             optimizer=self.optimizer,
-            accumulated_metrics=self.get_metrics(clear_cache=False),
+            # The full history, not `get_metrics()`: CheckpointState.accumulated_metrics is
+            # a list, and restore_checkpoint iterates it back into the recorder's buffer.
+            accumulated_metrics=self._metrics_recorder.get_metrics_history(clear_cache=False),
             accumulated_grads=self._accumulated_grads,
         ),
         custom_metadata=custom_metadata,
@@ -658,15 +666,36 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
 
   def get_metrics(self, clear_cache: bool = True) -> abstract_engine.MetricsBuffer:
-    """Returns accumulated step metrics as an on-device MetricsBuffer.
+    """Returns the most recent step's metrics as an on-device MetricsBuffer.
+
+    One buffer accumulates per train step. Both this engine's own abstract interface and
+    Tunix's `AbstractTrainer` declare a single buffer, so callers that want every step
+    must reach for `MetricsRecorder.get_metrics_history` instead.
 
     Args:
       clear_cache: Whether to reset cached metrics after retrieval.
 
     Returns:
-      On-device MetricsBuffer containing WeightedMetric and scalar arrays.
+      The newest on-device MetricsBuffer. When nothing has been recorded this is an empty
+      buffer with `id` set to EMPTY_METRICS_BUFFER_ID, not None, matching Tunix's
+      `PeftTrainer.get_metrics`. Callers detect that case with
+      `buffer.id == EMPTY_METRICS_BUFFER_ID`; a real buffer's id is its train step, which
+      is never negative.
     """
-    return self._metrics_recorder.get_metrics(clear_cache=clear_cache)
+    history = self._metrics_recorder.get_metrics_history(clear_cache=clear_cache)
+    if not history:
+      return abstract_engine.MetricsBuffer(id=EMPTY_METRICS_BUFFER_ID)
+    if len(history) > 1:
+      # Returning only the newest would otherwise drop the rest without a word, which is
+      # the silent-loss pattern that produced the fabricated 0.0 in the parity harness.
+      logging.warning(
+          "get_metrics() is returning the buffer for step %s and dropping %d older buffer(s); "
+          "call get_metrics() once per update, or use MetricsRecorder.get_metrics_history() "
+          "to read every step.",
+          history[-1].id,
+          len(history) - 1,
+      )
+    return history[-1]
 
   def prepare_weight_sync(self, **kwargs: Any) -> Any:
     """Stages weights for transfer and returns access coordinates.

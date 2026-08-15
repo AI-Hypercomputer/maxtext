@@ -180,10 +180,8 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
     )
 
     self.assertLen(history, 4)
-    for metrics_buf_list in history:
-      self.assertIsInstance(metrics_buf_list, list)
-      self.assertNotEmpty(metrics_buf_list)
-      self.assertIsInstance(metrics_buf_list[0], abstract_engine.MetricsBuffer)
+    for metrics_buf in history:
+      self.assertIsInstance(metrics_buf, abstract_engine.MetricsBuffer)
     self.assertEqual(trainer_instance.train_step, 4)
 
 

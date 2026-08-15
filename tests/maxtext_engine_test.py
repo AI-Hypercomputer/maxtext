@@ -292,6 +292,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_orbax_mgr.metadata.return_value = mock_metadata
 
     metrics_buf = abstract_engine.MetricsBuffer(id=5, mode="train")
+    # `weighted_metrics` is a plain dict; pylint cannot resolve that through
+    # flax.struct.dataclass and wrongly reports it as unsubscriptable.
+    # pylint: disable-next=unsupported-assignment-operation
     metrics_buf.weighted_metrics["loss"] = abstract_engine.WeightedMetric(
         unreduced_sum=jnp.array([4.0, 6.0]),
         denominator=jnp.array([2.0, 2.0]),
@@ -335,9 +338,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         aggregation_fn=lambda x: np.round(np.asarray(x), 4),
     )
 
-    metrics_buffer: Any = t.get_metrics(clear_cache=True)
-    self.assertLen(metrics_buffer, 1)
-    step0_metrics = metrics_buffer[0]
+    step0_metrics: Any = t.get_metrics(clear_cache=True)
+    self.assertIsInstance(step0_metrics, abstract_engine.MetricsBuffer)
     self.assertIn("loss", step0_metrics.weighted_metrics)
     np.testing.assert_array_equal(
         step0_metrics.weighted_metrics["loss"].unreduced_sum,
@@ -431,17 +433,16 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
 
     metrics = t.get_metrics(clear_cache=True)
-    self.assertLen(metrics, 1)
-    self.assertIn("loss", metrics[0].weighted_metrics)
-    self.assertIn("metric_a", metrics[0].weighted_metrics)
-    self.assertIn("metric_b", metrics[0].scalar_metrics)
+    self.assertIn("loss", metrics.weighted_metrics)
+    self.assertIn("metric_a", metrics.weighted_metrics)
+    self.assertIn("metric_b", metrics.scalar_metrics)
     self.assertAlmostEqual(
-        float(metrics[0].weighted_metrics["loss"].compute().item()),
+        float(metrics.weighted_metrics["loss"].compute().item()),
         6.0,
         places=4,
     )
     self.assertAlmostEqual(
-        float(metrics[0].weighted_metrics["metric_a"].compute().item()),
+        float(metrics.weighted_metrics["metric_a"].compute().item()),
         4.0,
         places=4,
     )
@@ -465,8 +466,51 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # Check that grad is scaled by 1/4.0
     np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
     metrics = t.get_metrics(clear_cache=True)
-    self.assertIn("loss", metrics[0].weighted_metrics)
-    self.assertIn("aux_stat", metrics[0].scalar_metrics)
+    self.assertIn("loss", metrics.weighted_metrics)
+    self.assertIn("aux_stat", metrics.scalar_metrics)
+
+  def test_get_metrics_returns_one_buffer_and_a_sentinel_when_empty(self):
+    """`get_metrics` returns a single buffer, matching both ABCs.
+
+    When nothing has been recorded it returns an empty buffer identified by
+    EMPTY_METRICS_BUFFER_ID rather than None, which is what Tunix's PeftTrainer does.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    empty = t.get_metrics(clear_cache=True)
+    self.assertIsInstance(empty, abstract_engine.MetricsBuffer)
+    self.assertEqual(empty.id, maxtext_engine.EMPTY_METRICS_BUFFER_ID)
+    self.assertEmpty(empty.weighted_metrics)
+
+    t.record_metrics(
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0)),
+    )
+    buf = t.get_metrics(clear_cache=True)
+    self.assertIsInstance(buf, abstract_engine.MetricsBuffer)
+    self.assertNotIsInstance(buf, list)
+    self.assertIn("loss", buf.weighted_metrics)
+    # A real buffer is identified by its train step, so it never collides with the sentinel.
+    self.assertNotEqual(buf.id, maxtext_engine.EMPTY_METRICS_BUFFER_ID)
+
+    # Draining leaves nothing behind, so the sentinel comes back.
+    self.assertEqual(t.get_metrics(clear_cache=True).id, maxtext_engine.EMPTY_METRICS_BUFFER_ID)
+
+  def test_get_metrics_returns_newest_and_history_stays_reachable(self):
+    """Older step buffers are still readable through the recorder, and never dropped silently."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    for step in range(3):
+      t.train_step = step
+      t.record_metrics(name="loss", metric=jnp.array(float(step)))
+
+    history = t._metrics_recorder.get_metrics_history(clear_cache=False)
+    self.assertLen(history, 3)
+    self.assertEqual([b.id for b in history], [0, 1, 2])
+
+    # Dropping the older buffers must be audible rather than silent.
+    with self.assertLogs(level="WARNING") as logs:
+      newest = t.get_metrics(clear_cache=True)
+    self.assertEqual(newest.id, 2)
+    self.assertIn("dropping 2 older buffer", "".join(logs.output))
 
   def test_has_aux_false_drops_tuple_aux(self):
     """`has_aux=False` suppresses aux recording; `has_aux=True` keeps it.
@@ -488,7 +532,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
       t.with_loss_fn(custom_loss, has_aux=has_aux)
       t.fwd_bwd(DummyPayload())
-      return t.get_metrics(clear_cache=True)[0]
+      return t.get_metrics(clear_cache=True)
 
     recorded = _run(has_aux=True)
     self.assertIn("aux_stat", recorded.scalar_metrics)
@@ -548,10 +592,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # d(unreduced_sum)/dw is 8.0 per element, scaled by compute_scale() = 1/4.0.
     np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
     metrics = t.get_metrics(clear_cache=True)
-    self.assertIn("loss", metrics[0].weighted_metrics)
-    self.assertAlmostEqual(float(metrics[0].weighted_metrics["loss"].compute().item()), 6.0, places=4)
+    self.assertIn("loss", metrics.weighted_metrics)
+    self.assertAlmostEqual(float(metrics.weighted_metrics["loss"].compute().item()), 6.0, places=4)
     # This form carries no aux, so nothing beyond the loss is recorded.
-    self.assertEmpty(metrics[0].scalar_metrics)
+    self.assertEmpty(metrics.scalar_metrics)
 
   def test_fwd_bwd_with_tunix_spelled_loss_output(self):
     """A loss written against Tunix's API behaves identically to the MaxText spelling.
@@ -579,11 +623,11 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
     metrics = t.get_metrics(clear_cache=True)
-    self.assertIn("loss", metrics[0].weighted_metrics)
-    self.assertIn("metric_a", metrics[0].weighted_metrics)
-    self.assertIn("metric_b", metrics[0].scalar_metrics)
-    self.assertAlmostEqual(float(metrics[0].weighted_metrics["loss"].compute().item()), 6.0, places=4)
-    self.assertAlmostEqual(float(metrics[0].weighted_metrics["metric_a"].compute().item()), 4.0, places=4)
+    self.assertIn("loss", metrics.weighted_metrics)
+    self.assertIn("metric_a", metrics.weighted_metrics)
+    self.assertIn("metric_b", metrics.scalar_metrics)
+    self.assertAlmostEqual(float(metrics.weighted_metrics["loss"].compute().item()), 6.0, places=4)
+    self.assertAlmostEqual(float(metrics.weighted_metrics["metric_a"].compute().item()), 4.0, places=4)
 
 
 if __name__ == "__main__":
