@@ -284,11 +284,12 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
         ("embed", "fsdp"),
         ("mlp", "fsdp"),
     )
+    v = nnx.Param(
+        jnp.zeros((3, 4)),
+        out_sharding=("embed", "mlp"),
+        eager_sharding=False,
+    )
     with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(rules):
-      v = nnx.Param(
-          jnp.zeros((3, 4)),
-          out_sharding=("embed", "mlp"),
-      )
       out = self._run(self._build_state(w=v))
       result_sharding = out["w"].get_value()
       self.assertIsInstance(result_sharding, NamedSharding)
@@ -305,11 +306,12 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
         ("mlp", "fsdp"),
         ("mlp", "stage"),
     )
+    v = nnx.Param(
+        jnp.zeros((3, 4)),
+        out_sharding=("embed", "mlp"),
+        eager_sharding=False,
+    )
     with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(rules):
-      v = nnx.Param(
-          jnp.zeros((3, 4)),
-          out_sharding=("embed", "mlp"),
-      )
       out = self._run(self._build_state(w=v))
       result_sharding = out["w"].get_value()
       self.assertIsInstance(result_sharding, NamedSharding)
@@ -327,6 +329,7 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
           jnp.zeros((3,)),
           out_sharding=("embed",),
           sharding_rules=(("embed", "fsdp"),),
+          eager_sharding=False,
       )
     out = self._run(self._build_state(w=v))
     result_sharding = out["w"].get_value()
@@ -354,13 +357,14 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
     # Local rules map 'embed' to 'stage'. Context rules map 'embed' to 'fsdp'.
     # Because local rules come first, 'embed' should resolve to 'stage'.
     context_rules = (("embed", "fsdp"),)
+    v = nnx.Param(
+        jnp.zeros((3,)),
+        out_sharding=("embed",),
+        sharding_rules=(("embed", "stage"),),
+        eager_sharding=False,
+    )
     with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(context_rules):
-      v = nnx.Param(
-          jnp.zeros((3,)),
-          out_sharding=("embed",),
-          sharding_rules=(("embed", "stage"),),
-      )
-    out = self._run(self._build_state(w=v))
+      out = self._run(self._build_state(w=v))
     result_sharding = out["w"].get_value()
     self.assertEqual(result_sharding.spec, PartitionSpec("stage"))
 
@@ -406,6 +410,38 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
     finally:
       # Re-apply the stub to keep other tests working
       sharding.remove_size_one_mesh_axis = lambda spec, mesh: spec
+
+
+class TruncateOutShardingTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.mesh = _create_2d_test_mesh(("data", "model"))
+
+  def test_truncate_out_sharding_none(self):
+    self.assertIsNone(sharding.truncate_out_sharding(None, 3))
+
+  def test_truncate_out_sharding_named_sharding(self):
+    ns = NamedSharding(self.mesh, PartitionSpec(("data", "model"), None, None, None))
+    truncated = sharding.truncate_out_sharding(ns, 3)
+    self.assertIsInstance(truncated, NamedSharding)
+    self.assertEqual(truncated.mesh, self.mesh)
+    self.assertEqual(truncated.spec, PartitionSpec(("data", "model"), None, None))
+
+  def test_truncate_out_sharding_named_sharding_no_op(self):
+    ns = NamedSharding(self.mesh, PartitionSpec(("data", "model"), None))
+    truncated = sharding.truncate_out_sharding(ns, 3)
+    self.assertIs(truncated, ns)
+
+  def test_truncate_out_sharding_partition_spec(self):
+    pspec = PartitionSpec("data", "model", None, None)
+    truncated = sharding.truncate_out_sharding(pspec, 2)
+    self.assertEqual(truncated, PartitionSpec("data", "model"))
+
+  def test_truncate_out_sharding_tuple(self):
+    spec = ("data", "model", None, None)
+    truncated = sharding.truncate_out_sharding(spec, 2)
+    self.assertEqual(truncated, ("data", "model"))
 
 
 if __name__ == "__main__":

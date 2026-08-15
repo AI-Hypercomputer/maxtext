@@ -371,6 +371,22 @@ python3 -m tests.utils.forward_pass_logit_checker \
     --max_kl_div=0.75
 ```
 
+## MLA Optimization
+
+To optimize Multi-Head Latent Attention (MLA) performance, you can enable sliced projections.
+
+*   **Flag**: `use_sliced_mla_proj` (default: `False`)
+*   **Description**: When set to `True`, it slices the projection kernel weights before contraction in MLA, instead of running the full projection followed by `jnp.split`. This can improve performance.
+*   **Constraint**: Sliced contraction is only supported when quantization is disabled (`quant=None`).
+
+## YaRN RoPE Optimization
+
+To optimize YaRN Rotary Position Embedding (RoPE) performance, you can enable pairwise RoPE.
+
+*   **Flag**: `rope_pairwise` (default: `False`)
+*   **Description**: When set to `True`, it keeps the rank-5 pair tensor intact (shape `[batch_size, sequence_length, num_heads, half_dim, 2]`, where `half_dim` represents the independent 2D rotation planes and `2` contains `[real, imag]` coordinates) and returns interleaved RoPE, avoiding complex number creation and some tensor reshaping.
+*   **Constraint**: `rope_pairwise=True` requires `rope_interleave=True`.
+
 ## Supported MoE strategy
 * Dropless
   * [MegaBlocks](https://arxiv.org/abs/2211.15841) implementation with flag `sparse_matmul=True megablox=True`.

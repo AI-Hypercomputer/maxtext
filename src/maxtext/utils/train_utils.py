@@ -202,6 +202,30 @@ def jit_train_and_eval_step(
   return p_train_step, p_eval_step
 
 
+class _ReorderedDataIterator:
+  """Applies a reorder function to each batch."""
+
+  def __init__(self, reorder_fn, data_iterator):
+    self.reorder_fn = reorder_fn
+    self.data_iterator = data_iterator
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    return self.reorder_fn(next(self.data_iterator))
+
+  def reset(self):
+    self.data_iterator.reset()
+
+
+def _reorder_data_iterator_for_loader(reorder_fn, data_iterator):
+  """Wraps the data iterator, or each element of an iterator list, with the reorder view."""
+  if isinstance(data_iterator, list):
+    return [_ReorderedDataIterator(reorder_fn, iterator) for iterator in data_iterator]
+  return _ReorderedDataIterator(reorder_fn, data_iterator)
+
+
 def setup_train_loop(config, recorder, devices=None):
   """Set up prerequisites for the training loop -
 
@@ -264,14 +288,10 @@ def setup_train_loop(config, recorder, devices=None):
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()
     if context_parallel_size > 1 and config.packing:
-      if config.dataset_type == "synthetic":
+      if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
         raise ValueError(
-            "Context parallelism with sequence packing is not supported with synthetic data. "
-            "Please disable sequence packing (set packing=False)."
-        )
-      if context_parallel_strategy not in ("all_gather", "ring"):
-        raise ValueError(
-            "Context parallelism with sequence packing supports context_parallel_strategy='all_gather' or 'ring'."
+            "Context parallelism with sequence packing supports context_parallel_strategy='all_gather', 'ring', "
+            "'ulysses', or 'usp'."
         )
       if (
           config.hardware in ("gpu", "gpu_multiprocess")
@@ -281,6 +301,7 @@ def setup_train_loop(config, recorder, devices=None):
         raise ValueError("Packing is only supported for load balanced ring attention with context parallelism for GPU.")
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
+    data_iterator_for_loader = data_iterator
     with jax.set_mesh(mesh):
       if context_parallel_size > 1 and config.context_parallel_load_balance:
 
@@ -301,12 +322,14 @@ def setup_train_loop(config, recorder, devices=None):
         reorder_fn = maxtext_utils.get_reorder_callable(
             context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
         )
-        data_iterator = map(reorder_fn, data_iterator)
+        # data_iterator itself stays unwrapped because checkpointing dispatches on
+        # its concrete type; only batch consumers receive the reordered view.
+        data_iterator_for_loader = _reorder_data_iterator_for_loader(reorder_fn, data_iterator)
         if eval_data_iterator:
-          eval_data_iterator = map(reorder_fn, eval_data_iterator)
+          eval_data_iterator = _ReorderedDataIterator(reorder_fn, eval_data_iterator)
 
     # Create data_loader AFTER reordering wrapper is applied
-    data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
+    data_loader = create_dataloader(config, mesh, data_iterator_for_loader, recorder, rampup_manager)
 
     state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn

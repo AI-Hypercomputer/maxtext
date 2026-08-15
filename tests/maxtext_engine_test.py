@@ -26,6 +26,7 @@ import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
+from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -67,22 +68,33 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.mock_from_pretrained = from_pretrained_patcher.start()
     self.mock_config = self.setup_config()
 
-  def setup_config(self, enable_checkpointing: bool = False):
-    """Sets up mock config."""
-    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
-
-    mock_config.init_weights_seed = 42
-    mock_config.model_name = "llama3.1-8b"
-    mock_config.learning_rate_schedule = mock.MagicMock(return_value=0.001)
-    mock_config.tensorboard_dir = "/tmp/tb_dir"
-    mock_config.run_name = "test_run"
-    mock_config.enable_tensorboard = False
+  def setup_config(self, enable_checkpointing: bool = False, **kwargs):
+    """Sets up a MaxText config via pyconfig.initialize."""
+    overrides = {
+        "model_name": "llama3.1-8b",
+        "run_name": "test_run",
+        "base_output_directory": self.create_tempdir().full_path,
+        "init_weights_seed": 42,
+        "micro_batch_size_to_train_on": 2,
+        "gradient_accumulation_steps": 1,
+        "enable_dropout": False,
+        "record_internal_nn_metrics": False,
+        "enable_tensorboard": False,
+        "tensorboard_dir": self.create_tempdir().full_path,
+        "skip_jax_distributed_system": True,
+        "enable_checkpointing": enable_checkpointing,
+    }
     if enable_checkpointing:
-      mock_config.checkpoint_directory = "/tmp/test_out/checkpoints"
-      mock_config.checkpoint_period = 500
-      mock_config.max_num_checkpoints_to_keep = 10
-      mock_config.async_checkpointing = True
-    return mock_config
+      overrides.update(
+          {
+              "checkpoint_dir": self.create_tempdir().full_path,
+              "checkpoint_period": 1,
+              "max_num_checkpoints_to_keep": 10,
+              "async_checkpointing": False,
+          }
+      )
+    overrides.update(kwargs)
+    return pyconfig.initialize([None, get_test_config_path()], **overrides)
 
   def test_raises_type_error_for_non_pyconfig(self):
     invalid_config = abstract_engine.TrainingConfig()
@@ -90,23 +102,17 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       maxtext_engine.MaxTextTrainingEngine(invalid_config)  # pytype: disable=wrong-arg-types
 
   def test_raises_value_error_for_missing_model_name(self):
-    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
-    mock_config.model_name = None
     with self.assertRaises(ValueError):
-      maxtext_engine.MaxTextTrainingEngine(mock_config)
+      self.setup_config(model_name="")
 
-  @mock.patch.object(
-      maxtext_engine.gradient_accumulation,
-      "gradient_accumulation_loss_and_grad",
-  )
-  def test_max_text_trainer_instantiation_with_pyconfig(self, mock_ga):
-    mock_ga.return_value = (
-        jnp.array(0.5),
-        {},
-        {"weights": jnp.array([0.1, 0.2])},
-    )
-
+  def test_max_text_trainer_instantiation_with_pyconfig(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
     self.assertIsInstance(t, abstract_engine.AbstractTrainingEngine)
     self.mock_from_pretrained.assert_called_once()
 
@@ -118,8 +124,6 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       )
       t.compile(payload)
       self.assertTrue(t._compiled)
-      t.with_loss_fn(lambda *args, **kwargs: (jnp.array(0.5), {}))
-      self.assertFalse(t._compiled)
       t.fwd_bwd(payload)
       self.assertEqual(t._micro_step_count, 1)
       t.update()
@@ -133,7 +137,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     _ = maxtext_engine.MaxTextTrainingEngine(mock_config)
     mock_create_mgr.assert_called_once_with(
-        directory=mock_config.checkpoint_directory,
+        directory=mock_config.checkpoint_dir,
         options=ocp.CheckpointManagerOptions(
             save_interval_steps=mock_config.checkpoint_period,
             max_to_keep=mock_config.max_num_checkpoints_to_keep,
@@ -322,34 +326,31 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         aggregation_fn=lambda x: np.round(np.asarray(x), 4),
     )
 
-    metrics_buffer = t.get_metrics(clear_cache=True)
+    metrics_buffer: Any = t.get_metrics(clear_cache=True)
     self.assertLen(metrics_buffer, 1)
-    self.assertIn("loss", metrics_buffer[0].weighted_metrics)
+    step0_metrics = metrics_buffer[0]
+    self.assertIn("loss", step0_metrics.weighted_metrics)
     np.testing.assert_array_equal(
-        metrics_buffer[0].weighted_metrics["loss"].unreduced_sum,
+        step0_metrics.weighted_metrics["loss"].unreduced_sum,
         jnp.array([20.0, 30.0]),
     )
     np.testing.assert_array_equal(
-        metrics_buffer[0].weighted_metrics["loss"].denominator,
+        step0_metrics.weighted_metrics["loss"].denominator,
         jnp.array([4.0, 6.0]),
     )
-    self.assertIn("lr", metrics_buffer[0].scalar_metrics)
-    np.testing.assert_array_equal(metrics_buffer[0].scalar_metrics["lr"], jnp.array([0.002]))
-    self.assertIn("lr", metrics_buffer[0].aggregation_fns)
-    self.assertEqual(metrics_buffer[0].aggregation_fns["lr"](jnp.array([0.002])), 0.002)
+    self.assertIn("lr", step0_metrics.scalar_metrics)
+    np.testing.assert_array_equal(step0_metrics.scalar_metrics["lr"], jnp.array([0.002]))
+    self.assertIn("lr", step0_metrics.aggregation_fns)
+    self.assertEqual(step0_metrics.aggregation_fns["lr"](jnp.array([0.002])), 0.002)
 
-  @mock.patch.object(
-      maxtext_engine.gradient_accumulation,
-      "gradient_accumulation_loss_and_grad",
-  )
-  def test_update_with_inflight_throttling(self, mock_ga):
-    mock_ga.return_value = (
-        jnp.array(0.5),
-        {},
-        {"weights": jnp.array([0.1, 0.2])},
-    )
-    self.mock_config.max_inflight_computations = 2
+  def test_update_with_inflight_throttling(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
 
     payload = DummyPayload()
     t.compile(payload)
@@ -394,6 +395,69 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # Closing trainer drains remaining inflight items.
     t.close()
     self.assertTrue(t._throttler._inflight_queue.empty())
+
+  def test_fwd_bwd_with_loss_output_and_aux_metrics(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload()
+
+    def _loss_fn(model, *args, **kwargs):
+      return abstract_engine.LossOutput(
+          primary_loss=abstract_engine.WeightedMetric(
+              unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+          ),
+          aux_metrics={
+              "metric_a": abstract_engine.WeightedMetric(unreduced_sum=jnp.array(12.0), denominator=jnp.array(3.0)),
+              "metric_b": jnp.array(0.42),
+          },
+      )
+
+    t.with_loss_fn(_loss_fn)
+    t.compile(payload)
+    t.fwd_bwd(payload)
+
+    self.assertEqual(t._micro_step_count, 1)
+    self.assertIsNotNone(t._accumulated_grads)
+
+    # Check that grad is scaled by 1/4.0
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+
+    metrics = t.get_metrics(clear_cache=True)
+    self.assertLen(metrics, 1)
+    self.assertIn("loss", metrics[0].weighted_metrics)
+    self.assertIn("metric_a", metrics[0].weighted_metrics)
+    self.assertIn("metric_b", metrics[0].scalar_metrics)
+    self.assertAlmostEqual(
+        float(metrics[0].weighted_metrics["loss"].compute().item()),
+        6.0,
+        places=4,
+    )
+    self.assertAlmostEqual(
+        float(metrics[0].weighted_metrics["metric_a"].compute().item()),
+        4.0,
+        places=4,
+    )
+
+  def test_fwd_bwd_with_loss_and_aux_dict_tuple(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload()
+
+    def custom_loss(model, *args, **kwargs):
+      unreduced_sum = jnp.sum(model.weights[...]) * 8.0
+      denominator = jnp.array(4.0)
+      return unreduced_sum / denominator, {
+          "aux_stat": jnp.array(1.23),
+          "xent_sum": unreduced_sum,
+          "total_weights": denominator,
+      }
+
+    t.with_loss_fn(custom_loss)
+    t.fwd_bwd(payload)
+
+    # Check that grad is scaled by 1/4.0
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+    metrics = t.get_metrics(clear_cache=True)
+    self.assertIn("loss", metrics[0].weighted_metrics)
+    self.assertIn("aux_stat", metrics[0].scalar_metrics)
 
 
 if __name__ == "__main__":

@@ -17,10 +17,8 @@ import pytest
 
 pytestmark = [pytest.mark.post_training]
 
-import subprocess
 import unittest
 import os.path
-import filelock
 import numpy as np
 import jax
 from jax.sharding import Mesh
@@ -34,6 +32,11 @@ from maxtext.input_pipeline import hf_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.input_pipeline.hf_data_processing import _get_pad_id
 from maxtext.input_pipeline.input_pipeline_utils import apply_chat_template, SFTPromptMasking, tokenization
+from tests.utils.test_helpers import ensure_tokenizer_downloaded
+
+QWEN3_TOKENIZER_PATH = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "qwen3-tokenizer")
+GEMMA4_TOKENIZER_PATH = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "gemma4-tokenizer")
+LLAMA2_TOKENIZER_PATH = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "llama2-chat-tokenizer")
 
 PROMPT_DATA = [
     [
@@ -102,7 +105,7 @@ MESSAGES_DATA = [
 ]
 
 LLAMA2_DATA = {
-    "tokenizer_path": None,
+    "tokenizer_path": LLAMA2_TOKENIZER_PATH,
     "messages": {
         "truncated_exp1_inputs": (
             "<s>[INST] <<SYS>>\nthe system prompt\n<</SYS>>\n\nexample one question one [/INST] "
@@ -200,7 +203,7 @@ LLAMA2_DATA = {
 }
 
 QWEN_DATA = {
-    "tokenizer_path": "Qwen/Qwen3-4B",
+    "tokenizer_path": QWEN3_TOKENIZER_PATH,
     "messages": {
         "truncated_exp1_inputs": (
             "<|im_start|>system\nthe system prompt<|im_end|>\n"
@@ -321,27 +324,12 @@ class SFTDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    tokenizer_dir = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
-    lock_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer.lock")
-    with filelock.FileLock(lock_path):
-      if not os.path.exists(tokenizer_dir):
-        command = [
-            "gcloud",
-            "storage",
-            "cp",
-            "--recursive",
-            "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
-            os.path.join(MAXTEXT_ASSETS_ROOT, ""),
-        ]
-        exit_code = subprocess.call(command)
-        if exit_code != 0:
-          raise unittest.SkipTest(f"Download tokenizer failed ({exit_code})")
+    ensure_tokenizer_downloaded("qwen3-tokenizer", QWEN3_TOKENIZER_PATH, skip_test_on_failure=True)
+    ensure_tokenizer_downloaded("llama2-chat-tokenizer", LLAMA2_TOKENIZER_PATH, skip_test_on_failure=True)
 
   def setUp(self):
     super().setUp()
-    tokenizer_path = self.test_data.get("tokenizer_path")
-    if tokenizer_path is None:
-      tokenizer_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
+    tokenizer_path = self.test_data.get("tokenizer_path", LLAMA2_TOKENIZER_PATH)
 
     self.config = pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "sft_trainer"), os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
@@ -491,31 +479,19 @@ class SFTDataProcessingTest(unittest.TestCase):
 
 @pytest.mark.external_training
 class SFTChatTemplateLogicTest(unittest.TestCase):
-  LLAMA_TOKENIZER_PATH = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
 
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    lock_path = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer.lock")
-    with filelock.FileLock(lock_path):
-      if not os.path.exists(cls.LLAMA_TOKENIZER_PATH):
-        command = [
-            "gcloud",
-            "storage",
-            "cp",
-            "-r",
-            "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
-            os.path.join(MAXTEXT_ASSETS_ROOT, ""),
-        ]
-        exit_code = subprocess.call(command)
-        if exit_code != 0:
-          raise unittest.SkipTest("Download tokenizer failed")
+    ensure_tokenizer_downloaded("qwen3-tokenizer", QWEN3_TOKENIZER_PATH, skip_test_on_failure=True)
+    ensure_tokenizer_downloaded("llama2-chat-tokenizer", LLAMA2_TOKENIZER_PATH, skip_test_on_failure=True)
+    ensure_tokenizer_downloaded("gemma4-tokenizer", GEMMA4_TOKENIZER_PATH, skip_test_on_failure=True)
 
   def setUp(self):
     super().setUp()
-    self.qwen3_tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
-    self.llama2_tokenizer = transformers.AutoTokenizer.from_pretrained(self.LLAMA_TOKENIZER_PATH)
-    self.gemma4_tokenizer = transformers.AutoTokenizer.from_pretrained("google/gemma-4-26B-A4B-it")
+    self.qwen3_tokenizer = transformers.AutoTokenizer.from_pretrained(QWEN3_TOKENIZER_PATH)
+    self.llama2_tokenizer = transformers.AutoTokenizer.from_pretrained(LLAMA2_TOKENIZER_PATH)
+    self.gemma4_tokenizer = transformers.AutoTokenizer.from_pretrained(GEMMA4_TOKENIZER_PATH)
 
   def _apply_chat_template(self, tokenizer):
     """Helper function to apply the chat template to a sample input and return the result for testing."""
@@ -562,11 +538,17 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
 @pytest.mark.external_training
 class SFTPromptMaskingTest(unittest.TestCase):
 
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    ensure_tokenizer_downloaded("qwen3-tokenizer", QWEN3_TOKENIZER_PATH, skip_test_on_failure=True)
+    ensure_tokenizer_downloaded("gemma4-tokenizer", GEMMA4_TOKENIZER_PATH, skip_test_on_failure=True)
+
   def setUp(self):
     super().setUp()
     self.max_target_length = 50
-    self.qwen3_tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
-    self.gemma4_tokenizer = transformers.AutoTokenizer.from_pretrained("google/gemma-4-26B-A4B-it")
+    self.qwen3_tokenizer = transformers.AutoTokenizer.from_pretrained(QWEN3_TOKENIZER_PATH)
+    self.gemma4_tokenizer = transformers.AutoTokenizer.from_pretrained(GEMMA4_TOKENIZER_PATH)
 
   def _apply_prompt_masking(self, tokenizer, unk_id, completion_only=True):
     """Helper function to apply the prompt masking to a sample input and return the result for testing."""

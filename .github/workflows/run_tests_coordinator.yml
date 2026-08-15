@@ -28,7 +28,7 @@ on:
             tpu7x-unit, tpu7x-integration,
             tpu7x-post-training-unit, tpu7x-post-training-integration,
             gpu-unit, gpu-integration,
-            cpu-unit,
+            cpu-unit, cpu-integration,
             cpu-post-training-unit
           )
         required: true
@@ -53,11 +53,6 @@ on:
         required: false
         type: boolean
         default: false
-      additional_pytest_args:
-        description: 'Additional pytest arguments to pass during test execution'
-        required: false
-        type: string
-        default: ''
 
 permissions:
   contents: read
@@ -99,8 +94,8 @@ jobs:
           fi
 
   execute-test-package:
+    name: Execute Tests
     needs: setup-parameters
-    name: ${{ inputs.flavor }}
     strategy:
       fail-fast: false
       matrix:
@@ -123,7 +118,9 @@ jobs:
           "gpu-unit": "cuda12",
           "gpu-integration": "cuda12",
           "cpu-unit": "cpu",
-          "cpu-post-training-unit": "cpu"
+          "cpu-integration": "cpu",
+          "cpu-post-training-unit": "cpu",
+          "cpu-post-training-integration": "cpu"
         }')[inputs.flavor] }}
 
       device_name: >-
@@ -139,7 +136,9 @@ jobs:
           "gpu-unit": "a100-40gb-4",
           "gpu-integration": "a100-40gb-4",
           "cpu-unit": "X64",
-          "cpu-post-training-unit": "X64"
+          "cpu-integration": "X64",
+          "cpu-post-training-unit": "X64",
+          "cpu-post-training-integration": "X64"
         }')[inputs.flavor] }}
 
       cloud_runner: >-
@@ -155,7 +154,9 @@ jobs:
           "gpu-unit": "linux-x86-a2-48-a100-4gpu",
           "gpu-integration": "linux-x86-a2-48-a100-4gpu",
           "cpu-unit": "linux-x86-n2-32",
-          "cpu-post-training-unit": "linux-x86-n2-32"
+          "cpu-integration": "linux-x86-n2-32",
+          "cpu-post-training-unit": "linux-x86-n2-32",
+          "cpu-post-training-integration": "linux-x86-n2-32"
         }')[inputs.flavor] }}
       # Pytest Marker Mapping
       pytest_marker: >-
@@ -163,15 +164,17 @@ jobs:
             "tpu-unit": "not cpu_only and not gpu_only and not integration_test and not post_training",
             "tpu-integration": "not cpu_only and not gpu_only and integration_test and not post_training",
             "tpu-post-training-unit": "not cpu_only and not gpu_only and not integration_test and post_training",
-            "tpu-post-training-integration": "not cpu_only and not gpu_only and integration_test",
+            "tpu-post-training-integration": "not cpu_only and not gpu_only and integration_test and post_training",
             "tpu7x-unit": "not cpu_only and not gpu_only and not integration_test and not post_training",
             "tpu7x-integration": "not cpu_only and not gpu_only and integration_test and not post_training",
             "tpu7x-post-training-unit": "not cpu_only and not gpu_only and not integration_test and post_training",
-            "tpu7x-post-training-integration": "not cpu_only and not gpu_only and integration_test",
+            "tpu7x-post-training-integration": "not cpu_only and not gpu_only and integration_test and post_training",
             "gpu-unit": "not cpu_only and not tpu_only and not integration_test and not post_training",
             "gpu-integration": "not cpu_only and not tpu_only and integration_test and not post_training",
-            "cpu-unit": "cpu_only and not post_training",
-            "cpu-post-training-unit": "cpu_only and post_training"
+            "cpu-unit": "cpu_only and not post_training and not integration_test",
+            "cpu-integration": "cpu_only and not post_training and integration_test",
+            "cpu-post-training-unit": "cpu_only and post_training",
+            "cpu-post-training-integration": "cpu_only and post_training and integration_test"
           }')[inputs.flavor] }}
 
       pytest_addopts: >-
@@ -187,7 +190,9 @@ jobs:
             "gpu-unit": "",
             "gpu-integration": "",
             "cpu-unit": "",
-            "cpu-post-training-unit": "tests/post_training/unit tests/unit"
+            "cpu-integration": "",
+            "cpu-post-training-unit": "tests/post_training/unit tests/unit",
+            "cpu-post-training-integration": "tests/post_training/integration"
           }')[inputs.flavor] }}
 
       pytest_extra_args: >-
@@ -203,9 +208,10 @@ jobs:
             "gpu-unit": "--ignore=tests/post_training",
             "gpu-integration": "--ignore=tests/post_training",
             "cpu-unit": "--ignore=tests/post_training",
-            "cpu-post-training-unit": ""
+            "cpu-integration": "--ignore=tests/post_training",
+            "cpu-post-training-unit": "",
+            "cpu-post-training-integration": ""
           }')[inputs.flavor] }}
-        ${{ inputs.additional_pytest_args }}
 
       # Resource Scaling
       xla_python_client_mem_fraction: "${{ contains(inputs.flavor, 'gpu') && '0.65' || '0.75' }}"

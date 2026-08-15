@@ -925,6 +925,7 @@ class NNXDecoder(nnx.Module):
       kv_caches_stacked=None,
       skip_block_remat: bool = False,
       unroll: int = 1,
+      metadata_axis_name: str = "layers",
       **kwargs,
   ):
     """Runs the layer stack using nnx.scan.
@@ -947,6 +948,10 @@ class NNXDecoder(nnx.Module):
         e.g. per-layer) remat internally, to avoid double rematerialization.
       unroll: Number of scan iterations to unroll into straight-line code
         (forwarded to jax.lax.scan). unroll >= length fully unrolls the loop.
+      metadata_axis_name: The name of the scan axis used during layer initialization.
+        This must perfectly match the string passed to `_create_scanned_layers`
+        (e.g., "layers", "scanned_blocks") to prevent strict JAX `pjit` PyTree
+        metadata mismatch errors when using custom `nnx.Variable` types (like `MoEBiasVar`).
       **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
 
     Returns:
@@ -1074,7 +1079,7 @@ class NNXDecoder(nnx.Module):
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
       # in the sharding metadata. jax.lax.scan emits it at position 0.
-      scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, "layers")
+      scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, metadata_axis_name)
 
       returned_kv_stacked = None
 
@@ -1084,7 +1089,7 @@ class NNXDecoder(nnx.Module):
       new_params, new_rest = scanned_state.split(nnx.Param, ...)
       out_layers = nnx.merge(updated_graphdef[0], new_params, new_rest)
     else:
-      clean_state = nnx.filter_state(scanned_state, nnx.Not((nnx.RngState, nnx.Intermediate)))
+      clean_state = nnx.filter_state(scanned_state, nnx.Not(nnx.RngState))
       nnx.update(layers, clean_state)
       out_layers = layers
 
@@ -2053,6 +2058,7 @@ class NNXDecoder(nnx.Module):
           deterministic,
           model_mode,
           length=num_full_blocks,
+          metadata_axis_name="scanned_blocks",
           **layer_call_kwargs,
       )
 

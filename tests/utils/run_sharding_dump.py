@@ -84,6 +84,8 @@ def run_single_dump(
     args.extend(overrides)
   if pure_nnx:
     args.append("pure_nnx=true")
+  else:
+    args.extend(["pure_nnx=False", "enable_nnx=False", "pure_nnx_decoder=False"])
   subprocess.run(args, check=True)
 
 

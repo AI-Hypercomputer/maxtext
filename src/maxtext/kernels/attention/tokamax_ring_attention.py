@@ -32,28 +32,12 @@ from maxtext.kernels.tokamax_splash_attention import ring_attention_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.utils import max_utils
+from maxtext.utils import sharding
 
 
 def is_context_parallel_ring_requested(config: Any) -> bool:
   """Returns True when the config requests ring context parallelism."""
   return config.context_parallel_strategy.lower() == "ring"
-
-
-def _mesh_axes_for_dim(axis_names: Any) -> tuple[Any, ...]:
-  if axis_names is None:
-    return ()
-  if isinstance(axis_names, str):
-    return (axis_names,)
-  return tuple(axis for axis in axis_names if axis is not None)
-
-
-def _mesh_axes_size(mesh: Any, axes: tuple[Any, ...]) -> int:
-  size = 1
-  for axis in axes:
-    if axis not in mesh.shape:
-      raise ValueError(f"TPU Tokamax ring attention requires mesh axis {axis!r} to exist.")
-    size *= mesh.shape[axis]
-  return size
 
 
 def with_sequence_axis(axis_names: Any, ring_axis: str, sequence_dim: int) -> Any:
@@ -62,19 +46,13 @@ def with_sequence_axis(axis_names: Any, ring_axis: str, sequence_dim: int) -> An
     return None
   if len(axis_names) <= sequence_dim:
     raise ValueError("TPU Tokamax ring attention expects a sequence sharding dimension.")
-  axes = list(axis_names)
-  existing_sequence_axes = _mesh_axes_for_dim(axes[sequence_dim])
+  existing_sequence_axes = sharding.mesh_axes_for_dim(axis_names[sequence_dim])
   if existing_sequence_axes and existing_sequence_axes != (ring_axis,):
     raise ValueError(
         "TPU Tokamax ring attention expects the existing sequence sharding to be "
         f"unsharded or exactly {(ring_axis,)}, got {existing_sequence_axes}."
     )
-  axes[sequence_dim] = ring_axis
-  if isinstance(axis_names, jax.sharding.PartitionSpec):
-    return jax.sharding.PartitionSpec(*axes, unreduced=axis_names.unreduced, reduced=axis_names.reduced)
-  if isinstance(axis_names, tuple):
-    return tuple(axes)
-  return axes
+  return sharding.with_axis_on_dim(axis_names, ring_axis, sequence_dim)
 
 
 def _validate_ring_axis_only_on_sequence(
@@ -88,7 +66,7 @@ def _validate_ring_axis_only_on_sequence(
   for dim, axis_name in enumerate(axis_names):
     if dim == sequence_dim:
       continue
-    dim_axes = _mesh_axes_for_dim(axis_name)
+    dim_axes = sharding.mesh_axes_for_dim(axis_name)
     if ring_axis in dim_axes:
       raise ValueError(
           "TPU Tokamax ring attention requires the context axis to appear only "
@@ -104,8 +82,8 @@ def validate_dkv_sharding(
     dkv_dim_kv: int,
 ) -> None:
   """Validates that the head-dim/D_KV dimension stays local for ring attention."""
-  q_dkv_axes = _mesh_axes_for_dim(axis_names_q[dkv_dim_q])
-  kv_dkv_axes = _mesh_axes_for_dim(axis_names_kv[dkv_dim_kv])
+  q_dkv_axes = sharding.mesh_axes_for_dim(axis_names_q[dkv_dim_q])
+  kv_dkv_axes = sharding.mesh_axes_for_dim(axis_names_kv[dkv_dim_kv])
   if q_dkv_axes or kv_dkv_axes:
     raise ValueError(
         "TPU Tokamax ring attention does not support sharding the D_KV/head-dim "
@@ -132,8 +110,6 @@ def validate_tokamax_ring_runtime(
     raise ValueError("TPU Tokamax ring attention does not support chunked prefill yet.")
   if sinks is not None:
     raise ValueError("TPU Tokamax ring attention does not support attention sinks.")
-  if indexer_mask is not None:
-    raise ValueError("TPU Tokamax ring attention does not support indexer masks.")
   if bidirectional_mask is not None:
     raise ValueError("TPU Tokamax ring attention does not support bidirectional masks.")
   if record_max_logits:
@@ -168,8 +144,8 @@ def validate_ring_mesh_axis(
       ring_axis=ring_axis,
   )
   expected_axes = (ring_axis,)
-  q_sequence_axes = _mesh_axes_for_dim(axis_names_q[sequence_dim_q])
-  key_value_sequence_axes = _mesh_axes_for_dim(axis_names_kv[sequence_dim_kv])
+  q_sequence_axes = sharding.mesh_axes_for_dim(axis_names_q[sequence_dim_q])
+  key_value_sequence_axes = sharding.mesh_axes_for_dim(axis_names_kv[sequence_dim_kv])
   if q_sequence_axes != expected_axes:
     raise ValueError(
         "TPU Tokamax ring attention requires Q sequence sharding to be exactly "
@@ -193,10 +169,10 @@ def validate_head_sharding(
     head_dim_kv: int,
 ) -> None:
   """Validates that local head layout preserves GQA/MQA head mapping."""
-  q_head_axes = _mesh_axes_for_dim(axis_names_q[head_dim_q])
-  kv_head_axes = _mesh_axes_for_dim(axis_names_kv[head_dim_kv])
-  q_head_shards = _mesh_axes_size(mesh, q_head_axes)
-  kv_head_shards = _mesh_axes_size(mesh, kv_head_axes)
+  q_head_axes = sharding.mesh_axes_for_dim(axis_names_q[head_dim_q])
+  kv_head_axes = sharding.mesh_axes_for_dim(axis_names_kv[head_dim_kv])
+  q_head_shards = sharding.mesh_axes_size(mesh, q_head_axes, label="TPU Tokamax ring attention")
+  kv_head_shards = sharding.mesh_axes_size(mesh, kv_head_axes, label="TPU Tokamax ring attention")
   if num_query_heads % q_head_shards != 0:
     raise ValueError(
         "TPU Tokamax ring attention requires num_query_heads "
@@ -278,6 +254,7 @@ def build_splash_config(
       dq_reduction_steps=dq_reduction_steps if dq_reduction_steps > 0 else None,
       use_experimental_scheduler=config.use_splash_scheduler,
       ring_scan_unroll=config.ring_scan_unroll,
+      bwd_dkv_megacore=config.sa_bwd_dkv_megacore,
   )
 
 
@@ -304,6 +281,7 @@ def make_sharded_ring_attention_kernel(
     ring_axis: str,
     attn_logits_soft_cap: float | None,
     maybe_shard_with_pspec: Any,
+    mask: Any = None,
 ):
   """Builds and shards the Tokamax ring attention kernel for MaxText."""
   splash_config = build_splash_config(
@@ -316,11 +294,17 @@ def make_sharded_ring_attention_kernel(
   if config.use_max_logit_estimate > 0:
     splash_config = dataclasses.replace(splash_config, max_logit_const=config.use_max_logit_estimate)
 
-  mask = _make_causal_mask(
-      (query.shape[2], key.shape[2]),
-      context_parallel_size,
-      load_balanced=config.context_parallel_load_balance,
-  )
+  if mask is None:
+    # When using the indexer, causal masking is unified into the dynamic indexer_mask
+    # and applied dynamically per block; use FullMask to avoid duplicate static masks.
+    if getattr(config, "use_indexer", False):
+      mask = tokamax_splash_mask.FullMask((query.shape[2], key.shape[2]))
+    else:
+      mask = _make_causal_mask(
+          (query.shape[2], key.shape[2]),
+          context_parallel_size,
+          load_balanced=config.context_parallel_load_balance,
+      )
 
   @functools.partial(jax.jit, static_argnames=["single_head_mask"])
   def wrap_ring_kernel(single_head_mask):
@@ -352,15 +336,27 @@ def call_ring_attention(
     decoder_segment_ids_q: Any,
     decoder_segment_ids_kv: Any,
     ring_kernel: Any,
+    indexer_mask: Any = None,
 ):
   """Calls a Tokamax ring attention kernel over the MaxText batch dimension."""
   if (decoder_segment_ids_q is None) != (decoder_segment_ids_kv is None):
     raise ValueError("decoder_segment_ids_q and decoder_segment_ids_kv must both be set or both be None.")
+  # Vectorize execution across batch dimension, threading indexer_mask when present.
+  # Note: ring_kernel expects positional arguments (q, k, v, segment_ids, sinks, indexer_mask).
   if decoder_segment_ids_q is None:
-    return jax.vmap(lambda q, k, v: ring_kernel(q, k, v, None), in_axes=(0, 0, 0))(query, key, value)
+    if indexer_mask is None:
+      return jax.vmap(lambda q, k, v: ring_kernel(q, k, v, None, None, None), in_axes=(0, 0, 0))(query, key, value)
+    return jax.vmap(
+        lambda q, k, v, im: ring_kernel(q, k, v, None, None, im),
+        in_axes=(0, 0, 0, 0),
+    )(query, key, value, indexer_mask)
 
-  def call_one(q, k, v, q_segment_ids, kv_segment_ids):
+  def call_one(q, k, v, q_segment_ids, kv_segment_ids, im=None):
     segment_ids = ring_attention_kernel.SegmentIds(q_segment_ids, kv_segment_ids)
-    return ring_kernel(q, k, v, segment_ids)
+    return ring_kernel(q, k, v, segment_ids, None, im)
 
-  return jax.vmap(call_one, in_axes=(0, 0, 0, 0, 0))(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv)
+  if indexer_mask is None:
+    return jax.vmap(call_one, in_axes=(0, 0, 0, 0, 0))(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv)
+  return jax.vmap(call_one, in_axes=(0, 0, 0, 0, 0, 0))(
+      query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv, indexer_mask
+  )

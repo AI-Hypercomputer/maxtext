@@ -16,6 +16,7 @@
 
 
 import datetime
+from types import SimpleNamespace
 import numpy as np
 import jax
 
@@ -25,6 +26,8 @@ from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.lax import with_sharding_constraint
+
+from maxtext.utils import sharding
 
 # Global model and data constants
 PER_DEVICE_BATCH_SIZE = 131072
@@ -37,6 +40,94 @@ NUM_LAYERS = 4  # number of simulated layers in the model
 data_sharding = PartitionSpec()
 parameter_sharding = PartitionSpec()
 multiply_layers_and_grad = None
+
+
+@pytest.mark.parametrize(
+    ("batch_size", "expected"),
+    (
+        (4, PartitionSpec(None, None, "tensor", None)),
+        (32, PartitionSpec("fsdp", None, "tensor", None)),
+    ),
+)
+def test_remove_incompatible_batch_mesh_axes(batch_size, expected):
+  """Only a non-divisible batch axis is replicated; valid head sharding remains."""
+  mesh = SimpleNamespace(shape={"fsdp": 32, "tensor": 2})
+  pspec = PartitionSpec("fsdp", None, "tensor", None)
+
+  actual = sharding.remove_incompatible_mesh_axes_from_partition_spec(
+      pspec,
+      (batch_size, 1024, 32, 128),
+      mesh,
+      dims=(0,),
+      allow_remove_axes=True,
+  )
+
+  assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("batch_size", "expected"),
+    (
+        (4, PartitionSpec(None, None, "tensor")),
+        (8, PartitionSpec(("data", "fsdp"), None, "tensor")),
+    ),
+)
+def test_remove_incompatible_composite_batch_mesh_axes(batch_size, expected):
+  """Compatibility uses the product of all mesh axes assigned to a dimension."""
+  mesh = SimpleNamespace(shape={"data": 2, "fsdp": 4, "tensor": 2})
+  pspec = PartitionSpec(("data", "fsdp"), None, "tensor")
+
+  actual = sharding.remove_incompatible_mesh_axes_from_partition_spec(
+      pspec,
+      (batch_size, 16, 8),
+      mesh,
+      dims=(0,),
+      allow_remove_axes=True,
+  )
+
+  assert actual == expected
+
+
+def test_incompatible_mesh_axes_fail_closed_by_default():
+  mesh = SimpleNamespace(shape={"fsdp": 8})
+  pspec = PartitionSpec("fsdp", None)
+
+  with pytest.raises(ValueError, match="allow_remove_axes=True"):
+    sharding.remove_incompatible_mesh_axes_from_partition_spec(
+        pspec,
+        (4, 16),
+        mesh,
+        dims=(0,),
+    )
+
+
+def test_remove_incompatible_mesh_axes_supports_negative_dims():
+  mesh = SimpleNamespace(shape={"tensor": 2})
+  pspec = PartitionSpec(None, None, "tensor")
+
+  actual = sharding.remove_incompatible_mesh_axes_from_partition_spec(
+      pspec,
+      (4, 16, 7),
+      mesh,
+      dims=(-1,),
+      allow_remove_axes=True,
+  )
+
+  assert actual == PartitionSpec(None, None, None)
+
+
+def test_remove_incompatible_mesh_axes_rejects_out_of_range_negative_dim():
+  mesh = SimpleNamespace(shape={"tensor": 2})
+  pspec = PartitionSpec(None, None, "tensor")
+
+  with pytest.raises(ValueError, match="out of bounds"):
+    sharding.remove_incompatible_mesh_axes_from_partition_spec(
+        pspec,
+        (4, 16, 7),
+        mesh,
+        dims=(-4,),
+        allow_remove_axes=True,
+    )
 
 
 def simple_timeit(f, tries=5, verbose=True):
@@ -198,3 +289,10 @@ def test_fsdp_sharding():
     TFLOPs_per_device = parameters * 6 * BATCH_SIZE / 10**12 / len(jax.devices())
     time = simple_timeit(lambda: jax.block_until_ready(jit_func(presharded_X, presharded_layers)))
     print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush=True)
+
+
+def test_with_axis_on_dim_handles_none_and_out_of_range():
+  """with_axis_on_dim passes None through and rejects an out-of-range dimension."""
+  assert sharding.with_axis_on_dim(None, "context", 2) is None
+  with pytest.raises(ValueError, match="out of range"):
+    sharding.with_axis_on_dim(PartitionSpec("data", None), "context", 2)

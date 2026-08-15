@@ -35,6 +35,7 @@ from maxtext.common.common_types import (
     AxisNames,
     AxisIdxes,
     ATTN_LENGTH,
+    ATTN_INPUT_LENGTH,
     DType,
     Config,
     Array,
@@ -51,7 +52,7 @@ from maxtext.common.common_types import (
     AttentionType,
 )
 from maxtext.layers import nnx_wrappers
-from maxtext.layers.attention_op import AttentionOp
+from maxtext.layers.attention_op import AttentionOp, _resolve_attention_type
 from maxtext.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
@@ -120,7 +121,7 @@ def attention_as_linen(
     float32_logits: bool = False,  # cast logits in float32 for stability.
     quant: Optional[Quant] = None,
     kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+    attention_type: AttentionType = AttentionType.GLOBAL,
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
     use_ragged_attention: bool = False,
@@ -142,7 +143,7 @@ def attention_as_linen(
     query_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
     key_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
     value_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH_ATTN, ATTN_LENGTH, ATTN_EMBED),
+    input_axis_names: AxisNames = (BATCH_ATTN, ATTN_INPUT_LENGTH, ATTN_EMBED),
     out_axis_names: AxisNames = (BATCH_ATTN, ATTN_LENGTH, HEAD, D_KV),
     prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, ATTN_EMBED),
     decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, ATTN_EMBED),
@@ -277,7 +278,7 @@ class Attention(nnx.Module):
       float32_logits: bool = False,  # cast logits in float32 for stability.
       quant: Optional[Quant] = None,
       kv_quant: Optional[KVQuant] = None,
-      attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+      attention_type: AttentionType = AttentionType.GLOBAL,
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
       use_ragged_attention: bool = False,
@@ -299,7 +300,7 @@ class Attention(nnx.Module):
       query_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
       key_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
       value_axis_names: AxisNames = (KV_BATCH, ATTN_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      input_axis_names: AxisNames = (BATCH_ATTN, ATTN_LENGTH, ATTN_EMBED),
+      input_axis_names: AxisNames = (BATCH_ATTN, ATTN_INPUT_LENGTH, ATTN_EMBED),
       out_axis_names: AxisNames = (BATCH_ATTN, ATTN_LENGTH, HEAD, D_KV),
       prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, ATTN_EMBED),
       decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, ATTN_EMBED),
@@ -388,7 +389,7 @@ class Attention(nnx.Module):
     self.float32_logits = float32_logits
     self.quant = quant
     self.kv_quant = kv_quant
-    self.attention_type = attention_type
+    self.attention_type = _resolve_attention_type(self.config, attention_type)
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.use_ragged_attention = use_ragged_attention
@@ -572,6 +573,78 @@ class Attention(nnx.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
+  def _validate_kv_head_sharding(
+      self,
+      kernel_axes: Tuple[Optional[str], ...],
+  ) -> None:
+    """Validates that the key/value head dimension can be sharded evenly.
+
+    Attention heads are atomic under tensor parallelism.  The `kv_heads`
+    logical axis of the key/value projection is split across whichever mesh
+    axes `logical_axis_rules` maps it to -- by default `tensor`,
+    `tensor_sequence` and `autoregressive` -- so the KV head count has to be
+    divisible by their combined size.  Note that `num_kv_heads` is the
+    per-layer count, which for models such as Gemma 4 is `global_num_kv_heads`
+    on global attention layers and `num_kv_heads` elsewhere.
+
+    Ulysses context parallelism shards the KV heads a second time, over the
+    context axis, using a runtime all-to-all rather than the weight's logical
+    axes, so that axis is folded in explicitly.  `types.py` separately requires
+    `num_kv_heads` to be divisible by the context-parallel size on its own;
+    checking the product here is what catches a head count that clears each
+    factor individually but not both together.
+
+    Without this check an over-sharded mesh fails much later, either with an
+    opaque XLA divisibility error or by silently leaving the projection
+    unsharded until `assert_params_sufficiently_sharded` trips.
+
+    Args:
+      kernel_axes: Logical axis names of the key/value projection kernel.
+
+    Raises:
+      ValueError: If the KV heads cannot be split evenly across the mesh.
+    """
+    if "kv_heads" not in kernel_axes:
+      # The projection is replicated, so the head count is unconstrained.
+      return
+
+    # Size-one mesh axes are already dropped, so this is the exact shard count.
+    # An empty result means no logical rule shards the heads; that is not an
+    # early exit, because Ulysses below can still shard them over the context
+    # axis. An unsharded head dimension just leaves `kv_parallelism` at 1.
+    kv_heads_index = kernel_axes.index("kv_heads")
+    kv_head_axes = self._logical_to_mesh_axes(kernel_axes)[kv_heads_index]
+    if kv_head_axes is None:
+      kv_head_axes = ()
+    elif isinstance(kv_head_axes, str):
+      kv_head_axes = (kv_head_axes,)
+    kv_head_axes = list(kv_head_axes)
+
+    # Ulysses exchanges sequence ownership for head ownership through an
+    # all-to-all, so the context axis shards KV heads too even though no
+    # logical rule says so.
+    if self.config.context_parallel_strategy.lower() == "ulysses":
+      ulysses_axis = self.config.context_sharding
+      if ulysses_axis not in kv_head_axes:
+        kv_head_axes.append(ulysses_axis)
+
+    kv_parallelism = 1
+    for axis in kv_head_axes:
+      kv_parallelism *= self.mesh.shape.get(axis, 1)
+
+    if self.num_kv_heads % kv_parallelism != 0:
+      raise ValueError(
+          f"num_kv_heads ({self.num_kv_heads}) for {self.attention_type}"
+          f" attention layers must be divisible by {kv_parallelism}, the"
+          f" combined size of the mesh axes {kv_head_axes} that shard KV heads."
+          " Attention heads are atomic under tensor parallelism and cannot be"
+          " split across more shards than there are heads. Either reduce the"
+          " parallelism on those axes, raise the KV head count"
+          " (`base_num_kv_heads`, or `global_num_kv_heads` for global attention"
+          " layers), or move the parallelism onto an axis that does not shard"
+          " KV heads (e.g. fsdp)."
+      )
+
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
     """Initializes the query, key, value, and output projections."""
     if self.config.fused_qkv:
@@ -648,6 +721,7 @@ class Attention(nnx.Module):
         if self.config.ici_context_autoregressive_parallelism > 1
         else ("embed", "kv_heads", "kv_head_dim")
     )
+    self._validate_kv_head_sharding(kernel_axes)
 
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_kv_shape),
@@ -851,6 +925,9 @@ class Attention(nnx.Module):
           cast_as_fprop_dtype=True,
           fprop_dtype=self.dtype,
           mrope_section=self.mrope_section,
+          partial_rotary_factor=(
+              self.partial_rotary_factor if self.partial_rotary_factor is not None else self.config.partial_rotary_factor
+          ),
           rngs=self.rngs,
       )
 
@@ -879,6 +956,7 @@ class Attention(nnx.Module):
           interleave=self.config.rope_interleave,
           truncate=self.config.rope_truncate,
           attention_scaling=self.config.rope_attention_scaling,
+          pairwise=self.config.rope_pairwise,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )

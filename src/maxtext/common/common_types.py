@@ -35,6 +35,7 @@ BATCH = "activation_batch"
 BATCH_ATTN = "activation_batch_attn"
 
 ATTN_LENGTH = "activation_length_attn"
+ATTN_INPUT_LENGTH = "activation_input_length_attn"
 
 LENGTH = "activation_length"
 PREFILL_LENGTH = "prefill_activation_length"
@@ -136,6 +137,7 @@ class AttentionType(enum.Enum):
   MLA = "mla"
   COMPRESSED = "compressed"
   FULL = "full"
+  BLOCK_DIFFUSION = "block_diffusion"
 
 
 class ShardMode(enum.Enum):
@@ -167,3 +169,4 @@ class CustomRule(enum.Enum):
   PIPELINE_LARGE_MOE = "pipeline-large-moe"
   FSDP_2D = "2d-fsdp"
   EP_AS_DP = "ep-as-dp"
+  SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"

@@ -27,6 +27,7 @@ import grain.python as grain
 import numpy as np
 from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, _TFRecordDatasetIterator  # pylint: disable=protected-access
 from grain.experimental import TFRecordIterDataset
+from maxtext.diffusion.block_diffusion import corruption as block_diffusion_corruption
 from maxtext.input_pipeline.protos import example_pb2
 from maxtext.input_pipeline import tokenizer
 from maxtext.multimodal import processor as mm_processor
@@ -849,14 +850,22 @@ class PadOrTrimToMaxLength(grain.MapTransform):
   ) -> dict[str, np.ndarray | mm_utils.PreprocessorOutput]:
     """map to each element"""
     data_columns = list(element.keys())
+    preserve_pad_valued_tokens = (
+        self.config is not None and getattr(self.config, "training_objective", "causal_lm") == "block_diffusion"
+    )
     for data_column in data_columns:
       if data_column != "images":
         if isinstance(element[data_column], mm_utils.PreprocessorOutput):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
-        element[f"{data_column}_segmentation"] = (
-            element[data_column] != self.pad_id  # pyrefly: ignore[unsupported-operation]
-        )  # pyrefly: ignore[unsupported-operation]
+        if preserve_pad_valued_tokens:
+          element[f"{data_column}_segmentation"] = np.ones(
+              element[data_column].shape[0], dtype=np.int32  # pyrefly: ignore[missing-attribute]
+          )
+        else:
+          element[f"{data_column}_segmentation"] = (
+              element[data_column] != self.pad_id  # pyrefly: ignore[unsupported-operation]
+          )  # pyrefly: ignore[unsupported-operation]
         # pyrefly: ignore[missing-attribute]
         element[f"{data_column}_segmentation"] = element[
             f"{data_column}_segmentation"
@@ -878,6 +887,8 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
         element["images"] = self._pad_image_and_mask(element["images"])  # pyrefly: ignore[bad-argument-type]
 
+      elif preserve_pad_valued_tokens and key.endswith(("_segmentation", "_position")):
+        element[key] = self._pad_text(element[key], self.max_length, 0)  # pyrefly: ignore[bad-argument-type]
       elif "true_length" not in key:
         element[key] = self._pad_text(element[key], self.max_length, self.pad_id)  # pyrefly: ignore[bad-argument-type]
     return element
@@ -909,6 +920,10 @@ class ExtractImagesAndMasks(grain.MapTransform):
     output["images"] = preprocessed_image.pixel_values  # pyrefly: ignore[unsupported-operation]
     if preprocessed_image.pixel_mask is not None:
       output["image_masks"] = preprocessed_image.pixel_mask
+    # Qwen MRoPE needs per-image (t, h, w) grids to build 3D positions.
+    pixel_grid_thw = getattr(preprocessed_image, "pixel_grid_thw", None)
+    if pixel_grid_thw is not None:
+      output["image_grid_thw"] = pixel_grid_thw
 
     return output
 
@@ -1272,6 +1287,46 @@ class MegatronSplitInputsTargets(grain.MapTransform):
 
 
 @dataclasses.dataclass
+class BlockDiffusionCorruption(grain.RandomMapTransform):
+  """Adapts block-diffusion corruption to the Grain batch contract."""
+
+  block_size: int
+  mask_id: int
+  min_noise: float = 1.0e-3
+  logit_alignment: str = "same_position"
+  canvas_policy: str = "all_masked"
+  axis: int = 1
+
+  def random_map(self, element, rng: np.random.Generator):
+    """Corrupts inputs while preserving clean targets and input metadata."""
+    inputs = np.asarray(element["inputs"])
+    targets = np.asarray(element["targets"])
+    targets_segmentation = np.asarray(element["targets_segmentation"])
+    if inputs.shape != targets.shape or inputs.shape != targets_segmentation.shape:
+      raise ValueError(
+          "inputs, targets, and targets_segmentation must have identical shapes, got "
+          f"{inputs.shape}, {targets.shape}, and {targets_segmentation.shape}"
+      )
+    result = block_diffusion_corruption.corrupt_tokens(
+        inputs,
+        targets_segmentation != 0,
+        rng,
+        block_size=self.block_size,
+        mask_id=self.mask_id,
+        min_noise=self.min_noise,
+        logit_alignment=self.logit_alignment,
+        canvas_policy=self.canvas_policy,
+        axis=self.axis,
+    )
+    output = dict(element)
+    output["inputs"] = result.inputs
+    output["targets"] = targets
+    output["corruption_mask"] = result.corruption_mask.astype(targets_segmentation.dtype)
+    output["targets_loss_mask"] = result.targets_loss_mask.astype(targets_segmentation.dtype)
+    return output
+
+
+@dataclasses.dataclass
 class ComputeQwen3OmniPositions(grain.MapTransform):
   """Computes 3D position IDs for Qwen3-Omni multimodal sequences.
 
@@ -1292,6 +1347,8 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
       spatial_merge_size: int = 2,
       position_id_per_seconds: int = 25,
       use_audio_in_video: bool = False,
+      config=None,
+      keep_aux_fields: bool = False,
   ):
     """Initialize the Qwen3-Omni position computation transform.
 
@@ -1300,11 +1357,17 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
       spatial_merge_size: Number of patches merged spatially (e.g., 2 for 2x2→1).
       position_id_per_seconds: Temporal granularity (tokens per second, typically 25).
       use_audio_in_video: If True, audio tokens are interleaved with video tokens.
+      config: Optional model config for model-specific special token IDs.
+      keep_aux_fields: If True, keep auxiliary (aux) fields — mrope deltas / grid
+        metadata — on the element for inference. Training should leave this False
+        so the batch matches get_shaped_batch.
     """
     self.data_column = data_column
     self.spatial_merge_size = spatial_merge_size
     self.position_id_per_seconds = position_id_per_seconds
     self.use_audio_in_video = use_audio_in_video
+    self.config = config
+    self.keep_aux_fields = keep_aux_fields
 
   def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Compute 3D position IDs for the batch element.
@@ -1313,13 +1376,13 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
       element: Dictionary containing:
         - {data_column}: Token IDs with shape (batch, seq_len)
         - {data_column}_segmentation: Attention mask (1=real, 0=padding)
-        - image_grid_thw: Optional (num_images, 3) array
+        - image_grid_thw: Optional (num_images, 3) or (batch, num_images, 3) array
         - video_grid_thw: Optional (num_videos, 3) array
         - audio_lengths: Optional (num_audios,) array
         - second_per_grids: Optional (num_videos,) array
 
     Returns:
-      element with {data_column}_position updated to shape (3, batch, seq_len)
+      element with {data_column}_position updated to shape (batch, seq_len, 3)
       for 3D positions (always 3D, even for text-only sequences).
     """
 
@@ -1332,6 +1395,14 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     video_grid_thw = element.get("video_grid_thw")
     audio_lengths = element.get("audio_lengths")
     second_per_grids = element.get("second_per_grids")
+
+    # grain.Batch stacks per-example (N, 3) grids to (B, N, 3). get_rope_index
+    # resets image_idx per sequence against a shared (N, 3) table, which is
+    # correct when training force-resizes all images to the same grid.
+    if image_grid_thw is not None and image_grid_thw.ndim == 3:
+      image_grid_thw = image_grid_thw[0]
+    if video_grid_thw is not None and video_grid_thw.ndim == 3:
+      video_grid_thw = video_grid_thw[0]
 
     # Call the standalone get_rope_index function from multimodal_utils
     from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
@@ -1347,11 +1418,20 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
         second_per_grids=second_per_grids,
         spatial_merge_size=self.spatial_merge_size,
         position_id_per_seconds=self.position_id_per_seconds,
+        config=self.config,
     )
 
     # Update element with 3D positions
-    # Shape: (3, batch, seq_len) for multimodal, or (batch, seq_len) for text-only
-    element[f"{self.data_column}_position"] = position_ids
-    element[f"{self.data_column}_mrope_deltas"] = mrope_position_deltas
+    # Shape: (batch, seq_len, 3) for multimodal, or (batch, seq_len) for text-only
+    element[f"{self.data_column}_position"] = position_ids.astype(np.int32)
+    if self.keep_aux_fields:
+      element[f"{self.data_column}_mrope_deltas"] = mrope_position_deltas
+    else:
+      # Drop metadata that is not part of the training shaped batch.
+      element.pop(f"{self.data_column}_mrope_deltas", None)
+      element.pop("image_grid_thw", None)
+      element.pop("video_grid_thw", None)
+      element.pop("audio_lengths", None)
+      element.pop("second_per_grids", None)
 
     return element

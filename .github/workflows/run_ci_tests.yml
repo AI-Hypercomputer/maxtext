@@ -14,7 +14,7 @@
 
 # This workflow will run unit and integration tests on MaxText Docker images.
 
-name: MaxText Unit and Integration Tests
+name: MaxText CI Tests on Docker Images
 
 on:
   workflow_call:
@@ -31,11 +31,17 @@ on:
       workflow:
         required: true
         type: string
+      additional_image_to_tag:
+        description: 'Optional additional image to tag as latest if tests pass.'
+        required: false
+        type: string
+        default: ''
 permissions:
   contents: read
 
 jobs:
   check_image:
+    name: Check Docker Image Existence
     runs-on: linux-x86-n2-16-buildkit
     container: google/cloud-sdk:524.0.0
     outputs:
@@ -50,12 +56,13 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           if gcloud container images describe "gcr.io/${PROJECT_NAME}/${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
   test:
+    name: CI Tests
     needs: check_image
     if: needs.check_image.outputs.image_exists == 'true'
     strategy:
@@ -64,8 +71,8 @@ jobs:
         flavor: >-
             ${{ fromJSON('{
               "gpu-pre-training": ["gpu-unit", "gpu-integration"],
-              "tpu-post-training": ["tpu-post-training-unit", "tpu-post-training-integration", "cpu-post-training-unit"],
-              "tpu-pre-training": ["tpu-unit", "tpu-integration", "cpu-unit"]
+              "tpu-post-training": ["tpu-post-training-unit", "tpu-post-training-integration", "cpu-post-training-unit", "cpu-post-training-integration"],
+              "tpu-pre-training": ["tpu-unit", "tpu-integration", "cpu-unit", "cpu-integration"]
             }')[format('{0}-{1}', inputs.device, inputs.workflow)] }}
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
@@ -73,4 +80,40 @@ jobs:
       base_image: ${{ inputs.image_name }}:${{ inputs.image_tag }}
       is_scheduled_run: true
       maxtext_installed: true
-      additional_pytest_args: ${{ contains(inputs.image_name, 'maxtext_jax_nightly') && '--ignore=tests/integration/hlo_diff_test.py' || '' }}
+
+  tag_docker_image:
+    name: Tag Docker Image
+    needs: test
+    if: needs.test.result == 'success'
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+      - name: Add tags
+        shell: bash
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          IMAGE_NAME_EXPR: ${{ inputs.image_name }}
+          IMAGE_TAG_EXPR: ${{ inputs.image_tag }}
+          ADDITIONAL_IMAGE_TO_TAG: ${{ inputs.additional_image_to_tag }}
+        run: |
+          image_name="$IMAGE_NAME_EXPR"
+          image_tag="$IMAGE_TAG_EXPR"
+          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${image_name}"
+
+          # Add the traceability tag to confirm it passed validation suite
+          gcloud container images add-tag "${SOURCE_IMAGE}:${image_tag}" \
+            "${SOURCE_IMAGE}:verified-${image_tag}" --quiet
+
+          # TODO: This is a workaround, to be removed when promote_docker_image.yml workflow is stable
+          # Add "latest" tag
+          gcloud container images add-tag "${SOURCE_IMAGE}:${image_tag}" "${SOURCE_IMAGE}:latest" --quiet
+
+          # Add "latest" tag to additional image if specified
+          if [ -n "$ADDITIONAL_IMAGE_TO_TAG" ]; then
+            ADDITIONAL_IMAGE="gcr.io/${PROJECT_NAME}/${ADDITIONAL_IMAGE_TO_TAG}"
+            echo "Tagging ${ADDITIONAL_IMAGE}:${image_tag} as ${ADDITIONAL_IMAGE}:latest"
+            gcloud container images add-tag "${ADDITIONAL_IMAGE}:${image_tag}" "${ADDITIONAL_IMAGE}:latest" --quiet
+          fi

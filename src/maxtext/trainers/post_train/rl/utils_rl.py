@@ -164,10 +164,18 @@ def boxed(x: str) -> str:
 
 def get_match_format_regex(tmvp_config: Any) -> re.Pattern[str]:
   """Returns a compiled regex to extract the answer from a completion."""
+  # Some thinking-model chat templates (Qwen3.5) prefill the opening
+  # reasoning marker in the prompt. The generated completion then begins with
+  # the reasoning body and contains only the closing marker.
+  reasoning_start = (
+      ""
+      if getattr(tmvp_config, "reasoning_start_token_in_prompt", False)
+      else re.escape(tmvp_config.reasoning_start_token)
+  )
   match_format = re.compile(
       (
-          rf"{tmvp_config.reasoning_start_token}.+{tmvp_config.reasoning_end_token}.*?"
-          rf"{tmvp_config.solution_start_token}(.+?){tmvp_config.solution_end_token}"
+          rf"{reasoning_start}.*?{re.escape(tmvp_config.reasoning_end_token)}.*?"
+          rf"{re.escape(tmvp_config.solution_start_token)}(.+?){re.escape(tmvp_config.solution_end_token)}"
       ),
       flags=re.MULTILINE | re.DOTALL,
   )
@@ -220,7 +228,10 @@ def match_format_approximately(prompts: list[str], completions: list[str], tmvp_
     # If we see 1, then plus some points!
     score += (
         tmvp_config.reward_partial_format_match
-        if completion.count(tmvp_config.reasoning_start_token) == 1
+        if (
+            getattr(tmvp_config, "reasoning_start_token_in_prompt", False)
+            or completion.count(tmvp_config.reasoning_start_token) == 1
+        )
         else tmvp_config.penalty_incorrect_format
     )
     score += (

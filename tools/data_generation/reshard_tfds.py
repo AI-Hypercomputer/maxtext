@@ -42,13 +42,18 @@ For Multiple Splits Dataset:
 
 import argparse
 import os
+import sys
 import json
 import multiprocessing
 import queue
 import threading
 
-import tensorflow as tf
-import tensorflow_datasets as tfds
+try:
+  import tensorflow as tf
+  import tensorflow_datasets as tfds
+except ImportError:
+  sys.exit("Tensorflow and tensorflow_datasets are required. Run `pip install tensorflow tensorflow-datasets`")
+
 from tqdm import tqdm
 
 

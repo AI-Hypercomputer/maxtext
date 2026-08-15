@@ -14,6 +14,7 @@
 
 """Unit tests for input_pipeline_utils."""
 
+import dataclasses
 import unittest
 from types import SimpleNamespace
 
@@ -21,7 +22,6 @@ import numpy as np
 
 from maxtext.input_pipeline.input_pipeline_utils import BlockDiffusionCorruption, compute_file_sharding, PadOrTrimToMaxLength
 
-import dataclasses
 import pytest
 
 from maxtext.input_pipeline import input_pipeline_utils

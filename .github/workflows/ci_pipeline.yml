@@ -30,10 +30,6 @@ on:
         required: false
       GEMINI_API_KEY:
         required: false
-    outputs:
-      tests_result:
-        description: 'The result of all_tests_passed and all_notebooks_passed jobs.'
-        value: ${{ (jobs.all_tests_passed.result == 'success' && jobs.all_notebooks_passed.result == 'success') && 'success' || 'failure' }}
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours
@@ -58,6 +54,10 @@ jobs:
     outputs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
+      run_pretrain_tests: ${{ steps.check.outputs.run_pretrain_tests }}
+      run_posttrain_tests: ${{ steps.check.outputs.run_posttrain_tests }}
+      run_pathways_tests: ${{ steps.check.outputs.run_pathways_tests }}
+      run_gpu_tests: ${{ steps.check.outputs.run_gpu_tests }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -66,84 +66,26 @@ jobs:
           persist-credentials: false
       - name: Check for Code Changes
         id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "Not a pull request, running all tests"
-            echo "run_tests=true" >> $GITHUB_OUTPUT
-            echo "run_notebooks=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          git fetch origin ${GITHUB_BASE_REF}
-          CHANGED_FILES=$(git diff --name-only origin/${GITHUB_BASE_REF}...HEAD)
-
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
-
-          if [ -z "$CHANGED_FILES" ]; then
-            echo "No files detected or diff failed. Running everything as a fail-safe."
-            echo "run_tests=true" >> $GITHUB_OUTPUT
-            echo "run_notebooks=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # default to running everything if something goes wrong with the checks
-          echo "run_tests=true" >> $GITHUB_OUTPUT
-          echo "run_notebooks=true" >> $GITHUB_OUTPUT
-
-          # 1. Check if only documentation files (.md) were changed
-          if ! echo "$CHANGED_FILES" | grep -v -E '\.md$' > /dev/null; then
-            echo "Documentation-only files changed, skipping all tests and notebooks."
-            echo "run_tests=false" >> $GITHUB_OUTPUT
-            echo "run_notebooks=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # 2. Check if dependencies or Github workflows were changed
-          if echo "$CHANGED_FILES" | grep -E '(^|/)(src/dependencies/|\.github/workflows/)' > /dev/null; then
-            echo "Core files (dependencies, workflows) changed, enabling all tests and notebooks."
-            echo "run_tests=true" >> $GITHUB_OUTPUT
-            # TODO: Temporarily disabled because notebook jobs are blocked; revert to "run_notebooks=true" after the fix is merged.
-            echo "run_notebooks=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # 3. Check if post-training files were changed
-          if echo "$CHANGED_FILES" | grep -E 'src/maxtext/trainers/post_train/' > /dev/null; then
-            echo "run_tests=true" >> $GITHUB_OUTPUT
-            echo "run_notebooks=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # 4. Check for source code changes (anything not .md and not .ipynb)
-          if echo "$CHANGED_FILES" | grep -v -E '\.(md|ipynb)$' > /dev/null; then
-            echo "Source code changed, enabling unit tests."
-            echo "run_tests=true" >> $GITHUB_OUTPUT
-          else
-            echo "No source code changes (only notebook/doc), skipping unit tests."
-            echo "run_tests=false" >> $GITHUB_OUTPUT
-          fi
-
-          # 5. Check for notebook (.ipynb) changes
-          if echo "$CHANGED_FILES" | grep '\.ipynb$' > /dev/null; then
-            echo "Notebook files changed, enabling notebook run."
-            echo "run_notebooks=true" >> $GITHUB_OUTPUT
-          else
-            echo "No notebook changes, skipping notebook run."
-            echo "run_notebooks=false" >> $GITHUB_OUTPUT
-          fi
+          bash .github/scripts/analyze_code_changes.sh
 
   code_quality_check:
+    name: Code Quality Check
     uses: ./.github/workflows/code_quality.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   docs_build_check:
+    name: Documentation Build Check
     uses: ./.github/workflows/check_docs_build.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   build_and_upload_maxtext_package:
+    name: Build MaxText Package
     needs: [analyze_code_changes, code_quality_check, docs_build_check]
     # Run if either tests or notebooks need to run; on PRs, gate on code quality + docs passing
     if: |
@@ -158,11 +100,14 @@ jobs:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   maxtext_jupyter_notebooks:
+    name: Jupyter Notebook Tests
     needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       always() &&
       needs.analyze_code_changes.outputs.run_notebooks == 'true' &&
-      needs.build_and_upload_maxtext_package.result == 'success'
+      needs.build_and_upload_maxtext_package.result == 'success' &&
+      (github.event_name != 'pull_request' ||
+        (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]'))
     uses: ./.github/workflows/run_jupyter_notebooks.yml
     strategy:
         fail-fast: false
@@ -196,17 +141,36 @@ jobs:
           echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
           echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
 
-  tpu-tests:
-    name: ${{ matrix.flavor || 'TPU' }} tests
-    needs: [gate_test_run]
+  tpu-pretrain-tests:
+    name: TPU Pretrain Tests
+    needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
-      needs.gate_test_run.result == 'success'
+      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
       matrix:
-        flavor: [tpu-unit, tpu-integration, tpu-post-training-unit]
+        flavor: [tpu-unit, tpu-integration]
+    with:
+      flavor: ${{ matrix.flavor }}
+      base_image: maxtext-unit-test-tpu:py312
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+
+  tpu-posttrain-tests:
+    name: TPU Posttrain Tests
+    needs: [gate_test_run, analyze_code_changes]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [tpu-post-training-unit, tpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
@@ -215,7 +179,7 @@ jobs:
 
 
   tpu7x-tests:
-    name: TPU7X tests
+    name: TPU7X Tests
     needs: [gate_test_run]
     if: |
       always() &&
@@ -233,11 +197,12 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   gpu-tests:
-    name: ${{ matrix.flavor || 'GPU' }} tests
-    needs: [gate_test_run]
+    name: GPU Tests
+    needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
-      needs.gate_test_run.result == 'success'
+      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_gpu_tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -249,17 +214,36 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
-  cpu-tests:
-    name: ${{ matrix.flavor || 'CPU' }} tests
-    needs: [gate_test_run]
+  cpu-pretrain-tests:
+    name: CPU Pretrain Tests
+    needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
-      needs.gate_test_run.result == 'success'
+      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu-unit, cpu-post-training-unit]
+        flavor: [cpu-unit, cpu-integration]
+    with:
+      flavor: ${{ matrix.flavor }}
+      base_image: maxtext-unit-test-tpu:py312
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+
+  cpu-posttrain-tests:
+    name: CPU Posttrain Tests
+    needs: [gate_test_run, analyze_code_changes]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [cpu-post-training-unit, cpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
@@ -267,10 +251,12 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
-    needs: [gate_test_run]
+    name: TPU Pathways Unit Tests
+    needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
-      needs.gate_test_run.result == 'success'
+      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -292,10 +278,12 @@ jobs:
       worker_group: ${{ matrix.group }}
 
   maxtext_tpu_pathways_integration_tests:
-    needs: [gate_test_run]
+    name: TPU Pathways Integration Tests
+    needs: [gate_test_run, analyze_code_changes]
     if: |
       always() &&
-      needs.gate_test_run.result == 'success'
+      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -314,7 +302,7 @@ jobs:
 
   all_tests_passed:
     name: All Required Tests Passed
-    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -325,10 +313,12 @@ jobs:
           echo "Code Quality result: ${NEEDS_CODE_QUALITY_CHECK_RESULT}"
           echo "Docs Build result: ${NEEDS_DOCS_BUILD_CHECK_RESULT}"
           echo "Gate result: ${NEEDS_GATE_TEST_RUN_RESULT}"
-          echo "TPU Tests (Matrix) result: ${NEEDS_TPU_TESTS_RESULT}"
+          echo "TPU Pretrain Tests result: ${NEEDS_TPU_PRETRAIN_TESTS_RESULT}"
+          echo "TPU Posttrain Tests result: ${NEEDS_TPU_POSTTRAIN_TESTS_RESULT}"
           echo "TPU7X Tests (Matrix) result: ${NEEDS_TPU7X_TESTS_RESULT}"
           echo "GPU Tests (Matrix) result: ${NEEDS_GPU_TESTS_RESULT}"
-          echo "CPU Tests (Matrix) result: ${NEEDS_CPU_TESTS_RESULT}"
+          echo "CPU Pretrain Tests result: ${NEEDS_CPU_PRETRAIN_TESTS_RESULT}"
+          echo "CPU Posttrain Tests result: ${NEEDS_CPU_POSTTRAIN_TESTS_RESULT}"
           echo "Pathways Unit result: ${NEEDS_MAXTEXT_TPU_PATHWAYS_UNIT_TESTS_RESULT}"
           echo "Pathways Integration result: ${NEEDS_MAXTEXT_TPU_PATHWAYS_INTEGRATION_TESTS_RESULT}"
 
@@ -344,8 +334,10 @@ jobs:
           NEEDS_CODE_QUALITY_CHECK_RESULT: ${{ needs.code_quality_check.result }}
           NEEDS_DOCS_BUILD_CHECK_RESULT: ${{ needs.docs_build_check.result }}
           NEEDS_GATE_TEST_RUN_RESULT: ${{ needs.gate_test_run.result }}
-          NEEDS_CPU_TESTS_RESULT: ${{ needs.cpu-tests.result }}
-          NEEDS_TPU_TESTS_RESULT: ${{ needs.tpu-tests.result }}
+          NEEDS_CPU_PRETRAIN_TESTS_RESULT: ${{ needs.cpu-pretrain-tests.result }}
+          NEEDS_CPU_POSTTRAIN_TESTS_RESULT: ${{ needs.cpu-posttrain-tests.result }}
+          NEEDS_TPU_PRETRAIN_TESTS_RESULT: ${{ needs.tpu-pretrain-tests.result }}
+          NEEDS_TPU_POSTTRAIN_TESTS_RESULT: ${{ needs.tpu-posttrain-tests.result }}
           NEEDS_TPU7X_TESTS_RESULT: ${{ needs.tpu7x-tests.result }}
           NEEDS_GPU_TESTS_RESULT: ${{ needs.gpu-tests.result }}
           NEEDS_MAXTEXT_TPU_PATHWAYS_UNIT_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_unit_tests.result }}
@@ -382,7 +374,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -396,7 +388,7 @@ jobs:
 
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
-    needs: [gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
+    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
     if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:
@@ -412,8 +404,8 @@ jobs:
 
   track_performance:
     name: Track Test Performance
-    needs: [tpu-tests, gpu-tests, cpu-tests]
-    if: ${{ always() && (needs.cpu-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-tests.result == 'success') }}
+    needs: [tpu-pretrain-tests, tpu-posttrain-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests]
+    if: ${{ always() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success') }}
     uses: ./.github/workflows/track_performance.yml
     permissions:
       contents: write

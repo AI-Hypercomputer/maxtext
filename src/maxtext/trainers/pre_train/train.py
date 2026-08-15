@@ -29,23 +29,31 @@ import optax
 
 import pathwaysutils  # pylint: disable=unused-import
 
-import tensorflow as tf
+try:
+  import tensorflow as tf
+
+  _TF_AVAILABLE = True
+except ImportError:
+  _TF_AVAILABLE = False
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
-from flax import linen as nn, nnx
+from flax import linen as nn, nnx, traverse_util
 from flax.linen import partitioning as nn_partitioning
 from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
+from maxtext.configs.types import TeCommGemmOverlapPolicy
+from maxtext.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
 from maxtext.utils.globals import EPS
 from maxtext.utils import elastic_utils
 # Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
+from maxtext.layers.attention_mla import indexer_losses
 from maxtext.common import checkpointing, profiler
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -102,6 +110,22 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     loss: average loss
     aux: a dictionary including intermediate_outputs, xent_sum, and total_weights
   """
+  is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
+  if getattr(config, "attention_type", "global") == "block_diffusion" and not is_block_diffusion:
+    raise ValueError(
+        "Block-diffusion attention requires target-aligned block-diffusion losses; "
+        "causal next-token labels would leak within a bidirectional block."
+    )
+  if is_block_diffusion:
+    required_masks = {"corruption_mask", "targets_loss_mask"}
+    missing_masks = required_masks - data.keys()
+    if missing_masks:
+      raise ValueError(f"Block-diffusion loss requires explicit batch masks; missing {sorted(missing_masks)}")
+    target_shape = data["targets"].shape
+    for mask_name in required_masks:
+      if data[mask_name].shape != target_shape:
+        raise ValueError(f"{mask_name} must match targets shape; got {data[mask_name].shape} and {target_shape}")
+
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
@@ -109,6 +133,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
+  if is_block_diffusion:
+    targets_loss_mask = (data["targets_loss_mask"] != 0) & (data["targets_segmentation"] != 0)
+    target_positions = data.get("targets_position", data["inputs_position"])
+  else:
+    targets_loss_mask = None
+    target_positions = None
   mutable_collections = ["intermediates"]
   if config.mtp_num_layers > 0 and is_train:
     # The single model.apply call now triggers the entire chain if MTP is enabled:
@@ -119,6 +149,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # make its specific collection mutable so the MTPBlock can sow into it.
   if config.mtp_eval_target_module > 0 and not is_train:
     mutable_collections.append("mtp_acceptance")
+  if config.use_indexer and is_train:
+    mutable_collections.append("indexer_losses")
+
   sparsity_enabled = is_train and config.weight_sparsity_n and config.weight_sparsity_m
   if sparsity_enabled:
     mutable_collections.append("batch_stats")
@@ -160,6 +193,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
       xent_sum, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
     else:
+      if is_block_diffusion:
+        logits = block_diffusion_target_alignment.align_logits_to_targets(
+            logits,
+            config.block_diffusion_logit_alignment,
+            target_positions,
+            data["targets_segmentation"] != 0,
+        )
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
@@ -178,9 +218,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           debug_sharding=config.debug_sharding,
       )
 
-      # Mask out paddings at the end of each example.
-      xent = xent * (data["targets_segmentation"] != 0)
-      z_loss = z_loss * (data["targets_segmentation"] != 0)
+      if is_block_diffusion:
+        xent = xent * targets_loss_mask
+        z_loss = z_loss * targets_loss_mask
+      else:
+        xent = xent * (data["targets_segmentation"] != 0)
+        z_loss = z_loss * (data["targets_segmentation"] != 0)
 
       xent_sum = jnp.sum(xent)
       total_z_loss = jnp.sum(z_loss)
@@ -204,6 +247,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       mtp_losses_state = nnx.pop(model, mtp_losses)
       mtp_acceptance_state = nnx.pop(model, mtp_acceptance)
 
+    indexer_losses_state = None
+    if config.use_indexer:
+      # Pop dedicated indexer_losses to harvest auxiliary KL loss and prevent model state PyTree mismatches.
+      indexer_losses_state = nnx.pop(model, indexer_losses)
+
     intermediates = nnx.pop(model, nnx.Intermediate)
     intermediate_outputs = intermediates.to_pure_dict()
 
@@ -212,6 +260,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     if mtp_losses_state is not None and mtp_acceptance_state is not None:
       intermediate_outputs["mtp_losses"] = mtp_losses_state.to_pure_dict()
       intermediate_outputs["mtp_acceptance"] = mtp_acceptance_state.to_pure_dict()
+
+    if indexer_losses_state is not None:
+      intermediate_outputs["indexer_losses"] = indexer_losses_state.to_pure_dict()
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
@@ -223,6 +274,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
       xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
     else:
+      if is_block_diffusion:
+        logits = block_diffusion_target_alignment.align_logits_to_targets(
+            logits,
+            config.block_diffusion_logit_alignment,
+            target_positions,
+            data["targets_segmentation"] != 0,
+        )
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
@@ -241,14 +299,21 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           debug_sharding=config.debug_sharding,
       )
 
-      # Mask out paddings at the end of each example.
-      xent = xent * (data["targets_segmentation"] != 0)
-      z_loss = z_loss * (data["targets_segmentation"] != 0)
+      if is_block_diffusion:
+        xent = xent * targets_loss_mask
+        z_loss = z_loss * targets_loss_mask
+      else:
+        xent = xent * (data["targets_segmentation"] != 0)
+        z_loss = z_loss * (data["targets_segmentation"] != 0)
 
       xent_sum = jnp.sum(xent)
       total_z_loss = jnp.sum(z_loss)
 
-  total_weights = jnp.sum(data["targets_segmentation"] != 0)
+  if is_block_diffusion:
+    assert targets_loss_mask is not None
+    total_weights = jnp.sum(targets_loss_mask)
+  else:
+    total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide xent_sum
   # by total_weights and then multiply the computed gradient by total_weights,
   # since it's equivalent to computing the gradient from xent_sum.
@@ -275,15 +340,16 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     mtp_loss = calculate_mtp_loss(intermediate_outputs, config)
     loss += mtp_loss
 
-  # get indexer loss
+  # Calculate and add auxiliary Indexer loss
   indexer_loss = 0.0
   if config.use_indexer and config.indexer_loss_scaling_factor > 0.0:
-    indexer_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "self_attention", "indexer_loss")
-    if indexer_losses:
-      indexer_loss = jnp.mean(jnp.concatenate(indexer_losses))
-      loss += indexer_loss
+    # Recursively collect per-layer indexer losses across all scanned transformer layers.
+    indexer_losses_list = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "indexer_loss")
+    if indexer_losses_list:
+      indexer_loss = jnp.mean(jnp.concatenate([jnp.atleast_1d(x) for x in indexer_losses_list]))
+      loss += indexer_loss  # Injects loss into scalar objective to drive backward gradients for indexer weights.
     else:
-      max_logging.debug("No indexer loss found.")
+      max_logging.debug("No Indexer loss found. Defaulting to 0.0.")
 
   # get MoE load balance loss
   moe_lb_loss = 0.0
@@ -297,30 +363,31 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
 
   # get MoE routed bias term updates
   moe_bias_updates = None
+  mtp_moe_bias_updates = None
   if config.routed_bias and config.routed_bias_update_rate > 0.0:
     if isinstance(model, nn.Module):
       nested_key = ("intermediates", "decoder", "moe_layers", "moe_bias_updates")
       moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
     else:
-      # NNX intermediates are model-rooted (no "intermediates" prefix), so match by
-      # suffix instead. Unlike collect_intermediates_by_suffix we must not ravel:
-      # the update is a 2-D matrix that's transposed at the apply site below.
-      moe_bias_updates = next(
-          (
-              val
-              for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs)
-              if tuple(k.key for k in path if hasattr(k, "key"))[-1:] == ("moe_bias_updates",)
-          ),
-          None,
-      )
-      if moe_bias_updates is not None:
-        # The Linen path returns the sow tuple and indexes [0] downstream; tree_leaves
-        # already descended that tuple, so wrap it back so the apply site is uniform.
-        moe_bias_updates = (moe_bias_updates,)
+      # NNX intermediates are model-rooted (no "intermediates" prefix),
+      # so match by suffix instead. Unlike collect_intermediates_by_suffix
+      # we must not ravel: the decoder update is a 2-D matrix that's
+      # transposed and MTP update is 1-D matrix.
+      for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
+        keys = tuple(k.key for k in path if hasattr(k, "key"))
+        if not keys or keys[-1] != "moe_bias_updates":
+          continue
+        if "decoder" in keys:
+          moe_bias_updates = (val,)
+        elif "mtp_block" in keys:
+          if mtp_moe_bias_updates is None:
+            mtp_moe_bias_updates = []
+          mtp_moe_bias_updates.append(val)
 
   # Add the model's primary output to the intermediates dict so it can be used
   # by the acceptance rate calculation in eval_step.
-  intermediate_outputs["logits"] = logits
+  if not is_train and config.mtp_eval_target_module > 0:
+    intermediate_outputs["logits"] = logits
 
   aux = {
       "intermediate_outputs": intermediate_outputs,
@@ -330,10 +397,21 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "moe_lb_loss": moe_lb_loss,
       "indexer_loss": indexer_loss,
       "moe_bias_updates": moe_bias_updates,
+      "mtp_moe_bias_updates": mtp_moe_bias_updates,
       "mtp_loss": mtp_loss,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
   return loss, aux
+
+
+def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
+  """Finds the router gate bias parameter in a module graph."""
+  if module is None:
+    return None
+  for _, node in nnx.iter_graph(module):
+    if type(node).__name__ == "GateLogit" and hasattr(node, "bias") and node.bias is not None:
+      return node.bias
+  return None
 
 
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
@@ -352,6 +430,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     new_state: Updated Linen TrainState or NNX pure State.
     metrics: Dictionary of model metrics such as loss, training rate, etc.
   """
+  # pylint: disable=too-many-nested-blocks
   # --- Per-path initialization ---
   if isinstance(model, nn.Module):
     params = state.params
@@ -465,8 +544,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   indexer_loss = aux.get("indexer_loss", 0.0)
   z_loss = aux.get("z_loss", 0.0)
   moe_bias_updates = aux.get("moe_bias_updates")
+  mtp_moe_bias_updates = aux.get("mtp_moe_bias_updates")
   mtp_loss = aux.get("mtp_loss", 0.0)
   new_opt_state = None
+  bias_metrics = {}
 
   if isinstance(model, nn.Module):
     if config.gradient_clipping_threshold > 0:
@@ -556,9 +637,52 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     new_state = state
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
-    if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
-      target_bias = new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
-      target_bias.value = target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
+    # pylint: disable=too-many-nested-blocks
+    if config.routed_bias and config.routed_bias_update_rate > 0.0:
+      if getattr(config, "model_name", "").startswith("deepseek4"):
+        max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
+        flat_intermediates = traverse_util.flatten_dict(aux.get("intermediate_outputs", {}))
+        for path, update in flat_intermediates.items():
+          if path[-1] != "moe_bias_updates":
+            continue
+          target = new_state.model
+          prefix = path[1:-1] if path[0] == "intermediates" else path[:-1]
+          for key in prefix:
+            if hasattr(target, key):
+              target = getattr(target, key)
+            elif isinstance(target, dict) and key in target:
+              target = target[key]
+            else:
+              target = None
+              break
+          if target is None:
+            continue
+          for _, node in nnx.iter_graph(target):
+            if type(node).__name__ == "GateLogit" and hasattr(node, "bias") and node.bias is not None:
+              update_val = update[0] if isinstance(update, (tuple, list)) else update
+              name_prefix = "-".join(map(str, prefix))
+              if getattr(config, "log_moe_bias_norms", False):
+                bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(node.bias.value)
+              node.bias.value = node.bias.value + jnp.array(update_val)
+              if getattr(config, "log_moe_bias_norms", False):
+                bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
+      else:
+        # 1. Update main decoder scanned MoE layers.
+        # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
+        decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
+        decoder_bias = _find_gate_bias(decoder_layer)
+        if decoder_bias is not None:
+          decoder_bias.value = decoder_bias.value + jnp.array(moe_bias_updates[0]).transpose()
+
+        # 2. Update auxiliary MTP MoE layers (if enabled).
+        # Unlike the main decoder, each MTP layer is an individual un-scanned layer
+        # with a 1D bias of shape (num_experts,).
+        if mtp_moe_bias_updates is not None and hasattr(new_state.model, "mtp_block"):
+          for i, update in enumerate(mtp_moe_bias_updates):
+            mtp_layer = getattr(new_state.model.mtp_block, f"mtp_layer_{i + 1}", None)
+            mtp_bias = _find_gate_bias(mtp_layer)
+            if mtp_bias is not None:
+              mtp_bias.value = mtp_bias.value + jnp.array(update)
 
   lm_loss = xent_sum / (total_weights + EPS)
   scalar_metrics = {
@@ -571,6 +695,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
+  scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
     if isinstance(model, nn.Module):
       new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)
@@ -943,9 +1068,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  # TF allocates extraneous GPU memory when using TFDS data
-  # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
-  tf.config.set_visible_devices([], "GPU")
+  if _TF_AVAILABLE:
+    # TF allocates extraneous GPU memory when using TFDS data
+    # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
+    tf.config.set_visible_devices([], "GPU")
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
@@ -962,7 +1088,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.use_te_comm_gemm_overlap:
+  if config.te_comm_gemm_overlap != TeCommGemmOverlapPolicy.DISABLED:
     max_utils.bootstrap_transformer_engine_cgemm(config)
 
   # Create the Goodput recorder

@@ -86,6 +86,8 @@ def maybe_shard_with_name(
   """
   if inputs is None:
     return None
+  if hasattr(inputs, "ndim"):
+    named_sharding = truncate_out_sharding(named_sharding, inputs.ndim)
   if (
       isinstance(named_sharding, NamedSharding)
       and hasattr(inputs, "shape")
@@ -128,8 +130,15 @@ def maybe_shard_with_name(
 
 
 def maybe_shard_with_pspec(
-    inputs, pspec: jax.sharding.PartitionSpec | None, mesh, shard_mode, debug_sharding=False, extra_stack_level=0
+    inputs,
+    pspec: jax.sharding.PartitionSpec | None,
+    mesh,
+    shard_mode,
+    debug_sharding=False,
+    extra_stack_level=0,
+    logical_axes=None,
 ):
+  """Apply a physical sharding constraint while preserving logical-axis debug metadata."""
   if pspec is None:
     return None
   sharding = NamedSharding(mesh, pspec)
@@ -139,6 +148,7 @@ def maybe_shard_with_pspec(
       shard_mode=shard_mode,
       debug_sharding=debug_sharding,
       extra_stack_level=extra_stack_level + 1,
+      logical_axes=logical_axes,
   )
 
 
@@ -188,6 +198,40 @@ def remove_size_one_mesh_axis(spec, mesh):
     else:
       new_spec.append(None if mesh.shape.get(s, 1) == 1 else s)  # type: ignore
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
+
+
+def mesh_axes_for_dim(axis_names):
+  """Returns the mesh axes attached to one tensor dimension."""
+  if axis_names is None:
+    return ()
+  if isinstance(axis_names, str):
+    return (axis_names,)
+  return tuple(axis for axis in axis_names if axis is not None)
+
+
+def mesh_axes_size(mesh, axes, *, label):
+  """Returns the product of mesh sizes for a set of axes."""
+  size = 1
+  for axis in axes:
+    if axis not in mesh.shape:
+      raise ValueError(f"{label} requires mesh axis {axis!r} to exist.")
+    size *= mesh.shape[axis]
+  return size
+
+
+def with_axis_on_dim(axis_names, axis, dim):
+  """Returns sharding axis names with one dimension replaced."""
+  if axis_names is None:
+    return None
+  if dim >= len(axis_names):
+    raise ValueError(f"Dimension {dim} is out of range for sharding axis names {axis_names}.")
+  axes = list(axis_names)
+  axes[dim] = axis
+  if isinstance(axis_names, P):
+    return P(*axes, unreduced=axis_names.unreduced, reduced=axis_names.reduced)
+  if isinstance(axis_names, tuple):
+    return tuple(axes)
+  return axes
 
 
 def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -> P:
@@ -348,6 +392,25 @@ def create_sharding(mesh, logical_names, rules=None):
   return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
 
 
+def truncate_out_sharding(out_sharding, out_ndim: int):
+  """Truncates out_sharding if tensor ndim is less than out_sharding pspec length."""
+  if out_sharding is None:
+    return None
+  if isinstance(out_sharding, NamedSharding):
+    if len(out_sharding.spec) > out_ndim:
+      return NamedSharding(
+          out_sharding.mesh,
+          P(*out_sharding.spec[:out_ndim]),
+      )
+  elif isinstance(out_sharding, P):
+    if len(out_sharding) > out_ndim:
+      return P(*out_sharding[:out_ndim])
+  elif isinstance(out_sharding, (tuple, list)):
+    if len(out_sharding) > out_ndim:
+      return tuple(out_sharding[:out_ndim])
+  return out_sharding
+
+
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
   """
   Extracts the set of mesh axis names that a tensor's PartitionSpec uses.
@@ -397,6 +460,7 @@ def _get_nontrival_mesh_axes(mesh):
       "fsdp_transpose",
       "sequence",
       "context",
+      "context_usp_ulysses",
       "context_autoregressive",
       "tensor",
       "tensor_sequence",
@@ -580,6 +644,18 @@ def add_data_to_sharding(mesh, path, aval, sharding):
   """
   if not isinstance(sharding, jax.sharding.NamedSharding):
     raise AssertionError(f"Expected NamedSharding, found {sharding} of {type(sharding)=} at {jax.tree_util.keystr(path)}")
+
+  pspec = sharding.spec
+  if len(pspec) != len(aval.shape):
+    if len(pspec) > len(aval.shape):
+      if "local_layers" in pspec and len(pspec) - 1 == len(aval.shape):
+        pspec = tuple(axis for axis in pspec if axis != "local_layers")
+      else:
+        pspec = pspec[: len(aval.shape)]
+    else:
+      pspec = tuple(pspec) + (None,) * (len(aval.shape) - len(pspec))
+    sharding = jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*pspec))
+
   try:
     sharded_shape = sharding.shard_shape(aval.shape)
   except Exception as e:
@@ -908,6 +984,79 @@ def remove_mesh_axes_from_partition_spec(pspec, axes_to_remove, dims=None):
     else:
       raise ValueError(f"Unsupported axis type: {type(axis)}")
   return jax.sharding.PartitionSpec(*new_spec)
+
+
+def remove_incompatible_mesh_axes_from_partition_spec(
+    pspec,
+    shape,
+    mesh,
+    dims=None,
+    *,
+    allow_remove_axes=False,
+):
+  """Replicate tensor dimensions that cannot be evenly sharded by their mesh axes.
+
+  `shard_map` requires every tensor dimension to be evenly divisible by the
+  product of the mesh axes assigned to that dimension. By default, an
+  incompatible specification raises an error. Callers that can safely
+  replicate the checked dimension may opt into removing its mesh axes.
+
+  Args:
+    pspec: Physical PartitionSpec to make compatible with `shape`.
+    shape: Global tensor shape described by `pspec`.
+    mesh: Device mesh containing the physical axes referenced by `pspec`.
+    dims: Dim indices to check; `None` (the default) checks every dim. Negative
+      indices follow normal Python indexing rules.
+    allow_remove_axes: Whether an incompatible checked dimension may be
+      replicated by removing its assigned mesh axes. Defaults to `False` so a
+      sharding configuration cannot silently fall back.
+
+  Returns:
+    A PartitionSpec whose checked dimensions are evenly shardable.
+  """
+  if len(pspec) > len(shape):
+    raise ValueError(f"PartitionSpec rank {len(pspec)} exceeds tensor rank {len(shape)}")
+
+  if dims is None:
+    dims_to_check = None
+  else:
+    rank = len(shape)
+    dims_to_check = set()
+    for dim in dims:
+      normalized_dim = dim + rank if dim < 0 else dim
+      if normalized_dim < 0 or normalized_dim >= rank:
+        raise ValueError(f"Dimension index {dim} is out of bounds for tensor rank {rank}")
+      dims_to_check.add(normalized_dim)
+
+  compatible_pspec = pspec
+  for dim, (dim_size, partition) in enumerate(zip(shape, pspec)):
+    if (dims_to_check is not None and dim not in dims_to_check) or partition is None or partition == P.UNCONSTRAINED:
+      continue
+
+    if isinstance(partition, str):
+      mesh_axes = (partition,)
+    elif isinstance(partition, (list, tuple)):
+      mesh_axes = tuple(partition)
+    else:
+      raise ValueError(f"Unsupported axis type: {type(partition)}")
+
+    shard_count = 1
+    for mesh_axis in mesh_axes:
+      shard_count *= mesh.shape[mesh_axis]
+    if dim_size % shard_count:
+      if not allow_remove_axes:
+        raise ValueError(
+            f"Tensor dimension {dim} with size {dim_size} is not evenly divisible by "
+            f"{shard_count} shards from mesh axes {mesh_axes}. Pass "
+            "allow_remove_axes=True only when replicating this dimension is safe."
+        )
+      compatible_pspec = remove_mesh_axes_from_partition_spec(
+          compatible_pspec,
+          mesh_axes,
+          dims=(dim,),
+      )
+
+  return compatible_pspec
 
 
 def remove_mesh_axes_from_sharding(sharding_tree, axes_to_remove):

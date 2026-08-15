@@ -79,6 +79,10 @@ jobs:
             image_name: maxtext_jax_nightly
           - test_type: post_training
             image_name: maxtext_post_training_nightly
+          - test_type: pre_training
+            image_name: maxtext_jax_stable
+          - test_type: post_training
+            image_name: maxtext_post_training_stable
     steps:
       - name: Configure Docker
         if: ${{ github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type }}
