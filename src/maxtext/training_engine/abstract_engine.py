@@ -126,11 +126,15 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def with_loss_fn(self, customized_fn: Callable[..., Any]) -> None:
+  def with_loss_fn(self, customized_fn: Callable[..., Any], has_aux: bool = False) -> "AbstractTrainingEngine":
     """Updates the trainer's loss function.
 
     Args:
       customized_fn: Custom loss function callable.
+      has_aux: Whether `customized_fn` returns auxiliary output alongside the loss.
+
+    Returns:
+      self, for chaining.
     """
 
   @abc.abstractmethod
@@ -156,18 +160,26 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: TrainerPayload) -> None:
+  def fwd_bwd(self, payload: TrainerPayload, **kwargs: Any) -> None:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
 
     Args:
       payload: Packed micro-batch payload for training.
+      **kwargs: Implementation-specific options.
     """
 
   @abc.abstractmethod
-  def update(self) -> None:
-    """Executes a model weight update step using accumulated gradients."""
+  def update(self, **kwargs: Any) -> int:
+    """Executes a model weight update step using accumulated gradients.
+
+    Args:
+      **kwargs: Implementation-specific options.
+
+    Returns:
+      The train step count after the update.
+    """
 
   @abc.abstractmethod
   def eval_step(self, payload: TrainerPayload, **kwargs: Any) -> None:

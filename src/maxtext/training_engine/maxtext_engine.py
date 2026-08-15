@@ -87,6 +87,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._mesh = mesh
     self._init_rng = jax.random.PRNGKey(training_config.init_weights_seed)
     self._loss_fn: Callable[..., Any] | None = None
+    # Defaults to True so the built-in `maxtext_train.loss_fn` -- which returns
+    # `(loss, aux)` with real aux and is used whenever `with_loss_fn` is never called --
+    # keeps recording its aux metrics. `with_loss_fn` overrides this per its own default.
+    self._has_aux: bool = True
     self._gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = None
     self._compiled = False
     if not training_config.model_name:
@@ -194,14 +198,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Returns True if accumulated gradients are present."""
     return self._accumulated_grads is not None
 
-  def with_loss_fn(self, customized_fn: Callable[..., Any]) -> None:
+  def with_loss_fn(self, customized_fn: Callable[..., Any], has_aux: bool = False) -> "MaxTextTrainingEngine":
     """Overrides the default autoregressive loss function with a custom RL loss.
 
     Args:
       customized_fn: Custom loss callable matching the MaxText loss signature.
+      has_aux: Whether `customized_fn` returns auxiliary output alongside the loss, i.e.
+        the `(loss, aux)` tuple form. When False, an aux returned that way is not recorded
+        as metrics -- though it is still read when the primary loss must be derived from
+        its `xent_sum`/`total_weights`. Structured returns (`LossOutput`, `WeightedMetric`)
+        carry their aux intrinsically rather than alongside, so they are unaffected.
+
+    Returns:
+      self, for chaining.
     """
     self._loss_fn = customized_fn
+    self._has_aux = has_aux
     self._compiled = False
+    return self
 
   def with_gen_model_input_fn(self, gen_model_input_fn: Callable[[Any], dict[str, Any]]) -> "MaxTextTrainingEngine":
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
@@ -241,9 +255,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
               "WeightedMetric, or second element to be a dict containing 'xent_sum' and 'total_weights'."
           )
 
+        # `has_aux=False` means the caller does not consider the second element to be
+        # auxiliary output, so it is not recorded -- even though it may have been read
+        # above to build `primary_loss`.
         loss_out = abstract_engine.LossOutput(
             primary_loss=primary_loss,
-            aux_metrics=aux if isinstance(aux, dict) else {},
+            aux_metrics=aux if (self._has_aux and isinstance(aux, dict)) else {},
         )
         return primary_loss.unreduced_sum, (loss_out, new_r)
       else:
@@ -367,11 +384,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     )
     self._compiled = True
 
-  def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> None:
+  def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
 
     Args:
       payload: Packed micro-batch training input.
+      **kwargs: Implementation-specific options, accepted for interface compatibility
+        and ignored by this engine.
     """
     if self._gen_model_input_fn is not None:
       batch = self._gen_model_input_fn(payload)
@@ -418,13 +437,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._accumulated_grads = jax.tree.map(jnp.add, self._accumulated_grads, micro_grads)
     self._micro_step_count += 1
 
-  def update(self) -> None:
+  def update(self, **kwargs: Any) -> int:
     """Applies accumulated gradients to update NNX model weights in HBM.
 
     Reuses NNX optimizer step from train.py (lines 511-535).
+
+    Args:
+      **kwargs: Implementation-specific options, accepted for interface compatibility
+        and ignored by this engine.
+
+    Returns:
+      The train step count after this update. Unchanged when there is nothing to apply.
     """
     if self._accumulated_grads is None:
-      return
+      return self.train_step
 
     if self._learning_rate_schedule is not None:
       lr = self._learning_rate_schedule(self.train_step)
@@ -469,6 +495,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_grads = None
     self._micro_step_count = 0
     self._train_step += 1
+    return self.train_step
 
   def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     """Executes an evaluation step on the given payload.

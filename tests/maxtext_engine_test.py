@@ -459,7 +459,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
           "total_weights": denominator,
       }
 
-    t.with_loss_fn(custom_loss)
+    t.with_loss_fn(custom_loss, has_aux=True)
     t.fwd_bwd(payload)
 
     # Check that grad is scaled by 1/4.0
@@ -467,6 +467,70 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     metrics = t.get_metrics(clear_cache=True)
     self.assertIn("loss", metrics[0].weighted_metrics)
     self.assertIn("aux_stat", metrics[0].scalar_metrics)
+
+  def test_has_aux_false_drops_tuple_aux(self):
+    """`has_aux=False` suppresses aux recording; `has_aux=True` keeps it.
+
+    Both directions are asserted deliberately: checking only the `True` case would let
+    an implementation that accepts the flag and ignores it pass.
+    """
+
+    def custom_loss(model, *args, **kwargs):
+      unreduced_sum = jnp.sum(model.weights[...]) * 8.0
+      denominator = jnp.array(4.0)
+      return unreduced_sum / denominator, {
+          "aux_stat": jnp.array(1.23),
+          "xent_sum": unreduced_sum,
+          "total_weights": denominator,
+      }
+
+    def _run(has_aux):
+      t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+      t.with_loss_fn(custom_loss, has_aux=has_aux)
+      t.fwd_bwd(DummyPayload())
+      return t.get_metrics(clear_cache=True)[0]
+
+    recorded = _run(has_aux=True)
+    self.assertIn("aux_stat", recorded.scalar_metrics)
+
+    dropped = _run(has_aux=False)
+    self.assertNotIn("aux_stat", dropped.scalar_metrics)
+    # The primary loss is still derived from xent_sum/total_weights in the aux, so
+    # suppressing the aux must not suppress the loss itself.
+    self.assertIn("loss", dropped.weighted_metrics)
+    self.assertAlmostEqual(float(dropped.weighted_metrics["loss"].compute().item()), 6.0, places=4)
+
+  def test_default_loss_fn_records_aux_without_with_loss_fn(self):
+    """An engine that never calls `with_loss_fn` still records the built-in loss's aux.
+
+    The default `maxtext_train.loss_fn` returns `(loss, aux)`, and the parity harness
+    relies on those aux metrics. If `_has_aux` defaulted to `with_loss_fn`'s own default
+    of False, they would vanish silently.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    self.assertTrue(t._has_aux)
+
+  def test_signatures_match_the_tunix_trainer_contract(self):
+    """`with_loss_fn` returns self, `fwd_bwd` takes kwargs, `update` returns train_step."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    returned = t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    self.assertIs(returned, t)
+
+    # Unknown kwargs are accepted and ignored rather than raising.
+    t.fwd_bwd(DummyPayload(), skip_jit=False)
+    step = t.update(skip_jit=False)
+    self.assertIsInstance(step, int)
+    self.assertEqual(step, t.train_step)
+    self.assertEqual(step, 1)
+
+    # With nothing accumulated, update() is a no-op that still reports the current step.
+    self.assertEqual(t.update(), 1)
 
   def test_fwd_bwd_with_bare_weighted_metric(self):
     """A loss may return a bare WeightedMetric, carrying no aux metrics."""
