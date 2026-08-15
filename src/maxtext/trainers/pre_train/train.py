@@ -363,30 +363,31 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
 
   # get MoE routed bias term updates
   moe_bias_updates = None
+  mtp_moe_bias_updates = None
   if config.routed_bias and config.routed_bias_update_rate > 0.0:
     if isinstance(model, nn.Module):
       nested_key = ("intermediates", "decoder", "moe_layers", "moe_bias_updates")
       moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
     else:
-      # NNX intermediates are model-rooted (no "intermediates" prefix), so match by
-      # suffix instead. Unlike collect_intermediates_by_suffix we must not ravel:
-      # the update is a 2-D matrix that's transposed at the apply site below.
-      moe_bias_updates = next(
-          (
-              val
-              for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs)
-              if tuple(k.key for k in path if hasattr(k, "key"))[-1:] == ("moe_bias_updates",)
-          ),
-          None,
-      )
-      if moe_bias_updates is not None:
-        # The Linen path returns the sow tuple and indexes [0] downstream; tree_leaves
-        # already descended that tuple, so wrap it back so the apply site is uniform.
-        moe_bias_updates = (moe_bias_updates,)
+      # NNX intermediates are model-rooted (no "intermediates" prefix),
+      # so match by suffix instead. Unlike collect_intermediates_by_suffix
+      # we must not ravel: the decoder update is a 2-D matrix that's
+      # transposed and MTP update is 1-D matrix.
+      for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
+        keys = tuple(k.key for k in path if hasattr(k, "key"))
+        if not keys or keys[-1] != "moe_bias_updates":
+          continue
+        if "decoder" in keys:
+          moe_bias_updates = (val,)
+        elif "mtp_block" in keys:
+          if mtp_moe_bias_updates is None:
+            mtp_moe_bias_updates = []
+          mtp_moe_bias_updates.append(val)
 
   # Add the model's primary output to the intermediates dict so it can be used
   # by the acceptance rate calculation in eval_step.
-  intermediate_outputs["logits"] = logits
+  if not is_train and config.mtp_eval_target_module > 0:
+    intermediate_outputs["logits"] = logits
 
   aux = {
       "intermediate_outputs": intermediate_outputs,
@@ -396,10 +397,21 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "moe_lb_loss": moe_lb_loss,
       "indexer_loss": indexer_loss,
       "moe_bias_updates": moe_bias_updates,
+      "mtp_moe_bias_updates": mtp_moe_bias_updates,
       "mtp_loss": mtp_loss,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
   return loss, aux
+
+
+def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
+  """Finds the router gate bias parameter in a module graph."""
+  if module is None:
+    return None
+  for _, node in nnx.iter_graph(module):
+    if type(node).__name__ == "GateLogit" and hasattr(node, "bias") and node.bias is not None:
+      return node.bias
+  return None
 
 
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
@@ -532,6 +544,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   indexer_loss = aux.get("indexer_loss", 0.0)
   z_loss = aux.get("z_loss", 0.0)
   moe_bias_updates = aux.get("moe_bias_updates")
+  mtp_moe_bias_updates = aux.get("mtp_moe_bias_updates")
   mtp_loss = aux.get("mtp_loss", 0.0)
   new_opt_state = None
   bias_metrics = {}
@@ -626,7 +639,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
     # pylint: disable=too-many-nested-blocks
     if config.routed_bias and config.routed_bias_update_rate > 0.0:
-      if config.model_name.startswith("deepseek4"):
+      if getattr(config, "model_name", "").startswith("deepseek4"):
         max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
         flat_intermediates = traverse_util.flatten_dict(aux.get("intermediate_outputs", {}))
         for path, update in flat_intermediates.items():
@@ -653,9 +666,23 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
               node.bias.value = node.bias.value + jnp.array(update_val)
               if getattr(config, "log_moe_bias_norms", False):
                 bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
-      elif moe_bias_updates is not None:
-        target_bias = new_state.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
-        target_bias.value = target_bias.value + jnp.array(moe_bias_updates[0]).transpose()
+      else:
+        # 1. Update main decoder scanned MoE layers.
+        # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
+        decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
+        decoder_bias = _find_gate_bias(decoder_layer)
+        if decoder_bias is not None:
+          decoder_bias.value = decoder_bias.value + jnp.array(moe_bias_updates[0]).transpose()
+
+        # 2. Update auxiliary MTP MoE layers (if enabled).
+        # Unlike the main decoder, each MTP layer is an individual un-scanned layer
+        # with a 1D bias of shape (num_experts,).
+        if mtp_moe_bias_updates is not None and hasattr(new_state.model, "mtp_block"):
+          for i, update in enumerate(mtp_moe_bias_updates):
+            mtp_layer = getattr(new_state.model.mtp_block, f"mtp_layer_{i + 1}", None)
+            mtp_bias = _find_gate_bias(mtp_layer)
+            if mtp_bias is not None:
+              mtp_bias.value = mtp_bias.value + jnp.array(update)
 
   lm_loss = xent_sum / (total_weights + EPS)
   scalar_metrics = {
