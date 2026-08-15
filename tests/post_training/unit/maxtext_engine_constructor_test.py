@@ -68,11 +68,19 @@ def _tiny_config(**overrides) -> pyconfig.HyperParameters:
       # assertion, and use a large LR so the delta is unmistakable.
       "warmup_steps_fraction=0.0",
       "learning_rate=1e-2",
-      # Tiny model, matching the sizing the parity suite uses for model_name=default.
+      # Tiny model. These have to be the `base_*` names: emb_dim, mlp_dim and
+      # micro_batch_size_to_train_on are *derived* (from base_emb_dim, base_mlp_dim and
+      # per_device_batch_size), so assigning them directly is silently discarded and
+      # leaves the full 2048 x 7168 x 16-layer default -- roughly 900MB of parameters,
+      # which cost this test ~5 minutes and ~2.4GB of checkpoint per run.
       "vocab_size=8",
-      "emb_dim=4",
-      "mlp_dim=8",
-      "micro_batch_size_to_train_on=2",
+      "base_emb_dim=8",
+      "base_mlp_dim=16",
+      "base_num_decoder_layers=2",
+      "base_num_query_heads=2",
+      "base_num_kv_heads=2",
+      "head_dim=4",
+      "per_device_batch_size=1",
       "max_target_length=4",
   ]
   argv.extend(f"{k}={v}" for k, v in overrides.items())
