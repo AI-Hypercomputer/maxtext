@@ -41,6 +41,9 @@ import numpy as np
 import pytest
 from tests.utils.test_helpers import get_test_config_path
 
+# training_engine imports tunix, so these tests need the post-training dependency bundle.
+pytestmark = [pytest.mark.post_training]
+
 
 def _tiny_config(**overrides) -> pyconfig.HyperParameters:
   """A deliberately tiny real config: no checkpoint to load, no HF fetch."""

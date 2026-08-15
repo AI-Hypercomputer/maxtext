@@ -31,7 +31,13 @@ from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+import pytest
+from tunix.experimental.common import datatypes
+from tunix.experimental.train import abstract_trainer
 from tunix.sft import utils as sft_utils
+
+# training_engine imports tunix, so these tests need the post-training dependency bundle.
+pytestmark = [pytest.mark.post_training]
 
 
 class DummyNNXModel(nnx.Module):
@@ -468,6 +474,100 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     metrics = t.get_metrics(clear_cache=True)
     self.assertIn("loss", metrics.weighted_metrics)
     self.assertIn("aux_stat", metrics.scalar_metrics)
+
+  def test_conforms_to_tunix_abstract_trainer(self):
+    """Every method Tunix's AbstractTrainer requires exists on the engine.
+
+    MaxText deliberately does not inherit that ABC: adding an abstractmethod upstream
+    would then break construction at runtime, in production, on a version bump. This test
+    buys the same drift detection and reports it as a failing test instead.
+
+    It must iterate `__abstractmethods__` rather than list today's names -- a hard-coded
+    list would never notice the additions this exists to catch.
+    """
+    required = abstract_trainer.AbstractTrainer.__abstractmethods__
+    self.assertNotEmpty(required)
+    missing = [name for name in required if not hasattr(maxtext_engine.MaxTextTrainingEngine, name)]
+    self.assertEmpty(
+        missing,
+        f"MaxTextTrainingEngine is missing {missing}, required by tunix's AbstractTrainer. "
+        "Implement them, or record why the divergence is intended.",
+    )
+
+  def test_shared_types_are_tunix_classes(self):
+    """The engine's data types are Tunix's own, which is what makes a Tunix loss work.
+
+    A same-named local copy would make every isinstance check in diff_wrapper miss and
+    surface as "Unsupported return type from loss function".
+    """
+    self.assertIs(abstract_engine.LossOutput, sft_utils.LossOutput)
+    self.assertIs(abstract_engine.WeightedMetric, sft_utils.WeightedMetric)
+    self.assertIs(abstract_engine.TrainerPayload, datatypes.TrainerPayload)
+
+    tunix_metric = sft_utils.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0))
+    self.assertIsInstance(tunix_metric, abstract_engine.WeightedMetric)
+    self.assertIsInstance(
+        sft_utils.LossOutput(primary_loss=tunix_metric, aux_metrics={}), abstract_engine.LossOutput
+    )
+
+    # Must be the sft.utils class, not the same-named one in tunix.experimental.metrics
+    # whose compute()/compute_scale() raise NotImplementedError -- importing that one
+    # would break gradient scaling at runtime rather than at import.
+    self.assertEqual(float(tunix_metric.compute()), 2.0)
+
+    # What actually arrives at fwd_bwd from GRPOAdapter.create_trainer_payloads.
+    rl_payload = datatypes.RLTrainerPayload(
+        token_ids=jnp.zeros((1, 4)),
+        token_mask=jnp.ones((1, 4)),
+        advantages=jnp.zeros((1,)),
+        loss_mask=jnp.ones((1, 4)),
+    )
+    self.assertIsInstance(rl_payload, abstract_engine.TrainerPayload)
+
+  def test_unsupported_loss_return_raises_naming_the_type(self):
+    """An unrecognised return fails loudly and says what it received."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(lambda *args, **kwargs: "not a loss")
+    with self.assertRaisesRegex(TypeError, "Unsupported return type.*str"):
+      t.fwd_bwd(DummyPayload())
+
+    # A 2-tuple is recognised in shape but not constructible into a WeightedMetric.
+    t2 = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t2.with_loss_fn(lambda *args, **kwargs: (jnp.array(1.0), {"unrelated": jnp.array(2.0)}))
+    with self.assertRaisesRegex(TypeError, "Cannot construct WeightedMetric"):
+      t2.fwd_bwd(DummyPayload())
+
+  def test_mixed_aux_dict_buckets_by_type(self):
+    """WeightedMetric aux lands in weighted_metrics, plain arrays in scalar_metrics.
+
+    Regression guard on MetricsRecorder._record_metric: reading a weighted loss out of
+    scalar_metrics is what produced a fabricated 0.0 in the parity harness.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    def _loss_fn(model, *args, **kwargs):
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(
+              unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+          ),
+          aux_metrics={
+              "kl": sft_utils.WeightedMetric(unreduced_sum=jnp.array(6.0), denominator=jnp.array(3.0)),
+              "entropy": jnp.array(1.5),
+          },
+      )
+
+    t.with_loss_fn(_loss_fn)
+    t.fwd_bwd(DummyPayload())
+    buf = t.get_metrics(clear_cache=True)
+
+    self.assertIn("kl", buf.weighted_metrics)
+    self.assertIn("entropy", buf.scalar_metrics)
+    self.assertNotIn("kl", buf.scalar_metrics)
+    self.assertNotIn("entropy", buf.weighted_metrics)
+    self.assertAlmostEqual(float(buf.weighted_metrics["kl"].compute().item()), 2.0, places=4)
+    # The primary loss is weighted, not scalar -- the specific confusion behind that 0.0.
+    self.assertIn("loss", buf.weighted_metrics)
+    self.assertNotIn("loss", buf.scalar_metrics)
 
   def test_eval_step_warns_once_and_mutates_no_state(self):
     """eval_step is an unimplemented no-op, but an audible one, and it disturbs nothing.

@@ -31,6 +31,9 @@ from tests.utils.test_helpers import get_test_config_path
 import optax
 import pytest
 
+# training_engine imports tunix, so these tests need the post-training dependency bundle.
+pytestmark = [pytest.mark.post_training]
+
 
 class DummyNNXModel(nnx.Module):
   """Dummy NNX model for testing."""
