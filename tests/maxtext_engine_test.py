@@ -469,6 +469,39 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("loss", metrics.weighted_metrics)
     self.assertIn("aux_stat", metrics.scalar_metrics)
 
+  def test_eval_step_warns_once_and_mutates_no_state(self):
+    """eval_step is an unimplemented no-op, but an audible one, and it disturbs nothing.
+
+    `AbstractTrainer.eval_step` forbids mutating trainer state, so this asserts against a
+    populated engine -- gradients accumulated and a micro step counted -- rather than a
+    fresh one, where "unchanged" would be trivially true.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    t.fwd_bwd(DummyPayload())
+
+    grads_before = jax.tree.map(jnp.copy, t._accumulated_grads)
+    micro_steps_before = t._micro_step_count
+    train_step_before = t.train_step
+    self.assertEqual(micro_steps_before, 1)
+
+    with self.assertLogs(level="WARNING") as logs:
+      t.eval_step(DummyPayload())
+      t.eval_step(DummyPayload())
+      t.eval_step(DummyPayload())
+
+    eval_warnings = [line for line in logs.output if "eval_step is not implemented" in line]
+    self.assertLen(eval_warnings, 1)
+
+    self.assertEqual(t._micro_step_count, micro_steps_before)
+    self.assertEqual(t.train_step, train_step_before)
+    jax.tree.map(np.testing.assert_array_equal, grads_before, t._accumulated_grads)
+
   def test_get_metrics_returns_one_buffer_and_a_sentinel_when_empty(self):
     """`get_metrics` returns a single buffer, matching both ABCs.
 

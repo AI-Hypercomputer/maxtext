@@ -98,6 +98,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # keeps recording its aux metrics. `with_loss_fn` overrides this per its own default.
     self._has_aux: bool = True
     self._gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = None
+    # Tracked per instance rather than via logging.log_first_n, which is process-wide and
+    # would make the warning depend on whether some earlier engine already triggered it.
+    self._eval_step_warned: bool = False
     self._compiled = False
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
@@ -504,12 +507,28 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return self.train_step
 
   def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
-    """Executes an evaluation step on the given payload.
+    """Warns once that evaluation is not implemented, then does nothing.
+
+    A silent no-op lets `TrainerWorker.run_eval` report success having evaluated nothing,
+    so any eval metrics for the run are meaningless rather than absent. Warning makes that
+    audible; warning only once keeps a loop that evaluates every step from flooding the
+    log. Implementing this properly means a forward-only pass plus deciding how eval
+    metrics bucket via `MetricsBuffer.mode`, which is tracked separately.
+
+    Mutates no trainer state -- in particular not `_accumulated_grads` or
+    `_micro_step_count` -- as `AbstractTrainer.eval_step` requires.
 
     Args:
-      payload: Packed micro-batch evaluation input.
-      **kwargs: Additional keyword arguments for evaluation.
+      payload: Packed micro-batch evaluation input. Currently unused.
+      **kwargs: Additional keyword arguments for evaluation. Currently unused.
     """
+    if not self._eval_step_warned:
+      self._eval_step_warned = True
+      logging.warning(
+          "MaxTextTrainingEngine.eval_step is not implemented: it evaluates nothing and "
+          "records no metrics, so any eval result reported for this run is meaningless. "
+          "Logged once per engine instance."
+      )
 
   def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
     """Forces asynchronous Orbax checkpoint serialization.
