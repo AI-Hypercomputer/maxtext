@@ -1211,6 +1211,14 @@ def from_pretrained(
             "Please ensure the checkpoint format matches the scan_layers setting."
         )
 
+    # Gemma-4 vision clipped-linears: fail-closed post-load validation BEFORE the first JIT forward/train.
+    # Asserts exactly 112 clip-state modules / 448 finite, correctly-ordered scalar bounds. A missing/NaN/
+    # unordered bound or wrong module count raises here rather than silently degrading to an identity clamp.
+    if bool(getattr(config, "use_clipped_linears_for_vit", False)) and bool(getattr(config, "use_multimodal", False)):
+      from maxtext.models import gemma4_vision  # pylint: disable=import-outside-toplevel
+      n_proj, n_bounds = gemma4_vision.validate_all_vision_clip_bounds(model)
+      max_logging.log(f"Gemma-4 vision clip validation OK: {n_proj} clip-state modules, {n_bounds} scalar bounds.")
+
     if wrap_with_tunix_adapter:
       with mesh:
         use_no_op_mappings = "maxtext_config" in config.vllm_additional_config

@@ -44,7 +44,8 @@ global_rope_proportion: 0.25
 local_rope_proportion: 1.0
 final_logits_soft_cap: 30.0
 
-# Vision encoder flags — multimodal not yet supported for E2B / E4B.
+# Vision encoder flags. Image (multimodal) parity requires use_clipped_linears_for_vit=true
+# (set at runtime alongside use_multimodal=true); the flags below configure the E2B image contract.
 vision_encoder_block: "gemma4"
 rope_theta_for_vit: 100
 image_size_for_vit: [672, 960]
@@ -58,3 +59,11 @@ num_attention_heads_for_vit: 12
 image_placeholder: "<|image|>"
 vision_output_length: 280
 num_position_embeddings_for_vit: 10240
+# E2B image contract (decoder-side): image spans are causal and the per-layer-embedding path
+# substitutes the pad token for image placeholder rows (matches HF modeling_gemma4).
+use_bidirectional_image_attn: False
+ple_pad_substitute_image_rows: True
+ple_pad_mode: "identity"
+image_placeholder_token_id: 258880
+ple_pad_token_id: 0
+packing: false  # Gemma-4 E2B/E4B multimodal does not support packed image spans (see configs/types.py gate)

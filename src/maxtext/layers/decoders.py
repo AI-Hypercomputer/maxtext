@@ -1680,6 +1680,18 @@ class Decoder(nn.Module):
 
     per_layer_inputs = None
     if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
+      # Fail-closed: the pure-Linen Gemma-4-small decoder does NOT implement the PLE image-row pad
+      # substitution (the HF-faithful mapping of image placeholder rows -> pad in the token-identity PLE
+      # path). That logic lives in the NNX decoder (nnx_decoders._apply_gemma4_small_layers) and is exercised
+      # by the supported enable_nnx=True path. Running E2B/E4B multimodal through this pure-Linen path would
+      # silently diverge on the image-span / post-image logits, so we refuse rather than degrade quietly.
+      if bool(getattr(cfg, "ple_pad_substitute_image_rows", False)) and multimodal_input is not None:
+        raise NotImplementedError(
+            "Gemma-4 E2B/E4B multimodal PLE pad-substitution is only implemented on the NNX decoder path "
+            "(enable_nnx=True, the default). The pure-Linen decoder does not perform the image-row PLE "
+            "substitution and would silently diverge from the HF reference. Set enable_nnx=True (default) to "
+            "run Gemma-4 E2B/E4B multimodal."
+        )
       per_layer_inputs = gemma4_small.PLEToLinen(
           config=cfg,
           mesh=mesh,

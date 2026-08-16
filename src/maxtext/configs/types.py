@@ -2235,6 +2235,47 @@ class MultimodalGeneral(BaseModel):
 
   use_multimodal: bool = Field(False, description="Enable multimodal capabilities.")
   attention_for_vit: str = Field("dot_product", description="The attention algorithm to use for vision encoder.")
+  use_clipped_linears_for_vit: bool = Field(
+      False,
+      description=(
+          "Gemma-4 vision only: apply the per-projection activation clip bounds carried in the reference "
+          "checkpoint (self_attn.{q,k,v,o}_proj and mlp.{gate,up,down}_proj each have scalar "
+          "{input,output}_{min,max}). A prerequisite for Gemma-4 E2B/E4B image parity (necessary but not "
+          "on its own sufficient); no-op for other encoders."
+      ),
+  )
+  use_bidirectional_image_attn: bool = Field(
+      False,
+      description=(
+          "Whether image placeholder tokens attend bidirectionally in the text decoder. Gemma-4 E2B/E4B "
+          "use causal image spans (False); bidirectional-image models (Gemma-3, gemma4-26b/31b) use True."
+      ),
+  )
+  ple_pad_substitute_image_rows: bool = Field(
+      False,
+      description=(
+          "Gemma-4 E2B/E4B per-layer-embedding (PLE) path: substitute ple_pad_token_id for image placeholder "
+          "rows before the per-layer embedder, matching HF modeling_gemma4 (llm_input_ids pad substitution). "
+          "Default False preserves the native PLE for other models."
+      ),
+  )
+  ple_pad_mode: str = Field(
+      "identity",
+      description=(
+          "PLE pad-substitution scope when ple_pad_substitute_image_rows=True. 'identity' (DEFAULT, "
+          "HF-faithful): map image placeholder rows -> pad in the token-identity PLE path only; the context/"
+          "projection path keeps the merged image features (matches HF Transformers 5.9.0 "
+          "Gemma4ForConditionalGeneration, where get_per_layer_inputs ignores inputs_embeds when input_ids is "
+          "provided). 'both': additionally overwrite the context path with the pad embedding — this is "
+          "HF-DIVERGENT and provided only for ablation. Validated as an enum; unknown values hard-fail."
+      ),
+  )
+  image_placeholder_token_id: int = Field(
+      258880, description="Gemma-4 image placeholder token id (GEMMA4_TOKEN_PLACEHOLDER)."
+  )
+  ple_pad_token_id: int = Field(
+      0, description="Pad token id used for PLE image-row substitution (Gemma-4 E2B text_config.pad_token_id=0)."
+  )
   vision_encoder_block: VisionEncoderBlockType = Field(
       VisionEncoderBlockType.NONE,
       description="The style of VisionEncoderBlock to use (e.g., 'gemma3', 'llama4').",
@@ -3833,16 +3874,84 @@ class MaxTextConfig(
           f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
       )
     if self.use_multimodal:
-      # Gemma 4 small (E2B / E4B) only supports text for now; multimodal
-      # support is pending clipped-linears in the vision encoder.
+      # Gemma 4 small (E2B / E4B) multimodal requires the vision-encoder clipped-linears AND the
+      # padded-patch masking / position-threading path; gate on the clipped-linears flag.
+      if self.model_name in ("gemma4-e2b", "gemma4-e4b") and not self.use_clipped_linears_for_vit:
+        raise ValueError(
+            f"Multimodal for {self.model_name} requires use_clipped_linears_for_vit=True "
+            "(the vision encoder ships per-projection activation clip bounds; without them the "
+            "image span diverges). Set use_clipped_linears_for_vit=True to enable image inputs."
+        )
+      # ---- Gemma-4 E2B/E4B multimodal STATIC contract gate (fail-closed) ----
+      # These invariants encode the semantics validated against pinned HF Transformers 5.9.0
+      # (Gemma4ForConditionalGeneration). Any deviation silently corrupts image/post-image logits, so we
+      # refuse to build the model rather than degrade to a wrong-but-runnable path.
       if self.model_name in ("gemma4-e2b", "gemma4-e4b"):
-        raise ValueError(f"Multimodal is not yet supported for {self.model_name}; only text inputs are supported.")
+        # (a) PLE pad-substitution mode must be a known value. HF maps image placeholder tokens -> pad in the
+        #     token-identity PLE path only (the context path keeps the merged image features); that is
+        #     "identity". "both" additionally overwrites the context path, which is HF-DIVERGENT. We keep the
+        #     knob for experimentation but hard-fail unknown/typo values instead of silently defaulting.
+        _valid_ple_modes = ("identity", "both")
+        if str(self.ple_pad_mode) not in _valid_ple_modes:
+          raise ValueError(
+              f"ple_pad_mode='{self.ple_pad_mode}' is not one of {_valid_ple_modes}. "
+              f"For Gemma-4 E2B/E4B the HF-faithful contract is 'identity' (token-identity PLE path maps "
+              f"image rows -> pad; context path keeps merged image features). 'both' is HF-divergent and "
+              f"provided only for ablation. Refusing to run with an unrecognized PLE mode."
+          )
+        # (b) The image placeholder id and PLE pad id are semantic constants tied to the tokenizer/model. We
+        #     require them to be set explicitly (single source of truth: the model yml derived from HF config)
+        #     so a silent hidden default cannot mask a tokenizer mismatch.
+        if self.ple_pad_substitute_image_rows:
+          if int(self.image_placeholder_token_id) < 0:
+            raise ValueError(
+                "image_placeholder_token_id must be a valid non-negative token id when "
+                "ple_pad_substitute_image_rows=True (derive it from the model/tokenizer config)."
+            )
+          if int(self.ple_pad_token_id) < 0:
+            raise ValueError(
+                "ple_pad_token_id must be a valid non-negative token id when "
+                "ple_pad_substitute_image_rows=True (Gemma-4 E2B text_config.pad_token_id=0)."
+            )
+        # (c) Gemma-4 E2B/E4B image spans are CAUSAL. Bidirectional image attention is a Gemma-3 / 26B / 31B
+        #     feature and would change the attention pattern for E2B/E4B.
+        if bool(getattr(self, "use_bidirectional_image_attn", False)):
+          raise ValueError(
+              f"{self.model_name} uses CAUSAL image spans; use_bidirectional_image_attn must be False. "
+              "Bidirectional image attention is for Gemma-3 / gemma4-26b / gemma4-31b."
+          )
+        # (d) The clipped path clamps q/k/v and gate/up/down per-projection; a fused QKV or fused MLP would
+        #     apply a single clamp and silently bypass the per-projection clip semantics. Fail closed here
+        #     (defense in depth alongside the runtime guards in gemma4_vision).
+        if bool(getattr(self, "fused_qkv", False)):
+          raise ValueError(
+              f"{self.model_name} multimodal clipped-linears require fused_qkv=False "
+              "(distinct q/k/v activation clip bounds must be applied per-projection)."
+          )
+        if bool(getattr(self, "fused_mlp", False)):
+          raise ValueError(
+              f"{self.model_name} multimodal clipped-linears require fused_mlp=False "
+              "(distinct gate/up/down activation clip bounds must be applied per-projection)."
+          )
+        # (e) Sequence packing is not supported for Gemma-4 E2B/E4B multimodal in ANY training mode. The stock
+        #     data pipeline does not pack image spans, and packing image-bearing examples together would risk
+        #     cross-document image attention and PLE image-row substitution bleeding across segment boundaries.
+        #     MaxText already forbids packing for multimodal SFT; extend that to every mode for these models
+        #     (fail closed rather than silently produce cross-doc image attention).
+        if bool(getattr(self, "packing", False)):
+          raise ValueError(
+              f"{self.model_name} multimodal does not support sequence packing (packing=True). The stock data "
+              "pipeline does not pack image spans; packing image-bearing examples risks cross-document image "
+              "attention and PLE image-row substitution across segment boundaries. Set packing=False."
+          )
       valid_mm_models = (
           "gemma3-4b",
           "gemma3-12b",
           "gemma3-27b",
           "gemma4-26b",
           "gemma4-31b",
+          "gemma4-e2b",
+          "gemma4-e4b",
           "llama4-17b-16e",
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",

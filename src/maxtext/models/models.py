@@ -129,6 +129,7 @@ class TransformerLinenPure(nn.Module):
       decoder_segment_ids=None,
       encoder_images: None | jnp.ndarray = None,
       encoder_image_masks: None | jnp.ndarray = None,
+      encoder_image_position_ids: None | jnp.ndarray = None,
       encoder_videos: None | jnp.ndarray = None,
       encoder_video_masks: None | jnp.ndarray = None,
       encoder_video_grid_thw: None | jnp.ndarray = None,
@@ -164,17 +165,19 @@ class TransformerLinenPure(nn.Module):
     video_embeddings = None
     audio_embeddings = None
     deepstack_visual_embeds = None
+    vision_image_masks = None
 
     if getattr(self.config, "use_multimodal", False) and encoder_images is not None:
-      image_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
-          input_images=encoder_images, deterministic=not enable_dropout
+      image_embeddings, deepstack_visual_embeds, vision_image_masks = self.vision_encoder(  # pyrefly: ignore[not-callable]
+          input_images=encoder_images, deterministic=not enable_dropout,
+          image_position_ids=encoder_image_position_ids,
       )
       bidirectional_mask_image = mm_processor.get_bidirectional_mask_vision(
           self.config, decoder_input_tokens, is_video=False
       )
 
     if getattr(self.config, "use_multimodal", False) and encoder_videos is not None:
-      video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
+      video_embeddings, deepstack_visual_embeds, _ = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_videos,
           input_masks=encoder_video_masks,
           video_grid_thw=encoder_video_grid_thw,
@@ -197,7 +200,7 @@ class TransformerLinenPure(nn.Module):
     if image_embeddings is not None or video_embeddings is not None or audio_embeddings is not None:
       multimodal_input = MultimodalInput(
           image_embeddings=image_embeddings,
-          image_masks=encoder_image_masks,
+          image_masks=vision_image_masks if vision_image_masks is not None else encoder_image_masks,
           video_embeddings=video_embeddings,
           video_masks=encoder_video_masks,
           audio_embeddings=audio_embeddings,
@@ -449,6 +452,7 @@ class Transformer(nnx.Module):
       cache=None,
       encoder_images: jax.Array | None = None,
       encoder_image_masks: jax.Array | None = None,
+      encoder_image_position_ids: jax.Array | None = None,
       encoder_videos: jax.Array | None = None,
       encoder_video_masks: jax.Array | None = None,
       encoder_video_grid_thw: jax.Array | None = None,
@@ -499,16 +503,18 @@ class Transformer(nnx.Module):
     video_embeddings = None
     audio_embeddings = None
     deepstack_visual_embeds = None
+    vision_image_masks = None
     if getattr(self.config, "use_multimodal", False) and encoder_images is not None:
-      image_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
-          input_images=encoder_images, deterministic=not enable_dropout
+      image_embeddings, deepstack_visual_embeds, vision_image_masks = self.vision_encoder(  # pyrefly: ignore[not-callable]
+          input_images=encoder_images, deterministic=not enable_dropout,
+          image_position_ids=encoder_image_position_ids,
       )
       bidirectional_mask_image = mm_processor.get_bidirectional_mask_vision(
           self.config, decoder_input_tokens, is_video=False
       )
 
     if getattr(self.config, "use_multimodal", False) and encoder_videos is not None:
-      video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
+      video_embeddings, deepstack_visual_embeds, _ = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_videos,
           input_masks=encoder_video_masks,
           video_grid_thw=encoder_video_grid_thw,
@@ -531,7 +537,7 @@ class Transformer(nnx.Module):
     if image_embeddings is not None or video_embeddings is not None or audio_embeddings is not None:
       multimodal_input = MultimodalInput(
           image_embeddings=image_embeddings,
-          image_masks=encoder_image_masks,
+          image_masks=vision_image_masks if vision_image_masks is not None else encoder_image_masks,
           video_embeddings=video_embeddings,
           video_masks=encoder_video_masks,
           audio_embeddings=audio_embeddings,
