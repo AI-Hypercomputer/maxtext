@@ -73,6 +73,15 @@ def _split_static_and_dynamic(batch: Any) -> tuple[Any, dict[str, Any]]:
   whose entries are named keyword arguments. Anything else is MaxText's positional `data`
   and is passed through untouched.
 
+  The split has a consequence worth stating plainly: whatever lands in `static` is
+  **closed over** by the compiled kernel, not passed to it. If a `gen_model_input_fn`
+  returns a different static value on a later call -- a swapped `algo_config`, a pad id
+  that varies by step -- the kernel keeps using the one captured at compile time. That
+  would be a wrong answer with no error and no log line, so `_batch_signature` includes
+  the static half by value and a change forces a recompile. Do not drop it from the
+  signature as a cost saving; the comparison is over a handful of small objects, while the
+  failure it prevents is silent.
+
   Returns:
     `(dynamic, static)`. `static` is empty for non-dict batches.
   """
@@ -91,15 +100,41 @@ def _split_static_and_dynamic(batch: Any) -> tuple[Any, dict[str, Any]]:
   return dynamic, static
 
 
-def _batch_signature(dynamic_batch: Any) -> Any:
-  """Returns a hashable key identifying a batch's jit-relevant structure.
+def _batch_signature(dynamic_batch: Any, static_batch: dict[str, Any]) -> Any:
+  """Returns a key identifying everything a compiled kernel was built against.
 
-  `in_shardings` is baked into the compiled callable, so a batch whose treedef or shapes
-  differ needs a fresh one. Without this the second structure raises a confusing
-  `in_shardings` prefix-mismatch instead of simply recompiling.
+  Two halves, for two different reasons:
+
+  - the traced half by treedef/shape/dtype, because `in_shardings` is baked into the
+    compiled callable, so a batch whose structure differs needs a fresh one. Without this
+    the second structure raises a confusing `in_shardings` prefix-mismatch instead of
+    simply recompiling.
+  - the static half by value, because those are *closed over* by the compiled kernel. A
+    caller that changes one -- a different `algo_config`, a scheduled `pad_id` -- would
+    otherwise keep silently computing against the value captured at compile time.
+
+  Compared with `!=` rather than hashed: the static half holds arbitrary caller objects,
+  and common ones (`types.SimpleNamespace`) define `__eq__` and are therefore unhashable.
   """
   leaves, treedef = jax.tree.flatten(dynamic_batch)
-  return (treedef, tuple((jnp.shape(leaf), jnp.result_type(leaf)) for leaf in leaves))
+  shapes = tuple((jnp.shape(leaf), jnp.result_type(leaf)) for leaf in leaves)
+  return (treedef, shapes, static_batch)
+
+
+def _signature_differs(previous: Any, current: Any) -> bool:
+  """Compares two batch signatures, treating an unanswerable comparison as a difference.
+
+  The static half is arbitrary caller data, so `!=` may raise or return a non-bool (a
+  numpy-style elementwise result). Recompiling is the safe direction to fail: it costs one
+  compilation, whereas reusing a kernel whose closed-over statics are stale is a silently
+  wrong answer.
+  """
+  if previous is None:
+    return True
+  try:
+    return bool(previous != current)
+  except Exception:  # pylint: disable=broad-except
+    return True
 
 
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
@@ -501,7 +536,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         out_shardings=update_out_shardings,
         static_argnums=(2,),
     )
-    self._compiled_signature = _batch_signature(dynamic_batch)
+    self._compiled_signature = _batch_signature(dynamic_batch, static_batch)
     self._compiled = True
 
   def compile(self, dummy_data: abstract_engine.TrainerPayload) -> None:
@@ -558,10 +593,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if self._compile_requested:
       dynamic_batch, static_batch = _split_static_and_dynamic(batch)
-      # `in_shardings` is baked into the compiled callable, so a batch whose structure or
-      # shapes changed needs a new one. Recompiling is the correct response; reusing it
-      # would raise an in_shardings mismatch instead.
-      if not self._compiled or self._compiled_signature != _batch_signature(dynamic_batch):
+      # A compiled kernel is valid only for the batch it was built against: the traced
+      # half is baked into `in_shardings`, and the static half is closed over. Either
+      # changing needs a fresh kernel -- reusing it would raise an in_shardings mismatch
+      # for the first, and silently use stale values for the second.
+      signature = _batch_signature(dynamic_batch, static_batch)
+      if not self._compiled or _signature_differs(self._compiled_signature, signature):
         self._compile_for_batch(dynamic_batch, static_batch)
       loss, aux, new_rest, micro_grads = self._compiled_fwd_bwd(params, rest, dynamic_batch)
     else:

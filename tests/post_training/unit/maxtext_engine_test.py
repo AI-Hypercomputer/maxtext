@@ -595,6 +595,41 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertTrue(t._compiled)
     np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
 
+  def test_compiled_kernel_is_rebuilt_when_a_static_loss_argument_changes(self):
+    """A changed non-traced loss argument must reach the loss, not the stale closure.
+
+    Static arguments are closed over by the compiled kernel rather than passed to it, so
+    keying recompilation on the traced half alone would leave a caller that swaps its
+    `algo_config` (or schedules `pad_id`) silently computing against the value captured at
+    compile time -- a wrong answer with no error and no log line.
+    """
+    algo_config = types.SimpleNamespace(scale=1.0)
+    holder = [algo_config]
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    def _loss_fn(model, tokens, algo_config):
+      del tokens
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0 * algo_config.scale,
+          denominator=jnp.array(4.0),
+      )
+
+    t.with_loss_fn(_loss_fn)
+    t.with_gen_model_input_fn(
+        lambda payload: {"tokens": payload.token_ids, "algo_config": holder[0]}
+    )
+    t.compile(DummyPayload())
+
+    t.fwd_bwd(DummyPayload())
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+
+    # Same payload shapes, different static value: only the static half of the signature
+    # can catch this.
+    holder[0] = types.SimpleNamespace(scale=3.0)
+    t._accumulated_grads = None
+    t.fwd_bwd(DummyPayload())
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([6.0, 6.0]), rtol=1e-5)
+
   def test_compiled_kernel_is_rebuilt_when_the_batch_shape_changes(self):
     """A differently-shaped batch recompiles rather than raising a sharding mismatch.
 
