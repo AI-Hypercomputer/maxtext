@@ -16,6 +16,7 @@
 # pylint: disable=protected-access
 
 import dataclasses
+import types
 from typing import Any
 from unittest import mock
 
@@ -526,6 +527,88 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t.with_gen_model_input_fn(lambda payload: payload)
     with self.assertRaisesRegex(TypeError, "must return a dict of loss-fn keyword arguments"):
       t.fwd_bwd(DummyPayload())
+
+  def _engine_with_mixed_batch(self, algo_config):
+    """An engine whose adapter returns arrays alongside non-array loss arguments.
+
+    This is the shape Tunix's GRPO adapter produces: a `TrainExample` next to an
+    `algo_config` object and integer `pad_id`/`eos_id`.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    def _loss_fn(model, tokens, algo_config, pad_id, eos_id):
+      del tokens, algo_config, pad_id, eos_id
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+      )
+
+    t.with_loss_fn(_loss_fn)
+    t.with_gen_model_input_fn(
+        lambda payload: {
+            "tokens": payload.token_ids,
+            "algo_config": algo_config,
+            "pad_id": 151643,
+            "eos_id": 151645,
+        }
+    )
+    return t
+
+  def test_compiled_path_closes_over_non_array_loss_arguments(self):
+    """A batch mixing arrays with plain objects still compiles, and matches eager.
+
+    `algo_config` is not a JAX type, so passing it as a jit argument fails outright. It
+    has to be closed over instead. Comparing gradients against the eager path is what
+    proves the closed-over values actually reached the loss rather than being dropped.
+    """
+    algo_config = types.SimpleNamespace(beta=0.0, epsilon=0.2)
+
+    eager = self._engine_with_mixed_batch(algo_config)
+    eager.fwd_bwd(DummyPayload())
+    self.assertFalse(eager._compiled, "an engine that never called compile() must stay eager")
+
+    compiled = self._engine_with_mixed_batch(algo_config)
+    compiled.compile(DummyPayload())
+    self.assertTrue(compiled._compiled)
+    compiled.fwd_bwd(DummyPayload())
+
+    np.testing.assert_allclose(
+        compiled._accumulated_grads["weights"], eager._accumulated_grads["weights"], rtol=1e-5
+    )
+    np.testing.assert_allclose(compiled._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+
+  def test_compile_without_dummy_data_defers_to_first_fwd_bwd(self):
+    """`compile(None)` cannot know input shapes, so it defers instead of failing.
+
+    Tunix's `TrainerWorker.compile` passes nothing, because `PeftTrainer.compile` is a
+    no-op that never needed a payload. Compiling eagerly there would jit against shapes
+    the engine has not seen; refusing outright would break the worker lifecycle.
+    """
+    t = self._engine_with_mixed_batch(types.SimpleNamespace(beta=0.0))
+
+    with self.assertLogs(level="INFO") as logs:
+      t.compile(None)
+    self.assertTrue(any("without dummy_data" in line for line in logs.output))
+    self.assertFalse(t._compiled, "compile(None) has no shapes to compile against")
+
+    # Deferred, not abandoned: the first real batch supplies the shapes.
+    t.fwd_bwd(DummyPayload())
+    self.assertTrue(t._compiled)
+    np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([2.0, 2.0]), rtol=1e-5)
+
+  def test_compiled_kernel_is_rebuilt_when_the_batch_shape_changes(self):
+    """A differently-shaped batch recompiles rather than raising a sharding mismatch.
+
+    `in_shardings` is baked into the compiled callable, so reusing it across a shape
+    change reports an in_shardings prefix error that says nothing about the real cause.
+    """
+    t = self._engine_with_mixed_batch(types.SimpleNamespace(beta=0.0))
+    t.compile(DummyPayload())
+    first_signature = t._compiled_signature
+
+    t.fwd_bwd(DummyPayload(token_ids=jnp.ones((4, 8)), token_mask=jnp.ones((4, 8))))
+
+    self.assertNotEqual(first_signature, t._compiled_signature)
+    self.assertTrue(t._compiled)
 
   def test_conforms_to_tunix_abstract_trainer(self):
     """Every method Tunix's AbstractTrainer requires exists on the engine.

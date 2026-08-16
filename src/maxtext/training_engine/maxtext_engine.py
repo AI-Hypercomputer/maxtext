@@ -28,6 +28,7 @@ from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
@@ -47,6 +48,58 @@ from maxtext.utils import train_utils
 # Mirrors Tunix's `PeftTrainer.get_metrics`, which returns `MetricsBuffer(id=-1)` in the
 # same situation. Real buffers are identified by their train step, so this cannot collide.
 EMPTY_METRICS_BUFFER_ID = -1
+
+
+def _is_jax_dynamic(value: Any) -> bool:
+  """Returns True if `value` can cross a `jax.jit` boundary as a traced argument.
+
+  A `gen_model_input_fn` returns the loss function's keyword arguments, and only some of
+  them are arrays. Tunix's GRPO adapter, for instance, returns a `TrainExample` alongside
+  an `algo_config` object and integer `pad_id`/`eos_id`. The arrays must be traced; the
+  rest must be closed over, or `jax.jit` rejects the call outright.
+  """
+  leaves = jax.tree.leaves(value)
+  if not leaves:
+    # An all-`None` subtree (e.g. an unset `ref_per_token_logps`) flattens to nothing. It
+    # carries no data either way, so tracing it is harmless and keeps the treedef intact.
+    return True
+  return all(isinstance(leaf, (float, int, jax.Array, np.generic, np.ndarray)) for leaf in leaves)
+
+
+def _split_static_and_dynamic(batch: Any) -> tuple[Any, dict[str, Any]]:
+  """Splits a loss-input batch into traced arrays and closed-over constants.
+
+  Only dict batches can be split -- those are the ones produced by a `gen_model_input_fn`,
+  whose entries are named keyword arguments. Anything else is MaxText's positional `data`
+  and is passed through untouched.
+
+  Returns:
+    `(dynamic, static)`. `static` is empty for non-dict batches.
+  """
+  if not isinstance(batch, dict):
+    return batch, {}
+  dynamic: dict[str, Any] = {}
+  static: dict[str, Any] = {}
+  for key, value in batch.items():
+    # Python scalars are constants in practice (`pad_id`, `eos_id`) and are better baked
+    # into the executable than traced, which would defeat constant folding in the masks
+    # they build.
+    if isinstance(value, (int, float, bool)) or not _is_jax_dynamic(value):
+      static[key] = value
+    else:
+      dynamic[key] = value
+  return dynamic, static
+
+
+def _batch_signature(dynamic_batch: Any) -> Any:
+  """Returns a hashable key identifying a batch's jit-relevant structure.
+
+  `in_shardings` is baked into the compiled callable, so a batch whose treedef or shapes
+  differ needs a fresh one. Without this the second structure raises a confusing
+  `in_shardings` prefix-mismatch instead of simply recompiling.
+  """
+  leaves, treedef = jax.tree.flatten(dynamic_batch)
+  return (treedef, tuple((jnp.shape(leaf), jnp.result_type(leaf)) for leaf in leaves))
 
 
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
@@ -102,6 +155,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # would make the warning depend on whether some earlier engine already triggered it.
     self._eval_step_warned: bool = False
     self._compiled = False
+    # Set by `compile()`, including when it defers for want of a dummy payload. `_compiled`
+    # alone cannot express "wanted, not yet built", and conflating them would either make
+    # every eager caller compile or make a deferred compile never happen.
+    self._compile_requested = False
+    self._compiled_signature: Any = None
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     model_or_model_mesh_pair = model_creation_utils.from_pretrained(
@@ -242,6 +300,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self, for chaining.
     """
     self._gen_model_input_fn = gen_model_input_fn
+    # The adapter decides which batch entries are traced and which are baked into the
+    # executable, so a compiled kernel built against the previous one is stale.
+    self._compiled = False
     return self
 
   def _fwd_bwd_kernel(self, params, rest, batch):
@@ -353,48 +414,70 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return new_state_pure, grad_norm, is_skipped_val
     return state_pure, grad_norm, is_skipped_val
 
-  def compile(self, dummy_data: abstract_engine.TrainerPayload) -> None:
-    """Triggers SPMD JIT compilation of fwd_bwd and update steps.
+  def _prepare_batch(self, payload: Any) -> Any:
+    """Maps a payload to the inputs the loss function is called with."""
+    if self._gen_model_input_fn is not None:
+      return self._gen_model_input_fn(payload)
+    if dataclasses.is_dataclass(payload):
+      return {k: getattr(payload, k) for k in payload.__dataclass_fields__ if getattr(payload, k) is not None}
+    return payload
 
-    Args:
-      dummy_data: Sample TrainerPayload providing representative tensor shapes.
+  def _mesh_sharding(self, leaf: Any) -> jax.sharding.Sharding:
+    """Returns `leaf`'s own sharding when it lives on this mesh, else a replicated one.
+
+    Reading `.sharding` unconditionally mixes device sets inside one `jax.jit`: model
+    parameters come from `from_pretrained` as NamedShardings spanning the whole mesh,
+    while scalars the optimizer allocates eagerly (adamw's `count`) carry a
+    SingleDeviceSharding on device 0. jit rejects that combination with "Received
+    incompatible devices for jitted computation", naming two unrelated arrays and no
+    cause. Normalizing the strays to a replicated NamedSharding puts every argument on the
+    same device set, while leaving genuinely sharded parameters untouched.
     """
-    if self._compiled:
-      return
+    leaf_sharding = getattr(leaf, "sharding", None)
+    if isinstance(leaf_sharding, jax.sharding.NamedSharding) and leaf_sharding.mesh == self._mesh:
+      return leaf_sharding
+    return jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec())
 
+  def _batch_data_shardings(self, dynamic_batch: Any) -> Any:
+    """Builds a per-leaf sharding tree for the traced part of a batch.
+
+    `get_input_data_sharding` returns one sharding describing a rank-2 `[batch, sequence]`
+    input. It cannot be used as a pytree prefix for a `gen_model_input_fn` batch, whose
+    leaves have mixed rank -- a rank-2 spec applied to a rank-1 array is an error. Each
+    leaf instead takes the leading entries of that spec that its own rank can absorb, so
+    the batch dimension stays sharded and everything below it is replicated.
+    """
+    data_sharding = sharding.get_input_data_sharding(self._config, self._mesh)
+    data_spec = tuple(data_sharding.spec)
+
+    def leaf_sharding(leaf):
+      rank = jnp.ndim(leaf)
+      spec = jax.sharding.PartitionSpec(*data_spec[:rank])
+      return jax.sharding.NamedSharding(self._mesh, spec)
+
+    return jax.tree.map(leaf_sharding, dynamic_batch)
+
+  def _compile_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
+    """JIT-compiles the fwd/bwd and update kernels for one batch structure.
+
+    `static_batch` is closed over rather than passed, so non-array loss arguments (Tunix's
+    `algo_config`, `pad_id`, `eos_id`) never reach the jit boundary.
+    """
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
 
     self._state_graphdef, state_pure = nnx.split(self._state)
     self._model_graphdef, params_pure, rest_pure = nnx.split(self._model, nnx.Param, ...)
 
+    def kernel(params, rest, dynamic):
+      batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
+      return self._fwd_bwd_kernel(params, rest, batch)
+
     if self._mesh is not None:
-      data_sharding = sharding.get_input_data_sharding(self._config, self._mesh)
-      state_mesh_shardings = jax.tree.map(
-          lambda x: getattr(
-              x,
-              "sharding",
-              jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec()),
-          ),
-          state_pure,
-      )
-      params_shardings = jax.tree.map(
-          lambda x: getattr(
-              x,
-              "sharding",
-              jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec()),
-          ),
-          params_pure,
-      )
-      rest_shardings = jax.tree.map(
-          lambda x: getattr(
-              x,
-              "sharding",
-              jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec()),
-          ),
-          rest_pure,
-      )
-      fwd_bwd_in_shardings = (params_shardings, rest_shardings, data_sharding)
+      state_mesh_shardings = jax.tree.map(self._mesh_sharding, state_pure)
+      params_shardings = jax.tree.map(self._mesh_sharding, params_pure)
+      rest_shardings = jax.tree.map(self._mesh_sharding, rest_pure)
+      fwd_bwd_in_shardings = (params_shardings, rest_shardings, self._batch_data_shardings(dynamic_batch))
       fwd_bwd_out_shardings = (None, None, rest_shardings, params_shardings)
       update_in_shardings = (state_mesh_shardings, params_shardings, None)
       update_out_shardings = (state_mesh_shardings, None, None)
@@ -406,7 +489,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     # 1. JIT Compile Micro FWD/BWD Pass
     self._compiled_fwd_bwd = jax.jit(
-        self._fwd_bwd_kernel,
+        kernel,
         in_shardings=fwd_bwd_in_shardings,
         out_shardings=fwd_bwd_out_shardings,
     )
@@ -418,7 +501,38 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         out_shardings=update_out_shardings,
         static_argnums=(2,),
     )
+    self._compiled_signature = _batch_signature(dynamic_batch)
     self._compiled = True
+
+  def compile(self, dummy_data: abstract_engine.TrainerPayload) -> None:
+    """Triggers SPMD JIT compilation of fwd_bwd and update steps.
+
+    Args:
+      dummy_data: Sample TrainerPayload providing representative tensor shapes. Its shapes
+        must match the real batches, or the first `fwd_bwd` simply recompiles. When it is
+        `None` the engine cannot know the input shapes, so it stays on the eager path and
+        compiles lazily on the first `fwd_bwd` instead.
+    """
+    # Recorded even when compilation is deferred: it is what tells `fwd_bwd` the caller
+    # wants the compiled path at all. Engines that never call `compile` stay eager.
+    self._compile_requested = True
+    if self._compiled:
+      return
+
+    if dummy_data is None:
+      # Callers driving a generic worker lifecycle (Tunix's `TrainerWorker.compile`) pass
+      # nothing to compile against. Deferring costs nothing measurable: `jax.jit` is lazy,
+      # so even with a payload this method only stages the wrappers and XLA still runs on
+      # the first `fwd_bwd`. Logged at info, not warning -- the first `fwd_bwd` compiles
+      # against the real batch, whose shapes are right by construction.
+      logging.info(
+          "MaxTextTrainingEngine.compile() was called without dummy_data; compiling "
+          "against the first fwd_bwd payload instead."
+      )
+      return
+
+    dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
+    self._compile_for_batch(dynamic_batch, static_batch)
 
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
@@ -428,12 +542,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       **kwargs: Implementation-specific options, accepted for interface compatibility
         and ignored by this engine.
     """
-    if self._gen_model_input_fn is not None:
-      batch = self._gen_model_input_fn(payload)
-    elif dataclasses.is_dataclass(payload):
-      batch = {k: getattr(payload, k) for k in payload.__dataclass_fields__ if getattr(payload, k) is not None}
-    else:
-      batch = payload
+    batch = self._prepare_batch(payload)
 
     model = getattr(self._state, "model", None) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
@@ -447,8 +556,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     model = getattr(self._state, "model", self._model)
     self._model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
 
-    if self._compiled and hasattr(self, "_compiled_fwd_bwd"):
-      loss, aux, new_rest, micro_grads = self._compiled_fwd_bwd(params, rest, batch)
+    if self._compile_requested:
+      dynamic_batch, static_batch = _split_static_and_dynamic(batch)
+      # `in_shardings` is baked into the compiled callable, so a batch whose structure or
+      # shapes changed needs a new one. Recompiling is the correct response; reusing it
+      # would raise an in_shardings mismatch instead.
+      if not self._compiled or self._compiled_signature != _batch_signature(dynamic_batch):
+        self._compile_for_batch(dynamic_batch, static_batch)
+      loss, aux, new_rest, micro_grads = self._compiled_fwd_bwd(params, rest, dynamic_batch)
     else:
       loss, aux, new_rest, micro_grads = self._fwd_bwd_kernel(params, rest, batch)
     nnx.update(model, new_rest)
