@@ -1144,6 +1144,86 @@ def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_l
   )
 
 
+def calculate_olmoe3_tflops_training_per_device(config, embedding_flops):
+  """Calculate training TFLOPs for OLMoE3 (hybrid KDA + latent MoE).
+
+  The generic path is wrong for this architecture in three ways, all of which
+  inflate the number and therefore flatter MFU:
+
+  * it charges standard-attention FLOPs to every layer, but only
+    ``num_decoder_layers / inhomogeneous_layer_cycle_interval`` are attention —
+    the rest are Kimi Delta Attention, whose cost is different and is otherwise
+    never counted at all;
+  * it sizes the routed experts at ``emb_dim``, but OLMoE3's experts run in the
+    compressed ``moe_expert_input_dim`` latent (the router still scores at
+    ``emb_dim``), and the per-layer down/up projections are unaccounted;
+  * it applies the MoE cost to every layer, ignoring ``first_num_dense_layers``.
+
+  Returns:
+    (attention_tflops, learnable_weight_tflops), matching the other
+    ``calculate_*_tflops_training_per_device`` helpers.
+  """
+  batch_seq = config.per_device_batch_size * config.max_target_length
+  emb = config.emb_dim
+  interval = max(1, config.inhomogeneous_layer_cycle_interval)
+  num_full_attn = config.num_decoder_layers // interval
+  num_kda = config.num_decoder_layers - num_full_attn
+  num_dense = min(config.first_num_dense_layers, config.num_decoder_layers)
+  num_moe = config.num_decoder_layers - num_dense
+
+  # --- full attention: q projection is doubled (fused sigmoid gate) ---
+  qkv_flops = 2 * batch_seq * emb * (2 * config.num_query_heads + 2 * config.num_kv_heads) * config.head_dim
+  projection_flops = 2 * batch_seq * emb * config.num_query_heads * config.head_dim
+  noncausal_attention_flops = (
+      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+  )
+  causal_attention_flops = noncausal_attention_flops / 2
+
+  # --- KDA: projections + low-rank decay/gate pairs + conv + recurrent state ---
+  heads, dk, dv = config.gdn_num_value_heads, config.gdn_key_head_dim, config.gdn_value_head_dim
+  kda_flops_per_layer = (
+      2
+      * batch_seq
+      * (
+          emb * heads * dk * 2  # w_q, w_k
+          + emb * heads * dv  # w_v
+          + emb * dv
+          + dv * heads * dk  # decay: f_proj_1, f_proj_2
+          + emb * dv
+          + dv * heads * dv  # gate: g_proj_1, g_proj_2
+          + emb * heads  # w_b
+          + heads * dv * emb  # w_out
+          + 3 * heads * dk * dv  # delta-rule state einsums
+      )
+  )
+
+  # --- MoE: router at emb_dim, experts at the latent, plus down/up ---
+  latent = config.moe_expert_input_dim if config.moe_expert_input_dim > 0 else emb
+  moe_flops_per_layer = (
+      2
+      * batch_seq
+      * (
+          emb * config.num_experts  # router
+          + emb * latent
+          + latent * emb  # latent down / up
+          + config.num_experts_per_tok * 3 * latent * config.moe_mlp_dim  # routed experts
+          + 3 * emb * config.moe_mlp_dim  # shared SwiGLU
+      )
+  )
+  dense_flops_per_layer = 2 * batch_seq * 3 * emb * config.mlp_dim
+
+  learnable = (
+      num_full_attn * (qkv_flops + projection_flops)
+      + num_kda * kda_flops_per_layer
+      + num_moe * moe_flops_per_layer
+      + num_dense * dense_flops_per_layer
+      + embedding_flops
+  )
+  attention_tflops = causal_attention_flops * num_full_attn * 3 / 10**12
+  learnable_weight_tflops = learnable * 3 / 10**12
+  return attention_tflops, learnable_weight_tflops
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   # MLP flops
@@ -1241,6 +1321,8 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops, attention_pattern_length=6
     )
+  elif config.decoder_block == DecoderBlockType.OLMOE3:
+    attention_tflops, learnable_weight_tflops = calculate_olmoe3_tflops_training_per_device(config, embedding_flops)
   elif config.decoder_block == DecoderBlockType.GEMMA4_SMALL:
     # The small path derives its own attention pattern from
     # gemma4_small.get_attention_pattern(config.model_name) and accounts for

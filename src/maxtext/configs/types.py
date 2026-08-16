@@ -290,6 +290,8 @@ ModelName = Literal[
     "olmo3-7b",
     "olmo3-7b-pt",
     "olmo3-32b",
+    "olmoe3-30m",
+    "olmoe3-3p5b",
     "envy-test",
     "envy-switch-base",
     "envy-switch-large",
@@ -1077,6 +1079,10 @@ class Qwen3Next(BaseModel):
   gdn_value_head_dim: int = Field(128, description="Head dimension for the value in the Gated Delta Net.")
   gdn_num_key_heads: int = Field(16, description="Number of key/query heads in the Gated Delta Net.")
   gdn_num_value_heads: int = Field(32, description="Number of value heads in the Gated Delta Net.")
+  gdn_state_dtype: str = Field(
+      "float32",
+      description="dtype for the chunked delta-rule state and matmul operands. The decay algebra stays float32 either way.",
+  )
   gdn_chunk_size: int = Field(
       64,
       description="Chunk size for the parallel scan algorithm in the Gated Delta Net.",
