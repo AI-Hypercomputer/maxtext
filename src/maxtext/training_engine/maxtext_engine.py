@@ -121,14 +121,23 @@ def _batch_signature(dynamic_batch: Any, static_batch: dict[str, Any]) -> Any:
   return (treedef, shapes, static_batch)
 
 
-_UNCOMPARABLE_STATICS_WARNING = (
-    "Static loss arguments could not be compared (%s), so the engine cannot tell whether "
-    "they changed and will recompile on EVERY fwd_bwd from now on. This happens when a "
-    "`gen_model_input_fn` returns a fresh object each call that holds an array -- a "
-    "dataclass or SimpleNamespace whose `__eq__` then compares elementwise, where `bool()` "
-    "is ambiguous. (Reusing one instance is fine: comparison short-circuits on identity.) "
-    "Fix by returning arrays as top-level entries of the batch dict, so they are traced "
-    "rather than closed over, or by holding the config object fixed across calls."
+_UNCOMPARABLE_SIGNATURE_WARNING = (
+    "Could not compare %s between fwd_bwd calls (%s), so the engine cannot tell whether "
+    "the compiled kernel is still valid and will recompile on EVERY fwd_bwd from now on. %s"
+)
+
+_UNCOMPARABLE_STATIC_HINT = (
+    "This happens when a `gen_model_input_fn` returns a fresh object each call that holds "
+    "an array -- a dataclass or SimpleNamespace whose `__eq__` then compares elementwise, "
+    "where `bool()` is ambiguous. (Reusing one instance is fine: comparison short-circuits "
+    "on identity.) Fix by returning arrays as top-level entries of the batch dict, so they "
+    "are traced rather than closed over, or by holding the config object fixed across calls."
+)
+
+_UNCOMPARABLE_STRUCTURE_HINT = (
+    "This is unexpected: the structural half is built from pytree treedefs, shapes and "
+    "dtypes, which compare cleanly. Recompilation stays correct, but the cost is now paid "
+    "every step, so this is worth reporting rather than living with."
 )
 
 
@@ -445,6 +454,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return new_state_pure, grad_norm, is_skipped_val
     return state_pure, grad_norm, is_skipped_val
 
+  def _warn_uncomparable(self, what: str, hint: str, exc: Exception) -> None:
+    """Warns once per instance that a signature half could not be compared.
+
+    Once per instance rather than `logging.log_first_n`, which is keyed per call site and
+    process-wide: a second engine would never warn, and the warning would become
+    execution-order dependent in tests.
+    """
+    if self._signature_compare_warned:
+      return
+    self._signature_compare_warned = True
+    logging.warning(_UNCOMPARABLE_SIGNATURE_WARNING, what, exc, hint)
+
   def _needs_recompile(self, signature: Any) -> bool:
     """Returns whether the compiled kernel is stale for `signature`.
 
@@ -453,17 +474,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     answer -- but it is not free: if the comparison always raises, this recompiles on
     every call, forever. XLA's cache can mask that as nothing worse than a mysteriously
     slow run, so the exception path says so out loud, once.
+
+    The two halves are compared separately so that report names the right culprit.
+    Comparing the signature as a whole would route a badly-behaved treedef or shape entry
+    into a message blaming the caller's static loss arguments.
     """
-    if self._compiled_signature is None:
+    previous = self._compiled_signature
+    if previous is None:
       return True
+
     try:
-      return bool(self._compiled_signature != signature)
+      if bool(previous[:2] != signature[:2]):
+        return True
     except Exception as exc:  # pylint: disable=broad-except
-      # Once per instance, not `logging.log_first_n`: that helper is keyed per call site
-      # and process-wide, so a second engine would never warn.
-      if not self._signature_compare_warned:
-        self._signature_compare_warned = True
-        logging.warning(_UNCOMPARABLE_STATICS_WARNING, exc)
+      self._warn_uncomparable("batch structure", _UNCOMPARABLE_STRUCTURE_HINT, exc)
+      return True
+
+    try:
+      return bool(previous[2] != signature[2])
+    except Exception as exc:  # pylint: disable=broad-except
+      self._warn_uncomparable("static loss arguments", _UNCOMPARABLE_STATIC_HINT, exc)
       return True
 
   def _prepare_batch(self, payload: Any) -> Any:

@@ -662,11 +662,43 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       for _ in range(3):
         t.fwd_bwd(DummyPayload())
 
-    matching = [line for line in logs.output if "could not be compared" in line]
+    matching = [line for line in logs.output if "Could not compare" in line]
     self.assertLen(matching, 1, f"expected exactly one warning, got {len(matching)}")
     self.assertIn("recompile on EVERY fwd_bwd", matching[0])
+    # Names the culprit. The halves are compared separately precisely so that a
+    # badly-behaved treedef cannot be reported as the caller's static arguments.
+    self.assertIn("static loss arguments", matching[0])
     # Correctness is unaffected: it still recompiles rather than reusing a stale kernel.
     self.assertTrue(t._compiled)
+
+  def test_uncomparable_batch_structure_is_reported_as_structure(self):
+    """A structural comparison failure must not be blamed on static loss arguments.
+
+    The signature is one tuple, so comparing it whole would funnel any misbehaving
+    treedef or shape entry into the static-argument message and send a reader looking at
+    their `gen_model_input_fn` for a fault that is not there.
+    """
+
+    class _Hostile:
+      # `__eq__`, not `__ne__`: tuple comparison probes its elements with `==`.
+
+      def __eq__(self, other):
+        raise ValueError("hostile structural comparison")
+
+      __hash__ = None
+
+    t = self._engine_with_mixed_batch(types.SimpleNamespace(beta=0.0))
+    t.compile(DummyPayload())
+    # Corrupt only the structural half; the static half stays perfectly comparable.
+    t._compiled_signature = (_Hostile(), (), t._compiled_signature[2])
+
+    with self.assertLogs(level="WARNING") as logs:
+      t.fwd_bwd(DummyPayload())
+
+    matching = [line for line in logs.output if "Could not compare" in line]
+    self.assertLen(matching, 1)
+    self.assertIn("batch structure", matching[0])
+    self.assertNotIn("static loss arguments", matching[0])
 
   def test_compiled_kernel_is_rebuilt_when_the_batch_shape_changes(self):
     """A differently-shaped batch recompiles rather than raising a sharding mismatch.
