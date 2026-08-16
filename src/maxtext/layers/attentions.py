@@ -431,8 +431,13 @@ class Attention(nnx.Module):
     self.share_kv_layer = share_kv_layer
 
     self.is_qwen2 = self.config.decoder_block == DecoderBlockType.QWEN2
+    # Gated attention: the query projection is widened to 2*head_dim and split into
+    # query and a sigmoid gate applied before the output projection. OLMoE3 shares
+    # this scheme (its reference keeps a separate w_g, which is the same parameter
+    # count in a different layout, so checkpoint conversion must split the kernel).
     self.is_qwen3_hybrid = (
-        self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5) and not self.is_vision
+        self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.OLMOE3)
+        and not self.is_vision
     )
 
     # Module attribute names must match names previously passed to Linen for checkpointing

@@ -1,0 +1,41 @@
+# model config for the OLMoE3 `30m` smoke rung (AI2 OLMo-core scaling ladder).
+#
+# Reference: allenai/OLMo-core@akshitab/standalone, src/scripts/standalone/.
+# Canonical parameter counts this config must reproduce:
+#   total 32,323,588 / active 29,964,292 / active non-embedding 17,119,236
+#
+# This rung is deliberately NOT 256-aligned: it is a fast plumbing and
+# correctness check, not a performance-representative shape.
+
+base_emb_dim: 128
+base_num_query_heads: 1
+base_num_kv_heads: 1
+head_dim: 128
+base_num_decoder_layers: 5
+
+first_num_dense_layers: 1
+base_mlp_dim: 1024        # 8 * d_model, the wide dense layer 0
+base_moe_mlp_dim: 192     # expert hidden size
+
+num_experts: 32
+num_experts_per_tok: 16
+moe_expert_input_dim: 64  # routed-expert latent width
+
+# Only layer 4 is full attention at this depth (range(4, 5, 5)).
+inhomogeneous_layer_cycle_interval: 5
+gdn_num_key_heads: 1
+gdn_num_value_heads: 1
+gdn_key_head_dim: 128
+gdn_value_head_dim: 256   # head_dim * kda_expand_v (2.0)
+gdn_conv_kernel_dim: 4
+gdn_chunk_size: 64
+
+vocab_size: 100352
+enable_dropout: false
+logits_via_embedding: false
+normalization_layer_epsilon: 1.0e-6
+mlp_activations: ["silu", "linear"]
+use_qk_norm: true
+decoder_block: "olmoe3"
+
+load_balance_loss_weight: 0.01

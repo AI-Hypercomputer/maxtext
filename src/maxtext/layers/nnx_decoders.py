@@ -61,6 +61,7 @@ from maxtext.models import (
     mistral,
     mixtral,
     olmo3,
+    olmoe3,
     qwen2,
     qwen3,
     qwen3_5,
@@ -411,6 +412,20 @@ class NNXDecoder(nnx.Module):
     self.dropout = linears.Dropout(rate=config.dropout_rate, rngs=rngs, broadcast_dims=(-2,))
     self.positional_embedding = PositionalEmbedding(embedding_dims=config.base_emb_dim)
 
+    # OLMoE3 normalizes the (scaled) token embedding before the first block.
+    if config.decoder_block == DecoderBlockType.OLMOE3:
+      self.embedding_norm = nnx.data(
+          self.get_norm_layer(num_features=config.emb_dim, rngs=rngs)(
+              dtype=config.dtype,
+              weight_dtype=config.weight_dtype,
+              epsilon=config.normalization_layer_epsilon,
+              kernel_axes=("norm",),
+              parameter_memory_host_offload=config.parameter_memory_host_offload,
+          )
+      )
+    else:
+      self.embedding_norm = None
+
     self.decoder_norm = self.get_norm_layer(num_features=config.emb_dim, rngs=rngs)(
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
@@ -434,6 +449,7 @@ class NNXDecoder(nnx.Module):
     self.scanned_layers = None
     self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
     self.is_deepseek4 = self.config.decoder_block == DecoderBlockType.DEEPSEEK4
+    self.is_olmoe3 = self.config.decoder_block == DecoderBlockType.OLMOE3
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
@@ -547,8 +563,33 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
+    elif self.is_olmoe3 and self.config.first_num_dense_layers > 0:
+      self._init_scanned_olmoe3(decoder_block_classes, rngs)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
+
+  def _init_scanned_olmoe3(self, decoder_block_classes, rngs):
+    """Initializes OLMoE3 scanned layers: an unrolled dense-bearing first cycle, then scanned cycles."""
+    config = self.config
+    block_cls = decoder_block_classes[0]
+    interval = config.inhomogeneous_layer_cycle_interval
+    if config.first_num_dense_layers > interval:
+      raise ValueError(
+          "olmoe3 scanning assumes the dense layers fit in the first mixer cycle, but "
+          f"{config.first_num_dense_layers=} > {interval=}."
+      )
+
+    self.layers_0 = self._create_single_layer(block_cls, rngs, first_layer_idx=0)
+
+    num_scanned_cycles = config.num_decoder_layers // interval - 1
+    if num_scanned_cycles > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          block_cls,
+          length=num_scanned_cycles,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+          first_layer_idx=interval,
+      )
 
   def _init_scanned_deepseek4(self, rngs):
     """Initializes DeepSeek V4 scanned layers: unrolls prefix hash layers and scans remaining full blocks."""
@@ -784,6 +825,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.OLMOE3,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1129,6 +1171,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
+        DecoderBlockType.OLMOE3: get_scannable(olmoe3.OLMoE3DecoderLayer, olmoe3.OLMoE3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
     }
 
@@ -1290,6 +1333,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
+        DecoderBlockType.OLMOE3,
         DecoderBlockType.ENVY,
     }:
       return functools.partial(
@@ -1332,6 +1376,10 @@ class NNXDecoder(nnx.Module):
     cfg = self.config
 
     y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+
+    if self.embedding_norm is not None:
+      # OLMoE3: scale by sqrt(d_model), then RMSNorm (reference `embed_scale`).
+      y = self.embedding_norm(y * (cfg.emb_dim**0.5))
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if multimodal_input is not None:
@@ -1833,6 +1881,16 @@ class NNXDecoder(nnx.Module):
                   **layer_kwargs,
               )
 
+        elif self.is_olmoe3 and cfg.first_num_dense_layers > 0:
+          y = self._apply_olmoe3_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              slot,
+              previous_chunk,
+          )
         elif self.is_deepseek4:
           y = self._apply_deepseek4_scanned_blocks(
               y,
@@ -2023,6 +2081,44 @@ class NNXDecoder(nnx.Module):
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     return logits, hidden_state, kv_caches
+
+  def _apply_olmoe3_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      slot=None,
+      previous_chunk=None,
+  ):
+    """Applies OLMoE3 scanned blocks: the unrolled first cycle, then the scanned remainder."""
+    cfg = self.config
+    layer_call_kwargs = {"previous_chunk": previous_chunk, "slot": slot}
+
+    y, _ = self.layers_0(
+        y,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        **layer_call_kwargs,
+    )
+
+    num_scanned_cycles = cfg.num_decoder_layers // cfg.inhomogeneous_layer_cycle_interval - 1
+    if num_scanned_cycles > 0:
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          length=num_scanned_cycles,
+          metadata_axis_name="scanned_blocks",
+          **layer_call_kwargs,
+      )
+    return y
 
   def _apply_deepseek4_scanned_blocks(
       self,

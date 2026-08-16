@@ -1322,6 +1322,8 @@ gdn_num_key_heads: 16
 gdn_num_value_heads: 32
 # Chunk size for the parallel scan algorithm in the Gated Delta Net.
 gdn_chunk_size: 64
+# dtype for the chunked delta-rule state and matmul operands; the decay algebra stays float32.
+gdn_state_dtype: "float32"
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
