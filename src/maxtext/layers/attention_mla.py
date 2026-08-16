@@ -743,12 +743,11 @@ class MLA(Attention):
       pattern = index_share_utils.parse_index_share_pattern(
           config.index_share_pattern, config.num_decoder_layers
       )
-      self.is_full_array = jnp.array([role == "F" for role in pattern], dtype=jnp.bool_)
-      group_sizes = index_share_utils.get_served_group_sizes(pattern)
-      self.served_group_size_array = jnp.array(group_sizes, dtype=jnp.float32)
+      self.is_full_tuple = tuple(role == "F" for role in pattern)
+      self.served_group_sizes_tuple = index_share_utils.get_served_group_sizes(pattern)
     else:
-      self.is_full_array = None
-      self.served_group_size_array = None
+      self.is_full_tuple = None
+      self.served_group_sizes_tuple = None
     is_pruned = (
         getattr(config, "use_index_share", False)
         and getattr(config, "prune_shared_indexers", True)
@@ -1346,8 +1345,8 @@ class MLA(Attention):
             return mask, indices, score
 
         if getattr(self.config, "use_index_share", False) and cached_indexer_state is not None:
-          if layer_idx is not None:
-            is_full = self.is_full_array[layer_idx]
+          if layer_idx is not None and self.is_full_tuple is not None:
+            is_full = jnp.array(self.is_full_tuple, dtype=jnp.bool_)[layer_idx]
             indexer_mask, topk_indices, indexer_score = jax.lax.cond(
                 is_full,
                 _run_full,
@@ -1369,8 +1368,8 @@ class MLA(Attention):
         loss_scale = self.config.indexer_loss_scaling_factor
         if getattr(self.config, "use_index_share", False):
           group_size = (
-              self.served_group_size_array[layer_idx]
-              if layer_idx is not None and self.served_group_size_array is not None
+              jnp.array(self.served_group_sizes_tuple, dtype=jnp.float32)[layer_idx]
+              if layer_idx is not None and self.served_group_sizes_tuple is not None
               else float(self.served_group_size)
           )
           if group_size > 1:
