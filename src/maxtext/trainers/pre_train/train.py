@@ -1043,10 +1043,13 @@ def recover(
       )
       break
 
-    except pathways_manager.ScaleUpSignalError as e:
-      _logger.info(
-          "ScaleUpSignalError caught during recovery: %s. Retrying recovery.", e
-      )
+    except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
+      if isinstance(e, pathways_manager.ScaleUpSignalError) or elastic.is_error_due_to_slice_down(e):
+        _logger.warning(
+            "Slice state change or error caught during recovery: %s. Retrying recovery.", e
+        )
+      else:
+        raise
 
 
 def train_loop(config, recorder, state=None):
