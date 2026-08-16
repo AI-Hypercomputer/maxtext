@@ -529,7 +529,12 @@ def restore_original_shardings(restored_pytree, original_abstract_pytree):
               restored_leaf.dtype,
               sharding=abstract_leaf.sharding,
           )
-        return jax.device_put(restored_leaf, abstract_leaf.sharding)
+        is_prng = hasattr(restored_leaf, "dtype") and jax.dtypes.issubdtype(restored_leaf.dtype, jax.dtypes.prng_key)
+        data = jax.random.key_data(restored_leaf) if is_prng else restored_leaf
+        put_data = jax.device_put(data, abstract_leaf.sharding)
+        if hasattr(abstract_leaf, "dtype") and jax.dtypes.issubdtype(abstract_leaf.dtype, jax.dtypes.prng_key):
+          return jax.random.wrap_key_data(put_data, dtype=abstract_leaf.dtype)
+        return put_data
     return restored_leaf
 
   return jax.tree.map(_put, restored_pytree, original_abstract_pytree)
