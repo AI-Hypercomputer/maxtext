@@ -254,6 +254,7 @@ class GLMDenseLayer(GLMGenericLayer):
       decoder_input_tokens=None,
       cached_indexer_state=None,
       layer_idx=None,
+      **kwargs,
   ):
     if isinstance(inputs, tuple):
       inputs = inputs[0]
@@ -336,6 +337,7 @@ class GLMMoELayer(GLMGenericLayer):
       decoder_input_tokens=None,
       cached_indexer_state=None,
       layer_idx=None,
+      **kwargs,
   ):
     if isinstance(inputs, tuple):
       inputs = inputs[0]
