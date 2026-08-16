@@ -1006,8 +1006,18 @@ def recover(
           replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
           restored_dict = snapshot_mgr.load(replicated_abstract_dict)
           restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
-          nnx.update(state.model, restored_dict["model"])
-          nnx.update(state.optimizer, restored_dict["optimizer"])
+          merged = jax.tree.map(
+              lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
+              restored_dict,
+              abstract_dict,
+              is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+          )
+          m_state = nnx.state(state.model)
+          nnx.replace_by_pure_dict(m_state, merged["model"])
+          nnx.update(state.model, m_state)
+          opt_state = nnx.state(state.optimizer)
+          nnx.replace_by_pure_dict(opt_state, merged["optimizer"])
+          nnx.update(state.optimizer, opt_state)
           restored_state = state
 
         if metric_logger_instance is not None:
