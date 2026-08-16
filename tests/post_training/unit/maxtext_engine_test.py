@@ -630,6 +630,44 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t.fwd_bwd(DummyPayload())
     np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([6.0, 6.0]), rtol=1e-5)
 
+  def test_uncomparable_static_arguments_warn_once(self):
+    """An uncomparable static argument recompiles every step, and says so once.
+
+    Failing towards recompilation is right for correctness, but its cost is unbounded: if
+    the comparison always raises, every fwd_bwd recompiles. XLA's cache can disguise that
+    as merely a slow run, so it must be diagnosable -- and warning per step would itself
+    be the noise.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    def _loss_fn(model, tokens, algo_config):
+      del tokens, algo_config
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+      )
+
+    t.with_loss_fn(_loss_fn)
+    # A fresh object per call holding an array: equality compares elementwise, so bool()
+    # is ambiguous. Reusing one instance would short-circuit on identity and stay
+    # comparable, which is why today's functools.partial adapter is unaffected.
+    t.with_gen_model_input_fn(
+        lambda payload: {
+            "tokens": payload.token_ids,
+            "algo_config": types.SimpleNamespace(w=jnp.ones((3,))),
+        }
+    )
+    t.compile(DummyPayload())
+
+    with self.assertLogs(level="WARNING") as logs:
+      for _ in range(3):
+        t.fwd_bwd(DummyPayload())
+
+    matching = [line for line in logs.output if "could not be compared" in line]
+    self.assertLen(matching, 1, f"expected exactly one warning, got {len(matching)}")
+    self.assertIn("recompile on EVERY fwd_bwd", matching[0])
+    # Correctness is unaffected: it still recompiles rather than reusing a stale kernel.
+    self.assertTrue(t._compiled)
+
   def test_compiled_kernel_is_rebuilt_when_the_batch_shape_changes(self):
     """A differently-shaped batch recompiles rather than raising a sharding mismatch.
 

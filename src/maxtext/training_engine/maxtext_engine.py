@@ -121,20 +121,15 @@ def _batch_signature(dynamic_batch: Any, static_batch: dict[str, Any]) -> Any:
   return (treedef, shapes, static_batch)
 
 
-def _signature_differs(previous: Any, current: Any) -> bool:
-  """Compares two batch signatures, treating an unanswerable comparison as a difference.
-
-  The static half is arbitrary caller data, so `!=` may raise or return a non-bool (a
-  numpy-style elementwise result). Recompiling is the safe direction to fail: it costs one
-  compilation, whereas reusing a kernel whose closed-over statics are stale is a silently
-  wrong answer.
-  """
-  if previous is None:
-    return True
-  try:
-    return bool(previous != current)
-  except Exception:  # pylint: disable=broad-except
-    return True
+_UNCOMPARABLE_STATICS_WARNING = (
+    "Static loss arguments could not be compared (%s), so the engine cannot tell whether "
+    "they changed and will recompile on EVERY fwd_bwd from now on. This happens when a "
+    "`gen_model_input_fn` returns a fresh object each call that holds an array -- a "
+    "dataclass or SimpleNamespace whose `__eq__` then compares elementwise, where `bool()` "
+    "is ambiguous. (Reusing one instance is fine: comparison short-circuits on identity.) "
+    "Fix by returning arrays as top-level entries of the batch dict, so they are traced "
+    "rather than closed over, or by holding the config object fixed across calls."
+)
 
 
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
@@ -195,6 +190,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # every eager caller compile or make a deferred compile never happen.
     self._compile_requested = False
     self._compiled_signature: Any = None
+    self._signature_compare_warned: bool = False
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     model_or_model_mesh_pair = model_creation_utils.from_pretrained(
@@ -449,6 +445,27 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return new_state_pure, grad_norm, is_skipped_val
     return state_pure, grad_norm, is_skipped_val
 
+  def _needs_recompile(self, signature: Any) -> bool:
+    """Returns whether the compiled kernel is stale for `signature`.
+
+    An unanswerable comparison counts as stale. That is the right direction for
+    correctness -- reusing a kernel whose closed-over statics changed is a silently wrong
+    answer -- but it is not free: if the comparison always raises, this recompiles on
+    every call, forever. XLA's cache can mask that as nothing worse than a mysteriously
+    slow run, so the exception path says so out loud, once.
+    """
+    if self._compiled_signature is None:
+      return True
+    try:
+      return bool(self._compiled_signature != signature)
+    except Exception as exc:  # pylint: disable=broad-except
+      # Once per instance, not `logging.log_first_n`: that helper is keyed per call site
+      # and process-wide, so a second engine would never warn.
+      if not self._signature_compare_warned:
+        self._signature_compare_warned = True
+        logging.warning(_UNCOMPARABLE_STATICS_WARNING, exc)
+      return True
+
   def _prepare_batch(self, payload: Any) -> Any:
     """Maps a payload to the inputs the loss function is called with."""
     if self._gen_model_input_fn is not None:
@@ -598,7 +615,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # changing needs a fresh kernel -- reusing it would raise an in_shardings mismatch
       # for the first, and silently use stale values for the second.
       signature = _batch_signature(dynamic_batch, static_batch)
-      if not self._compiled or _signature_differs(self._compiled_signature, signature):
+      if not self._compiled or self._needs_recompile(signature):
         self._compile_for_batch(dynamic_batch, static_batch)
       loss, aux, new_rest, micro_grads = self._compiled_fwd_bwd(params, rest, dynamic_batch)
     else:
