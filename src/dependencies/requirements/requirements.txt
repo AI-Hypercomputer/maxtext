@@ -23,7 +23,7 @@ numpy
 omegaconf
 optax
 orbax-checkpoint
-git+https://github.com/AI-Hypercomputer/pathways-utils.git@47ea599d396f2c978dfa42be0b9f4a62f60f1bd9
+git+https://github.com/AI-Hypercomputer/pathways-utils.git@150b22e1a38dfc6183e20084c7987cb2327a3c30
 pillow
 pre-commit
 protobuf
