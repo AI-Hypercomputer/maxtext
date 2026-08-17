@@ -1,7 +1,70 @@
 # Qwen3.5 MoE 1-Decoder Layer Kernel Drift Results
 
+> **STILL STALE -- REGENERATION BLOCKED (2026-08-14).** The
+> `AttentionMetadata` construction bug described below has been fixed and
+> verified in `tests/unit/qwen3_5_layer_dump_test.py`
+> (`query_start_loc = jnp.arange(0, (batch_size+1)*seq_len, seq_len, ...)`,
+> `request_distribution = jnp.array([0, 0, batch_size], ...)`). However,
+> regenerating this document surfaced a **second, independent, pre-existing
+> bug** that blocks the run before any RPA-derived numbers can be produced:
+>
+> * The fixed metadata arrays (`query_start_loc` shape `(batch_size+1,)=(5,)`,
+>   `request_distribution` shape `(3,)`) are sharded by the RPA kernel's
+>   `shard_map` across the mesh's data axis, and neither 5 nor 3 is evenly
+>   divisible by a 4-device data-parallel mesh. Fix applied: build the
+>   inference mesh as a tensor-parallel slice of `min(len(jax.devices()),
+>   num_kv_heads)=2` devices instead of reusing the 4-device training mesh
+>   (mirroring the working pattern in `tests/run_qwen3_5_logit_parity.py`).
+>   This fix works and is committed in `tests/run_qwen3_5_layer_dump.py` and
+>   `tests/diagnose_t19_t20_amplification.py`.
+> * That fix exposed a **new, unresolved blocker**: `sync_qwen3_5_layer_weights`
+>   (in `tests/unit/qwen3_5_layer_dump_test.py`) copies weights between the
+>   train and infer `Qwen3_5DecoderLayer` instances via raw attribute
+>   aliasing (`dst_attn.query = src_attn.query`), which makes the two layers
+>   share the same underlying `nnx.Variable` objects. This was fixed by
+>   rebuilding the infer layer via `nnx.split`/`nnx.merge` with device-placed
+>   values (breaking the aliasing) instead of `nnx.state`/`nnx.update`
+>   (which mutates the shared `Variable` in place and was observed to
+>   silently corrupt the *training* layer's weights too).
+> * After both of the above fixes, the inference forward pass still fails
+>   inside `Qwen3_5SparseMoEBlock.shared_expert`'s `MlpBlock.__call__` ->
+>   `_maybe_shard_with_logical` -> `jax.lax.with_sharding_constraint`, which
+>   falls back to `jax.sharding.reshard(...)` (compat shim in
+>   `src/maxtext/integration/tunix/tunix_adapter.py::_compat_wsc`). That
+>   `reshard` call raises:
+>   ```
+>   ValueError: Received incompatible devices for jitted computation. Got
+>   argument args[0] of reshard with shape bfloat16[4,512,512] and with
+>   device ids [0, 1] on platform TPU and jit's context mesh with device ids
+>   [0, 2, 1, 3] on platform TPU
+>   ```
+>   i.e. the reshard target sharding correctly uses the 2-device inference
+>   mesh (`[0, 1]`), but its ambient/"jit context" mesh is still the
+>   4-device training mesh (`[0, 2, 1, 3]`). Three mitigation attempts were
+>   made and none resolved it: (1) `with jax.set_mesh(infer_mesh):` around
+>   the inference forward call, (2) calling `jax.set_mesh(infer_mesh)` as a
+>   bare global setter immediately before the call, (3) confirming the
+>   `MlpBlock`'s own `self.mesh` attribute is correctly the 2-device infer
+>   mesh (unaffected by the `nnx.split`/`nnx.merge` weight-placement fix,
+>   since it is a plain Python attribute, not an `nnx.Variable`). The root
+>   cause appears to be that `jax.sharding.reshard`'s ambient "context mesh"
+>   is not being updated by `jax.set_mesh` in this eager (non-`jax.jit`)
+>   call path -- this looks like a separate, pre-existing bug/limitation in
+>   how this codebase mixes differently-sized meshes for train vs. infer
+>   layers when calling submodules directly (bypassing the full `Transformer`
+>   model's top-level call, which is what `tests/run_qwen3_5_logit_parity.py`
+>   uses and where this failure mode has not been observed).
+>
+> **The numbers below are UNCHANGED from before the `AttentionMetadata` fix
+> and remain unverified/potentially stale for T12 onward** (attention core
+> output and everything downstream: T12-T25, including MoE routing/output
+> and final layer output). Do not trust them. Re-run
+> `tests/run_qwen3_5_layer_dump.py` after resolving the `reshard`/ambient-mesh
+> issue above (or after further debugging the train/infer split-mesh setup)
+> and replace this document before relying on it.
+
 **Date / Timestamp:** 2026-08-13 05:36:31 UTC  
-**Hardware Platform:** Google Cloud TPU v5p (Shared Pathways Service over GKE `auto-v5p-8-bodaborg`)  
+**Hardware Platform:** Google Cloud TPU v5p (Shared Pathways Service over GKE `auto-v5p-8-bodaborg`) -- *stale run, predates SPS removal*  
 **Topology:** 2x2x1 (4 TPU Devices)  
 **Model Architecture:** Qwen3.5 MoE (`qwen3.5-35b-a3b` 1-Layer Full Attention + MoE Block)  
 
