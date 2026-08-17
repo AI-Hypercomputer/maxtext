@@ -29,6 +29,23 @@ import jax.numpy as jnp
 from orbax import checkpoint as ocp
 import qwix
 
+try:
+  from qwix._src.utils import flax_util as _qwix_flax_util  # pylint: disable=g-import-not-at-top
+
+  _orig_qwix_find_param = _qwix_flax_util.find_param
+
+  def _safe_qwix_find_param(x, ptq_array_type=None):
+    try:
+      return _orig_qwix_find_param(x, ptq_array_type)
+    except AttributeError as e:
+      if "shape" in str(e):
+        return None
+      raise
+
+  _qwix_flax_util.find_param = _safe_qwix_find_param
+except (ImportError, AttributeError):
+  pass
+
 from maxtext.common import checkpointing
 from maxtext.configs import pyconfig
 from maxtext.utils import gcs_utils
@@ -470,10 +487,18 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
   return qwix.LoraProvider(**lora_kwargs)
 
 
-def _prepare_dummy_inputs(dummy_bs: int = 1) -> tuple[jnp.ndarray, jnp.ndarray]:
-  """Builds dummy decoder inputs used to materialize LoRA parameters."""
-  # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
-  seq_len = 1
+def _prepare_dummy_inputs(
+    mesh: Optional[jax.sharding.Mesh] = None,
+    dummy_bs: int = 1,
+    seq_len: int = 1,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Builds minimal dummy decoder inputs partitioned appropriately for the mesh."""
+  if mesh is not None:
+    for axis in ("data", "fsdp", "fsdp_transpose", "expert"):
+      dummy_bs *= mesh.shape.get(axis, 1)
+    for axis in ("tensor_sequence", "context"):
+      seq_len *= mesh.shape.get(axis, 1)
+
   decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   return decoder_input_tokens, decoder_positions
@@ -598,12 +623,8 @@ def apply_lora_to_model(
 
   lora_provider = _build_lora_provider(mt_config)
 
-  dp_size = 1
-  if mesh is not None and "data" in mesh.shape:
-    dp_size = mesh.shape["data"]
-
   model_rngs = getattr(model.decoder, "rngs", None)  # pyrefly: ignore[missing-attribute]
-  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(dummy_bs=dp_size)
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mesh)
 
   lora_model = qwix.apply_lora_to_model(
       model,
@@ -612,6 +633,9 @@ def apply_lora_to_model(
       decoder_positions=decoder_positions,
       rngs=model_rngs,
   )
+  for _, val in nnx.graph.iter_graph(lora_model):
+    if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
+      del val.qwix_rngs
 
   if mesh is not None:
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
@@ -636,6 +660,16 @@ def apply_lora_to_model(
         val = var.get_value()
         if not isinstance(val, jax.Array):
           return var
+        if hasattr(sharding_spec, "spec") and len(sharding_spec.spec) != val.ndim:
+          spec_tuple = tuple(sharding_spec.spec)
+          if len(spec_tuple) > val.ndim:
+            if "local_layers" in spec_tuple and len(spec_tuple) - 1 == val.ndim:
+              spec_tuple = tuple(axis for axis in spec_tuple if axis != "local_layers")
+            else:
+              spec_tuple = spec_tuple[: val.ndim]
+          elif len(spec_tuple) < val.ndim:
+            spec_tuple = spec_tuple + (None,) * (val.ndim - len(spec_tuple))
+          sharding_spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*spec_tuple))
         # make_array_from_callback natively constructs a globally sharded array
         # from the local host arrays, bypassing backend-specific device_put issues
         # on both Pathways and McJAX.

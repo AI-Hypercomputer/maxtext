@@ -53,8 +53,8 @@ python3 -m maxtext.inference.vllm_decode \
     max_target_length=256 \
     max_num_batched_tokens=256 \
     ici_tensor_parallelism=4 \
-    ici_expert_parallelism=4 \
-    ici_data_parallelism=4 \
+    ici_expert_parallelism=2 \
+    ici_data_parallelism=2 \
     allow_split_physical_axes=True \
     prefuse_moe_weights=True \
     use_chat_template=True \
@@ -82,10 +82,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     remat_policy=full \
     hbm_utilization_vllm=0.55 \
     use_pathways=True \
-    chips_per_vm=8 \
-    ici_tensor_parallelism=4 \
-    ici_fsdp_parallelism=4 \
-    ici_expert_parallelism=2 \
+    chips_per_vm=4 \
     max_target_length=512 \
     weight_dtype=bfloat16 \
     dtype=bfloat16 \
@@ -105,8 +102,8 @@ python3 -m maxtext.inference.vllm_decode \
     max_target_length=256 \
     max_num_batched_tokens=256 \
     ici_tensor_parallelism=4 \
-    ici_expert_parallelism=4 \
-    ici_data_parallelism=4 \
+    ici_expert_parallelism=2 \
+    ici_data_parallelism=2 \
     allow_split_physical_axes=True \
     prefuse_moe_weights=True \
     use_chat_template=True \

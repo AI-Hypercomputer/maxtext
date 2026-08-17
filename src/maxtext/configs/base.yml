@@ -163,7 +163,9 @@ weight_sparsity_update_step: 10
 # The first number of steps before updating the sparsity masks.
 weight_sparsity_start_step: 50
 # Whether to use Transformer Engine's collective GEMM overlap algorithm with quantization in MLP layers. Note: only valid with tensor-sequence parallelism.
-use_te_comm_gemm_overlap: false
+# "disabled" means no overlap, "mlp" means to only overlap up and down projections in MLP layers,
+# and "full" means to overlap MLP projections as well as the QKV and output projection layers in attention.
+te_comm_gemm_overlap: "disabled"
 
 decoder_block: "llama2" # which style of decoderblock to use.
 # global parameter scale needs to be a power of 2. if you want finer grained control of the model sizes
@@ -191,7 +193,7 @@ logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embed
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
-mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix across the unsharded local heads dimension natively.
+mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the Indexer across the unsharded local heads dimension natively.
 float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
 float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
 
@@ -479,9 +481,21 @@ base_output_directory: ""
 # enable_multi_tier_checkpointing=true local_checkpoint_directory="/local" local_checkpoint_period=20 multi_tier_checkpointing_backup_interval_minutes=20
 enable_multi_tier_checkpointing: false
 
-# The interval to backup local checkpoints to the persistent storage(GCS bucket) in minutes.
+# The interval to backup local checkpoints to the persistent storage
+# (GCS bucket) in minutes.
 # It should be a positive number when enabling multi-tier checkpointing.
-multi_tier_checkpointing_backup_interval_minutes: 0
+# Note: This parameter and `multi_tier_checkpointing_backup_interval_steps`
+# are mutually exclusive. Exactly one must be specified when enabling
+# multi-tier checkpointing.
+multi_tier_checkpointing_backup_interval_minutes: null
+
+# The interval to backup local checkpoints to the persistent storage
+# (GCS bucket) in steps.
+# It should be a positive number when enabling multi-tier checkpointing.
+# Note: This parameter and `multi_tier_checkpointing_backup_interval_minutes`
+# are mutually exclusive. Exactly one must be specified when enabling
+# multi-tier checkpointing.
+multi_tier_checkpointing_backup_interval_steps: null
 
 # Number of identical pipelines in job, should be equal to ICI data parallelism * DCN data parallelism.
 # It should be a positive number when enabling multi-tier checkpointing. If set to 0, it will be set to num of slices.
@@ -514,7 +528,7 @@ compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_s
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
 custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
-mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_autoregressive', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']
+mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'context_autoregressive', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['circular_repeats', []],
                       # ==========================================
@@ -522,22 +536,23 @@ logical_axis_rules: [
                       # ==========================================
                       # Vocab Activations
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
                       ['activation_vocab', ['tensor', 'tensor_sequence']],
                       ['activation_vocab', ['tensor']],
                       ['activation_vocab', 'tensor_sequence'],
                       # Vocab Weights
                       ['vocab', ['tensor', 'tensor_sequence', 'autoregressive']],
-                      ['embed_vocab', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
+                      ['embed_vocab', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
                       # ==========================================
                       # Attention
                       # ==========================================
                       # Attention Activations
                       ['activation_batch_attn', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_input_length_attn', ['tensor_sequence', 'context']],
                       ['activation_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_sequence']],
-                      ['activation_length_attn', ['context']],
-                      ['activation_q_length', ['context']],
+                      ['activation_length_attn', ['context', 'context_usp_ulysses']],
+                      ['activation_q_length', ['context', 'context_usp_ulysses']],
                       ['activation_kv_length', []],
                       ['activation_embed_attn', ['tensor']],
                       ['activation_kv', ['tensor', 'tensor_sequence']],
@@ -550,27 +565,27 @@ logical_axis_rules: [
                       ['qkv', []],
                       ['kv', []],
                       ['kv_head_dim', []],
-                      ['q_lora', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
-                      ['q_lora', ['fsdp', 'context', 'expert']],
+                      ['q_lora', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      ['q_lora', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
                       ["q_lora_up_proj", []],
-                      ['kv_lora', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
-                      ['kv_lora', ['fsdp', 'context', 'expert']],
+                      ['kv_lora', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      ['kv_lora', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
                       ["kv_lora_up_proj", []],
                       # ==========================================
                       # Mixture of Experts (MoE)
                       # ==========================================
                       # MoE Activations
                       ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_length_moe', ['context']],
-                      ['activation_norm_length_moe', ['tensor_sequence', 'context']],
+                      ['activation_length_moe', ['context', 'context_usp_ulysses']],
+                      ['activation_norm_length_moe', ['tensor_sequence', 'context', 'context_usp_ulysses']],
                       ['activation_embed_moe', ['tensor']],
                       ['activation_mlp_moe', ['tensor', 'tensor_sequence']],
                       ['activation_exp', ['expert']],
                       # MoE Weights
                       ['exp', 'expert'],
                       ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
-                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'context']],
-                      ['embed_moe', ['fsdp', 'context']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses']],
+                      ['embed_moe', ['fsdp', 'context', 'context_usp_ulysses']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
@@ -578,8 +593,8 @@ logical_axis_rules: [
                       ['activation_mlp', ['tensor', 'tensor_sequence']],
                       # Note activation batch and length also get used in vocab
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_length', ['context']],
-                      ['activation_norm_length', ['tensor_sequence', 'context']],
+                      ['activation_length', ['context', 'context_usp_ulysses']],
+                      ['activation_norm_length', ['tensor_sequence', 'context', 'context_usp_ulysses']],
                       ['activation_embed', ['tensor']],
                       ['activation_stage', 'stage'],
                       # General Weights
@@ -587,8 +602,8 @@ logical_axis_rules: [
                       # GDN (linear-attention) projections shard like 'mlp' during training; the
                       # vLLM serving config overrides this to match tpu-inference's ATTN_HEAD order.
                       ['gdn_head', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
-                      ['embed', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
-                      ['embed', ['fsdp', 'context', 'expert']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      ['embed', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
                       ['norm', ['tensor']],
                       ['layers', 'stage'],
                       ['diloco', 'diloco'],
@@ -600,8 +615,8 @@ logical_axis_rules: [
                       # ==========================================
                       # Inference(Prefill, Decode, Cache)
                       # ==========================================
-                      ['prefill_activation_length', ['context']],
-                      ['prefill_activation_norm_length', ['tensor_sequence', 'context']],
+                      ['prefill_activation_length', ['context', 'context_usp_ulysses']],
+                      ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'context_usp_ulysses']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['decode_length', []],
@@ -622,11 +637,14 @@ logical_axis_rules: [
                       ['exp_with_fsdp', 'fsdp'],
                   ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_autoregressive', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']]
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'context_autoregressive', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']]
 input_data_sharding_logical_axes: ['activation_embed_and_logits_batch', 'activation_norm_length']
 # Determines which physical axis plays the role of context parallelism for input data processing and load balancing
 # only supports "context" or "expert" (when custom_mesh_and_rule=ep-as-cp)
 context_sharding: "context"
+# Physical axis for the Ulysses (all-to-all) dimension of context_parallel_strategy='usp'
+# only supports "context_usp_ulysses"
+ulysses_context_sharding: "context_usp_ulysses"
 # Customized mesh and logical rules for evaluation (e.g. "ep-as-cp")
 custom_mesh_and_rule_for_eval: ""
 logical_axis_rules_for_eval: []
@@ -644,6 +662,7 @@ dcn_fsdp_parallelism: 1
 dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
 dcn_context_parallelism: 1
+dcn_context_usp_ulysses_parallelism: 1
 dcn_context_autoregressive_parallelism: 1
 dcn_tensor_parallelism: 1 # never recommended
 dcn_tensor_sequence_parallelism: 1 # never recommended
@@ -656,6 +675,7 @@ ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
 ici_context_parallelism: 1
+ici_context_usp_ulysses_parallelism: 1 # Ulysses (head-exchange) dimension of the context parallelism; used by context_parallel_strategy='usp'.
 ici_context_autoregressive_parallelism: 1
 ici_tensor_parallelism: 1
 ici_tensor_sequence_parallelism: 1
@@ -716,6 +736,7 @@ train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected
 train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
+default_prompt: ''
 packing: true
 num_epoch: 1
 generate_padding_batch_train: false
@@ -806,6 +827,12 @@ olmo_apply_ngram_filter: true # mask instances with repetitive n-grams (OLMo-cor
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
 log_period: 100 # The frequency of Tensorboard flush, gcs metrics writing, and managed profiler metrics updating.
+max_inflight_computations: 2 # Maximum number of inflight computations on device.
+training_objective: 'causal_lm' # Supported objectives: causal_lm, block_diffusion
+block_diffusion_mask_id: -1 # Tokenizer mask-token id; required for training_objective='block_diffusion'
+block_diffusion_min_noise: 0.001 # Minimum per-block corruption probability for block-diffusion training
+block_diffusion_logit_alignment: 'same_position' # Supported alignments: same_position, shifted
+block_diffusion_canvas_policy: 'all_masked' # Supported canvases: all_masked, seed_and_mask
 
 jax_distributed_initialization_timeout: 300 # This is the default timeout in https://github.com/jax-ml/jax/blob/main/jax/_src/distributed.py
 # Note there are two separate initializations - the jax coordination service (aka jax.distributed.initialize) and the backend (e.g. PjRT), the timeout above refers
@@ -1154,7 +1181,7 @@ cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: true
-context_parallel_strategy: "all_gather" # "all_gather", "ring", or "ulysses"
+context_parallel_strategy: "all_gather" # "all_gather", "ring", "ulysses", or "usp"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
 
@@ -1312,6 +1339,15 @@ sinkhorn_iterations: 20
 #   the expensive sinkhorn iterations, the downside to this approach is that
 #   it is factorial in k.
 enable_mhc_lite: False
+# Whether to use the Pallas TPU kernel implementation for mHC-lite when running on TPU.
+use_mhc_pallas_kernel: False
+# Block size for forward pass of MHC Pallas kernel.
+mhc_pallas_kernel_fwd_block_size: 256
+# Block size for backward pass of MHC Pallas kernel.
+# The backward pass is more memory intensive, so we were running into OOMs with
+# TPU v7x if we go higher. For TPU v6 (Trillium), there is more VMEM, so 256
+# works and provides better results.
+mhc_pallas_kernel_bwd_block_size: 128
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
@@ -1355,4 +1391,3 @@ elastic_backup_kind: "snapshot"
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
-

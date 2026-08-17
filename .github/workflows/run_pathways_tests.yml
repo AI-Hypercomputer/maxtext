@@ -37,13 +37,13 @@ on:
         default: ''
       is_scheduled_run:
         required: true
-        type: string
+        type: boolean
       xla_python_client_mem_fraction:
         required: true
         type: string
       tf_force_gpu_allow_growth:
         required: true
-        type: string
+        type: boolean
       container_resource_option:
         required: true
         type: string
@@ -68,6 +68,7 @@ permissions:
 
 jobs:
   run:
+    name: ${{ format('tpu-pathways-{0}', !contains(inputs.pytest_marker, 'not integration_test') && 'integration' || 'unit') }}
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
       image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
@@ -98,7 +99,7 @@ jobs:
           python3 -m uv venv --seed
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
-          uv pip install ${maxtext_wheel}[tpu] --resolution=lowest
+          uv pip install "${maxtext_wheel}[tpu]" --resolution=lowest
           install_tpu_pre_train_extra_deps
           python3 --version
           python3 -m pip freeze
@@ -108,7 +109,7 @@ jobs:
         shell: bash
         run: |
           echo "Waiting for Pathways Proxy at localhost:29000..."
-          for i in {1..30}; do
+          for _ in {1..30}; do
             if python3 -c "import socket; socket.create_connection(('localhost', 29000), timeout=1)" 2>/dev/null; then
               echo "Pathways Proxy port is open and listening!"
               sleep 2  # Allow gRPC server to complete internal handshakes
@@ -153,14 +154,16 @@ jobs:
               FINAL_PYTEST_MARKER="${PYTEST_MARKER} and (not scheduled_only or newly_added)"
             fi
           fi
-          export MAXTEXT_REPO_ROOT=$(pwd)
-          export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
-          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
-          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
+          MAXTEXT_REPO_ROOT=$(pwd)
+          MAXTEXT_ASSETS_ROOT="$(pwd)/src/maxtext/assets"
+          MAXTEXT_TEST_ASSETS_ROOT="$(pwd)/tests/assets"
+          MAXTEXT_PKG_DIR="$(pwd)/src/maxtext"
+          export MAXTEXT_REPO_ROOT MAXTEXT_ASSETS_ROOT MAXTEXT_TEST_ASSETS_ROOT MAXTEXT_PKG_DIR
           # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
+          # shellcheck disable=SC2086
           .venv/bin/python3 -m pytest ${PYTEST_ADDOPTS} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0 ${SPLIT_ARGS} &
           PYTEST_PID=$!
-          wait $PYTEST_PID
+          wait "$PYTEST_PID"
     services:
       resource_manager:
         image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest # zizmor: ignore[unpinned-images]

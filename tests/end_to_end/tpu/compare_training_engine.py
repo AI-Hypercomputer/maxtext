@@ -68,7 +68,7 @@ def get_tpu_mesh(
     cfg: pyconfig.HyperParameters | None = None,
 ) -> jax.sharding.Mesh:
   """Returns SPMD device mesh based on configuration or default 1-device TPU mesh."""
-  if cfg is not None and getattr(cfg, "model_name", "simple_mlp") != "simple_mlp":
+  if cfg is not None and cfg.model_name != "default":
     return maxtext_utils.get_mesh_from_config(cfg)
   devices = jax.devices("tpu") if jax.default_backend() == "tpu" else jax.devices()
   return jax.make_mesh((1, 1, 1, 1), ("data", "fsdp", "expert", "context"), devices=devices[:1])
@@ -87,7 +87,7 @@ class TinyDecoder(nnx.Module):
     self.mesh = get_tpu_mesh(cfg)
     if cfg is None:
       cfg = setup_config(
-          "simple_mlp",
+          "default",
           emb_dim=hidden,
           mlp_dim=hidden * 2,
           vocab_size=vocab_size,
@@ -98,24 +98,25 @@ class TinyDecoder(nnx.Module):
 
   def __call__(
       self,
-      decoder_input_tokens,
-      decoder_positions=None,
-      decoder_segment_ids=None,
-      encoder_images=None,
-      encoder_image_masks=None,
-      enable_dropout=False,
-      decoder_target_tokens=None,
-      decoder_target_mask=None,
-  ):
-    del (
-        encoder_images,
-        encoder_image_masks,
-        enable_dropout,
-        decoder_target_tokens,
-        decoder_target_mask,
-    )
+      decoder_input_tokens: jax.Array,
+      decoder_positions: jax.Array | None = None,
+      decoder_segment_ids: jax.Array | None = None,
+      deterministic: bool = True,
+      model_mode: str = "train",
+      **kwargs: Any,
+  ) -> jax.Array:
+    del kwargs
     x = self.embed(decoder_input_tokens)
-    x = self.layer(x, decoder_positions, decoder_segment_ids, False, "train")
+    x = self.layer(
+        x,
+        positions=decoder_positions,
+        segmentation=decoder_segment_ids,
+        deterministic=deterministic,
+        model_mode=model_mode,
+    )
+    # SimpleMlpDecoderLayer returns (output, None) when scan_layers=True (default in base.yml).
+    if isinstance(x, tuple):
+      x = x[0]
     return self.proj(x)
 
 
@@ -141,17 +142,17 @@ _DUMMY_DATA_RNG = np.random.default_rng(42)
 
 def make_dummy_data(
     batch_size: int = 2,
-    seq_len: int = 4,
+    seq_len: int = 16,
     vocab_size: int = 8,
     seed: int | None = None,
     cfg: pyconfig.HyperParameters | None = None,
     mask_prob: float = 0.0,
 ) -> dict[str, jax.Array]:
   """Constructs dummy token batch dictionary for loss_fn / train_step."""
-  if cfg is not None and getattr(cfg, "model_name", "simple_mlp") != "simple_mlp":
-    batch_size = getattr(cfg, "micro_batch_size_to_train_on", batch_size)
-    seq_len = getattr(cfg, "max_target_length", seq_len)
-    vocab_size = getattr(cfg, "vocab_size", vocab_size)
+  if cfg is not None and cfg.model_name != "default":
+    batch_size = cfg.micro_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    vocab_size = cfg.vocab_size
   rng = np.random.default_rng(seed) if seed is not None else _DUMMY_DATA_RNG
   tokens = jnp.array(rng.integers(0, vocab_size, size=(batch_size, seq_len)), dtype=jnp.int32)
   targets = jnp.array(rng.integers(0, vocab_size, size=(batch_size, seq_len)), dtype=jnp.int32)
@@ -174,7 +175,7 @@ def make_dummy_data(
       "decoder_loss_weights": weights,
       "decoder_positions": positions,
   }
-  if cfg is not None and getattr(cfg, "model_name", "simple_mlp") != "simple_mlp":
+  if cfg is not None and cfg.model_name != "default":
     mesh = get_tpu_mesh(cfg)
     data_sharding = sharding.get_input_data_sharding(cfg, mesh)
     res = {k: jax.device_put(v, data_sharding) for k, v in res.items()}
@@ -182,7 +183,7 @@ def make_dummy_data(
 
 
 def setup_config(
-    model_name: str = "simple_mlp",
+    model_name: str = "default",
     gradient_accumulation_steps: int = 1,
     skip_step_on_spikes: bool = False,
     gradient_clipping_threshold: float = 0.0,
@@ -198,11 +199,10 @@ def setup_config(
   ):
     config_cls = types.RLConfig
 
-  actual_model = "default" if model_name == "simple_mlp" else model_name
   argv = [
       "compare_training_engine.py",
       base_yml,
-      f"model_name={actual_model}",
+      f"model_name={model_name}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"skip_step_on_spikes={skip_step_on_spikes}",
       f"gradient_clipping_threshold={gradient_clipping_threshold}",
@@ -217,7 +217,7 @@ def setup_config(
       "record_internal_nn_metrics=False",
       "skip_jax_distributed_system=True",
   ]
-  if model_name == "simple_mlp":
+  if model_name == "default":
     argv.extend(
         [
             "vocab_size=8",
@@ -233,34 +233,29 @@ def setup_config(
     for override in cli_overrides:
       clean_override = override[2:] if override.startswith("--") else override
       if clean_override.startswith("model_name="):
-        override_model = clean_override.split("=", 1)[1]
-        actual_model = "default" if override_model == "simple_mlp" else override_model
-        argv[2] = f"model_name={actual_model}"
+        argv[2] = clean_override
       elif clean_override.endswith(".yml") or clean_override.endswith(".yaml"):
         argv[1] = clean_override
         if "rl" in os.path.basename(clean_override):
           config_cls = types.RLConfig
       else:
         argv.append(clean_override)
-  cfg = pyconfig.initialize(argv, config_class=config_cls)
-  if model_name == "simple_mlp":
-    cfg.model_name = "simple_mlp"
-  if not getattr(cfg, "compiled_trainstep_file", None):
-    cfg.compiled_trainstep_file = ""
-  return cfg
+  return pyconfig.initialize(argv, config_class=config_cls)
 
 
 def create_identical_models_and_opts(
     cfg: pyconfig.HyperParameters,
+    learning_rate_schedule: Any = None,
 ) -> tuple[Any, Any, Any, Any, Any, Any]:
   """Creates two identical model/optimizer pairs with identical initial weights."""
   mesh = get_tpu_mesh(cfg)
-  if getattr(cfg, "model_name", "simple_mlp") == "simple_mlp":
+  if cfg.model_name == "default":
+    lr = learning_rate_schedule if learning_rate_schedule is not None else cfg.learning_rate
     model_baseline = TinyDecoder(vocab_size=cfg.vocab_size, hidden=4, rngs=nnx.Rngs(42))
     opt_baseline = nnx.Optimizer(
         model_baseline,
         optax.adamw(
-            learning_rate=getattr(cfg, "learning_rate_schedule", 0.01),
+            learning_rate=lr,
             b1=0.9,
             b2=0.999,
             weight_decay=1e-4,
@@ -272,7 +267,7 @@ def create_identical_models_and_opts(
     opt_engine = nnx.Optimizer(
         model_engine,
         optax.adamw(
-            learning_rate=getattr(cfg, "learning_rate_schedule", 0.01),
+            learning_rate=lr,
             b1=0.9,
             b2=0.999,
             weight_decay=1e-4,
@@ -305,7 +300,7 @@ def create_identical_models_and_opts(
         config=cfg,
         mesh=mesh,
         model_mode=common_types.MODEL_MODE_TRAIN,
-        rng_key=jax.random.PRNGKey(getattr(cfg, "init_weights_seed", 42)),
+        rng_key=jax.random.PRNGKey(cfg.init_weights_seed),
     )
     _, tx_b = train_utils.create_training_optimizer(cfg, model_baseline)
     opt_baseline = nnx.Optimizer(model_baseline, tx_b, wrt=nnx.Param)
@@ -314,7 +309,7 @@ def create_identical_models_and_opts(
         config=cfg,
         mesh=mesh,
         model_mode=common_types.MODEL_MODE_TRAIN,
-        rng_key=jax.random.PRNGKey(getattr(cfg, "init_weights_seed", 42)),
+        rng_key=jax.random.PRNGKey(cfg.init_weights_seed),
     )
     _, tx_e = train_utils.create_training_optimizer(cfg, model_engine)
     opt_engine = nnx.Optimizer(model_engine, tx_e, wrt=nnx.Param)
@@ -410,9 +405,15 @@ class VerificationContext:
 
 
 @contextlib.contextmanager
-def verification_harness(cfg: pyconfig.HyperParameters, compiled: bool = False) -> Any:
+def verification_harness(
+    cfg: pyconfig.HyperParameters,
+    compiled: bool = False,
+    learning_rate_schedule: Any = None,
+) -> Any:
   """Context manager establishing synchronized baseline/engine testing scaffold and memory cleanup."""
-  model_b, opt_b, model_e, opt_e, state_shardings, params_shardings = create_identical_models_and_opts(cfg)
+  model_b, opt_b, model_e, opt_e, state_shardings, params_shardings = create_identical_models_and_opts(
+      cfg, learning_rate_schedule=learning_rate_schedule
+  )
   mesh = get_tpu_mesh(cfg)
 
   ts_baseline = train_state_nnx.TrainStateNNX(model_b, opt_b)
@@ -554,7 +555,7 @@ def verify_parity_with_train_py(
 ) -> None:
   """Verifies numerical and weight parity between standalone train_step and MaxTextTrainingEngine over N steps."""
   if cfg is None:
-    cfg = setup_config("simple_mlp")
+    cfg = setup_config("default")
 
   with verification_harness(cfg, compiled) as ctx:
     p_train_step = None
@@ -596,7 +597,7 @@ def verify_auxiliary_metrics_and_telemetry_parity(
 ) -> None:
   """Verifies aux metrics, gradient norm, and spike skipping telemetry parity over N steps (CL 956059885)."""
   if cfg is None:
-    cfg = setup_config("simple_mlp", skip_step_on_spikes=True, gradient_clipping_threshold=1.0)
+    cfg = setup_config("default", skip_step_on_spikes=True, gradient_clipping_threshold=1.0)
 
   with verification_harness(cfg, compiled) as ctx:
     p_train_step = None
@@ -648,18 +649,23 @@ def verify_gradient_accumulation_parity(
   """Verifies multi-step gradient accumulation parity across M microbatches per outer step under dynamic LR."""
   if cfg is None:
     cfg = setup_config(
-        "simple_mlp",
+        "default",
         gradient_accumulation_steps=m_steps,
         use_tunix_gradient_accumulation=True,
     )
+  else:
+    assert (
+        cfg.use_tunix_gradient_accumulation
+    ), "Gradient accumulation parity verification requires cfg.use_tunix_gradient_accumulation=True"
 
-  def lr_schedule(step):
-    return 0.01 * (0.9**step)
+  def lr_schedule(step: int | float) -> float:
+    return cfg.learning_rate * (0.9**step)
 
-  cfg.learning_rate_schedule = lr_schedule
-  cfg.use_tunix_gradient_accumulation = True
-
-  with verification_harness(cfg, compiled) as ctx:
+  with verification_harness(
+      cfg,
+      compiled,
+      learning_rate_schedule=lr_schedule if cfg.model_name == "default" else None,
+  ) as ctx:
     p_train_step = None
     state_pure = ctx.state_pure
     for step in range(num_steps):
@@ -743,7 +749,10 @@ def benchmark_gradient_accumulation_performance(
         gradient_accumulation_steps=m_steps,
         use_tunix_gradient_accumulation=True,
     )
-  cfg.use_tunix_gradient_accumulation = True
+  else:
+    assert (
+        cfg.use_tunix_gradient_accumulation
+    ), "Gradient accumulation performance benchmarking requires cfg.use_tunix_gradient_accumulation=True"
 
   print(
       "\n=== [BENCHMARK] Initializing Gradient Accumulation Hardware"
@@ -896,16 +905,14 @@ def run_all_verifications(cli_overrides: list[str] | None = None) -> None:
       continue
     if clean_arg.startswith("model_name="):
       model_name = clean_arg.split("=", 1)[1]
-      if model_name != "simple_mlp":
+      if model_name != "default":
         overrides.append(arg)
       continue
-    elif clean_arg.endswith(".yml") and model_name == "simple_mlp":
-      model_name = "default"
     if clean_arg.startswith("max_target_length="):
       has_target_length = True
     overrides.append(arg)
 
-  if model_name != "simple_mlp" and not has_target_length:
+  if model_name != "default" and not has_target_length:
     overrides.append("max_target_length=256")
 
   cfg_base = setup_config(
@@ -927,7 +934,7 @@ def run_all_verifications(cli_overrides: list[str] | None = None) -> None:
       cli_overrides=overrides,
   )
 
-  if model_name == "simple_mlp":
+  if model_name == "default":
     print(
         "=== Running Training Engine Parity Verification Suite (Eager" " Mode) ===",
         flush=True,

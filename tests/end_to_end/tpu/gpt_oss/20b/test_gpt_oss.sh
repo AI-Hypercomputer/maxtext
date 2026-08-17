@@ -62,7 +62,6 @@ python3 -m maxtext.trainers.pre_train.train \
     async_checkpointing=false \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
-    ici_fsdp_parallelism=64 \
     model_name=${MODEL_NAME} \
     scan_layers=false \
     use_multimodal=false

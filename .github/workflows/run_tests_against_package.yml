@@ -43,7 +43,7 @@ on:
         default: ''
       is_scheduled_run:
         required: true
-        type: string
+        type: boolean
       xla_python_client_mem_fraction:
         required: true
         type: string
@@ -86,6 +86,7 @@ permissions:
   contents: read
 jobs:
   run:
+    name: ${{ inputs.flavor }}
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
       image: gcr.io/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
@@ -123,7 +124,7 @@ jobs:
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           echo "Installing ${maxtext_wheel} for ${MAXTEXT_PACKAGE_EXTRA}..."
-          uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
+          uv pip install "${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}]" --resolution=lowest
           if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
             if command -v apt-get &> /dev/null; then
               echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
@@ -190,11 +191,12 @@ jobs:
             fi
           fi
           # TODO: Use package data for testing and remove the env vars
-          export MAXTEXT_REPO_ROOT=$(pwd)
+          MAXTEXT_REPO_ROOT=$(pwd)
           echo "MAXTEXT_REPO_ROOT (the current working directory) is ${MAXTEXT_REPO_ROOT}."
-          export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
-          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
-          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
+          MAXTEXT_ASSETS_ROOT="$(pwd)/src/maxtext/assets"
+          MAXTEXT_TEST_ASSETS_ROOT="$(pwd)/tests/assets"
+          MAXTEXT_PKG_DIR="$(pwd)/src/maxtext"
+          export MAXTEXT_REPO_ROOT MAXTEXT_ASSETS_ROOT MAXTEXT_TEST_ASSETS_ROOT MAXTEXT_PKG_DIR
           # omit this libtpu init args for gpu tests
           if [ "${INPUTS_DEVICE_TYPE}" != "cuda12" ]; then
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
@@ -209,7 +211,8 @@ jobs:
               if [ -n "${NVIDIA_DIR}" ]; then
                 for dir in "${NVIDIA_DIR}"/*; do
                   if [ -d "$dir/lib" ]; then
-                    export LD_LIBRARY_PATH=$(pwd)/$dir/lib:${LD_LIBRARY_PATH}
+                    LD_LIBRARY_PATH="$(pwd)/$dir/lib:${LD_LIBRARY_PATH}"
+                    export LD_LIBRARY_PATH
                   fi
                 done
               fi
@@ -231,6 +234,7 @@ jobs:
           if [ "${INPUTS_IS_UPDATE_HLO}" == "true" ]; then
             python3 tests/utils/update_hlo_references.py
           else
+            # shellcheck disable=SC2086
             $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
               -v \
               -m "${FINAL_PYTEST_MARKER}" \
@@ -240,7 +244,7 @@ jobs:
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS} &
             PYTEST_PID=$!
-            wait $PYTEST_PID
+            wait "$PYTEST_PID"
           fi
 
         env:
@@ -296,10 +300,11 @@ jobs:
           PY
           export DECOUPLE_GCLOUD=TRUE
           export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
-          export MAXTEXT_REPO_ROOT=$(pwd)
-          export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
-          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
-          export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
+          MAXTEXT_REPO_ROOT=$(pwd)
+          MAXTEXT_ASSETS_ROOT="$(pwd)/src/maxtext/assets"
+          MAXTEXT_TEST_ASSETS_ROOT="$(pwd)/tests/assets"
+          MAXTEXT_PKG_DIR="$(pwd)/src/maxtext"
+          export MAXTEXT_REPO_ROOT MAXTEXT_ASSETS_ROOT MAXTEXT_TEST_ASSETS_ROOT MAXTEXT_PKG_DIR
           python3 -m pytest -v \
             -m "decoupled_target" \
             --durations=0 \
@@ -320,7 +325,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
           # If scheduled, upload to scheduled flag only. If PR, upload to regular flag only.
-          flags: ${{ inputs.is_scheduled_run == 'true' && 'scheduled' || 'regular' }}
+          flags: ${{ inputs.is_scheduled_run && 'scheduled' || 'regular' }}
           verbose: true
       - name: Upload Test Results XML
         if: always()

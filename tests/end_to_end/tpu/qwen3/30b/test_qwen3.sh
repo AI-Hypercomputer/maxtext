@@ -59,11 +59,11 @@ python3 -m maxtext.trainers.pre_train.train \
     model_name=${MODEL_NAME} \
     scan_layers=true \
     remat_policy=full \
-    ici_tensor_parallelism=4 \
-    ici_fsdp_parallelism=16 \
     weight_dtype=bfloat16 \
     dtype=bfloat16 \
+    ici_expert_parallelism=8 \
     opt_type=sgd
+
 
 # Step 3: Run inference on the checkpoint produced by the pre-training run
 python3 -m maxtext.inference.decode \

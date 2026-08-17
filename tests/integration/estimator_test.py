@@ -96,7 +96,6 @@ class EstimatorE2ETest(unittest.TestCase):
     ]
     policy = RematPolicy(tensor_names=tensor_names, initial_level=Action.REMAT)
 
-    jax.clear_caches()
     result = is_oom(base_argv, policy, pdb=2.0)
 
     self.assertIsInstance(result, bool)
@@ -120,7 +119,6 @@ class EstimatorE2ETest(unittest.TestCase):
         "out_proj",
     ]
 
-    jax.clear_caches()
     result = search_policy_only(tensor_names, base_argv, pdb=2.0)
 
     # Should return a RematPolicy

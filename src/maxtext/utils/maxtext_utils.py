@@ -163,6 +163,9 @@ def get_shaped_batch(config, batch_sharding=None):
   shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  if getattr(config, "training_objective", "causal_lm") == "block_diffusion":
+    shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+    shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   if config.use_multimodal:
     image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
@@ -1950,8 +1953,12 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
 
       def _make_abstract_leaf(leaf_a, leaf_s):
         leaf_s = _extract_primary_sharding(leaf_s)
-        if hasattr(leaf_s, "spec") and len(leaf_a.shape) != len(leaf_s.spec):
-          leaf_s = jax.sharding.NamedSharding(leaf_s.mesh, jax.sharding.PartitionSpec(*leaf_s.spec[: len(leaf_a.shape)]))
+        if hasattr(leaf_s, "spec") and len(leaf_s.spec) > len(leaf_a.shape):
+          if "local_layers" in leaf_s.spec and len(leaf_s.spec) - 1 == len(leaf_a.shape):
+            spec_tuple = tuple(axis for axis in leaf_s.spec if axis != "local_layers")
+          else:
+            spec_tuple = leaf_s.spec[: len(leaf_a.shape)]
+          leaf_s = jax.sharding.NamedSharding(leaf_s.mesh, jax.sharding.PartitionSpec(*spec_tuple))
         return jax.ShapeDtypeStruct(leaf_a.shape, leaf_a.dtype, sharding=leaf_s)
 
       if type(a_val) in (jax.Array, jax.ShapeDtypeStruct) or (hasattr(a_val, "shape") and not hasattr(a_val, "qvalue")):
@@ -2169,6 +2176,7 @@ def create_device_mesh(config, devices=None):
         "fsdp_transpose": getattr(config, "ici_fsdp_transpose_parallelism", 1),
         "sequence": getattr(config, "ici_sequence_parallelism", 1),
         "context": getattr(config, "ici_context_parallelism", 1),
+        "context_usp_ulysses": getattr(config, "ici_context_usp_ulysses_parallelism", 1),
         "context_autoregressive": getattr(config, "ici_context_autoregressive_parallelism", 1),
         "tensor": getattr(config, "ici_tensor_parallelism", 1),
         "tensor_sequence": getattr(config, "ici_tensor_sequence_parallelism", 1),
@@ -2196,6 +2204,7 @@ def create_device_mesh(config, devices=None):
           "fsdp_transpose": getattr(config, "dcn_fsdp_transpose_parallelism", 1),
           "sequence": getattr(config, "dcn_sequence_parallelism", 1),
           "context": getattr(config, "dcn_context_parallelism", 1),
+          "context_usp_ulysses": getattr(config, "dcn_context_usp_ulysses_parallelism", 1),
           "context_autoregressive": getattr(config, "dcn_context_autoregressive_parallelism", 1),
           "tensor": getattr(config, "dcn_tensor_parallelism", 1),
           "tensor_sequence": getattr(config, "dcn_tensor_sequence_parallelism", 1),

@@ -110,8 +110,6 @@ def validate_tokamax_ring_runtime(
     raise ValueError("TPU Tokamax ring attention does not support chunked prefill yet.")
   if sinks is not None:
     raise ValueError("TPU Tokamax ring attention does not support attention sinks.")
-  if indexer_mask is not None:
-    raise ValueError("TPU Tokamax ring attention does not support indexer masks.")
   if bidirectional_mask is not None:
     raise ValueError("TPU Tokamax ring attention does not support bidirectional masks.")
   if record_max_logits:
@@ -283,6 +281,7 @@ def make_sharded_ring_attention_kernel(
     ring_axis: str,
     attn_logits_soft_cap: float | None,
     maybe_shard_with_pspec: Any,
+    mask: Any = None,
 ):
   """Builds and shards the Tokamax ring attention kernel for MaxText."""
   splash_config = build_splash_config(
@@ -295,11 +294,17 @@ def make_sharded_ring_attention_kernel(
   if config.use_max_logit_estimate > 0:
     splash_config = dataclasses.replace(splash_config, max_logit_const=config.use_max_logit_estimate)
 
-  mask = _make_causal_mask(
-      (query.shape[2], key.shape[2]),
-      context_parallel_size,
-      load_balanced=config.context_parallel_load_balance,
-  )
+  if mask is None:
+    # When using the indexer, causal masking is unified into the dynamic indexer_mask
+    # and applied dynamically per block; use FullMask to avoid duplicate static masks.
+    if getattr(config, "use_indexer", False):
+      mask = tokamax_splash_mask.FullMask((query.shape[2], key.shape[2]))
+    else:
+      mask = _make_causal_mask(
+          (query.shape[2], key.shape[2]),
+          context_parallel_size,
+          load_balanced=config.context_parallel_load_balance,
+      )
 
   @functools.partial(jax.jit, static_argnames=["single_head_mask"])
   def wrap_ring_kernel(single_head_mask):
@@ -331,15 +336,27 @@ def call_ring_attention(
     decoder_segment_ids_q: Any,
     decoder_segment_ids_kv: Any,
     ring_kernel: Any,
+    indexer_mask: Any = None,
 ):
   """Calls a Tokamax ring attention kernel over the MaxText batch dimension."""
   if (decoder_segment_ids_q is None) != (decoder_segment_ids_kv is None):
     raise ValueError("decoder_segment_ids_q and decoder_segment_ids_kv must both be set or both be None.")
+  # Vectorize execution across batch dimension, threading indexer_mask when present.
+  # Note: ring_kernel expects positional arguments (q, k, v, segment_ids, sinks, indexer_mask).
   if decoder_segment_ids_q is None:
-    return jax.vmap(lambda q, k, v: ring_kernel(q, k, v, None), in_axes=(0, 0, 0))(query, key, value)
+    if indexer_mask is None:
+      return jax.vmap(lambda q, k, v: ring_kernel(q, k, v, None, None, None), in_axes=(0, 0, 0))(query, key, value)
+    return jax.vmap(
+        lambda q, k, v, im: ring_kernel(q, k, v, None, None, im),
+        in_axes=(0, 0, 0, 0),
+    )(query, key, value, indexer_mask)
 
-  def call_one(q, k, v, q_segment_ids, kv_segment_ids):
+  def call_one(q, k, v, q_segment_ids, kv_segment_ids, im=None):
     segment_ids = ring_attention_kernel.SegmentIds(q_segment_ids, kv_segment_ids)
-    return ring_kernel(q, k, v, segment_ids)
+    return ring_kernel(q, k, v, segment_ids, None, im)
 
-  return jax.vmap(call_one, in_axes=(0, 0, 0, 0, 0))(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv)
+  if indexer_mask is None:
+    return jax.vmap(call_one, in_axes=(0, 0, 0, 0, 0))(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv)
+  return jax.vmap(call_one, in_axes=(0, 0, 0, 0, 0, 0))(
+      query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv, indexer_mask
+  )

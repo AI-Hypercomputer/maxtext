@@ -44,6 +44,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     steps=5 scan_layers=true \
     model_name=${MODEL_NAME} tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     enable_single_controller=${use_pathways} \
+    remat_policy=full \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
 
 # Step 3: Run inference on the checkpoint generated from the previous run

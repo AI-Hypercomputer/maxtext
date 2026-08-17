@@ -14,6 +14,7 @@
 
 """Unit tests for train_sft.py."""
 
+import inspect
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -26,6 +27,8 @@ pytestmark = [pytest.mark.post_training]
 
 class TrainSFTTest(unittest.TestCase):
   """Tests for train_sft.py."""
+
+  # pylint: disable=protected-access
 
   def test_validate_config_valid(self):
     config = SimpleNamespace(
@@ -80,6 +83,25 @@ class TrainSFTTest(unittest.TestCase):
         "eval_iter",
         cache_nnx_graph=True,
     )
+
+  def test_maxtext_peft_trainer_train_step_signature(self):
+    """Test that MaxTextPeftTrainer train_step accepts Tunix args including is_update_step."""
+    mock_model = mock.MagicMock()
+
+    with mock.patch("flax.nnx.pop"), mock.patch("flax.nnx.split", return_value=(mock.MagicMock(), {}, {})):
+      trainer = mock.MagicMock()
+      trainer.loss_fn = mock.MagicMock()
+      trainer._has_aux = False
+      trainer.gen_model_input_fn = lambda x: x
+      trainer._lora_enabled = False
+      trainer.model = mock_model
+
+      train_step_fn = train_sft.MaxTextPeftTrainer.create_train_step_fn(trainer)
+
+      # Should accept positional and keyword args from Tunix PeftTrainer
+      sig = inspect.signature(train_step_fn)
+      params = list(sig.parameters.keys())
+      self.assertEqual(params, ["model", "optimizer", "grad_accumulator", "inputs", "is_update_step"])
 
 
 if __name__ == "__main__":

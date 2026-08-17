@@ -162,7 +162,7 @@ class MetricsLogger:
     """
 
     self._tb_writer = None
-    if getattr(config, "enable_tensorboard", False):
+    if config.enable_tensorboard:
       self._tb_writer = max_utils.initialize_summary_writer(
           config.tensorboard_dir, config.run_name, config.enable_tensorboard
       )

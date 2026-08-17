@@ -27,6 +27,7 @@ import grain.python as grain
 import numpy as np
 from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, _TFRecordDatasetIterator  # pylint: disable=protected-access
 from grain.experimental import TFRecordIterDataset
+from maxtext.diffusion.block_diffusion import corruption as block_diffusion_corruption
 from maxtext.input_pipeline.protos import example_pb2
 from maxtext.input_pipeline import tokenizer
 from maxtext.multimodal import processor as mm_processor
@@ -792,8 +793,16 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
-    if self.config.model_name and self.config.model_name.startswith("qwen3-omni"):  # pyrefly: ignore[missing-attribute]
+    vision_block = mm_processor._get_vision_block(self.config)  # pylint: disable=protected-access
+    model_name = getattr(self.config, "model_name", None)
+    if vision_block in ["qwen3_omni", "qwen3_vl", "qwen3_5"]:
       return preprocessed_image
+    elif model_name and model_name.startswith("qwen"):
+      raise ValueError(
+          f"Qwen multimodal model '{model_name}' with vision_block '{vision_block}' was not "
+          f"registered in `PadOrTrimToMaxLength`. Qwen models use native dynamic grids and must be "
+          f"registered to bypass image padding."
+      )
 
     # Determine the maximum number of images/masks allowed.
     image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)
@@ -849,14 +858,22 @@ class PadOrTrimToMaxLength(grain.MapTransform):
   ) -> dict[str, np.ndarray | mm_utils.PreprocessorOutput]:
     """map to each element"""
     data_columns = list(element.keys())
+    preserve_pad_valued_tokens = (
+        self.config is not None and getattr(self.config, "training_objective", "causal_lm") == "block_diffusion"
+    )
     for data_column in data_columns:
       if data_column != "images":
         if isinstance(element[data_column], mm_utils.PreprocessorOutput):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
-        element[f"{data_column}_segmentation"] = (
-            element[data_column] != self.pad_id  # pyrefly: ignore[unsupported-operation]
-        )  # pyrefly: ignore[unsupported-operation]
+        if preserve_pad_valued_tokens:
+          element[f"{data_column}_segmentation"] = np.ones(
+              element[data_column].shape[0], dtype=np.int32  # pyrefly: ignore[missing-attribute]
+          )
+        else:
+          element[f"{data_column}_segmentation"] = (
+              element[data_column] != self.pad_id  # pyrefly: ignore[unsupported-operation]
+          )  # pyrefly: ignore[unsupported-operation]
         # pyrefly: ignore[missing-attribute]
         element[f"{data_column}_segmentation"] = element[
             f"{data_column}_segmentation"
@@ -878,6 +895,8 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
         element["images"] = self._pad_image_and_mask(element["images"])  # pyrefly: ignore[bad-argument-type]
 
+      elif preserve_pad_valued_tokens and key.endswith(("_segmentation", "_position")):
+        element[key] = self._pad_text(element[key], self.max_length, 0)  # pyrefly: ignore[bad-argument-type]
       elif "true_length" not in key:
         element[key] = self._pad_text(element[key], self.max_length, self.pad_id)  # pyrefly: ignore[bad-argument-type]
     return element
@@ -1003,6 +1022,46 @@ class ShiftData(grain.MapTransform):
 
   def map(self, element):
     return shift_and_refine(element, ignored_ids=self.ignored_ids, axis=self.axis)
+
+
+@dataclasses.dataclass
+class BlockDiffusionCorruption(grain.RandomMapTransform):
+  """Adapts block-diffusion corruption to the Grain batch contract."""
+
+  block_size: int
+  mask_id: int
+  min_noise: float = 1.0e-3
+  logit_alignment: str = "same_position"
+  canvas_policy: str = "all_masked"
+  axis: int = 1
+
+  def random_map(self, element, rng: np.random.Generator):
+    """Corrupts inputs while preserving clean targets and input metadata."""
+    inputs = np.asarray(element["inputs"])
+    targets = np.asarray(element["targets"])
+    targets_segmentation = np.asarray(element["targets_segmentation"])
+    if inputs.shape != targets.shape or inputs.shape != targets_segmentation.shape:
+      raise ValueError(
+          "inputs, targets, and targets_segmentation must have identical shapes, got "
+          f"{inputs.shape}, {targets.shape}, and {targets_segmentation.shape}"
+      )
+    result = block_diffusion_corruption.corrupt_tokens(
+        inputs,
+        targets_segmentation != 0,
+        rng,
+        block_size=self.block_size,
+        mask_id=self.mask_id,
+        min_noise=self.min_noise,
+        logit_alignment=self.logit_alignment,
+        canvas_policy=self.canvas_policy,
+        axis=self.axis,
+    )
+    output = dict(element)
+    output["inputs"] = result.inputs
+    output["targets"] = targets
+    output["corruption_mask"] = result.corruption_mask.astype(targets_segmentation.dtype)
+    output["targets_loss_mask"] = result.targets_loss_mask.astype(targets_segmentation.dtype)
+    return output
 
 
 @dataclasses.dataclass
