@@ -118,21 +118,25 @@ def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_block
 
 
 def _find_qwen_scanned_layer_idx(key_tuple):
-  """Finds a Qwen heterogeneous scanned block path like `layers.layer_0`."""
+  """Finds a Qwen scanned block path like `layers.layer_0` or `layers.moe_block`."""
   for i in range(len(key_tuple) - 1):
     if key_tuple[i] != "layers" or not isinstance(key_tuple[i + 1], str):
       continue
+    if key_tuple[i + 1].startswith("layers_"):
+      continue
     match = re.fullmatch(r"layer_(\d+)", key_tuple[i + 1])
     if match:
-      return i, int(match.group(1))
-  return -1, -1
+      return i, int(match.group(1)), 2
+    return i, 0, 1
+  return -1, -1, 0
 
 
 def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Optional[int] = None):
-  """Unroll Qwen's heterogeneous scanned blocks for an unscanned MaxText target.
+  """Unroll Qwen's heterogeneous or homogeneous scanned blocks for an unscanned MaxText target.
 
   Qwen 3 Next/3.5 training stores a repeating layer cycle as
   `decoder.layers.layer_{slot}`, with repetitions stacked on `scan_axis`.
+  Qwen 3 base training stores homogeneous layers as `decoder.layers.*` stacked on `scan_axis`.
   The inference model stores every layer as a direct decoder attribute named
   `layers_{global_index}`. Tunix's generic direct-sync mapper cannot bridge
   these two structures and otherwise silently leaves all destination layers at
@@ -159,12 +163,12 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
   slot_indices = set()
   scan_lengths = set()
   for key, value in flat_w.items():
-    container_idx, slot_idx = _find_qwen_scanned_layer_idx(key)
+    container_idx, slot_idx, consumed = _find_qwen_scanned_layer_idx(key)
     if container_idx == -1 or "dropout" in key or "rngs" in key:
       continue
     if not hasattr(value, "shape") or len(value.shape) <= scan_axis:
       raise ValueError(f"Qwen scanned parameter {'.'.join(map(str, key))} has no scan axis {scan_axis}: {value!r}")
-    scanned_keys.append((key, value, container_idx, slot_idx))
+    scanned_keys.append((key, value, container_idx, slot_idx, consumed))
     slot_indices.add(slot_idx)
     scan_lengths.add(value.shape[scan_axis])
 
@@ -184,12 +188,12 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
     raise ValueError(f"Qwen scanned parameters disagree on scan length: {sorted(scan_lengths)}")
 
   scan_length = scan_lengths.pop()
-  scanned_key_paths = {key for key, _, _, _ in scanned_keys}
+  scanned_key_paths = {key for key, _, _, _, _ in scanned_keys}
   new_flat_w = {key: value for key, value in flat_w.items() if key not in scanned_key_paths}
 
-  for key, value, container_idx, slot_idx in scanned_keys:
+  for key, value, container_idx, slot_idx, consumed in scanned_keys:
     prefix = key[:container_idx]
-    suffix = key[container_idx + 2 :]
+    suffix = key[container_idx + consumed :]
     for repetition in range(scan_length):
       global_idx = repetition * pattern_length + slot_idx
       new_key = prefix + (f"layers_{global_idx}",) + suffix
@@ -197,7 +201,7 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
 
   logging.info(
       "MaxTextVllmSampler: unrolled %d Qwen tensor components across %d layers for direct MaxText weight sync.",
-      len(scanned_keys),
+      len(scanned_key_paths),
       scan_length * pattern_length,
   )
   return unflatten_dict(new_flat_w)
