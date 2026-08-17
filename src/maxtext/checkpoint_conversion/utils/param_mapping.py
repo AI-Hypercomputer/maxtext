@@ -1812,61 +1812,81 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     """Reshapes and transposes indexer wq_b kernel weights.
 
     HF indexer.wq_b.weight has shape [4096, 2048].
-    JAX scanned indexer-wq_b-kernel expects [2048, num_layers, 32, 128].
+    JAX NNX scanned indexer-wq_b-kernel expects [num_layers=78, in_dim=2048, num_heads=32, head_dim=128].
+    JAX Linen scanned indexer-wq_b-kernel expects [2048, num_layers=78, 32, 128].
     """
     num_heads = maxtext_config.indexer_n_heads
     head_dim = maxtext_config.indexer_head_dim
 
     if saving_to_hf:
       # JAX -> HF
-      # input_tensor: [2048, L, H, D]
-      transposed = input_tensor.transpose(1, 2, 3, 0)
-      reshaped = transposed.reshape(transposed.shape[0], num_heads * head_dim, transposed.shape[-1])
-      if len(target_shape) == 2:
-        return reshaped[0].T
-      return reshaped.transpose(0, 2, 1)
+      if input_tensor.ndim == 4:
+        if input_tensor.shape[0] == num_heads or input_tensor.shape[0] == input_tensor.shape[-1]:
+          transposed = input_tensor.transpose(1, 2, 3, 0)
+        else:
+          transposed = input_tensor.transpose(0, 2, 3, 1)
+        reshaped = transposed.reshape(transposed.shape[0], num_heads * head_dim, transposed.shape[-1])
+        if len(target_shape) == 2:
+          return reshaped[0].T
+        return reshaped.transpose(0, 2, 1)
+      else:
+        transposed = input_tensor.transpose(1, 2, 0)
+        return transposed.reshape(num_heads * head_dim, transposed.shape[-1]).T
     else:
       # HF -> JAX
-      # input_tensor: [L, 4096, 2048] or [4096, 2048]
       if input_tensor.ndim == 2:
         input_tensor = input_tensor[None, :, :]
       # Reshape [L, 4096, 2048] -> [L, H, D, I]
       reshaped = input_tensor.reshape(input_tensor.shape[0], num_heads, head_dim, input_tensor.shape[-1])
-      # Transpose (L, H, D, I) -> (I, L, H, D) using axes (3, 0, 1, 2)
-      transposed = reshaped.transpose(3, 0, 1, 2)
-      if len(target_shape) == 3:
-        return transposed[:, 0, :, :]
-      return transposed
+      if len(target_shape) == 4:
+        if target_shape[0] == input_tensor.shape[-1]:  # [I, L, H, D] (Linen)
+          return reshaped.transpose(3, 0, 1, 2)
+        return reshaped.transpose(0, 3, 1, 2)          # [L, I, H, D] (NNX)
+      elif len(target_shape) == 3:
+        if target_shape[0] == input_tensor.shape[-1]:
+          return reshaped.transpose(3, 0, 1, 2)[:, 0, :, :]
+        return reshaped.transpose(0, 3, 1, 2)[0, :, :, :]
+      return reshaped
 
   def reshape_out_kernel(input_tensor, target_shape):
     """Reshapes and transposes out kernel weights.
 
     HF o_proj.weight has shape [6144, 16384].
-    JAX scanned out-kernel expects [64, num_layers, 256, 6144].
+    JAX NNX scanned out-kernel expects [num_layers=78, num_heads=64, head_dim=256, hidden_dim=6144].
+    JAX Linen scanned out-kernel expects [num_heads=64, num_layers=78, head_dim=256, hidden_dim=6144].
     """
     num_heads = maxtext_config.num_query_heads
     v_head_dim = maxtext_config.v_head_dim
 
     if saving_to_hf:
       # JAX -> HF
-      # input_tensor: [H, L, D, I]
-      transposed = input_tensor.transpose(1, 3, 0, 2)
-      reshaped = transposed.reshape(transposed.shape[0], transposed.shape[1], num_heads * v_head_dim)
-      if len(target_shape) == 2:
-        return reshaped[0].T
-      return reshaped.transpose(0, 2, 1)
+      if input_tensor.ndim == 4:
+        if input_tensor.shape[0] == num_heads:
+          transposed = input_tensor.transpose(1, 3, 0, 2)
+        else:
+          transposed = input_tensor.transpose(0, 3, 1, 2)
+        reshaped = transposed.reshape(transposed.shape[0], transposed.shape[1], num_heads * v_head_dim)
+        if len(target_shape) == 2:
+          return reshaped[0].T
+        return reshaped.transpose(0, 2, 1)
+      else:
+        transposed = input_tensor.transpose(2, 0, 1)
+        return transposed.reshape(transposed.shape[0], num_heads * v_head_dim).T
     else:
       # HF -> JAX
-      # input_tensor: [L, 6144, 16384] or [6144, 16384]
       if input_tensor.ndim == 2:
         input_tensor = input_tensor[None, :, :]
       # Reshape [L, 6144, 16384] -> [L, I, H, D]
       reshaped = input_tensor.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads, v_head_dim)
-      # Transpose (L, I, H, D) -> (H, L, D, I) using axes (2, 0, 3, 1)
-      transposed = reshaped.transpose(2, 0, 3, 1)
-      if len(target_shape) == 3:
-        return transposed[:, 0, :, :]
-      return transposed
+      if len(target_shape) == 4:
+        if target_shape[0] == num_heads:
+          return reshaped.transpose(2, 0, 3, 1)  # [H, L, D, I] (Linen)
+        return reshaped.transpose(0, 2, 3, 1)    # [L, H, D, I] (NNX)
+      elif len(target_shape) == 3:
+        if target_shape[0] == num_heads:
+          return reshaped.transpose(2, 0, 3, 1)[:, 0, :, :]
+        return reshaped.transpose(0, 2, 3, 1)[0, :, :, :]
+      return reshaped
 
   num_main_layers = config["num_hidden_layers"]
   first_num_dense_layers = config["first_k_dense_replace"]
