@@ -1285,11 +1285,11 @@ class PipelineParallelism(BaseModel):
 class RematAndOffload(BaseModel):
   """Configuration for gradient checkpointing (rematerialization) and offloading."""
 
-  remat_policy: str = Field(
+  remat_policy: str | None = Field(
       RematPolicy.FULL.value,
       description="The rematerialization policy, trading off speed and memory.",
   )
-  remat_policy_for_vit: str = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
+  remat_policy_for_vit: str | None = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
   decoder_layer_input: RematLocation = Field(
       RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
   )
