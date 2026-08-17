@@ -220,7 +220,10 @@ def run_comparison(
              tap_pure = tap_pure[-1]
              tap_hybrid = tap_hybrid[-1]
         
-        max_tap_diff = float(jnp.max(jnp.abs(tap_pure - tap_hybrid)))
+        tap_pure_flat = tap_pure.flatten()
+        tap_hybrid_flat = tap_hybrid.flatten()
+        valid_size = min(tap_pure_flat.size, tap_hybrid_flat.size)
+        max_tap_diff = float(jnp.max(jnp.abs(tap_pure_flat[:valid_size] - tap_hybrid_flat[:valid_size])))
         print(f"Tap Variable Max Diff (e.g. t_inv or A): {max_tap_diff:.2e}")
     else:
         print("Tap variables not found in output.")

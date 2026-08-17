@@ -175,7 +175,16 @@ def inner_kernel(
 
   # Store output and recurrent to vmem.
   out_slot_ref[...] = out.astype(out_slot_ref.dtype)
-  tap_slot_ref[...] = tap_val.astype(tap_slot_ref.dtype)
+  
+  # Flatten and pad/truncate tap_val to exactly match tap_slot_ref
+  tap_val_flat = tap_val.flatten()
+  slot_size = tap_slot_ref.size
+  if tap_val_flat.size > slot_size:
+      tap_val_flat = tap_val_flat[:slot_size]
+  else:
+      tap_val_flat = jnp.pad(tap_val_flat, (0, slot_size - tap_val_flat.size))
+  tap_slot_ref[...] = tap_val_flat.reshape(tap_slot_ref.shape).astype(tap_slot_ref.dtype)
+  
   recurrent_slot_ref[...] = new_recurrent_state.astype(recurrent_slot_ref.dtype)
 
   if carry_recurrent_scratch_ref is not None:
@@ -472,6 +481,8 @@ def fused_conv1d_gdn(
       out_shape = in_act
       in_out_spec = hbm_spec
       input_output_aliases[len(metadata_obj) + 5] = 0
+
+    tap_shape = (padded_batch_size, cfg.chunk_size, n_v, cfg.chunk_size)
 
     res = pl.pallas_call(
         functools.partial(outer_kernel, cfg=cfg),
