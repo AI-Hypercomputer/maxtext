@@ -171,6 +171,50 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
+def _gather_replicated_activations(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    num_repeats: int,
+    use_custom_vjp: bool,
+) -> jax.Array:
+  """Gathers sorted rows without materializing repeated inputs.
+
+  `sort_indices` must permute `inputs.shape[0] * num_repeats` rows.
+  """
+  assert sort_indices.shape[0] == inputs.shape[0] * num_repeats
+
+  if not use_custom_vjp:
+    return _sort_activations(jnp.repeat(inputs, num_repeats, axis=0), sort_indices, use_custom_vjp)
+
+  with jax.named_scope("sort_activations"):
+    return _gather_replicated_custom(inputs, sort_indices, num_repeats)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _gather_replicated_custom(inputs: jax.Array, sort_indices: jax.Array, num_repeats: int) -> jax.Array:
+  """Replicated-row gather with custom vjp."""
+  return inputs[sort_indices // num_repeats, ...]
+
+
+def _gather_replicated_custom_fwd(
+    inputs: jax.Array, sort_indices: jax.Array, num_repeats: int
+) -> tuple[jax.Array, jax.Array]:
+  """Forward pass of the custom vjp for `_gather_replicated_activations()`."""
+  return _gather_replicated_custom(inputs, sort_indices, num_repeats), sort_indices
+
+
+def _gather_replicated_custom_bwd(num_repeats: int, residuals: jax.Array, grads: jax.Array) -> tuple[jax.Array, None]:
+  """Backward pass of the custom vjp for `_gather_replicated_activations()`."""
+  sort_indices = residuals
+  unsorted_grads = grads[jnp.argsort(sort_indices), ...]
+  reshaped_grads = unsorted_grads.reshape(-1, num_repeats, *unsorted_grads.shape[1:])
+  # Match the cotangent-dtype accumulation used by the transpose of `jnp.repeat`.
+  return reshaped_grads.sum(axis=1, dtype=grads.dtype), None
+
+
+_gather_replicated_custom.defvjp(_gather_replicated_custom_fwd, _gather_replicated_custom_bwd)
+
+
 def get_batchsplit_init_kernel_axes():
   return (
       ("expert_only", "embed_moe", None),
@@ -952,11 +996,9 @@ class RoutedMoE(nnx.Module):
       if roll_to_expert_id is not None:
         flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
       sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-      # sort inputs for number of selected experts
-      replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-      sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
-          self.dtype
-      )
+      sorted_inputs = _gather_replicated_activations(
+          inputs_2d, sorted_selected_experts, self.num_experts_per_tok, use_custom_sort_vjp
+      ).astype(self.dtype)
       group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
