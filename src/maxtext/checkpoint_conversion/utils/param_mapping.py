@@ -2065,18 +2065,19 @@ def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
   else:
     for i in range(first_num_dense_layers):
       for key in dense_need_reshape:
-        mapping[f"params-decoder-dense_layer_{i}-{key}"] = reshape_kernel
-      mapping[f"params-decoder-dense_layer_{i}-self_attention-wkv_b-kernel"] = reshape_wkv_b_kernel
-      mapping[f"params-decoder-dense_layer_{i}-self_attention-wq_b-kernel"] = reshape_wq_b_kernel
-      mapping[f"params-decoder-dense_layer_{i}-self_attention-indexer-wq_b-kernel"] = reshape_indexer_wq_b_kernel
-      mapping[f"params-decoder-dense_layer_{i}-self_attention-out-kernel"] = reshape_out_kernel
+        mapping[f"params-decoder-dense_layers_{i}-{key}"] = reshape_kernel
+      mapping[f"params-decoder-dense_layers_{i}-self_attention-wkv_b-kernel"] = reshape_wkv_b_kernel
+      mapping[f"params-decoder-dense_layers_{i}-self_attention-wq_b-kernel"] = reshape_wq_b_kernel
+      mapping[f"params-decoder-dense_layers_{i}-self_attention-indexer-wq_b-kernel"] = reshape_indexer_wq_b_kernel
+      mapping[f"params-decoder-dense_layers_{i}-self_attention-out-kernel"] = reshape_out_kernel
     for i in range(first_num_dense_layers, num_main_layers):
+      moe_layer_idx = i - first_num_dense_layers
       for key in moe_need_reshape:
-        mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
-      mapping[f"params-decoder-layers_{i}-self_attention-wkv_b-kernel"] = reshape_wkv_b_kernel
-      mapping[f"params-decoder-layers_{i}-self_attention-wq_b-kernel"] = reshape_wq_b_kernel
-      mapping[f"params-decoder-layers_{i}-self_attention-indexer-wq_b-kernel"] = reshape_indexer_wq_b_kernel
-      mapping[f"params-decoder-layers_{i}-self_attention-out-kernel"] = reshape_out_kernel
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{key}"] = reshape_kernel
+      mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-wkv_b-kernel"] = reshape_wkv_b_kernel
+      mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-wq_b-kernel"] = reshape_wq_b_kernel
+      mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-indexer-wq_b-kernel"] = reshape_indexer_wq_b_kernel
+      mapping[f"params-decoder-moe_layers_{moe_layer_idx}-self_attention-out-kernel"] = reshape_out_kernel
 
   return mapping
 
