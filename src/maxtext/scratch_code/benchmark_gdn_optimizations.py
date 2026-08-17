@@ -49,7 +49,7 @@ def create_model_configs(
     chunk_size: int = 64,
     dtype: jnp.dtype = jnp.bfloat16,
     use_qk_norm: bool = True,
-) -> Tuple[types.SimpleNamespace, types.SimpleNamespace]:
+) -> Tuple[types.SimpleNamespace, types.SimpleNamespace, types.SimpleNamespace]:
     """Creates configurations for both Pure JAX GDN and Hybrid GDN."""
     base_dict = dict(
         emb_dim=hidden_size,
@@ -84,7 +84,13 @@ def create_model_configs(
         use_hybrid_gdn=True,
     )
 
-    return pure_jax_config, hybrid_gdn_config
+    hybrid_bwd_config = types.SimpleNamespace(
+        **base_dict,
+        use_gdn_kernel=True,
+        use_hybrid_gdn_bwd=True,
+    )
+
+    return pure_jax_config, hybrid_gdn_config, hybrid_bwd_config
 
 
 def create_jitted_train_step(model: nnx.Module, input_shape: Tuple[int, ...]):
@@ -168,7 +174,7 @@ def run_comparison(
     print(f"Config: Batch={BATCH}, SeqLen={SEQ_LEN}, Dtype={DTYPE}")
     print(f"Model: H={HIDDEN_SIZE}, K_Heads={NUM_KEY_HEADS}, V_Heads={NUM_VALUE_HEADS}, HeadDim={HEAD_DIM}")
 
-    pure_jax_cfg, hybrid_gdn_cfg = create_model_configs(
+    pure_jax_cfg, hybrid_gdn_cfg, hybrid_bwd_cfg = create_model_configs(
         hidden_size=HIDDEN_SIZE,
         num_key_heads=NUM_KEY_HEADS,
         num_value_heads=NUM_VALUE_HEADS,
@@ -186,10 +192,14 @@ def run_comparison(
 
     rngs_hybrid = nnx.Rngs(0)
     hybrid_model = qwen3.Qwen3NextGatedDeltaNet(config=hybrid_gdn_cfg, rngs=rngs_hybrid)
+    
+    rngs_hybrid_bwd = nnx.Rngs(0)
+    hybrid_bwd_model = qwen3.Qwen3NextGatedDeltaNet(config=hybrid_bwd_cfg, rngs=rngs_hybrid_bwd)
 
     # 2. WEIGHT SYNCHRONIZATION
     _, params_state = nnx.split(hybrid_model)
     nnx.update(pure_jax_model, params_state)
+    nnx.update(hybrid_bwd_model, params_state)
     print("✅ Models synchronized with identical weights.")
 
     # 3. INPUTS
@@ -203,6 +213,7 @@ def run_comparison(
 
     jit_train_pure, params_pure = create_jitted_train_step(pure_jax_model, inputs.shape)
     jit_train_hybrid, params_hybrid = create_jitted_train_step(hybrid_model, inputs.shape)
+    jit_train_hybrid_bwd, params_hybrid_bwd = create_jitted_train_step(hybrid_bwd_model, inputs.shape)
 
     loss_pure, out_pure, grads_pure = jit_train_pure(params_pure, inputs)
     jax.block_until_ready((loss_pure, out_pure, grads_pure))
@@ -243,19 +254,26 @@ def run_comparison(
 
     # 2. Compare Loss
     diff_loss = float(jnp.abs(loss_pure - loss_hybrid))
-    print(f"Loss Scalar Diff:             {diff_loss:.2e}")
+    diff_loss_bwd = float(jnp.abs(loss_pure - loss_hybrid_bwd))
+    print(f"Loss Scalar Diff (Hybrid):             {diff_loss:.2e}")
+    print(f"Loss Scalar Diff (Hybrid Bwd):         {diff_loss_bwd:.2e}")
 
     # 3. Compare Gradients (Element-by-Element)
     flat_grads_pure, _ = jax.tree_util.tree_flatten(grads_pure)
     flat_grads_hybrid, _ = jax.tree_util.tree_flatten(grads_hybrid)
+    flat_grads_hybrid_bwd, _ = jax.tree_util.tree_flatten(grads_hybrid_bwd)
 
     max_grad_diff = 0.0
-    for g1, g2 in zip(flat_grads_pure, flat_grads_hybrid):
+    max_grad_diff_bwd = 0.0
+    for g1, g2, g3 in zip(flat_grads_pure, flat_grads_hybrid, flat_grads_hybrid_bwd):
         if hasattr(g1, "shape"):
             d = jnp.max(jnp.abs(g1 - g2))
+            d_bwd = jnp.max(jnp.abs(g1 - g3))
             max_grad_diff = max(max_grad_diff, float(d))
+            max_grad_diff_bwd = max(max_grad_diff_bwd, float(d_bwd))
 
-    print(f"Backward Pass Max Grad Diff:  {max_grad_diff:.2e}")
+    print(f"Backward Pass Max Grad Diff (Hybrid):      {max_grad_diff:.2e}")
+    print(f"Backward Pass Max Grad Diff (Hybrid Bwd):  {max_grad_diff_bwd:.2e}")
 
     TOLERANCE = 1e-2 if DTYPE == jnp.bfloat16 else 1e-5
     if max_out_diff > TOLERANCE or max_grad_diff > TOLERANCE:
@@ -293,6 +311,7 @@ def run_comparison(
 
     t_train_pure = benchmark_func("Pure JAX Train Step", jit_train_pure, params_pure, inputs)
     t_train_hybrid = benchmark_func("Hybrid GDN Train Step", jit_train_hybrid, params_hybrid, inputs)
+    t_train_hybrid_bwd = benchmark_func("Hybrid Bwd GDN Train Step", jit_train_hybrid_bwd, params_hybrid_bwd, inputs)
 
     print(f"\n--- Results Summary ---")
     fwd_speedup = t_fwd_pure / t_fwd_hybrid if t_fwd_hybrid > 0 else 0.0

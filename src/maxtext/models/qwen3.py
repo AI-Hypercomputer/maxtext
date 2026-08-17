@@ -894,6 +894,27 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
           compute_dtype=cfg.dtype,
       )
+    elif getattr(cfg, "use_gdn_kernel", False) and getattr(cfg, "use_hybrid_gdn_bwd", False):
+      from maxtext.models.hybrid_gdn_bwd import hybrid_bwd_fused_conv1d_gdn
+      core_attn_out, (next_conv_state, next_recurrent_state), pure_jax_tap = hybrid_bwd_fused_conv1d_gdn(
+          qkv=qkv,
+          b=b,
+          a=a,
+          conv_weight=self.conv1d.kernel.value,
+          conv_bias=None,
+          a_log=self.A_log[...],
+          dt_bias=self.dt_bias[...],
+          conv_state=conv_state,
+          recurrent_state=recurrent_state,
+          num_k_heads=self.num_k_heads,
+          num_v_heads=self.num_v_heads,
+          head_k_dim=self.head_k_dim,
+          head_v_dim=self.head_v_dim,
+          conv_kernel_size=self.config.gdn_conv_kernel_dim,
+          chunk_size=self.config.gdn_chunk_size,
+          use_qk_norm_in_gdn=self.config.use_qk_norm_in_gdn,
+          compute_dtype=self.config.dtype,
+      )
     elif getattr(cfg, "use_gdn_kernel", False) and getattr(cfg, "use_hybrid_gdn", False):
       from maxtext.models.hybrid_gdn import hybrid_fused_conv1d_gdn
 
