@@ -51,8 +51,8 @@ v_head_dim: 256
 # RoPE
 mscale: 1.0
 rope_type: "default"
-rope_max_timescale: 1000000 # "rope_theta": 1000000
-max_position_embeddings: 202752
+rope_max_timescale: 8000000 # "rope_theta": 8000000
+max_position_embeddings: 1048576
 rope_interleave: true
 
 # Indexer for Dynamic Sparse Attention (DSA)
@@ -61,7 +61,7 @@ indexer_n_heads: 32
 indexer_head_dim: 128
 indexer_topk: 2048
 
-# GLM-5.2 Cross-Layer IndexCache / IndexShare
+# GLM-5.2 Cross-Layer IndexCache / IndexShare (Exact 78-layer HF topology: 3 Dense Full + 18x(3 Shared + 1 Full) + 3 Shared)
 use_index_share: true
-index_share_pattern: "FSSS"
+index_share_pattern: "FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"
 prune_shared_indexers: true
