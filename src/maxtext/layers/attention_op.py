@@ -242,7 +242,8 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
       if q_ids.size == 0 or kv_ids.size == 0:
         return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
 
-      is_local = kv_ids < local_kv_len
+      q_valid = q_ids < local_kv_len
+      is_local = (kv_ids < local_kv_len) & q_valid
       causal = q_ids >= kv_ids
       if sliding_window_size is not None:
         local_valid = causal & ((q_ids - kv_ids) < sliding_window_size)
@@ -255,7 +256,7 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
       else:
         c_thresh = (q_ids + 1) // compress_ratio
 
-      compressed_valid = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < compressed_kv_len)
+      compressed_valid = q_valid & (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < compressed_kv_len)
       return (is_local & local_valid) | compressed_valid
 
     super().__init__(
@@ -1804,19 +1805,13 @@ class AttentionOp(nnx.Module):
     # create_splash_attention config
     def create_sa_config(config, query, key, attn_logits_soft_cap):
       if config.use_tokamax_splash:
-        block_q = min(self.block_q, query.shape[2])
-        block_kv = min(self.block_kv, key.shape[2])
-        if self.attention_type == AttentionType.COMPRESSED and indexer_mask is None:
-          block_q = math.gcd(block_q, query.shape[2])
-          block_kv = math.gcd(block_kv, key.shape[2])
-
         sa_config = tokamax_splash_kernel.SplashConfig(
-            block_q=block_q,
-            block_kv=block_kv,
-            block_kv_compute=min(self.block_kv_compute, block_kv),
-            block_q_dkv=min(self.block_q_dkv, block_q),
-            block_kv_dkv=min(self.block_kv_dkv, block_kv),
-            block_kv_dkv_compute=min(self.block_kv_dkv_compute, block_kv),
+            block_q=min(self.block_q, query.shape[2]),
+            block_kv=min(self.block_kv, key.shape[2]),
+            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
+            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(self.block_kv_dkv_compute, key.shape[2]),
             use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
             q_layout=tokamax_splash_kernel.QKVLayout[self.q_layout],
             k_layout=tokamax_splash_kernel.QKVLayout[self.k_layout],
@@ -1905,7 +1900,7 @@ class AttentionOp(nnx.Module):
       block_kv = sa_config.block_kv
       # Splash requires sequences to be padded to strict block-sized boundaries.
       # If naturally divisible (condition false), it falls back to exact sequence lengths.
-      if self.attention_type == AttentionType.COMPRESSED and indexer_mask is not None and (
+      if self.attention_type == AttentionType.COMPRESSED and (
           (query.shape[2] % block_q != 0) or (key.shape[2] % block_kv != 0)
       ):
         padded_q_len = ((query.shape[2] + block_q - 1) // block_q) * block_q
@@ -2267,6 +2262,14 @@ class AttentionOp(nnx.Module):
 
       return attention_output, None
 
+    # Pad query and segment IDs to mask_shape if sequence length is not aligned to block size
+    orig_q_len = query.shape[2]
+    pad_q = mask_shape[0] - query.shape[2]
+    if pad_q > 0:
+      query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
+      if decoder_segment_ids is not None:
+        decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)))
+
     query = self._maybe_shard_with_pspec(query, axis_names_q)
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
     value = self._maybe_shard_with_pspec(value, axis_names_kv)
@@ -2292,6 +2295,11 @@ class AttentionOp(nnx.Module):
 
     x, max_logits = ret
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
+    # Slice outputs back to unpadded sequence length
+    if pad_q > 0:
+      x = x[:, :orig_q_len, :, :]
+      if record_max_logits:
+        max_logits = max_logits[:, :, :orig_q_len]
 
     if record_max_logits:
       # Max over sequence length (dim 2 of max_logits)
