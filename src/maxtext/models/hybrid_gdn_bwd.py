@@ -14,20 +14,20 @@ def _safe_dot(lhs, rhs, *args, **kwargs):
 def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
     n_v, chunk_size, _ = t.shape
     
-    iota_r = jax.lax.broadcasted_iota(jnp.int32, (n_v, chunk_size, chunk_size), 1)
-    iota_c = jax.lax.broadcasted_iota(jnp.int32, (n_v, chunk_size, chunk_size), 2)
-    inv_t = jnp.where(iota_r == iota_c, 1.0, 0.0).astype(t.dtype)
+    # FIX: Native 1x64x64 generation to avoid lane relayout crashes
+    iota_r_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 1)
+    iota_c_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 2)
+    inv_t_base = jnp.where(iota_r_2d == iota_c_2d, 1.0, 0.0).astype(t.dtype)
+    inv_t = jnp.broadcast_to(inv_t_base, t.shape)
     
-    # Natively generate 3D index maps to avoid TPU vector shape casting
+    # 1D masks for the loop
     iota_row_3d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, 1), 1)
     iota_col_3d = jax.lax.broadcasted_iota(jnp.int32, (1, 1, chunk_size), 2)
     
     def body_fun(i, inv_t_acc):
-        # Native 1x64x1 row mask
         row_mask = jnp.where(iota_row_3d == i, 1.0, 0.0).astype(t.dtype)
         t_row = jnp.sum(t * row_mask, axis=1, keepdims=True)
         
-        # Native 1x1x64 column mask
         col_mask = iota_col_3d < i
         t_row = jnp.where(col_mask, t_row, 0.0)
         
@@ -36,7 +36,6 @@ def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
             dimension_numbers=(((2,), (1,)), ((0,), (0,)))
         )
         
-        # Native 1x1x64 one_hot
         one_hot = jnp.where(iota_col_3d == i, 1.0, 0.0).astype(t.dtype)
         new_row = new_row + one_hot
         
@@ -157,14 +156,22 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             beta_large = fused_transpose_broadcast(beta, src_dim=2, dst_dim=0)[:n_v]
             g_cum_sum_log_t = fused_transpose_broadcast(g_cum_sum_log, src_dim=1, dst_dim=2)
             g_cum_sum_diff_log = g_cum_sum_log - g_cum_sum_log_t
-            gating_map = jnp.exp(g_cum_sum_diff_log)
+            
+            # --- FIX: Generate 1x64x64 masks to prevent 32x64x64 compiler crashes! ---
+            iota_r_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 1)
+            iota_c_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 2)
+            identity_mask = iota_r_2d == iota_c_2d
+            strictly_lower_mask = iota_r_2d > iota_c_2d
+            lower_mask = iota_r_2d >= iota_c_2d
+            
+            # Apply safe diff mask before exp!
+            safe_diff_fwd = jnp.where(strictly_lower_mask, g_cum_sum_diff_log, -1e4)
+            gating_map = jnp.exp(safe_diff_fwd)
+            
             gating_backward = jnp.exp(-g_cum_sum_diff_log[..., -1:])
             gating_forward = jnp.exp(g_cum_sum_log)
             gating_last = gating_forward[:, -1:]
-            iota_r = jax.lax.broadcasted_iota(jnp.int32, gating_map.shape, 1)
-            iota_c = jax.lax.broadcasted_iota(jnp.int32, gating_map.shape, 2)
-            identity_mask = iota_r == iota_c
-            strictly_lower_mask = iota_r > iota_c
+            
             gating_map_masked = jnp.where(strictly_lower_mask, gating_map, 0)
             k_beta_repeat = k_repeat * beta_large
             beta_k_k_t = _safe_dot(k_beta_repeat, k_repeat, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
@@ -266,15 +273,22 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             beta_large = fused_transpose_broadcast(beta, src_dim=2, dst_dim=0)[:n_v]
             g_cum_sum_log_t = fused_transpose_broadcast(g_cum_sum_log, src_dim=1, dst_dim=2)
             g_cum_sum_diff_log = g_cum_sum_log - g_cum_sum_log_t
-            gating_map = jnp.exp(g_cum_sum_diff_log)
+            
+            # --- FIX: Generate 1x64x64 masks to prevent 32x64x64 compiler crashes! ---
+            iota_r_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 1)
+            iota_c_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 2)
+            identity_mask = iota_r_2d == iota_c_2d
+            strictly_lower_mask = iota_r_2d > iota_c_2d
+            lower_mask = iota_r_2d >= iota_c_2d
+            
+            # --- CRITICAL NaN TRAP FIX: Applied before exp() ---
+            safe_diff_bwd = jnp.where(strictly_lower_mask, g_cum_sum_diff_log, -1e4)
+            gating_map = jnp.exp(safe_diff_bwd)
+            
             gating_backward = jnp.exp(-g_cum_sum_diff_log[..., -1:])
             gating_forward = jnp.exp(g_cum_sum_log)
             gating_last = gating_forward[:, -1:]
-            iota_r = jax.lax.broadcasted_iota(jnp.int32, gating_map.shape, 1)
-            iota_c = jax.lax.broadcasted_iota(jnp.int32, gating_map.shape, 2)
-            identity_mask = iota_r == iota_c
-            strictly_lower_mask = iota_r > iota_c
-            lower_mask = iota_r >= iota_c
+            
             gating_map_masked = jnp.where(strictly_lower_mask, gating_map, 0)
             k_beta_repeat = k_repeat * beta_large
             beta_k_k_t = _safe_dot(k_beta_repeat, k_repeat, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
