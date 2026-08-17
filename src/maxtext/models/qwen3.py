@@ -659,23 +659,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # =========================================================================
       try:
         from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-
-        # `GdnAttentionConfig` / the `layers.common.ragged_gated_delta_rule_wrapper`
-        # module only exist in newer tpu-inference revisions. Against releases that
-        # predate them, fall back to calling run_jax_gdn_attention without a config
-        # and let it pick its own default delta-rule implementation.
-        try:
-          from tpu_inference.layers.common.gdn_attention import GdnAttentionConfig  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        except ImportError:
-          GdnAttentionConfig = None
-        try:
-          from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import RaggedGatedDeltaRuleImpl  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        except ImportError:
-          try:
-            from tpu_inference.kernels.gdn.reference.ragged_gated_delta_rule_wrapper import RaggedGatedDeltaRuleImpl  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-          except ImportError:
-            RaggedGatedDeltaRuleImpl = None
-
         from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
@@ -719,12 +702,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       conv_state_paged, recurrent_state_paged = kv_cache
 
-      # Use REF impl (pure JAX) to avoid Mosaic kernel compilation issues.
-      if GdnAttentionConfig is not None and RaggedGatedDeltaRuleImpl is not None:
-        extra_gdn_kwargs = {"config": GdnAttentionConfig(ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF)}
-      else:
-        extra_gdn_kwargs = {}
-
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
           b_flat,
@@ -745,7 +722,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           self.head_v_dim,
           cfg.gdn_conv_kernel_dim,
           mesh=self.mesh,
-          **extra_gdn_kwargs,
       )
 
       # Reshape GDN output and apply gated norm + out projection.

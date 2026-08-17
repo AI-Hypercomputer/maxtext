@@ -1849,11 +1849,6 @@ class NNXDecoder(nnx.Module):
 
           graphdef, state = nnx.split(layer)
           if kv_caches is not None:
-            # vLLM/tpu-inference hands us a flat per-layer list, one entry per
-            # decoder layer. For hybrid QWEN3_NEXT / QWEN3_5 stacks that includes
-            # the GDN (linear-attention) layers, whose recurrent state lives in
-            # their own entry -- Qwen3_5DecoderLayer forwards kv_cache to the
-            # GatedDeltaNet branch too, so they must not be handed None.
             kv_cache = kv_caches[lyr]
           else:
             kv_cache = None
@@ -1877,10 +1872,6 @@ class NNXDecoder(nnx.Module):
             nnx.update(layer, new_state)
 
           if kv_caches is not None and kv_cache is not None:
-            # Mirror of the read side above: write the layer's updated cache back
-            # into the flat per-layer list vLLM/tpu-inference handed us. This
-            # covers both the full-attention layers and the GDN layers, whose
-            # entry carries the (conv_state, recurrent_state) pair.
             kv_caches[lyr] = kv_cache
 
           if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
