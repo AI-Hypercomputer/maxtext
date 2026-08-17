@@ -143,6 +143,7 @@ def run_comparison(
     warmup: int | None = None,
     dtype_str: str | None = None,
     profile_dir: str = "/tmp/maxtext_gdn_profile",
+    test_bwd: bool = False,
 ):
     backend = jax.extend.backend.get_backend().platform
     print(f"\nDevice: {jax.devices()[0]} ({backend})")
@@ -191,15 +192,16 @@ def run_comparison(
     pure_jax_model = qwen3.Qwen3NextGatedDeltaNet(config=pure_jax_cfg, rngs=rngs_pure)
 
     rngs_hybrid = nnx.Rngs(0)
-    hybrid_model = qwen3.Qwen3NextGatedDeltaNet(config=hybrid_gdn_cfg, rngs=rngs_hybrid)
-    
-    rngs_hybrid_bwd = nnx.Rngs(0)
-    hybrid_bwd_model = qwen3.Qwen3NextGatedDeltaNet(config=hybrid_bwd_cfg, rngs=rngs_hybrid_bwd)
+    if test_bwd:
+        print("Using Hybrid Bwd GDN (Backward Pallas kernel)")
+        hybrid_model = qwen3.Qwen3NextGatedDeltaNet(config=hybrid_bwd_cfg, rngs=rngs_hybrid)
+    else:
+        print("Using Hybrid GDN (Forward Tokamax kernel)")
+        hybrid_model = qwen3.Qwen3NextGatedDeltaNet(config=hybrid_gdn_cfg, rngs=rngs_hybrid)
 
     # 2. WEIGHT SYNCHRONIZATION
     _, params_state = nnx.split(hybrid_model)
     nnx.update(pure_jax_model, params_state)
-    nnx.update(hybrid_bwd_model, params_state)
     print("✅ Models synchronized with identical weights.")
 
     # 3. INPUTS
@@ -213,7 +215,6 @@ def run_comparison(
 
     jit_train_pure, params_pure = create_jitted_train_step(pure_jax_model, inputs.shape)
     jit_train_hybrid, params_hybrid = create_jitted_train_step(hybrid_model, inputs.shape)
-    jit_train_hybrid_bwd, params_hybrid_bwd = create_jitted_train_step(hybrid_bwd_model, inputs.shape)
 
     loss_pure, out_pure, grads_pure = jit_train_pure(params_pure, inputs)
     jax.block_until_ready((loss_pure, out_pure, grads_pure))
@@ -254,26 +255,19 @@ def run_comparison(
 
     # 2. Compare Loss
     diff_loss = float(jnp.abs(loss_pure - loss_hybrid))
-    diff_loss_bwd = float(jnp.abs(loss_pure - loss_hybrid_bwd))
-    print(f"Loss Scalar Diff (Hybrid):             {diff_loss:.2e}")
-    print(f"Loss Scalar Diff (Hybrid Bwd):         {diff_loss_bwd:.2e}")
+    print(f"Loss Scalar Diff:             {diff_loss:.2e}")
 
     # 3. Compare Gradients (Element-by-Element)
     flat_grads_pure, _ = jax.tree_util.tree_flatten(grads_pure)
     flat_grads_hybrid, _ = jax.tree_util.tree_flatten(grads_hybrid)
-    flat_grads_hybrid_bwd, _ = jax.tree_util.tree_flatten(grads_hybrid_bwd)
 
     max_grad_diff = 0.0
-    max_grad_diff_bwd = 0.0
-    for g1, g2, g3 in zip(flat_grads_pure, flat_grads_hybrid, flat_grads_hybrid_bwd):
+    for g1, g2 in zip(flat_grads_pure, flat_grads_hybrid):
         if hasattr(g1, "shape"):
             d = jnp.max(jnp.abs(g1 - g2))
-            d_bwd = jnp.max(jnp.abs(g1 - g3))
             max_grad_diff = max(max_grad_diff, float(d))
-            max_grad_diff_bwd = max(max_grad_diff_bwd, float(d_bwd))
 
-    print(f"Backward Pass Max Grad Diff (Hybrid):      {max_grad_diff:.2e}")
-    print(f"Backward Pass Max Grad Diff (Hybrid Bwd):  {max_grad_diff_bwd:.2e}")
+    print(f"Backward Pass Max Grad Diff:  {max_grad_diff:.2e}")
 
     TOLERANCE = 1e-2 if DTYPE == jnp.bfloat16 else 1e-5
     if max_out_diff > TOLERANCE or max_grad_diff > TOLERANCE:
@@ -311,7 +305,6 @@ def run_comparison(
 
     t_train_pure = benchmark_func("Pure JAX Train Step", jit_train_pure, params_pure, inputs)
     t_train_hybrid = benchmark_func("Hybrid GDN Train Step", jit_train_hybrid, params_hybrid, inputs)
-    t_train_hybrid_bwd = benchmark_func("Hybrid Bwd GDN Train Step", jit_train_hybrid_bwd, params_hybrid_bwd, inputs)
 
     print(f"\n--- Results Summary ---")
     fwd_speedup = t_fwd_pure / t_fwd_hybrid if t_fwd_hybrid > 0 else 0.0
@@ -443,6 +436,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=None, help="Number of warmup iterations")
     parser.add_argument("--dtype", type=str, default=None, help="Compute dtype (bfloat16, float32, etc.)")
     parser.add_argument("--profile_dir", type=str, default="/tmp/maxtext_gdn_profile", help="Directory for trace output")
+    parser.add_argument("--test_bwd", action="store_true", help="If true, tests hybrid_gdn_bwd instead of hybrid_gdn")
     args = parser.parse_args()
 
     run_comparison(
@@ -452,4 +446,5 @@ if __name__ == "__main__":
         warmup=args.warmup,
         dtype_str=args.dtype,
         profile_dir=args.profile_dir,
+        test_bwd=args.test_bwd,
     )
