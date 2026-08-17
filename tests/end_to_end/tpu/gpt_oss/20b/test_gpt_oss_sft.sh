@@ -32,7 +32,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     per_device_batch_size=1 \
     run_name=${run_id} \
-    steps=5 \
+    steps=2 \
     scan_layers=true \
     model_name=${MODEL_NAME} \
     tokenizer_path='unsloth/gpt-oss-20b-BF16' \

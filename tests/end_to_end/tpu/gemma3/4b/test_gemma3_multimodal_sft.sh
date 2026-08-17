@@ -44,6 +44,9 @@ python3 -m maxtext.inference.decode \
     prompt=\'Describe\ image\ \<start_of_image\>\' \
     image_path=\'tests/assets/test_image.jpg\' \
     attention=\'dot_product\' \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    enable_single_controller=${use_pathways} \
     skip_jax_distributed_system=True
 
 # Step 3: Run SFT on the MaxText checkpoint on ChartQA dataset
@@ -53,12 +56,12 @@ python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DI
     per_device_batch_size=1 \
     max_prefill_predict_length=1024 \
     max_target_length=2048 \
-    steps=5 \
+    steps=2 \
     scan_layers=true \
     async_checkpointing=False \
     attention=\'dot_product\' \
     dataset_type=hf hf_path=parquet \
-    hf_train_files=gs://aireenmei-multipod/dataset/hf/chartqa/train-* \
+    hf_train_files=${DATASET_PATH}/hf/chartqa/train-* \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/multimodal/sft \
     load_parameters_path=${MULTIMODAL_SCANNED_CKPT_PATH} \
     dtype=bfloat16 \
@@ -72,7 +75,7 @@ python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DI
 # Step 4: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}/checkpoints/4/items \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_prefill_predict_length=272 \
@@ -84,4 +87,8 @@ python3 -m maxtext.inference.decode \
     tokenizer_type=huggingface \
     prompt=\'Describe\ image\ \<start_of_image\>\' \
     image_path=\'tests/assets/test_image.jpg\' \
-    attention=\'dot_product\' skip_jax_distributed_system=True
+    attention=\'dot_product\' \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    enable_single_controller=${use_pathways} \
+    skip_jax_distributed_system=True

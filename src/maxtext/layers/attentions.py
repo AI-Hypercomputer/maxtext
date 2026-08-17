@@ -1135,9 +1135,9 @@ class Attention(nnx.Module):
           "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
       ) from e
 
-    query = query.reshape(-1, query.shape[2], query.shape[3])
-    key = key.reshape(-1, key.shape[2], key.shape[3])
-    value = value.reshape(-1, value.shape[2], value.shape[3])
+    query = query.reshape(-1, query.shape[2], query.shape[3]).astype(self.dtype)
+    key = key.reshape(-1, key.shape[2], key.shape[3]).astype(self.dtype)
+    value = value.reshape(-1, value.shape[2], value.shape[3]).astype(self.dtype)
 
     if rpa_kv_cache is None or rpa_metadata is None:
       # Return dummy values for dry runs (e.g. during model initialization or JIT tracing)
