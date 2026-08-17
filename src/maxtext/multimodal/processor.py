@@ -39,6 +39,8 @@ _MODEL_TO_BLOCKS = {
     "qwen3.5-397b-a17b": ("qwen3_5", "qwen3_5"),
     # Stitched model
     "maxtext-omni-gemma3-qwen3": ("gemma3", "qwen3"),
+    # Cosmos
+    "cosmos3-nano-reasoner": ("qwen3_vl", "qwen3"),
 }
 
 
@@ -358,7 +360,7 @@ def downsample_video_mask_to_tokens(video_mask, config):
   """Routes video-mask reduction to the model-specific multimodal processor."""
   if video_mask is None:
     return None
-  if config.model_name.startswith(("qwen3")):
+  if config.model_name.startswith(("qwen3", "cosmos3")):
     from maxtext.multimodal.processor_qwen3_omni import (  # pylint: disable=import-outside-toplevel
         downsample_video_mask_to_tokens as downsample_qwen3_video_mask,
     )
