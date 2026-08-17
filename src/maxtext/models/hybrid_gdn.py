@@ -178,7 +178,11 @@ def _run_tokamax_fused_fwd(
 
     core_attn_out = core_attn_out_flat.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
     num_chunks = seq_len // chunk_size
-    tap_out = tap_out.reshape(batch_size, -1, num_v_heads, chunk_size, chunk_size)[:, :num_chunks].astype(jnp.float32)
+    # Reshape from flat sequences into (Batch, Chunks, Tokens, Heads, Tokens)
+    tap_out = tap_out.reshape(batch_size, num_chunks, chunk_size, num_v_heads, chunk_size)
+    
+    # Swap to the expected output shape: (Batch, Chunks, Heads, Tokens, Tokens)
+    tap_out = jnp.swapaxes(tap_out, 2, 3).astype(jnp.float32)
     return core_attn_out.astype(qkv.dtype), (new_conv_state[1:].astype(qkv.dtype), new_recurrent_state[1:].astype(qkv.dtype)), tap_out
 
 

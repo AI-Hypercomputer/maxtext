@@ -36,7 +36,6 @@ def inner_kernel(
     recurrent_slot_ref: jax.Array,  # [seq, num_v_heads, kq_head, v_head]
     # Outputs.
     out_slot_ref: jax.Array,  # [seq * chunk, num_v_heads, v_head]
-    tap_slot_ref: jax.Array,
     # Scratches.
     metadata_ref: memory_ref.MetadataRef,
     weights_ref: memory_ref.WeightRefs,
@@ -146,8 +145,6 @@ def inner_kernel(
         cfg=cfg,
         real_sizes=real_sizes,
     )
-    
-    tap_val = jnp.zeros((cfg.aligned_num_v_heads, cfg.chunk_size, cfg.chunk_size), dtype=jnp.float32)
 
   else:
     q_large, k_large, v_large, b_large, a_large = (
@@ -175,16 +172,13 @@ def inner_kernel(
 
   # Store output and recurrent to vmem.
   out_slot_ref[...] = out.astype(out_slot_ref.dtype)
-  
-  # Flatten and pad/truncate tap_val to exactly match tap_slot_ref
-  tap_val_flat = tap_val.flatten()
-  slot_size = tap_slot_ref.size
-  if tap_val_flat.size > slot_size:
-      tap_val_flat = tap_val_flat[:slot_size]
-  else:
-      tap_val_flat = jnp.pad(tap_val_flat, (0, slot_size - tap_val_flat.size))
-  tap_slot_ref[...] = tap_val_flat.reshape(tap_slot_ref.shape).astype(tap_slot_ref.dtype)
-  
+  if tap_val.ndim == 3:
+      tap_val = jnp.expand_dims(tap_val, 0)
+      
+  # Transpose from [seq_tile_size, num_v_heads, chunk_size, chunk_size] 
+  # to token-first layout [seq_tile_size, chunk_size, num_v_heads, chunk_size]
+  tap_val_transposed = jnp.swapaxes(tap_val, 1, 2)
+  tap_slot_ref[...] = tap_val_transposed.astype(tap_slot_ref.dtype)
   recurrent_slot_ref[...] = new_recurrent_state.astype(recurrent_slot_ref.dtype)
 
   if carry_recurrent_scratch_ref is not None:
@@ -203,9 +197,9 @@ def outer_kernel(
     weights_ref: memory_ref.WeightRefs,
     # Outputs.
     out_ref: jax.Array,
+    tap_ref: jax.Array,
     conv_state_out_ref: jax.Array,
     recurrent_state_out_ref: jax.Array,
-    tap_ref: jax.Array,
     # Scratches.
     carry_conv_scratch_ref: jax.Array | None,
     carry_recurrent_scratch_ref: jax.Array | None,
@@ -482,8 +476,6 @@ def fused_conv1d_gdn(
       in_out_spec = hbm_spec
       input_output_aliases[len(metadata_obj) + 5] = 0
 
-    tap_shape = (padded_batch_size, cfg.chunk_size, n_v, cfg.chunk_size)
-
     res = pl.pallas_call(
         functools.partial(outer_kernel, cfg=cfg),
         out_shape=(out_shape, in_conv_state, in_recurrent_state, out_shape),
@@ -519,10 +511,10 @@ def fused_conv1d_gdn(
     out_act, out_conv, out_rec, out_tap = res
     return (out_conv, out_rec), out_act, out_tap
 
-  (out_conv_state, out_recurrent_state), out_act, tap_out = call_kernel(
+  out_act, out_conv_state, out_recurrent_state = call_kernel(
       conv_state, recurrent_state, None, config.GDNMode.BATCHED
   )
-  (out_conv_state, out_recurrent_state), out_act, tap_out = call_kernel(
+  out_act, out_conv_state, out_recurrent_state = call_kernel(
       out_conv_state, out_recurrent_state, out_act, config.GDNMode.PER_SEQ
   )
 
@@ -531,4 +523,4 @@ def fused_conv1d_gdn(
   out_conv_state = out_conv_state.reshape(conv_state_shape)
   out_recurrent_state = out_recurrent_state.astype(recurrent_out_dtype)
 
-  return (out_conv_state, out_recurrent_state), out_act, tap_out
+  return (out_conv_state, out_recurrent_state), out_act
