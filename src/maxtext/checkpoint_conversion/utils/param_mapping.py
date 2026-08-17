@@ -1888,82 +1888,52 @@ def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
       return input_tensor
 
   def reshape_wkv_b_kernel(input_tensor, target_shape):
-    """Reshapes and transposes wkv_b kernel weights between MaxText and HF.
+    """Reshapes and transposes wkv_b kernel weights between MaxText and HF GLM-5.2.
 
     HF kv_b_proj.weight shape is [num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank].
-    It is split globally in HF: all k_nope first, then all value.
+    In HF GlmMoeDsa, the weight is arranged per-head: [num_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank].
     JAX expects wkv_b shape [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
     or scanned [num_layers, kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim].
     """
     num_heads = maxtext_config.num_query_heads
     qk_nope_head_dim = maxtext_config.qk_nope_head_dim
     v_head_dim = maxtext_config.v_head_dim
+    head_dim = qk_nope_head_dim + v_head_dim
 
     if saving_to_hf:
       # JAX -> HF
-      if input_tensor.ndim == 4:  # [L, In, num_heads, head_dim]
-        k_nope, value = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
-        k_nope = k_nope.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * qk_nope_head_dim)
-        value = value.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * v_head_dim)
-        concatenated = np.concatenate([k_nope, value], axis=-1)
-        return concatenated.transpose(0, 2, 1)
-      k_nope, value = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
-      k_nope = k_nope.reshape(input_tensor.shape[0], num_heads * qk_nope_head_dim)
-      value = value.reshape(input_tensor.shape[0], num_heads * v_head_dim)
-      concatenated = np.concatenate([k_nope, value], axis=-1)
-      return concatenated.T
+      if input_tensor.ndim == 4:  # [L, kv_lora_rank, num_heads, head_dim]
+        return input_tensor.transpose(0, 2, 3, 1).reshape(input_tensor.shape[0], num_heads * head_dim, input_tensor.shape[1])
+      return input_tensor.transpose(1, 2, 0).reshape(num_heads * head_dim, input_tensor.shape[0])
     else:
       # HF -> JAX
-      t_tensor = input_tensor.transpose(0, 2, 1) if input_tensor.ndim == 3 else input_tensor.T
-      split_idx = num_heads * qk_nope_head_dim
-      k_nope_weight = t_tensor[..., :split_idx]
-      value_weight = t_tensor[..., split_idx:]
-      if input_tensor.ndim == 3:
-        k_nope_weight = k_nope_weight.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_nope_head_dim)
-        value_weight = value_weight.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, v_head_dim)
-      else:
-        k_nope_weight = k_nope_weight.reshape(t_tensor.shape[0], num_heads, qk_nope_head_dim)
-        value_weight = value_weight.reshape(t_tensor.shape[0], num_heads, v_head_dim)
-      return np.concatenate([k_nope_weight, value_weight], axis=-1)
+      if input_tensor.ndim == 3:  # [L, num_heads * head_dim, kv_lora_rank]
+        return input_tensor.reshape(input_tensor.shape[0], num_heads, head_dim, input_tensor.shape[-1]).transpose(0, 3, 1, 2)
+      return input_tensor.reshape(num_heads, head_dim, input_tensor.shape[-1]).transpose(2, 0, 1)
 
   def reshape_wq_b_kernel(input_tensor, target_shape):
-    """Reshapes and transposes wq_b kernel weights between MaxText and HF.
+    """Reshapes and transposes wq_b kernel weights between MaxText and HF GLM-5.2.
 
     HF q_b_proj.weight shape is [num_heads * (qk_nope_head_dim + qk_rope_head_dim), q_lora_rank].
-    It is split globally in HF: all q_nope first, then all q_rope.
+    In HF GlmMoeDsa, the weight is arranged per-head: [num_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank].
     JAX expects wq_b shape [q_lora_rank, num_heads, qk_nope_head_dim + qk_rope_head_dim]
     or scanned [num_layers, q_lora_rank, num_heads, qk_nope_head_dim + qk_rope_head_dim].
     """
     num_heads = maxtext_config.num_query_heads
     qk_nope_head_dim = maxtext_config.qk_nope_head_dim
     qk_rope_head_dim = maxtext_config.qk_rope_head_dim
+    head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     if saving_to_hf:
       # JAX -> HF
-      if input_tensor.ndim == 4:  # [L, In, num_heads, head_dim]
-        q_nope, q_rope = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
-        q_nope = q_nope.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * qk_nope_head_dim)
-        q_rope = q_rope.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * qk_rope_head_dim)
-        concatenated = np.concatenate([q_nope, q_rope], axis=-1)
-        return concatenated.transpose(0, 2, 1)
-      q_nope, q_rope = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
-      q_nope = q_nope.reshape(input_tensor.shape[0], num_heads * qk_nope_head_dim)
-      q_rope = q_rope.reshape(input_tensor.shape[0], num_heads * qk_rope_head_dim)
-      concatenated = np.concatenate([q_nope, q_rope], axis=-1)
-      return concatenated.T
+      if input_tensor.ndim == 4:  # [L, q_lora_rank, num_heads, head_dim]
+        return input_tensor.transpose(0, 2, 3, 1).reshape(input_tensor.shape[0], num_heads * head_dim, input_tensor.shape[1])
+      return input_tensor.transpose(1, 2, 0).reshape(num_heads * head_dim, input_tensor.shape[0])
     else:
       # HF -> JAX
-      t_tensor = input_tensor.transpose(0, 2, 1) if input_tensor.ndim == 3 else input_tensor.T
-      split_idx = num_heads * qk_nope_head_dim
-      q_nope_weight = t_tensor[..., :split_idx]
-      q_rope_weight = t_tensor[..., split_idx:]
-      if input_tensor.ndim == 3:
-        q_nope_weight = q_nope_weight.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_nope_head_dim)
-        q_rope_weight = q_rope_weight.reshape(t_tensor.shape[0], t_tensor.shape[1], num_heads, qk_rope_head_dim)
-      else:
-        q_nope_weight = q_nope_weight.reshape(t_tensor.shape[0], num_heads, qk_nope_head_dim)
-        q_rope_weight = q_rope_weight.reshape(t_tensor.shape[0], num_heads, qk_rope_head_dim)
-      return np.concatenate([q_nope_weight, q_rope_weight], axis=-1)
+      if input_tensor.ndim == 3:  # [L, num_heads * head_dim, q_lora_rank]
+        return input_tensor.reshape(input_tensor.shape[0], num_heads, head_dim, input_tensor.shape[-1]).transpose(0, 3, 1, 2)
+      return input_tensor.reshape(num_heads, head_dim, input_tensor.shape[-1]).transpose(2, 0, 1)
 
   def reshape_indexer_wq_b_kernel(input_tensor, target_shape):
     """Reshapes and transposes indexer wq_b kernel weights.
