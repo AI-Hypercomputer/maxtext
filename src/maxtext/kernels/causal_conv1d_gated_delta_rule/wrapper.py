@@ -36,6 +36,7 @@ def inner_kernel(
     recurrent_slot_ref: jax.Array,  # [seq, num_v_heads, kq_head, v_head]
     # Outputs.
     out_slot_ref: jax.Array,  # [seq * chunk, num_v_heads, v_head]
+    tap_slot_ref: jax.Array,
     # Scratches.
     metadata_ref: memory_ref.MetadataRef,
     weights_ref: memory_ref.WeightRefs,
