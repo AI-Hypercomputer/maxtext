@@ -66,11 +66,34 @@ def _make_config(**overrides):
   """Return a MaxTextConfig object suitable for unit tests."""
   config_dict = _BASE_CONFIG.copy()
   config_dict.update(overrides)
-  # Use initialize_pydantic to get nested models as objects (attribute access)
   return pyconfig.initialize_pydantic(
       [sys.argv[0], get_test_config_path()],
       **config_dict,
   )
+
+
+_DS4_TINY_NUM_LAYERS = 5
+_DS4_TINY_PREFIX_LAYERS = 3
+_DS4_LORA_MODULES = (
+    "self_attention/wq_a",
+    "self_attention/wq_b",
+    "self_attention/wkv",
+    "self_attention/o_a_proj",
+    "self_attention/o_b_proj",
+    "mlp/shared_experts/wi_0",
+    "mlp/shared_experts/wi_1",
+    "mlp/shared_experts/wo",
+)
+
+
+def _ds4_expected_lora_paths(layer_template, layer_indices):
+  """Expected LoRAParam state paths for the given DeepSeek-V4 layers."""
+  return {
+      f"{layer_template.format(i=i)}/{module}/kernel_lora_{ab}"
+      for i in layer_indices
+      for module in _DS4_LORA_MODULES
+      for ab in ("a", "b")
+  }
 
 
 class LoraUtilsTest(unittest.TestCase):
@@ -504,6 +527,86 @@ class LoraUtilsTest(unittest.TestCase):
 
     for path in non_matching_paths:
       self.assertFalse(compiled.search(path), f"Incorrectly matched invalid path: {path}")
+
+  def test_deepseek4_lora_path_matching(self):
+    """Test the DeepSeek-V4 LoRA regex with re.fullmatch against module paths, as qwix does."""
+    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
+    mock_config.lora = mock.MagicMock()
+    mock_config.lora.lora_module_path = ""
+    mock_config.model_name = "deepseek4-284b"
+
+    compiled = re.compile(lora_utils._get_lora_module_path(mock_config))
+
+    matching_paths = [
+        "decoder/layers_0/self_attention/wq_a",
+        "decoder/layers_2/self_attention/wq_b",
+        "decoder/layers_1/self_attention/wkv",
+        "decoder/layers_0/self_attention/o_a_proj",
+        "decoder/layers_0/self_attention/o_b_proj",
+        "decoder/layers_0/mlp/shared_experts/wi_0",
+        "decoder/layers_2/mlp/shared_experts/wi_1",
+        "decoder/layers_1/mlp/shared_experts/wo",
+        "decoder/scanned_blocks/layers_0/self_attention/wq_a",
+        "decoder/scanned_blocks/layers_1/mlp/shared_experts/wo",
+        "decoder/layers/0/self_attention/wkv",
+        "decoder/layers/4/mlp/shared_experts/wi_0",
+    ]
+    for path in matching_paths:
+      self.assertIsNotNone(compiled.fullmatch(path), f"Failed to match valid path: {path}")
+
+    non_matching_paths = [
+        "decoder/scanned_blocks/layers_0/mlp/MoeBlock_0/wi_0",
+        "decoder/layers_0/mlp/MoeBlock_0/wo",
+        "decoder/layers/3/mlp/MoeBlock_0/wi_1",
+        "decoder/layers_0/pre_self_attention_layer_norm/scale",
+        "decoder/decoder_norm/scale",
+        "token_embedder/embedding",
+        "decoder/scanned_blocks/layers_0/mlp/MoeBlock_0/gate/kernel",
+    ]
+    for path in non_matching_paths:
+      self.assertIsNone(compiled.fullmatch(path), f"Incorrectly matched invalid path: {path}")
+
+  def _deepseek4_tiny_lora_paths(self, scan_layers):
+    """Materializes LoRA on a 5-layer DeepSeek-V4 and returns its LoRAParam state paths."""
+    cfg = _make_config(
+        model_name="deepseek4-tiny",
+        base_num_decoder_layers=_DS4_TINY_NUM_LAYERS,
+        compress_ratios=[0, 0, 4, 128, 4],
+        sliding_window_size=32,
+        base_emb_dim=64,
+        base_mlp_dim=64,
+        base_moe_mlp_dim=64,
+        base_num_query_heads=4,
+        base_num_kv_heads=1,
+        num_experts=4,
+        num_experts_per_tok=2,
+        shared_experts=1,
+        vocab_size=32,
+        max_target_length=16,
+        scan_layers=scan_layers,
+        lora={"enable_lora": True, "lora_rank": 4, "lora_alpha": 8.0},
+    )
+    model, _ = model_creation_utils.from_pretrained(cfg, mesh=None, model_mode=model_creation_utils.MODEL_MODE_TRAIN)
+    lora_model = lora_utils.apply_lora_to_model(model, None, cfg)
+    _, state = nnx.split(lora_model)
+    return {"/".join(str(p) for p in path) for path, value in state.flat_state() if isinstance(value, nnx.LoRAParam)}
+
+  def test_apply_lora_to_deepseek4_tiny_unscanned(self):
+    """Every DeepSeek-V4 layer gets exactly the eight targeted projections adapted."""
+    self.assertEqual(
+        self._deepseek4_tiny_lora_paths(scan_layers=False),
+        _ds4_expected_lora_paths("decoder/layers_{i}", range(_DS4_TINY_NUM_LAYERS)),
+    )
+
+  def test_apply_lora_to_deepseek4_tiny_scanned(self):
+    """With scan_layers, the 3 prefix layers stay unrolled and the rest live under scanned_blocks."""
+    self.assertEqual(
+        self._deepseek4_tiny_lora_paths(scan_layers=True),
+        _ds4_expected_lora_paths("decoder/layers_{i}", range(_DS4_TINY_PREFIX_LAYERS))
+        | _ds4_expected_lora_paths(
+            "decoder/scanned_blocks/layers_{i}", range(_DS4_TINY_NUM_LAYERS - _DS4_TINY_PREFIX_LAYERS)
+        ),
+    )
 
 
 if __name__ == "__main__":
