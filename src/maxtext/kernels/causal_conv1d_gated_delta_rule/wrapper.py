@@ -203,9 +203,9 @@ def outer_kernel(
     weights_ref: memory_ref.WeightRefs,
     # Outputs.
     out_ref: jax.Array,
-    tap_ref: jax.Array,
     conv_state_out_ref: jax.Array,
     recurrent_state_out_ref: jax.Array,
+    tap_ref: jax.Array,
     # Scratches.
     carry_conv_scratch_ref: jax.Array | None,
     carry_recurrent_scratch_ref: jax.Array | None,
