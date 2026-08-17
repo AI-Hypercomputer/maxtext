@@ -125,11 +125,8 @@ def _run_tokamax_fused_fwd(
             conv_kernel_size=conv_kernel_size, chunk_size=chunk_size, use_qk_norm_in_gdn=use_qk_norm_in_gdn, compute_dtype=compute_dtype,
         )
 
-    # When on TPU, invoke Tokamax GDN v3 fused_conv1d_gdn kernel
-    try:
-        from tokamax._src.ops.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
-    except ImportError:
-        from tokamax._src.ops.experimental.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
+    # When on TPU, invoke local MaxText GDN v3 fused_conv1d_gdn kernel
+    from maxtext.kernels.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
     batch_size, seq_len, dim_size = qkv.shape
     num_seqs = batch_size
 
