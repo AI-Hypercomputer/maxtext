@@ -1741,15 +1741,14 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 
     if saving_to_hf:
       # JAX -> HF
-      if "glm" in maxtext_config.model_name.lower():
-        if input_tensor.ndim == 4:  # [L, kv_lora_rank, num_heads, head_dim]
-          transposed = input_tensor.transpose(0, 2, 3, 1)
-          return transposed.reshape(
-              transposed.shape[0], num_heads * (qk_nope_head_dim + v_head_dim), transposed.shape[-1]
-          )
-        return input_tensor.reshape(input_tensor.shape[0], num_heads * (qk_nope_head_dim + v_head_dim)).T
       # target_shape: [num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]
       # input_tensor: [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
+      if input_tensor.ndim == 4:  # [L, In, num_heads, head_dim]
+        k_nope, value = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
+        k_nope = k_nope.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * qk_nope_head_dim)
+        value = value.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * v_head_dim)
+        concatenated = np.concatenate([k_nope, value], axis=-1)
+        return concatenated.transpose(0, 2, 1)
       k_nope, value = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
       k_nope = k_nope.reshape(input_tensor.shape[0], num_heads * qk_nope_head_dim)
       value = value.reshape(input_tensor.shape[0], num_heads * v_head_dim)
@@ -1757,14 +1756,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       return concatenated.T
     else:
       # HF -> JAX
-      if "glm" in maxtext_config.model_name.lower():
-        if input_tensor.ndim == 3:
-          # input_tensor: [L, Out, In] = [L, num_heads * head_dim, kv_lora_rank]
-          reshaped = input_tensor.reshape(
-              input_tensor.shape[0], num_heads, qk_nope_head_dim + v_head_dim, input_tensor.shape[2]
-          )
-          return reshaped.transpose(0, 3, 1, 2)  # [L, In, num_heads, head_dim]
-        return input_tensor.T.reshape(input_tensor.shape[1], num_heads, qk_nope_head_dim + v_head_dim)
       # input_tensor: [num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]
       # target_shape: [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
       t_tensor = input_tensor.transpose(0, 2, 1) if input_tensor.ndim == 3 else input_tensor.T
@@ -1792,13 +1783,12 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 
     if saving_to_hf:
       # JAX -> HF
-      if "glm" in maxtext_config.model_name.lower():
-        if input_tensor.ndim == 4:  # [L, q_lora_rank, num_heads, head_dim_sum]
-          transposed = input_tensor.transpose(0, 2, 3, 1)
-          return transposed.reshape(
-              transposed.shape[0], num_heads * (qk_nope_head_dim + qk_rope_head_dim), transposed.shape[-1]
-          )
-        return input_tensor.reshape(input_tensor.shape[0], num_heads * (qk_nope_head_dim + qk_rope_head_dim)).T
+      if input_tensor.ndim == 4:  # [L, In, num_heads, head_dim]
+        q_nope, q_rope = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
+        q_nope = q_nope.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * qk_nope_head_dim)
+        q_rope = q_rope.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * qk_rope_head_dim)
+        concatenated = np.concatenate([q_nope, q_rope], axis=-1)
+        return concatenated.transpose(0, 2, 1)
       q_nope, q_rope = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
       q_nope = q_nope.reshape(input_tensor.shape[0], num_heads * qk_nope_head_dim)
       q_rope = q_rope.reshape(input_tensor.shape[0], num_heads * qk_rope_head_dim)
@@ -1806,14 +1796,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       return concatenated.T
     else:
       # HF -> JAX
-      if "glm" in maxtext_config.model_name.lower():
-        if input_tensor.ndim == 3:
-          # input_tensor: [L, Out, In] = [L, num_heads * head_dim, q_lora_rank]
-          reshaped = input_tensor.reshape(
-              input_tensor.shape[0], num_heads, qk_nope_head_dim + qk_rope_head_dim, input_tensor.shape[2]
-          )
-          return reshaped.transpose(0, 3, 1, 2)  # [L, In, num_heads, head_dim]
-        return input_tensor.T.reshape(input_tensor.shape[1], num_heads, qk_nope_head_dim + qk_rope_head_dim)
       t_tensor = input_tensor.transpose(0, 2, 1) if input_tensor.ndim == 3 else input_tensor.T
       split_idx = num_heads * qk_nope_head_dim
       q_nope_weight = t_tensor[..., :split_idx]
