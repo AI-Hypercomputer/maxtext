@@ -43,6 +43,7 @@ from orbax.checkpoint import v1 as ocp_v1
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 from orbax.checkpoint._src.checkpoint_managers import preservation_policy as preservation_policy_lib
 from orbax.checkpoint._src.checkpoint_managers import save_decision_policy as save_decision_policy_lib
+from orbax.checkpoint.options import MultiprocessingOptions
 
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
 Composite = ocp.args.Composite
@@ -373,6 +374,8 @@ def create_orbax_checkpoint_manager(
       item_handlers=item_handlers,
       options=CheckpointManagerOptions(
           create=True,
+          enable_per_process_directory_creation=True,
+          multiprocessing_options=MultiprocessingOptions(primary_host=None),
           enable_async_checkpointing=use_async,
           save_decision_policy=save_decision_policy,
           preservation_policy=preservation_policy,
