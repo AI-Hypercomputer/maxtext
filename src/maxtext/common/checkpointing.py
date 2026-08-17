@@ -338,6 +338,7 @@ def create_orbax_checkpoint_manager(
           save_concurrent_gb=checkpoint_storage_concurrent_gb,
           use_ocdbt=use_ocdbt,
           use_zarr3=use_zarr3,
+          multiprocessing_options=MultiprocessingOptions(primary_host=None),
       )
   }
 
