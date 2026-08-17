@@ -922,6 +922,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         logical_rules = get_logical_axis_rules()
         batch_pspec3 = logical_to_mesh_axes((KV_BATCH, None, None), mesh=self.mesh, rules=logical_rules)
         batch_pspec4 = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=self.mesh, rules=logical_rules)
+        batch_pspec5 = logical_to_mesh_axes((KV_BATCH, None, None, None, None), mesh=self.mesh, rules=logical_rules)
         none_pspec3 = logical_to_mesh_axes((None, None, None), mesh=self.mesh, rules=logical_rules)
         none_pspec1 = logical_to_mesh_axes((None,), mesh=self.mesh, rules=logical_rules)
 
@@ -958,6 +959,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             out_specs=(
                 batch_pspec4,  # core_attn_out
                 (batch_pspec3, batch_pspec4),  # (next_conv_state, next_recurrent_state)
+                batch_pspec5,  # pure_jax_tap
             ),
             check_vma=False,
         )
@@ -982,7 +984,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
               compute_dtype=self.config.dtype,
           )
 
-        core_attn_out, (next_conv_state, next_recurrent_state) = shard_mapped_hybrid_gdn(
+        core_attn_out, (next_conv_state, next_recurrent_state), pure_jax_tap = shard_mapped_hybrid_gdn(
             qkv,
             b,
             a,
