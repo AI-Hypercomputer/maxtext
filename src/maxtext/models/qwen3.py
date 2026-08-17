@@ -239,7 +239,7 @@ def jax_chunk_gated_delta_rule(
     initial_state: None | Array = None,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
-) -> tuple[Array, None | Array]:
+) -> tuple[Array, None | Array, Array]:
   """Optimized JAX implementation of Gated Delta Rule."""
   # =========================================================================
   # STAGE 1: PREPARATION & PADDING
@@ -403,7 +403,7 @@ def jax_chunk_gated_delta_rule(
 
   o = o.astype(initial_dtype)
 
-  return o, (final_h if initial_state is not None else None)
+  return o, (final_h if initial_state is not None else None), A
 
 
 def jax_ar_gated_delta_rule(
@@ -972,7 +972,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             recurrent_state_arg,
         )
       else:
-        core_attn_out, (next_conv_state, next_recurrent_state) = hybrid_fused_conv1d_gdn(
+        core_attn_out, (next_conv_state, next_recurrent_state), pure_jax_tap = hybrid_fused_conv1d_gdn(
             qkv=qkv,
             b=b,
             a=a,
@@ -992,7 +992,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             compute_dtype=self.config.dtype,
         )
     elif getattr(cfg, "use_gdn_kernel", False):
-      core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
+      core_attn_out, next_recurrent_state, pure_jax_tap = jax_chunk_gated_delta_rule(
           query,
           key,
           value,
@@ -1046,7 +1046,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       core_attn_out, next_recurrent_state = shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg)
     else:
-      core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
+      core_attn_out, next_recurrent_state, pure_jax_tap = jax_chunk_gated_delta_rule(
           query,
           key,
           value,
@@ -1096,7 +1096,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output)
 
-    return output, active_cache
+    # Note: pure_jax_tap might be unbound if shard_mapped_delta_rule was used, but benchmark sets scan_layers=False.
+    try:
+      tap = pure_jax_tap
+    except UnboundLocalError:
+      tap = None
+
+    return output, active_cache, tap
 
   def init_kv_caches(self, batch_size: int):
     """Initializes KVCache dynamically using the traced runtime batch size."""

@@ -79,7 +79,7 @@ def pure_jax_fused_conv1d_gdn(
         query = jnp.repeat(query, repeats, axis=2)
         key = jnp.repeat(key, repeats, axis=2)
 
-    core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
+    core_attn_out, next_recurrent_state, pure_jax_tap = jax_chunk_gated_delta_rule(
         query=query,
         key=key,
         value=value,
@@ -95,7 +95,7 @@ def pure_jax_fused_conv1d_gdn(
     if next_recurrent_state is None:
         next_recurrent_state = jnp.zeros((batch, num_v_heads, head_k_dim, head_v_dim), dtype=compute_dtype)
 
-    return core_attn_out.astype(qkv.dtype), (next_conv_state.astype(qkv.dtype), next_recurrent_state.astype(qkv.dtype))
+    return core_attn_out.astype(qkv.dtype), (next_conv_state.astype(qkv.dtype), next_recurrent_state.astype(qkv.dtype)), pure_jax_tap
 
 
 def _run_tokamax_fused_fwd(
@@ -154,7 +154,7 @@ def _run_tokamax_fused_fwd(
     else:
         tokamax_recurrent_state = recurrent_state
 
-    (new_conv_state, new_recurrent_state), core_attn_out_flat = tokamax_gdn_wrapper.fused_conv1d_gdn(
+    (new_conv_state, new_recurrent_state), core_attn_out_flat, tap_out = tokamax_gdn_wrapper.fused_conv1d_gdn(
         qkv=qkv_flat,
         b=b_flat,
         a=a_flat,
@@ -227,7 +227,7 @@ def _hybrid_fused_conv1d_gdn_fwd(
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
 ):
-    out, states = _run_tokamax_fused_fwd(
+    out, states, tap_out = _run_tokamax_fused_fwd(
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
         num_k_heads=num_k_heads, num_v_heads=num_v_heads, head_k_dim=head_k_dim, head_v_dim=head_v_dim,
         conv_kernel_size=conv_kernel_size, chunk_size=chunk_size, use_qk_norm_in_gdn=use_qk_norm_in_gdn, compute_dtype=compute_dtype,
@@ -235,7 +235,7 @@ def _hybrid_fused_conv1d_gdn_fwd(
     residuals = (
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state
     )
-    return (out, states), residuals
+    return (out, states, tap_out), residuals
 
 
 def _hybrid_fused_conv1d_gdn_bwd(
@@ -271,9 +271,9 @@ def _hybrid_fused_conv1d_gdn_bwd(
         target_fn,
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
     )
-    d_out, d_states = cotangents
+    d_out, d_states, d_tap = cotangents
     d_conv_state, d_recurrent_state = d_states
-    return vjp_fn((d_out, (d_conv_state, d_recurrent_state)))
+    return vjp_fn((d_out, (d_conv_state, d_recurrent_state), d_tap))
 
 
 hybrid_fused_conv1d_gdn.defvjp(_hybrid_fused_conv1d_gdn_fwd, _hybrid_fused_conv1d_gdn_bwd)

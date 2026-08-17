@@ -111,7 +111,7 @@ def chunked_gdn_per_seq(
     beta: jax.Array,  # [1, 1, num_v_heads]
     state_prev: jax.Array,  # [num_v_heads, kq_head_dim, v_head_dim]
     cfg: config.GDNConfig,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Perform chunked GDN over input [num_heads, chunk, head_dim]."""
 
   # NOTE: Repeat along non lane/sublane dim is free.
@@ -248,7 +248,7 @@ def chunked_gdn_per_seq(
   )
   out = out_updated + out_new
 
-  return out, state
+  return out, state, t_inv
 
 
 def chunked_gdn(
@@ -301,8 +301,9 @@ def chunked_gdn(
 
   out_list = []
   state_list = []
+  t_inv_list = []
   for idx in range(cfg.seq_tile_size):
-    out, state = chunked_gdn_per_seq(
+    out, state, t_inv = chunked_gdn_per_seq(
         q_large[idx],
         k_large[idx],
         v_large[idx],
@@ -313,9 +314,11 @@ def chunked_gdn(
     )
     out_list.append(out.swapaxes(0, 1))
     state_list.append(state)
+    t_inv_list.append(t_inv)
   out = jnp.stack(out_list, axis=0)
   state = jnp.stack(state_list, axis=0)
-  return out, state
+  t_inv_out = jnp.stack(t_inv_list, axis=0)
+  return out, state, t_inv_out
 
 
 def recurrent_gdn_per_seq(

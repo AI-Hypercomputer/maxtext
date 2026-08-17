@@ -96,13 +96,15 @@ def create_jitted_train_step(model: nnx.Module, input_shape: Tuple[int, ...]):
 
     @jax.jit
     def pure_train_step(params, x):
+        jax.debug.print("Compiling pure_train_step...")
         m = nnx.merge(graphdef, params)
 
         def loss_fn(m_inner):
             out = m_inner(x)
             y = out[0] if isinstance(out, tuple) else out
             loss = jnp.mean(y * projection.astype(y.dtype))
-            return loss, y
+            # Qwen3NextGatedDeltaNet outputs: hidden_states, recurrent, conv, tap. It is a tuple if it has layers. If it is the full model, we need to extract from layers.
+            return loss, out
 
         (loss, y), grads = nnx.value_and_grad(loss_fn, has_aux=True)(m)
         return loss, y, grads
@@ -116,10 +118,10 @@ def create_jitted_forward(model: nnx.Module):
 
     @jax.jit
     def pure_forward(params, x):
+        jax.debug.print("Compiling pure_forward...")
         m = nnx.merge(graphdef, params)
         out = m(x)
-        y = out[0] if isinstance(out, tuple) else out
-        return y
+        return out
 
     return pure_forward, params
 
@@ -208,8 +210,26 @@ def run_comparison(
     loss_hybrid, out_hybrid, grads_hybrid = jit_train_hybrid(params_hybrid, inputs)
     jax.block_until_ready((loss_hybrid, out_hybrid, grads_hybrid))
 
+    print("Extracting Tap Outputs...")
+    tap_pure = out_pure[-1] if isinstance(out_pure, tuple) else None
+    tap_hybrid = out_hybrid[-1] if isinstance(out_hybrid, tuple) else None
+
+    if tap_pure is not None and tap_hybrid is not None:
+        # The model returns a tuple of outputs for each layer. For a single layer model like Qwen3NextGatedDeltaNet layer directly:
+        if isinstance(tap_pure, tuple):
+             tap_pure = tap_pure[-1]
+             tap_hybrid = tap_hybrid[-1]
+        
+        max_tap_diff = float(jnp.max(jnp.abs(tap_pure - tap_hybrid)))
+        print(f"Tap Variable Max Diff (e.g. t_inv or A): {max_tap_diff:.2e}")
+    else:
+        print("Tap variables not found in output.")
+
+
     # 1. Compare Forward Output Tensors (Element-by-Element)
-    max_out_diff = float(jnp.max(jnp.abs(out_pure - out_hybrid)))
+    out_pure_tensor = out_pure[0] if isinstance(out_pure, tuple) else out_pure
+    out_hybrid_tensor = out_hybrid[0] if isinstance(out_hybrid, tuple) else out_hybrid
+    max_out_diff = float(jnp.max(jnp.abs(out_pure_tensor - out_hybrid_tensor)))
     print(f"Forward Pass Max Output Diff: {max_out_diff:.2e}")
 
     # 2. Compare Loss

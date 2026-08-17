@@ -157,7 +157,7 @@ def inner_kernel(
         )
     )
 
-    out, new_recurrent_state = compute_gdn.chunked_gdn(
+    out, new_recurrent_state, tap_val = compute_gdn.chunked_gdn(
         q_large=q_large,
         k_large=k_large,
         v_large=v_large,
@@ -172,6 +172,7 @@ def inner_kernel(
 
   # Store output and recurrent to vmem.
   out_slot_ref[...] = out.astype(out_slot_ref.dtype)
+  tap_slot_ref[...] = tap_val.astype(tap_slot_ref.dtype)
   recurrent_slot_ref[...] = new_recurrent_state.astype(recurrent_slot_ref.dtype)
 
   if carry_recurrent_scratch_ref is not None:
@@ -190,6 +191,7 @@ def outer_kernel(
     weights_ref: memory_ref.WeightRefs,
     # Outputs.
     out_ref: jax.Array,
+    tap_ref: jax.Array,
     conv_state_out_ref: jax.Array,
     recurrent_state_out_ref: jax.Array,
     # Scratches.
@@ -229,7 +231,7 @@ def outer_kernel(
           conv_alloc.spec,
           recurrent_alloc.spec,
       ),
-      out_specs=(out_alloc.spec,),
+      out_specs=(out_alloc.spec, out_alloc.spec,),
   )
 
   @pl.with_scoped(
@@ -239,6 +241,7 @@ def outer_kernel(
           a_alloc,
           conv_alloc,
           recurrent_alloc,
+          out_alloc,
           out_alloc,
       ),
   )
@@ -250,6 +253,7 @@ def outer_kernel(
         conv_state_ref,
         recurrent_state_ref,
         out_ref,
+        tap_ref,
         scratches=(
             metadata_ref,
             weights_ref,
@@ -466,9 +470,9 @@ def fused_conv1d_gdn(
       in_out_spec = hbm_spec
       input_output_aliases[len(metadata_obj) + 5] = 0
 
-    return pl.pallas_call(
+    res = pl.pallas_call(
         functools.partial(outer_kernel, cfg=cfg),
-        out_shape=(out_shape, in_conv_state, in_recurrent_state),
+        out_shape=(out_shape, in_conv_state, in_recurrent_state, out_shape),
         in_specs=(
             metadata_spec,
             hbm_spec,
@@ -479,15 +483,15 @@ def fused_conv1d_gdn(
             in_out_spec,
             weights_spec,
         ),
-        out_specs=(hbm_spec, hbm_spec, hbm_spec),
+        out_specs=(hbm_spec, hbm_spec, hbm_spec, hbm_spec),
         scratch_shapes=cfg.get_scratch_shape_dict(),
-        input_output_aliases=input_output_aliases,
         compiler_params=pltpu.CompilerParams(
             disable_bounds_checks=True,
             vmem_limit_bytes=cfg.get_vmem_limit_bytes(),
         ),
         name=cfg.get_kernel_name(),
         metadata=cfg.get_metadata(),
+        input_output_aliases=input_output_aliases,
     )(
         metadata_obj,
         qkv,
@@ -498,6 +502,8 @@ def fused_conv1d_gdn(
         in_act,
         weights,
     )
+    out_act, out_conv, out_rec, out_tap = res
+    return (out_conv, out_rec), out_act, out_tap
 
   out_act, out_conv_state, out_recurrent_state = call_kernel(
       conv_state, recurrent_state, None, config.GDNMode.BATCHED
