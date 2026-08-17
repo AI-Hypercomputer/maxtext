@@ -16,7 +16,11 @@
 
 # MaxText
 
-[![MaxText Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml/badge.svg)](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml?query=event%3Aschedule)
+[![MaxText Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml/badge.svg?event=schedule)](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml)
+[![PyPI version](https://img.shields.io/pypi/v/maxtext)](https://pypi.org/project/maxtext/)
+
+[**Documentation**](https://maxtext.readthedocs.io/en)
+| [**Release Notes**](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/release_notes.md)
 
 > **_NOTE:_** We recommend customers use the latest [PyPI release](https://pypi.org/project/maxtext/) (see [installation guide](docs/install_maxtext.md)) or corresponding [pre-built container images](docs/tutorials/build_maxtext.md#pre-built-maxtext-docker-images), while the `main` branch is not expected to be production-ready.
 >
