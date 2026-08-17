@@ -248,7 +248,7 @@ def chunked_gdn_per_seq(
   )
   out = out_updated + out_new
 
-  return out, state, t_inv
+  return out, state, t
 
 
 def chunked_gdn(

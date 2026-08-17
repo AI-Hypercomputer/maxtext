@@ -403,7 +403,7 @@ def jax_chunk_gated_delta_rule(
 
   o = o.astype(initial_dtype)
 
-  return o, (final_h if initial_state is not None else None), A
+  return o, (final_h if initial_state is not None else None), S + jnp.eye(chunk_size)
 
 
 def jax_ar_gated_delta_rule(

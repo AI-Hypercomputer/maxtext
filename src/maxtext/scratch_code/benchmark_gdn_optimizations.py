@@ -215,16 +215,22 @@ def run_comparison(
     tap_hybrid = out_hybrid[-1] if isinstance(out_hybrid, tuple) else None
 
     if tap_pure is not None and tap_hybrid is not None:
-        # The model returns a tuple of outputs for each layer. For a single layer model like Qwen3NextGatedDeltaNet layer directly:
         if isinstance(tap_pure, tuple):
              tap_pure = tap_pure[-1]
              tap_hybrid = tap_hybrid[-1]
         
-        tap_pure_flat = tap_pure.flatten()
-        tap_hybrid_flat = tap_hybrid.flatten()
-        valid_size = min(tap_pure_flat.size, tap_hybrid_flat.size)
-        max_tap_diff = float(jnp.max(jnp.abs(tap_pure_flat[:valid_size] - tap_hybrid_flat[:valid_size])))
-        print(f"Tap Variable Max Diff (e.g. t_inv or A): {max_tap_diff:.2e}")
+        if tap_pure.shape != tap_hybrid.shape:
+            print(f"Shape mismatch! Pure: {tap_pure.shape}, Hybrid: {tap_hybrid.shape}")
+        else:
+            diff_tensor = jnp.abs(tap_pure - tap_hybrid)
+            max_diff = float(jnp.max(diff_tensor))
+            
+            # Find EXACTLY where the difference happened
+            max_idx = jnp.unravel_index(jnp.argmax(diff_tensor), diff_tensor.shape)
+            
+            print(f"Tap Variable Max Diff: {max_diff:.3e} at coordinate {max_idx}")
+            print(f"  -> Pure JAX value: {float(tap_pure[max_idx]):.6f}")
+            print(f"  -> Pallas value:   {float(tap_hybrid[max_idx]):.6f}")
     else:
         print("Tap variables not found in output.")
 
