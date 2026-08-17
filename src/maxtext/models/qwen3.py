@@ -304,6 +304,7 @@ def jax_chunk_gated_delta_rule(
   # S Matrix Calculation
   S = jnp.matmul(k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
   S = S.astype(jnp.float32)
+  S_initial = S
 
   # Apply mask BEFORE exp to prevent 'inf' gradients
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
@@ -403,7 +404,7 @@ def jax_chunk_gated_delta_rule(
 
   o = o.astype(initial_dtype)
 
-  return o, (final_h if initial_state is not None else None), jnp.exp(g_diff)
+  return o, (final_h if initial_state is not None else None), S_initial
 
 
 def jax_ar_gated_delta_rule(

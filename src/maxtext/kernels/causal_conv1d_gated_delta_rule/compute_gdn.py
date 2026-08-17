@@ -248,7 +248,7 @@ def chunked_gdn_per_seq(
   )
   out = out_updated + out_new
 
-  return out, state, gating_map_masked
+  return out, state, beta_k_k_t
 
 
 def chunked_gdn(
