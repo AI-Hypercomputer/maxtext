@@ -105,7 +105,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         d_state_final = d_state_final_ref[batch_idx, ...]
         init_state = (
             d_state_final,
-            jnp.zeros((prev_kernel_size, dim_size), dtype=jnp.float32),
+            jnp.zeros((prev_kernel_size, dim_size), dtype=W.dtype),
             jnp.zeros_like(W),
             jnp.zeros_like(conv_bias),
             jnp.zeros_like(a_log),
