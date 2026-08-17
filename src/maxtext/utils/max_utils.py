@@ -484,6 +484,50 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
   return parallelism_vals
 
 
+def create_ring_axis_device_mesh(ici_parallelism, mesh_axes, devices, ring_axis):
+  """Creates an ICI device mesh with `ring_axis` groups arranged as physical TPU rings."""
+  if ring_axis not in mesh_axes:
+    raise ValueError(f"mesh_ring_axis={ring_axis} is not one of the mesh axes {mesh_axes}")
+  axis = list(mesh_axes).index(ring_axis)
+  ring = ici_parallelism[axis]
+  if ring % 2:
+    raise ValueError(f"mesh_ring_axis={ring_axis} needs an even parallelism, got {ring}")
+
+  coords = np.array([d.coords for d in devices])
+  origin, extent = coords.min(axis=0), coords.max(axis=0) - coords.min(axis=0) + 1
+  physical = np.empty(tuple(extent), dtype=object)
+  for device, coord in zip(devices, coords):
+    physical[tuple(coord - origin)] = device
+  physical = physical.reshape([dim for dim in extent if dim > 1])
+  if physical.ndim != 2:
+    raise ValueError(f"mesh_ring_axis needs a 2D slice of the torus, got physical shape {tuple(extent)}")
+  # Preserve locality for non-ring axes.
+  if physical.shape[0] > physical.shape[1]:
+    physical = physical.T
+  ring_height, ring_width = ring // 2, 2
+  if physical.shape[0] % ring_height or physical.shape[1] % ring_width:
+    raise ValueError(
+        f"mesh_ring_axis={ring_axis} of size {ring} needs a {ring_height}x{ring_width} block to tile the"
+        f" physical mesh {physical.shape}"
+    )
+
+  rings = []
+  for i in range(physical.shape[0] // ring_height):
+    columns = range(physical.shape[1] // ring_width)
+    for j in columns if i % 2 == 0 else reversed(columns):
+      left = list(physical[i * ring_height : (i + 1) * ring_height, ring_width * j])
+      right = list(physical[i * ring_height : (i + 1) * ring_height, ring_width * j + 1])
+      rings.append(left + right[::-1])
+
+  mesh = np.empty((len(rings), ring), dtype=object)
+  for i, devices_in_ring in enumerate(rings):
+    mesh[i] = devices_in_ring
+  other_axes = [size for i, size in enumerate(ici_parallelism) if i != axis]
+  mesh = np.moveaxis(mesh.reshape([*other_axes, ring]), -1, axis)
+  max_logging.log(f"Laid the '{ring_axis}' mesh axis out as a {ring_height}x{ring_width} physical ring")
+  return mesh
+
+
 def reshape_mesh_to_rings(a, strategy):
   """Reshape device mesh to rings for 64x4 or 32x8 mesh shape"""
   b = []
