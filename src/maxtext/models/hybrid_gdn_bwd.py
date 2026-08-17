@@ -72,9 +72,9 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         d_qkv_ref, d_b_ref, d_a_ref, d_state_out_ref,
         d_conv_weight_ref, d_conv_bias_ref, d_a_log_ref, d_dt_bias_ref, all_states_hbm_ref,
         qkv_db, b_db, a_db, d_out_db,
-        d_qkv_db, d_b_db, d_a_db, 
         
-        # --- FIX 2a: Updated Signature ---
+        # --- REMOVED d_qkv_db, d_b_db, d_a_db ---
+        
         shared_state_init_out, shared_state_db, 
         
         sem_qkv_fwd, sem_b_fwd, sem_a_fwd, sem_state_fwd,
@@ -236,6 +236,14 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             pl.semaphore_wait(sem_a_bwd.at[db_idx], 1)
             pl.semaphore_wait(sem_dout_bwd.at[db_idx], 1)
             pl.semaphore_wait(sem_state_bwd.at[db_idx], 1)
+            def wait_prev_write_bwd(_):
+                # Wait for next_db_idx to finish writing before we overwrite it with a new read!
+                pl.semaphore_wait(sem_dqkv_bwd.at[next_db_idx], 1)
+                pl.semaphore_wait(sem_db_bwd.at[next_db_idx], 1)
+                pl.semaphore_wait(sem_da_bwd.at[next_db_idx], 1)
+                return None
+            jax.lax.cond(i >= 1, wait_prev_write_bwd, lambda _: None, None)
+
             def start_next(_):
                 next_chunk_idx = chunk_idx - 1
                 pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds(next_chunk_idx * chunk_size, chunk_size + overlap), :], qkv_db.at[next_db_idx, ...], sem_qkv_bwd.at[next_db_idx]).start()
@@ -405,11 +413,13 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             d_a_log_chunk = jnp.sum(d_gating_log * gating_log, axis=(0, 1))
             d_dt_bias_chunk = jnp.sum(d_a, axis=0)
             d_Y_ext = jnp.concatenate([d_Y, d_Y_next], axis=0)
-            d_X = jnp.zeros((chunk_size, dim_size), dtype=jnp.float32)
+            # --- FIX: Change d_X to bf16! Saves 1.04 MB ---
+            d_X = jnp.zeros((chunk_size, dim_size), dtype=qkv_ext.dtype)
             for k in range(kernel_size):
                 start_idx = kernel_size - 1 - k
                 d_Y_slice = d_Y_ext[start_idx : start_idx + chunk_size, :]
                 d_X += d_Y_slice * W[k]
+                
             d_W_list = []
             for k in range(kernel_size):
                 X_slice = qkv_ext[k + shift : k + shift + chunk_size, :]
@@ -417,12 +427,17 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
                 d_W_list.append(d_W_k)
             d_W_chunk = jnp.stack(d_W_list, axis=0)
             d_B_chunk = jnp.sum(d_Y, axis=0)
-            d_qkv_db[db_idx, ...] = d_X
-            d_b_db[db_idx, ...] = d_b
-            d_a_db[db_idx, ...] = d_a
-            pltpu.make_async_copy(d_qkv_db.at[db_idx, ...], d_qkv_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_dqkv_bwd.at[db_idx]).start()
-            pltpu.make_async_copy(d_b_db.at[db_idx, ...], d_b_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_db_bwd.at[db_idx]).start()
-            pltpu.make_async_copy(d_a_db.at[db_idx, ...], d_a_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_da_bwd.at[db_idx]).start()
+            
+            # --- FIX: Overwrite the Read Buffers directly! ---
+            # We are done reading qkv_ext, so we overwrite it with d_X!
+            qkv_db.at[db_idx, pl.ds(0, chunk_size), :].set(d_X)
+            b_db.at[db_idx, ...].set(d_b)
+            a_db.at[db_idx, ...].set(d_a)
+            
+            pltpu.make_async_copy(qkv_db.at[db_idx, pl.ds(0, chunk_size), :], d_qkv_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_dqkv_bwd.at[db_idx]).start()
+            pltpu.make_async_copy(b_db.at[db_idx, ...], d_b_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_db_bwd.at[db_idx]).start()
+            pltpu.make_async_copy(a_db.at[db_idx, ...], d_a_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_da_bwd.at[db_idx]).start()
+            
             return (
                 d_state_prev,
                 d_Y[:prev_kernel_size],
@@ -495,37 +510,30 @@ def computation(
     vmem_spec = pl.BlockSpec()
 
     scratch_shapes = (
-        pltpu.VMEM(shape=(2, chunk_size + overlap, dim_size), dtype=qkv.dtype),
-        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=b.dtype),
-        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=a.dtype),
+        pltpu.VMEM(shape=(2, chunk_size + overlap, dim_size), dtype=qkv.dtype), # ALIASED: qkv_db AND d_qkv_db
+        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=b.dtype),                  # ALIASED: b_db AND d_b_db
+        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=a.dtype),                  # ALIASED: a_db AND d_a_db
         pltpu.VMEM(shape=(2, chunk_size, n_v * d_v), dtype=d_out.dtype),
-        pltpu.VMEM(shape=(2, chunk_size, dim_size), dtype=qkv.dtype),
-        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=b.dtype),
-        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=a.dtype),
         
-        # --- FIX 1: We deduplicated the states! Only 2 buffers instead of 4 ---
+        # --- REMOVED 3 MASSIVE WRITE BUFFERS HERE TO SAVE 2.11 MB ---
+        
         pltpu.VMEM(shape=(n_v, d_k, d_v), dtype=state_init.dtype),        # shared_state_init_out
         pltpu.VMEM(shape=(2, n_v, d_k, d_v), dtype=state_init.dtype),     # shared_state_db
         
         # 12 Semaphores
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
-        pltpu.SemaphoreType.REGULAR((2,)),
+        pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
+        pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
+        pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
+        pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
+        pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
+        pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
     )
 
     res = pl.pallas_call(
         get_kernel(chunk_size, n_kq, n_v, d_k, d_v),
         out_shape=(d_qkv_shape, d_b_shape, d_a_shape, d_state_shape, d_conv_weight_shape, d_conv_bias_shape, d_a_log_shape, d_dt_bias_shape, all_states_shape),
         grid=grid,
+        # REMOVED 3 vmem_specs from the input signature
         in_specs=[hbm_spec] * 4 + [vmem_spec] * 4 + [hbm_spec, vmem_spec],
         out_specs=(hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec),
         scratch_shapes=scratch_shapes,
