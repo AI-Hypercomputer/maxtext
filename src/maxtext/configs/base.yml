@@ -236,6 +236,7 @@ moe_dispatch_no_expert_sharding: false
 use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the MoE permute path; valid both with and
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
+moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
