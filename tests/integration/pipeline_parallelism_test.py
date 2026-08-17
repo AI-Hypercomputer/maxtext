@@ -41,6 +41,8 @@ from maxtext.trainers.pre_train.train import main as train_main
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 import pytest
 
+pytestmark = [pytest.mark.integration_test, pytest.mark.tpu_only]
+
 
 # Helper to fix pipeline parallelism in test_full_train_fp8 and test_full_train_nanoo_fp8
 def _adapt_parallelism(args, pipeline_stages=4):
@@ -99,7 +101,6 @@ def assert_same_output_and_grad(f1, f2, *inputs):
   )
 
 
-@pytest.mark.integration_test
 class PipelineParallelismTest(unittest.TestCase):
   decoupled = is_decoupled()
   base_output_directory = get_test_base_output_directory()
@@ -275,7 +276,6 @@ class PipelineParallelismTest(unittest.TestCase):
       )
       self.assert_pipeline_matches_sequential_output_and_grad(config)
 
-  @pytest.mark.tpu_only
   def test_circular_minimum_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
@@ -292,7 +292,6 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_matches_sequential_output_and_grad(config)
 
-  @pytest.mark.tpu_only
   def test_circular_extra_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
@@ -309,7 +308,6 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_matches_sequential_output_and_grad(config)
 
-  @pytest.mark.tpu_only
   def test_circular_deepseek_megablox_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches.
     # DeepSeek's MoE block (`moe.RoutedAndSharedMoE`) constructs a `shared_experts`
@@ -346,7 +344,6 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.scheduled_only
-  @pytest.mark.tpu_only
   def test_deepseek_ragged_a2a_ep_same_output_and_grad(self):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -380,7 +377,6 @@ class PipelineParallelismTest(unittest.TestCase):
         single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen,
     )
 
-  @pytest.mark.tpu_only
   def test_circular_ag_once(self):
     # 2 stages, 8 microbatches, all gather once
     config = pyconfig.initialize(
@@ -398,15 +394,12 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_matches_sequential_output_and_grad(config)
 
-  @pytest.mark.tpu_only
   def test_circular_pipeline_ag_per_repeat(self):
     self._assert_circular_pipeline_ag_per_repeat_core("nnx_scan")
 
-  @pytest.mark.tpu_only
   def test_circular_pipeline_ag_per_repeat_jax_state_core(self):
     self._assert_circular_pipeline_ag_per_repeat_core("jax_state")
 
-  @pytest.mark.tpu_only
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
@@ -422,8 +415,6 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_matches_sequential_output_and_grad(config)
 
-  @pytest.mark.integration_test
-  @pytest.mark.tpu_only
   def test_full_train_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats), 8 microbatches
     train_main(
@@ -454,8 +445,6 @@ class PipelineParallelismTest(unittest.TestCase):
         ]
     )
 
-  @pytest.mark.integration_test
-  @pytest.mark.tpu_only
   def test_full_train_circular_pipeline_ag_per_repeat(self):
     # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats),
     # 8 microbatches and using pipeline ag per repeat
@@ -487,7 +476,6 @@ class PipelineParallelismTest(unittest.TestCase):
         ]
     )
 
-  @pytest.mark.tpu_only
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
@@ -505,8 +493,6 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_matches_sequential_output_and_grad(config)
 
-  @pytest.mark.integration_test
-  @pytest.mark.tpu_only
   def test_full_train_non_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (8 layers per stage), 8 microbatches
     train_main(
@@ -537,8 +523,6 @@ class PipelineParallelismTest(unittest.TestCase):
         ]
     )
 
-  @pytest.mark.integration_test
-  @pytest.mark.tpu_only
   def test_subset_layers(self):
     # Run a full train.py call with 4 stages, 16 layers - 8 in pipeline, 8 ran outside of pipeline
     train_main(
@@ -572,7 +556,6 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.skipif(is_decoupled(), reason="Pipeline parallelism not supported in decoupled mode")
-  @pytest.mark.integration_test
   def test_full_train_fp8(self):
     # Run a full train.py call with fp8 quantization, which adds extra
     # variable collections that need to be handled
@@ -605,7 +588,6 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(args)
 
   @pytest.mark.skipif(is_decoupled(), reason="Pipeline parallelism not supported in decoupled mode")
-  @pytest.mark.integration_test
   def test_full_train_nanoo_fp8(self):
     # Run a full train.py call with NANOO fp8 quantization, which adds extra
     # variable collections that need to be handled

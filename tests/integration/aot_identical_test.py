@@ -30,6 +30,8 @@ from tests.utils.test_helpers import get_test_config_path
 from maxtext.trainers.pre_train import train_compile
 from maxtext.trainers.pre_train import train
 
+pytestmark = [pytest.mark.integration_test]
+
 
 class AotBaseTest(unittest.TestCase):
   """Base class for AOT identity tests providing shared utilities."""

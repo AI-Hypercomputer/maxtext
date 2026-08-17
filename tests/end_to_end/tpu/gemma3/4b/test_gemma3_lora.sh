@@ -17,7 +17,8 @@
 
 set -ex
 
-run_id=${1:-$(date +%Y-%m-%d-%H-%M)}
+run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
+use_pathways=${2:-false}
 MODEL_NAME='gemma3-4b'
 
 # Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you have the scanned and unscanned checkpoints stored
@@ -25,37 +26,34 @@ BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
-# Step 1: Install torch
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# Step 2: Run inference on the original checkpoint converted from Hugging Face
+# Step 1: Run inference on the original checkpoint converted from Hugging Face
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.6 \
+    hbm_utilization_vllm=0.5 \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True \
-    scan_layers=false
+    scan_layers=false \
+    enable_single_controller=${use_pathways}
 
-# Step 3: Run LoRA on the converted checkpoint
+# Step 2: Run LoRA on the converted checkpoint
 python3 -m maxtext.trainers.post_train.sft.train_sft \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/lora \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     per_device_batch_size=1 run_name=${run_id} \
-    steps=5 scan_layers=true \
+    steps=5 \
+    scan_layers=true \
     model_name=${MODEL_NAME} \
     learning_rate=3e-6 \
     lora.enable_lora=True \
     lora.lora_rank=16 \
     lora.lora_alpha=32.0 \
-    enable_nnx=True \
-    pure_nnx_decoder=True \
-    enable_single_controller=True \
-    checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
+    enable_single_controller=${use_pathways} \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False
 
-
-# Step 4: Run inference on the checkpoint generated from the previous run
+# Step 3: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.vllm_decode \
     --use_tunix=True \
     model_name=${MODEL_NAME} \
@@ -68,16 +66,5 @@ python3 -m maxtext.inference.vllm_decode \
     hbm_utilization_vllm=0.6 \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True \
-    enable_nnx=True \
-    pure_nnx_decoder=True \
-    scan_layers=true
-
-# Step 5: Convert the checkpoint from MaxText format to Hugging Face format
-python3 -m maxtext.checkpoint_conversion.to_huggingface \
-    model_name=${MODEL_NAME} \
-    load_parameters_path=${SCANNED_CKPT_PATH} \
-    lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY}/lora/${run_id}/checkpoints/5/model_params \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/unscanned/${run_id} \
     scan_layers=true \
-    enable_nnx=True \
-    pure_nnx_decoder=True
+    enable_single_controller=${use_pathways}

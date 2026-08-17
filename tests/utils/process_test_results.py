@@ -29,7 +29,19 @@ ABS_INCREASE_UNIT_SEC = 15.0
 ABS_INCREASE_INTEGRATION_SEC = 30.0
 
 
-def process_testcase(testcase, xml_file, baseline_data, new_baseline_data):
+def extract_job_name(xml_file):
+  """Extracts job/flavor name from XML filename."""
+  basename = os.path.basename(xml_file)
+  parts = basename.replace(".xml", "").split("-")
+  if len(parts) >= 4 and parts[0] == "test" and parts[1] == "results":
+    return "-".join(parts[2:-1])
+  elif len(parts) >= 3:
+    return parts[2]
+  else:
+    return "unknown"
+
+
+def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
   """Processes a single testcase and checks for limit violations or regressions."""
   failed = False
 
@@ -55,7 +67,7 @@ def process_testcase(testcase, xml_file, baseline_data, new_baseline_data):
         markers.add(prop.get("value"))
 
   is_integration = "integration_test" in markers
-  is_cpu = "cpu" in os.path.basename(xml_file).lower()
+  is_cpu = "cpu" in os.path.basename(xml_file).lower() or "cpu" in job_name.lower()
 
   if is_integration:
     abs_noise_threshold = ABS_INCREASE_INTEGRATION_SEC
@@ -66,20 +78,22 @@ def process_testcase(testcase, xml_file, baseline_data, new_baseline_data):
     rel_regression_ratio = REL_REGRESSION_OTHER_RATIO
     test_type = "Unit Test"
 
-  new_baseline_data[full_name] = time_val
+  baseline_key = f"{job_name}::{full_name}"
+  new_baseline_data[baseline_key] = time_val
 
   # Skip regression checking for CPU tests due to shared CPU multi-tenancy noise
   skip_regression = is_cpu
 
   # Check relative regression if baseline exists
-  if not skip_regression and full_name in baseline_data:
-    base_time = baseline_data[full_name]
-    if base_time > 0:
+  if not skip_regression and baseline_key in baseline_data:
+    base_time = baseline_data[baseline_key]
+    if isinstance(base_time, (int, float)) and base_time > 0:
       ratio = time_val / base_time
       increase = time_val - base_time
       if ratio >= rel_regression_ratio and increase > abs_noise_threshold:
         print(f"::error::[REGRESSION ALERT] {test_type} significantly degraded!")
         print(f"  Test: {full_name}")
+        print(f"  Flavor: {job_name}")
         print(f"  File: {os.path.basename(xml_file)}")
         print(f"  Previous Duration: {base_time:.2f}s")
         print(f"  New Duration: {time_val:.2f}s")
@@ -130,8 +144,8 @@ def main():
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"Error loading baseline {args.baseline}: {e}")
 
-  # Initialize with a copy of baseline_data to preserve history for tests not run or skipped
-  new_baseline_data = dict(baseline_data)
+  # Initialize with existing baseline data, filtering out old legacy keys without flavor separator '::'
+  new_baseline_data = {k: v for k, v in baseline_data.items() if "::" in k and isinstance(v, (int, float))}
   has_regression = False
   has_errors = False
 
@@ -139,16 +153,7 @@ def main():
   total_tests_by_job = {}
 
   for xml_file in xml_files:
-    basename = os.path.basename(xml_file)
-    parts = basename.replace(".xml", "").split("-")
-    if len(parts) >= 4 and parts[0] == "test" and parts[1] == "results":
-      job_name = "-".join(parts[2:-1])
-    else:
-      # Fallback to device type if naming is simple (e.g. test-results-cpu-1.xml)
-      if len(parts) >= 3:
-        job_name = parts[2]
-      else:
-        job_name = "unknown"
+    job_name = extract_job_name(xml_file)
 
     try:
       tree = ET.parse(xml_file)
@@ -163,7 +168,7 @@ def main():
         job_time += time_val
 
         # Micro-level regression check
-        if process_testcase(testcase, xml_file, baseline_data, new_baseline_data):
+        if process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
           has_regression = True
 
       if job_name != "unknown" or job_count > 0:
@@ -178,6 +183,9 @@ def main():
   if args.output_benchmark:
     benchmarks = []
     for job, total_time in total_times_by_job.items():
+      # Exclude CPU suites from macro-level dashboard tracking to avoid false alerts from CPU runner noise
+      if "cpu" in job.lower():
+        continue
       benchmarks.append(
           {
               "name": f"Total {job.upper()} Tests Duration",
@@ -216,8 +224,9 @@ def main():
         dirname = os.path.dirname(args.save_baseline)
         if dirname:
           os.makedirs(dirname, exist_ok=True)
+        sorted_baseline = dict(sorted(new_baseline_data.items()))
         with open(args.save_baseline, "w", encoding="utf-8") as f:
-          json.dump(new_baseline_data, f, indent=2)
+          json.dump(sorted_baseline, f, indent=2)
         print(f"Saved new baseline to {args.save_baseline}")
       except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"Error saving baseline {args.save_baseline}: {e}")

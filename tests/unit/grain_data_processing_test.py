@@ -181,7 +181,6 @@ class _GrainArrayRecordSetup:
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
 
 
-@pytest.mark.cpu_only
 class GrainArrayRecordProcessingTest(
     _GrainArrayRecordSetup, GrainDeterminismMixin, GrainBaseProcessingTest, unittest.TestCase
 ):
@@ -202,7 +201,6 @@ class GrainArrayRecordProcessingTest(
     super().test_batch_determinism()
 
 
-@pytest.mark.cpu_only
 class GrainArrayRecordProcessingWithMultiSourceBlendingTest(
     _GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase
 ):
@@ -213,7 +211,6 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(
     self.config = self._make_config(grain_train_files=train_files_weighted)
 
 
-@pytest.mark.cpu_only
 class GrainArrayRecordProcessingWithMixtureConfigTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
 
   def setUp(self):
@@ -273,7 +270,6 @@ class GrainArrayRecordAutoTuneTest(_GrainArrayRecordSetup, GrainBaseProcessingTe
     self.config = self._make_config(grain_ram_budget_mb=512, grain_worker_count=-1)  # Enable auto-tuning
 
 
-@pytest.mark.cpu_only
 class GrainArrayRecordTiktokenTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with tiktoken tokenizer."""
 
@@ -285,7 +281,6 @@ class GrainArrayRecordTiktokenTest(_GrainArrayRecordSetup, GrainBaseProcessingTe
     )
 
 
-@pytest.mark.cpu_only
 class GrainArrayRecordHFTokenizerTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with HuggingFace tokenizer."""
 
@@ -297,7 +292,6 @@ class GrainArrayRecordHFTokenizerTest(_GrainArrayRecordSetup, GrainBaseProcessin
     )
 
 
-@pytest.mark.cpu_only
 class GrainArrayRecordBestFitPackingTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with best_fit packing strategy."""
 
@@ -387,7 +381,6 @@ class _GrainParquetSetup:
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
 
 
-@pytest.mark.cpu_only
 class GrainParquetProcessingTest(_GrainParquetSetup, GrainDeterminismMixin, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with Parquet format.
 
@@ -526,7 +519,6 @@ class _GrainTFRecordSetup:
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
 
 
-@pytest.mark.cpu_only
 class GrainTFRecordProcessingTest(_GrainTFRecordSetup, GrainDeterminismMixin, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with TFRecord format.
 
@@ -541,7 +533,6 @@ class GrainTFRecordProcessingTest(_GrainTFRecordSetup, GrainDeterminismMixin, Gr
     super().setUpClass()
 
 
-@pytest.mark.cpu_only
 class GrainTFRecordPreTokenizedProcessingTest(_GrainTFRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with a pre-tokenized TFRecord dataset (tokenize_train_data=False).
 
@@ -561,7 +552,6 @@ class GrainTFRecordPreTokenizedProcessingTest(_GrainTFRecordSetup, GrainBaseProc
     )
 
 
-@pytest.mark.cpu_only
 class GrainFewerFilesThanHostsTest(_GrainTFRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Tests data loading when file count < dataloading_host_count.
 

@@ -17,14 +17,31 @@
 
 from __future__ import annotations
 
+import functools
 import types
 from unittest import mock
 
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from maxtext.kernels.attention import tokamax_ring_attention
+
+
+def _count_primitives(jaxpr, primitive_name, name_param=None):
+  """Counts primitive occurrences in a jaxpr, recursing into sub-jaxprs."""
+  count = 0
+  for eqn in jaxpr.eqns:
+    if eqn.primitive.name == primitive_name and (name_param is None or name_param in str(eqn.params.get("name", ""))):
+      count += 1
+    for value in eqn.params.values():
+      values = value if isinstance(value, (list, tuple)) else (value,)
+      for entry in values:
+        entry = getattr(entry, "jaxpr", entry)
+        if hasattr(entry, "eqns"):
+          count += _count_primitives(entry, primitive_name, name_param)
+  return count
 
 
 class TokamaxRingAttentionTest(absltest.TestCase):
@@ -84,10 +101,12 @@ class TokamaxRingAttentionTest(absltest.TestCase):
         self.q = q
         self.kv = kv
 
-    def kernel(q, k, v, segment_ids):
+    def kernel(q, k, v, segment_ids, sinks, indexer_mask):
       captured["segment_ids_type"] = type(segment_ids)
       captured["q_segment_shape"] = segment_ids.q.shape
       captured["kv_segment_shape"] = segment_ids.kv.shape
+      captured["sinks"] = sinks
+      captured["indexer_mask"] = indexer_mask
       return q + k + v
 
     query = jnp.ones((1, 2, 4, 2))
@@ -109,6 +128,70 @@ class TokamaxRingAttentionTest(absltest.TestCase):
     self.assertIs(captured["segment_ids_type"], RingSegmentIds)
     self.assertEqual(captured["q_segment_shape"], (4,))
     self.assertEqual(captured["kv_segment_shape"], (4,))
+    self.assertIsNone(captured["sinks"])
+    self.assertIsNone(captured["indexer_mask"])
+
+  def test_call_ring_attention_threads_indexer_mask_without_segment_ids(self):
+    captured = {}
+
+    def kernel(q, k, v, segment_ids, sinks, indexer_mask):
+      captured["has_indexer_mask"] = indexer_mask is not None
+      captured["indexer_mask_shape"] = indexer_mask.shape
+      return q + k + v
+
+    query = jnp.ones((2, 2, 4, 2))
+    key = jnp.ones((2, 2, 4, 2))
+    value = jnp.ones((2, 2, 4, 2))
+    indexer_mask = jnp.ones((2, 4, 4), dtype=jnp.bool_)
+
+    out = tokamax_ring_attention.call_ring_attention(
+        query,
+        key,
+        value,
+        None,
+        None,
+        kernel,
+        indexer_mask=indexer_mask,
+    )
+
+    self.assertEqual(out.shape, query.shape)
+    self.assertTrue(captured["has_indexer_mask"])
+    self.assertEqual(captured["indexer_mask_shape"], (4, 4))
+
+  def test_call_ring_attention_threads_indexer_mask_with_segment_ids(self):
+    captured = {}
+
+    class RingSegmentIds:
+
+      def __init__(self, q, kv):
+        self.q = q
+        self.kv = kv
+
+    def kernel(q, k, v, segment_ids, sinks, indexer_mask):
+      captured["segment_ids_type"] = type(segment_ids)
+      captured["indexer_mask_shape"] = indexer_mask.shape
+      return q + k + v
+
+    query = jnp.ones((2, 2, 4, 2))
+    key = jnp.ones((2, 2, 4, 2))
+    value = jnp.ones((2, 2, 4, 2))
+    segment_ids = jnp.ones((2, 4), dtype=jnp.int32)
+    indexer_mask = jnp.ones((2, 4, 4), dtype=jnp.bool_)
+
+    with mock.patch.object(tokamax_ring_attention.ring_attention_kernel, "SegmentIds", RingSegmentIds):
+      out = tokamax_ring_attention.call_ring_attention(
+          query,
+          key,
+          value,
+          segment_ids,
+          segment_ids,
+          kernel,
+          indexer_mask=indexer_mask,
+      )
+
+    self.assertEqual(out.shape, query.shape)
+    self.assertIs(captured["segment_ids_type"], RingSegmentIds)
+    self.assertEqual(captured["indexer_mask_shape"], (4, 4))
 
   def test_with_sequence_axis_preserves_partition_spec_type(self):
     spec = jax.sharding.PartitionSpec("data", None, None, "model")
@@ -117,6 +200,130 @@ class TokamaxRingAttentionTest(absltest.TestCase):
 
     self.assertIsInstance(out, jax.sharding.PartitionSpec)
     self.assertEqual(tuple(out), ("data", None, "context", "model"))
+
+  def test_build_splash_config_keeps_staged_dq_for_larger_kv_shards(self):
+    config = types.SimpleNamespace(
+        dq_reduction_steps=3,
+        sa_block_q=128,
+        sa_block_kv=128,
+        sa_block_kv_compute=128,
+        sa_block_q_dkv=128,
+        sa_block_kv_dkv=128,
+        sa_block_kv_dkv_compute=128,
+        sa_q_layout="HEAD_DIM_MINOR",
+        sa_k_layout="HEAD_DIM_MINOR",
+        sa_v_layout="HEAD_DIM_MINOR",
+        cost_estimate_flops_fwd=-1,
+        cost_estimate_flops_bwd=-1,
+        use_splash_scheduler=False,
+        ring_scan_unroll=2,
+        context_parallel_load_balance=False,
+        sa_bwd_dkv_megacore=False,
+    )
+
+    splash_config = tokamax_ring_attention.build_splash_config(
+        config,
+        q_seq_len=1024,
+        kv_seq_len=1024,
+        context_parallel_size=2,
+    )
+
+    self.assertEqual(splash_config.dq_reduction_steps, 3)
+    self.assertEqual(splash_config.ring_scan_unroll, 2)
+
+  def test_build_splash_config_disables_staged_dq_for_small_kv_shards(self):
+    config = types.SimpleNamespace(
+        dq_reduction_steps=3,
+        sa_block_q=128,
+        sa_block_kv=128,
+        sa_block_kv_compute=128,
+        sa_block_q_dkv=128,
+        sa_block_kv_dkv=128,
+        sa_block_kv_dkv_compute=128,
+        sa_q_layout="HEAD_DIM_MINOR",
+        sa_k_layout="HEAD_DIM_MINOR",
+        sa_v_layout="HEAD_DIM_MINOR",
+        cost_estimate_flops_fwd=-1,
+        cost_estimate_flops_bwd=-1,
+        use_splash_scheduler=False,
+        ring_scan_unroll=1,
+        context_parallel_load_balance=False,
+        sa_bwd_dkv_megacore=False,
+    )
+
+    splash_config = tokamax_ring_attention.build_splash_config(
+        config,
+        q_seq_len=512,
+        kv_seq_len=512,
+        context_parallel_size=2,
+    )
+
+    self.assertIsNone(splash_config.dq_reduction_steps)
+
+  def test_residual_checkpoint_name_enables_context_remat_policy(self):
+    """The named ring residuals let a save-context policy skip the forward recompute."""
+    if len(jax.devices()) < 2:
+      self.skipTest("Requires at least 2 devices for a ring mesh.")
+    config = types.SimpleNamespace(
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=True,
+        dq_reduction_steps=-1,
+        sa_block_q=128,
+        sa_block_kv=128,
+        sa_block_kv_compute=128,
+        sa_block_q_dkv=128,
+        sa_block_kv_dkv=128,
+        sa_block_kv_dkv_compute=128,
+        sa_q_layout="HEAD_DIM_MINOR",
+        sa_k_layout="HEAD_DIM_MINOR",
+        sa_v_layout="HEAD_DIM_MINOR",
+        cost_estimate_flops_fwd=-1,
+        cost_estimate_flops_bwd=-1,
+        use_splash_scheduler=False,
+        ring_scan_unroll=1,
+        use_max_logit_estimate=-1,
+        sa_bwd_dkv_megacore=False,
+    )
+    devices = np.asarray(jax.devices()[:2]).reshape(1, 2)
+    # The ring axis is deliberately not named "context" so that the string
+    # only appears in the jaxpr through the residual checkpoint name.
+    mesh = jax.sharding.Mesh(devices, ("data", "ring"))
+    query = jnp.zeros((1, 1, 256, 128), jnp.bfloat16)
+
+    def shard_with_pspec(arr, spec):
+      return jax.device_put(arr, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*spec)))
+
+    _, ring_kernel, ring_kernel_spec = tokamax_ring_attention.make_sharded_ring_attention_kernel(
+        config,
+        query=query,
+        key=query,
+        context_parallel_size=2,
+        ring_axis="ring",
+        attn_logits_soft_cap=None,
+        maybe_shard_with_pspec=shard_with_pspec,
+    )
+    qkv_spec = jax.sharding.PartitionSpec(None, None, "ring", None)
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(ring_kernel_spec, qkv_spec, qkv_spec, qkv_spec),
+        out_specs=qkv_spec,
+        check_vma=False,
+    )
+    def ring_attn(ring_kernel, q, k, v):
+      return tokamax_ring_attention.call_ring_attention(q, k, v, None, None, ring_kernel)
+
+    def grad_jaxpr(policy):
+      remat = jax.checkpoint(lambda q, k, v: ring_attn(ring_kernel, q, k, v).astype(jnp.float32).sum(), policy=policy)
+      return jax.make_jaxpr(jax.grad(remat))(query, query, query).jaxpr
+
+    saved = grad_jaxpr(jax.checkpoint_policies.save_only_these_names("context"))
+    recomputed = grad_jaxpr(jax.checkpoint_policies.nothing_saveable)
+    self.assertGreaterEqual(_count_primitives(saved, "name", "context"), 2)
+    # Saving the named residuals removes the ring forward recompute, and with
+    # it that recompute's collective permutes, from the backward program.
+    self.assertLess(_count_primitives(saved, "ppermute"), _count_primitives(recomputed, "ppermute"))
 
 
 if __name__ == "__main__":

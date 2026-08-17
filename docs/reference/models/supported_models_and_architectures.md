@@ -12,7 +12,7 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 
 - **Supported Precisions**: FP32, BF16, INT8, and FP8.
 - **Ahead-of-Time Compilation (AOT)**: For faster model development/prototyping and earlier OOM detection.
-- **Quantization**: Via **Qwix** (recommended) and AQT (deprecated). See the [Quantization guide](quantization-doc).
+- **Quantization**: Via **Qwix** (recommended) and AQT (deprecated). See the [Quantization guide](../core_concepts/quantization.md).
 - **Diagnostics**: Simple logging via `max_logging`, profiling in **XProf**, and visualization in **TensorBoard**.
 - **Multi-Token Prediction (MTP)**: Enables token efficient training with multi-token prediction.
 - **Elastic Training**: Fault-tolerant and dynamic scale-up/scale-down on Cloud TPUs with Pathways.
@@ -43,8 +43,8 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 
 ### DeepSeek
 
-- **Variants**: V2 (16B, 236B), V3 (671B) / R1 / V3.1, V3.2 (671B)
-- **Notes**: MLA; shared/finer-grained experts; MTP; YaRN-style scaling; DeepSeek Sparse Attention (V3.2).
+- **Variants**: V2 (16B, 236B), V3 (671B) / R1 / V3.1, V3.2 (671B), V4 Flash (284B)
+- **Notes**: MLA; shared/finer-grained experts; MTP; YaRN-style scaling; DeepSeek Sparse Attention (V3.2); Heavily compressed attention + compressed sparse attention + manifold-constrained hyperconnections + HashRouting (V4).
 
 ### Qwen3
 

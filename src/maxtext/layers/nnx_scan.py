@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities for constructing stacks of scanned NNX layers."""
+"""Utilities for constructing and applying stacks of scanned NNX layers."""
 
 from collections.abc import Callable
+from typing import Any
 
 from flax import nnx
 import jax
@@ -87,3 +88,99 @@ def create_scanned_layers(
   stacked_params = add_scan_metadata(stacked_params, param_scan_axis)
   stacked_rest = add_scan_metadata(stacked_rest, 0)
   return nnx.merge(layer_graphdef, stacked_params, stacked_rest)
+
+
+def apply_scanned_layers(
+    layers: nnx.Module,
+    carry: Any,
+    *,
+    length: int,
+    param_scan_axis: int,
+    apply_fn: Callable[[nnx.Module, Any], Any],
+    remat: bool = False,
+    remat_policy: Callable[..., Any] | None = None,
+    prevent_cse: bool = True,
+    unroll: int = 1,
+) -> Any:
+  """Applies stacked NNX layers using ``jax.lax.scan``.
+
+  This helper owns the generic NNX state and scan-axis mechanics. ``apply_fn``
+  defines the model-specific module invocation and must return the next carry.
+  ``remat`` is separate from ``remat_policy`` because ``None`` is JAX's full
+  rematerialization policy, not an indication that rematerialization is off.
+
+  Externally managed per-layer state, such as KV caches, is not supported by
+  this scan path.
+
+  Note:
+    This is a minimal, model-agnostic scan primitive. The other NNX decoder
+    paths instead go through ``NNXDecoder._apply_layers_sequentially``, a heavier
+    applier that also threads external (vLLM) KV caches via a static unroll and
+    re-applies scan-axis metadata. Gemma4 is currently the only caller of this
+    function; unifying the two appliers is a follow-up cleanup.
+  """
+  if length <= 0:
+    return carry
+
+  layer_graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+  if param_scan_axis != 0:
+    params = jax.tree.map(lambda x: jnp.moveaxis(x, param_scan_axis, 0), params)
+
+  def _ensure_stacked(x):
+    if hasattr(x, "ndim") and x.ndim == 0:
+      return jnp.broadcast_to(x, (length,))
+    return x
+
+  state = jax.tree.map(_ensure_stacked, state)
+
+  def _strip_scan_metadata(leaf):
+    if hasattr(leaf, "replace") and hasattr(leaf, "value"):  # pylint: disable=too-many-nested-blocks
+      replace_kwargs = {}
+      if hasattr(leaf, "get_metadata"):
+        replace_kwargs.update(leaf.get_metadata())
+
+      replace_kwargs.pop(nnx.PARTITION_NAME, None)
+      replace_kwargs.pop("param_scan_axis", None)
+
+      val = getattr(leaf, "value", None)
+      val_ndim = getattr(val, "ndim", None)
+
+      for key in ["sharding", "out_sharding", "kernel_axes", "sharding_names"]:
+        value = getattr(leaf, key, None)
+        if value is None and key in replace_kwargs:
+          value = replace_kwargs[key]
+        if value is not None:
+          if isinstance(value, str):
+            value = (value,)
+          if isinstance(value, tuple):
+            if val_ndim is not None and len(value) > val_ndim:
+              filtered = tuple(
+                  axis for axis in value if axis not in ("local_layers", "layers", "scanned_blocks", "decoder_layers")
+              )
+              if len(filtered) > val_ndim:
+                filtered = filtered[:val_ndim]
+              replace_kwargs[key] = filtered
+      return leaf.replace(**replace_kwargs)
+    return leaf
+
+  def scan_body(current_carry, scanned_state):
+    current_params, current_state = scanned_state
+    current_params = jax.tree.map(
+        _strip_scan_metadata,
+        current_params,
+        is_leaf=lambda x: hasattr(x, "replace") and hasattr(x, "value"),
+    )
+    current_layer = nnx.merge(layer_graphdef, current_params, current_state)
+    next_carry = apply_fn(current_layer, current_carry)
+    return next_carry, nnx.state(current_layer)
+
+  scan_fn = jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse) if remat else scan_body
+  final_carry, scanned_state = jax.lax.scan(scan_fn, carry, (params, state), length=length, unroll=unroll)
+
+  if param_scan_axis != 0:
+    scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
+    scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), scanned_params)
+    scanned_state = nnx.State.merge(scanned_params, scanned_other)
+
+  nnx.update(layers, scanned_state)
+  return final_carry

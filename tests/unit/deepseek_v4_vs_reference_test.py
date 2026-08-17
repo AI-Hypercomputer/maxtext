@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests validating DeepSeek-V4 MaxText components against PyTorch references."""
+"""Tests validating DeepSeek-V4 MaxText components against PyTorch references.
+
+Note on numerical tolerances:
+Tolerances across this file are tuned for TPU execution (bfloat16/float32 mixed precision
+and XLA instruction differences), requiring lower/relaxed tolerances compared to CPU execution.
+"""
 
 import os
 import sys
@@ -35,7 +40,19 @@ import torch
 transformers_repo_path = os.environ.get("TRANSFORMERS_REPO_PATH", "")
 sys.path.insert(0, os.path.join(transformers_repo_path, "src"))
 
-jax.config.update("jax_default_matmul_precision", "highest")
+_ORIG_MATMUL_PRECISION = None
+
+
+def setUpModule():
+  global _ORIG_MATMUL_PRECISION
+  _ORIG_MATMUL_PRECISION = jax.config.jax_default_matmul_precision
+  jax.config.update("jax_default_matmul_precision", "highest")
+
+
+def tearDownModule():
+  if _ORIG_MATMUL_PRECISION is not None:
+    jax.config.update("jax_default_matmul_precision", _ORIG_MATMUL_PRECISION)
+
 
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 
@@ -754,30 +771,54 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
   def test_forward_uncompressed(self):
     self._run_e2e_test("sliding_attention")
 
-  @parameterized.named_parameters(
-      {"testcase_name": "dot_product", "attention_kernel": "dot_product"},
-      {"testcase_name": "flash", "attention_kernel": "flash", "check_norm": True},
-  )
-  def test_forward_hca(self, attention_kernel, check_norm=False):
-    self._run_e2e_test("heavily_compressed_attention", attention_kernel=attention_kernel, check_norm=check_norm)
+  def test_forward_hca_dot_product(self):
+    self._run_e2e_test("heavily_compressed_attention", attention_kernel="dot_product")
+
+  @pytest.mark.tpu_only
+  def test_forward_hca_flash(self):
+    self._run_e2e_test("heavily_compressed_attention", attention_kernel="flash", check_norm=True)
+
+  def test_forward_csa_dot_product(self):
+    self._run_e2e_test("compressed_sparse_attention", attention_kernel="dot_product")
+
+  @pytest.mark.tpu_only
+  def test_forward_csa_flash(self):
+    self._run_e2e_test("compressed_sparse_attention", attention_kernel="flash", check_norm=True)
 
   @parameterized.named_parameters(
-      {"testcase_name": "dot_product", "attention_kernel": "dot_product"},
-      {"testcase_name": "flash", "attention_kernel": "flash", "check_norm": True},
+      {
+          "testcase_name": "hca_dot_product",
+          "layer_type": "heavily_compressed_attention",
+      },
+      {
+          "testcase_name": "csa_dot_product",
+          "layer_type": "compressed_sparse_attention",
+      },
   )
-  def test_forward_csa(self, attention_kernel, check_norm=False):
-    self._run_e2e_test("compressed_sparse_attention", attention_kernel=attention_kernel, check_norm=check_norm)
-
-  @parameterized.named_parameters(
-      {"testcase_name": "dot_product", "attention_kernel": "dot_product"},
-      {"testcase_name": "flash", "attention_kernel": "flash", "check_norm": True},
-  )
-  def test_document_packing_masking(self, attention_kernel, check_norm=False):
+  def test_document_packing_masking_dot_product(self, layer_type):
     self._run_e2e_test(
-        "heavily_compressed_attention",
+        layer_type,
         is_packed=True,
-        attention_kernel=attention_kernel,
-        check_norm=check_norm,
+        attention_kernel="dot_product",
+    )
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "hca_flash",
+          "layer_type": "heavily_compressed_attention",
+      },
+      {
+          "testcase_name": "csa_flash",
+          "layer_type": "compressed_sparse_attention",
+      },
+  )
+  @pytest.mark.tpu_only
+  def test_document_packing_masking_flash(self, layer_type):
+    self._run_e2e_test(
+        layer_type,
+        is_packed=True,
+        attention_kernel="flash",
+        check_norm=True,
     )
 
   @pytest.mark.tpu_only
@@ -934,8 +975,8 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
 
     # Explicitly initialize PyTorch weights since torch.empty leaves garbage in memory,
     # which causes NaN/Inf drift between PyTorch and MaxText/XLA execution.
-    torch.nn.init.normal_(pt_router.weight)
-    torch.nn.init.normal_(pt_router.e_score_correction_bias)
+    torch.nn.init.normal_(pt_router.weight, std=0.02)
+    torch.nn.init.normal_(pt_router.e_score_correction_bias, std=0.02)
 
     mx_moe = RoutedMoE(
         config=self.mx_config,
@@ -1287,13 +1328,13 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
   def setUp(self):
     self.batch_size = 2
     self.seq_len = 32
-    self.hidden_dim = 4096
-    self.num_heads = 64
-    self.head_dim = 512
-    self.q_lora_rank = 1024
-    self.o_groups = 8
-    self.o_lora_rank = 1024
-    self.qk_rope_head_dim = 64
+    self.hidden_dim = 64
+    self.num_heads = 4
+    self.head_dim = 32
+    self.q_lora_rank = 16
+    self.o_groups = 4
+    self.o_lora_rank = 16
+    self.qk_rope_head_dim = 32
     self.partial_rotary_factor = self.qk_rope_head_dim / self.head_dim
     self.vocab_size = 129280
 
@@ -1306,6 +1347,9 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
         kv_lora_rank=self.head_dim,
         o_groups=self.o_groups,
         o_lora_rank=self.o_lora_rank,
+        index_head_dim=self.head_dim,
+        index_n_heads=self.num_heads,
+        index_topk=16,
         layer_types=[
             "sliding_attention",
             "sliding_attention",
@@ -1317,8 +1361,10 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
         ],
         num_hidden_layers=7,
         num_nextn_predict_layers=0,
-        num_local_experts=8,
-        num_experts_per_tok=3,
+        moe_intermediate_size=64,
+        n_routed_experts=16,
+        n_shared_experts=1,
+        num_experts_per_tok=4,
         vocab_size=self.vocab_size,
     )
 
@@ -1332,6 +1378,7 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
         "dtype": "float32",
         "weight_dtype": "float32",
         "skip_jax_distributed_system": True,
+        "use_tokamax_splash": True,
     }
     argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
     self.mx_config = pyconfig.initialize(argv, **config_arguments)
@@ -1565,13 +1612,18 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
     # Build MaxText config dictionary
     argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-tiny"]
     config_arguments = {
+        "override_model_config": True,
         "attention": "dot_product",
         "dtype": "float32",
         "weight_dtype": "float32",
         "mhc_expansion_rate": self.hc_mult,
+        "base_emb_dim": self.hidden_dim,
         "emb_dim": self.hidden_dim,
+        "megablox": False,
+        "sparse_matmul": False,
         "normalization_layer_epsilon": 1e-6,
         "skip_jax_distributed_system": True,
+        "use_tokamax_splash": True,
     }
     self.mx_config = pyconfig.initialize(argv, **config_arguments)
 
@@ -1603,6 +1655,35 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
     mean_diff = np.mean(np.abs(mt_out - pt_out))
     print(f"HYPER HEAD PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
     np.testing.assert_allclose(mt_out, pt_out, rtol=5e-5, atol=5e-5)
+
+  def test_nnx_decoder_hyperhead_integration(self):
+    from maxtext.layers.nnx_decoders import NNXDecoder
+    from unittest.mock import patch
+
+    # Specifically instantiate full NNXDecoder to ensure it didn't bypass the HyperHead!
+    mt_decoder = NNXDecoder(
+        config=self.mx_config,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+    self.assertTrue(hasattr(mt_decoder, "hc_head"), "NNXDecoder completely missed hc_head setup! Bug in nnx_decoders.py!")
+    self.assertIsInstance(mt_decoder.hc_head, DeepSeek4HyperHead, "NNXDecoder instantiated the wrong HyperHead class!")
+
+    # Verify hc_head.__call__ is invoked during NNXDecoder forward pass
+    def dummy_embed(tokens, **kwargs):
+      return jnp.zeros((tokens.shape[0], tokens.shape[1], self.mx_config.emb_dim), dtype=jnp.float32)
+
+    dummy_tokens = jnp.zeros((2, 4), dtype=jnp.int32)
+    dummy_positions = jnp.arange(4, dtype=jnp.int32)[None, :]
+
+    with patch.object(DeepSeek4HyperHead, "__call__", wraps=mt_decoder.hc_head.__call__) as mock_call:
+      _ = mt_decoder(
+          shared_embedding=dummy_embed,
+          decoder_input_tokens=dummy_tokens,
+          decoder_positions=dummy_positions,
+          deterministic=True,
+      )
+      self.assertTrue(mock_call.called, "NNXDecoder forward pass did not invoke hc_head.__call__!")
 
 
 if __name__ == "__main__":

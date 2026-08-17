@@ -14,7 +14,10 @@
 
 """Packed Sequence Op."""
 
-import tensorflow as tf
+try:
+  import tensorflow as tf
+except ImportError as error:
+  raise ImportError("TensorFlow is required. Run `pip install tensorflow`") from error
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 

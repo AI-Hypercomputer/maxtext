@@ -25,6 +25,13 @@ on:
         type: 'string'
         description: 'Any additional context from the request'
         required: false
+    secrets:
+      APP_PRIVATE_KEY:
+        required: false
+      GEMINI_API_KEY:
+        required: false
+      GOOGLE_API_KEY:
+        required: false
 
 concurrency:
   # any single pull request, only one invoke runs at a time
@@ -48,7 +55,7 @@ jobs:
         id: 'mint_identity_token'
         if: |-
           ${{ vars.APP_ID }}
-        uses: 'actions/create-github-app-token@v2'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           app-id: '${{ vars.APP_ID }}'
           private-key: '${{ secrets.APP_PRIVATE_KEY }}'
@@ -59,7 +66,7 @@ jobs:
       - name: 'Run Gemini CLI'
       # Trigger Gemini with context
         id: 'run_gemini'
-        uses: 'google-github-actions/run-gemini-cli@main'
+        uses: google-github-actions/run-gemini-cli@f5a57753971eb5f2734c70df7e796f2fcfbef6e7 # main
         env:
           GEMINI_CLI_TRUST_WORKSPACE: 'true'
           TITLE: '${{ github.event.pull_request.title || github.event.issue.title }}'
@@ -86,7 +93,7 @@ jobs:
           settings: |-
             {
               "model": {
-                "maxSessionTurns": 25
+                "maxSessionTurns": 100
               },
               "telemetry": {
                 "enabled": false,

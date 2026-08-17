@@ -42,7 +42,13 @@ def _get_mock_devices(devices_per_slice, num_slices=1):
 class TrainRLTest(unittest.TestCase):
   """Tests for train_rl.py."""
 
-  @pytest.mark.cpu_only
+  def test_rl_config_includes_decoder_engram_defaults(self):
+    """RL models must expose Engram fields consumed by the shared decoder."""
+    config = types.RLConfig(model_name="gemma4-26b")
+
+    self.assertEqual(config.engram_layers, [])
+    self.assertEqual(config.engram_max_ngram_size, 3)
+
   def test_setup_configs_and_devices_pathways_split(self):
     """Test setup_configs_and_devices with multiple VMs and Pathways."""
     mock_devices = _get_mock_devices(8)
@@ -75,7 +81,6 @@ class TrainRLTest(unittest.TestCase):
       self.assertEqual(trainer_devices, mock_devices[:4])
       self.assertEqual(sampler_devices, mock_devices[4:])
 
-  @pytest.mark.cpu_only
   def test_setup_configs_and_devices_pathways_fractional_split(self):
     """Test setup_configs_and_devices with multiple VMs and custom fractions."""
     mock_devices = _get_mock_devices(8)
@@ -105,7 +110,6 @@ class TrainRLTest(unittest.TestCase):
       self.assertEqual(trainer_devices, mock_devices[:2])
       self.assertEqual(sampler_devices, mock_devices[2:])
 
-  @pytest.mark.cpu_only
   def test_setup_configs_and_devices_multislice_not_enough_slices(self):
     """Test setup_configs_and_devices raises ValueError when not enough slices."""
     mock_devices = _get_mock_devices(num_slices=2, devices_per_slice=4)
@@ -130,7 +134,6 @@ class TrainRLTest(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "Not enough slices for trainer and samplers"):
         model_creation_utils.setup_configs_and_devices(["dummy", "dummy"], config_class=types.RLConfig)
 
-  @pytest.mark.cpu_only
   def test_setup_configs_and_devices_multislice_invalid_tp(self):
     """Test setup_configs_and_devices raises ValueError for invalid TP."""
     mock_devices = _get_mock_devices(num_slices=4, devices_per_slice=8)
@@ -157,7 +160,6 @@ class TrainRLTest(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "must be divisible by tensor parallelism"):
         model_creation_utils.setup_configs_and_devices(["dummy", "dummy"], config_class=types.RLConfig)
 
-  @pytest.mark.cpu_only
   def test_setup_configs_and_devices_multislice_invalid_tp_fsdp(self):
     """Test setup_configs_and_devices raises ValueError for inconsistent TP and FSDP."""
     mock_devices = _get_mock_devices(num_slices=4, devices_per_slice=8)
@@ -184,7 +186,6 @@ class TrainRLTest(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "must equal devices_per_slice"):
         model_creation_utils.setup_configs_and_devices(["dummy", "dummy"], config_class=types.RLConfig)
 
-  @pytest.mark.cpu_only
   def test_get_rollout_kwargs_no_dp(self):
     """Test case 1: sampler_config.rollout_data_parallelism=-1 -> verify result is calculated."""
     # num_sampler_devices=16, tp=2, ep=4 -> dp should be 16 // (2 * 4) = 2
@@ -203,7 +204,6 @@ class TrainRLTest(unittest.TestCase):
         expected_result,
     )
 
-  @pytest.mark.cpu_only
   def test_get_rollout_kwargs_auto_tp(self):
     """Test case 2: dp=2, tp=-1, num_sampler_devices=4."""
     sampler_config = SimpleNamespace(
@@ -221,7 +221,6 @@ class TrainRLTest(unittest.TestCase):
         expected_result,
     )
 
-  @pytest.mark.cpu_only
   def test_get_rollout_kwargs_fixed_tp_dp(self):
     """Test case 3: dp=2, tp=2, num_sampler_devices=4."""
     sampler_config = SimpleNamespace(
@@ -239,7 +238,6 @@ class TrainRLTest(unittest.TestCase):
         expected_result,
     )
 
-  @pytest.mark.cpu_only
   def test_get_rollout_kwargs_auto_ep(self):
     """Test case 4: ep=-1 -> verify result is calculated."""
     # num_sampler_devices=8, tp=2, dp=2 -> ep should be 8 // (2 * 2) = 2
@@ -258,7 +256,6 @@ class TrainRLTest(unittest.TestCase):
         expected_result,
     )
 
-  @pytest.mark.cpu_only
   def test_get_rollout_kwargs_errors(self):
     """Test various error cases for get_rollout_kwargs_for_parallelism."""
     # More than one -1
@@ -306,7 +303,6 @@ class TrainRLTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, r"!= len\(sampler_devices\)"):
       train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8)
 
-  @pytest.mark.cpu_only
   def test_prompt_filtering(self):
     """Test that prompts longer than max_prefill_predict_length are filtered out."""
     # Setup mocks
@@ -404,7 +400,6 @@ class TrainRLTest(unittest.TestCase):
       self.assertEqual(len(test_batch["prompts"]), 1)
       self.assertEqual(test_batch["prompts"][0], "short")
 
-  @pytest.mark.cpu_only
   @mock.patch("datasets.load_dataset")
   def test_prepare_datasets_with_split(self, mock_load):
     mock_ds = mock.MagicMock()
@@ -457,7 +452,6 @@ class TrainRLTest(unittest.TestCase):
     total_test_examples = sum(len(batch["question"]) for batch in test_batches)
     assert total_test_examples == 1
 
-  @pytest.mark.cpu_only
   @mock.patch("datasets.load_dataset")
   def test_prepare_datasets_without_split(self, mock_load):
     mock_ds = mock.MagicMock()
@@ -506,7 +500,6 @@ class TrainRLTest(unittest.TestCase):
     mock_load.assert_has_calls(expected_calls, any_order=True)
     assert mock_load.call_count == len(expected_calls)
 
-  @pytest.mark.cpu_only
   def test_build_reward_fns_defaults_when_no_custom(self):
     """With neither knob set, the built-in 3-fn stack is returned."""
     trainer_config = SimpleNamespace(reward_functions_path="", reward_functions="")
@@ -520,7 +513,6 @@ class TrainRLTest(unittest.TestCase):
         ],
     )
 
-  @pytest.mark.cpu_only
   def test_build_reward_fns_custom_replaces_builtins(self):
     """When both knobs are set, the stack is the user-provided functions only."""
     trainer_config = SimpleNamespace(
@@ -540,7 +532,6 @@ class TrainRLTest(unittest.TestCase):
         ]
     )
 
-  @pytest.mark.cpu_only
   def test_build_reward_fns_partial_config_falls_back(self):
     """If only one of the two knobs is set, the built-in stack is used."""
     trainer_config = SimpleNamespace(reward_functions_path="/tmp/my_rewards.py", reward_functions="")
@@ -551,7 +542,6 @@ class TrainRLTest(unittest.TestCase):
 class TokenizerChatTemplateTest(unittest.TestCase):
   """Unit tests for configure_tokenizer_chat_template."""
 
-  @pytest.mark.cpu_only
   def test_chat_template_populated_from_config_string(self):
     """Test that chat_template is set from config.chat_template when tokenizer lacks one."""
     mock_tokenizer = mock.MagicMock()
@@ -564,7 +554,6 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
     self.assertEqual(mock_tokenizer.chat_template, "{{ messages[0].content }}")
 
-  @pytest.mark.cpu_only
   @mock.patch("maxtext.input_pipeline.instruction_data_processing.load_chat_template_from_file")
   def test_chat_template_populated_from_config_file(self, mock_load):
     """Test that chat_template is loaded from chat_template_path when tokenizer lacks one."""
@@ -583,7 +572,6 @@ class TokenizerChatTemplateTest(unittest.TestCase):
         "{% for message in messages %}{{ message.content }}{% endfor %}",
     )
 
-  @pytest.mark.cpu_only
   def test_chat_template_raises_value_error_when_empty(self):
     """Test that ValueError is raised when tokenizer lacks chat_template and both config options are empty."""
     mock_tokenizer = mock.MagicMock()
@@ -596,7 +584,6 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "Tokenizer 'dummy-base-model' has no chat_template"):
       train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
 
-  @pytest.mark.cpu_only
   def test_chat_template_unchanged_when_already_exists(self):
     """Test that an existing chat_template on the tokenizer is preserved (backward compatibility)."""
     mock_tokenizer = mock.MagicMock()
@@ -609,7 +596,6 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
     self.assertEqual(mock_tokenizer.chat_template, "{{ existing_template }}")
 
-  @pytest.mark.cpu_only
   def test_apply_chat_template_works_after_configuration(self):
     """Verifies apply_chat_template succeeds and produces the expected format after our code path runs."""
 

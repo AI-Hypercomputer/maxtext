@@ -194,6 +194,10 @@ jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 
 - **`rl_llama3_demo.ipynb`** → GRPO/GSPO training on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k). We recommend running this on a v5p-8 TPU VM using [Method 2](#method-2-visual-studio-code-with-tpu-recommended) or [Method 3](#method-3-local-jupyter-lab-with-tpu-recommended).
 
+### Parameter-Efficient Fine-Tuning (PEFT/LoRA)
+
+- **`native_lora_demo.ipynb`** → Interactive Parameter-Efficient Fine-Tuning (PEFT) and pre-training demo with native LoRA and QLoRA for supported models (such as Qwen3-0.6B and Gemma4-e2b). Includes SFT on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k) and pre-training with QLoRA. Runs successfully on free-tier Google Colab TPUs or TPU VMs.
+
 ## Common Pitfalls & Debugging
 
 | Issue                          | Solution                                                     |

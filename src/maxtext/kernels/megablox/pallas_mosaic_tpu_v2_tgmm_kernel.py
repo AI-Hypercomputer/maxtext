@@ -13,8 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Forked from:
-# https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/
-# tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py
+# https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py
 """TGMM kernel"""
 
 import dataclasses
@@ -350,7 +349,7 @@ def tgmm_inner_kernel(
         scale_slice = tiled_rhs_scale_ref[0]  # pyrefly: ignore[unsupported-operation]
         acc *= scale_slice
       if cfgs.has_partial_sum:
-        acc += tiled_ps_ref[...].astype(acc.dtype)
+        acc += tiled_ps_ref[...].astype(acc.dtype)  # pyrefly: ignore[unsupported-operation]
       tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
     else:
       acc_ref[...] = acc

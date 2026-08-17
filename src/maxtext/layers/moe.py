@@ -42,8 +42,8 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec, get_logical_axis_rules
+from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec, logical_to_mesh_axes
+from maxtext.utils.sharding import get_logical_axis_rules, remove_expert_from_partition_spec, remove_mesh_axes_from_partition_spec
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -232,6 +232,10 @@ class Tid2EidVar(nnx.Variable):
   """Custom variable to hold tid2eid without trainable param overhead."""
 
 
+class MoEBiasVar(nnx.Variable):
+  """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -307,10 +311,17 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
+      # DSV3 was using nnx.Param and that code we are keeping the same
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
           out_sharding=bias_axes,
       )
+      if self.model_name.startswith("deepseek4"):
+        # DSV4 uses MoEBiasVar to naturally isolate from sequence-wise updates
+        self.bias = MoEBiasVar(
+            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            out_sharding=bias_axes,
+        )
     else:
       self.bias = None
 
@@ -713,7 +724,8 @@ class RoutedMoE(nnx.Module):
       tid2eid_int = self.tid2eid.value
       # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
       tid2eid_int = tid2eid_int.astype(jnp.int32)
-      top_k_indices = tid2eid_int[input_ids]
+      # Cast input_ids to int32 to safely index the hash routing table
+      top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     # NOTE: deepseek2 has a different pattern
     elif self.config.model_name.startswith(("deepseek3", "deepseek4")):
@@ -734,6 +746,12 @@ class RoutedMoE(nnx.Module):
       # Normalization of router weights (e.g. used by Qwen3, Gemma4).
       if self.config.norm_topk_prob:
         top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
+
+      if self.per_expert_scale is not None and not (
+          self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
+      ):
+        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
+        top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
     return top_k_weights, top_k_indices
 
@@ -917,6 +935,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -1005,6 +1024,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -1069,6 +1089,7 @@ class RoutedMoE(nnx.Module):
       use_custom_sort_vjp=True,
       use_ragged_sort=False,
       ragged_buffer_factor=-1.0,
+      use_single_sparsecore=False,
   ):
     """Permutes tokens locally within an expert shard.
 
@@ -1152,7 +1173,12 @@ class RoutedMoE(nnx.Module):
       # the worst-case ragged buffer. Restricting the gather to that prefix
       # makes both forward and backward proportional to the routed token count.
       valid_end = jnp.sum(local_group_size).astype(jnp.int32)
-      sorted_inputs = a2a_ragged_sort(inputs, sorted_indices, valid_end)
+      sorted_inputs = a2a_ragged_sort(
+          inputs,
+          sorted_indices,
+          valid_end,
+          use_single_sparsecore=use_single_sparsecore,
+      )
     else:
       sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
     sorted_experts_ids = expert_indices[sorted_indices]
@@ -1383,6 +1409,7 @@ class RoutedMoE(nnx.Module):
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
+      # Clamps the tile size using the minimum
       tiling = (
           min(tiling[0], m),
           min(tiling[1], k),
@@ -1393,7 +1420,7 @@ class RoutedMoE(nnx.Module):
         if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
           raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
         rhs_inputs = kernel.qvalue
-      if self.config.use_qwix_quantization:
+      if self.config.quantization and self.config.use_qwix_quantization:
         # Use full contraction for QWIX quantization to allow quantization
         # fusion (max reduce over contracting dimension).
         tiling = (tiling[0], k, tiling[2])
@@ -1424,7 +1451,7 @@ class RoutedMoE(nnx.Module):
       return output
 
     def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
-      if self.config.use_qwix_quantization:
+      if self.config.quantization and self.config.use_qwix_quantization:
         return group_sizes
       elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
         return group_sizes
@@ -1484,42 +1511,28 @@ class RoutedMoE(nnx.Module):
       # mode on a TPU target breaks check_vma and bloats HBM temporaries.
       megablox_interpret = self.mesh.devices.flat[0].platform != "tpu"
 
-      # We support three implementations for gmm - tokamax, older forked kernel, or jax.lax.ragged_dot
-      # For quantized tokamax we call a forked version that supports our quantization recipes.
-      if self.config.use_tokamax_gmm:
-        # tokamax gmm v1 (quantized) or tokamax gmm v2 (unquantized)
-        # tokamax gmm v2 (quantized) not supported yet
-        if self.config.quantization or self.config.use_gmm_v2:
-          output = mblx.gmm(
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=group_sizes,
-              preferred_element_type=self.dtype,
-              tiling=tiling,
-              group_offset=group_offset,
-              lhs_quantize_dtype=lhs_quantize_dtype,
-              rhs_quantize_dtype=rhs_quantize_dtype,
-              use_qwix_quantization=self.config.use_qwix_quantization,
-              use_tokamax_backend=self.config.use_tokamax_gmm,
-              weight_gather_axes=weight_gather_axes,
-              lhs_vma_axes=lhs_vma_axes,
-              rhs_vma_axes=rhs_vma_axes,
-              use_gmm_v2=self.config.use_gmm_v2,
-              partial_sum=partial_sum,
-              interpret=megablox_interpret,
-          )
-        else:  # tokamax (unquantized)
-          output = tokamax.ragged_dot(
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=tokamax_group_sizes,
-              precision=jax.lax.Precision.DEFAULT,
-              preferred_element_type=self.dtype,
-              implementation="mosaic",
-              # `group_offset` is not yet supported
-              group_offset=None,
-          )
-      elif self.config.megablox:  # Older forked megablox
+      # We support various implementations for gmm - tokamax gmm (v1, v2), older forked megablox, or jax.lax.ragged_dot
+      # Determine whether we can use: tokamax gmm v1 (quantized)
+      is_tokamax_v1_unquantized = (
+          self.config.use_tokamax_gmm and not self.config.quantization and not self.config.use_gmm_v2
+      )
+      # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
+      use_custom_vjp_gmm = self.config.use_tokamax_gmm or self.config.megablox
+
+      if is_tokamax_v1_unquantized:
+        # tokamax v1 (unquantized)
+        output = tokamax.ragged_dot(
+            lhs=inputs,
+            rhs=kernel,
+            group_sizes=tokamax_group_sizes,
+            precision=jax.lax.Precision.DEFAULT,
+            preferred_element_type=self.dtype,
+            implementation="mosaic",
+            # `group_offset` is not yet supported
+            group_offset=None,
+        )
+      elif use_custom_vjp_gmm:
+        # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
         output = mblx.gmm(
             lhs=inputs,
             rhs=kernel,
@@ -1529,14 +1542,19 @@ class RoutedMoE(nnx.Module):
             group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
+            # Only "fp8_full" quantizes GMM; other schemes (e.g. "fp8", "int8")
+            # do not define a GMM quantization rule.
+            use_qwix_quantization=bool(self.config.quantization == "fp8_full") and self.config.use_qwix_quantization,
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,
             rhs_vma_axes=rhs_vma_axes,
+            use_gmm_v2=self.config.use_gmm_v2,
+            partial_sum=partial_sum,
             interpret=megablox_interpret,
         )
-      else:  # jax.lax.ragged_dot
+      else:
+        # jax.lax.ragged_dot
         output = jax_ragged_dot_gmm(
             inputs,
             kernel,
@@ -1545,6 +1563,7 @@ class RoutedMoE(nnx.Module):
             expert_assignments,
             padding_amount,
         )
+
       if padding_amount > 0:
         output = output[: orig_inputs_shape[0]]
       return output
@@ -1617,6 +1636,10 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
+        # Update kernel pspec for FSDP AG
+        w0_pspec = remove_mesh_axes_from_partition_spec(w0_pspec, ("fsdp",))
+        w1_pspec = remove_mesh_axes_from_partition_spec(w1_pspec, ("fsdp",))
+        wo_pspec = remove_mesh_axes_from_partition_spec(wo_pspec, ("fsdp",))
       return (
           batch_logical_axis,
           input_partition_pspec,
@@ -1762,6 +1785,7 @@ class RoutedMoE(nnx.Module):
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.config.ragged_buffer_factor,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
@@ -1774,6 +1798,7 @@ class RoutedMoE(nnx.Module):
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.config.ragged_buffer_factor,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
 
       return (
@@ -1959,6 +1984,7 @@ class RoutedMoE(nnx.Module):
               intermediate_output,
               jnp.argsort(route_metadata.local_sorted_indices),  # pylint: disable=undefined-variable
               valid_end,
+              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
           local_output = _sort_activations(
@@ -2571,13 +2597,29 @@ class RoutedMoE(nnx.Module):
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits) -> jax.Array:
-    """Compute the load balance loss."""
+    """Compute the sequence-wise load balance loss.
+
+    For DeepSeek V4 like models, standard load balancing across an entire batch can
+    be inadequate due to heterogeneous prompt lengths and varying sequence
+    characteristics. This method implements sequence-wise load balancing by
+    computing the token density and routing probabilities on a per-sequence basis.
+
+    The resulting loss is scaled by `self.config.load_balance_loss_weight`.
+    When this configuration value is set > 0, the computed loss is aggregated
+    into the total training loss. By minimizing this scaled auxiliary loss,
+    the optimizer updates the routing parameters to actively enforce an even
+    distribution of tokens to experts within each individual sequence.
+    """
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     summed_expert_mask = jnp.sum(expert_mask, axis=2)
     # Get fraction of tokens dispatched to each expert
+    # jnp.mean over axis=1 (sequence length) isolates the token density per sequence.
     density = jnp.mean(summed_expert_mask, axis=1)
     # get fraction of probability allocated to each expert
+    # jnp.mean over axis=1 isolates the routing probability per sequence.
     density_prob = jnp.mean(logits, axis=1)
+    # The sequence-wise densities and probabilities are multiplied and then averaged
+    # over the batch dimension, scaled by the required constant.
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 
