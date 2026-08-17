@@ -140,6 +140,16 @@ def get_muon_weight_dimension_numbers(model, config, verbose=False):
     def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], leaf):
       # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
       path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
+      if (
+          config is not None
+          and getattr(config, "mhc_split_axis_contraction", False)
+          and _is_path_contain_any(("mhc_attention", "mhc_mlp"), path_strings)
+          and _is_path_contain_any(("pre_alpha", "post_alpha", "res_alpha"), path_strings)
+      ):
+        ndim = len(leaf.shape)
+        scan_axis = getattr(config, "param_scan_axis", 1) % ndim if ndim == 4 else None
+        reduction_axes = tuple(axis for axis in range(ndim - 1) if axis != scan_axis)
+        return mdn(reduction_axes, (-1,))
       return transform_logic(path_strings)
 
     # NNX abstract_param is an nnx.State (not Linen's dict of LogicallyPartitioned leaves);

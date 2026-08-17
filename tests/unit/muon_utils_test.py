@@ -173,6 +173,19 @@ class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
     # 'w_standard' does not trigger any special rule → standard mdn.
     self.assertEqual(result["w_standard"], mdn((0,), (-1,)))
 
+  def test_split_mhc_alphas_reduce_rate_and_embed_axes(self):
+    model = nnx.Module()
+    model.mhc_attention = nnx.Module()
+    model.mhc_attention.pre_alpha = nnx.Param(jnp.ones((4, 8, 4)))
+    model.mhc_mlp = nnx.Module()
+    model.mhc_mlp.res_alpha = nnx.Param(jnp.ones((4, 2, 8, 16)))
+    config = mock.Mock(mhc_split_axis_contraction=True, param_scan_axis=1)
+
+    result = muon_utils.get_muon_weight_dimension_numbers(model, config)
+
+    self.assertEqual(result["mhc_attention"]["pre_alpha"], mdn((0, 1), (-1,)))
+    self.assertEqual(result["mhc_mlp"]["res_alpha"], mdn((0, 2), (-1,)))
+
   def test_nnx_verbose_path_executes_print_debug(self):
     """verbose=True should also execute _print_structure_debug without raising."""
     buf = io.StringIO()
