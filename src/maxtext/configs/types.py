@@ -2203,6 +2203,7 @@ class Profiling(BaseModel):
   profile_cleanly: bool = Field(True, description="Add block_until_ready to align profile for each step.")
   profile_periodically_period: int = Field(-1, description="If positive, profile every N steps.")
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
+  enable_continuous_profiling: bool = Field(False, description="Enable continuous profiling in tunix profiler. Once enabled, it will support saving profile > 2GB.")
   enable_jax_profiler: bool = Field(False, description="Enable the JAX live profiler.")
   jax_profiler_port: int = Field(9999, description="Port for the JAX profiler.")
   enable_tpu_profiling_options: bool = Field(False, description="Enable TPU advanced profiling options.")
