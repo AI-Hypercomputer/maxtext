@@ -27,11 +27,7 @@ sys.path.insert(0, os.path.abspath("src"))
 import jax
 from jax import numpy as jnp
 import numpy as np
-import pathwaysutils.proxy_backend
 
-pathwaysutils.proxy_backend.register_backend_factory()
-
-from pathwaysutils.experimental.shared_pathways_service import isc_pathways
 from maxtext.configs import pyconfig
 from maxtext.models import qwen3_5
 from maxtext.utils import maxtext_utils
@@ -91,15 +87,32 @@ def run_isolation_diagnostics():
         [sys.argv[0], get_test_config_path(), "attention=flash", "use_tokamax_splash=True", "sa_use_base2_exp=False", "sparse_matmul=False"],
         **base_kwargs,
     )
+
+    # Tensor-parallel degree for the inference mesh is capped at
+    # `num_kv_heads` (2 for qwen3.5-35b-a3b): the RPA kernel's shard_map
+    # requires the (batch_size+1,)-shaped `query_start_loc` and (3,)-shaped
+    # `request_distribution` AttentionMetadata arrays to be evenly divisible
+    # by the mesh axis size, which a 4-device data-parallel mesh violates
+    # for batch_size=4. See tests/run_qwen3_5_logit_parity.py for the
+    # reference pattern.
+    infer_tp_degree = min(len(jax.devices()), cfg_train.num_kv_heads)
+
     cfg_infer = pyconfig.initialize(
-        [sys.argv[0], get_test_config_path("inference/vllm.yml"), "attention=vllm_rpa", "prefuse_moe_weights=False", "model_call_mode=inference", "ici_data_parallelism=-1"],
+        [sys.argv[0], get_test_config_path("inference/vllm.yml"), "attention=vllm_rpa", "prefuse_moe_weights=False", "model_call_mode=inference", f"ici_tensor_parallelism={infer_tp_degree}"],
         **base_kwargs,
     )
 
     from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
     mesh_train = Mesh(maxtext_utils.create_device_mesh(cfg_train), cfg_train.mesh_axes)
-    mesh_infer = Mesh(maxtext_utils.create_device_mesh(cfg_infer), cfg_infer.mesh_axes)
+
+    # `create_device_mesh` requires the ICI parallelism product to equal the
+    # total visible device count, which does not hold for `infer_tp_degree`
+    # (<=4). Build the mesh directly from a device slice instead.
+    infer_device_slice = np.array(jax.devices()[:infer_tp_degree])
+    infer_mesh_shape = tuple(infer_tp_degree if axis == "model" else 1 for axis in cfg_infer.mesh_axes)
+    infer_devices = infer_device_slice.reshape(infer_mesh_shape)
+    mesh_infer = Mesh(infer_devices, cfg_infer.mesh_axes)
 
     key = jax.random.PRNGKey(42)
     k_in, k_lyr = jax.random.split(key, 2)
@@ -107,9 +120,16 @@ def run_isolation_diagnostics():
     decoder_positions = jnp.tile(jnp.arange(seq_len, dtype=jnp.int32), (batch_size, 1))
     decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
-    x_input = jax.device_put(x_input, NamedSharding(mesh_train, P(("data", "fsdp"), None, None)))
-    decoder_positions = jax.device_put(decoder_positions, NamedSharding(mesh_train, P(("data", "fsdp"), None)))
-    decoder_segment_ids = jax.device_put(decoder_segment_ids, NamedSharding(mesh_train, P(("data", "fsdp"), None)))
+    x_input_np, decoder_positions_np, decoder_segment_ids_np = x_input, decoder_positions, decoder_segment_ids
+
+    x_input = jax.device_put(x_input_np, NamedSharding(mesh_train, P(("data", "fsdp"), None, None)))
+    decoder_positions = jax.device_put(decoder_positions_np, NamedSharding(mesh_train, P(("data", "fsdp"), None)))
+    decoder_segment_ids = jax.device_put(decoder_segment_ids_np, NamedSharding(mesh_train, P(("data", "fsdp"), None)))
+
+    infer_replicated_sharding = NamedSharding(mesh_infer, P())
+    infer_x_input = jax.device_put(x_input_np, infer_replicated_sharding)
+    infer_decoder_positions = jax.device_put(decoder_positions_np, infer_replicated_sharding)
+    infer_decoder_segment_ids = jax.device_put(decoder_segment_ids_np, infer_replicated_sharding)
 
     from flax import nnx
 
@@ -130,13 +150,26 @@ def run_isolation_diagnostics():
 
     sync_qwen3_5_layer_weights(layer_train, layer_infer)
 
+    # `sync_qwen3_5_layer_weights` aliases Variable objects between the two
+    # layers (raw attribute assignment). `nnx.split`/`nnx.merge` rebuilds
+    # `layer_infer` with brand-new Variable objects wrapping device-placed
+    # values, breaking that aliasing before the mesh-mismatched forward pass
+    # (see tests/run_qwen3_5_layer_dump.py for the same fix + rationale).
+    _infer_graphdef, _infer_state = nnx.split(layer_infer)
+    _infer_state = jax.tree_util.tree_map(
+        lambda x: jax.device_put(x, infer_replicated_sharding), _infer_state
+    )
+    layer_infer = nnx.merge(_infer_graphdef, _infer_state)
+
     # 1. Full Cascaded Layer Run
-    _, t_train = capture_qwen3_5_layer_intermediates(
-        layer_train, x_input, decoder_segment_ids, decoder_positions, "train"
-    )
-    _, t_infer = capture_qwen3_5_layer_intermediates(
-        layer_infer, x_input, decoder_segment_ids, decoder_positions, "prefill"
-    )
+    with jax.set_mesh(mesh_train):
+        _, t_train = capture_qwen3_5_layer_intermediates(
+            layer_train, x_input, decoder_segment_ids, decoder_positions, "train"
+        )
+    with jax.set_mesh(mesh_infer):
+        _, t_infer = capture_qwen3_5_layer_intermediates(
+            layer_infer, infer_x_input, infer_decoder_segment_ids, infer_decoder_positions, "prefill"
+        )
 
     m_t16 = compute_metrics(t_train["T16_post_attn_layernorm_out"], t_infer["T16_post_attn_layernorm_out"])
     m_t19 = compute_metrics(t_train["T19_shared_expert_mlp_out"], t_infer["T19_shared_expert_mlp_out"])
@@ -151,20 +184,23 @@ def run_isolation_diagnostics():
 
     # 2. Isolated Direct Test with Identical Clean Input
     clean_norm_input = t_train["T16_post_attn_layernorm_out"]
-    
+    # `layer_infer` now lives on `mesh_infer` (<=4 devices); re-place the
+    # clean input (captured on `mesh_train`, 4 devices) before feeding it to
+    # `layer_infer`'s submodules directly.
+    infer_clean_norm_input = jax.device_put(clean_norm_input, infer_replicated_sharding)
+
     # Run Shared Expert on identical input
-    shared_out_train_clean = layer_train.mlp.shared_expert(clean_norm_input, deterministic=True)
-    shared_out_infer_clean = layer_infer.mlp.shared_expert(clean_norm_input, deterministic=True)
+    with jax.set_mesh(mesh_train):
+        shared_out_train_clean = layer_train.mlp.shared_expert(clean_norm_input, deterministic=True)
+        gate_out_train_clean, _ = layer_train.mlp.routed_experts.gate(clean_norm_input)
+        routed_out_train_clean, _, _ = layer_train.mlp.routed_experts(clean_norm_input)
+    with jax.set_mesh(mesh_infer):
+        shared_out_infer_clean = layer_infer.mlp.shared_expert(infer_clean_norm_input, deterministic=True)
+        gate_out_infer_clean, _ = layer_infer.mlp.routed_experts.gate(infer_clean_norm_input)
+        routed_out_infer_clean, _, _ = layer_infer.mlp.routed_experts(infer_clean_norm_input)
+
     m_t19_clean = compute_metrics(shared_out_train_clean, shared_out_infer_clean)
-
-    # Run Router Gate on identical input
-    gate_out_train_clean, _ = layer_train.mlp.routed_experts.gate(clean_norm_input)
-    gate_out_infer_clean, _ = layer_infer.mlp.routed_experts.gate(clean_norm_input)
     m_t20_clean = compute_metrics(gate_out_train_clean, gate_out_infer_clean)
-
-    # Run Routed MoE Experts on identical input
-    routed_out_train_clean, _, _ = layer_train.mlp.routed_experts(clean_norm_input)
-    routed_out_infer_clean, _, _ = layer_infer.mlp.routed_experts(clean_norm_input)
     m_t23_clean = compute_metrics(routed_out_train_clean, routed_out_infer_clean)
 
     print("\n" + "=" * 80)
@@ -177,30 +213,8 @@ def run_isolation_diagnostics():
 
 
 def main():
-    cluster = "auto-v5p-8-bodaborg"
-    project = "cloud-tpu-multipod-dev"
-    region = "europe-west4"
-    gcs_bucket = "gs://cloud-pathways-staging/mohit-scratch"
-    pathways_service = "sps-mohit-pathways-head-0-0.sps-mohit:29001"
-    tpu_instance_type = "tpuv5:2x2x1"
-    tpu_slice_count = 1
-    proxy_server_image = (
-        "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@"
-        "sha256:cca2c7eeb5d6b1f49a7619d078e74ef4d0ef2d6129d7ac9fb36b8c937194204b"
-    )
-
-    with isc_pathways.connect(
-        cluster=cluster,
-        project=project,
-        region=region,
-        gcs_bucket=gcs_bucket,
-        pathways_service=pathways_service,
-        expected_tpu_instances={tpu_instance_type: tpu_slice_count},
-        proxy_server_image=proxy_server_image,
-        collect_service_metrics=True,
-    ):
-        print("✓ Connected to SPS Cloud TPU v5p!")
-        run_isolation_diagnostics()
+    print("[Local TPU VM] Running directly on locally-attached TPU chips.")
+    run_isolation_diagnostics()
 
 
 if __name__ == "__main__":

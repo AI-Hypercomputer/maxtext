@@ -31,6 +31,7 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import numpy as np
+import pytest
 
 # Ensure Mosaic Pallas TPU lowering is registered
 try:
@@ -140,7 +141,7 @@ def run_rpa_attention(
         import tpu_inference.kernels.experimental.batched_rpa.wrapper as batched_rpa
 
         def _batched_rpa_wrapper(*args, **kwargs):
-            kwargs.setdefault("vmem_limit_bytes", 32 * 1024 * 1024)
+            kwargs.setdefault("vmem_limit_bytes", 64 * 1024 * 1024)
             return batched_rpa.ragged_paged_attention(*args, **kwargs)
 
         attention_interface.ragged_paged_attention = _batched_rpa_wrapper
@@ -170,8 +171,10 @@ def run_rpa_attention(
 
     block_tables = jnp.arange(total_pages, dtype=jnp.int32)
     seq_lens = jnp.array([seq_len] * batch_size, dtype=jnp.int32)
-    query_start_loc = jnp.tile(jnp.array([0, seq_len], dtype=jnp.int32), (batch_size,))
-    request_distribution = jnp.tile(jnp.array([0, 0, 1], dtype=jnp.int32), (batch_size,))
+    # Cumulative per-request token offsets, shape (batch_size+1,).
+    query_start_loc = jnp.arange(0, (batch_size + 1) * seq_len, seq_len, dtype=jnp.int32)
+    # [num_decode_requests, num_decode_requests, num_total_requests], shape (3,).
+    request_distribution = jnp.array([0, 0, batch_size], dtype=jnp.int32)
 
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
@@ -180,8 +183,36 @@ def run_rpa_attention(
     k_3d = key.reshape(-1, num_kv_heads, head_dim)
     v_3d = value.reshape(-1, num_kv_heads, head_dim)
 
-    out_rpa = _forward_rpa(
-        q_3d, k_3d, v_3d, kv_cache, seq_lens, block_tables, query_start_loc, request_distribution
+    # The RPA kernel's shard_map runs on `mesh`, which (per real vLLM-TPU
+    # serving) may use only a subset of the visible devices (tensor-parallel
+    # capped at num_kv_heads). Inputs may still be committed to a different
+    # mesh's devices (e.g. the training mesh) -- explicitly re-place them
+    # (replicated) onto `mesh`'s devices so shard_map's device set matches.
+    replicated = NamedSharding(mesh, P())
+    q_3d = jax.device_put(q_3d, replicated)
+    k_3d = jax.device_put(k_3d, replicated)
+    v_3d = jax.device_put(v_3d, replicated)
+
+    # Invoke the real Pallas RPA kernel via tpu_inference's sharded entry point
+    # (the same path `run_standalone_rpa` in run_sps_attention_batched_rpa_repro.py
+    # uses), rather than a nonexistent `_forward_rpa` helper.
+    out_rpa, _ = attention_interface.sharded_ragged_paged_attention(
+        mesh,
+        q_3d,
+        k_3d,
+        v_3d,
+        kv_cache,
+        seq_lens,
+        block_tables,
+        query_start_loc,
+        request_distribution,
+        None,             # sinks
+        softmax_scale,    # query_pre_attn_scalar
+        None,             # attention_chunk_size
+        None,             # q_scale
+        None,             # k_scale
+        None,             # v_scale
+        update_kv_cache=True,
     )
     return out_rpa.reshape(batch_size, seq_len, num_query_heads, head_dim)
 
@@ -268,7 +299,18 @@ def compare_attention_kernels_on_tpu(
     train_devices = maxtext_utils.create_device_mesh(train_cfg)
     train_mesh = Mesh(train_devices, train_cfg.mesh_axes)
 
-    infer_devices = maxtext_utils.create_device_mesh(cfg_infer)
+    # Real vLLM-TPU serving shards tensor-parallel across the "model" mesh axis,
+    # capped at num_kv_heads -- NOT data-parallel across all devices (the
+    # request_distribution/query_start_loc metadata arrays have small fixed
+    # shapes that cannot be sharded across >1 "data" replicas). Build the
+    # inference mesh manually with model=tp_degree, all other axes=1, rather
+    # than via maxtext_utils.create_device_mesh (which requires the ICI
+    # product to equal the full visible device count).
+    all_devices = jax.devices()
+    tp_degree = min(num_kv_heads, len(all_devices))
+    infer_devices = np.array(all_devices[:tp_degree])
+    mesh_shape = tuple(tp_degree if axis == "model" else 1 for axis in cfg_infer.mesh_axes)
+    infer_devices = infer_devices.reshape(mesh_shape)
     infer_mesh = Mesh(infer_devices, cfg_infer.mesh_axes)
 
     key_rng = jax.random.PRNGKey(42)
@@ -334,3 +376,32 @@ def compare_attention_kernels_on_tpu(
         "out_rpa": out_rpa,
         "out_ref": out_ref,
     }
+
+
+@pytest.mark.tpu_only
+@pytest.mark.integration_test
+def test_splash_vs_rpa_vs_reference_small():
+    """Small, fast 3-way parity check (Splash training kernel vs. default Pallas RPA
+    inference kernel vs. an exact FP32 math reference), runnable on a single TPU host.
+
+    This is the smoke-test counterpart to the larger sweeps performed by
+    `tests/run_attention_kernel_repro.py` (multi-config sweep) and
+    `tests/run_attention_batched_rpa_repro.py` (batched-RPA specific), which run
+    directly on this TPU VM's locally-attached chips. It only asserts the
+    kernels are in the same numerical ballpark as each other and as the
+    reference -- it is not meant to reproduce the exact benchmark numbers
+    published in docs, which require the full sweep.
+    """
+    results = compare_attention_kernels_on_tpu(
+        batch_size=1,
+        seq_len=128,
+        num_query_heads=4,
+        num_kv_heads=1,
+        head_dim=128,
+        dtype_str="bfloat16",
+        block_size=128,
+        infer_attention="vllm_rpa",
+    )
+    assert results["splash_vs_rpa"]["cos_sim"] > 0.99
+    assert results["splash_vs_ref"]["cos_sim"] > 0.99
+    assert results["rpa_vs_ref"]["cos_sim"] > 0.99

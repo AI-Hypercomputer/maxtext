@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Programmatic SPS launcher to run and benchmark Qwen3.5 MoE 1-Layer
+"""Runner to benchmark Qwen3.5 MoE 1-Layer Intermediate Tensor & Logits
 
-Intermediate Tensor & Logits Dumps on Cloud TPU v5p over GKE.
+Dumps directly on locally-attached Cloud TPU v5p chips.
 """
 
 import os
@@ -27,19 +27,16 @@ os.environ["VLLM_TARGET_DEVICE"] = "tpu"
 sys.path.insert(0, os.path.abspath("."))
 sys.path.insert(0, os.path.abspath("src"))
 
-import subprocess
 import time
 from typing import Any
 
 import jax
 import jax.numpy as jnp
-import pathwaysutils.proxy_backend
+import numpy as np
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from pathwaysutils.experimental.shared_pathways_service import gke_utils, isc_pathways
 
-pathwaysutils.proxy_backend.register_backend_factory()
 try:
     from jax._src.pallas.mosaic import lowering as _mosaic_lowering
 except Exception:
@@ -53,27 +50,6 @@ from tests.unit.qwen3_5_layer_dump_test import (capture_qwen3_5_layer_intermedia
                                                 dump_tensors_to_npz, generate_comparison_markdown_table,
                                                 sync_qwen3_5_layer_weights)
 from tests.utils.test_helpers import get_test_config_path
-
-
-# --- Monkey-Patch 300s Pod Timeout ---
-def custom_check_pod_ready(pod_name: str) -> str:
-    """Extends kubectl wait timeout to 300s for slow image pulls / cluster scheduling."""
-    target = f"pod/{pod_name}" if not pod_name.startswith("pod/") else pod_name
-    print(f"[SPS Launcher] Waiting up to 300s for {target} to be ready...")
-    wait_command = [
-        "kubectl",
-        "wait",
-        "--for=condition=Ready",
-        "--timeout=300s",
-        "--",
-        target,
-    ]
-    subprocess.run(wait_command, check=True)
-    return pod_name
-
-
-gke_utils.check_pod_ready = custom_check_pod_ready
-# -------------------------------------
 
 
 # pylint: disable=too-many-positional-arguments
@@ -153,6 +129,17 @@ def benchmark_layer_on_tpu(
         **train_kwargs,
     )
 
+    # Tensor-parallel degree for the inference mesh is capped at
+    # `num_kv_heads`: the RPA kernel shards the KV cache's head axis across
+    # the ('model', 'expert', 'dcp') mesh axes, and that combined axis size
+    # must evenly divide num_kv_heads (2 for qwen3.5-35b-a3b). It also must
+    # evenly divide the (batch_size+1,)-shaped `query_start_loc` and (3,)
+    # -shaped `request_distribution` AttentionMetadata arrays that shard_map
+    # replicates across ('data', 'pcp', 'attn_dp', 'attn_dp_expert') -- so
+    # the infer mesh cannot simply reuse the 4-device data-parallel train
+    # mesh (see tests/run_qwen3_5_logit_parity.py for the reference pattern).
+    infer_tp_degree = min(len(jax.devices()), cfg_train.num_kv_heads)
+
     cfg_infer = pyconfig.initialize(
         [
             sys.argv[0],
@@ -160,7 +147,7 @@ def benchmark_layer_on_tpu(
             "attention=vllm_rpa",
             "prefuse_moe_weights=True",
             "model_call_mode=inference",
-            "ici_data_parallelism=-1",
+            f"ici_tensor_parallelism={infer_tp_degree}",
         ],
         weight_dtype=dtype_str,
         dtype=dtype_str,
@@ -170,7 +157,12 @@ def benchmark_layer_on_tpu(
     train_devices = maxtext_utils.create_device_mesh(cfg_train)
     train_mesh = Mesh(train_devices, cfg_train.mesh_axes)
 
-    infer_devices = maxtext_utils.create_device_mesh(cfg_infer)
+    # `create_device_mesh` requires the ICI parallelism product to equal the
+    # total visible device count, which does not hold for `infer_tp_degree`
+    # (<=4). Build the mesh directly from a device slice instead.
+    infer_device_slice = np.array(jax.devices()[:infer_tp_degree])
+    infer_mesh_shape = tuple(infer_tp_degree if axis == "model" else 1 for axis in cfg_infer.mesh_axes)
+    infer_devices = infer_device_slice.reshape(infer_mesh_shape)
     infer_mesh = Mesh(infer_devices, cfg_infer.mesh_axes)
 
     actual_batch_size = max(len(jax.devices()), 4)
@@ -193,27 +185,50 @@ def benchmark_layer_on_tpu(
 
     sync_qwen3_5_layer_weights(train_layer, infer_layer)
 
+    # `sync_qwen3_5_layer_weights` does raw attribute assignment
+    # (`dst_attn.query = src_attn.query`), which makes `infer_layer` share
+    # the *same* nnx.Param/Variable objects as `train_layer` (not copies).
+    # `nnx.state`/`nnx.update` mutate a Variable's `.value` in place, so
+    # calling them on `infer_layer` after this aliasing would silently also
+    # overwrite `train_layer`'s params (observed: it moved train_layer's
+    # weights onto the smaller infer device slice, corrupting the training
+    # pass). `nnx.split`/`nnx.merge` instead rebuilds `infer_layer` with
+    # brand-new Variable objects wrapping the (device-placed) values, which
+    # breaks the aliasing cleanly.
+    infer_replicated_sharding = NamedSharding(infer_mesh, P())
+    _infer_graphdef, _infer_state = nnx.split(infer_layer)
+    _infer_state = jax.tree_util.tree_map(
+        lambda x: jax.device_put(x, infer_replicated_sharding), _infer_state
+    )
+    infer_layer = nnx.merge(_infer_graphdef, _infer_state)
+
     dtype_jax = jnp.bfloat16 if dtype_str == "bfloat16" else jnp.float32
     key = jax.random.PRNGKey(101)
-    inputs = jax.random.normal(
+    inputs_np = jax.random.normal(
         key, (actual_batch_size, seq_len, emb_dim), dtype=dtype_jax
     )
-    decoder_positions = jnp.broadcast_to(
+    decoder_positions_np = jnp.broadcast_to(
         jnp.arange(seq_len, dtype=jnp.int32), (actual_batch_size, seq_len)
     )
-    decoder_segment_ids = jnp.ones((actual_batch_size, seq_len), dtype=jnp.int32)
+    decoder_segment_ids_np = jnp.ones((actual_batch_size, seq_len), dtype=jnp.int32)
 
     inputs = jax.device_put(
-        inputs, NamedSharding(train_mesh, P(("data", "fsdp"), None, None))
+        inputs_np, NamedSharding(train_mesh, P(("data", "fsdp"), None, None))
     )
     decoder_positions = jax.device_put(
-        decoder_positions, NamedSharding(train_mesh, P(("data", "fsdp"), None))
+        decoder_positions_np, NamedSharding(train_mesh, P(("data", "fsdp"), None))
     )
     decoder_segment_ids = jax.device_put(
-        decoder_segment_ids, NamedSharding(train_mesh, P(("data", "fsdp"), None))
+        decoder_segment_ids_np, NamedSharding(train_mesh, P(("data", "fsdp"), None))
     )
 
+    # Separate copies placed on `infer_mesh` for the inference forward pass.
+    infer_inputs = jax.device_put(inputs_np, infer_replicated_sharding)
+    infer_decoder_positions = jax.device_put(decoder_positions_np, infer_replicated_sharding)
+    infer_decoder_segment_ids = jax.device_put(decoder_segment_ids_np, infer_replicated_sharding)
+
     print("  -> Executing Training pass (Flash Attention + Sparse MoE)...")
+    jax.set_mesh(train_mesh)
     _, train_tensors = capture_qwen3_5_layer_intermediates(
         train_layer,
         inputs,
@@ -223,11 +238,12 @@ def benchmark_layer_on_tpu(
     )
 
     print("  -> Executing Inference pass (vLLM RPA + Pallas Fused MoE)...")
+    jax.set_mesh(infer_mesh)
     _, infer_tensors = capture_qwen3_5_layer_intermediates(
         infer_layer,
-        inputs,
-        decoder_segment_ids,
-        decoder_positions,
+        infer_inputs,
+        infer_decoder_segment_ids,
+        infer_decoder_positions,
         model_mode=MODEL_MODE_PREFILL,
     )
 
@@ -265,23 +281,9 @@ def benchmark_layer_on_tpu(
 
 
 def main():
-    """Connects to SPS cluster and runs full Qwen3.5 1-layer numerical drift benchmarks."""
-    cluster = "auto-v5p-8-bodaborg"
-    project = "cloud-tpu-multipod-dev"
-    region = "europe-west4"
-    gcs_bucket = "gs://cloud-pathways-staging/mohit-scratch"
-    pathways_service = "sps-mohit-pathways-head-0-0.sps-mohit:29001"
-    tpu_instance_type = "tpuv5:2x2x1"
-    tpu_slice_count = 1
-    proxy_server_image = (
-        "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@"
-        "sha256:cca2c7eeb5d6b1f49a7619d078e74ef4d0ef2d6129d7ac9fb36b8c937194204b"
-    )
-
+    """Runs full Qwen3.5 1-layer numerical drift benchmarks on the local TPU VM."""
     print("=" * 80)
-    print(
-        f"[SPS Launcher] Connecting to {cluster} ({tpu_instance_type} x {tpu_slice_count} slice)..."
-    )
+    print("[Local TPU VM] Running directly on locally-attached TPU chips (no SPS proxy).")
     print("=" * 80)
 
     results_doc_path = os.path.join(
@@ -289,56 +291,45 @@ def main():
     )
     os.makedirs(os.path.dirname(results_doc_path), exist_ok=True)
 
-    with isc_pathways.connect(
-        cluster=cluster,
-        project=project,
-        region=region,
-        gcs_bucket=gcs_bucket,
-        pathways_service=pathways_service,
-        expected_tpu_instances={tpu_instance_type: tpu_slice_count},
-        proxy_server_image=proxy_server_image,
-        collect_service_metrics=True,
-    ):
-        print("✓ Successfully connected to SPS Cloud TPU v5p!")
-        print(f"  JAX Platforms: {jax.config.jax_platforms}")
-        print(f"  Detected TPU Devices ({len(jax.devices())}): {jax.devices()}\n")
+    print(f"  JAX Platforms: {jax.config.jax_platforms}")
+    print(f"  Detected TPU Devices ({len(jax.devices())}): {jax.devices()}\n")
 
-        # 1. Baseline: BFloat16 Benchmark
-        print(">>> Running Qwen3.5 1-Layer MoE Benchmark in bfloat16 on TPU...")
-        b1_table, b1_metrics = benchmark_layer_on_tpu(
-            dtype_str="bfloat16",
-            batch_size=4,
-            seq_len=512,
-            emb_dim=2048,
-            moe_mlp_dim=512,
-            num_experts=8,
-            num_experts_per_tok=8,
-            output_dir="",
-            test_label="BFloat16 (Tokamax Splash base-e vs vLLM RPA)",
-        )
+    # 1. Baseline: BFloat16 Benchmark
+    print(">>> Running Qwen3.5 1-Layer MoE Benchmark in bfloat16 on TPU...")
+    b1_table, b1_metrics = benchmark_layer_on_tpu(
+        dtype_str="bfloat16",
+        batch_size=4,
+        seq_len=512,
+        emb_dim=2048,
+        moe_mlp_dim=512,
+        num_experts=8,
+        num_experts_per_tok=8,
+        output_dir="",
+        test_label="BFloat16 (Tokamax Splash base-e vs vLLM RPA)",
+    )
 
-        # 2. Float32 Benchmark
-        print("\n>>> Running Qwen3.5 1-Layer MoE Benchmark in float32 on TPU...")
-        f32_table, f32_metrics = benchmark_layer_on_tpu(
-            dtype_str="float32",
-            batch_size=4,
-            seq_len=512,
-            emb_dim=2048,
-            moe_mlp_dim=512,
-            num_experts=8,
-            num_experts_per_tok=8,
-            output_dir="",
-            test_label="Float32 (Tokamax Splash base-e vs vLLM RPA)",
-        )
+    # 2. Float32 Benchmark
+    print("\n>>> Running Qwen3.5 1-Layer MoE Benchmark in float32 on TPU...")
+    f32_table, f32_metrics = benchmark_layer_on_tpu(
+        dtype_str="float32",
+        batch_size=4,
+        seq_len=512,
+        emb_dim=2048,
+        moe_mlp_dim=512,
+        num_experts=8,
+        num_experts_per_tok=8,
+        output_dir="",
+        test_label="Float32 (Tokamax Splash base-e vs vLLM RPA)",
+    )
 
-        time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        num_devs = len(jax.devices())
-        doc_content = f"""# Qwen3.5 MoE 1-Decoder Layer Kernel Drift Results
+    time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    num_devs = len(jax.devices())
+    doc_content = f"""# Qwen3.5 MoE 1-Decoder Layer Kernel Drift Results
 
-**Date / Timestamp:** {time_str}  
-**Hardware Platform:** Google Cloud TPU v5p (Shared Pathways Service over GKE `{cluster}`)  
-**Topology:** 2x2x1 ({num_devs} TPU Devices)  
-**Model Architecture:** Qwen3.5 MoE (`qwen3.5-35b-a3b` 1-Layer Full Attention + MoE Block)  
+**Date / Timestamp:** {time_str}
+**Hardware Platform:** Google Cloud TPU v5p (local TPU VM, locally-attached chips)
+**Topology:** {num_devs} TPU Devices
+**Model Architecture:** Qwen3.5 MoE (`qwen3.5-35b-a3b` 1-Layer Full Attention + MoE Block)
 
 ---
 
@@ -365,10 +356,17 @@ def main():
 
 {b1_table}
 """
-        with open(results_doc_path, "w", encoding="utf-8") as f:
-            f.write(doc_content)
+    with open(results_doc_path, "w", encoding="utf-8") as f:
+        f.write(doc_content)
 
-        print(f"\n✓ Results successfully saved to branch artifact: {results_doc_path}")
+    print(f"\n✓ Results successfully saved to branch artifact: {results_doc_path}")
+    print(
+        "NOTE: This dump uses the AttentionMetadata construction in "
+        "tests/unit/qwen3_5_layer_dump_test.py, which was fixed to use correct "
+        "query_start_loc / request_distribution shapes/values. If this doc was "
+        "regenerated after that fix, the RPA-derived tensor numbers above are "
+        "current; otherwise treat any pre-fix copy of this file as stale."
+    )
 
 
 if __name__ == "__main__":

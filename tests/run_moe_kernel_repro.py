@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SPS Runner for Isolated Tokamax GMM v2 vs Fused MoE Kernel Numerical Parity in Float32.
+"""Runner for Isolated Tokamax GMM v2 vs Fused MoE Kernel Numerical Parity in Float32.
 
-Connects to Google Cloud Shared Pathways Service (SPS) on GKE,
-executes the standalone MoE kernel tests on Cloud TPU v5p,
-and outputs the exact 3-way comparative error analysis across different MoE configurations.
+Executes the standalone MoE kernel tests directly on locally-attached Cloud
+TPU v5p chips and outputs the exact 3-way comparative error analysis across
+different MoE configurations.
 """
 
 import os
@@ -29,39 +29,22 @@ os.environ["VLLM_TARGET_DEVICE"] = "tpu"
 sys.path.insert(0, os.path.abspath("."))
 sys.path.insert(0, os.path.abspath("src"))
 
-import time
 import jax
-import numpy as np
-import pathwaysutils.proxy_backend
 
-pathwaysutils.proxy_backend.register_backend_factory()
-
-# Ensure Mosaic Pallas TPU lowering is registered for SPS client
+# Ensure Mosaic Pallas TPU lowering is registered
 try:
     from jax._src.pallas.mosaic import lowering as _mosaic_lowering
 except ImportError:
     pass
 
-from pathwaysutils.experimental.shared_pathways_service import isc_pathways
 from tests.unit.moe_kernel_repro_test import compare_moe_kernels_on_tpu
 
 
-def main():
-    cluster = "auto-v5p-8-bodaborg"
-    project = "cloud-tpu-multipod-dev"
-    region = "europe-west4"
-    gcs_bucket = "gs://cloud-pathways-staging/mohit-scratch"
-    pathways_service = "sps-mohit-pathways-head-0-0.sps-mohit:29001"
-    tpu_instance_type = "tpuv5:2x2x1"
-    tpu_slice_count = 1
-    proxy_server_image = (
-        "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@"
-        "sha256:cca2c7eeb5d6b1f49a7619d078e74ef4d0ef2d6129d7ac9fb36b8c937194204b"
-    )
-
+def run_sweep(dtype):
+    dtype_name = "FLOAT32" if dtype == jax.numpy.float32 else "BFLOAT16"
     print("=" * 80)
-    print("STANDALONE MOE KERNEL REPRO: TOKAMAX GMM V2 VS FUSED MOE (FLOAT32)")
-    print(f"Connecting to {cluster} ({tpu_instance_type} x {tpu_slice_count} slice)...")
+    print(f"STANDALONE MOE KERNEL REPRO: TOKAMAX GMM V2 VS FUSED MOE ({dtype_name})")
+    print("[Local TPU VM] Running directly on locally-attached TPU chips.")
     print("=" * 80)
 
     moe_configs_to_test = [
@@ -80,56 +63,60 @@ def main():
         }),
     ]
 
-    with isc_pathways.connect(
-        cluster=cluster,
-        project=project,
-        region=region,
-        gcs_bucket=gcs_bucket,
-        pathways_service=pathways_service,
-        expected_tpu_instances={tpu_instance_type: tpu_slice_count},
-        proxy_server_image=proxy_server_image,
-        collect_service_metrics=True,
-    ):
-        print("✓ Connected to SPS Cloud TPU v5p!\n")
+    print("=" * 110)
+    print(f">>> MOE KERNEL SWEEP ({dtype_name}) [Inference = Fused MoE Kernel (tpu-inference)]")
+    print("=" * 110)
+    print(f"{'Configuration':<45} | {'Vs Infer L_inf':<14} | {'Vs Infer MAE':<14} | {'Vs Infer CosSim':<15} | {'Vs Ref L_inf':<14} | {'Vs Ref MAE':<12}")
+    print("-" * 110)
 
-        print("=" * 110)
-        print(">>> MOE KERNEL SWEEP (FLOAT32) [Inference = Fused MoE Kernel (tpu-inference)]")
-        print("=" * 110)
-        print(f"{'Configuration':<45} | {'Vs Infer L_inf':<14} | {'Vs Infer MAE':<14} | {'Vs Infer CosSim':<15} | {'Vs Ref L_inf':<14} | {'Vs Ref MAE':<12}")
-        print("-" * 110)
-
-        for name, extra_kwargs in moe_configs_to_test:
-            try:
-                res = compare_moe_kernels_on_tpu(
-                    mesh=None,
-                    batch_size=4,
-                    seq_len=512,
-                    emb_dim=2048,
-                    moe_mlp_dim=512,
-                    num_experts=8,
-                    num_experts_per_tok=8,
-                    dtype=jax.numpy.float32,
-                    train_moe_kwargs=extra_kwargs,
-                )
-                m_infer = res["train_vs_infer"]
-                m_ref = res["train_vs_ref"]
-                print(
-                    f"{name:<45} | {m_infer['max_err']:<14.2e} | {m_infer['mae']:<14.2e} | "
-                    f"{m_infer['cos_sim']:<15.6f} | {m_ref['max_err']:<14.2e} | {m_ref['mae']:<12.2e}"
-                )
-            except Exception as e:
-                print(f"{name:<45} | FAILED: {e}")
-
-        # Baseline: Fused MoE vs Exact Reference
+    results = []
+    res = None
+    for name, extra_kwargs in moe_configs_to_test:
         try:
-            m_infer_ref = res["infer_vs_ref"]
+            res = compare_moe_kernels_on_tpu(
+                mesh=None,
+                batch_size=4,
+                seq_len=512,
+                emb_dim=2048,
+                moe_mlp_dim=512,
+                num_experts=8,
+                num_experts_per_tok=8,
+                dtype=dtype,
+                train_moe_kwargs=extra_kwargs,
+            )
+            m_infer = res["train_vs_infer"]
+            m_ref = res["train_vs_ref"]
+            print(
+                f"{name:<45} | {m_infer['max_err']:<14.2e} | {m_infer['mae']:<14.2e} | "
+                f"{m_infer['cos_sim']:<15.6f} | {m_ref['max_err']:<14.2e} | {m_ref['mae']:<12.2e}"
+            )
+            results.append((name, m_infer, m_ref))
+        except Exception as e:
+            print(f"{name:<45} | FAILED: {e}")
+            results.append((name, None, None, str(e)))
+
+    # Baseline: Fused MoE vs Exact Reference
+    infer_vs_ref = None
+    if res is not None:
+        try:
+            infer_vs_ref = res["infer_vs_ref"]
             print("-" * 110)
             print(
-                f"--> INFERENCE Fused MoE vs Exact Ref (FLOAT32): L_inf={m_infer_ref['max_err']:.2e}, "
-                f"MAE={m_infer_ref['mae']:.2e}, CosSim={m_infer_ref['cos_sim']:.6f}"
+                f"--> INFERENCE Fused MoE vs Exact Ref ({dtype_name}): L_inf={infer_vs_ref['max_err']:.2e}, "
+                f"MAE={infer_vs_ref['mae']:.2e}, CosSim={infer_vs_ref['cos_sim']:.6f}"
             )
         except Exception:
             pass
+
+    return results, infer_vs_ref
+
+
+def main():
+    all_results = {}
+    for dtype in (jax.numpy.float32, jax.numpy.bfloat16):
+        dtype_name = "float32" if dtype == jax.numpy.float32 else "bfloat16"
+        all_results[dtype_name] = run_sweep(dtype)
+    return all_results
 
 
 if __name__ == "__main__":

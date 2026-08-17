@@ -31,6 +31,7 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import numpy as np
+import pytest
 
 # Ensure Mosaic Pallas TPU lowering is registered
 try:
@@ -297,3 +298,30 @@ def compare_moe_kernels_on_tpu(
         "train_vs_ref": metrics_train_vs_ref,
         "infer_vs_ref": metrics_infer_vs_ref,
     }
+
+
+@pytest.mark.tpu_only
+@pytest.mark.integration_test
+def test_tokamax_gmm_v2_vs_fused_moe_small():
+    """Small, fast 3-way parity check between the training MoE kernel (Tokamax GMM v2,
+    `RoutedMoE` with `use_tokamax_gmm=True, use_gmm_v2=True`) and the real inference
+    MoE kernel actually served by vLLM/tpu-inference (`RoutedMoE.fused_moe_matmul`,
+    which calls `tpu_inference.layers.common.fused_moe_gmm.fused_moe_func` whenever
+    `attention in ("vllm_rpa", "vllm_batched_rpa")`), against an exact FP32 math
+    reference. This is the smoke-test counterpart to the larger multi-config sweep
+    performed by `tests/run_moe_kernel_repro.py`, run directly on this TPU VM's
+    locally-attached chips.
+    """
+    results = compare_moe_kernels_on_tpu(
+        mesh=None,
+        batch_size=1,
+        seq_len=64,
+        emb_dim=256,
+        moe_mlp_dim=128,
+        num_experts=4,
+        num_experts_per_tok=2,
+        dtype=jnp.float32,
+    )
+    assert results["train_vs_infer"]["cos_sim"] > 0.99
+    assert results["train_vs_ref"]["cos_sim"] > 0.99
+    assert results["infer_vs_ref"]["cos_sim"] > 0.99

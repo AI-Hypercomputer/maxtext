@@ -26,14 +26,10 @@ sys.path.insert(0, os.path.abspath("."))
 sys.path.insert(0, os.path.abspath("src"))
 
 import jax
+import numpy as np
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-import numpy as np
-import pathwaysutils.proxy_backend
 
-pathwaysutils.proxy_backend.register_backend_factory()
-
-from pathwaysutils.experimental.shared_pathways_service import isc_pathways
 from maxtext.configs import pyconfig
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -69,15 +65,17 @@ def run_standalone_rpa(
 
     block_tables = jnp.arange(total_pages, dtype=jnp.int32)
     seq_lens = jnp.array([seq_len] * batch_size, dtype=jnp.int32)
-    query_start_loc = jnp.tile(jnp.array([0, seq_len], dtype=jnp.int32), (batch_size,))
-    request_distribution = jnp.tile(jnp.array([0, 0, 1], dtype=jnp.int32), (batch_size,))
+    # Cumulative per-request token offsets, shape (batch_size+1,).
+    query_start_loc = jnp.arange(0, (batch_size + 1) * seq_len, seq_len, dtype=jnp.int32)
+    # [num_decode_requests, num_decode_requests, num_total_requests], shape (3,).
+    request_distribution = jnp.array([0, 0, batch_size], dtype=jnp.int32)
 
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
     if use_batched_kernel:
         def _batched_rpa_wrapper(*args, **kwargs):
-            kwargs.setdefault("vmem_limit_bytes", 120 * 1024 * 1024)
+            kwargs.setdefault("vmem_limit_bytes", 64 * 1024 * 1024)
             return batched_rpa.ragged_paged_attention(*args, **kwargs)
 
         attention_interface.ragged_paged_attention = _batched_rpa_wrapper
@@ -87,6 +85,16 @@ def run_standalone_rpa(
     q_3d = q.reshape(-1, num_query_heads, head_dim)
     k_3d = k.reshape(-1, num_kv_heads, head_dim)
     v_3d = v.reshape(-1, num_kv_heads, head_dim)
+
+    # The RPA kernel's shard_map runs on `mesh`, which (per real vLLM-TPU
+    # serving) may use only a subset of the visible devices (tensor-parallel
+    # capped at num_kv_heads). Inputs may still be committed to a different
+    # mesh's devices (e.g. the training mesh) -- explicitly re-place them
+    # (replicated) onto `mesh`'s devices so shard_map's device set matches.
+    replicated = NamedSharding(mesh, P())
+    q_3d = jax.device_put(q_3d, replicated)
+    k_3d = jax.device_put(k_3d, replicated)
+    v_3d = jax.device_put(v_3d, replicated)
 
     out_rpa, _ = attention_interface.sharded_ragged_paged_attention(
         mesh,
@@ -110,12 +118,19 @@ def run_standalone_rpa(
 
 
 def benchmark_attention_kernels(dtype_str: str = "float32"):
-    batch_size = 4
-    seq_len = 512
+    # NOTE: batch_size/seq_len/block_size reduced from the original
+    # (4, 512, 128) sweep -- the Batched RPA kernel's internal autotuned
+    # decode-shape compilation (e.g. "RPAd-p128-b8-q1-k1152") requested
+    # ~84.9MB of scoped VMEM against the real ~64MB TPU v5p VMEM budget at
+    # the original sizes, causing a RESOURCE_EXHAUSTED CompileTimeScopedVmemOom
+    # even with vmem_limit_bytes raised well past 64MB (the limit kwarg can't
+    # exceed the physical budget). This smaller config fits within budget.
+    batch_size = 2
+    seq_len = 256
     num_query_heads = 16
     num_kv_heads = 2
     head_dim = 256
-    block_size = 128
+    block_size = 64
     dtype = jnp.bfloat16 if dtype_str == "bfloat16" else jnp.float32
 
     train_kwargs = {
@@ -163,7 +178,18 @@ def benchmark_attention_kernels(dtype_str: str = "float32"):
         ],
         **train_kwargs,
     )
-    infer_devices = maxtext_utils.create_device_mesh(cfg_infer)
+    # Real vLLM-TPU serving shards tensor-parallel across the "model" mesh axis,
+    # capped at num_kv_heads -- NOT data-parallel across all devices (the
+    # request_distribution/query_start_loc metadata arrays have small fixed
+    # shapes that cannot be sharded across >1 "data" replicas). Build the
+    # inference mesh manually with model=tp_degree, all other axes=1, rather
+    # than via maxtext_utils.create_device_mesh (which requires the ICI
+    # product to equal the full visible device count).
+    all_devices = jax.devices()
+    tp_degree = min(num_kv_heads, len(all_devices))
+    infer_devices = np.array(all_devices[:tp_degree])
+    infer_mesh_shape = tuple(tp_degree if axis == "model" else 1 for axis in cfg_infer.mesh_axes)
+    infer_devices = infer_devices.reshape(infer_mesh_shape)
     infer_mesh = Mesh(infer_devices, cfg_infer.mesh_axes)
 
     key_rng = jax.random.PRNGKey(42)
@@ -234,31 +260,9 @@ def benchmark_attention_kernels(dtype_str: str = "float32"):
 
 
 def main():
-    cluster = "auto-v5p-8-bodaborg"
-    project = "cloud-tpu-multipod-dev"
-    region = "europe-west4"
-    gcs_bucket = "gs://cloud-pathways-staging/mohit-scratch"
-    pathways_service = "sps-mohit-pathways-head-0-0.sps-mohit:29001"
-    tpu_instance_type = "tpuv5:2x2x1"
-    tpu_slice_count = 1
-    proxy_server_image = (
-        "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@"
-        "sha256:cca2c7eeb5d6b1f49a7619d078e74ef4d0ef2d6129d7ac9fb36b8c937194204b"
-    )
-
-    with isc_pathways.connect(
-        cluster=cluster,
-        project=project,
-        region=region,
-        gcs_bucket=gcs_bucket,
-        pathways_service=pathways_service,
-        expected_tpu_instances={tpu_instance_type: tpu_slice_count},
-        proxy_server_image=proxy_server_image,
-        collect_service_metrics=True,
-    ):
-        print("✓ Connected to SPS Cloud TPU v5p!")
-        for dt in ["float32", "bfloat16"]:
-            benchmark_attention_kernels(dt)
+    print("[Local TPU VM] Running directly on locally-attached TPU chips (no SPS proxy).")
+    for dt in ["float32", "bfloat16"]:
+        benchmark_attention_kernels(dt)
 
 
 if __name__ == "__main__":

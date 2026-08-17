@@ -329,11 +329,20 @@ def capture_qwen3_5_layer_intermediates(
                 total_pages = batch_size * num_blocks_per_seq
                 block_tables = jnp.arange(total_pages, dtype=jnp.int32)
                 seq_lens = jnp.array([seq_len] * batch_size, dtype=jnp.int32)
-                query_start_loc = jnp.tile(
-                    jnp.array([0, seq_len], dtype=jnp.int32), (batch_size,)
+                # `query_start_loc` is (batch_size+1,): cumulative per-request
+                # token offsets, e.g. [0, seq_len, 2*seq_len, ...]. NOT a
+                # per-request tile of a 2-element pair -- that produces the
+                # wrong shape/values and can crash the TPU chip or silently
+                # yield garbage RPA output.
+                query_start_loc = jnp.arange(
+                    0, (batch_size + 1) * seq_len, seq_len, dtype=jnp.int32
                 )
-                request_distribution = jnp.tile(
-                    jnp.array([0, 0, 1], dtype=jnp.int32), (batch_size,)
+                # `request_distribution` is a single global (3,) vector
+                # [num_decode_requests, num_decode_requests, num_total_requests]
+                # (see tpu_inference/runner/tpu_runner.py) -- NOT tiled per
+                # batch element. All requests here are prefill (0 decodes).
+                request_distribution = jnp.array(
+                    [0, 0, batch_size], dtype=jnp.int32
                 )
                 input_positions = decoder_positions.reshape(-1)
 
