@@ -459,6 +459,24 @@ class RoutedMoE(nnx.Module):
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
     )
 
+    self._late_tp_combine = (
+        self.config.moe_late_tp_combine
+        and self.config.sparse_matmul
+        and self.mesh.shape.get("tensor", 1) > 1
+        and self.config.attention not in ("vllm_rpa", "vllm_batched_rpa")
+        and self.config.custom_mesh_and_rule != ctypes.CustomRule.CP_AS_EP
+        and not self.config.shard_exp_on_fsdp
+        and not self.config.use_2d_fsdp_sharding
+        and not self.config.use_batch_split_schedule
+    )
+    if self._late_tp_combine:
+      num_moe_shards = self.mesh.shape.get("expert", 1) * self.mesh.shape["tensor"]
+      if self.config.num_experts % num_moe_shards != 0:
+        raise ValueError(
+            f"moe_late_tp_combine needs num_experts ({self.config.num_experts}) divisible by "
+            f"expert*tensor parallelism ({num_moe_shards})."
+        )
+
     if self.config.shard_exp_on_fsdp:
       # special sharding for dsv3
       self.wi_kernel_axes = ("embed_moe", None, "mlp_moe")
@@ -468,6 +486,9 @@ class RoutedMoE(nnx.Module):
       self.wo_kernel_axes = ("embed_moe", "mlp_moe", None)
     elif self.config.use_batch_split_schedule:
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
+    elif self._late_tp_combine:
+      self.wi_kernel_axes = ("exp_tp", "embed_moe", None)
+      self.wo_kernel_axes = ("exp_tp", None, "embed_moe")
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
       self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
@@ -483,6 +504,9 @@ class RoutedMoE(nnx.Module):
     elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
+    elif self._late_tp_combine:
+      # Keep axis order aligned with the exp_tp partition spec.
+      self._expert_parallelism_name = ("expert", "tensor")
     else:
       self._expert_parallelism_name = "expert"
 
@@ -696,6 +720,8 @@ class RoutedMoE(nnx.Module):
     return self.mesh.shape.get(self._expert_parallelism_name, 1)
 
   def get_tensor_parallelism_size(self):
+    if self._late_tp_combine:
+      return 1
     if isinstance(self._tensor_parallelism_name, tuple):
       size = 1
       for axis in self._tensor_parallelism_name:
@@ -1618,21 +1644,31 @@ class RoutedMoE(nnx.Module):
       else:
         batch_logical_axis = "decode_batch_moe"
 
-      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
-      w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
-      w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
-      wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed"))
+      def token_split_pspec(logical_axes):
+        spec = list(self._logical_to_mesh_axes(logical_axes))
+        seq = spec[1]
+        seq = () if seq is None else ((seq,) if isinstance(seq, str) else tuple(seq))
+        spec[1] = seq + ("tensor",)
+        return P(*spec)
 
-      gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      token_pspec = token_split_pspec if self._late_tp_combine else self._logical_to_mesh_axes
+      exp_axis = "exp_tp" if self._late_tp_combine else "exp"
+
+      input_partition_pspec = token_pspec((batch_logical_axis, "activation_norm_length", None))
+      w0_bias_pspec = self._logical_to_mesh_axes((exp_axis, "activation_mlp"))
+      w1_bias_pspec = self._logical_to_mesh_axes((exp_axis, "activation_mlp"))
+      wo_bias_pspec = self._logical_to_mesh_axes((exp_axis, "activation_embed"))
+
+      gate_logits_pspec = token_pspec((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
       if self.config.model_name.startswith(("deepseek3", "deepseek4")):
-        pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+        pre_bias_logits_pspec = token_pspec((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
         pre_bias_logits_pspec = None
 
       if has_input_ids:
-        decoder_tokens_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length"))
+        decoder_tokens_pspec = token_pspec((batch_logical_axis, "activation_norm_length"))
       else:
         decoder_tokens_pspec = None
 
@@ -1654,6 +1690,10 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         w1_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
+      elif self._late_tp_combine:
+        w0_pspec = self._logical_to_mesh_axes(("exp_tp", None, None))
+        w1_pspec = self._logical_to_mesh_axes(("exp_tp", None, None))
+        wo_pspec = self._logical_to_mesh_axes(("exp_tp", None, None))
       else:
         # These are the main shardings used by default - they use funky rules to AG over FSDP.
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
@@ -2292,7 +2332,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Replicate the input key
         ),
         out_specs=(
-            output_pspec,
+            input_partition_pspec if self._late_tp_combine else output_pspec,
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
         ),
