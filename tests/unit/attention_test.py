@@ -391,6 +391,7 @@ class BlockCausalMaskTest(unittest.TestCase):
         sa_use_base2_exp=False,
         use_tokamax_splash=False,
         use_jax_splash=False,
+        compressed_use_dynamic_splash=False,
     )
     device = types.SimpleNamespace(platform="cpu")
     mesh = types.SimpleNamespace(
@@ -713,7 +714,9 @@ class LoadBalancedMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(mask[:, :], expected)
 
   def test_dot_product_local_mask_uses_segment_positions(self):
-    config = types.SimpleNamespace(context_parallel_load_balance=True, context_sharding="context")
+    config = types.SimpleNamespace(
+        context_parallel_load_balance=True, context_sharding="context", compressed_use_dynamic_splash=False
+    )
     mesh = types.SimpleNamespace(shape={"context": 4})
     seq_len = 16
     sliding_window_size = 4
