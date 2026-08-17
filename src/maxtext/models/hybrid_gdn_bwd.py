@@ -9,7 +9,7 @@ def _safe_dot(lhs, rhs, *args, **kwargs):
     if 'dimension_numbers' in kwargs:
         return jax.lax.dot_general(lhs, rhs, *args, **kwargs).astype(lhs.dtype)
     else:
-        return _safe_dot(lhs, rhs, *args, **kwargs).astype(lhs.dtype)
+        return jax.lax.dot(lhs, rhs, *args, **kwargs).astype(lhs.dtype)
 
 def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
     n_v, chunk_size, _ = t.shape
