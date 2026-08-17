@@ -1494,6 +1494,14 @@ class GrainDataset(BaseModel):
       16,
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
   )
+  grain_index_storage_option: None | Literal["in_memory", "offloaded"] = Field(
+      None,
+      description=(
+          "ArrayRecord reader index storage. None uses the ArrayRecord reader default. Do not use 'offloaded' with "
+          "direct gs:// paths because it can significantly degrade input performance. For Cloud Storage, use a "
+          "filesystem with metadata caching, such as GCSFUSE."
+      ),
+  )
   grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
 
 
