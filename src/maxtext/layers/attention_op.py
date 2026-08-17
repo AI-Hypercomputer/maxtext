@@ -1813,10 +1813,10 @@ class AttentionOp(nnx.Module):
         sa_config = tokamax_splash_kernel.SplashConfig(
             block_q=block_q,
             block_kv=block_kv,
-            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
-            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(self.block_kv_dkv_compute, key.shape[2]),
+            block_kv_compute=min(self.block_kv_compute, block_kv),
+            block_q_dkv=min(self.block_q_dkv, block_q),
+            block_kv_dkv=min(self.block_kv_dkv, block_kv),
+            block_kv_dkv_compute=min(self.block_kv_dkv_compute, block_kv),
             use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
             q_layout=tokamax_splash_kernel.QKVLayout[self.q_layout],
             k_layout=tokamax_splash_kernel.QKVLayout[self.k_layout],
