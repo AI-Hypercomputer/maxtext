@@ -75,7 +75,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         qkv_db, b_db, a_db, d_out_db,
         
         # --- FIX: Removed the redundant init_state scratchpad! ---
-        shared_state_db, 
+        shared_state_db, d_state_final_scratch,
         
         sem_qkv_fwd, sem_b_fwd, sem_a_fwd, sem_state_fwd,
         sem_qkv_bwd, sem_b_bwd, sem_a_bwd, sem_dout_bwd,
@@ -102,7 +102,8 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         dt_bias = dt_bias_ref[...]
         
         # This implicitly loads from HBM into VMEM taking exactly 1 batch's worth of space!
-        d_state_final = d_state_final_ref[batch_idx, ...]
+        pltpu.sync_copy(d_state_final_ref.at[batch_idx, ...], d_state_final_scratch.at[...])
+        d_state_final = d_state_final_scratch[...]
         init_state = (
             d_state_final,
             jnp.zeros((prev_kernel_size, dim_size), dtype=W.dtype),
@@ -121,8 +122,9 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         jax.lax.cond(num_chunks > 0, fwd_prologue, lambda _: None, None)
         
         # --- FIX: Direct HBM Sync Write (Bypasses VMEM scratchpad) ---
-        state_0 = state_init_ref[batch_idx, ...]
-        all_states_hbm_ref.at[batch_idx, 0, ...].set(state_0)
+        pltpu.sync_copy(state_init_ref.at[batch_idx, ...], d_state_final_scratch.at[...])
+        state_0 = d_state_final_scratch[...]
+        pltpu.sync_copy(d_state_final_scratch, all_states_hbm_ref.at[batch_idx, 0, ...])
         
         def fwd_body_fun(i, state_prev):
             chunk_idx = i
@@ -454,8 +456,9 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         d_a_log_ref.at[batch_idx, ...].set(d_a_log_total)
         d_dt_bias_ref.at[batch_idx, ...].set(d_dt_bias_total)
         
-        # --- FIX: Direct sync write to bypass d_state_out_scratch! ---
-        d_state_out_ref.at[batch_idx, ...].set(d_state_init)
+        # --- Bounce through VMEM to store to HBM ---
+        d_state_final_scratch[...] = d_state_init
+        pltpu.sync_copy(d_state_final_scratch, d_state_out_ref.at[batch_idx, ...])
 
     return kernel
 
@@ -498,7 +501,8 @@ def computation(
         pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=b.dtype),                  
         pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=a.dtype),                  
         pltpu.VMEM(shape=(2, chunk_size, n_v * d_v), dtype=d_out.dtype),        
-        pltpu.VMEM(shape=(2, n_v, d_k, d_v), dtype=state_init.dtype),           
+        pltpu.VMEM(shape=(2, n_v, d_k, d_v), dtype=state_init.dtype),
+        pltpu.VMEM(shape=(n_v, d_k, d_v), dtype=state_init.dtype), # d_state_final_scratch
         # 12 Semaphores
         pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
         pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
