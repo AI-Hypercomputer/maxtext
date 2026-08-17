@@ -51,9 +51,8 @@ def _init_test_cfg(extra_args=(), **kwargs):
   """pyconfig.initialize with this file's common test defaults folded in.
 
   Only pass kwargs that actually need to differ from base.yml (or from the
-  selected model's own yaml) -- e.g. omit ici_*_parallelism, enable_nnx,
-  pure_nnx, pure_nnx_decoder, sparse_matmul, dtype, and scan_layers=True,
-  which already match their base.yml defaults.
+  selected model's own yaml) -- e.g. omit ici_*_parallelism, sparse_matmul,
+  dtype, and scan_layers=True, which already match their base.yml defaults.
   """
   kwargs.setdefault("enable_checkpointing", False)
   kwargs.setdefault("log_config", False)
@@ -262,78 +261,6 @@ class UnsupportedConfigGuardTest(unittest.TestCase):
     os.environ["NEW_MODEL_DESIGN"] = "1"
     os.environ["SKIP_JAX_PRECOMPILE"] = "1"
     self.seq_len, self.batch_size, self.top_k = 8, 1, 2
-
-  def _run(self, **overrides):
-    """Builds a tiny model and applies it with forced routing enabled."""
-    cfg = _init_test_cfg(
-        extra_args=["attention=dot_product"],
-        **_tiny_qwen35_kwargs(
-            self.seq_len,
-            self.batch_size,
-            4,
-            self.top_k,
-            run_name="test_router_replay_guard",
-            base_num_decoder_layers=1,
-            num_decoder_layers=1,
-            **overrides,
-        ),
-    )
-    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
-    ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-    positions = jnp.arange(self.seq_len, dtype=jnp.int32)[None, :]
-    segmentation = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-    forced = jnp.zeros((self.batch_size, self.seq_len, self.top_k), dtype=jnp.int32)
-
-    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
-    params = model.init(
-        {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)},
-        ids,
-        positions,
-        segmentation,
-        enable_dropout=False,
-    )
-    return model.apply(
-        params,
-        ids,
-        positions,
-        segmentation,
-        enable_dropout=False,
-        forced_routed_experts=forced,
-    )
-
-  def test_linen_decoder_rejects_forced_routing(self):
-    with self.assertRaisesRegex(NotImplementedError, "pure-NNX decoder"):
-      self._run(scan_layers=False, pure_nnx_decoder=False)
-
-  def test_linen_decoder_without_forced_routing_still_works(self):
-    """The guard must not break the Linen path when replay is unused."""
-    cfg = _init_test_cfg(
-        extra_args=["attention=dot_product"],
-        **_tiny_qwen35_kwargs(
-            self.seq_len,
-            self.batch_size,
-            4,
-            self.top_k,
-            run_name="test_router_replay_guard_linen_ok",
-            base_num_decoder_layers=1,
-            num_decoder_layers=1,
-            scan_layers=False,
-            pure_nnx_decoder=False,
-        ),
-    )
-    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
-    ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-    positions = jnp.arange(self.seq_len, dtype=jnp.int32)[None, :]
-    segmentation = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
-    params = model.init(
-        {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)},
-        ids,
-        positions,
-        segmentation,
-        enable_dropout=False,
-    )
-    self.assertIsNotNone(params)
 
   def test_gemma4_scanned_rejects_forced_routing(self):
     cfg = _init_test_cfg(

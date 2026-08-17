@@ -281,9 +281,9 @@ def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
   return max_1.astype(jnp.float32) + max_2.astype(jnp.float32)
 
 
-def calculate_load_balance_updates(top_k_indices, num_experts, rate):
-  """
-  Computes a bias adjustment update based on expert load.
+def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None):
+  """Computes a bias adjustment update based on expert load.
+
   Used in DeepSeek V3: https://arxiv.org/html/2412.19437v1.
   Implementation reference: https://arxiv.org/pdf/2408.15664.
 
@@ -291,6 +291,10 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate):
       top_k_indices: Shape (batch, sequence, top_k).
       num_experts: Total number of experts.
       rate: The update rate.
+      axis_names: Optional mesh axis names to reduce expert counts across.
+        Defaults to None for backward compatibility. When provided, expert token
+        counts are collectively reduced (psum) across these axes before
+        computing the load balance updates.
 
   Returns:
       update: The value to add to the expert bias. Shape (num_experts,).
@@ -299,11 +303,58 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate):
   # one_hot rather than bincount: bincount clips out-of-range values, so the -1
   # padding that forced routing uses would all be counted as expert 0.
   expert_counts = jnp.sum(jax.nn.one_hot(flat_indices, num_experts, dtype=jnp.int32), axis=0)
+  if axis_names:
+    expert_counts = jax.lax.psum(expert_counts, axis_names)
   total_tokens = jnp.sum(expert_counts)
   average_load = total_tokens / num_experts
   direction = jnp.sign(average_load - expert_counts)
   output = direction * rate
   return output
+
+
+def _batch_axis_names(pspec) -> tuple[str, ...] | None:
+  """Returns the mesh axes the (batch, sequence) dims are partitioned over."""
+  if not pspec:
+    return None
+  allowed_batch_axes = frozenset(
+      {
+          "data",
+          "fsdp",
+          "fsdp_transpose",
+          "expert",
+          "context",
+          "context_usp_ulysses",
+          "context_autoregressive",
+          "tensor_sequence",
+      }
+  )
+  axes = []
+  for dim in pspec[:2]:
+    items = (dim,) if isinstance(dim, str) else (dim or ())
+    for ax in items:
+      if ax in allowed_batch_axes and ax not in axes:
+        axes.append(ax)
+  return tuple(axes) or None
+
+
+def _filter_axis_names(
+    axis_names: tuple[str, ...] | None,
+    exclude_axes: str | tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...] | None:
+  """Filters out specified axes from a tuple of axis names.
+
+  Args:
+    axis_names: Mesh axis names to filter, or None.
+    exclude_axes: An axis name or collection of axis names to exclude.
+
+  Returns:
+    Filtered axis names tuple, or None if no axes remain.
+  """
+  if not axis_names or not exclude_axes:
+    return axis_names
+  exclude = (exclude_axes,) if isinstance(exclude_axes, str) else tuple(exclude_axes)
+  filtered = tuple(ax for ax in axis_names if ax not in exclude)
+  return filtered or None
 
 
 class Tid2EidVar(nnx.Variable):
@@ -999,6 +1050,7 @@ class RoutedMoE(nnx.Module):
       input_ids=None,
       forced_routed_experts=None,
       force_dropless=False,
+      mesh_axis_names=None,
   ):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
@@ -1019,6 +1071,7 @@ class RoutedMoE(nnx.Module):
           selected_experts,
           self.config.num_experts,
           self.config.routed_bias_update_rate,
+          axis_names=mesh_axis_names,
       )
     else:
       bias_updates = None
@@ -1867,6 +1920,12 @@ class RoutedMoE(nnx.Module):
     pre_bias_logits_pspec = maybe_replicate_incompatible_batch(pre_bias_logits_pspec, pre_bias_logits)
     decoder_tokens_pspec = maybe_replicate_incompatible_batch(decoder_tokens_pspec, input_ids)
     output_pspec = maybe_replicate_incompatible_batch(output_pspec, inputs)
+    bias_update_axis_names = _batch_axis_names(gate_logits_pspec)
+    # In RoE, logits are already all-gathered across self._expert_parallelism_name before
+    # routing, so each shard evaluates the full batch and computes identical token counts.
+    # Exclude the EP axis so psum doesn't redundantly reduce and scale counts by num_ep
+    # for calculate_load_balance_updates().
+    roe_bias_axis_names = _filter_axis_names(bias_update_axis_names, self._expert_parallelism_name)
 
     def roe_ag_and_route(
         x,
@@ -1917,6 +1976,7 @@ class RoutedMoE(nnx.Module):
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
           force_dropless=force_dropless,
+          mesh_axis_names=roe_bias_axis_names,
       )
       return (
           x,
@@ -1969,6 +2029,7 @@ class RoutedMoE(nnx.Module):
           rngs,
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
+          mesh_axis_names=bias_update_axis_names,
       )
 
       if num_ep > 1:
@@ -3084,10 +3145,13 @@ class RoutedMoE(nnx.Module):
     # Calculate routed bias updates (loss-free)
     # The bias update logic is only applicable to Top-K routed layers.
     if self.should_update_load_balance():
+      # Under plain JIT (dense_matmul), GSPMD automatically inserts the all-reduce
+      # across partitioned batch/sequence axes on global arrays, so axis_names=None.
       bias_updates = calculate_load_balance_updates(
           top_k_indices,
           self.config.num_experts,
           self.config.routed_bias_update_rate,
+          axis_names=None,
       )
     else:
       bias_updates = None
@@ -3402,12 +3466,23 @@ class RoutedMoE(nnx.Module):
         self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4)
     )
 
-    output_2d = fused_moe_func(
+    # The fused kernel quantizes for itself: expert weights go in pre-quantized with
+    # per-block scales (when the qwix rule covers the grouped matmul) and the kernel
+    # quantizes the activations in-kernel, accumulating in f32. The call runs outside
+    # qwix's interception: qwix only guards pallas_call, while the kernel is launched
+    # through pl.kernel, so under a QtProvider its tiled matmuls would otherwise be
+    # fake-quantized into fp8 x fp8 with a bf16 accumulator, which Mosaic rejects.
+    rule = quantizations.get_fused_moe_rule()
+    quantized_w1, w1_scale = quantizations.quantize_weight_for_fused_moe(fused_kernel, rule)
+    quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
+    fused_moe = quantizations.without_qwix_interception(fused_moe_func)
+
+    output_2d = fused_moe(
         hidden_states=hidden_states,
-        w1=fused_kernel,
-        w2=wo_kernel,
-        w1_scale=None,
-        w2_scale=None,
+        w1=quantized_w1,
+        w2=quantized_w2,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
         w1_bias=None,
         w2_bias=None,
         gating_output=gating_output,

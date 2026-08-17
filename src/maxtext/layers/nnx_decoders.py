@@ -38,7 +38,7 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.configs.types import check_forced_routing_support
-from maxtext.layers import initializers, linears, mhc, moe, normalizations, quantizations
+from maxtext.layers import linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -573,7 +573,7 @@ class NNXDecoder(nnx.Module):
         self.layers_outside_pipeline = self._create_scanned_layers(
             base_cls,
             length=remaining_layers,
-            metadata_axis_name="layers",
+            metadata_axis_name="layers_outside_pipeline",
             rngs=rngs,
         )
       else:
@@ -1534,19 +1534,31 @@ class NNXDecoder(nnx.Module):
 
     return y
 
-  def apply_output_head(self, shared_embedding, y, deterministic, model_mode):
-    """Applies final normalization and projects hidden states to logits."""
+  def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True):
+    """Applies final normalization and projects hidden states to logits.
+
+    Args:
+      shared_embedding: Shared token embedding layer for tied logit projection.
+      y: Input hidden state tensor to project to logits.
+      deterministic: Whether dropout is disabled.
+      model_mode: Operational mode (e.g. MODEL_MODE_TRAIN, MODEL_MODE_PREFILL).
+      normalize_y: If True (default), applies the main decoder final normalization
+        (decoder_norm) before projecting to logits. Set to False when called from
+        Multi-Token Prediction (MTP), which applies its own dedicated final norm
+        (mtp_k_final_norm) to avoid double normalization.
+    """
 
     cfg = self.config
-    if cfg.shard_mode == ShardMode.EXPLICIT:
-      norm_out_sharding = create_sharding(
-          self.mesh,
-          ("activation_batch", "activation_length", "activation_embed"),
-      )
-    else:
-      norm_out_sharding = None
+    if normalize_y:
+      if cfg.shard_mode == ShardMode.EXPLICIT:
+        norm_out_sharding = create_sharding(
+            self.mesh,
+            ("activation_batch", "activation_length", "activation_embed"),
+        )
+      else:
+        norm_out_sharding = None
 
-    y = self.decoder_norm(y, out_sharding=norm_out_sharding)
+      y = self.decoder_norm(y, out_sharding=norm_out_sharding)
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
     if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE}:
@@ -2725,25 +2737,3 @@ class NNXDecoder(nnx.Module):
           _add(m)
 
     return layers
-
-
-def decoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-    rngs: nnx.Rngs,
-    model_mode: str,
-    quant: None | Quant = None,
-):
-  """Creates a Decoder module"""
-  module = nnx_wrappers.to_linen(
-      NNXDecoder,
-      config=config,
-      mesh=mesh,
-      model_mode=model_mode,
-      rngs=rngs,
-      quant=quant,
-      name="decoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module

@@ -767,6 +767,11 @@ eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
 default_prompt: ''
 packing: true
+# Whether to use continuous stream chunking (unpacked monolithic token stream with 0% padding,
+# monotonic positions, and uniform cross-document attention) for c4_mlperf datasets.
+# If null, defaults to true for pre-tokenized datasets (tokenize_train_data=false)
+# and false for raw text datasets.
+use_stream_chunking: null
 num_epoch: 1
 generate_padding_batch_train: false
 generate_padding_batch_eval: false
@@ -1033,9 +1038,12 @@ mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inher
 # https://github.com/google-deepmind/optax/blob/main/optax/contrib/_muon.py
 # "mu_dtype", "adam_eps" are shared by AdamW
 # "nesterov", "weight_decay_mask", "adaptive" use default
+muon_type: "optax_muon" # Type of Muon optimizer: "optax_muon" (or "optax") vs "maxtext_muon" (or "maxtext")
 muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
+muon_include_routers: true # Whether to apply Muon updates to MoE router matrices. If False, routers are optimized with AdamW.
+muon_use_all_to_all: false # Whether to use all-to-all communication during Newton-Schulz iterations in maxtext_muon.
 
 
 # Use iota operator in Embed
@@ -1339,11 +1347,6 @@ position_id_per_seconds: 25
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
 
-# NNX
-enable_nnx: true
-pure_nnx_decoder: true
-pure_nnx: true
-
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
 gdn_conv_kernel_dim: 4
@@ -1374,6 +1377,22 @@ vllm_hf_config_path: ""
 vllm_hf_overrides: {}
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
+# Whether to use the streaming target-free weight converter for trainer-side conversion
+use_weight_converter: true
+# Tensor parallelism per replica for rollout (-1 for auto-determined)
+rollout_tensor_parallelism: -1
+# Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax')
+rollout_backend: "maxtext"
+# Degree of tensor parallelism for KV cache / attention heads in rollout
+kv_tp_size: 1
+# Degree of tensor parallelism for MoE MLP dimension in rollout
+moe_mlp_tp_size: 1
+# Enable debug verification and checksum logging during weight sync
+weight_sync_debug: false
+# Whether to use Raiden FFI transport for weight sync (null derives from platform)
+use_raiden_ffi: null
+# Weight load format for vLLM in converter validation
+vllm_load_format: "dummy"
 # When use_jax_splash=true, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
 

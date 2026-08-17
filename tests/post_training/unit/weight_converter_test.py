@@ -733,6 +733,57 @@ class TargetFreeConversionTest(unittest.TestCase):
     with self.assertRaises(NotImplementedError):
       list(torchax_wc.convert_streaming(source))
 
+  def test_case_9_target_free_kv_head_replication(self):
+    cfg = _config(
+        base_num_kv_heads=2,
+        inhomogeneous_layer_cycle_interval=1,
+        num_decoder_layers=2,
+    )
+    key_val = _scanned(EMB, 2, 4)
+    value_val = _scanned(EMB, 2, 4)
+    source = {
+        "base": {
+            "decoder": {
+                "layers": {
+                    "self_attention": {
+                        "key": {"kernel": key_val},
+                        "value": {"kernel": value_val},
+                    }
+                }
+            }
+        }
+    }
+
+    # 1. Successful replication: kv_tp_size=4, base_num_kv_heads=2 -> kv_replication=2
+    converter = WeightConverter(
+        config=cfg,
+        kv_tp_size=4,
+        rollout_backend="maxtext",
+    )
+    self.assertEqual(converter._direct.kv_replication, 2)  # pylint: disable=protected-access
+    out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
+    for layer_idx in range(2):
+      layer_key = f"layers_{layer_idx}"
+      key_kernel = getattr(
+          out_root["decoder"][layer_key]["self_attention"]["key"]["kernel"],
+          "value",
+          out_root["decoder"][layer_key]["self_attention"]["key"]["kernel"],
+      )
+      self.assertEqual(key_kernel.shape, (EMB, 4, 4))
+      # Heads 0 and 1 are repeated along axis -2
+      np.testing.assert_array_equal(key_kernel[:, 0, :], key_kernel[:, 1, :])
+      np.testing.assert_array_equal(key_kernel[:, 2, :], key_kernel[:, 3, :])
+
+    # 2. Divisibility failure: kv_tp_size=3, base_num_kv_heads=2
+    with self.assertRaises(ValueError) as ctx:
+      WeightConverter(
+          config=cfg,
+          kv_tp_size=3,
+          rollout_backend="maxtext",
+      )
+    self.assertIn("must be divisible by base_num_kv_heads", str(ctx.exception))
+
 
 if __name__ == "__main__":
   unittest.main()

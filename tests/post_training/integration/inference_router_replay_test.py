@@ -92,9 +92,6 @@ class InferenceRouterReplayExtractionTest(unittest.TestCase):
         "ici_tensor_parallelism": 4,
         "ici_data_parallelism": 1,
         "ici_expert_parallelism": 1,
-        "enable_nnx": True,
-        "pure_nnx": True,
-        "pure_nnx_decoder": True,
     }
 
     cfg_infer = pyconfig.initialize(

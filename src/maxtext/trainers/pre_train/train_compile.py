@@ -133,7 +133,7 @@ def get_shaped_inputs(topology_mesh, config):
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
-  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model, mesh=topology_mesh)
 
   def create_train_state_fn():
     nnx_model = _create_model_partial()

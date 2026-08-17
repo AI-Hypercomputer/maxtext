@@ -17,15 +17,12 @@
 
 from typing import Type
 
-from flax import linen as nn
 from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config, DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers import moe
-from maxtext.layers.decoders import DecoderLayer
-from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.layers.normalizations import RMSNorm
@@ -208,6 +205,15 @@ class MultiTokenPredictionLayer(nnx.Module):
         rngs=rngs,
     )
 
+    self.final_norm = RMSNorm(
+        num_features=cfg.emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=("norm",),
+        rngs=rngs,
+    )
+
   @property
   def embedding_norm(self):
     return getattr(self, f"mtp_{self.layer_number}_embedding_norm")
@@ -239,6 +245,14 @@ class MultiTokenPredictionLayer(nnx.Module):
   @transformer_layer.setter
   def transformer_layer(self, module):
     setattr(self, f"mtp_{self.layer_number}_transformer_layer", module)
+
+  @property
+  def final_norm(self):
+    return getattr(self, f"mtp_{self.layer_number}_final_norm")
+
+  @final_norm.setter
+  def final_norm(self, module):
+    setattr(self, f"mtp_{self.layer_number}_final_norm", module)
 
   def __call__(
       self,
@@ -336,7 +350,50 @@ def _cross_entropy_with_integer_labels(logits: jnp.ndarray, labels: jnp.ndarray)
 
 
 class MultiTokenPredictionBlock(nnx.Module):
-  """Orchestrates the MTP process by running a sequence of MTP layers."""
+  """Orchestrates DeepSeek Multi-Token Prediction (MTP) over K future positions.
+
+  Architecture:
+    For each prediction depth k in [1, K]:
+      1. Dual Input Norm & Projection:
+           h_in_k = W_p [ RMSNorm(h_{k-1}) ; RMSNorm(emb(x_{t+k})) ]
+      2. Transformer Layer (MLA + MoE):
+           h_k = TransformerLayer_k(h_in_k)
+      3. Dedicated Final Norm & Shared Output Head:
+           h_normed_k = mtp_k_final_norm(h_k)   # Dedicated MTP RMSNorm
+           logits_k   = lm_head(h_normed_k)     # Shared with main model
+      4. Loss Computation:
+           loss_k = CrossEntropy(logits_k, target=x_{t+k+1})
+
+  Dataflow:
+    Main Backbone ──► h_0
+                       │
+    x_{t+1} ──► emb ───┴──► [MTP Layer 1] ──► h_1 (unnormalized)
+                                                │
+                         ┌──────────────────────┴────────────────┐
+                         ▼                                       ▼
+                 mtp_1_final_norm                      To Layer 2 (if K > 1)
+                         │
+                         ▼
+            lm_head (normalize_y=False)
+                         │
+                         ▼
+                     MTP Logits ──► Loss_1
+
+  Norm Decoupling:
+    DeepSeek-V3 ties the projection head (shared_head.head == lm_head),
+    but keeps the final normalization separate (shared_head.norm != model.norm).
+    Passing normalize_y=False to apply_output_head prevents double-normalizing
+    with the main model's decoder_norm.
+    Reference: NVIDIA Megatron-LM multi_token_prediction.py:
+    https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/multi_token_prediction.py
+
+  Attributes:
+    config: Model hyperparameters.
+    mesh: Device mesh for tensor and activation sharding.
+    decoder: Decoder instance providing shared embedding and apply_output_head.
+    mtp_layer_{k}: MultiTokenPredictionLayer dynamically assigned for each depth
+      k in [1, mtp_num_layers], predicting token position t + k + 1.
+  """
 
   def __init__(
       self,
@@ -462,7 +519,19 @@ class MultiTokenPredictionBlock(nnx.Module):
           model_mode=self.decoder.model_mode,
       )
 
-      mtp_logits = self.decoder.apply_output_head(shared_embedding, mtp_hidden_state, deterministic, model_mode)
+      # Apply separate normalization to the MTP hidden state before projecting to logits.
+      normed_mtp_hidden_state = mtp_layer.final_norm(mtp_hidden_state)
+      normed_mtp_hidden_state = sharding.maybe_shard_with_logical(
+          normed_mtp_hidden_state,
+          ("activation_batch", "activation_length", "activation_embed"),
+          self.mesh,
+          cfg.shard_mode,
+          sharding.get_logical_axis_rules(),
+      )
+
+      mtp_logits = self.decoder.apply_output_head(
+          shared_embedding, normed_mtp_hidden_state, deterministic, model_mode, normalize_y=False
+      )
 
       logits_logical_axes = (
           "activation_embed_and_logits_batch",
@@ -563,37 +632,3 @@ def calculate_mtp_acceptance_rate(intermediate_outputs, config):
   total_valid_tokens = jnp.sum(valid_mask)
 
   return (correct_predictions / (total_valid_tokens + EPS)) * 100
-
-
-def multi_token_prediction_block_as_linen(
-    *,
-    config: Config,
-    mesh: Mesh,
-    transformer_layer_module: Type[DecoderLayer],
-    decoder: nnx.Module,
-    rngs: nnx.Rngs,
-    name: str | None = None,
-) -> nn.Module:
-  """Initializes MultiTokenPredictionBlock as a Linen module.
-
-  Args:
-    config: Configuration object containing model hyperparameters.
-    mesh: JAX Mesh for model parallelism.
-    transformer_layer_module: The Transformer Decoder Layer class to use.
-    decoder: The decoder module that provides embedding and output head.
-    rngs: Random number generators for initialization.
-    name: Optional name for the module.
-
-  Returns:
-    An instance of MultiTokenPredictionBlock wrapped as a Linen module.
-  """
-  return nnx.bridge.to_linen(
-      MultiTokenPredictionBlock,
-      config=config,
-      mesh=mesh,
-      transformer_layer_module=transformer_layer_module,
-      decoder=decoder,
-      rngs=rngs,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )

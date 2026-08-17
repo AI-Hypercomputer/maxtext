@@ -15,7 +15,7 @@
 """Core index-building algorithms for Megatron-LM .npy index files.
 
 Functions in this module are used both at offline build time
-(``tools/data_processing/mmap_index_builder.py``) and at training-time
+(``src/maxtext/utils/mmap_index_builder.py``) and at training-time
 auto-rebuild (``_mmap_datasource._ensure_npy_indices``).
 
 All pure-computation helpers are deterministic given the same inputs

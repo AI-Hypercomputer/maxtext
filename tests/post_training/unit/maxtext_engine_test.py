@@ -1002,6 +1002,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIs(abstract_engine.LossOutput, sft_utils.LossOutput)
     self.assertIs(abstract_engine.WeightedMetric, sft_utils.WeightedMetric)
     self.assertIs(abstract_engine.TrainerPayload, datatypes.TrainerPayload)
+    self.assertIs(abstract_engine.RLTrainerPayload, datatypes.RLTrainerPayload)
 
     tunix_metric = sft_utils.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0))
     self.assertIsInstance(tunix_metric, abstract_engine.WeightedMetric)
@@ -1014,12 +1015,14 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     # What actually arrives at fwd_bwd from GRPOAdapter.create_trainer_payloads.
     rl_payload = datatypes.RLTrainerPayload(
-        token_ids=jnp.zeros((1, 4)),
-        token_mask=jnp.ones((1, 4)),
+        prompt_ids=jnp.zeros((1, 4)),
+        prompt_mask=jnp.ones((1, 4)),
+        completion_ids=jnp.zeros((1, 4)),
+        completion_mask=jnp.ones((1, 4)),
         advantages=jnp.zeros((1,)),
-        loss_mask=jnp.ones((1, 4)),
     )
     self.assertIsInstance(rl_payload, abstract_engine.TrainerPayload)
+    self.assertIsInstance(rl_payload, abstract_engine.RLTrainerPayload)
 
   def test_unsupported_loss_return_raises_naming_the_type(self):
     """An unrecognised return fails loudly and says what it received."""
@@ -1348,6 +1351,54 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertAlmostEqual(processed["loss"], 6.0, places=4)
     self.assertIn("perplexity", processed)
     self.assertAlmostEqual(processed["perplexity"], float(np.exp(6.0)), places=3)
+
+  def test_prepare_weight_sync_rejects_an_unknown_transport(self):
+    """An unrecognised transport must name itself rather than return empty metadata."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    with self.assertRaisesRegex(ValueError, "raidan"):
+      t.prepare_weight_sync(staging_transport="raidan")
+
+  def _sharded_batch_spec(self, engine, axis="data"):
+    """A data sharding whose batch dim is actually sharded.
+
+    The single-device test mesh makes `get_input_data_sharding` return a spec with `None`
+    in the batch position, so the replication branch is unreachable as configured -- an
+    earlier version of these tests asserted `spec[0] is None` and passed without ever
+    running the code under test. Stub a spec that shards the batch dim instead.
+    """
+    return jax.sharding.NamedSharding(engine._mesh, jax.sharding.PartitionSpec(axis, None))  # pylint: disable=protected-access
+
+  def test_indivisible_batch_dim_replicates_and_warns_once(self):
+    """Replicating the batch dim is an N-fold compute cliff, so it must be audible."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    batch = {"a": jnp.zeros((1, 4)), "b": jnp.zeros((1, 4))}
+
+    # Batch dim 1 against a 2-wide axis: indivisible, so the dim must be replicated.
+    with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
+      with mock.patch.object(type(t), "_batch_axis_size", return_value=2):
+        with self.assertLogs(level="WARNING") as logs:
+          shardings = t._batch_data_shardings(batch)  # pylint: disable=protected-access
+          t._batch_data_shardings(batch)  # pylint: disable=protected-access
+
+    for name, leaf_sharding in shardings.items():
+      self.assertIsNone(leaf_sharding.spec[0], f"{name} should have its batch dim replicated")
+
+    # Once per instance, not per leaf and not per call: two leaves over two calls is four
+    # chances to warn.
+    warnings = [line for line in logs.output if "does not divide mesh axis" in line]
+    self.assertLen(warnings, 1)
+    self.assertIn("2x the work", warnings[0])
+
+  def test_divisible_batch_dim_stays_sharded_and_is_silent(self):
+    """The normal case must neither replicate nor warn."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
+      with mock.patch.object(type(t), "_batch_axis_size", return_value=2):
+        shardings = t._batch_data_shardings({"a": jnp.zeros((4, 4))})  # pylint: disable=protected-access
+
+    self.assertEqual(shardings["a"].spec[0], "data")
+    self.assertFalse(t._replicated_batch_warned)  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":

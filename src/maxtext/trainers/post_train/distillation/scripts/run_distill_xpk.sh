@@ -100,7 +100,7 @@
 #   DISTILL_ALPHA          default: 0.5
 #   DISTILL_TEMPERATURE    default: 1.0
 #   DISTILL_BETA           default: 1.0   (>0 enables feature-map loss;
-#                          requires scan_layers=True and enable_nnx=True)
+#                          requires scan_layers=True)
 #   DISTILL_LAYER_INDICES  default: [0,1,2,3,4,5,6,7]  (no spaces inside brackets)
 #
 # Image pinning (used by prep_image):
@@ -164,7 +164,7 @@ require_env() {
 : "${DISTILL_LAYER_INDICES:=[0,1,2,3,4,5,6,7]}"
 
 # Image pinning (used by prep_image).
-: "${TUNIX_SOURCE:=git+https://github.com/google/tunix@1b0e3c5e89058d4dddf0ec68ae8be06c127f68ac}"
+: "${TUNIX_SOURCE:=git+https://github.com/google/tunix@a8d70582f1e2f1fb65973210989e0e148b5ef7ad}"
 : "${JAX_PIN:=0.10.0}"
 : "${JAXLIB_PIN:=0.10.0}"
 : "${LIBTPU_PIN:=0.0.39}"
@@ -185,8 +185,7 @@ LAST_WORKLOAD_FILE="${XPK_LAST_WORKLOAD_FILE:-${HOME}/.xpk_last_workload}"
 extra_cli="distill_alpha=${DISTILL_ALPHA} \
 distill_temperature=${DISTILL_TEMPERATURE} \
 distill_beta=${DISTILL_BETA} \
-distill_layer_indices=${DISTILL_LAYER_INDICES} \
-enable_nnx=True"
+distill_layer_indices=${DISTILL_LAYER_INDICES}"
 if [ -n "${STEPS_OVERRIDE:-}" ]; then
   extra_cli="$extra_cli learning_rate_schedule_steps=${STEPS_OVERRIDE} steps=${STEPS_OVERRIDE}"
 fi

@@ -1371,29 +1371,8 @@ class HardwareAndMesh(BaseModel):
       description="Customized mesh and logical rules for evaluation.",
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
-  enable_nnx: bool = Field(
-      True,
-      description=(
-          "Whether to use NNX for model definition. Setting this to False selects the Linen path, "
-          "which will be deprecated in the near future."
-      ),
-  )
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
-  pure_nnx_decoder: bool = Field(
-      True,
-      description=(
-          "Whether to enable pure NNX decoder. Setting this to False selects the Linen decoder, "
-          "which will be deprecated in the near future."
-      ),
-  )
-  pure_nnx: bool = Field(
-      True,
-      description=(
-          "Whether to enable pure NNX mode. Setting this to False selects the Linen path, "
-          "which will be deprecated in the near future."
-      ),
-  )
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
@@ -1657,6 +1636,14 @@ class DatasetGeneral(BaseModel):
   max_segments_per_seq: int = Field(
       -1,
       description="Maximum number of segments that can be packed into a single sequence. -1 or None for no limit.",
+  )
+  use_stream_chunking: bool | None = Field(
+      None,
+      description=(
+          "Whether to use continuous stream chunking (unpacked monolithic token stream with 0% padding, "
+          "monotonic positions, and uniform cross-document attention) for c4_mlperf datasets. "
+          "If None, defaults to True for pre-tokenized datasets and False for raw text."
+      ),
   )
   num_epoch: int = Field(1, description="Number of epochs to train for.")
   expansion_factor_real_data: float = Field(-1.0, description="Factor for partial data loading on hosts.")
@@ -2216,14 +2203,30 @@ class AdamW(BaseModel):
 class Muon(BaseModel):
   """Configuration specific to the Muon optimizer."""
 
+  muon_type: str = Field(
+      "optax_muon",
+      description=("Type of Muon optimizer: 'optax_muon' (or 'optax') vs 'maxtext_muon' (or 'maxtext')."),
+  )
   muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
   muon_weight_decay: float = Field(
-      0,
-      description="Strength of the weight decay regularization. This is multiplied with the learning rate.",
+      0.0,
+      description=("Strength of the weight decay regularization. This is multiplied with" " the learning rate."),
   )
   muon_consistent_rms: float | None = Field(
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
+  )
+  muon_include_routers: bool = Field(
+      True,
+      description=(
+          "Whether to apply Muon updates to MoE router matrices. If False," " routers are optimized with AdamW."
+      ),
+  )
+  muon_use_all_to_all: bool = Field(
+      False,
+      description=(
+          "Whether to use all-to-all communication during Newton-Schulz" " iterations in the maxtext_muon optimizer."
+      ),
   )
 
 
@@ -2741,11 +2744,23 @@ class VLLM(BaseModel):
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
   use_weight_converter: bool = Field(
-      False,
+      True,
       description=(
           "Use an explicit weight converter for trainer->rollout weight sync instead of "
           "the legacy transfer_state_directly / transfer_state_with_mappings paths."
       ),
+  )
+  use_raiden_ffi: Optional[bool] = Field(
+      None,
+      description="Use Raiden FFI transport for weight sync.",
+  )
+  rollout_tensor_parallelism: int = Field(
+      -1,
+      description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
+  )
+  rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
+      "maxtext",
+      description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
   )
   weight_sync_debug: bool = Field(
       False,
@@ -2765,6 +2780,16 @@ class VLLM(BaseModel):
           "executables, so the gap between them is how much of a sync is compilation "
           "rather than data movement. Adds one barrier per sync."
       ),
+  )
+  kv_tp_size: int = Field(
+      1,
+      ge=1,
+      description="Degree of tensor parallelism for KV cache / attention heads in rollout.",
+  )
+  moe_mlp_tp_size: int = Field(
+      1,
+      ge=1,
+      description="Degree of tensor parallelism for MoE MLP dimension in rollout.",
   )
   vllm_load_format: str = Field(
       "dummy",
@@ -3755,34 +3780,6 @@ class MaxTextConfig(
     if self.distill_beta > 0.0:
       if not self.scan_layers:
         raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
-      if not self.enable_nnx:
-        raise ValueError("a value of self.distill_beta > 0.0 requires self.enable_nnx = True")
-
-    if self.pure_nnx and not self.pure_nnx_decoder and self.use_qwix_quantization and not self.use_batch_split_schedule:
-      if self.quantization:
-        raise ValueError(
-            f"quantization='{self.quantization}' with use_qwix_quantization=True under pure_nnx=True requires "
-            "pure_nnx_decoder=True. The bridged Linen decoder (pure_nnx_decoder=False) is invisible to Qwix, "
-            "so quantization (and weight sparsity) would silently have no effect. Set pure_nnx_decoder=True."
-        )
-
-    # TODO: Remove this block once the Linen code path and the enable_nnx, pure_nnx and pure_nnx_decoder flags are deleted.
-    linen_flags = [
-        name
-        for name, value in (
-            ("enable_nnx", self.enable_nnx),
-            ("pure_nnx", self.pure_nnx),
-            ("pure_nnx_decoder", self.pure_nnx_decoder),
-        )
-        if not value
-    ]
-    if linen_flags:
-      logger.warning("=" * 80)
-      logger.warning("MAXTEXT DEPRECATION NOTICE: you are running on the Linen code path.")
-      logger.warning("Selected by: %s", ", ".join(f"{name}=False" for name in linen_flags))
-      logger.warning("Linen will be deprecated in the near future and removed after that.")
-      logger.warning("Plan to migrate to NNX: leave enable_nnx, pure_nnx and pure_nnx_decoder at their default of True.")
-      logger.warning("=" * 80)
 
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
@@ -4379,19 +4376,11 @@ class MaxTextConfig(
             "te_gmm_quantization must be specified when te_moe_block=True. "
             "te_gmm_quantization=te_no_quant is supported for BF16."
         )
-      if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
-        raise ValueError(
-            "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
-            "Please set pure_nnx=True or disable routed_bias."
-        )
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
       self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
-
-    if self.enable_diloco and not self.pure_nnx:
-      raise ValueError("enable_diloco=True requires pure_nnx=True (Linen support for DiLoCo has been removed).")
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:

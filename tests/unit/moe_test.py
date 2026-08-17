@@ -13,6 +13,7 @@
 # limitations under the License.
 """Mixture of Experts (MoE) tests."""
 
+import functools
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -340,6 +341,81 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
     assert_moe_close(actual_updates, expected_updates, jnp.float32)
 
+  def test_batch_axis_names(self):
+    # pylint: disable=protected-access
+    self.assertIsNone(moe._batch_axis_names(None))
+    self.assertEqual(moe._batch_axis_names(P("data", "context")), ("data", "context"))
+    self.assertEqual(moe._batch_axis_names(P("stage", "data")), ("data",))
+    self.assertEqual(
+        moe._batch_axis_names(P(("data", "fsdp", "context_usp_ulysses", "expert"), "context")),
+        ("data", "fsdp", "context_usp_ulysses", "expert", "context"),
+    )
+
+  def test_filter_axis_names(self):
+    # pylint: disable=protected-access
+    axes = moe._batch_axis_names(P(("data", "fsdp", "expert"), "context"))
+    # When exclude_axes is a string:
+    self.assertEqual(
+        moe._filter_axis_names(axes, "expert"),
+        ("data", "fsdp", "context"),
+    )
+    # When exclude_axes is a tuple:
+    self.assertEqual(
+        moe._filter_axis_names(axes, ("context", "expert")),
+        ("data", "fsdp"),
+    )
+    # When all axes are filtered, result is None:
+    only_ep = moe._batch_axis_names(P("expert", None))
+    self.assertIsNone(moe._filter_axis_names(only_ep, "expert"))
+    # When axis_names is None:
+    self.assertIsNone(moe._filter_axis_names(None, "expert"))
+    # When exclude_axes is None:
+    self.assertEqual(moe._filter_axis_names(axes, None), axes)
+
+  def test_deepseek_bias_updates_multi_slice_psum_reduction(self):
+    """Verifies calculate_load_balance_updates reduces counts across mesh axes via real psum all-reduce."""
+    num_experts, rate = 4, 0.01
+    shard0_indices = jnp.array([0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3], dtype=jnp.int32).reshape((2, 4, 2))
+    shard1_indices = jnp.array([0, 0, 0, 0, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3], dtype=jnp.int32).reshape((2, 4, 2))
+
+    # Without psum, the two shards compute conflicting local updates:
+    assert_moe_close(
+        moe.calculate_load_balance_updates(shard0_indices, num_experts, rate),
+        jnp.array([0.01, -0.01, 0.0, -0.01]),
+        jnp.float32,
+    )
+    assert_moe_close(
+        moe.calculate_load_balance_updates(shard1_indices, num_experts, rate),
+        jnp.array([0.0, 0.01, 0.0, -0.01]),
+        jnp.float32,
+    )
+
+    # Global counts after psum across data/fsdp shards:
+    # total tokens = 6 + 6 + 8 + 12 = 32, average tokens per expert = 32 / 4 = 8
+    # expert 0: 6 tokens  --> underload (8 - 6 = +2 > 0), update: +0.01
+    # expert 1: 6 tokens  --> underload (8 - 6 = +2 > 0), update: +0.01
+    # expert 2: 8 tokens  --> balanced  (8 - 8 =  0 == 0), update:  0.0
+    # expert 3: 12 tokens --> overload  (8 - 12 = -4 < 0), update: -0.01
+    expected_updates = jnp.array([0.01, 0.01, 0.0, -0.01])
+
+    devices = jax.devices()
+    n_dev = min(len(devices), 2)
+    mesh = Mesh(np.array(devices[:n_dev]).reshape(n_dev, 1), axis_names=("data", "fsdp"))
+    top_k_indices = jnp.concatenate([shard0_indices, shard1_indices], axis=0)
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=P(("data", "fsdp"), None, None),
+        out_specs=P(),
+        check_vma=False,
+    )
+    def compute_updates(indices):
+      return moe.calculate_load_balance_updates(indices, num_experts, rate, axis_names=("data", "fsdp"))
+
+    actual_updates = compute_updates(top_k_indices)
+    assert_moe_close(actual_updates, expected_updates, jnp.float32)
+
 
 class MoeLoopBlock(nnx.Module):
   """Reference implementation from https://github.com/mistralai/mistral-inference.
@@ -460,6 +536,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
       mesh=SimpleNamespace(shape={"fsdp": 32, "expert": expert_parallelism}),
       rngs=object(),
       get_expert_parallelism_size=lambda: expert_parallelism,
+      _expert_parallelism_name="expert",
   )
   original_batch_partition = "fsdp" if expert_parallelism == 1 else ("fsdp", "expert")
   fake_moe._logical_to_mesh_axes = lambda logical_axes: P(  # pylint: disable=protected-access
