@@ -1804,9 +1804,15 @@ class AttentionOp(nnx.Module):
     # create_splash_attention config
     def create_sa_config(config, query, key, attn_logits_soft_cap):
       if config.use_tokamax_splash:
+        block_q = min(self.block_q, query.shape[2])
+        block_kv = min(self.block_kv, key.shape[2])
+        if self.attention_type == AttentionType.COMPRESSED and indexer_mask is None:
+          block_q = math.gcd(block_q, query.shape[2])
+          block_kv = math.gcd(block_kv, key.shape[2])
+
         sa_config = tokamax_splash_kernel.SplashConfig(
-            block_q=min(self.block_q, query.shape[2]),
-            block_kv=min(self.block_kv, key.shape[2]),
+            block_q=block_q,
+            block_kv=block_kv,
             block_kv_compute=min(self.block_kv_compute, key.shape[2]),
             block_q_dkv=min(self.block_q_dkv, query.shape[2]),
             block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
