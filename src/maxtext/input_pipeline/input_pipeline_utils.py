@@ -67,12 +67,17 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
   for data_column in data_columns:
     x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != padding_token, tf.int32)
     x[f"{data_column}_position"] = tf.broadcast_to(
-        tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
+        tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :],
+        x[data_column].shape,
     )
   return x
 
 
-def TokenizeOp(tokenizer_model, features: Features, data_keys: Iterable[str] = ("inputs", "targets")) -> Features:
+def TokenizeOp(
+    tokenizer_model,
+    features: Features,
+    data_keys: Iterable[str] = ("inputs", "targets"),
+) -> Features:
   """Op for tokenization"""
   import tensorflow as tf  # pylint: disable=import-outside-toplevel
 
@@ -315,14 +320,39 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
 
 
 def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
-  """Tokenize a HuggingFace dataset"""
+  """Tokenize text columns using HuggingFace or SentencePiece/Tiktoken tokenizer."""
+
+  def _encode(text):
+    if callable(hf_tokenizer):
+      try:
+        res = hf_tokenizer(text, truncation=truncation, max_length=max_length)
+        if isinstance(res, dict) and "input_ids" in res:
+          return res["input_ids"]
+        if isinstance(res, list):
+          return res
+      except TypeError:
+        pass
+
+    if hasattr(hf_tokenizer, "tokenizer") and callable(hf_tokenizer.tokenizer):
+      try:
+        res = hf_tokenizer.tokenizer(text, truncation=truncation, max_length=max_length)
+        if isinstance(res, dict) and "input_ids" in res:
+          return res["input_ids"]
+        if isinstance(res, list):
+          return res
+      except TypeError:
+        pass
+
+    if hasattr(hf_tokenizer, "encode"):
+      return hf_tokenizer.encode(text)
+
+    raise ValueError(f"Unsupported tokenizer: {hf_tokenizer}")
+
   for column_name in column_names:
     if isinstance(example[column_name], list):
-      example[column_name] = [
-          hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
-      ]
+      example[column_name] = [_encode(x) for x in example[column_name]]
     elif isinstance(example[column_name], str):
-      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
+      example[column_name] = _encode(example[column_name])
   return example
 
 
@@ -370,7 +400,12 @@ class SFTPromptMaskingVision(grain.MapTransform):
 
   def map(self, element):
     inputs = np.concatenate((element[self.query_column], element[self.response_column]))
-    targets = np.concatenate((np.asarray([self.pad_id] * len(element[self.query_column])), element[self.response_column]))
+    targets = np.concatenate(
+        (
+            np.asarray([self.pad_id] * len(element[self.query_column])),
+            element[self.response_column],
+        )
+    )
     return {
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
@@ -528,7 +563,11 @@ def compute_file_sharding(file_count, host_index, host_count):
       and the file's group has >1 reader; otherwise None.
   """
   if file_count >= host_count:
-    return slice(host_index, None, host_count), max(file_count // host_count, 1), None
+    return (
+        slice(host_index, None, host_count),
+        max(file_count // host_count, 1),
+        None,
+    )
   file_idx = host_index % file_count
   row_shard_idx = host_index // file_count
   row_shard_count = (host_count // file_count) + (1 if file_idx < (host_count % file_count) else 0)
@@ -881,11 +920,13 @@ class PadOrTrimToMaxLength(grain.MapTransform):
             np.int32
         )
         element[f"{data_column}_position"] = np.arange(
-            element[data_column].shape[0], dtype=np.int32  # pyrefly: ignore[missing-attribute]
+            element[data_column].shape[0],
+            dtype=np.int32,  # pyrefly: ignore[missing-attribute]
         )  # pyrefly: ignore[missing-attribute]
         if self.add_true_length:
           element[f"{data_column}_true_length"] = np.array(
-              [element[data_column].shape[0]], dtype=np.int32  # pyrefly: ignore[missing-attribute]
+              [element[data_column].shape[0]],
+              dtype=np.int32,  # pyrefly: ignore[missing-attribute]
           )  # pyrefly: ignore[missing-attribute]
 
     for key, _ in element.items():
