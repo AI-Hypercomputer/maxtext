@@ -898,17 +898,32 @@ class DeepseekV4Indexer(nnx.Module):
       entry_indices_mask = jnp.arange(compressed_len)
       future_mask = entry_indices_mask[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
 
+    segment_mask = attention_mask[:, :, :compressed_len] if attention_mask is not None else None
+    # Autoregressive queries have one row and cannot be partitioned over tensor ranks.
+    shard_topk = self.config.indexer_sharded_topk and self.mesh is not None and model_mode != MODEL_MODE_AUTOREGRESSIVE
+
+    if shard_topk:
+      index_scores = self._shard_acts(index_scores, ("activation_batch", "indexer_topk_seq", None))
+      future_mask = self._shard_acts(future_mask, ("activation_batch", "indexer_topk_seq", None))
+      if segment_mask is not None:
+        segment_mask = self._shard_acts(segment_mask, ("activation_batch", "indexer_topk_seq", None))
+
     # Apply the mask to the scores
     index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
-    if attention_mask is not None:
-      index_scores += attention_mask[:, :, :compressed_len]
+    if segment_mask is not None:
+      index_scores += segment_mask
 
     top_k_indices = jax.lax.top_k(index_scores, k)[1]
     invalid = jnp.take_along_axis(future_mask, top_k_indices, axis=-1)
 
     final_indices = jnp.where(invalid, jnp.full_like(top_k_indices, -1), top_k_indices)
 
+    if shard_topk:
+      # Sparse attention consumes selections in the standard sequence layout.
+      final_indices = self._shard_acts(final_indices, ("activation_batch", "activation_length", None))
+    if self.config.indexer_save_selection:
+      final_indices = checkpoint_name(final_indices, "indexer_selection")
     return final_indices
 
 

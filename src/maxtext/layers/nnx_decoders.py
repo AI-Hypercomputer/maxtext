@@ -377,6 +377,22 @@ class NNXScannedPipelineStage(nnx.Module):
     return final_carry
 
 
+def compose_indexer_selection_policy(policy, config):
+  """Adds the indexer selection to a rematerialization policy."""
+  if not config.indexer_save_selection:
+    return policy
+  save_selection = jax.checkpoint_policies.save_only_these_names("indexer_selection")
+  if policy is None:
+    return save_selection
+
+  def combined_policy(primitive, *args, **params):
+    if save_selection(primitive, *args, **params):
+      return True
+    return policy(primitive, *args, **params)
+
+  return combined_policy
+
+
 class NNXDecoder(nnx.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture, using NNX."""
 
@@ -1265,7 +1281,7 @@ class NNXDecoder(nnx.Module):
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
-    return policy
+    return compose_indexer_selection_policy(policy, cfg)
 
   def get_norm_layer(self, num_features: int, rngs: nnx.Rngs):
     """get normalization layer (return type inherits from nn.Module)"""
