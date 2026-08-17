@@ -225,6 +225,47 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), 4)
 
   @pytest.mark.cpu_only
+  def test_correctly_unrolls_homogeneous_scanned_weights(self):
+    """Verify homogeneous scanned layers (LLaMA, Qwen Base) unroll to layers_{global_idx}."""
+    # 4 layers stacked on scan_axis=1 (feature_dim=2, num_layers=4, hidden=1)
+    probe_arr = np.zeros((2, 4, 1), dtype=np.float32)
+    for i in range(4):
+      probe_arr[:, i, :] = i
+    weights = MockWeights(
+        {
+            "base": {
+                "decoder": {
+                    "layers": {
+                        "self_attention": {"probe": probe_arr},
+                        "dropout": {"rngs": {"key": np.ones(2, dtype=np.uint32)}},
+                    },
+                    "decoder_norm": {"scale": np.ones(2)},
+                }
+            }
+        }
+    )
+
+    unrolled = unroll_qwen_scanned_weights(weights)
+
+    decoder = unrolled["base"]["decoder"]
+    for layer_idx in range(4):
+      self.assertIn(f"layers_{layer_idx}", decoder)
+      np.testing.assert_array_equal(
+          decoder[f"layers_{layer_idx}"]["self_attention"]["probe"],
+          np.full((2, 1), layer_idx, dtype=np.float32),
+      )
+    np.testing.assert_array_equal(decoder["decoder_norm"]["scale"], np.ones(2))
+    target = {
+        "model": {
+            "decoder": {
+                f"layers_{layer_idx}": {"self_attention": {"probe": np.zeros((2, 1), dtype=np.float32)}}
+                for layer_idx in range(4)
+            }
+        }
+    }
+    self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), 4)
+
+  @pytest.mark.cpu_only
   def test_rejects_inconsistent_scan_lengths(self):
     weights = MockWeights(
         {

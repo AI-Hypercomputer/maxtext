@@ -49,7 +49,7 @@ python3 -m maxtext.trainers.pre_train.train \
     dataset_path=${DATASET_PATH} \
     tokenizer_type="huggingface" \
     load_parameters_path=${SCANNED_CKPT_PATH} \
-    per_device_batch_size=0.25 \
+    per_device_batch_size=1 \
     run_name=${run_id} \
     max_target_length=64 \
     steps=5 \

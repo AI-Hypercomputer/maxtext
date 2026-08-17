@@ -43,7 +43,7 @@ python3 -m maxtext.inference.vllm_decode \
 python3 -m maxtext.trainers.post_train.sft.train_sft \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
-    per_device_batch_size=0.25 \
+    per_device_batch_size=1 \
     run_name=${run_id} \
     steps=5 \
     scan_layers=true \
