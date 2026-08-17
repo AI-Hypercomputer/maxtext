@@ -2229,14 +2229,29 @@ class AttentionOp(nnx.Module):
             s_folded = jnp.tile(sinks, (B,))
           else:
             s_folded = jnp.reshape(sinks, (B * H,))
+            
+          if decoder_segment_ids_tuple is not None:
+             d_q = decoder_segment_ids_tuple.q
+             d_kv = decoder_segment_ids_tuple.kv
+             # d_q usually (B, seq_len), tile to (B * H, seq_len)
+             # Wait, if it has 1 as dim 1 like (B, 1, seq_len)
+             if d_q.ndim == 3:
+                 d_q = jnp.tile(d_q, (1, H, 1)).reshape((B * H, -1))
+                 d_kv = jnp.tile(d_kv, (1, KV_H, 1)).reshape((B * KV_H, -1))
+             else:
+                 d_q = jnp.repeat(d_q, H, axis=0)
+                 d_kv = jnp.repeat(d_kv, KV_H, axis=0)
+             d_folded = tokamax_splash_kernel.SegmentIds(d_q, d_kv)
+          else:
+             d_folded = None
 
           if record_max_logits:
-            out_folded, stats = kernel(q_folded, k_folded, v_folded, None, sinks=s_folded, save_residuals=True)
+            out_folded, stats = kernel(q_folded, k_folded, v_folded, d_folded, sinks=s_folded, save_residuals=True)
             attention_output = jnp.reshape(out_folded, (B, H, q_len, D))
             max_logits = jnp.reshape(stats["max_logits"], (B, H, q_len))
             return attention_output, max_logits
           else:
-            out_folded = kernel(q_folded, k_folded, v_folded, None, sinks=s_folded)
+            out_folded = kernel(q_folded, k_folded, v_folded, d_folded, sinks=s_folded)
             attention_output = jnp.reshape(out_folded, (B, H, q_len, D))
             return attention_output, None
 
