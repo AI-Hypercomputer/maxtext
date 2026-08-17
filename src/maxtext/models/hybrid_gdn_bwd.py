@@ -72,12 +72,22 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         d_qkv_ref, d_b_ref, d_a_ref, d_state_out_ref,
         d_conv_weight_ref, d_conv_bias_ref, d_a_log_ref, d_dt_bias_ref, all_states_hbm_ref,
         qkv_db, b_db, a_db, d_out_db,
-        d_qkv_db, d_b_db, d_a_db, d_state_out_scratch,
-        state_vmem_db, state_read_db, init_state_scratch,
+        d_qkv_db, d_b_db, d_a_db, 
+        
+        # --- FIX 2a: Updated Signature ---
+        shared_state_init_out, shared_state_db, 
+        
         sem_qkv_fwd, sem_b_fwd, sem_a_fwd, sem_state_fwd,
         sem_qkv_bwd, sem_b_bwd, sem_a_bwd, sem_dout_bwd,
         sem_dqkv_bwd, sem_db_bwd, sem_da_bwd, sem_state_bwd
     ):
+        # --- FIX 2b: Wire up the aliases ---
+        # FWD and BWD passes now share the exact same physical VMEM registers
+        state_vmem_db = shared_state_db
+        state_read_db = shared_state_db
+        init_state_scratch = shared_state_init_out
+        d_state_out_scratch = shared_state_init_out
+
         batch_idx = pl.program_id(0)
 
         dim_size = n_kq * d_k * 2 + n_v * d_v
@@ -492,10 +502,12 @@ def computation(
         pltpu.VMEM(shape=(2, chunk_size, dim_size), dtype=qkv.dtype),
         pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=b.dtype),
         pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=a.dtype),
-        pltpu.VMEM(shape=(n_v, d_k, d_v), dtype=state_init.dtype),
-        pltpu.VMEM(shape=(2, n_v, d_k, d_v), dtype=state_init.dtype),
-        pltpu.VMEM(shape=(2, n_v, d_k, d_v), dtype=state_init.dtype),
-        pltpu.VMEM(shape=(n_v, d_k, d_v), dtype=state_init.dtype),
+        
+        # --- FIX 1: We deduplicated the states! Only 2 buffers instead of 4 ---
+        pltpu.VMEM(shape=(n_v, d_k, d_v), dtype=state_init.dtype),        # shared_state_init_out
+        pltpu.VMEM(shape=(2, n_v, d_k, d_v), dtype=state_init.dtype),     # shared_state_db
+        
+        # 12 Semaphores
         pltpu.SemaphoreType.REGULAR((2,)),
         pltpu.SemaphoreType.REGULAR((2,)),
         pltpu.SemaphoreType.REGULAR((2,)),
