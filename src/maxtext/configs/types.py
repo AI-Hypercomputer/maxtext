@@ -290,6 +290,7 @@ ModelName = Literal[
     "olmo3-7b",
     "olmo3-7b-pt",
     "olmo3-32b",
+    "stable-diffusion-v1.5",
     "envy-test",
     "envy-switch-base",
     "envy-switch-large",
@@ -2574,6 +2575,42 @@ class Engram(BaseModel):
   engram_seed: int = Field(0, description="The seed for Engram hash mapping.")
 
 
+class Diffusion(BaseModel):
+  """Configuration for Diffusion models (e.g. Stable Diffusion)."""
+
+  model_type: str = Field("diffusion", description="Type of model architecture.")
+  sample_size: int = Field(64, description="UNet input sample spatial dimension.")
+  in_channels: int = Field(4, description="UNet input channel dimension.")
+  out_channels: int = Field(4, description="UNet output channel dimension.")
+  block_out_channels: list[int] = Field(
+      default_factory=lambda: [320, 640, 1280, 1280],
+      description="Output channels for UNet blocks.",
+  )
+  layers_per_block: int = Field(2, description="UNet ResNet layers per block.")
+  cross_attention_dim: int = Field(768, description="UNet cross-attention context dim.")
+  attention_head_dim: int = Field(8, description="UNet attention head dim.")
+  norm_num_groups: int = Field(32, description="UNet GroupNorm num groups.")
+  vae_sample_size: int = Field(512, description="VAE image resolution.")
+  vae_in_channels: int = Field(3, description="VAE input image channels.")
+  vae_out_channels: int = Field(3, description="VAE output image channels.")
+  vae_latent_channels: int = Field(4, description="VAE latent channels.")
+  vae_block_out_channels: list[int] = Field(
+      default_factory=lambda: [128, 256, 512, 512],
+      description="Output channels for VAE blocks.",
+  )
+  vae_scaling_factor: float = Field(0.18215, description="VAE latent scaling factor.")
+  negative_prompt: str = Field("", description="Negative prompt for diffusion.")
+  guidance_scale: float = Field(7.5, description="Classifier-free guidance scale.")
+  num_inference_steps: int = Field(50, description="Number of diffusion denoising steps.")
+  image_height: int = Field(512, description="Output image height.")
+  image_width: int = Field(512, description="Output image width.")
+  scheduler_type: str = Field("pndm", description="Diffusion scheduler type.")
+  output_image_path: str = Field(
+      "/home/hengtaoguo_google_com/projects/astronaut_rides_horse.png",
+      description="Output path for generated image.",
+  )
+
+
 class DerivedValues(BaseModel):
   """Holds all fields that are derived from other config values for perfect legacy compatibility."""
 
@@ -2865,6 +2902,8 @@ class MaxTextConfig(
     VisionTower,
     VisionProjector,
     AudioEncoder,
+    # Diffusion
+    Diffusion,
     # Derived
     DerivedValues,
 ):

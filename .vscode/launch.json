@@ -9,24 +9,26 @@
       "justMyCode": false,
       "python": "python3",
       "module": "maxtext.inference.decode",
-      "args": ["src/maxtext/configs/base.yml",
-               "run_name=runner_$(date +%Y-%m-%d-%H-%M)",
-               "base_output_directory=gs://test-maxtext-output",
-               "dataset_path=gs://test-maxtext-dataset",
-               "model_name=llama2-7b",
-               "load_parameters_path=gs://msingh-bkt/checkpoints/quant_llama2-7b-chat/20241120034012/int8_",
-               "tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.llama2",
-               "per_device_batch_size=8",
-               "max_prefill_predict_length=8",
-               "max_target_length=20",
-               "weight_dtype=bfloat16",
-               "ici_fsdp_parallelism=1",
-               "ici_tensor_parallelism=-1",
-               "scan_layers=false",
-               "quantization=int8",
-               "checkpoint_is_quantized=true",
-               "attention=dot_product",
-               "autoregressive_decode_assert=travel and explore new places"]
+      "args": [
+        "src/maxtext/configs/base.yml",
+        "run_name=runner_$(date +%Y-%m-%d-%H-%M)",
+        "base_output_directory=gs://test-maxtext-output",
+        "dataset_path=gs://test-maxtext-dataset",
+        "model_name=llama2-7b",
+        "load_parameters_path=gs://msingh-bkt/checkpoints/quant_llama2-7b-chat/20241120034012/int8_",
+        "tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.llama2",
+        "per_device_batch_size=8",
+        "max_prefill_predict_length=8",
+        "max_target_length=20",
+        "weight_dtype=bfloat16",
+        "ici_fsdp_parallelism=1",
+        "ici_tensor_parallelism=-1",
+        "scan_layers=false",
+        "quantization=int8",
+        "checkpoint_is_quantized=true",
+        "attention=dot_product",
+        "autoregressive_decode_assert=travel and explore new places"
+      ]
     },
     {
       "name": "Debug MaxText Decode (Test)",
@@ -36,13 +38,15 @@
       "justMyCode": false,
       "python": "python3",
       "module": "maxtext.inference.decode",
-      "args": ["src/maxtext/configs/base.yml",
-               "run_name=runner_$(date +%Y-%m-%d-%H-%M)",
-               "base_output_directory=gs://test-maxtext-output",
-               "dataset_path=gs://test-maxtext-dataset",
-               "steps=2",
-               "attention=dot_product",
-               "enable_checkpointing=false"]
+      "args": [
+        "src/maxtext/configs/base.yml",
+        "run_name=runner_$(date +%Y-%m-%d-%H-%M)",
+        "base_output_directory=gs://test-maxtext-output",
+        "dataset_path=gs://test-maxtext-dataset",
+        "steps=2",
+        "attention=dot_product",
+        "enable_checkpointing=false"
+      ]
     },
     {
       "name": "Debug MaxText Train",
@@ -52,12 +56,14 @@
       "justMyCode": false,
       "python": "python3",
       "module": "maxtext.trainers.pre_train.train",
-      "args": ["src/maxtext/configs/base.yml",
-               "run_name=runner_$(date +%Y-%m-%d-%H-%M)",
-               "base_output_directory=gs://test-maxtext-output",
-               "dataset_path=gs://test-maxtext-dataset",
-               "steps=2",
-               "enable_checkpointing=false"]
+      "args": [
+        "src/maxtext/configs/base.yml",
+        "run_name=runner_$(date +%Y-%m-%d-%H-%M)",
+        "base_output_directory=gs://test-maxtext-output",
+        "dataset_path=gs://test-maxtext-dataset",
+        "steps=2",
+        "enable_checkpointing=false"
+      ]
     },
     {
       "name": "Debug MaxText Inference Microbenchmark",
@@ -91,6 +97,28 @@
         "per_device_batch_size=24",
         "quantization=int8",
         "quantize_kvcache=True"
+      ]
+    },
+    {
+      "name": "diffusion_decode",
+      "type": "debugpy",
+      "request": "launch",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "/home/hengtaoguo_google_com/projects/venv3/bin/python",
+      "cwd": "/home/hengtaoguo_google_com/projects/maxtext",
+      "module": "maxtext.inference.diffusion_decode",
+      "env": {
+        "PYTHONPATH": "/home/hengtaoguo_google_com/projects/maxtext/src",
+        "HF_HOME": "/dev/shm/hengtaoguo"
+      },
+      "args": [
+        "src/maxtext/configs/base.yml",
+        "model_name=stable-diffusion-v1.5",
+        "override_model_config=true",
+        "prompt=\"a photo of an astronaut riding a horse on mars\"",
+        "output_image_path=/home/hengtaoguo_google_com/projects/astronaut_rides_horse.png",
+        "num_inference_steps=50"
       ]
     }
   ]

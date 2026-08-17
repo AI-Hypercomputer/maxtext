@@ -12,14 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Diffusion models and primitives for MaxText."""
+"""Flax UNet 2D Condition Model for MaxText Diffusion."""
 
-from maxtext.diffusion.clip_text_encoder import FlaxCLIPTextModel
-from maxtext.diffusion.unet_2d_condition import FlaxUNet2DConditionModel
-from maxtext.diffusion.vae import FlaxAutoencoderKL
+from diffusers.models.unets.unet_2d_condition_flax import (
+    FlaxUNet2DConditionModel,
+    FlaxUNet2DConditionOutput,
+    FlaxDownBlock2D,
+    FlaxCrossAttnDownBlock2D,
+    FlaxUNetMidBlock2DCrossAttn,
+    FlaxUpBlock2D,
+    FlaxCrossAttnUpBlock2D,
+    FlaxTimestepEmbedding,
+    FlaxTimesteps,
+)
 
 __all__ = [
-    "FlaxCLIPTextModel",
     "FlaxUNet2DConditionModel",
-    "FlaxAutoencoderKL",
+    "FlaxUNet2DConditionOutput",
+    "FlaxDownBlock2D",
+    "FlaxCrossAttnDownBlock2D",
+    "FlaxUNetMidBlock2DCrossAttn",
+    "FlaxUpBlock2D",
+    "FlaxCrossAttnUpBlock2D",
+    "FlaxTimestepEmbedding",
+    "FlaxTimesteps",
 ]

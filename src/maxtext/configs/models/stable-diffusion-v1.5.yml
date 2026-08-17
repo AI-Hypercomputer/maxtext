@@ -1,0 +1,57 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Model Architecture: Stable Diffusion v1.5
+model_name: "stable-diffusion-v1.5"
+model_type: "diffusion"
+
+# Text Encoder (CLIP ViT-L/14)
+vocab_size: 49408
+emb_dim: 768
+base_emb_dim: 768
+base_num_decoder_layers: 12
+base_num_query_heads: 12
+base_num_kv_heads: 12
+mlp_dim: 3072
+max_position_embeddings: 77
+max_target_length: 77
+
+# UNet Architecture
+sample_size: 64
+in_channels: 4
+out_channels: 4
+block_out_channels: [320, 640, 1280, 1280]
+layers_per_block: 2
+cross_attention_dim: 768
+attention_head_dim: 8
+norm_num_groups: 32
+
+# VAE Architecture
+vae_sample_size: 512
+vae_in_channels: 3
+vae_out_channels: 3
+vae_latent_channels: 4
+vae_block_out_channels: [128, 256, 512, 512]
+vae_scaling_factor: 0.18215
+
+# Inference Defaults
+prompt: "a photo of an astronaut riding a horse on mars"
+negative_prompt: ""
+guidance_scale: 7.5
+num_inference_steps: 50
+image_height: 512
+image_width: 512
+scheduler_type: "pndm"
+output_image_path: "/home/hengtaoguo_google_com/projects/astronaut_rides_horse.png"
+load_parameters_path: "/home/hengtaoguo_google_com/projects/checkpoints/stable-diffusion-v1.5"

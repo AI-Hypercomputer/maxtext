@@ -4217,7 +4217,57 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   return mapping
 
 
+def STABLE_DIFFUSION_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates parameter mapping from MaxText to Hugging Face for Stable Diffusion 1.5."""
+  mapping = {
+      # Text Encoder
+      "params-text_encoder-embeddings-token_embedding-embedding": "text_encoder.embeddings.token_embedding.weight",
+      "params-text_encoder-embeddings-position_embedding-embedding": "text_encoder.embeddings.position_embedding.weight",
+      "params-text_encoder-final_layer_norm-scale": "text_encoder.final_layer_norm.weight",
+      "params-text_encoder-final_layer_norm-bias": "text_encoder.final_layer_norm.bias",
+  }
+  for i in range(12):
+    mapping.update({
+        f"params-text_encoder-encoder-layers_{i}-layer_norm1-scale": f"text_encoder.encoder.layers.{i}.layer_norm1.weight",
+        f"params-text_encoder-encoder-layers_{i}-layer_norm1-bias": f"text_encoder.encoder.layers.{i}.layer_norm1.bias",
+        f"params-text_encoder-encoder-layers_{i}-self_attn-q_proj-kernel": f"text_encoder.encoder.layers.{i}.self_attn.q_proj.weight",
+        f"params-text_encoder-encoder-layers_{i}-self_attn-q_proj-bias": f"text_encoder.encoder.layers.{i}.self_attn.q_proj.bias",
+        f"params-text_encoder-encoder-layers_{i}-self_attn-k_proj-kernel": f"text_encoder.encoder.layers.{i}.self_attn.k_proj.weight",
+        f"params-text_encoder-encoder-layers_{i}-self_attn-k_proj-bias": f"text_encoder.encoder.layers.{i}.self_attn.k_proj.bias",
+        f"params-text_encoder-encoder-layers_{i}-self_attn-v_proj-kernel": f"text_encoder.encoder.layers.{i}.self_attn.v_proj.weight",
+        f"params-text_encoder-encoder-layers_{i}-self_attn-v_proj-bias": f"text_encoder.encoder.layers.{i}.self_attn.v_proj.bias",
+        f"params-text_encoder-encoder-layers_{i}-self_attn-out_proj-kernel": f"text_encoder.encoder.layers.{i}.self_attn.out_proj.weight",
+        f"params-text_encoder-encoder-layers_{i}-self_attn-out_proj-bias": f"text_encoder.encoder.layers.{i}.self_attn.out_proj.bias",
+        f"params-text_encoder-encoder-layers_{i}-layer_norm2-scale": f"text_encoder.encoder.layers.{i}.layer_norm2.weight",
+        f"params-text_encoder-encoder-layers_{i}-layer_norm2-bias": f"text_encoder.encoder.layers.{i}.layer_norm2.bias",
+        f"params-text_encoder-encoder-layers_{i}-mlp-fc1-kernel": f"text_encoder.encoder.layers.{i}.mlp.fc1.weight",
+        f"params-text_encoder-encoder-layers_{i}-mlp-fc1-bias": f"text_encoder.encoder.layers.{i}.mlp.fc1.bias",
+        f"params-text_encoder-encoder-layers_{i}-mlp-fc2-kernel": f"text_encoder.encoder.layers.{i}.mlp.fc2.weight",
+        f"params-text_encoder-encoder-layers_{i}-mlp-fc2-bias": f"text_encoder.encoder.layers.{i}.mlp.fc2.bias",
+    })
+  return mapping
+
+
+def STABLE_DIFFUSION_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Stable Diffusion 1.5."""
+  mapping = {}
+
+  def transpose_linear(input_tensor, target_shape=None):
+    return input_tensor.T
+
+  for i in range(12):
+    mapping[f"params-text_encoder-encoder-layers_{i}-self_attn-q_proj-kernel"] = transpose_linear
+    mapping[f"params-text_encoder-encoder-layers_{i}-self_attn-k_proj-kernel"] = transpose_linear
+    mapping[f"params-text_encoder-encoder-layers_{i}-self_attn-v_proj-kernel"] = transpose_linear
+    mapping[f"params-text_encoder-encoder-layers_{i}-self_attn-out_proj-kernel"] = transpose_linear
+    mapping[f"params-text_encoder-encoder-layers_{i}-mlp-fc1-kernel"] = transpose_linear
+    mapping[f"params-text_encoder-encoder-layers_{i}-mlp-fc2-kernel"] = transpose_linear
+
+  return mapping
+
+
 PARAM_MAPPING = {
+    "stable-diffusion-v1.5": STABLE_DIFFUSION_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4272,6 +4322,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "stable-diffusion-v1.5": STABLE_DIFFUSION_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
