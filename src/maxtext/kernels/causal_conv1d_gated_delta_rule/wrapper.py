@@ -147,8 +147,8 @@ def inner_kernel(
         real_sizes=real_sizes,
     )
     
-    # MUST BE DEFINED HERE FOR BATCHED MODE (CHUNK_SIZE=1)
-    tap_val = jnp.zeros((cfg.aligned_num_v_heads, cfg.chunk_size, cfg.chunk_size), dtype=jnp.float32)
+    # MUST HAVE seq_tile_size DIMENSION (cfg.num_v_heads, not aligned_num_v_heads to match HBM!)
+    tap_val = jnp.zeros((cfg.seq_tile_size, cfg.num_v_heads, cfg.chunk_size, cfg.chunk_size), dtype=jnp.float32)
 
   else:
     q_large, k_large, v_large, b_large, a_large = (
@@ -215,61 +215,44 @@ def outer_kernel(
 
   qkv_alloc, b_alloc, a_alloc, conv_alloc, recurrent_alloc, out_alloc = (
       memory_ref.create_allocs(
-          metadata_ref=metadata_ref,
-          qkv_ref=qkv_ref,
-          b_ref=b_ref,
-          a_ref=a_ref,
-          out_ref=out_ref,
-          conv_state_ref=conv_state_ref,
-          recurrent_state_ref=recurrent_state_ref,
-          cfg=cfg,
+          metadata_ref=metadata_ref, qkv_ref=qkv_ref, b_ref=b_ref, a_ref=a_ref,
+          out_ref=out_ref, conv_state_ref=conv_state_ref, recurrent_state_ref=recurrent_state_ref, cfg=cfg,
       )
+  )
+
+  # --- CREATE DEDICATED TAP ALLOCATOR ---
+  pipeline_mode = pl.Buffered(buffer_count=cfg.num_buffers, use_lookahead=False)
+  tap_alloc = memory_ref.OutBufferedRef.output(
+      spec=pl.BlockSpec(
+          memory_space=pltpu.VMEM,
+          index_map=lambda i: (i,),
+          pipeline_mode=pipeline_mode,
+          block_shape=(cfg.seq_tile_size, cfg.chunk_size, cfg.num_v_heads, cfg.chunk_size)
+      ),
+      dtype_or_type=tap_ref,
+      buffer_count=pipeline_mode.buffer_count,
+      use_lookahead=pipeline_mode.use_lookahead,
+      cfg=cfg,
+      metadata_ref=metadata_ref,
   )
 
   num_tiles = metadata_ref.num_tiles[...]
 
   pipeline_func = pltpu.emit_pipeline(
-      body=functools.partial(
-          inner_kernel,
-          cfg=cfg,
-      ),
+      body=functools.partial(inner_kernel, cfg=cfg),
       grid=(num_tiles,),
-      in_specs=(
-          qkv_alloc.spec,
-          b_alloc.spec,
-          a_alloc.spec,
-          conv_alloc.spec,
-          recurrent_alloc.spec,
-      ),
-      out_specs=(out_alloc.spec, out_alloc.spec,),
+      in_specs=(qkv_alloc.spec, b_alloc.spec, a_alloc.spec, conv_alloc.spec, recurrent_alloc.spec),
+      out_specs=(out_alloc.spec, tap_alloc.spec), # <--- USING TAP_ALLOC.SPEC
   )
 
   @pl.with_scoped(
-      allocations=(
-          qkv_alloc,
-          b_alloc,
-          a_alloc,
-          conv_alloc,
-          recurrent_alloc,
-          out_alloc,
-          out_alloc,
-      ),
+      allocations=(qkv_alloc, b_alloc, a_alloc, conv_alloc, recurrent_alloc, out_alloc, tap_alloc), # <--- USING TAP_ALLOC
   )
   def _run(allocations):
     pipeline_func(
-        qkv_ref,
-        b_ref,
-        a_ref,
-        conv_state_ref,
-        recurrent_state_ref,
-        out_ref,
-        tap_ref,
-        scratches=(
-            metadata_ref,
-            weights_ref,
-            carry_conv_scratch_ref,
-            carry_recurrent_scratch_ref,
-        ),
+        qkv_ref, b_ref, a_ref, conv_state_ref, recurrent_state_ref, 
+        out_ref, tap_ref, # <--- PASSING TAP_REF
+        scratches=(metadata_ref, weights_ref, carry_conv_scratch_ref, carry_recurrent_scratch_ref),
         allocations=allocations,
     )
 
@@ -479,10 +462,15 @@ def fused_conv1d_gdn(
       out_shape = in_act
       in_out_spec = hbm_spec
       input_output_aliases[len(metadata_obj) + 5] = 0
+    # Create the correct HBM shape for the Tap
+    tap_shape = jax.ShapeDtypeStruct(
+        (padded_batch_size, cfg.num_v_heads, cfg.chunk_size), 
+        jnp.float32
+    )
 
     res = pl.pallas_call(
         functools.partial(outer_kernel, cfg=cfg),
-        out_shape=(out_shape, in_conv_state, in_recurrent_state, out_shape),
+        out_shape=(out_shape, in_conv_state, in_recurrent_state, tap_shape), # <--- USING TAP_SHAPE
         in_specs=(
             metadata_spec,
             hbm_spec,
