@@ -71,22 +71,21 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         state_init_ref, d_state_final_ref,
         d_qkv_ref, d_b_ref, d_a_ref, d_state_out_ref,
         d_conv_weight_ref, d_conv_bias_ref, d_a_log_ref, d_dt_bias_ref, all_states_hbm_ref,
+        
         qkv_db, b_db, a_db, d_out_db,
         
-        # --- REMOVED d_qkv_db, d_b_db, d_a_db ---
-        
-        shared_state_init_out, shared_state_db, 
+        # --- FIX: Removed the redundant init_state scratchpad! ---
+        shared_state_db, 
         
         sem_qkv_fwd, sem_b_fwd, sem_a_fwd, sem_state_fwd,
         sem_qkv_bwd, sem_b_bwd, sem_a_bwd, sem_dout_bwd,
         sem_dqkv_bwd, sem_db_bwd, sem_da_bwd, sem_state_bwd
     ):
-        # --- FIX 2b: Wire up the aliases ---
-        # FWD and BWD passes now share the exact same physical VMEM registers
+        d_qkv_db = qkv_db
+        d_b_db = b_db
+        d_a_db = a_db
         state_vmem_db = shared_state_db
         state_read_db = shared_state_db
-        init_state_scratch = shared_state_init_out
-        d_state_out_scratch = shared_state_init_out
 
         batch_idx = pl.program_id(0)
 
@@ -101,6 +100,8 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         conv_bias = conv_bias_ref[...]
         a_log = a_log_ref[...]
         dt_bias = dt_bias_ref[...]
+        
+        # This implicitly loads from HBM into VMEM taking exactly 1 batch's worth of space!
         d_state_final = d_state_final_ref[batch_idx, ...]
         init_state = (
             d_state_final,
@@ -110,6 +111,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             jnp.zeros_like(a_log),
             jnp.zeros_like(dt_bias)
         )
+        
         # --- FWD Pass Prologue ---
         def fwd_prologue(_):
             pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds(0, chunk_size + overlap), :], qkv_db.at[0, ...], sem_qkv_fwd.at[0]).start()
@@ -117,9 +119,11 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             pltpu.make_async_copy(a_ref.at[batch_idx, pl.ds(0, chunk_size), :], a_db.at[0, ...], sem_a_fwd.at[0]).start()
             return None
         jax.lax.cond(num_chunks > 0, fwd_prologue, lambda _: None, None)
-        pltpu.sync_copy(state_init_ref.at[batch_idx, ...], init_state_scratch)
-        pltpu.sync_copy(init_state_scratch, all_states_hbm_ref.at[batch_idx, 0, ...])
-        state_0 = init_state_scratch[...]
+        
+        # --- FIX: Direct HBM Sync Write (Bypasses VMEM scratchpad) ---
+        state_0 = state_init_ref[batch_idx, ...]
+        all_states_hbm_ref.at[batch_idx, 0, ...].set(state_0)
+        
         def fwd_body_fun(i, state_prev):
             chunk_idx = i
             db_idx = i % 2
@@ -137,6 +141,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
                 pl.semaphore_wait(sem_state_fwd.at[db_idx], 1)
                 return None
             jax.lax.cond(chunk_idx >= 2, wait_prev_write, lambda _: None, None)
+            
             qkv_ext = qkv_db[db_idx, ...]
             b_ext = b_db[db_idx, ...]
             a_ext = a_db[db_idx, ...]
@@ -167,21 +172,14 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             g_cum_sum_log_t = fused_transpose_broadcast(g_cum_sum_log, src_dim=1, dst_dim=2)
             g_cum_sum_diff_log = g_cum_sum_log - g_cum_sum_log_t
             
-            # --- 1. GENERATE MASKS DIRECTLY AS FLOATS ---
             iota_r_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 1)
             iota_c_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 2)
-            
             identity_mask = (iota_r_2d == iota_c_2d).astype(k_repeat.dtype)
             strictly_lower_mask = (iota_r_2d > iota_c_2d).astype(k_repeat.dtype)
             lower_mask = (iota_r_2d >= iota_c_2d).astype(k_repeat.dtype)
             
-            # --- 2. NO MORE jnp.where! ---
-            # safe_diff_log enforces -1e4 in the upper triangle to prevent NaN traps
             safe_diff_log = g_cum_sum_diff_log * strictly_lower_mask + (-1e4) * (1.0 - strictly_lower_mask)
-            
-            # Because exp(-1e4) is 0.0, gating_map natively has 0.0 in the upper triangle!
             gating_map = jnp.exp(safe_diff_log)
-            
             gating_backward = jnp.exp(-g_cum_sum_diff_log[..., -1:])
             gating_forward = jnp.exp(g_cum_sum_log)
             gating_last = gating_forward[:, -1:]
@@ -189,10 +187,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             k_beta_repeat = k_repeat * beta_large
             beta_k_k_t = _safe_dot(k_beta_repeat, k_repeat, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
             gating_beta_k_k_t = gating_map * beta_k_k_t
-            
-            # Replace t = jnp.where(...) with math!
             t = gating_beta_k_k_t * (1.0 - identity_mask) + identity_mask
-            
             t_inv = invert_triangular_matrix(t)
             v_beta_large = v_large * beta_large
             k_beta_gating = k_beta_repeat * gating_forward
@@ -206,7 +201,9 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             state_vmem_db[db_idx, ...] = state_curr
             pltpu.make_async_copy(state_vmem_db.at[db_idx, ...], all_states_hbm_ref.at[batch_idx, chunk_idx + 1, ...], sem_state_fwd.at[db_idx]).start()
             return state_curr
+            
         _ = jax.lax.fori_loop(0, num_chunks, fwd_body_fun, state_0)
+        
         # --- FWD Pass Epilogue ---
         def wait_last_writes(_):
             pl.semaphore_wait(sem_state_fwd.at[(num_chunks - 1) % 2], 1)
@@ -214,8 +211,8 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             pl.semaphore_wait(sem_state_fwd.at[(num_chunks - 2) % 2], 1)
             return None
         jax.lax.cond(num_chunks >= 2, wait_second_last, lambda _: None, None)
-        return None
         jax.lax.cond(num_chunks >= 1, wait_last_writes, lambda _: None, None)
+        
         # --- BWD Pass Prologue ---
         def bwd_prologue(_):
             chunk_idx_0 = num_chunks - 1
@@ -226,6 +223,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             pltpu.make_async_copy(all_states_hbm_ref.at[batch_idx, chunk_idx_0, ...], state_read_db.at[0, ...], sem_state_bwd.at[0]).start()
             return None
         jax.lax.cond(num_chunks > 0, bwd_prologue, lambda _: None, None)
+        
         def bwd_body_fun(i, loop_state):
             chunk_idx = num_chunks - 1 - i
             db_idx = i % 2
@@ -236,8 +234,8 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             pl.semaphore_wait(sem_a_bwd.at[db_idx], 1)
             pl.semaphore_wait(sem_dout_bwd.at[db_idx], 1)
             pl.semaphore_wait(sem_state_bwd.at[db_idx], 1)
+            
             def wait_prev_write_bwd(_):
-                # Wait for next_db_idx to finish writing before we overwrite it with a new read!
                 pl.semaphore_wait(sem_dqkv_bwd.at[next_db_idx], 1)
                 pl.semaphore_wait(sem_db_bwd.at[next_db_idx], 1)
                 pl.semaphore_wait(sem_da_bwd.at[next_db_idx], 1)
@@ -253,12 +251,13 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
                 pltpu.make_async_copy(all_states_hbm_ref.at[batch_idx, next_chunk_idx, ...], state_read_db.at[next_db_idx, ...], sem_state_bwd.at[next_db_idx]).start()
                 return None
             jax.lax.cond(i + 1 < num_chunks, start_next, lambda _: None, None)
-            def wait_prev_write_bwd(_):
+            def wait_prev_write_bwd_2(_):
                 pl.semaphore_wait(sem_dqkv_bwd.at[db_idx], 1)
                 pl.semaphore_wait(sem_db_bwd.at[db_idx], 1)
                 pl.semaphore_wait(sem_da_bwd.at[db_idx], 1)
                 return None
-            jax.lax.cond(i >= 2, wait_prev_write_bwd, lambda _: None, None)
+            jax.lax.cond(i >= 2, wait_prev_write_bwd_2, lambda _: None, None)
+            
             qkv_ext = qkv_db[db_idx, ...]
             b_ext = b_db[db_idx, ...]
             a_ext = a_db[db_idx, ...]
@@ -268,6 +267,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             for k in range(kernel_size):
                 conv_out_base += qkv_ext[k + shift : k + shift + chunk_size, :] * W[k, :]
             conv_out = conv_out_base + conv_bias
+            
             q_start = 0
             q_end = n_kq * d_k
             k_start = q_end
@@ -289,27 +289,21 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             iota_c_cumsum = jax.lax.broadcasted_iota(jnp.int32, (chunk_size, chunk_size), 1)
             lower_tri_mask = jnp.where(iota_r_cumsum >= iota_c_cumsum, 1.0, 0.0)
             gating_log_2d = gating_log[0]
-            g_cum_sum_log_2d = _safe_dot(
-                lower_tri_mask.astype(gating_log_2d.dtype),
-                gating_log_2d
-            )
+            g_cum_sum_log_2d = _safe_dot(lower_tri_mask.astype(gating_log_2d.dtype), gating_log_2d)
             g_cum_sum_log = g_cum_sum_log_2d.reshape(1, chunk_size, n_v)
             g_cum_sum_log = fused_transpose_broadcast(g_cum_sum_log, src_dim=2, dst_dim=0)[:n_v]
             beta_large = fused_transpose_broadcast(beta, src_dim=2, dst_dim=0)[:n_v]
             g_cum_sum_log_t = fused_transpose_broadcast(g_cum_sum_log, src_dim=1, dst_dim=2)
             g_cum_sum_diff_log = g_cum_sum_log - g_cum_sum_log_t
             
-            # --- FIX: Generate 1x64x64 masks to prevent 32x64x64 compiler crashes! ---
             iota_r_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 1)
             iota_c_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 2)
-            identity_mask = iota_r_2d == iota_c_2d
-            strictly_lower_mask = iota_r_2d > iota_c_2d
-            lower_mask = iota_r_2d >= iota_c_2d
+            identity_mask = (iota_r_2d == iota_c_2d).astype(k_repeat.dtype)
+            strictly_lower_mask = (iota_r_2d > iota_c_2d).astype(k_repeat.dtype)
+            lower_mask = (iota_r_2d >= iota_c_2d).astype(k_repeat.dtype)
             
-            # --- CRITICAL NaN TRAP FIX: Applied before exp() ---
             safe_diff_bwd = g_cum_sum_diff_log * strictly_lower_mask + (-1e4) * (1.0 - strictly_lower_mask)
             gating_map = jnp.exp(safe_diff_bwd)
-            
             gating_backward = jnp.exp(-g_cum_sum_diff_log[..., -1:])
             gating_forward = jnp.exp(g_cum_sum_log)
             gating_last = gating_forward[:, -1:]
@@ -396,12 +390,9 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             d_g_cum_sum_log_orig = d_g_cum_sum_log.swapaxes(0, 2)
             iota_r_rev = jax.lax.broadcasted_iota(jnp.int32, (chunk_size, chunk_size), 0)
             iota_c_rev = jax.lax.broadcasted_iota(jnp.int32, (chunk_size, chunk_size), 1)
-            upper_tri_mask_rev = jnp.where(iota_r_rev <= iota_c_rev, 1.0, 0.0)
+            upper_tri_mask_rev = (iota_r_rev <= iota_c_rev).astype(d_g_cum_sum_log_orig.dtype)
             d_g_cum_sum_log_2d = d_g_cum_sum_log_orig[0]
-            d_gating_log_2d = _safe_dot(
-                upper_tri_mask_rev.astype(d_g_cum_sum_log_2d.dtype),
-                d_g_cum_sum_log_2d
-            )
+            d_gating_log_2d = _safe_dot(upper_tri_mask_rev, d_g_cum_sum_log_2d)
             d_gating_log = d_gating_log_2d.reshape(1, chunk_size, n_v)
             d_a = d_gating_log * (-jnp.exp(a_log)) * jax.nn.sigmoid(a_ext + dt_bias)
             d_a = d_a.reshape(chunk_size, n_v)
@@ -412,9 +403,11 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             d_b = d_b.reshape(chunk_size, n_v)
             d_a_log_chunk = jnp.sum(d_gating_log * gating_log, axis=(0, 1))
             d_dt_bias_chunk = jnp.sum(d_a, axis=0)
+            
             d_Y_ext = jnp.concatenate([d_Y, d_Y_next], axis=0)
-            # --- FIX: Change d_X to bf16! Saves 1.04 MB ---
-            d_X = jnp.zeros((chunk_size, dim_size), dtype=qkv_ext.dtype)
+            
+            # --- Kept fp32 accumulation for numeric stability! ---
+            d_X = jnp.zeros((chunk_size, dim_size), dtype=jnp.float32)
             for k in range(kernel_size):
                 start_idx = kernel_size - 1 - k
                 d_Y_slice = d_Y_ext[start_idx : start_idx + chunk_size, :]
@@ -428,15 +421,13 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             d_W_chunk = jnp.stack(d_W_list, axis=0)
             d_B_chunk = jnp.sum(d_Y, axis=0)
             
-            # --- FIX: Overwrite the Read Buffers directly! ---
-            # We are done reading qkv_ext, so we overwrite it with d_X!
-            qkv_db.at[db_idx, pl.ds(0, chunk_size), :].set(d_X)
-            b_db.at[db_idx, ...].set(d_b)
-            a_db.at[db_idx, ...].set(d_a)
+            d_qkv_db.at[db_idx, pl.ds(0, chunk_size), :].set(d_X.astype(d_qkv_db.dtype))
+            d_b_db.at[db_idx, ...].set(d_b.astype(d_b_db.dtype))
+            d_a_db.at[db_idx, ...].set(d_a.astype(d_a_db.dtype))
             
-            pltpu.make_async_copy(qkv_db.at[db_idx, pl.ds(0, chunk_size), :], d_qkv_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_dqkv_bwd.at[db_idx]).start()
-            pltpu.make_async_copy(b_db.at[db_idx, ...], d_b_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_db_bwd.at[db_idx]).start()
-            pltpu.make_async_copy(a_db.at[db_idx, ...], d_a_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_da_bwd.at[db_idx]).start()
+            pltpu.make_async_copy(d_qkv_db.at[db_idx, pl.ds(0, chunk_size), :], d_qkv_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_dqkv_bwd.at[db_idx]).start()
+            pltpu.make_async_copy(d_b_db.at[db_idx, ...], d_b_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_db_bwd.at[db_idx]).start()
+            pltpu.make_async_copy(d_a_db.at[db_idx, ...], d_a_ref.at[batch_idx, pl.ds(chunk_idx * chunk_size, chunk_size), :], sem_da_bwd.at[db_idx]).start()
             
             return (
                 d_state_prev,
@@ -446,20 +437,11 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
                 d_a_log_acc + d_a_log_chunk,
                 d_dt_bias_acc + d_dt_bias_chunk
             )
+            
         final_state = jax.lax.fori_loop(0, num_chunks, bwd_body_fun, init_state)
         d_state_init, _, d_W_total, d_B_total, d_a_log_total, d_dt_bias_total = final_state
-        # --- BWD Pass Epilogue ---
-        def wait_last_writes_bwd(_):
-            pl.semaphore_wait(sem_dqkv_bwd.at[(num_chunks - 1) % 2], 1)
-            pl.semaphore_wait(sem_db_bwd.at[(num_chunks - 1) % 2], 1)
-            pl.semaphore_wait(sem_da_bwd.at[(num_chunks - 1) % 2], 1)
-        def wait_second_last_bwd(_):
-            pl.semaphore_wait(sem_dqkv_bwd.at[(num_chunks - 2) % 2], 1)
-            pl.semaphore_wait(sem_db_bwd.at[(num_chunks - 2) % 2], 1)
-            pl.semaphore_wait(sem_da_bwd.at[(num_chunks - 2) % 2], 1)
-            return None
-        jax.lax.cond(num_chunks >= 2, wait_second_last_bwd, lambda _: None, None)
         
+        # --- BWD Pass Epilogue ---
         def wait_last_writes_bwd_with_return(_):
             pl.semaphore_wait(sem_dqkv_bwd.at[(num_chunks - 1) % 2], 1)
             pl.semaphore_wait(sem_db_bwd.at[(num_chunks - 1) % 2], 1)
@@ -471,8 +453,9 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         d_conv_bias_ref.at[batch_idx, ...].set(d_B_total)
         d_a_log_ref.at[batch_idx, ...].set(d_a_log_total)
         d_dt_bias_ref.at[batch_idx, ...].set(d_dt_bias_total)
-        d_state_out_scratch[...] = d_state_init
-        pltpu.sync_copy(d_state_out_scratch, d_state_out_ref.at[batch_idx, ...])
+        
+        # --- FIX: Direct sync write to bypass d_state_out_scratch! ---
+        d_state_out_ref.at[batch_idx, ...].set(d_state_init)
 
     return kernel
 
@@ -509,17 +492,13 @@ def computation(
     hbm_spec = pl.BlockSpec(memory_space=pltpu.HBM)
     vmem_spec = pl.BlockSpec()
 
+    # --- FIX: Removed the massive `init_state` scratchpad to save 1.0 MB ---
     scratch_shapes = (
-        pltpu.VMEM(shape=(2, chunk_size + overlap, dim_size), dtype=qkv.dtype), # ALIASED: qkv_db AND d_qkv_db
-        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=b.dtype),                  # ALIASED: b_db AND d_b_db
-        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=a.dtype),                  # ALIASED: a_db AND d_a_db
-        pltpu.VMEM(shape=(2, chunk_size, n_v * d_v), dtype=d_out.dtype),
-        
-        # --- REMOVED 3 MASSIVE WRITE BUFFERS HERE TO SAVE 2.11 MB ---
-        
-        pltpu.VMEM(shape=(n_v, d_k, d_v), dtype=state_init.dtype),        # shared_state_init_out
-        pltpu.VMEM(shape=(2, n_v, d_k, d_v), dtype=state_init.dtype),     # shared_state_db
-        
+        pltpu.VMEM(shape=(2, chunk_size + overlap, dim_size), dtype=qkv.dtype), 
+        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=b.dtype),                  
+        pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=a.dtype),                  
+        pltpu.VMEM(shape=(2, chunk_size, n_v * d_v), dtype=d_out.dtype),        
+        pltpu.VMEM(shape=(2, n_v, d_k, d_v), dtype=state_init.dtype),           
         # 12 Semaphores
         pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
         pltpu.SemaphoreType.REGULAR((2,)), pltpu.SemaphoreType.REGULAR((2,)),
@@ -533,8 +512,10 @@ def computation(
         get_kernel(chunk_size, n_kq, n_v, d_k, d_v),
         out_shape=(d_qkv_shape, d_b_shape, d_a_shape, d_state_shape, d_conv_weight_shape, d_conv_bias_shape, d_a_log_shape, d_dt_bias_shape, all_states_shape),
         grid=grid,
-        # REMOVED 3 vmem_specs from the input signature
-        in_specs=[hbm_spec] * 4 + [vmem_spec] * 4 + [hbm_spec, vmem_spec],
+        
+        # --- FIX: d_state_final (Input 9) is now mapped to HBM to save 2.0 MB ---
+        in_specs=[hbm_spec] * 4 + [vmem_spec] * 4 + [hbm_spec, hbm_spec],
+        
         out_specs=(hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec),
         scratch_shapes=scratch_shapes,
     )(qkv_padded, b_flat, a_flat, d_out_flat, conv_weight, conv_bias, a_log, dt_bias, state_init, d_state_final)
