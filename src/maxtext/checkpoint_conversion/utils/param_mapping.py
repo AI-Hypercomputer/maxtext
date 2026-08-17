@@ -4313,8 +4313,19 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
         return input_tensor.reshape(heads, in_dim, head_dim).transpose(0, 2, 1)
 
   # --- MHC Hook Functions ---
+  # With mhc_split_axis_contraction the alphas are stored as (k, dim, n) instead of
+  # (k * dim, n). The split values are the flat ones reshaped, so converting either way
+  # is a plain reshape; every other mHC parameter keeps its layout.
+  mhc_split = getattr(maxtext_config, "mhc_split_axis_contraction", False)
+
+  def mhc_alpha_to_hf(w, *args, **kwargs):
+    parts = [np.asarray(t) for t in w]
+    if mhc_split:
+      parts = [t.reshape((-1, t.shape[-1])) for t in parts]
+    return np.concatenate(parts, axis=-1).T
+
   mhc_composite_fns = {
-      "alpha": lambda w, *args, **kwargs: np.concatenate(w, axis=-1).T,
+      "alpha": mhc_alpha_to_hf,
       "beta": lambda w, *args, **kwargs: np.concatenate([w[0], w[1], w[2].flatten()], axis=-1),
       "scale": lambda w, *args, **kwargs: np.concatenate(w, axis=-1),
   }
@@ -4323,18 +4334,21 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
     """Unified slicer for MHC parameters across alpha (0), beta (1), and scale (2)."""
 
     def hook(tensor: np.ndarray, target_shape=None):
-      del target_shape
       if mode == "scale":
         return tensor[part_idx : part_idx + 1]
       t = tensor.T if mode == "alpha" else tensor
       k = int(np.sqrt(1 + t.shape[-1]) - 1)
       if part_idx == 0:
-        return t[..., :k]
+        out = t[..., :k]
       elif part_idx == 1:
-        return t[..., k : 2 * k]
+        out = t[..., k : 2 * k]
       else:
-        res = t[..., 2 * k :]
-        return res.reshape(k, k) if mode == "beta" else res
+        out = t[..., 2 * k :]
+        if mode == "beta":
+          out = out.reshape(k, k)
+      if mode == "alpha" and mhc_split and target_shape is not None:
+        out = out.reshape(target_shape)
+      return out
 
     return hook
 
