@@ -3,6 +3,14 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
+
+def _safe_dot(lhs, rhs, *args, **kwargs):
+    kwargs['preferred_element_type'] = jnp.float32
+    if 'dimension_numbers' in kwargs:
+        return jax.lax.dot_general(lhs, rhs, *args, **kwargs).astype(lhs.dtype)
+    else:
+        return _safe_dot(lhs, rhs, *args, **kwargs).astype(lhs.dtype)
+
 def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
     n_v, chunk_size, _ = t.shape
     iota_r = jax.lax.broadcasted_iota(jnp.int32, (n_v, chunk_size, chunk_size), 1)
@@ -13,7 +21,7 @@ def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
         t_row = jnp.sum(t * row_mask, axis=1, keepdims=True)
         col_mask = (jnp.arange(chunk_size) < i).reshape(1, 1, chunk_size)
         t_row = jnp.where(col_mask, t_row, 0.0)
-        new_row = -jax.lax.dot(
+        new_row = -_safe_dot(
             t_row, inv_t_acc,
             dimension_numbers=(((2,), (1,)), ((0,), (0,)))
         )
@@ -127,7 +135,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             iota_c_cumsum = jax.lax.broadcasted_iota(jnp.int32, (chunk_size, chunk_size), 1)
             lower_tri_mask = jnp.where(iota_r_cumsum >= iota_c_cumsum, 1.0, 0.0)
             gating_log_2d = gating_log[0]
-            g_cum_sum_log_2d = jax.lax.dot(lower_tri_mask.astype(gating_log_2d.dtype), gating_log_2d)
+            g_cum_sum_log_2d = _safe_dot(lower_tri_mask.astype(gating_log_2d.dtype), gating_log_2d)
             g_cum_sum_log = g_cum_sum_log_2d.reshape(1, chunk_size, n_v)
             g_cum_sum_log = fused_transpose_broadcast(g_cum_sum_log, src_dim=2, dst_dim=0)[:n_v]
             beta_large = fused_transpose_broadcast(beta, src_dim=2, dst_dim=0)[:n_v]
@@ -143,17 +151,17 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             strictly_lower_mask = iota_r > iota_c
             gating_map_masked = jnp.where(strictly_lower_mask, gating_map, 0)
             k_beta_repeat = k_repeat * beta_large
-            beta_k_k_t = jax.lax.dot(k_beta_repeat, k_repeat, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
+            beta_k_k_t = _safe_dot(k_beta_repeat, k_repeat, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
             t = jnp.where(identity_mask, 1, gating_map_masked * beta_k_k_t)
             t_inv = invert_triangular_matrix(t)
             v_beta_large = v_large * beta_large
             k_beta_gating = k_beta_repeat * gating_forward
             merged_v_k = jnp.concat([v_beta_large, k_beta_gating], axis=-1)
-            merged_uw = jax.lax.dot(t_inv, merged_v_k, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            merged_uw = _safe_dot(t_inv, merged_v_k, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             u, w = jnp.split(merged_uw, [d_v], axis=-1)
-            ws = jax.lax.dot(w, state_prev, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            ws = _safe_dot(w, state_prev, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             u_ws = u - ws
-            state_new = jax.lax.dot(k_repeat * gating_backward, u_ws, dimension_numbers=(((1,), (1,)), ((0,), (0,))))
+            state_new = _safe_dot(k_repeat * gating_backward, u_ws, dimension_numbers=(((1,), (1,)), ((0,), (0,))))
             state_curr = state_prev * gating_last + state_new
             state_vmem_db[db_idx, ...] = state_curr
             pltpu.make_async_copy(state_vmem_db.at[db_idx, ...], all_states_hbm_ref.at[batch_idx, chunk_idx + 1, ...], sem_state_fwd.at[db_idx]).start()
@@ -233,7 +241,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             iota_c_cumsum = jax.lax.broadcasted_iota(jnp.int32, (chunk_size, chunk_size), 1)
             lower_tri_mask = jnp.where(iota_r_cumsum >= iota_c_cumsum, 1.0, 0.0)
             gating_log_2d = gating_log[0]
-            g_cum_sum_log_2d = jax.lax.dot(
+            g_cum_sum_log_2d = _safe_dot(
                 lower_tri_mask.astype(gating_log_2d.dtype),
                 gating_log_2d
             )
@@ -253,56 +261,56 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             lower_mask = iota_r >= iota_c
             gating_map_masked = jnp.where(strictly_lower_mask, gating_map, 0)
             k_beta_repeat = k_repeat * beta_large
-            beta_k_k_t = jax.lax.dot(k_beta_repeat, k_repeat, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
+            beta_k_k_t = _safe_dot(k_beta_repeat, k_repeat, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
             gating_beta_k_k_t = gating_map_masked * beta_k_k_t
             t = jnp.where(identity_mask, 1, gating_beta_k_k_t)
             t_inv = invert_triangular_matrix(t)
             v_beta_large = v_large * beta_large
             k_beta_gating = k_beta_repeat * gating_forward
             merged_v_k = jnp.concat([v_beta_large, k_beta_gating], axis=-1)
-            merged_uw = jax.lax.dot(t_inv, merged_v_k, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            merged_uw = _safe_dot(t_inv, merged_v_k, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             u, w = jnp.split(merged_uw, [d_v], axis=-1)
             q_large_gating = q_repeat * gating_forward
             merged_w_q = jnp.concat([w, q_large_gating], axis=1)
-            merged_ws_out_updated = jax.lax.dot(merged_w_q, state_prev, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            merged_ws_out_updated = _safe_dot(merged_w_q, state_prev, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             ws, out_updated = jnp.split(merged_ws_out_updated, 2, axis=1)
             u_ws = u - ws
             k_repeat_gating = k_repeat * gating_backward
-            out_qk_raw = jax.lax.dot(q_large, k_large, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
+            out_qk_raw = _safe_dot(q_large, k_large, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
             out_qk_raw_repeated = jnp.repeat(out_qk_raw, v_per_kq_head, axis=0)
             out_qk = out_qk_raw_repeated * gating_map
             out_qk = jnp.where(lower_mask, out_qk, 0)
             d_out_new = d_out.reshape(chunk_size, n_v, d_v).swapaxes(0, 1)
             d_out_updated = d_out_new
-            d_out_qk = jax.lax.dot(d_out_new, u_ws, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
+            d_out_qk = _safe_dot(d_out_new, u_ws, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
             d_out_qk = jnp.where(lower_mask, d_out_qk, 0)
-            d_u_ws = jax.lax.dot(out_qk, d_out_new, dimension_numbers=(((1,), (1,)), ((0,), (0,))))
+            d_u_ws = _safe_dot(out_qk, d_out_new, dimension_numbers=(((1,), (1,)), ((0,), (0,))))
             d_state_new = d_state_next
-            d_k_repeat_gating = jax.lax.dot(d_state_new, u_ws, dimension_numbers=(((2,), (2,)), ((0,), (0,)))).swapaxes(1, 2)
-            d_u_ws += jax.lax.dot(k_repeat_gating, d_state_new, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            d_k_repeat_gating = _safe_dot(d_state_new, u_ws, dimension_numbers=(((2,), (2,)), ((0,), (0,)))).swapaxes(1, 2)
+            d_u_ws += _safe_dot(k_repeat_gating, d_state_new, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             d_u = d_u_ws
             d_ws = -d_u_ws
             d_merged_ws_out_updated = jnp.concat([d_ws, d_out_updated], axis=1)
-            d_merged_w_q = jax.lax.dot(d_merged_ws_out_updated, state_prev, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
+            d_merged_w_q = _safe_dot(d_merged_ws_out_updated, state_prev, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
             d_w, d_q_large_gating = jnp.split(d_merged_w_q, 2, axis=1)
-            d_state_prev = jax.lax.dot(merged_w_q, d_merged_ws_out_updated, dimension_numbers=(((1,), (1,)), ((0,), (0,))))
+            d_state_prev = _safe_dot(merged_w_q, d_merged_ws_out_updated, dimension_numbers=(((1,), (1,)), ((0,), (0,))))
             d_state_prev += d_state_next * gating_last
             d_merged_uw = jnp.concat([d_u, d_w], axis=-1)
-            d_t_inv = jax.lax.dot(d_merged_uw, merged_v_k, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
-            d_merged_v_k = jax.lax.dot(t_inv, d_merged_uw, dimension_numbers=(((1,), (1,)), ((0,), (0,))))
+            d_t_inv = _safe_dot(d_merged_uw, merged_v_k, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
+            d_merged_v_k = _safe_dot(t_inv, d_merged_uw, dimension_numbers=(((1,), (1,)), ((0,), (0,))))
             d_v_beta_large, d_k_beta_gating = jnp.split(d_merged_v_k, [d_v], axis=-1)
             t_inv_t = t_inv.swapaxes(1, 2)
-            d_t = -jax.lax.dot(t_inv_t, jax.lax.dot(d_t_inv, t_inv_t, dimension_numbers=(((2,), (1,)), ((0,), (0,)))) , dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            d_t = -_safe_dot(t_inv_t, _safe_dot(d_t_inv, t_inv_t, dimension_numbers=(((2,), (1,)), ((0,), (0,)))) , dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             d_t = jnp.where(strictly_lower_mask, d_t, 0)
             d_gating_beta_k_k_t = d_t
             d_beta_k_k_t = d_gating_beta_k_k_t * gating_map_masked
-            d_k_beta_repeat = jax.lax.dot(d_beta_k_k_t, k_repeat, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
-            d_k_repeat = jax.lax.dot(d_beta_k_k_t.swapaxes(1, 2), k_beta_repeat, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            d_k_beta_repeat = _safe_dot(d_beta_k_k_t, k_repeat, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            d_k_repeat = _safe_dot(d_beta_k_k_t.swapaxes(1, 2), k_beta_repeat, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             d_out_qk_unmasked = d_out_qk * gating_map
             d_out_qk_raw_repeated = d_out_qk_unmasked
             d_out_qk_raw = jnp.sum(d_out_qk_raw_repeated.reshape(n_kq, v_per_kq_head, chunk_size, chunk_size), axis=1)
-            d_q_large = jax.lax.dot(d_out_qk_raw, k_large, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
-            d_k_large = jax.lax.dot(d_out_qk_raw.swapaxes(1, 2), q_large, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            d_q_large = _safe_dot(d_out_qk_raw, k_large, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
+            d_k_large = _safe_dot(d_out_qk_raw.swapaxes(1, 2), q_large, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             d_q_repeat = d_q_large_gating * gating_forward
             d_k_beta_repeat += d_k_beta_gating * gating_forward
             d_k_repeat += d_k_beta_repeat * beta_large
@@ -336,7 +344,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             iota_c_rev = jax.lax.broadcasted_iota(jnp.int32, (chunk_size, chunk_size), 1)
             upper_tri_mask_rev = jnp.where(iota_r_rev <= iota_c_rev, 1.0, 0.0)
             d_g_cum_sum_log_2d = d_g_cum_sum_log_orig[0]
-            d_gating_log_2d = jax.lax.dot(
+            d_gating_log_2d = _safe_dot(
                 upper_tri_mask_rev.astype(d_g_cum_sum_log_2d.dtype),
                 d_g_cum_sum_log_2d
             )
