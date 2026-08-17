@@ -144,6 +144,88 @@ gemma4_31b_dict["text_config"].update(  # pyrefly: ignore[no-matching-overload]
 )
 
 
+# The `gemma4_unified` architecture: dense Gemma 4 text tower, encoder-free vision
+# embedder. Only text + vision are converted, so `audio_config` is left unset.
+gemma4_12b_dict = {
+    "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+    "audio_config": None,
+    "audio_token_id": 258881,
+    "boa_token_id": 256000,
+    "boi_token_id": 255999,
+    "dtype": "bfloat16",
+    "eoa_token_index": 258883,
+    "eoi_token_id": 258882,
+    "eos_token_id": [1, 106],
+    "image_token_id": 258880,
+    "initializer_range": 0.02,
+    "model_type": "gemma4_unified",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "attention_k_eq_v": True,
+        "bos_token_id": 2,
+        "dtype": "bfloat16",
+        "enable_moe_block": False,
+        "eos_token_id": 1,
+        "final_logit_softcapping": 30.0,
+        "global_head_dim": 512,
+        "head_dim": 256,
+        "hidden_activation": "gelu_pytorch_tanh",
+        "hidden_size": 3840,
+        "hidden_size_per_layer_input": 0,
+        "initializer_range": 0.02,
+        "intermediate_size": 15360,
+        "layer_types": [
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "full_attention",
+        ]
+        * 8,
+        "max_position_embeddings": 262144,
+        "model_type": "gemma4_unified_text",
+        "moe_intermediate_size": None,
+        "num_attention_heads": 16,
+        "num_experts": None,
+        "num_global_key_value_heads": 1,
+        "num_hidden_layers": 48,
+        "num_key_value_heads": 8,
+        "num_kv_shared_layers": 0,
+        "pad_token_id": 0,
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+            "full_attention": {"partial_rotary_factor": 0.25, "rope_theta": 1_000_000.0, "rope_type": "proportional"},
+            "sliding_attention": {"rope_theta": 10_000.0, "rope_type": "default"},
+        },
+        "sliding_window": 1024,
+        "tie_word_embeddings": True,
+        "top_k_experts": None,
+        "use_bidirectional_attention": "vision",
+        "use_cache": True,
+        "use_double_wide_mlp": False,
+        "vocab_size": 262144,
+        "vocab_size_per_layer_input": 262144,
+    },
+    "tie_word_embeddings": True,
+    "transformers_version": "5.10.0.dev0",
+    "video_token_id": 258884,
+    "vision_config": {
+        "initializer_range": 0.02,
+        "mm_embed_dim": 3840,
+        "mm_posemb_size": 1120,
+        "model_patch_size": 48,
+        "model_type": "gemma4_unified_vision",
+        "num_soft_tokens": 280,
+        "output_proj_dims": 3840,
+        "patch_size": 16,
+        "pooling_kernel_size": 3,
+        "rms_norm_eps": 1e-06,
+    },
+}
+
+
 gemma4_e2b_dict = {
     "architectures": ["Gemma4ForConditionalGeneration"],
     "audio_config": None,
@@ -263,12 +345,41 @@ gemma4_e4b_dict["text_config"].update(
 )
 
 
+def _restore_global_attention_overrides(config, config_dict):
+  """Puts the Gemma 4 global-attention overrides back on the flat text config.
+
+  Transformers keeps `global_head_dim` and `num_global_key_value_heads` in a per-layer
+  view rather than on the text config, so they do not survive `to_dict()`. The param and
+  shape maps read them from the flat text config, and the published config.json carries
+  them too, so set them back explicitly. Without this, global layers silently get the
+  sliding-layer head_dim / kv-head count.
+  """
+  text_config = config_dict["text_config"]
+  config.text_config.global_head_dim = text_config["global_head_dim"]
+  config.text_config.num_global_key_value_heads = text_config["num_global_key_value_heads"]
+
+
+try:
+  # Will execute successfully if Transformers is updated with Gemma 4 Unified support
+  # (`gemma4_unified` landed later than `gemma4`, so it gets its own try/except).
+  gemma4_12b_config = transformers.Gemma4UnifiedConfig(**gemma4_12b_dict)  # pyrefly: ignore[missing-attribute]
+  _restore_global_attention_overrides(gemma4_12b_config, gemma4_12b_dict)
+except AttributeError:
+  gemma4_12b_config = PTConfig(**gemma4_12b_dict)  # pytype: disable=wrong-arg-types
+
 try:
   # Will execute successfully if Transformers is updated with Gemma 4 support
   gemma4_26b_config = transformers.Gemma4Config(**gemma4_26b_dict)  # pyrefly: ignore[missing-attribute]
   gemma4_31b_config = transformers.Gemma4Config(**gemma4_31b_dict)  # pyrefly: ignore[missing-attribute]
   gemma4_e2b_config = transformers.Gemma4Config(**gemma4_e2b_dict)  # pyrefly: ignore[missing-attribute]
   gemma4_e4b_config = transformers.Gemma4Config(**gemma4_e4b_dict)  # pyrefly: ignore[missing-attribute]
+  for _gemma4_config, _gemma4_dict in (
+      (gemma4_26b_config, gemma4_26b_dict),
+      (gemma4_31b_config, gemma4_31b_dict),
+      (gemma4_e2b_config, gemma4_e2b_dict),
+      (gemma4_e4b_config, gemma4_e4b_dict),
+  ):
+    _restore_global_attention_overrides(_gemma4_config, _gemma4_dict)
 except AttributeError:
   # Graceful fallback to raw dict-based PTConfig if Gemma 4 natively is missing
   gemma4_26b_config = PTConfig(**gemma4_26b_dict)  # pytype: disable=wrong-arg-types
@@ -1892,6 +2003,7 @@ HF_MODEL_CONFIGS = {
     "gemma3-4b": gemma3_4b_config,
     "gemma3-12b": gemma3_12b_config,
     "gemma3-27b": gemma3_27b_config,
+    "gemma4-12b": gemma4_12b_config,
     "gemma4-26b": gemma4_26b_config,
     "gemma4-31b": gemma4_31b_config,
     "gemma4-e2b": gemma4_e2b_config,

@@ -50,6 +50,7 @@ HF_IDS = {
     "gemma3-4b": "google/gemma-3-4b-it",  # hf multi-modal should also support the pure-text
     "gemma3-12b": "google/gemma-3-12b-it",
     "gemma3-27b": "google/gemma-3-27b-it",
+    "gemma4-12b": "google/gemma-4-12B",
     "gemma4-26b": "google/gemma-4-26b-a4b-it",
     "gemma4-31b": "google/gemma-4-31b-it",
     "gemma4-e2b": "google/gemma-4-E2B-it",

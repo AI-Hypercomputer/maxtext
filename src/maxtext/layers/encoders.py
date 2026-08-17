@@ -69,6 +69,19 @@ class VisionEncoder(nnx.Module):
       setattr(
           self, projector_name, gemma4_vision.Gemma4VisionProjector(config=self.config, mesh=self.mesh, rngs=self.rngs)
       )
+    elif self.vision_encoder_block == VisionEncoderBlockType.GEMMA4_UNIFIED:
+      from maxtext.models import gemma4_vision  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "Gemma4UnifiedVisionEmbedder_0"
+      projector_name = "Gemma4VisionProjector_0"
+      setattr(
+          self,
+          encoder_name,
+          gemma4_vision.Gemma4UnifiedVisionEmbedder(config=self.config, mesh=self.mesh, rngs=self.rngs),
+      )
+      setattr(
+          self, projector_name, gemma4_vision.Gemma4VisionProjector(config=self.config, mesh=self.mesh, rngs=self.rngs)
+      )
     elif self.vision_encoder_block == VisionEncoderBlockType.QWEN3_5:
       from maxtext.models import qwen3_5_vision  # pylint: disable=import-outside-toplevel
 

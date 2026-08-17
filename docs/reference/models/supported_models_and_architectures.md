@@ -38,8 +38,8 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 
 ### Gemma
 
-- **Variants**: Gemma 1 (2B/7B), Gemma 2 (2B/9B/27B), Gemma 3 (4B/12B/27B), **Gemma 4 (31B Dense, MoE 26B-A4B)** (text & multimodal)
-- **Notes**: RMSNorm; RoPE; GELU/SwiGLU; **QK-Norm** (Gemma 3, 4); **Value Norm** (Gemma 4); Interleaved sliding-window & global attention (Gemma 3, 4); routed + shared experts (Gemma 4); long-context scaling.
+- **Variants**: Gemma 1 (2B/7B), Gemma 2 (2B/9B/27B), Gemma 3 (4B/12B/27B), **Gemma 4 (12B Unified, 31B Dense, MoE 26B-A4B)** (text & multimodal)
+- **Notes**: RMSNorm; RoPE; GELU/SwiGLU; **QK-Norm** (Gemma 3, 4); **Value Norm** (Gemma 4); Interleaved sliding-window & global attention (Gemma 3, 4); routed + shared experts (Gemma 4); long-context scaling. Gemma 4 12B is the `gemma4_unified` architecture: the dense Gemma 4 text tower paired with an **encoder-free vision embedder** that projects raw merged pixel patches into the LM space instead of running a ViT.
 
 ### DeepSeek
 

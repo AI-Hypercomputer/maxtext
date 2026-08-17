@@ -264,7 +264,10 @@ def GEMMA4_HF_WEIGHTS_TO_SHAPE(config):
       shapes[f"{hf_prefix}.mlp.up_proj.weight"] = [intermediate_size, hidden_size]
       shapes[f"{hf_prefix}.mlp.down_proj.weight"] = [hidden_size, intermediate_size]
 
-  if vision_cfg:
+  # The `gemma4_unified` (12B) vision config describes an encoder-free embedder and
+  # carries none of the ViT trunk keys below; its shapes come from
+  # GEMMA4_UNIFIED_HF_WEIGHTS_TO_SHAPE, which calls this function for the text side.
+  if vision_cfg and "num_hidden_layers" in vision_cfg:
     vis_hidden = vision_cfg["hidden_size"]
     vis_intermediate = vision_cfg["intermediate_size"]
     vis_num_layers = vision_cfg["num_hidden_layers"]
@@ -302,6 +305,53 @@ def GEMMA4_HF_WEIGHTS_TO_SHAPE(config):
       shapes[f"{vis_prefix}.mlp.gate_proj.linear.weight"] = [vis_intermediate, vis_hidden]
       shapes[f"{vis_prefix}.mlp.up_proj.linear.weight"] = [vis_intermediate, vis_hidden]
       shapes[f"{vis_prefix}.mlp.down_proj.linear.weight"] = [vis_hidden, vis_intermediate]
+
+  return shapes
+
+
+def GEMMA4_UNIFIED_HF_WEIGHTS_TO_SHAPE(config):
+  """Generates HF parameter shapes for Gemma 4 Unified (12B).
+
+  The text tower is identical to the dense Gemma 4 tower, so the text shapes come
+  straight from ``GEMMA4_HF_WEIGHTS_TO_SHAPE``. Only the vision side differs: there
+  is no ViT trunk, just the patch embedder (``model.vision_embedder.*``) plus the
+  shared multimodal projection (``model.embed_vision.embedding_projection.weight``).
+
+  Args:
+    config (dict): The Hugging Face model configuration dictionary, with
+      'text_config' and a 'gemma4_unified_vision'-style 'vision_config'.
+
+  Returns:
+    dict: A dictionary mapping Hugging Face parameter names to their shapes.
+  """
+  shapes = GEMMA4_HF_WEIGHTS_TO_SHAPE(config)
+
+  vision_cfg = config.get("vision_config", {})
+  if vision_cfg:
+    text_cfg = config.get("text_config", config)
+    hidden_size = text_cfg["hidden_size"]
+    mm_embed_dim = vision_cfg["mm_embed_dim"]
+    # Model patches are the pooled teacher patches: (16 * 3)**2 * 3 = 6912. HF exposes
+    # `model_patch_size` as a derived property, so it survives the raw config dict but
+    # not `Gemma4UnifiedVisionConfig.to_dict()`; derive it when it is absent.
+    model_patch_size = vision_cfg.get("model_patch_size") or (
+        vision_cfg["patch_size"] * vision_cfg["pooling_kernel_size"]
+    )
+    patch_flat = 3 * model_patch_size**2
+
+    shapes["model.vision_embedder.patch_ln1.weight"] = [patch_flat]
+    shapes["model.vision_embedder.patch_ln1.bias"] = [patch_flat]
+    # patch_dense is a linear [patch_flat, mm_embed_dim] transposed to [mm_embed_dim, patch_flat]
+    shapes["model.vision_embedder.patch_dense.weight"] = [mm_embed_dim, patch_flat]
+    shapes["model.vision_embedder.patch_dense.bias"] = [mm_embed_dim]
+    shapes["model.vision_embedder.patch_ln2.weight"] = [mm_embed_dim]
+    shapes["model.vision_embedder.patch_ln2.bias"] = [mm_embed_dim]
+    # Factorized position table; HF and MaxText agree on the (N, 2, D) layout here,
+    # unlike the ViT variants where HF stores (2, N, D).
+    shapes["model.vision_embedder.pos_embedding"] = [vision_cfg["mm_posemb_size"], 2, mm_embed_dim]
+    shapes["model.vision_embedder.pos_norm.weight"] = [mm_embed_dim]
+    shapes["model.vision_embedder.pos_norm.bias"] = [mm_embed_dim]
+    shapes["model.embed_vision.embedding_projection.weight"] = [hidden_size, vision_cfg["output_proj_dims"]]
 
   return shapes
 
@@ -1284,6 +1334,7 @@ HF_SHAPE = {
     "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+    "gemma4-12b": GEMMA4_UNIFIED_HF_WEIGHTS_TO_SHAPE,
     "gemma4-26b": GEMMA4_HF_WEIGHTS_TO_SHAPE,
     "gemma4-31b": GEMMA4_HF_WEIGHTS_TO_SHAPE,
     "gemma4-e2b": GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE,

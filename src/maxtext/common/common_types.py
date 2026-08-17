@@ -126,6 +126,7 @@ class VisionEncoderBlockType(enum.Enum):
   LLAMA4 = "llama4"
   QWEN3_OMNI = "qwen3_omni"
   GEMMA4 = "gemma4"
+  GEMMA4_UNIFIED = "gemma4_unified"  # Encoder-free patch embedder, no ViT trunk (gemma4-12b).
   QWEN3_5 = "qwen3_5"
   QWEN3_VL = "qwen3_vl"
 
