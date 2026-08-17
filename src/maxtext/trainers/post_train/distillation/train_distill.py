@@ -552,16 +552,29 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     # 3. Restore Model & Optimizer State correctly via MaxTextCheckpointManager.
     # Accessing protected variables of the base class IS allowed inside the subclass!
-    self._train_steps, self._restored_custom_metadata = self.checkpoint_manager.maybe_restore(
-        self.model,
-        self.optimizer,
-        restore_only_lora_params=getattr(self, "_lora_enabled", False),
-    )
+    #
+    # post_train_skip_checkpointing covers restore as well as save. A run carrying the flag wants
+    # nothing to do with the checkpoint directory, and a partial checkpoint left there by an
+    # earlier run is not a state it can resume from: the 0816 rerun died in maybe_restore with
+    # "restore item and on-disk value metadata tree structures do not match", reading a step-1
+    # checkpoint that a previous broken run had written into the same path.
+    if getattr(config, "post_train_skip_checkpointing", False):
+      max_logging.log("post_train_skip_checkpointing=True: starting from step 0, not restoring.")
+      # An empty dict rather than None: tunix/rl/trainer.py reads this with .get(), and while
+      # distillation does not take that path today, a None here would be a live trap for whoever
+      # does.
+      self._train_steps, self._restored_custom_metadata = 0, {}
+    else:
+      self._train_steps, self._restored_custom_metadata = self.checkpoint_manager.maybe_restore(
+          self.model,
+          self.optimizer,
+          restore_only_lora_params=getattr(self, "_lora_enabled", False),
+      )
     grad_accum_steps = self.config.get_with_default("gradient_accumulation_steps", 1)
     self._iter_steps = self._train_steps * grad_accum_steps
 
     # 4. Restore input state (if applicable)
-    if enable_checkpointing:
+    if enable_checkpointing and not getattr(config, "post_train_skip_checkpointing", False):
       restored_iter = self.checkpoint_manager.restore_iterator()
       if restored_iter is not None:
         max_logging.log("Restored input pipeline state to match model step.")
@@ -647,8 +660,23 @@ def build_training_components(
   # Prepare optimizer
   optimizer = get_distillation_optimizer(student_config, student_config.steps)
 
+  # post_train_skip_checkpointing is honoured here as well as in post_train/checkpointing.py's
+  # install(). Distillation does not go through install() -- it builds its own manager -- so a flag
+  # applied only there left this path saving anyway: the 0815 matrix passed the flag and every case
+  # still wrote a checkpoint at step 1, several dying in that save after training had already
+  # produced a loss.
+  #
+  # Widening the interval rather than removing the manager: Tunix's PeftTrainer.train calls
+  # self.checkpoint_manager.save() on every update step with no None check, so setting the manager
+  # to None killed all 15 cases with AttributeError before any of them reached a loss. An interval
+  # past the last step leaves that call in place and lets Orbax decline it.
+  save_interval = student_config.checkpoint_period
+  if getattr(student_config, "post_train_skip_checkpointing", False):
+    save_interval = student_config.steps + 1_000_000
+    max_logging.log(f"post_train_skip_checkpointing=True: save_interval_steps={save_interval}, no checkpoint will be written.")
+
   checkpointing_options = checkpoint.CheckpointManagerOptions(
-      save_interval_steps=student_config.checkpoint_period,
+      save_interval_steps=save_interval,
       max_to_keep=student_config.max_num_checkpoints_to_keep,
       enable_async_checkpointing=student_config.async_checkpointing,
       create=True,
@@ -839,7 +867,11 @@ def train_distill(
     apply_lti_model_update(student_model, student_config)
 
   # 9. Final Save (Conditional)
-  if student_config.save_checkpoint_on_completion:
+  # The widened save_interval_steps above does not cover this block: it saves with force=True,
+  # which bypasses the interval entirely. Both have to be off for a run to write nothing.
+  if student_config.save_checkpoint_on_completion and not getattr(
+      student_config, "post_train_skip_checkpointing", False
+  ):
     should_save = student_config.steps % student_config.checkpoint_period
 
     if should_save:

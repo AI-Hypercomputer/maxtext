@@ -3,8 +3,10 @@ Optimized for XPK execution.
 """
 
 import os
+import re
 import subprocess
 import csv
+import shlex
 import json
 import sys
 
@@ -33,32 +35,43 @@ except ImportError:
 # after it. The cases known to run cleanly go first so their results survive; the ones that are
 # expected to fail, or have been seen to take the pod down, go last.
 CASES = [
-    ("gemma2-2b", "scanned"),
-    ("gemma2-2b", "unscanned"),
-    ("gemma3-4b", "scanned"),
-    ("gemma3-4b", "unscanned"),
     ("qwen3-0.6b", "scanned"),
     ("qwen3-0.6b", "unscanned"),
     ("qwen2.5-1.5b", "scanned"),
     ("qwen2.5-1.5b", "unscanned"),
+    ("gemma2-2b", "scanned"),
+    ("gemma2-2b", "unscanned"),
+    ("gemma3-4b", "scanned"),
+    ("gemma3-4b", "unscanned"),
+    # Crash-looped the Pathways workers on a previous run, so it sits after the cases that are
+    # known to behave rather than ahead of them.
+    ("gemma4-e2b", "unscanned"),
+    ("llama3-8b", "scanned"),
+    ("llama3-8b", "unscanned"),
+    ("gemma4-31b", "scanned"),
+    ("gemma4-31b", "unscanned"),
+    # Last among the runnable cases because it crash-loops the pod rather than failing its own
+    # case: on 08150133 it restarted until the jobset hit its restart limit, which ended the run
+    # with 18 cases still unattempted. Why it crashes is not established -- the last line before
+    # the restarts is a "Metadata file does not exist: ..._CHECKPOINT_METADATA" warning, but
+    # llama3-8b's checkpoint lacks that file too and decodes fine, so the warning is not the
+    # cause. Running it last keeps the question open without costing the other cases.
+    ("qwen3-vl-2b", "unscanned"),
+    # The rest have no converted checkpoint to decode from, and are kept so the matrix reports why
+    # rather than silently omitting them:
+    #   mistral-7b     - conversion is unsupported; wiring it to the Llama mapping converted
+    #                    cleanly and produced numerically wrong weights (KL 1.3e-1 vs a 3e-3
+    #                    threshold), so it was removed again.
+    #   deepseek4-tiny - a unit-test shape with no HuggingFace repo to convert from.
+    #   deepseek*      - bf16 trees of 568 GiB and 1342 GiB against 187 GiB of host memory.
     ("mistral-7b", "scanned"),
     ("mistral-7b", "unscanned"),
-    # Crash-looped the Pathways workers on the previous run; kept, but last among the runnable
-    # cases so it cannot take the others down with it.
-    ("gemma4-e2b", "unscanned"),
-    # The three below are expected to fail on this v6e-32, for reasons that are not configuration:
-    #   deepseek4-tiny  - a unit-test shape with no HuggingFace config, which vLLM needs for the
-    #                     model geometry; it can only borrow V4-Flash's 284B dimensions.
-    #   deepseek3-671b  - ~1342GiB of bf16 weights against the slice's 1024GiB of HBM.
-    #   gemma4-31b      - no converted checkpoint exists in any layout (the bucket has 26b).
     ("deepseek4-tiny", "scanned"),
     ("deepseek4-tiny", "unscanned"),
     ("deepseek4-284b", "scanned"),
     ("deepseek4-284b", "unscanned"),
     ("deepseek3-671b", "scanned"),
     ("deepseek3-671b", "unscanned"),
-    ("gemma4-31b", "scanned"),
-    ("gemma4-31b", "unscanned"),
 ]
 
 # The Pathways workers do not survive many vLLM engines in one pod: two separate runs crash-looped
@@ -106,6 +119,13 @@ DEEPSEEK_PARALLELISM = {
 # makes vLLM fall back to load_format="dummy" (random weights). The generated text is garbage, but
 # the run still exercises model build, sharding and the scanned/unscanned code paths end to end.
 HF_CONVERSIONS = "gs://mesa-maxtext/huggingface_transformers"
+
+# What the conversion matrix in run_hf_convert_matrix_xpk_internal.py writes. Preferred over
+# everything in BASE_CHECKPOINTS below when a case has one, so that decode tests the checkpoints
+# this repo produces today rather than older conversions or, worse, the dummy random weights that
+# several entries below fall back to -- a decode from random weights exercises model build and
+# sharding but says nothing about whether the conversion was right.
+FRESH_CONVERSIONS = "gs://mesa-maxtext/hf_conversions_xpk"
 
 BASE_CHECKPOINTS = {
     # No conversion exists for these, so they decode from random weights.
@@ -173,6 +193,7 @@ DEFAULT_HBM_UTILIZATION = 0.5
 # prompt instead, which is the right thing for a base model.
 NO_CHAT_TEMPLATE = {
     "gemma2-2b",  # google/gemma-2-2b
+    "llama3-8b",  # meta-llama/Meta-Llama-3-8B -- the base repo, not -Instruct
     "mistral-7b",  # mistralai/Mistral-7B-v0.3
     "deepseek4-284b",  # deepseek-ai/DeepSeek-V4-Flash
     "deepseek4-tiny",  # borrows the V4-Flash tokenizer
@@ -182,6 +203,90 @@ NO_CHAT_TEMPLATE = {
 def get_hf_id(model_name):
   """Returns the HuggingFace repo id backing a MaxText model name."""
   return HF_IDS.get(model_name) or HF_ID_FALLBACKS.get(model_name, model_name)
+
+
+def first_error(log_path):
+  """Returns the most informative exception line from a failed run, for the summary.
+
+  Interpreter teardown emits its own errors after the real one, so the last matching line is
+  usually the least useful; the first line that reads like "SomeError: what happened" is kept
+  instead of whichever line came last.
+  """
+  wanted = ("Error", "Exception", "RESOURCE_EXHAUSTED", "Killed", "AssertionError", "No space left")
+  # "Config param autoregressive_decode_assert:" matches on "assert" and is printed for every run,
+  # so without this the summary for a failure reports a config line instead of the exception. The
+  # vLLM banner lines are excluded for the same reason: they name the model and quantization
+  # config, which routinely contain "error" substrings from unrelated fields.
+  noise = (
+      "sys.meta_path is None",
+      "Python is likely shutting down",
+      "pyconfig.py:584",
+      "Config param",
+      "Initializing a V1 LLM engine",
+      # Printed on every run, including runs that succeed: vLLM's TPU path has no compiled _C
+      # extension and says so at import. It matched on "Error" from the ModuleNotFoundError inside
+      # the message and became the reported cause for all ten failures in the 0815 matrix, hiding
+      # four genuinely different ones (a missing chat template, HBM exhaustion, a mesh axis
+      # mismatch, and an AttributeError in the weight mapping).
+      "Failed to import from vllm._C",
+      "Failed to import from vllm._moe_C",
+  )
+  try:
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+      lines = [ln.strip() for ln in f if any(w in ln for w in wanted) and not any(n in ln for n in noise)]
+  except OSError:
+    return ""
+  formatted = [ln for ln in lines if re.match(r"^[\w.]*(Error|Exception)\b.*:", ln)]
+  chosen = formatted or lines
+  return chosen[0][:150] if chosen else ""
+
+
+def case_log_path(model, scan_mode):
+  """One file per model and layout, matching the conversion matrix's layout."""
+  return f"{LOCAL_LOGS}/{scan_mode}/{model}_vllm_decode.log"
+
+
+def record_case(model, scan_mode, status, detail, command=None):
+  """Writes one case's outcome to its own log and to the roll-up, then ships the log.
+
+  Uploaded per case rather than at the end: a decode that takes the pod down -- gemma4-e2b
+  crash-looped the Pathways workers once already -- would otherwise take every earlier case's log
+  with it.
+  """
+  with open(CSV_REPORT, "a", newline="", encoding="utf-8") as f:
+    csv.writer(f).writerow([model, scan_mode, "vllm_decode", status, detail])
+
+  log_path = case_log_path(model, scan_mode)
+  os.makedirs(os.path.dirname(log_path), exist_ok=True)
+  with open(log_path, "a", encoding="utf-8") as f:
+    if command and not os.path.getsize(log_path):
+      f.write(f"Command: {command}\n\n")
+    f.write(f"\n{'=' * 100}\nRESULT: {status}\nDETAIL: {detail}\n")
+
+  remote = f"{FRESH_CONVERSIONS}/_reports/{model}_{scan_mode}_vllm_decode.log"
+  if subprocess.run(["gcloud", "storage", "cp", log_path, remote], check=False).returncode == 0:
+    print(f"[INFO] log -> {remote}")
+  else:
+    print(f"[WARN] could not copy {log_path} to {remote}")
+
+
+def fresh_checkpoint(model, scan_mode):
+  """Returns this repo's own converted checkpoint for a case, or "" when it has none."""
+  return f"{FRESH_CONVERSIONS}/{model}/{scan_mode}/0/items"
+
+
+def checkpoint_exists(path):
+  """True when a checkpoint is actually present, not merely named.
+
+  Checked before the case runs because the alternative is a vLLM failure many minutes in, whose
+  message is about a missing tensor rather than about the checkpoint that was never built.
+  """
+  if not path:
+    return False
+  result = subprocess.run(
+      ["gcloud", "storage", "ls", f"{path}/"], capture_output=True, text=True, check=False
+  )
+  return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def execute_command(cmd, log_path):
@@ -222,9 +327,22 @@ def run_matrix():
     scan_bool = "True" if scan_mode == "scanned" else "False"
 
     run_name = "ckpt_pretrain_base"
-    load_path = BASE_CHECKPOINTS.get(
-        (model, scan_mode), f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/9/items"
-    )
+    # This repo's own conversion first, then the older per-case entries, then the pre-train layout.
+    load_path = fresh_checkpoint(model, scan_mode)
+    if checkpoint_exists(load_path):
+      print(f"[INFO] Decoding from this run's conversion: {load_path}")
+    else:
+      load_path = BASE_CHECKPOINTS.get(
+          (model, scan_mode), f"{GCS_BASE}/{scan_mode}/pre_train/{model}/{run_name}/checkpoints/9/items"
+      )
+      if not checkpoint_exists(load_path):
+        # Reported rather than run. vLLM would otherwise spend minutes building the model before
+        # failing on a missing tensor, and the message would describe that tensor rather than the
+        # checkpoint that was never converted in the first place.
+        detail = "no converted checkpoint (conversion FAILED or was SKIPPED for this case)"
+        print(f"[SKIP] {model} | {scan_mode} | {detail}")
+        record_case(model, scan_mode, "SKIP", detail, command=None)
+        continue
     hf_overrides = {"architectures": ["MaxTextForCausalLM"]}
     if "deepseek" in model:
       # An empty dict, not None. vLLM's DeepseekV4FP8Config.override_quantization_method only
@@ -304,16 +422,15 @@ def run_matrix():
       # getting byte-identical output. Kept only because it matches the original script.
       cmd.append("use_standalone_converter=True")
 
-    log_path = f"{LOCAL_LOGS}/{scan_mode}/{model}_vllm_decode.log"
+    log_path = case_log_path(model, scan_mode)
     success = execute_command(cmd, log_path)
     if not success:
-        all_passed = False
+      all_passed = False
 
     status = "PASS" if success else "FAIL"
-    print(f"[{status}] {model} | {scan_mode} | vllm_decode")
-    with open(CSV_REPORT, "a", newline="", encoding="utf-8") as f:
-      writer = csv.writer(f)
-      writer.writerow([model, scan_mode, "vllm_decode", run_name, status])
+    detail = f"decoded from {load_path}" if success else (first_error(log_path) or "see log")
+    print(f"[{status}] {model} | {scan_mode} | {detail}")
+    record_case(model, scan_mode, status, detail, command=" ".join(shlex.quote(str(c)) for c in cmd))
 
   print("\n" + "="*80)
   print("VLLM VALIDATION SUMMARY")

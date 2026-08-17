@@ -78,17 +78,36 @@ if [ -n "${MAXTEXT_PATCH_FILES:-}" ]; then
             exit 1
         fi
     done
-    PATCH_B64=$(tar -czf - $MAXTEXT_PATCH_FILES | base64 -w 0)
-    PATCH_CMD="echo '${PATCH_B64}' | base64 -d | tar -xzvf - -C /deps; "
-    echo "Shipping local patches into /deps: ${MAXTEXT_PATCH_FILES}"
+    # Staged through GCS rather than inlined. The command string is passed as a process argument,
+    # and base64 of a few large sources overruns ARG_MAX: ten files here came to 184KB and the
+    # submission died with "Argument list too long". Size is not obvious from the file list --
+    # param_mapping.py alone is 202KB -- so this does not depend on remembering to keep it small.
+    PATCH_TAR="/tmp/maxtext_patch_${WORKLOAD_NAME}.tar.gz"
+    PATCH_GCS="gs://mesa-maxtext/xpk_patches/${WORKLOAD_NAME}.tar.gz"
+    tar -czf "$PATCH_TAR" $MAXTEXT_PATCH_FILES
+    if ! /usr/bin/gcloud storage cp "$PATCH_TAR" "$PATCH_GCS" >/dev/null 2>&1; then
+        echo "❌ ERROR: failed to stage patches to $PATCH_GCS"
+        exit 1
+    fi
+    PATCH_CMD="gcloud storage cp ${PATCH_GCS} /tmp/patch.tar.gz && tar -xzvf /tmp/patch.tar.gz -C /deps; "
+    echo "Shipping local patches via ${PATCH_GCS}: ${MAXTEXT_PATCH_FILES}"
 fi
 
 # Final command executed INSIDE the K8s pod
+# Every MATRIX_*, VERIFY_* and GCSFUSE_* variable that is set is forwarded, rather than a fixed
+# list naming them one by one. That list silently dropped anything not on it: a VERIFY_EXTRA_FLAGS
+# passed to test one config override never reached the pod, the inner script fell back to its
+# default, and the run looked like a clean result for the override rather than a run without it.
+FORWARDED_ENV=""
+for _var in $(compgen -v | grep -E '^(MATRIX_|VERIFY_|GCSFUSE_)' | sort); do
+    FORWARDED_ENV="${FORWARDED_ENV}export ${_var}=$(printf '%q' "${!_var}"); "
+done
+
 XPK_COMMAND="set -xue; \
 export JAX_PLATFORMS='proxy,cpu'; \
 export JAX_BACKEND_TARGET='grpc://127.0.0.1:29000'; \
 export HF_TOKEN='${HF_TOKEN}'; \
-export MATRIX_CASE_SLICE='${MATRIX_CASE_SLICE:-}'; \
+${FORWARDED_ENV}\
 sed -i 's/\${HF_TOKEN}//g' /deps/src/maxtext/configs/base.yml || true; \
 ${PATCH_CMD}\
 echo '$INNER_SCRIPT_B64' | base64 -d > /tmp/matrix_internal.py; \
@@ -96,6 +115,10 @@ python3 /tmp/matrix_internal.py"
 
 
 echo "Submitting to K8s via XPK..."
+# PIPESTATUS, not the pipeline's status: `if ! xpk ... | tee` tests tee, which succeeds even when
+# xpk does not. That masked an "Argument list too long" failure and left the script waiting 100
+# minutes for a pod that was never going to be created.
+set -o pipefail
 if ! xpk workload create-pathways \
     --cluster="$CLUSTER_NAME" \
     --workload="$WORKLOAD_NAME" \
@@ -188,14 +211,42 @@ while true; do
 done
 
 FULL_POD_LOG_FILE="${BASE_LOG_DIR}/${WORKLOAD_NAME}_full_pod.log"
+sync_reports() {
+    # Runs on both the success and the failure path: a run that dies partway still produced
+    # results for the cases that finished, and those are exactly the ones worth keeping.
+    local gcs="${MATRIX_REPORTS_GCS:-gs://mesa-maxtext/hf_conversions_xpk/_reports}"
+    local dest="${MATRIX_REPORTS_LOCAL:-$(dirname "$LOCAL_LOG_FILE")/reports}"
+    /usr/bin/gcloud storage ls "${gcs}/" >/dev/null 2>&1 || return 0
+    mkdir -p "$dest"
+    if /usr/bin/gcloud storage cp "${gcs}/*" "$dest/" >/dev/null 2>&1; then
+        echo "Reports synced to $dest"
+    else
+        echo "[WARN] could not sync reports from ${gcs}"
+    fi
+}
+
 echo "Dumping full pod logs to $FULL_POD_LOG_FILE..."
 /usr/bin/kubectl logs "$POD_NAME" -c jax-tpu > "$FULL_POD_LOG_FILE" 2>&1
 
 # --- Phase 3: Final Status Check ---
+
+# Before the failure branch below, which exits: a failed run still has results worth keeping.
+sync_reports
+
 if [ "$POD_STATUS" == "Succeeded" ]; then
     echo "✅ SUCCESS: Finished $WORKLOAD_NAME."
     exit 0
 else
     echo "❌ ERROR: $WORKLOAD_NAME failed (Status: $POD_STATUS)."
+
+    # The container logs stop mid-sentence when the pod is killed rather than exiting, and say
+    # nothing about why: an OOMKilled container, an evicted pod and a node that went away all look
+    # identical from inside. Kubernetes knows which it was, so ask it before the pod is collected.
+    # Both commands are best-effort; a pod that has already gone simply prints nothing.
+    echo "--- Container termination state ---"
+    /usr/bin/kubectl get pod "$POD_NAME" -o jsonpath='{range .status.containerStatuses[*]}{.name}{": "}{.state}{" last="}{.lastState}{"\n"}{end}' 2>&1 | head -20
+    echo ""
+    echo "--- Pod events ---"
+    /usr/bin/kubectl describe pod "$POD_NAME" 2>&1 | sed -n '/^Events:/,$p' | head -25
     exit 1
 fi

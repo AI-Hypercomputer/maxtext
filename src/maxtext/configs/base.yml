@@ -55,6 +55,8 @@ save_checkpoint_on_start: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
 checkpoint_period: 10_000
+# Post-training only: skip installing a checkpoint manager, so nothing is written back.
+post_train_skip_checkpointing: false
 max_num_checkpoints_to_keep: None
 enable_continuous_checkpointing: false
 # enables one replica to read the ckpt then broadcast to the rest

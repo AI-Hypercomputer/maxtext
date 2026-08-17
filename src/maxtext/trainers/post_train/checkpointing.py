@@ -415,6 +415,21 @@ def install(trainer, checkpoint_dir: str, config=None) -> None:
     checkpoint_dir: Directory to read and write checkpoints in.
     config: The run's config, read for the metadata the checkpoint stores.
   """
+  # enable_checkpointing is a documented MaxText flag, and until now this path ignored it: the
+  # manager was installed regardless, so Tunix saved at the end of training no matter what the
+  # config said. That save is not free -- an 8B SFT writes 44.9 GiB and the transfer to host
+  # OOMKills the container -- so being able to turn it off is the difference between a smoke test
+  # that reports whether the trainer runs and one that cannot get past its first save.
+  # post_train_skip_checkpointing exists because neither existing flag can say this:
+  # enable_checkpointing is validated as required whenever load_parameters_path is set, and
+  # checkpoint_period=0 makes the shared checkpointing path raise ZeroDivisionError on
+  # `step % config.checkpoint_period`.
+  if config is not None and (
+      not getattr(config, "enable_checkpointing", True) or getattr(config, "post_train_skip_checkpointing", False)
+  ):
+    max_logging.log("Checkpoint saving disabled: skipping post-train checkpoint manager install.")
+    return
+
   if trainer.checkpoint_manager is not None:
     trainer.checkpoint_manager.close()
 
