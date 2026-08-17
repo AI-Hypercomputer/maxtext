@@ -915,6 +915,157 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
       )
 
 
+class FlashAttentionKvHeadShardingTest(unittest.TestCase):
+  """Tests K/V head sharding for TPU flash attention."""
+
+  def test_replicates_kv_head_axis_for_mqa(self):
+    # pylint: disable=protected-access
+    mesh = types.SimpleNamespace(shape={"expert": 8, "tensor": 8})
+    spec = jax.sharding.PartitionSpec("expert", "tensor", None, None)
+
+    self.assertEqual(
+        attention_op._replicate_indivisible_mqa_kv_head_axis(spec, 1, mesh),
+        jax.sharding.PartitionSpec("expert", None, None, None),
+    )
+
+  def test_keeps_kv_head_axis_when_kv_heads_divide_shards(self):
+    # pylint: disable=protected-access
+    mesh = types.SimpleNamespace(shape={"expert": 8, "tensor": 8})
+    spec = jax.sharding.PartitionSpec("expert", "tensor", None, None)
+
+    self.assertEqual(attention_op._replicate_indivisible_mqa_kv_head_axis(spec, 8, mesh), spec)
+
+  def test_indivisible_non_mqa_gqa_is_left_untouched(self):
+    """Multiple replicated K/V heads would change shard-local Q-to-K/V grouping."""
+    # pylint: disable=protected-access
+    mesh = types.SimpleNamespace(shape={"tensor": 4})
+    spec = jax.sharding.PartitionSpec("expert", "tensor", None, None)
+
+    self.assertEqual(attention_op._replicate_indivisible_mqa_kv_head_axis(spec, 2, mesh), spec)
+    self.assertEqual(attention_op._replicate_indivisible_mqa_kv_head_axis(spec, 3, mesh), spec)
+    self.assertEqual(attention_op._replicate_indivisible_mqa_kv_head_axis(spec, 6, mesh), spec)
+
+
+class FlashAttentionShardedHeadAxisTest(unittest.TestCase):
+  """Tests TPU flash attention over a sharded head axis on CPU."""
+
+  _TENSOR_PARALLELISM = 4
+  _SEQUENCE_LENGTH = 128
+  _HEAD_DIM = 64
+
+  def setUp(self):
+    super().setUp()
+    device_count = len(jax.devices())
+    if device_count < self._TENSOR_PARALLELISM or device_count % self._TENSOR_PARALLELISM:
+      self.skipTest(
+          f"Needs a device count that is a positive multiple of {self._TENSOR_PARALLELISM}, got {device_count}."
+      )
+
+  def _build_op(self, *, num_query_heads, num_kv_heads):
+    seq = self._SEQUENCE_LENGTH
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        per_device_batch_size=1.0,
+        run_name="flash_sharded_head_axis_test",
+        enable_checkpointing=False,
+        max_target_length=seq,
+        base_num_query_heads=num_query_heads,
+        base_num_kv_heads=num_kv_heads,
+        head_dim=self._HEAD_DIM,
+        attention="flash",
+        use_jax_splash=True,
+        use_tokamax_splash=False,
+        ici_tensor_parallelism=self._TENSOR_PARALLELISM,
+        ici_fsdp_parallelism=-1,
+        sa_block_q=seq,
+        sa_block_kv=seq,
+        sa_block_kv_compute=seq,
+        sa_block_q_dkv=seq,
+        sa_block_kv_dkv=seq,
+        sa_block_kv_dkv_compute=seq,
+        sa_block_q_dq=seq,
+        sa_block_kv_dq=seq,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
+    self.assertEqual(mesh.shape["tensor"], self._TENSOR_PARALLELISM)
+    op = AttentionOp(
+        config=config,
+        mesh=mesh,
+        attention_kernel="flash",
+        max_target_length=config.max_target_length,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        dtype=jnp.float32,
+        rngs=nnx.Rngs(params=0),
+    )
+    return config, mesh, op
+
+  def _random_qkv(self, batch, num_query_heads, num_kv_heads):
+    shape = lambda heads: (batch, self._SEQUENCE_LENGTH, heads, self._HEAD_DIM)
+    return (
+        jax.random.normal(jax.random.PRNGKey(0), shape(num_query_heads), jnp.float32),
+        jax.random.normal(jax.random.PRNGKey(1), shape(num_kv_heads), jnp.float32),
+        jax.random.normal(jax.random.PRNGKey(2), shape(num_kv_heads), jnp.float32),
+    )
+
+  @staticmethod
+  def _reference_causal_attention(query, key, value):
+    """Computes unsharded dense causal GQA."""
+    group_size = query.shape[2] // key.shape[2]
+    logits = jnp.einsum("bqhd,bkhd->bhqk", query, jnp.repeat(key, group_size, axis=2))
+    causal = jnp.tril(jnp.ones((query.shape[1], key.shape[1]), dtype=bool))
+    probs = jax.nn.softmax(jnp.where(causal[None, None], logits, DEFAULT_MASK_VALUE), axis=-1)
+    return jnp.einsum("bhqk,bkhd->bqhd", probs, jnp.repeat(value, group_size, axis=2))
+
+  def test_mqa_over_sharded_head_axis_matches_unsharded_reference(self):
+    num_query_heads = self._TENSOR_PARALLELISM
+    config, mesh, op = self._build_op(num_query_heads=num_query_heads, num_kv_heads=1)
+    query, key, value = self._random_qkv(config.global_batch_size_to_train_on, num_query_heads, 1)
+
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+      out, _ = op.tpu_flash_attention(query, key, value, None, None, None)
+
+    np.testing.assert_allclose(
+        jax.device_get(out),
+        jax.device_get(self._reference_causal_attention(query, key, value)),
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+  def test_mqa_over_sharded_head_axis_matches_unsharded_reference_gradients(self):
+    num_query_heads = self._TENSOR_PARALLELISM
+    config, mesh, op = self._build_op(num_query_heads=num_query_heads, num_kv_heads=1)
+    query, key, value = self._random_qkv(config.global_batch_size_to_train_on, num_query_heads, 1)
+
+    def flash_loss(q, k, v):
+      out, _ = op.tpu_flash_attention(q, k, v, None, None, None)
+      return jnp.sum(out * out)
+
+    def reference_loss(q, k, v):
+      return jnp.sum(self._reference_causal_attention(q, k, v) ** 2)
+
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+      flash_grads = jax.grad(flash_loss, argnums=(0, 1, 2))(query, key, value)
+    reference_grads = jax.grad(reference_loss, argnums=(0, 1, 2))(query, key, value)
+
+    for name, flash_grad, reference_grad in zip(("query", "key", "value"), flash_grads, reference_grads):
+      np.testing.assert_allclose(
+          jax.device_get(flash_grad),
+          jax.device_get(reference_grad),
+          rtol=1e-3,
+          atol=1e-2,
+          err_msg=f"{name} gradient mismatch",
+      )
+
+  def test_indivisible_non_mqa_gqa_over_sharded_head_axis_is_rejected(self):
+    config, mesh, op = self._build_op(num_query_heads=8, num_kv_heads=2)
+    query, key, value = self._random_qkv(config.global_batch_size_to_train_on, 8, 2)
+
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+      with self.assertRaises(ValueError):
+        op.tpu_flash_attention(query, key, value, None, None, None)
+
+
 class AttentionTest(parameterized.TestCase):
   """Test for the Attention"""
 

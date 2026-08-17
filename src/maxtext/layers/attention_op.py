@@ -142,6 +142,38 @@ def validate_gpu_flash_attention(sinks: Array | None, record_max_logits: bool) -
     raise NotImplementedError("record_max_logits (QK-Clip) is not supported for GPU flash attention kernels yet.")
 
 
+def _replicate_indivisible_mqa_kv_head_axis(
+    axis_names_kv: jax.sharding.PartitionSpec | None, num_kv_heads: int, mesh: Mesh
+) -> jax.sharding.PartitionSpec | None:
+  """Replicates the sharded K/V head axis for MQA.
+
+  Replicating multiple K/V heads would change their shard-local grouping with query heads.
+  """
+  if num_kv_heads != 1 or axis_names_kv is None:
+    return axis_names_kv
+  # PartitionSpecs with unreduced/reduced metadata cannot be indexed or iterated.
+  partitions = axis_names_kv.partitions
+  if len(partitions) <= 1:
+    return axis_names_kv
+  kv_head_spec = partitions[1]
+  if isinstance(kv_head_spec, str):
+    kv_head_axes = (kv_head_spec,)
+  elif isinstance(kv_head_spec, tuple):
+    kv_head_axes = kv_head_spec
+  else:
+    return axis_names_kv
+  kv_head_shards = math.prod(mesh.shape.get(axis, 1) for axis in kv_head_axes)
+  if kv_head_shards <= 1:
+    return axis_names_kv
+  return jax.sharding.PartitionSpec(
+      partitions[0],
+      None,
+      *partitions[2:],
+      unreduced=axis_names_kv.unreduced,
+      reduced=axis_names_kv.reduced,
+  )
+
+
 # TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
 class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
   """Lazy chunked causal mask.
@@ -1664,6 +1696,7 @@ class AttentionOp(nnx.Module):
     axis_names_splash_kernel = self._logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
     axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
+    axis_names_kv = _replicate_indivisible_mqa_kv_head_axis(axis_names_kv, key.shape[1], self.mesh)
     indexer_mask_axis_names = self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH, KV_LENGTH))
     if use_tokamax_ring:
       context_axis = self.config.context_sharding
