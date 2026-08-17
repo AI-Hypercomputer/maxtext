@@ -1159,10 +1159,12 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.HY3,
     ):
-      # Hy3 has DeepSeek's routed + shared + leading-dense structure. The
-      # generic fallback below sizes experts with mlp_dim (the dense width)
-      # instead of moe_mlp_dim and skips the shared expert, inflating
-      # reported TFLOP/s. Training itself is unaffected; only MFU reporting is.
+      # Hy3 (like DeepSeek) splits layers into a dense prefix
+      # (first_num_dense_layers) and MoE layers with a shared expert. The
+      # generic fallback below has no shared-expert term at all, and applies
+      # one MoE-shaped formula uniformly to every layer -- it can't express
+      # "some layers are dense". Both undercount reported TFLOP/s. Training
+      # itself is unaffected; only MFU reporting is.
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
     elif config.decoder_block == DecoderBlockType.QWEN3_CUSTOM_MOE:
@@ -1257,8 +1259,10 @@ def calculate_tflops_training_per_device(config, log=True):
         config, total_ffn_flops_all_layers, embedding_flops
     )
   elif config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
-    # total_ffn_flops_all_layers is already summed over layers by the helper
-    # above; the generic branch would multiply by num_decoder_layers again.
+    # This formula is currently identical to the generic `else` fallback
+    # below -- it's kept as an explicit branch (not a functional fix) so
+    # DeepSeek/Hy3 don't silently start depending on whatever the generic
+    # branch happens to compute if it's changed for some other model later.
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
         * 3

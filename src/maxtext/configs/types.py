@@ -3823,7 +3823,9 @@ class MaxTextConfig(
               DecoderBlockType.HY3,
           )
       ):
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek, DeepSeek V4, and Hy3 decoder blocks.")
+        raise ValueError(
+            "Loss-free load balancing is only supported for the DeepSeek, DeepSeek V4, and Hy3 decoder blocks."
+        )
       if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
         raise ValueError(
             "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "

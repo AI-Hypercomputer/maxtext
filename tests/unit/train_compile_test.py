@@ -857,6 +857,36 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @parameterized.named_parameters(
+      {"testcase_name": "linen_scanned", "scan_layers": "true", "enable_nnx": "False"},
+      {"testcase_name": "nnx_scanned", "scan_layers": "true", "enable_nnx": "True"},
+  )
+  @pytest.mark.cpu_only
+  def test_hy3(self, scan_layers, enable_nnx):
+    # test hy3 compile across Linen and NNX, at the full declared 295B/80-layer scale
+    compiled_trainstep_file = f"/tmp/test_hy3_{scan_layers}_{enable_nnx}.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=hy3-295b",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            f"scan_layers={scan_layers}",
+            "attention=dot_product",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            f"enable_nnx={enable_nnx}",
+            f"pure_nnx={enable_nnx}",
+            f"pure_nnx_decoder={enable_nnx}",
+            "override_model_config=True",
+        )
+    )
+
   def test_indexer_dense_warmup(self):
     # test deepseek3.2 with sparse attention
     compiled_trainstep_file = "/tmp/test_indexer_dense_warmup.pickle"

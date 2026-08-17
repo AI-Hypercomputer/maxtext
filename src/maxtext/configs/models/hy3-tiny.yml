@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Test config for Hy3 (Tencent Hunyuan V3, https://huggingface.co/tencent/Hy3).
-# Small dims/layer count for fast local iteration with random init; architecturally
-# significant fields (routing, norm epsilon, QK-Norm) keep their real hy3-295b values.
+# TEST/SMOKE-CHECK config for Hy3 (Tencent Hunyuan V3, https://huggingface.co/tencent/Hy3).
+# Not the real model -- small dims/layer count for fast local iteration with random
+# init. Architecturally significant fields (routing, norm epsilon, QK-Norm) keep
+# their real hy3-295b values. For the full-scale model, use hy3-295b.yml.
 
 decoder_block: "hy3"
 

@@ -69,7 +69,7 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 ### Hy3
 
 - **Variants**: Hy3 (295B, MoE 21B-A active)
-- **Notes**: GQA; **QK-Norm**; RMSNorm; RoPE; DeepSeek-V3-style aux-loss-free sigmoid+bias routed MoE with 1 shared expert; dense first layer; MTP.
+- **Notes**: GQA; **QK-Norm**; RMSNorm; RoPE; DeepSeek-V3-style aux-loss-free sigmoid+bias routed MoE with 1 shared expert; dense first layer. Multi-Token Prediction (MTP) is **not** onboarded/verified in this initial PR -- MTP weights are left unmapped (randomly initialized on checkpoint conversion) and MTP training logic is omitted; can be addressed in a follow-up.
 
 ## Parallelism building blocks
 

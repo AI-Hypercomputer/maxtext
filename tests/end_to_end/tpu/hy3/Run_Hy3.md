@@ -22,27 +22,35 @@ Hy3 is an open-weights Mixture-of-Experts (MoE) model released by Tencent ([tenc
 * **MoE Routing**: Auxiliary-loss-free routing with Sigmoid activation and bias, 192 routed experts + 1 shared expert (selecting top-8 routed experts per token).
 * **Supported Configs**: `hy3-tiny` (testing/smoke checks), `hy3-295b` (full-scale model).
 
-### Known limitation: MoE load balancing does not currently function during training
+### Note: MoE load balancing (previously broken, now fixed upstream)
 
 Hy3's aux-loss-free routing (`routed_bias=true`) has two optional training-time
 load-balancing mechanisms, controlled by `routed_bias_update_rate` (EMA-style
 router-bias update) and `load_balance_loss_weight` (gradient-based auxiliary
-loss). **Neither currently works when `scan_layers=true`**: the scanned-layer
-application in `nnx_decoders.py` discards `nnx.Intermediate` state (the sown
-`moe_bias_updates`/`moe_lb_loss` values) before it reaches `train.py`, so both
-mechanisms silently no-op -- no error, but the values also never take effect.
-`routed_bias_update_rate > 0.0` additionally raises `AttributeError` when
-`scan_layers=false`, since that code path assumes the single stacked
-`moe_layers` attribute scanning produces, which doesn't exist for unscanned
-layers (`moe_layers_0`, `moe_layers_1`, ... instead).
+loss). Both were broken in this framework (not specific to Hy3 -- the same
+root cause reproduces on DeepSeek V3's `deepseek3-tiny` config) until two
+recent upstream fixes landed:
 
-This is **not specific to Hy3** -- it reproduces identically with DeepSeek V3's
-own `deepseek3-tiny` config, since Hy3 shares that code path. It's a
-pre-existing MaxText gap, not something introduced by this model's onboarding.
-Until it's fixed upstream, leave `routed_bias_update_rate` and
-`load_balance_loss_weight` at their defaults (`0.0`, matches `hy3-tiny.yml`/
-`hy3-295b.yml`) -- inference and plain next-token-loss training are unaffected,
-this only concerns the two optional load-balancing signals.
+- `1e6a5159f` ("[NNX] Preserve Intermediates in scanned layers for MoE load
+  balance loss") fixed `scan_layers=true`: `nnx_decoders.py`'s scanned-layer
+  application no longer discards `nnx.Intermediate` state (the sown
+  `moe_bias_updates`/`moe_lb_loss` values) before `train.py` reads it.
+- `263b8c18e` ("Fix shape mismatch for DeepSeek routed bias updates when MTP
+  is enabled in NNX") fixed `scan_layers=false`: the bias-update path now
+  finds the router bias generically via `_find_gate_bias` (searches the
+  module graph by type, `GateLogit`) instead of assuming a hardcoded,
+  scanned-only module path.
+
+Verified both modes with a CPU smoke test (`hy3-tiny`, `routed_bias_update_rate=0.05`,
+`load_balance_loss_weight=0.01`) -- `moe_lb_loss` is nonzero every step and
+the router bias genuinely changes step-to-step in both:
+
+- `scan_layers=true`: bias norm `0.000147 -> 0.245096 -> 0.173291 -> 0.245103 -> 0.173297`.
+- `scan_layers=false`: bias norm `0.0000843 -> 0.1414 -> 0.2828 -> 0.4241 -> 0.5656`.
+
+`hy3-tiny.yml`/`hy3-295b.yml` still leave both settings at their default
+(`0.0`); enabling them is now a real, working option rather than a no-op or
+crash.
 
 ---
 
