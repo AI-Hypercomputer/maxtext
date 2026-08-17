@@ -1712,6 +1712,165 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
   def reshape_kernel(input_tensor, target_shape):
     """Reshapes and transposes kernel weights between MaxText and HF."""
     if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  num_main_layers = config["num_hidden_layers"]
+  first_num_dense_layers = config["first_k_dense_replace"]
+
+  mapping = {
+      "params-decoder-logits_dense-kernel": reshape_kernel,
+  }
+
+  attention_need_reshape = {
+      "self_attention-wkv_a-kernel",  # transpose
+      "self_attention-wkv_b-kernel",
+      "self_attention-out-kernel",
+      # v2
+      "self_attention-query-kernel",
+      # v3
+      "self_attention-wq_a-kernel",  # transpose
+      "self_attention-wq_b-kernel",
+      # v3.2
+      "self_attention-indexer-weights_proj-kernel",  # transpose
+      "self_attention-indexer-wk-kernel",  # transpose
+      "self_attention-indexer-wq_b-kernel",
+  }
+
+  dense_need_reshape = attention_need_reshape | {
+      "mlp-wi_0-kernel",  # transpose
+      "mlp-wi_1-kernel",  # transpose
+      "mlp-wo-kernel",  # transpose
+  }
+
+  moe_need_reshape = attention_need_reshape | {
+      "DeepSeekMoeBlock_0-shared_experts-wi_0-kernel",  # transpose
+      "DeepSeekMoeBlock_0-shared_experts-wi_1-kernel",  # transpose
+      "DeepSeekMoeBlock_0-shared_experts-wo-kernel",  # transpose
+      "DeepSeekMoeBlock_0-MoeBlock_0-gate-kernel",  # transpose
+      "DeepSeekMoeBlock_0-MoeBlock_0-wi_0",  # transpose
+      "DeepSeekMoeBlock_0-MoeBlock_0-wi_1",  # transpose
+      "DeepSeekMoeBlock_0-MoeBlock_0-wo",  # transpose
+  }
+
+  # scan
+  if scan_layers:
+    for key in dense_need_reshape:
+      mapping[f"params-decoder-dense_layers-{key}"] = reshape_kernel
+    for key in moe_need_reshape:
+      mapping[f"params-decoder-moe_layers-{key}"] = reshape_kernel
+  # unscan
+  else:
+    for i in range(first_num_dense_layers):
+      for key in dense_need_reshape:
+        mapping[f"params-decoder-dense_layers_{i}-{key}"] = reshape_kernel
+    for i in range(first_num_dense_layers, num_main_layers):
+      moe_layer_idx = i - first_num_dense_layers
+      for key in moe_need_reshape:
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{key}"] = reshape_kernel
+
+  return mapping
+
+
+def DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN():
+  """Creates parameter transformation functions for Deepseek."""
+  return {}
+
+
+def GLM_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates mapping from MaxText GLM-5.1/5.2 to Hugging Face weight paths."""
+  num_main_layers = config["num_hidden_layers"]
+  first_num_dense_layers = config["first_k_dense_replace"]
+  num_experts = config.get("n_routed_experts", 0)
+
+  # Mapping for non-layer-specific weights
+  mapping = {
+      "params-token_embedder-embedding": "model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+  # Attention keys are shared by both dense and MoE
+  attention_keys = {
+      "pre_self_attention_layer_norm-scale": "input_layernorm.weight",
+      "post_self_attention_layer_norm-scale": "post_attention_layernorm.weight",
+      "self_attention-kv_norm-scale": "self_attn.kv_a_layernorm.weight",
+      "self_attention-wkv_a-kernel": "self_attn.kv_a_proj_with_mqa.weight",
+      "self_attention-wkv_b-kernel": "self_attn.kv_b_proj.weight",
+      "self_attention-out-kernel": "self_attn.o_proj.weight",
+      "self_attention-q_norm-scale": "self_attn.q_a_layernorm.weight",
+      "self_attention-wq_a-kernel": "self_attn.q_a_proj.weight",
+      "self_attention-wq_b-kernel": "self_attn.q_b_proj.weight",
+      "self_attention-indexer-k_norm-bias": "self_attn.indexer.k_norm.bias",
+      "self_attention-indexer-k_norm-scale": "self_attn.indexer.k_norm.weight",
+      "self_attention-indexer-weights_proj-kernel": "self_attn.indexer.weights_proj.weight",
+      "self_attention-indexer-wk-kernel": "self_attn.indexer.wk.weight",
+      "self_attention-indexer-wq_b-kernel": "self_attn.indexer.wq_b.weight",
+  }
+  # Dense Layers
+  dense_layer_keys = attention_keys | {
+      "mlp-wi_0-kernel": "mlp.gate_proj.weight",
+      "mlp-wi_1-kernel": "mlp.up_proj.weight",
+      "mlp-wo-kernel": "mlp.down_proj.weight",
+  }
+  # MoE Layers
+  moe_layer_keys = attention_keys | {
+      "DeepSeekMoeBlock_0-shared_experts-wi_0-kernel": "mlp.shared_experts.gate_proj.weight",
+      "DeepSeekMoeBlock_0-shared_experts-wi_1-kernel": "mlp.shared_experts.up_proj.weight",
+      "DeepSeekMoeBlock_0-shared_experts-wo-kernel": "mlp.shared_experts.down_proj.weight",
+      "DeepSeekMoeBlock_0-MoeBlock_0-gate-kernel": "mlp.gate.weight",
+      "DeepSeekMoeBlock_0-MoeBlock_0-gate-bias": "mlp.gate.e_score_correction_bias",
+  }
+  # MoE Experts (nested list mapping: [[e0_l0, e0_l1..], [e1_l0, e1_l1..]..])
+  moe_expert_keys = {
+      "DeepSeekMoeBlock_0-MoeBlock_0-wi_0": "gate_proj.weight",
+      "DeepSeekMoeBlock_0-MoeBlock_0-wi_1": "up_proj.weight",
+      "DeepSeekMoeBlock_0-MoeBlock_0-wo": "down_proj.weight",
+  }
+
+  # scan
+  if scan_layers:
+    for maxtext_key, hf_key in dense_layer_keys.items():
+      mapping[f"params-decoder-dense_layers-{maxtext_key}"] = [
+          f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers)
+      ]
+
+    for maxtext_key, hf_key in moe_layer_keys.items():
+      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [
+          f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)
+      ]
+
+    for maxtext_key, hf_key in moe_expert_keys.items():
+      mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [
+          [f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)]
+          for e in range(num_experts)
+      ]
+  # unscan
+  else:
+    for i in range(first_num_dense_layers):
+      for maxtext_key, hf_key in dense_layer_keys.items():
+        mapping[f"params-decoder-dense_layers_{i}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+
+    for i in range(first_num_dense_layers, num_main_layers):
+      moe_layer_idx = i - first_num_dense_layers
+
+      for maxtext_key, hf_key in moe_layer_keys.items():
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+
+      for maxtext_key, hf_key in moe_expert_keys.items():
+        mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [
+            f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
+        ]
+  return mapping
+
+
+def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for GLM-5.1 & GLM-5.2."""
+
+  def reshape_kernel(input_tensor, target_shape):
+    """Reshapes and transposes standard 2D, 3D, and 4D linear kernels."""
+    if saving_to_hf:
       if input_tensor.ndim == 4:
         return input_tensor.transpose(0, 1, 3, 2)
       elif input_tensor.ndim == 3:
@@ -1733,7 +1892,8 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 
     HF kv_b_proj.weight shape is [num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank].
     It is split globally in HF: all k_nope first, then all value.
-    JAX expects wkv_b shape [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim].
+    JAX expects wkv_b shape [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
+    or scanned [num_layers, kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim].
     """
     num_heads = maxtext_config.num_query_heads
     qk_nope_head_dim = maxtext_config.qk_nope_head_dim
@@ -1741,8 +1901,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 
     if saving_to_hf:
       # JAX -> HF
-      # target_shape: [num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]
-      # input_tensor: [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
       if input_tensor.ndim == 4:  # [L, In, num_heads, head_dim]
         k_nope, value = np.split(input_tensor, [qk_nope_head_dim], axis=-1)
         k_nope = k_nope.reshape(input_tensor.shape[0], input_tensor.shape[1], num_heads * qk_nope_head_dim)
@@ -1756,8 +1914,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       return concatenated.T
     else:
       # HF -> JAX
-      # input_tensor: [num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]
-      # target_shape: [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
       t_tensor = input_tensor.transpose(0, 2, 1) if input_tensor.ndim == 3 else input_tensor.T
       split_idx = num_heads * qk_nope_head_dim
       k_nope_weight = t_tensor[..., :split_idx]
@@ -1775,7 +1931,8 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 
     HF q_b_proj.weight shape is [num_heads * (qk_nope_head_dim + qk_rope_head_dim), q_lora_rank].
     It is split globally in HF: all q_nope first, then all q_rope.
-    JAX expects wq_b shape [q_lora_rank, num_heads, qk_nope_head_dim + qk_rope_head_dim].
+    JAX expects wq_b shape [q_lora_rank, num_heads, qk_nope_head_dim + qk_rope_head_dim]
+    or scanned [num_layers, q_lora_rank, num_heads, qk_nope_head_dim + qk_rope_head_dim].
     """
     num_heads = maxtext_config.num_query_heads
     qk_nope_head_dim = maxtext_config.qk_nope_head_dim
@@ -1897,11 +2054,8 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 
   attention_need_reshape = {
       "self_attention-wkv_a-kernel",  # transpose
-      # v2
       "self_attention-query-kernel",
-      # v3
       "self_attention-wq_a-kernel",  # transpose
-      # v3.2
       "self_attention-indexer-weights_proj-kernel",  # transpose
       "self_attention-indexer-wk-kernel",  # transpose
   }
@@ -1955,11 +2109,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       mapping[f"params-decoder-layers_{i}-self_attention-out-kernel"] = reshape_out_kernel
 
   return mapping
-
-
-def DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN():
-  """Creates parameter transformation functions for Deepseek."""
-  return {}
 
 
 def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
@@ -4423,9 +4572,9 @@ PARAM_MAPPING = {
     "deepseek2-16b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "glm5.1-744b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "glm5.2-744b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-284b": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.1-744b": GLM_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.2-744b": GLM_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4479,10 +4628,10 @@ HOOK_FNS = {
     "deepseek2-16b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "glm5.1-744b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "glm5.2-744b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-tiny": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-284b": DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.1-744b": GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.2-744b": GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
