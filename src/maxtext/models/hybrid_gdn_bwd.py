@@ -71,6 +71,8 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         num_chunks = b_ref.shape[1] // chunk_size
         kernel_size = conv_weight_ref.shape[0]
         prev_kernel_size = kernel_size - 1
+        overlap = 8
+        shift = overlap - prev_kernel_size
         v_per_kq_head = n_v // n_kq
         W = conv_weight_ref[...]
         conv_bias = conv_bias_ref[...]
@@ -87,7 +89,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         )
         # --- FWD Pass Prologue ---
         def fwd_prologue(_):
-            pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds(0, chunk_size + prev_kernel_size), :], qkv_db.at[0, ...], sem_qkv_fwd.at[0]).start()
+            pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds(0, chunk_size + overlap), :], qkv_db.at[0, ...], sem_qkv_fwd.at[0]).start()
             pltpu.make_async_copy(b_ref.at[batch_idx, pl.ds(0, chunk_size), :], b_db.at[0, ...], sem_b_fwd.at[0]).start()
             pltpu.make_async_copy(a_ref.at[batch_idx, pl.ds(0, chunk_size), :], a_db.at[0, ...], sem_a_fwd.at[0]).start()
             return None
@@ -103,7 +105,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             pl.semaphore_wait(sem_b_fwd.at[db_idx], 1)
             pl.semaphore_wait(sem_a_fwd.at[db_idx], 1)
             def start_next(_):
-                pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds((chunk_idx + 1) * chunk_size, chunk_size + prev_kernel_size), :], qkv_db.at[next_db_idx, ...], sem_qkv_fwd.at[next_db_idx]).start()
+                pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds((chunk_idx + 1) * chunk_size, chunk_size + overlap), :], qkv_db.at[next_db_idx, ...], sem_qkv_fwd.at[next_db_idx]).start()
                 pltpu.make_async_copy(b_ref.at[batch_idx, pl.ds((chunk_idx + 1) * chunk_size, chunk_size), :], b_db.at[next_db_idx, ...], sem_b_fwd.at[next_db_idx]).start()
                 pltpu.make_async_copy(a_ref.at[batch_idx, pl.ds((chunk_idx + 1) * chunk_size, chunk_size), :], a_db.at[next_db_idx, ...], sem_a_fwd.at[next_db_idx]).start()
                 return None
@@ -117,7 +119,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             a_ext = a_db[db_idx, ...]
             conv_out_base = jnp.zeros((chunk_size, dim_size), dtype=qkv_ext.dtype)
             for k in range(kernel_size):
-                conv_out_base += qkv_ext[k : k + chunk_size, :] * W[k, :]
+                conv_out_base += qkv_ext[k + shift : k + shift + chunk_size, :] * W[k, :]
             conv_out = conv_out_base + conv_bias
             k_start = n_kq * d_k
             k_end = k_start + n_kq * d_k
@@ -179,7 +181,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
         # --- BWD Pass Prologue ---
         def bwd_prologue(_):
             chunk_idx_0 = num_chunks - 1
-            pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds(chunk_idx_0 * chunk_size, chunk_size + prev_kernel_size), :], qkv_db.at[0, ...], sem_qkv_bwd.at[0]).start()
+            pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds(chunk_idx_0 * chunk_size, chunk_size + overlap), :], qkv_db.at[0, ...], sem_qkv_bwd.at[0]).start()
             pltpu.make_async_copy(b_ref.at[batch_idx, pl.ds(chunk_idx_0 * chunk_size, chunk_size), :], b_db.at[0, ...], sem_b_bwd.at[0]).start()
             pltpu.make_async_copy(a_ref.at[batch_idx, pl.ds(chunk_idx_0 * chunk_size, chunk_size), :], a_db.at[0, ...], sem_a_bwd.at[0]).start()
             pltpu.make_async_copy(d_out_ref.at[batch_idx, pl.ds(chunk_idx_0 * chunk_size, chunk_size), :], d_out_db.at[0, ...], sem_dout_bwd.at[0]).start()
@@ -198,7 +200,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             pl.semaphore_wait(sem_state_bwd.at[db_idx], 1)
             def start_next(_):
                 next_chunk_idx = chunk_idx - 1
-                pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds(next_chunk_idx * chunk_size, chunk_size + prev_kernel_size), :], qkv_db.at[next_db_idx, ...], sem_qkv_bwd.at[next_db_idx]).start()
+                pltpu.make_async_copy(qkv_padded_ref.at[batch_idx, pl.ds(next_chunk_idx * chunk_size, chunk_size + overlap), :], qkv_db.at[next_db_idx, ...], sem_qkv_bwd.at[next_db_idx]).start()
                 pltpu.make_async_copy(b_ref.at[batch_idx, pl.ds(next_chunk_idx * chunk_size, chunk_size), :], b_db.at[next_db_idx, ...], sem_b_bwd.at[next_db_idx]).start()
                 pltpu.make_async_copy(a_ref.at[batch_idx, pl.ds(next_chunk_idx * chunk_size, chunk_size), :], a_db.at[next_db_idx, ...], sem_a_bwd.at[next_db_idx]).start()
                 pltpu.make_async_copy(d_out_ref.at[batch_idx, pl.ds(next_chunk_idx * chunk_size, chunk_size), :], d_out_db.at[next_db_idx, ...], sem_dout_bwd.at[next_db_idx]).start()
@@ -218,7 +220,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             state_prev = state_read_db[db_idx, ...]
             conv_out_base = jnp.zeros((chunk_size, dim_size), dtype=qkv_ext.dtype)
             for k in range(kernel_size):
-                conv_out_base += qkv_ext[k : k + chunk_size, :] * W[k, :]
+                conv_out_base += qkv_ext[k + shift : k + shift + chunk_size, :] * W[k, :]
             conv_out = conv_out_base + conv_bias
             q_start = 0
             q_end = n_kq * d_k
@@ -366,7 +368,7 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
                 d_X += d_Y_slice * W[k]
             d_W_list = []
             for k in range(kernel_size):
-                X_slice = qkv_ext[k : k + chunk_size, :]
+                X_slice = qkv_ext[k + shift : k + shift + chunk_size, :]
                 d_W_k = jnp.sum(d_Y * X_slice, axis=0)
                 d_W_list.append(d_W_k)
             d_W_chunk = jnp.stack(d_W_list, axis=0)
@@ -431,7 +433,8 @@ def computation(
     a_flat = a.reshape(batch_size, seq_len, n_v)
     d_out_flat = d_out.reshape(batch_size, seq_len, n_v * d_v)
 
-    qkv_padded = jnp.pad(qkv_flat, ((0, 0), (prev_kernel_size, 0), (0, 0)))
+    overlap = 8
+    qkv_padded = jnp.pad(qkv_flat, ((0, 0), (overlap, 0), (0, 0)))
 
     d_qkv_shape = jax.ShapeDtypeStruct(qkv_flat.shape, qkv_flat.dtype)
     d_b_shape = jax.ShapeDtypeStruct(b_flat.shape, b_flat.dtype)
@@ -448,7 +451,7 @@ def computation(
     vmem_spec = pl.BlockSpec()
 
     scratch_shapes = (
-        pltpu.VMEM(shape=(2, chunk_size + prev_kernel_size, dim_size), dtype=qkv.dtype),
+        pltpu.VMEM(shape=(2, chunk_size + overlap, dim_size), dtype=qkv.dtype),
         pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=b.dtype),
         pltpu.VMEM(shape=(2, chunk_size, n_v), dtype=a.dtype),
         pltpu.VMEM(shape=(2, chunk_size, n_v * d_v), dtype=d_out.dtype),
