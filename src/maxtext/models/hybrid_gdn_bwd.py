@@ -13,22 +13,36 @@ def _safe_dot(lhs, rhs, *args, **kwargs):
 
 def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
     n_v, chunk_size, _ = t.shape
+    
     iota_r = jax.lax.broadcasted_iota(jnp.int32, (n_v, chunk_size, chunk_size), 1)
     iota_c = jax.lax.broadcasted_iota(jnp.int32, (n_v, chunk_size, chunk_size), 2)
     inv_t = jnp.where(iota_r == iota_c, 1.0, 0.0).astype(t.dtype)
+    
+    # Natively generate 3D index maps to avoid TPU vector shape casting
+    iota_row_3d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, 1), 1)
+    iota_col_3d = jax.lax.broadcasted_iota(jnp.int32, (1, 1, chunk_size), 2)
+    
     def body_fun(i, inv_t_acc):
-        row_mask = jnp.where(jnp.arange(chunk_size) == i, 1.0, 0.0).astype(t.dtype).reshape(1, chunk_size, 1)
+        # Native 1x64x1 row mask
+        row_mask = jnp.where(iota_row_3d == i, 1.0, 0.0).astype(t.dtype)
         t_row = jnp.sum(t * row_mask, axis=1, keepdims=True)
-        col_mask = (jnp.arange(chunk_size) < i).reshape(1, 1, chunk_size)
+        
+        # Native 1x1x64 column mask
+        col_mask = iota_col_3d < i
         t_row = jnp.where(col_mask, t_row, 0.0)
+        
         new_row = -_safe_dot(
             t_row, inv_t_acc,
             dimension_numbers=(((2,), (1,)), ((0,), (0,)))
         )
-        one_hot = jnp.where(jnp.arange(chunk_size) == i, 1.0, 0.0).astype(t.dtype)
-        new_row = new_row + one_hot.reshape(1, 1, chunk_size)
+        
+        # Native 1x1x64 one_hot
+        one_hot = jnp.where(iota_col_3d == i, 1.0, 0.0).astype(t.dtype)
+        new_row = new_row + one_hot
+        
         inv_t_acc = inv_t_acc * (1.0 - row_mask) + new_row * row_mask
         return inv_t_acc
+        
     return jax.lax.fori_loop(1, chunk_size, body_fun, inv_t)
 def fused_transpose_broadcast(x: jax.Array, src_dim: int, dst_dim: int) -> jax.Array:
     dtype = x.dtype
