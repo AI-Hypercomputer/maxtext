@@ -2217,42 +2217,22 @@ class AttentionOp(nnx.Module):
             return attention_output, None
         else:
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
-          B, H, q_len, D = query.shape
-          _, KV_H, kv_len, _ = key.shape
-
-          q_folded = jnp.reshape(query, (B * H, q_len, D))
-          k_folded = jnp.reshape(key, (B * KV_H, kv_len, D))
-          v_folded = jnp.reshape(value, (B * KV_H, kv_len, D))
-          if sinks is None:
-            s_folded = None
-          elif sinks.ndim == 1:
-            s_folded = jnp.tile(sinks, (B,))
-          else:
-            s_folded = jnp.reshape(sinks, (B * H,))
-            
-          if decoder_segment_ids_tuple is not None:
-             d_q = decoder_segment_ids_tuple.q
-             d_kv = decoder_segment_ids_tuple.kv
-             # d_q usually (B, seq_len), tile to (B * H, seq_len)
-             # Wait, if it has 1 as dim 1 like (B, 1, seq_len)
-             if d_q.ndim == 3:
-                 d_q = jnp.tile(d_q, (1, H, 1)).reshape((B * H, -1))
-                 d_kv = jnp.tile(d_kv, (1, KV_H, 1)).reshape((B * KV_H, -1))
-             else:
-                 d_q = jnp.repeat(d_q, H, axis=0)
-                 d_kv = jnp.repeat(d_kv, KV_H, axis=0)
-             d_folded = tokamax_splash_kernel.SegmentIds(d_q, d_kv)
-          else:
-             d_folded = None
 
           if record_max_logits:
-            out_folded, stats = kernel(q_folded, k_folded, v_folded, d_folded, sinks=s_folded, save_residuals=True)
-            attention_output = jnp.reshape(out_folded, (B, H, q_len, D))
-            max_logits = jnp.reshape(stats["max_logits"], (B, H, q_len))
+
+            def kernel_fn(q, k, v, d, s):
+              # Pass save_residuals=True to force stats generation
+              out, stats = kernel(q, k, v, d, sinks=s, save_residuals=True)
+              return out, stats["max_logits"]
+
+            attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(
+                query, key, value, decoder_segment_ids_tuple, sinks
+            )
             return attention_output, max_logits
           else:
-            out_folded = kernel(q_folded, k_folded, v_folded, d_folded, sinks=s_folded)
-            attention_output = jnp.reshape(out_folded, (B, H, q_len, D))
+            attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
+                query, key, value, decoder_segment_ids_tuple, sinks
+            )
             return attention_output, None
 
       elif self.config.use_jax_splash:
