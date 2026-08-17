@@ -1090,65 +1090,77 @@ def train_loop(config, recorder, state=None):
 
   # Kills the workload if initialization takes longer than 20 minutes
   with watchdog.watchdog(name="initialization", timeout=20 * 60, repeat=False):
-    setup_results = {}
-    init_complete_event = threading.Event()
-
-    def run_setup():
-      try:
-        results = train_utils.setup_train_loop(
-            config, recorder, devices=devices
-        )
-        setup_results["results"] = results
-      except Exception as e:
-        setup_results["exception"] = e
-      finally:
-        init_complete_event.set()
-
-    setup_thread = threading.Thread(target=run_setup, daemon=True)
-    setup_thread.start()
-
     while True:
-      init_done = init_complete_event.wait(timeout=1)
+      try:
+        if config.elastic_enabled and elastic_manager:
+          elastic_utils.mutate_config_for_topology(config, elastic_manager)
+          devices = elastic_utils.live_devices(config)
 
-      if elastic_manager and elastic_utils.elastic_enabled(config):
-        new_slice = bool(elastic_manager.available_inactive_slices)
+        setup_results = {}
+        init_complete_event = threading.Event()
 
-        if new_slice and not init_done:
-          max_logging.log(
-              "New slice detected during initialization. Triggering retry."
-          )
-          raise elastic_utils.manager.ScaleUpSignalError(
-              "Scale up during initialization"
-          )
+        def run_setup():
+          try:
+            results = train_utils.setup_train_loop(
+                config, recorder, devices=devices
+            )
+            setup_results["results"] = results
+          except Exception as e:
+            setup_results["exception"] = e
+          finally:
+            init_complete_event.set()
 
-        if init_done and new_slice:
-          raise elastic_utils.manager.ScaleUpSignalError(
-              "Both events set during initialization"
-          )
+        setup_thread = threading.Thread(target=run_setup, daemon=True)
+        setup_thread.start()
 
-      if init_done:
-        break
+        while True:
+          init_done = init_complete_event.wait(timeout=1)
 
-    if "exception" in setup_results:
-      raise setup_results["exception"]
+          if elastic_manager and elastic_utils.elastic_enabled(config):
+            new_slice = bool(elastic_manager.available_inactive_slices)
 
-    (
-        init_rng,
-        checkpoint_manager,
-        state_mesh_shardings,
-        model,
-        mesh,
-        learning_rate_schedule,
-        data_iterator,
-        data_loader,
-        rampup_manager,
-        eval_data_iterator,
-        state,
-    ) = setup_results["results"]
+            if new_slice and not init_done:
+              max_logging.log(
+                  "New slice detected during initialization. Triggering retry."
+              )
+              raise pathways_manager.ScaleUpSignalError(
+                  "Scale up during initialization"
+              )
 
-    init_rng = jax.device_put(
-        init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-    )
+            if init_done and new_slice:
+              raise pathways_manager.ScaleUpSignalError(
+                  "Both events set during initialization"
+              )
+
+          if init_done:
+            break
+
+        if "exception" in setup_results:
+          raise setup_results["exception"]
+
+        (
+            init_rng,
+            checkpoint_manager,
+            state_mesh_shardings,
+            model,
+            mesh,
+            learning_rate_schedule,
+            data_iterator,
+            data_loader,
+            rampup_manager,
+            eval_data_iterator,
+            state,
+        ) = setup_results["results"]
+
+        init_rng = jax.device_put(
+            init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+        )
+        break  # Initialization succeeded!
+      except pathways_manager.ScaleUpSignalError as e:
+        _logger.warning(
+            "Slice scale-up signal caught during initialization: %s. Refreshing slice topology and retrying setup.",
+            e,
+        )
 
   # Throttling is applied only if configured (dcn_bandwidth_limit is set).
   # The default flag value is empty, meaning no throttling is applied by default.
