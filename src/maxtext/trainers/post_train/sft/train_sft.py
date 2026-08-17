@@ -110,6 +110,7 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
         grad_accumulator: Any = None,
         inputs: Any = None,
         is_update_step: Any = True,
+        **kwargs: Any,
     ):
       if inputs is None and grad_accumulator is not None:
         # In Tunix versions where train_step only receives (model, optimizer, inputs)
@@ -138,26 +139,24 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
               object.__setattr__(v, "_trace_state", tracers.TraceState())  # pylint: disable=protected-access
 
         out = loss_fn_ref(local_model, **inputs_kw)
-        # Capture updated non-param state (e.g. RNG counters) from local_model.
-        _, _, new_rest = nnx.split(local_model, wrt, ...)
+        # Capture updated RNG counters from local_model.
+        rng_state = nnx.state(local_model, nnx.RngState)
         if has_aux:
           loss, aux = out
-          return loss, (aux, new_rest)
+          return loss, (aux, rng_state)
         else:
-          return out, (None, new_rest)
+          return out, (None, rng_state)
 
       grad_fn = jax.value_and_grad(loss_wrapper, argnums=0, has_aux=True)
-      (out_val, (aux, new_rest)), grads = grad_fn(diff_params, rest, **inputs)
+      (out_val, (aux, new_rng_state)), grads = grad_fn(diff_params, rest, **inputs)
 
-      # Propagate updated non-param state (RNG counters, etc.) back to model.
-      # Fix flax.errors.TraceContextError when returning from jax.value_and_grad
-
+      # Propagate updated RNG state back to model.
       for _, v in nnx.iter_graph(model):
         if isinstance(v, nnx.Variable) and hasattr(v, "_trace_state"):
           if not v._trace_state.is_valid():  # pylint: disable=protected-access
             object.__setattr__(v, "_trace_state", tracers.TraceState())  # pylint: disable=protected-access
 
-      nnx.update(model, new_rest)
+      nnx.update(model, new_rng_state)
 
       # Handle gradient accumulation and conditional/direct optimizer update
       if not _uses_gradient_accumulation:
@@ -328,14 +327,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-    # Disable NNX graph caching for MoE models (where experts > 1) to allow
-    # necessary dynamic metadata synchronization during forward passes (e.g., in jax.lax.scan).
-    enable_nnx_cache = mt_config.num_experts <= 1
-
     trainer.train(
         trainer.data_hooks.train_data_iterator,
         trainer.data_hooks.eval_data_iterator,
-        cache_nnx_graph=enable_nnx_cache,
+        cache_nnx_graph=True,
     )
   return trainer
 

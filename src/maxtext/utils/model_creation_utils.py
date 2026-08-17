@@ -49,6 +49,7 @@ from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.layers import moe
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
@@ -583,7 +584,8 @@ def create_nnx_abstract_model(
     # serve-mode AQT variables (NamedSharding with `spec=None` rejected under
     # AbstractMesh). Sharding is resolved afterwards via the helper, so the
     # wrap is unnecessary here.
-    abs_model = nnx.eval_shape(_create_model)
+    with jax.set_mesh(None):
+      abs_model = nnx.eval_shape(_create_model)
     if mesh is None:
       mesh = abs_model.mesh
     graphdef, abs_var_state = nnx.split(abs_model)
@@ -1010,7 +1012,9 @@ def from_pretrained(
       # types (e.g. `qrhs.frozen`), which are NOT subclasses of `nnx.Param`. Negative filtering with
       # `not isinstance(...)` safely retains all weight-like leaves while excluding transient runtime state.
       param_state = sharded_state.filter(
-          lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+          lambda path, var: not isinstance(
+              var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat, moe.Tid2EidVar, moe.MoEBiasVar)
+          )
       )
       is_nnx_checkpoint = True
       if (
@@ -1102,7 +1106,9 @@ def from_pretrained(
         is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
         if (
             isinstance(node, nnx.Variable)
-            and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+            and not isinstance(
+                node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat, moe.Tid2EidVar, moe.MoEBiasVar)
+            )
             and not is_custom
         ):
           inner = node.get_value() if hasattr(node, "get_value") else node[...]

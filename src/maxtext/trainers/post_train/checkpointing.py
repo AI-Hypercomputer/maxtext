@@ -255,6 +255,22 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     del step
     return {}
 
+  def should_save(self, step: int) -> bool:
+    """Returns True if a checkpoint should be saved for the current step."""
+    if self._checkpoint_manager is None:
+      return False
+    if self._config is not None:
+      checkpoint_period = getattr(self._config, "checkpoint_period", None)
+      steps = getattr(self._config, "steps", None)
+      if checkpoint_period is not None and checkpoint_period > 0:
+        if step % checkpoint_period == 0:
+          return True
+      if steps is not None and step == steps:
+        return True
+      if checkpoint_period is not None or steps is not None:
+        return False
+    return self._checkpoint_manager.should_save(step)
+
   def save(  # pylint: disable=too-many-positional-arguments
       self,
       step: int,
@@ -279,7 +295,7 @@ class MaxTextLayoutCheckpointManager(tunix_checkpoint_manager.CheckpointManager)
     """
     if self._checkpoint_manager is None:
       return False
-    if not force and not self._checkpoint_manager.should_save(step):
+    if not force and not self.should_save(step):
       return False
 
     state = self._train_state(model, optimizer)

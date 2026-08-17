@@ -274,7 +274,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   # Inherits _shard_optimizer from PeftTrainer.
 
-  def _train_step(self, model, optimizer, inputs, grad_accumulator=None, **kwargs):  # pyrefly: ignore[bad-override]
+  def _train_step(self, model, optimizer, grad_accumulator, inputs, is_update_step=True, **kwargs):  # pyrefly: ignore[bad-override]
     """Overrides the main JIT block to natively handle ModelBundle module.
 
     Uses jax.value_and_grad with explicit split/merge to avoid nesting
@@ -807,7 +807,7 @@ def train_distill(
     # 8. Train
     max_logging.log("Starting Distillation Training...")
     # Pass both iterators to the trainer
-    trainer.train(train_iter, eval_iter)
+    trainer.train(train_iter, eval_iter, cache_nnx_graph=True)
 
   if student_config.learn_to_init_mode:
     # If learn_to_init_mode is enabled, generate the final weights and update the model structure
