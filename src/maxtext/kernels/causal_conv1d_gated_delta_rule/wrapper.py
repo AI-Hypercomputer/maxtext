@@ -36,6 +36,7 @@ def inner_kernel(
     recurrent_slot_ref: jax.Array,  # [seq, num_v_heads, kq_head, v_head]
     # Outputs.
     out_slot_ref: jax.Array,  # [seq * chunk, num_v_heads, v_head]
+    tap_slot_ref: jax.Array,
     # Scratches.
     metadata_ref: memory_ref.MetadataRef,
     weights_ref: memory_ref.WeightRefs,
@@ -505,10 +506,10 @@ def fused_conv1d_gdn(
     out_act, out_conv, out_rec, out_tap = res
     return (out_conv, out_rec), out_act, out_tap
 
-  out_act, out_conv_state, out_recurrent_state = call_kernel(
+  (out_conv_state, out_recurrent_state), out_act, tap_out = call_kernel(
       conv_state, recurrent_state, None, config.GDNMode.BATCHED
   )
-  out_act, out_conv_state, out_recurrent_state = call_kernel(
+  (out_conv_state, out_recurrent_state), out_act, tap_out = call_kernel(
       out_conv_state, out_recurrent_state, out_act, config.GDNMode.PER_SEQ
   )
 
@@ -517,4 +518,4 @@ def fused_conv1d_gdn(
   out_conv_state = out_conv_state.reshape(conv_state_shape)
   out_recurrent_state = out_recurrent_state.astype(recurrent_out_dtype)
 
-  return (out_conv_state, out_recurrent_state), out_act
+  return (out_conv_state, out_recurrent_state), out_act, tap_out
