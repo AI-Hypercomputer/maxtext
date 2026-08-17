@@ -1041,6 +1041,11 @@ class MoEKernels(BaseModel):
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
   )
 
+  use_gmm_v2_tiling_fn: bool = Field(
+      False,
+      description="Whether to use the tiling function from Tokamax GMM v2, when use_gmm_v2=true.",
+  )
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -4297,6 +4302,12 @@ class MaxTextConfig(
     if self.use_gmm_v2:
       if not self.use_tokamax_gmm:
         raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
+      if not self.use_gmm_v2_tiling_fn:
+        logger.info(
+            "A heuristic tiling function is available for Tokamax GMM v2 "
+            "and can be enabled with `use_gmm_v2_tiling_fn=True`. "
+            "This is recommended when not using custom tile sizes."
+        )
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
 
