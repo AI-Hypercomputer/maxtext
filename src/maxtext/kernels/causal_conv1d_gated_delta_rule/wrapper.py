@@ -146,6 +146,9 @@ def inner_kernel(
         cfg=cfg,
         real_sizes=real_sizes,
     )
+    
+    # MUST BE DEFINED HERE FOR BATCHED MODE (CHUNK_SIZE=1)
+    tap_val = jnp.zeros((cfg.aligned_num_v_heads, cfg.chunk_size, cfg.chunk_size), dtype=jnp.float32)
 
   else:
     q_large, k_large, v_large, b_large, a_large = (
