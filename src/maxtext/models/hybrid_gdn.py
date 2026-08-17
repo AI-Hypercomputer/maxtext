@@ -177,7 +177,8 @@ def _run_tokamax_fused_fwd(
     )
 
     core_attn_out = core_attn_out_flat.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
-    return core_attn_out.astype(qkv.dtype), (new_conv_state[1:].astype(qkv.dtype), new_recurrent_state[1:].astype(qkv.dtype))
+    tap_out = tap_out.reshape(batch_size, -1, num_v_heads, chunk_size, chunk_size)
+    return core_attn_out.astype(qkv.dtype), (new_conv_state[1:].astype(qkv.dtype), new_recurrent_state[1:].astype(qkv.dtype)), tap_out
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
@@ -199,7 +200,7 @@ def hybrid_fused_conv1d_gdn(
     chunk_size: int,
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
-) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
+) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array], jax.Array]:
     """Hybrid Fused Conv1D + GDN: Tokamax GDN v3 forward + Custom VJP backward."""
     return _run_tokamax_fused_fwd(
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
