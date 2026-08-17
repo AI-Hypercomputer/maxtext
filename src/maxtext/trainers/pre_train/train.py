@@ -173,7 +173,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         model_vars["batch_stats"] = sparsity_state
     else:
       model_vars = params
-    is_video = "video_grid_thw" in data
+    is_video = getattr(config, "video_max_grid_t", None) is not None or "video_grid_thw" in data or (encoder_images is not None and encoder_images.ndim == 5)
     logits, intermediate_outputs = model.apply(
         model_vars,
         data["inputs"],
@@ -237,7 +237,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       total_z_loss = jnp.sum(z_loss)
   else:
     # Flax NNX model: forward pass, then pop Intermediates sown during it.
-    is_video = "video_grid_thw" in data
+    is_video = getattr(config, "video_max_grid_t", None) is not None or "video_grid_thw" in data or (encoder_images is not None and encoder_images.ndim == 5)
     logits = model(
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],

@@ -1174,14 +1174,6 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     audio_lengths = element.get("audio_lengths")
     second_per_grids = element.get("second_per_grids")
 
-    # grain.Batch stacks per-example (N, 3) grids to (B, N, 3). get_rope_index
-    # resets image_idx per sequence against a shared (N, 3) table, which is
-    # correct when training force-resizes all images to the same grid.
-    if image_grid_thw is not None and image_grid_thw.ndim == 3:
-      image_grid_thw = image_grid_thw[0]
-    if video_grid_thw is not None and video_grid_thw.ndim == 3:
-      video_grid_thw = video_grid_thw[0]
-
     # Call the standalone get_rope_index function from multimodal_utils
     from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
 
@@ -1208,7 +1200,8 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
       # Drop metadata that is not part of the training shaped batch.
       element.pop(f"{self.data_column}_mrope_deltas", None)
       element.pop("image_grid_thw", None)
-      element.pop("video_grid_thw", None)
+      if getattr(self.config, "video_max_grid_t", None) is None:
+        element.pop("video_grid_thw", None)
       element.pop("audio_lengths", None)
       element.pop("second_per_grids", None)
 
