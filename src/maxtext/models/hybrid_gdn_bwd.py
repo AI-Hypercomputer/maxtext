@@ -11,48 +11,48 @@ def _safe_dot(lhs, rhs, *args, **kwargs):
     else:
         return jax.lax.dot(lhs, rhs, *args, **kwargs).astype(lhs.dtype)
 
+def fused_transpose_broadcast(x: jax.Array, src_dim: int, dst_dim: int) -> jax.Array:
+    dtype = x.dtype
+    mask_shape = list(x.shape)
+    mask_size = mask_shape[src_dim]
+    mask_shape[dst_dim] = mask_size
+    src_mask = jax.lax.broadcasted_iota(jnp.int32, mask_shape, src_dim)
+    dst_mask = jax.lax.broadcasted_iota(jnp.int32, mask_shape, dst_dim)
+    # Cast to float immediately!
+    mask_f = (src_mask == dst_mask).astype(dtype)
+    return (x * mask_f).sum(axis=src_dim, keepdims=True)
+
 def invert_triangular_matrix(t: jax.Array, block_size: int = 16) -> jax.Array:
     n_v, chunk_size, _ = t.shape
+    dtype = t.dtype
     
-    # FIX: Native 1x64x64 generation to avoid lane relayout crashes
     iota_r_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 1)
     iota_c_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 2)
-    inv_t_base = jnp.where(iota_r_2d == iota_c_2d, 1.0, 0.0).astype(t.dtype)
+    inv_t_base = (iota_r_2d == iota_c_2d).astype(dtype)
     inv_t = jnp.broadcast_to(inv_t_base, t.shape)
     
-    # 1D masks for the loop
     iota_row_3d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, 1), 1)
     iota_col_3d = jax.lax.broadcasted_iota(jnp.int32, (1, 1, chunk_size), 2)
     
     def body_fun(i, inv_t_acc):
-        row_mask = jnp.where(iota_row_3d == i, 1.0, 0.0).astype(t.dtype)
+        row_mask = (iota_row_3d == i).astype(dtype)
         t_row = jnp.sum(t * row_mask, axis=1, keepdims=True)
         
-        col_mask = iota_col_3d < i
-        t_row = jnp.where(col_mask, t_row, 0.0)
+        col_mask = (iota_col_3d < i).astype(dtype)
+        t_row = t_row * col_mask
         
         new_row = -_safe_dot(
             t_row, inv_t_acc,
             dimension_numbers=(((2,), (1,)), ((0,), (0,)))
         )
         
-        one_hot = jnp.where(iota_col_3d == i, 1.0, 0.0).astype(t.dtype)
+        one_hot = (iota_col_3d == i).astype(dtype)
         new_row = new_row + one_hot
         
         inv_t_acc = inv_t_acc * (1.0 - row_mask) + new_row * row_mask
         return inv_t_acc
         
     return jax.lax.fori_loop(1, chunk_size, body_fun, inv_t)
-def fused_transpose_broadcast(x: jax.Array, src_dim: int, dst_dim: int) -> jax.Array:
-    dtype = x.dtype
-    mask_dtype = jnp.int32
-    mask_shape = list(x.shape)
-    mask_size = mask_shape[src_dim]
-    mask_shape[dst_dim] = mask_size
-    src_mask = jax.lax.broadcasted_iota(mask_dtype, mask_shape, src_dim)
-    dst_mask = jax.lax.broadcasted_iota(mask_dtype, mask_shape, dst_dim)
-    mask = src_mask == dst_mask
-    return jnp.where(mask, x, 0).sum(axis=src_dim, keepdims=True, dtype=dtype)
 def l2_norm(x: jax.Array, eps: float = 1e-6) -> jax.Array:
     norm = jnp.sqrt(jnp.sum(x * x, axis=-1, keepdims=True, dtype=x.dtype) + eps)
     return x / norm
@@ -157,25 +157,32 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             g_cum_sum_log_t = fused_transpose_broadcast(g_cum_sum_log, src_dim=1, dst_dim=2)
             g_cum_sum_diff_log = g_cum_sum_log - g_cum_sum_log_t
             
-            # --- FIX: Generate 1x64x64 masks to prevent 32x64x64 compiler crashes! ---
+            # --- 1. GENERATE MASKS DIRECTLY AS FLOATS ---
             iota_r_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 1)
             iota_c_2d = jax.lax.broadcasted_iota(jnp.int32, (1, chunk_size, chunk_size), 2)
-            identity_mask = iota_r_2d == iota_c_2d
-            strictly_lower_mask = iota_r_2d > iota_c_2d
-            lower_mask = iota_r_2d >= iota_c_2d
             
-            # Apply safe diff mask before exp!
-            safe_diff_fwd = jnp.where(strictly_lower_mask, g_cum_sum_diff_log, -1e4)
-            gating_map = jnp.exp(safe_diff_fwd)
+            identity_mask = (iota_r_2d == iota_c_2d).astype(k_repeat.dtype)
+            strictly_lower_mask = (iota_r_2d > iota_c_2d).astype(k_repeat.dtype)
+            lower_mask = (iota_r_2d >= iota_c_2d).astype(k_repeat.dtype)
+            
+            # --- 2. NO MORE jnp.where! ---
+            # safe_diff_log enforces -1e4 in the upper triangle to prevent NaN traps
+            safe_diff_log = g_cum_sum_diff_log * strictly_lower_mask + (-1e4) * (1.0 - strictly_lower_mask)
+            
+            # Because exp(-1e4) is 0.0, gating_map natively has 0.0 in the upper triangle!
+            gating_map = jnp.exp(safe_diff_log)
             
             gating_backward = jnp.exp(-g_cum_sum_diff_log[..., -1:])
             gating_forward = jnp.exp(g_cum_sum_log)
             gating_last = gating_forward[:, -1:]
             
-            gating_map_masked = jnp.where(strictly_lower_mask, gating_map, 0)
             k_beta_repeat = k_repeat * beta_large
             beta_k_k_t = _safe_dot(k_beta_repeat, k_repeat, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
-            t = jnp.where(identity_mask, 1, gating_map_masked * beta_k_k_t)
+            gating_beta_k_k_t = gating_map * beta_k_k_t
+            
+            # Replace t = jnp.where(...) with math!
+            t = gating_beta_k_k_t * (1.0 - identity_mask) + identity_mask
+            
             t_inv = invert_triangular_matrix(t)
             v_beta_large = v_large * beta_large
             k_beta_gating = k_beta_repeat * gating_forward
@@ -282,18 +289,17 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             lower_mask = iota_r_2d >= iota_c_2d
             
             # --- CRITICAL NaN TRAP FIX: Applied before exp() ---
-            safe_diff_bwd = jnp.where(strictly_lower_mask, g_cum_sum_diff_log, -1e4)
+            safe_diff_bwd = g_cum_sum_diff_log * strictly_lower_mask + (-1e4) * (1.0 - strictly_lower_mask)
             gating_map = jnp.exp(safe_diff_bwd)
             
             gating_backward = jnp.exp(-g_cum_sum_diff_log[..., -1:])
             gating_forward = jnp.exp(g_cum_sum_log)
             gating_last = gating_forward[:, -1:]
             
-            gating_map_masked = jnp.where(strictly_lower_mask, gating_map, 0)
             k_beta_repeat = k_repeat * beta_large
             beta_k_k_t = _safe_dot(k_beta_repeat, k_repeat, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
-            gating_beta_k_k_t = gating_map_masked * beta_k_k_t
-            t = jnp.where(identity_mask, 1, gating_beta_k_k_t)
+            gating_beta_k_k_t = gating_map * beta_k_k_t
+            t = gating_beta_k_k_t * (1.0 - identity_mask) + identity_mask
             t_inv = invert_triangular_matrix(t)
             v_beta_large = v_large * beta_large
             k_beta_gating = k_beta_repeat * gating_forward
@@ -309,11 +315,11 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             out_qk_raw = _safe_dot(q_large, k_large, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
             out_qk_raw_repeated = jnp.repeat(out_qk_raw, v_per_kq_head, axis=0)
             out_qk = out_qk_raw_repeated * gating_map
-            out_qk = jnp.where(lower_mask, out_qk, 0)
+            out_qk = out_qk * lower_mask
             d_out_new = d_out.reshape(chunk_size, n_v, d_v).swapaxes(0, 1)
             d_out_updated = d_out_new
             d_out_qk = _safe_dot(d_out_new, u_ws, dimension_numbers=(((2,), (2,)), ((0,), (0,))))
-            d_out_qk = jnp.where(lower_mask, d_out_qk, 0)
+            d_out_qk = d_out_qk * lower_mask
             d_u_ws = _safe_dot(out_qk, d_out_new, dimension_numbers=(((1,), (1,)), ((0,), (0,))))
             d_state_new = d_state_next
             d_k_repeat_gating = _safe_dot(d_state_new, u_ws, dimension_numbers=(((2,), (2,)), ((0,), (0,)))).swapaxes(1, 2)
@@ -331,9 +337,9 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             d_v_beta_large, d_k_beta_gating = jnp.split(d_merged_v_k, [d_v], axis=-1)
             t_inv_t = t_inv.swapaxes(1, 2)
             d_t = -_safe_dot(t_inv_t, _safe_dot(d_t_inv, t_inv_t, dimension_numbers=(((2,), (1,)), ((0,), (0,)))) , dimension_numbers=(((2,), (1,)), ((0,), (0,))))
-            d_t = jnp.where(strictly_lower_mask, d_t, 0)
+            d_t = d_t * strictly_lower_mask
             d_gating_beta_k_k_t = d_t
-            d_beta_k_k_t = d_gating_beta_k_k_t * gating_map_masked
+            d_beta_k_k_t = d_gating_beta_k_k_t * gating_map
             d_k_beta_repeat = _safe_dot(d_beta_k_k_t, k_repeat, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             d_k_repeat = _safe_dot(d_beta_k_k_t.swapaxes(1, 2), k_beta_repeat, dimension_numbers=(((2,), (1,)), ((0,), (0,))))
             d_out_qk_unmasked = d_out_qk * gating_map
