@@ -1229,8 +1229,8 @@ def train_loop(config, recorder, state=None):
 
   elastic_utils.record_elastic_reinit_end()
 
-  # Initialize host snapshot manager only in elastic mode
-  if config.elastic_enabled:
+  # Initialize host snapshot manager only in elastic snapshot mode
+  if elastic_utils.elastic_snapshot(config):
     replica_axis_idx = config.mesh_axes.index("data")
     snapshot_mgr = Snapshotter(replica_axis_index=replica_axis_idx)
     save_snapshot(snapshot_mgr, state, start_step, model)
@@ -1294,9 +1294,9 @@ def train_loop(config, recorder, state=None):
           watchdog.watchdog("step-timebomb", timeout=15 * 60, repeat=False),
       ):
         try:
-          # Scale-up check at the end of the step (only if elastic)
+          # Scale-up check at the end of the step (only if elastic snapshot)
           if (
-              config.elastic_enabled
+              elastic_utils.elastic_snapshot(config)
               and elastic_manager.available_inactive_slices
           ):
             recover(
@@ -1312,7 +1312,7 @@ def train_loop(config, recorder, state=None):
           python_vars["step"] += 1
 
         except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
-          if config.elastic_enabled and (
+          if elastic_utils.elastic_snapshot(config) and (
               isinstance(e, pathways_manager.ScaleUpSignalError)
               or elastic.is_error_due_to_slice_down(e)
           ):
@@ -1321,6 +1321,8 @@ def train_loop(config, recorder, state=None):
             )
             needs_recovery = True
           else:
+            # Checkpoint mode or non-elastic error: bubble to elastic_retry
+            elastic_utils.maybe_bubble_elastic_exception(config, e)
             # Non-elastic or unrelated JAX error: log and re-raise
             _logger.exception(
                 "[!] JAX Runtime Error detected around step %d. Re-raising.",
