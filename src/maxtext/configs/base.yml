@@ -460,6 +460,9 @@ compressed_rope_max_timescale: 160_000 # If positive, used for Compressed Sparse
 # Route COMPRESSED and LOCAL_SLIDING train attention to tokamax splash on TPU.
 # Requires use_tokamax_splash: true.
 compressed_use_dynamic_splash: false
+splash_bool_masks: false # Requires compressed_use_dynamic_splash: true.
+hoist_static_attention_masks: false
+indexer_threshold_membership: false
 
 # QK-Clip (Muon Clip) Configuration
 use_qk_clip: false  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)

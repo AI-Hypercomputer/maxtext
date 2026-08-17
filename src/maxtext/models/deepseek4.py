@@ -139,6 +139,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
       kv_cache=None,
       attention_metadata=None,
       decoder_input_tokens=None,
+      hoisted_masks=None,
   ):
     if isinstance(inputs, tuple):
       inputs = inputs[0]
@@ -154,6 +155,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
         model_mode,
         previous_chunk,
         slot,
+        hoisted_masks=hoisted_masks,
     )
 
     layer_output, metadata = self.mhc_mlp(
@@ -227,6 +229,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
       attention_metadata=None,
       kv_cache=None,
       decoder_input_tokens=None,
+      hoisted_masks=None,
   ):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
@@ -243,6 +246,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
         decoder_input_tokens=decoder_input_tokens,
+        hoisted_masks=hoisted_masks,
     )
 
     y, _ = self.layers_1(
@@ -256,6 +260,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
         decoder_input_tokens=decoder_input_tokens,
+        hoisted_masks=hoisted_masks,
     )
 
     return y, None

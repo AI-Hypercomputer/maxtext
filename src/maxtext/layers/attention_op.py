@@ -170,20 +170,29 @@ def build_compressed_splash_mask(
     q_seq_len: int,
     kv_seq_len: int,
     sliding_window_size: int | None,
+    precomputed_uncompressed: Array | None = None,
 ) -> Array:
   """Builds the boolean COMPRESSED mask for dynamic splash attention.
 
-  The result has shape `[batch, q_seq_len, kv_seq_len]` and matches the dense path's
-  `apply_mask_to_logits` keep predicate.
+  `compressed_mask` may use the additive or boolean representation. The result has shape
+  `[batch, q_seq_len, kv_seq_len]`.
   """
   c_len = compressed_mask.shape[-1]
   s_len = kv_seq_len - c_len
   b = compressed_mask.shape[0]
 
-  uncompressed = build_local_sliding_splash_mask(
-      b, decoder_segment_ids, segment_positions, q_seq_len, s_len, sliding_window_size
-  )
-  compressed_keep = compressed_mask.reshape(b, q_seq_len, c_len) >= DEFAULT_MASK_VALUE * 0.5
+  if precomputed_uncompressed is not None:
+    if precomputed_uncompressed.shape != (b, q_seq_len, s_len):
+      raise ValueError(f"hoisted prefix mask shape {precomputed_uncompressed.shape} != expected {(b, q_seq_len, s_len)}")
+    uncompressed = precomputed_uncompressed
+  else:
+    uncompressed = build_local_sliding_splash_mask(
+        b, decoder_segment_ids, segment_positions, q_seq_len, s_len, sliding_window_size
+    )
+  if compressed_mask.dtype == jnp.bool_:
+    compressed_keep = compressed_mask.reshape(b, q_seq_len, c_len)
+  else:
+    compressed_keep = compressed_mask.reshape(b, q_seq_len, c_len) >= DEFAULT_MASK_VALUE * 0.5
   return jnp.concatenate([uncompressed, compressed_keep], axis=-1)
 
 
@@ -1003,6 +1012,8 @@ class AttentionOp(nnx.Module):
       [2] SARATHI: Efficient LLM Inference by Piggybacking Decodes with
           Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
     """
+    if compressed_mask is not None and compressed_mask.dtype == jnp.bool_:
+      raise ValueError("The dense attention path requires an additive compressed_mask.")
     mask = None
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -1403,6 +1414,7 @@ class AttentionOp(nnx.Module):
       indexer_mask: Array | None = None,
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
+      hoisted_prefix_bool_mask: Array | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1480,6 +1492,7 @@ class AttentionOp(nnx.Module):
           compressed_mask,
           sinks,
           record_max_logits,
+          hoisted_prefix_bool_mask=hoisted_prefix_bool_mask,
       )
 
     # 'vllm_rpa' uses the same dot-attention wrapper but routes to the vLLM
@@ -1702,6 +1715,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Array,
       sinks: Array | None,
       record_max_logits: bool = False,
+      hoisted_prefix_bool_mask: Array | None = None,
   ) -> tuple[Array, None, None]:
     """Runs COMPRESSED train attention with the tokamax dynamic splash kernel.
 
@@ -1726,7 +1740,13 @@ class AttentionOp(nnx.Module):
         )
 
     bool_mask = build_compressed_splash_mask(
-        compressed_mask, decoder_segment_ids, segment_positions, q_seq_len, kv_seq_len, self.sliding_window_size
+        compressed_mask,
+        decoder_segment_ids,
+        segment_positions,
+        q_seq_len,
+        kv_seq_len,
+        self.sliding_window_size,
+        precomputed_uncompressed=hoisted_prefix_bool_mask,
     )
 
     lcm = math.lcm(self.block_kv, self.block_kv_compute, self.block_kv_dkv, self.block_kv_dkv_compute)
@@ -2870,6 +2890,7 @@ class AttentionOp(nnx.Module):
       compressed_kv: Optional[Array] = None,
       slot: Optional[int] = None,
       record_max_logits: bool = False,
+      hoisted_prefix_bool_mask: Optional[Array] = None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -2908,6 +2929,7 @@ class AttentionOp(nnx.Module):
         indexer_mask=indexer_mask_prefill,
         compressed_mask=compressed_mask if pass_comp_to_prefill else None,
         record_max_logits=record_max_logits,
+        hoisted_prefix_bool_mask=hoisted_prefix_bool_mask,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
     )

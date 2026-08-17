@@ -214,8 +214,10 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
+      hoisted_masks=None,
   ):
     """Executes the attention layer."""
+    extra_attention_kwargs = {} if hoisted_masks is None else {"hoisted_masks": hoisted_masks}
     attention_result, _ = self.self_attention(
         x,
         x,
@@ -226,6 +228,7 @@ class DeepSeekGenericLayer(nnx.Module):
         out_sharding=self.out_sharding,
         previous_chunk=previous_chunk,
         slot=slot,
+        **extra_attention_kwargs,
     )
     return self.with_logical_constraint(attention_result)
 
@@ -274,8 +277,10 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
+      hoisted_masks=None,
   ):
     """self-attention with normalization"""
+    extra_attention_kwargs = {} if hoisted_masks is None else {"hoisted_masks": hoisted_masks}
     if self.is_mhc_enabled:
       intermediate_inputs, _ = self.mhc_attention(
           self.pre_attention_norm_op,
@@ -289,6 +294,7 @@ class DeepSeekGenericLayer(nnx.Module):
           out_sharding=self.out_sharding,
           previous_chunk=previous_chunk,
           slot=slot,
+          **extra_attention_kwargs,
       )
     else:
       lnx = self.pre_attention_norm_op(inputs)
@@ -300,6 +306,7 @@ class DeepSeekGenericLayer(nnx.Module):
           model_mode,
           previous_chunk,
           slot,
+          hoisted_masks=hoisted_masks,
       )
       intermediate_inputs = inputs + attention_lnx
     # Normalization

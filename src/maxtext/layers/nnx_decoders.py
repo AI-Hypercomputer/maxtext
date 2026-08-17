@@ -38,6 +38,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
 from maxtext.layers import nnx_scan, nnx_wrappers
+from maxtext.layers.attention_compressed import build_deepseek4_hoisted_masks
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -1619,6 +1620,12 @@ class NNXDecoder(nnx.Module):
         "slot": slot,
         "previous_chunk": previous_chunk,
     }
+    hoisted_masks = None
+    if self.is_deepseek4 and not getattr(cfg, "using_pipeline_parallelism", False):
+      hoisted_masks = build_deepseek4_hoisted_masks(cfg, self.mesh, decoder_segment_ids, decoder_positions, model_mode)
+      if hoisted_masks is not None and not cfg.scan_layers:
+        layer_kwargs["hoisted_masks"] = hoisted_masks
+
     # Extract the bidirectional mask locally for layer configurations
     bidirectional_mask = None
     if multimodal_input is not None:
@@ -1844,6 +1851,7 @@ class NNXDecoder(nnx.Module):
               slot,
               previous_chunk,
               decoder_input_tokens,
+              hoisted_masks,
           )
         elif self.is_gemma3:
           y = self._apply_gemma3_scanned_blocks(
@@ -2023,6 +2031,7 @@ class NNXDecoder(nnx.Module):
       slot=None,
       previous_chunk=None,
       decoder_input_tokens=None,
+      hoisted_masks=None,
   ):
     """Applies DeepSeek V4 scanned decoder blocks: unrolled prefix hash layers followed by scanned full blocks."""
     cfg = self.config
@@ -2033,6 +2042,10 @@ class NNXDecoder(nnx.Module):
         "slot": slot,
         "decoder_input_tokens": decoder_input_tokens,
     }
+
+    # Keep these arrays closed over by the scan body rather than adding them to the scan carry.
+    if hoisted_masks is not None:
+      layer_call_kwargs["hoisted_masks"] = hoisted_masks
 
     # 1. Unrolled prefix layers (0, 1, 2)
     for layer_idx in range(num_hash_layers):

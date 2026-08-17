@@ -713,6 +713,23 @@ class CompressedAttention(BaseModel):
       description="Route COMPRESSED and LOCAL_SLIDING train attention to tokamax splash on TPU. Requires "
       "use_tokamax_splash=true.",
   )
+  splash_bool_masks: bool = Field(
+      False,
+      description="Keep DeepSeek-V4 compressed masks boolean end to end on the dynamic-splash train path "
+      "instead of building additive float masks and re-thresholding them. Requires "
+      "compressed_use_dynamic_splash=true.",
+  )
+  hoist_static_attention_masks: bool = Field(
+      False,
+      description="Build the layer-invariant DeepSeek-V4 mask tensors once per train step in the decoder and "
+      "pass them to the layers, instead of rebuilding them in every layer and remat pass.",
+  )
+  indexer_threshold_membership: bool = Field(
+      False,
+      description="Return the CSA indexer's selection as a boolean membership mask computed by thresholding "
+      "scores against the k-th top-k value, so the consumer skips the index one-hot expansion. Selects the "
+      "same window set as the top-k-indices path, including jax.lax.top_k's tie semantics.",
+  )
 
 
 class AttentionIndexer(BaseModel):
@@ -3688,6 +3705,17 @@ class MaxTextConfig(
           "`compressed_use_dynamic_splash` requires `use_tokamax_splash=true`; without it the boolean mask "
           "would be silently ignored by the non-tokamax splash branches."
       )
+    if self.splash_bool_masks and not self.compressed_use_dynamic_splash:
+      raise ValueError(
+          "`splash_bool_masks` requires `compressed_use_dynamic_splash=true`; only the dynamic-splash "
+          "path consumes boolean masks."
+      )
+    if (
+        self.hoist_static_attention_masks
+        and self.decoder_block == DecoderBlockType.DEEPSEEK4
+        and self.using_pipeline_parallelism
+    ):
+      raise ValueError("`hoist_static_attention_masks` does not support pipeline parallelism.")
     if self.mla_qk_head_chunk_size > 0:
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(
