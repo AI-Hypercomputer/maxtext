@@ -3049,6 +3049,72 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
   return mapping
 
 
+_GEMMA4_UNIFIED_VISION_PREFIX = "params-vision_encoder-Gemma4UnifiedVisionEmbedder_0"
+
+# MaxText subkey -> HF suffix under `model.vision_embedder`, for the encoder-free
+# (gemma4_unified / 12B) vision embedder. The multimodal projection is shared with
+# the ViT variants and stays at `model.embed_vision.embedding_projection.weight`.
+_GEMMA4_UNIFIED_VISION_PARAMS = (
+    ("patch_ln1-scale", "patch_ln1.weight"),
+    ("patch_ln1-bias", "patch_ln1.bias"),
+    ("patch_dense-kernel", "patch_dense.weight"),
+    ("patch_dense-bias", "patch_dense.bias"),
+    ("patch_ln2-scale", "patch_ln2.weight"),
+    ("patch_ln2-bias", "patch_ln2.bias"),
+    ("pos_emb_param", "pos_embedding"),
+    ("pos_norm-scale", "pos_norm.weight"),
+    ("pos_norm-bias", "pos_norm.bias"),
+)
+
+
+def GEMMA4_UNIFIED_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns MaxText<->HF weight paths for Gemma 4 Unified (12B).
+
+  The text tower is byte-for-byte the dense Gemma 4 layout (same period-6 attention
+  pattern, per-layer scalar and shared global KV projections), so it is delegated to
+  ``GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING``. Only the vision entries are swapped: the
+  SigLIP-style ``model.vision_tower.*`` trunk is replaced by the encoder-free
+  ``model.vision_embedder.*`` patch embedder.
+  """
+  mapping = GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
+
+  # Drop the ViT trunk entries the dense mapping emits (encoder blocks, patch
+  # embedder and std_scale/std_bias). The projector entry is deliberately kept.
+  mapping = {k: v for k, v in mapping.items() if "-Gemma4VisionEncoderLayer_0" not in k}
+
+  if config.get("vision_config", {}):
+    mapping.update(
+        {
+            f"{_GEMMA4_UNIFIED_VISION_PREFIX}-{mt_key}": f"model.vision_embedder.{hf_suffix}"
+            for mt_key, hf_suffix in _GEMMA4_UNIFIED_VISION_PARAMS
+        }
+    )
+  return mapping
+
+
+def GEMMA4_UNIFIED_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Gemma 4 Unified (12B)."""
+  hooks = GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers, saving_to_hf=saving_to_hf)
+
+  hooks = {k: v for k, v in hooks.items() if not (isinstance(k, str) and "-Gemma4VisionEncoderLayer_0" in k)}
+
+  if config.get("vision_config", {}):
+
+    def reshape_kernel(input_tensor, target_shape):
+      if saving_to_hf:
+        flipped_target_shape = np.flip(np.array(target_shape))
+        return input_tensor.reshape(flipped_target_shape).T
+      else:
+        return input_tensor.T.reshape(target_shape)
+
+    # Only patch_dense needs a transpose; the LayerNorm scales/biases are 1-D and the
+    # factorized position table already shares HF's (N, 2, D) layout, so both default
+    # to the identity mapping.
+    hooks[f"{_GEMMA4_UNIFIED_VISION_PREFIX}-patch_dense-kernel"] = reshape_kernel
+
+  return hooks
+
+
 def GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """MaxText↔HF weight-path map for Gemma 4 small (E2B / E4B).
 
@@ -4224,6 +4290,7 @@ PARAM_MAPPING = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gemma4-12b": GEMMA4_UNIFIED_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma4-26b": GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma4-31b": GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma4-e2b": GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4278,6 +4345,7 @@ HOOK_FNS = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gemma4-12b": GEMMA4_UNIFIED_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma4-26b": GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma4-31b": GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma4-e2b": GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_HOOK_FN,

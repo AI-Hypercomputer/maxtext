@@ -23,6 +23,8 @@ _MODEL_TO_BLOCKS = {
     "gemma3-12b": ("gemma3", "gemma3"),
     "gemma3-27b": ("gemma3", "gemma3"),
     # Gemma 4
+    # gemma4-12b is encoder-free: it embeds patches directly, but shares the gemma4 decoder.
+    "gemma4-12b": ("gemma4_unified", "gemma4"),
     "gemma4-26b": ("gemma4", "gemma4"),
     "gemma4-31b": ("gemma4", "gemma4"),
     "gemma4-e2b": ("gemma4", "gemma4_small"),
@@ -90,7 +92,7 @@ def preprocess_mm_data(config):
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
     processor_outputs = preprocess_mm_data_gemma3(images)
-  elif vision_block in ["gemma4"]:
+  elif vision_block in ["gemma4", "gemma4_unified"]:
     from maxtext.multimodal.processor_gemma4 import preprocess_mm_data_gemma4  # pylint: disable=import-outside-toplevel
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
@@ -119,7 +121,7 @@ def preprocess_image_for_training(image, config):
     from maxtext.multimodal.processor_gemma3 import preprocess_mm_data_gemma3  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_gemma3(image)
-  elif vision_block in ["gemma4"]:
+  elif vision_block in ["gemma4", "gemma4_unified"]:
     from maxtext.multimodal.processor_gemma4 import preprocess_mm_data_gemma4  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_gemma4(image)
@@ -143,7 +145,7 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_gemma3 import get_image_offsets_gemma3  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_gemma3(processor_output)
-  elif vision_block in ["gemma4"]:
+  elif vision_block in ["gemma4", "gemma4_unified"]:
     from maxtext.multimodal.processor_gemma4 import get_image_offsets_gemma4  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_gemma4(processor_output)
@@ -226,7 +228,7 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     return add_extra_tokens_for_images_gemma3(
         tokens, max_num_images=processor_output.num_images  # pyrefly: ignore[missing-attribute]
     )  # pyrefly: ignore[missing-attribute]
-  elif vision_block in ["gemma4"]:
+  elif vision_block in ["gemma4", "gemma4_unified"]:
     from maxtext.multimodal.processor_gemma4 import add_extra_tokens_for_images_gemma4  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_gemma4(
@@ -252,7 +254,7 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     from maxtext.multimodal.processor_gemma3 import get_dummy_image_shape_for_init_gemma3  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_gemma3(batch_size, num_image_per_sequence)
-  elif vision_block in ["gemma4"]:
+  elif vision_block in ["gemma4", "gemma4_unified"]:
     from maxtext.multimodal.processor_gemma4 import get_dummy_image_shape_for_init_gemma4  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_gemma4(batch_size, num_image_per_sequence)

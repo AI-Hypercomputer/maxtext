@@ -551,6 +551,16 @@ def main(config, test_args):  # pylint: disable=W0621
             qwen_tokens.image_pad,
             qwen_tokens.video_pad,
         ]
+      elif config.model_name.lower().startswith("gemma4") and config.use_multimodal:
+        # An image placeholder is always followed by another image token, so the
+        # next-token distribution there is never trained and is badly conditioned:
+        # perturbing the vision embeddings by their float32 noise floor (~1e-4
+        # relative) swings these logits by tens of nats, while text positions move
+        # by <1e-3. Comparing them would measure numerical luck, not correctness.
+        # pylint: disable-next=import-outside-toplevel
+        from maxtext.multimodal.processor_gemma4 import GEMMA4_TOKEN_PLACEHOLDER
+
+        ignore_token_ids = [GEMMA4_TOKEN_PLACEHOLDER]
 
       if ignore_token_ids:
         slice_ids = ids[0, start_index:token_size]

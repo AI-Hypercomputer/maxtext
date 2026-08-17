@@ -24,7 +24,7 @@ from flax import linen as nn
 from flax import nnx
 from typing import Optional, Any
 
-from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
+from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL, VisionEncoderBlockType
 from maxtext.layers import initializers
 from maxtext.layers import moe
 from maxtext.layers import nnx_scan, nnx_wrappers
@@ -178,6 +178,9 @@ class Gemma4DecoderLayer(nnx.Module):
     self.rngs = rngs
     self.attention_type = attention_type
     self.layer_idx = layer_idx
+    # `gemma4_unified` (12B) keeps the bidirectional image-block overlay on global attention
+    # layers; every other Gemma 4 variant drops it. See the mask handling in `__call__`.
+    self.is_gemma4_unified = getattr(config, "vision_encoder_block", None) == VisionEncoderBlockType.GEMMA4_UNIFIED
 
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
@@ -338,9 +341,17 @@ class Gemma4DecoderLayer(nnx.Module):
     lnx = self.pre_self_attention_norm(inputs)
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
-    # Gemma4 only applies bidirectional attention in sliding (local) layers,
-    # not in full (global) attention layers.
-    if self.attention_type != AttentionType.LOCAL_SLIDING:
+    # Gemma 4 applies bidirectional attention in sliding (local) layers only, not in full
+    # (global) attention layers -- `Gemma4Model.forward` routes through
+    # `create_masks_for_vision_model` to get exactly that.
+    #
+    # `gemma4_unified` (12B) is the exception: its `Gemma4UnifiedModel.forward` has no such
+    # branch and instead hands `block_sequence_ids` to the generic `create_masks_for_generate`,
+    # which ORs the image-block overlay into *both* mask types. We follow the reference
+    # implementation for the architecture we are implementing, so the overlay is kept on
+    # global layers there. Reverting this to the sliding-only rule costs KL ~0.75 and ~50%
+    # of next-token argmaxes against a stock Hugging Face forward pass.
+    if self.attention_type != AttentionType.LOCAL_SLIDING and not self.is_gemma4_unified:
       bidirectional_mask = None
 
     # Self-attention block

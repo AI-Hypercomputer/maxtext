@@ -1349,6 +1349,7 @@ class NNXDecoder(nnx.Module):
             "gemma3-4b",
             "gemma3-12b",
             "gemma3-27b",
+            "gemma4-12b",
             "gemma4-26b",
             "gemma4-31b",
             "gemma4-e2b",

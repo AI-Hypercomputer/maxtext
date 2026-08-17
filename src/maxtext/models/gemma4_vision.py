@@ -638,6 +638,104 @@ class Gemma4VisionProjector(nnx.Module):
     return x_projected
 
 
+class Gemma4UnifiedVisionEmbedder(nnx.Module):
+  """Encoder-free vision embedder for the ``gemma4_unified`` architecture (gemma4-12b).
+
+  Replaces the ViT trunk of :class:`Gemma4VisionEncoderLayer` with a direct projection
+  of pixel patches into the language-model space::
+
+      patches -> LayerNorm -> Dense -> LayerNorm -> +factorized_posemb -> LayerNorm
+
+  :class:`Gemma4VisionProjector` then applies the same multimodal head the ViT
+  variants use.
+
+  ``patch_size_for_vit`` is the *model* patch size (48). Upstream cuts 16px patches
+  and merges them in 3x3 groups; cutting 48px patches directly is the same operation
+  with the same element ordering, so :func:`patchify` alone yields both the merged
+  patches and their (x, y) positions.
+  """
+
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    self.rngs = rngs
+
+    self.patch_size = config.patch_size_for_vit
+    self.d_model = config.hidden_size_for_vit
+    patch_dim = self.patch_size * self.patch_size * config.num_channels_for_vit
+
+    self.patch_ln1 = nnx.LayerNorm(
+        num_features=patch_dim,
+        epsilon=config.normalization_layer_epsilon,
+        dtype=config.dtype_mm,
+        param_dtype=config.weight_dtype,
+        rngs=self.rngs,
+    )
+    self.patch_dense = linears.DenseGeneral(
+        in_features_shape=patch_dim,
+        out_features_shape=self.d_model,
+        use_bias=True,
+        dtype=config.dtype_mm,
+        weight_dtype=config.weight_dtype,
+        matmul_precision=config.matmul_precision,
+        axis=-1,
+        # Same (in, out) -> ("embed", "mlp") convention the ViT blocks and the shared
+        # projector use. This is the largest parameter the embedder adds
+        # (patch_dim x d_model), so leaving it unannotated would replicate it on every
+        # shard. `DenseGeneral` derives bias_axes from the trailing kernel axes.
+        kernel_axes=("embed", "mlp"),
+        rngs=self.rngs,
+    )
+    self.patch_ln2 = nnx.LayerNorm(
+        num_features=self.d_model,
+        epsilon=config.normalization_layer_epsilon,
+        dtype=config.dtype_mm,
+        param_dtype=config.weight_dtype,
+        rngs=self.rngs,
+    )
+
+    pos_emb_init = nnx.initializers.normal(stddev=0.02)
+    self.pos_emb_param = nnx.Param(
+        pos_emb_init(
+            rngs.params(),
+            (config.num_position_embeddings_for_vit, 2, self.d_model),
+            config.weight_dtype,
+        ),
+        # Declared replicated, matching `std_scale` / `std_bias` on the ViT variant. The
+        # table is gathered by position and added to the patch activations, so sharding
+        # its feature dim would only buy ~17 MB at the cost of a reshard on every add.
+        sharding=(None, None, None),
+    )
+    self.pos_norm = nnx.LayerNorm(
+        num_features=self.d_model,
+        epsilon=config.normalization_layer_epsilon,
+        dtype=config.dtype_mm,
+        param_dtype=config.weight_dtype,
+        rngs=self.rngs,
+    )
+
+  def __call__(self, inputs: jax.Array, deterministic: bool = False) -> jax.Array:
+    """Embeds images of shape ``[B, N, H, W, C]`` into ``[B, N, num_patches, d_model]``."""
+    del deterministic  # No dropout here.
+    if inputs.ndim == 4:
+      inputs = jnp.expand_dims(inputs, 1)
+    b, n, h, w, c = inputs.shape
+    inputs_flat = jnp.reshape(inputs, (b * n, h, w, c))
+
+    patches, positions_xy = patchify(inputs_flat, self.patch_size)
+
+    x = self.patch_ln1(patches)
+    x = self.patch_dense(x)
+    x = self.patch_ln2(x)
+
+    pos_embed = factorized_posemb(
+        cast(jax.Array, self.pos_emb_param.value), positions_xy, self.config.matmul_precision
+    ).astype(x.dtype)
+    x = self.pos_norm(x + pos_embed)
+
+    return jnp.reshape(x, (b, n, x.shape[1], x.shape[2]))
+
+
 def gemma4_vision_encoder_as_linen(config: Config, mesh: Mesh) -> nn.Module:
   """Wraps the Gemma 4 Vision Encoder as a Linen module."""
   return nnx_wrappers.to_linen(
