@@ -398,12 +398,18 @@ def get_kernel(chunk_size, n_kq, n_v, d_k, d_v):
             pl.semaphore_wait(sem_da_bwd.at[(num_chunks - 2) % 2], 1)
             return None
         jax.lax.cond(num_chunks >= 2, wait_second_last_bwd, lambda _: None, None)
-        return None
-        jax.lax.cond(num_chunks >= 1, wait_last_writes_bwd, lambda _: None, None)
-        d_conv_weight_ref[...] = d_W_total
-        d_conv_bias_ref[...] = d_B_total
-        d_a_log_ref[...] = d_a_log_total
-        d_dt_bias_ref[...] = d_dt_bias_total
+        
+        def wait_last_writes_bwd_with_return(_):
+            pl.semaphore_wait(sem_dqkv_bwd.at[(num_chunks - 1) % 2], 1)
+            pl.semaphore_wait(sem_db_bwd.at[(num_chunks - 1) % 2], 1)
+            pl.semaphore_wait(sem_da_bwd.at[(num_chunks - 1) % 2], 1)
+            return None
+        jax.lax.cond(num_chunks >= 1, wait_last_writes_bwd_with_return, lambda _: None, None)
+        
+        d_conv_weight_ref.at[batch_idx, ...].set(d_W_total)
+        d_conv_bias_ref.at[batch_idx, ...].set(d_B_total)
+        d_a_log_ref.at[batch_idx, ...].set(d_a_log_total)
+        d_dt_bias_ref.at[batch_idx, ...].set(d_dt_bias_total)
         d_state_out_scratch[...] = d_state_init
         pltpu.sync_copy(d_state_out_scratch, d_state_out_ref.at[batch_idx, ...])
 
@@ -431,10 +437,10 @@ def computation(
     d_b_shape = jax.ShapeDtypeStruct(b_flat.shape, b_flat.dtype)
     d_a_shape = jax.ShapeDtypeStruct(a_flat.shape, a_flat.dtype)
     d_state_shape = jax.ShapeDtypeStruct(state_init.shape, state_init.dtype)
-    d_conv_weight_shape = jax.ShapeDtypeStruct(conv_weight.shape, conv_weight.dtype)
-    d_conv_bias_shape = jax.ShapeDtypeStruct(conv_bias.shape, conv_bias.dtype)
-    d_a_log_shape = jax.ShapeDtypeStruct(a_log.shape, a_log.dtype)
-    d_dt_bias_shape = jax.ShapeDtypeStruct(dt_bias.shape, dt_bias.dtype)
+    d_conv_weight_shape = jax.ShapeDtypeStruct((batch_size,) + conv_weight.shape, conv_weight.dtype)
+    d_conv_bias_shape = jax.ShapeDtypeStruct((batch_size,) + conv_bias.shape, conv_bias.dtype)
+    d_a_log_shape = jax.ShapeDtypeStruct((batch_size,) + a_log.shape, a_log.dtype)
+    d_dt_bias_shape = jax.ShapeDtypeStruct((batch_size,) + dt_bias.shape, dt_bias.dtype)
     all_states_shape = jax.ShapeDtypeStruct((batch_size, num_chunks + 1, n_v, d_k, d_v), state_init.dtype)
 
     grid = (batch_size,)
@@ -472,11 +478,16 @@ def computation(
         out_shape=(d_qkv_shape, d_b_shape, d_a_shape, d_state_shape, d_conv_weight_shape, d_conv_bias_shape, d_a_log_shape, d_dt_bias_shape, all_states_shape),
         grid=grid,
         in_specs=[hbm_spec] * 4 + [vmem_spec] * 4 + [hbm_spec, vmem_spec],
-        out_specs=(hbm_spec, hbm_spec, hbm_spec, hbm_spec, vmem_spec, vmem_spec, vmem_spec, vmem_spec, hbm_spec),
+        out_specs=(hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec),
         scratch_shapes=scratch_shapes,
     )(qkv_padded, b_flat, a_flat, d_out_flat, conv_weight, conv_bias, a_log, dt_bias, state_init, d_state_final)
 
-    d_qkv_flat, d_b_flat, d_a_flat, d_state_init_out, d_conv_weight, d_conv_bias, d_a_log, d_dt_bias, _ = res
+    d_qkv_flat, d_b_flat, d_a_flat, d_state_init_out, d_conv_weight_b, d_conv_bias_b, d_a_log_b, d_dt_bias_b, _ = res
+    
+    d_conv_weight = jnp.sum(d_conv_weight_b, axis=0)
+    d_conv_bias = jnp.sum(d_conv_bias_b, axis=0)
+    d_a_log = jnp.sum(d_a_log_b, axis=0)
+    d_dt_bias = jnp.sum(d_dt_bias_b, axis=0)
     d_qkv = d_qkv_flat.reshape(batch_size, seq_len, dim_size)
     d_b = d_b_flat.reshape(batch_size, seq_len, n_v)
     d_a = d_a_flat.reshape(batch_size, seq_len, n_v)
