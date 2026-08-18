@@ -1110,7 +1110,7 @@ class CompressedAttention(Attention):
       sliding_window_size: int | None = None,
       use_ragged_attention: bool = False,
       ragged_block_size: int = 256,
-      use_qk_norm: bool = False,
+      use_qk_norm: bool | None = None,
       query_pre_attn_scalar: float | None = None,
       use_bias_in_projections: bool = False,
       # Compression Specific Parameters:
@@ -1606,7 +1606,7 @@ def compressed_attention(
     sliding_window_size: int | None = None,
     use_ragged_attention: bool = False,
     ragged_block_size: int = 256,
-    use_qk_norm: bool = False,
+    use_qk_norm: bool | None = None,
     query_pre_attn_scalar: float | None = None,
     use_bias_in_projections: bool = False,
     q_lora_rank: int = 1536,

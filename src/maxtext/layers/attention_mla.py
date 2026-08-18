@@ -477,7 +477,7 @@ def mla_as_linen(
     sliding_window_size: int | None = None,
     use_ragged_attention: bool = False,
     ragged_block_size: int = 256,
-    use_qk_norm: bool = False,
+    use_qk_norm: bool | None = None,
     query_pre_attn_scalar: float | None = None,
     use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
     # Temperature tuning parameters used for Llama4
@@ -615,7 +615,7 @@ class MLA(Attention):
       sliding_window_size: int | None = None,
       use_ragged_attention: bool = False,
       ragged_block_size: int = 256,
-      use_qk_norm: bool = False,
+      use_qk_norm: bool | None = None,
       query_pre_attn_scalar: float | None = None,
       use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
       # Temperature tuning parameters used for Llama4
