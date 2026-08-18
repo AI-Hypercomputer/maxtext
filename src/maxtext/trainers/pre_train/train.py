@@ -959,7 +959,10 @@ def train_loop(config, recorder, state=None):
       params_shardings,
   )
 
-  with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  # Do not enter the legacy `mesh` context manager here: the training loop calls
+  # p_train_step without it, and the mismatch in jit's tracing-cache key would
+  # cause train_step to be traced and compiled a second time on the first step.
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     data_sharding = sharding.get_input_data_sharding(config, mesh)
     shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     if config.shard_optimizer_over_data and isinstance(model, nn.Module):
@@ -973,7 +976,12 @@ def train_loop(config, recorder, state=None):
     else:
       lower_args = (state, shaped_batch)
     maxtext_utils.maybe_dump_jaxpr(config, p_train_step, lower_args)
-    if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
+    if config.compiled_trainstep_file == "" and not jax.config.jax_enable_pgle:
+      # Compile only when there is no pre-compiled file loaded. With AutoPGLE, an
+      # ahead-of-time compiled executable can never be reused by the dispatch path
+      # (the active PGLE profiler is part of JAX's executable cache key), so this
+      # compile would only add a third full compilation on top of the profiling
+      # compile and the FDO recompile; skip it and its memory stats.
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
       compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)
       compiled_stats = compiled.memory_analysis()
