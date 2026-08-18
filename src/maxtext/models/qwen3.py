@@ -33,16 +33,11 @@ from flax import nnx
 
 from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.common.common_types import KV_BATCH, KV_HEAD
-<<<<<<< HEAD
 from maxtext.utils.sharding import (
     get_logical_axis_rules,
     logical_to_mesh_axes,
     remove_incompatible_mesh_axes_from_partition_spec,
 )
-=======
-from maxtext.utils.sharding import logical_to_mesh_axes, get_logical_axis_rules
-from maxtext.utils.sharding import logical_to_mesh_axes, get_logical_axis_rules
->>>>>>> 9ac782c80 (Update existing gdn code with hybrid gdn (tokamax + newton-schultz))
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -720,7 +715,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # vLLM PAGED STATE PATH: use tpu_inference fused conv + ragged delta-rule.
       # =========================================================================
       try:
-<<<<<<< HEAD
         from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from tpu_inference.layers.common.utils import (  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
@@ -729,16 +723,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         )
         from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-=======
-        # pylint: disable=import-outside-toplevel
-        # pytype: disable=import-error
-        from tpu_inference.layers.common.gdn_attention import GdnAttentionConfig, run_jax_gdn_attention  # pylint: disable=import-outside-toplevel
-        from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import RaggedGatedDeltaRuleImpl  # pylint: disable=import-outside-toplevel
-        from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel
-        from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding  # pylint: disable=import-outside-toplevel
-        from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel
-        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel
->>>>>>> 9ac782c80 (Update existing gdn code with hybrid gdn (tokamax + newton-schultz))
       except ImportError as e:
         raise ImportError(
             "GDN attention kernel require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
@@ -778,7 +762,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       conv_state_paged, recurrent_state_paged = kv_cache
 
-<<<<<<< HEAD
       # Compile against the active request bucket rather than the runner's
       # maximum-size metadata buffers.
       dp_size = get_mesh_shape_product(self.mesh, attn_data)
@@ -798,10 +781,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           padded_num_reqs_per_dp,
           dp_size,
       )
-=======
-      # Use REF impl (pure JAX) to avoid Mosaic kernel compilation issues.
-      gdn_config = GdnAttentionConfig(ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF)
->>>>>>> 9ac782c80 (Update existing gdn code with hybrid gdn (tokamax + newton-schultz))
 
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
@@ -813,17 +792,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           None,  # conv_bias: MaxText conv1d uses use_bias=False.
           jnp.asarray(self.A_log[...], dtype=cfg.dtype),
           jnp.asarray(self.dt_bias[...], dtype=cfg.dtype),
-<<<<<<< HEAD
           state_indices,
           query_start_loc,
           attention_metadata.request_distribution,  # pyrefly: ignore[missing-attribute]
           seq_lens,
-=======
-          attention_metadata.mamba_state_indices.astype(jnp.int32),
-          attention_metadata.query_start_loc,
-          attention_metadata.request_distribution,
-          attention_metadata.seq_lens,
->>>>>>> 9ac782c80 (Update existing gdn code with hybrid gdn (tokamax + newton-schultz))
           self.num_k_heads,
           self.num_v_heads,
           self.head_k_dim,
