@@ -496,10 +496,11 @@ Gemma4SmallDecoderLayerToLinen = nnx_wrappers.to_linen_class(
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
-from maxtext.layers import nnx_scan
+from maxtext.utils import maxtext_utils
 
-class Gemma4SmallScannableBlock(nnx.Module):
-  """A repeatable block of Gemma4 small decoder layers."""
+
+class Gemma4SmallScannableLayer(nnx.Module):
+  """A scannable wrapper around a single Gemma4SmallDecoderLayer."""
 
   def __init__(
       self,
@@ -508,182 +509,133 @@ class Gemma4SmallScannableBlock(nnx.Module):
       model_mode: str,
       rngs: nnx.Rngs,
       quant: None | Quant = None,
-      num_of_layers: int = 6,
+      attention_type: AttentionType = AttentionType.LOCAL_SLIDING,
+      layer_idx: int = 0,
       remat_policy_fn: Any = None,
-      apply_internal_remat: bool = False,
+      apply_internal_remat: bool = True,
   ):
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
     self.quant = quant
-    self.rngs = rngs
-    self.num_of_layers = num_of_layers
+    self.attention_type = attention_type
+    self.layer_idx = layer_idx
     self.remat_policy_fn = remat_policy_fn
     self.apply_internal_remat = apply_internal_remat
 
-    pattern = get_attention_pattern(config.model_name)
-    pattern_length = len(pattern)
-    if not 0 <= num_of_layers <= pattern_length:
-      raise ValueError(f"Gemma4SmallScannableBlock must contain between 0 and {pattern_length} layers; got {num_of_layers}.")
-      
-    if config.hidden_size_per_layer_input > 0 and config.vocab_size_per_layer_input > 0:
-      self.per_layer_embedder = Gemma4SmallPLE(config=config, mesh=mesh, rngs=rngs)
-    else:
-      self.per_layer_embedder = None
-      
-    self.layer_types = [pattern[lyr % pattern_length] for lyr in range(num_of_layers)]
-    for lyr in range(num_of_layers):
-      layer = Gemma4SmallDecoderLayer(
-          config=config,
-          mesh=mesh,
-          model_mode=model_mode,
-          quant=quant,
-          rngs=rngs,
-          attention_type=self.layer_types[lyr],
-          layer_idx=lyr,
-      )
-      setattr(self, f"layers_{lyr}", layer)
+    self.layer = Gemma4SmallDecoderLayer(
+        config=config,
+        mesh=mesh,
+        model_mode=model_mode,
+        quant=quant,
+        rngs=rngs,
+        attention_type=attention_type,
+        layer_idx=layer_idx,
+    )
 
-  @property
-  def _remat_enabled(self):
-    return self.apply_internal_remat and self.config.remat_policy != "none"
+    num_layers = config.num_decoder_layers
+    self.layer_types = build_layer_types(num_layers, config.model_name)
+    self.is_donor = is_kv_donor_layer(layer_idx, self.layer_types, config.num_kv_shared_layers)
+    self.is_shared = is_kv_shared_layer(layer_idx, num_layers, config.num_kv_shared_layers)
+
+  def compute_shared_kv(self, inputs: jax.Array, decoder_positions: jax.Array) -> tuple[jax.Array, jax.Array]:
+    return self.layer.compute_shared_kv(inputs, decoder_positions)
 
   def __call__(
       self,
-      inputs,
+      inputs: jax.Array,
       decoder_segment_ids,
       decoder_positions,
-      deterministic,
-      model_mode,
-      slot=None,
-      page_state=None,
+      deterministic: bool,
+      model_mode: str,
       previous_chunk=None,
+      page_state=None,
+      slot=None,
       bidirectional_mask=None,
       kv_cache=None,
       attention_metadata=None,
-      decoder_input_tokens=None,
+      per_layer_input: jax.Array | None = None,
+      shared_key: jax.Array | None = None,
+      shared_value: jax.Array | None = None,
   ):
     cfg = self.config
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
-    from jax.ad_checkpoint import checkpoint_name
-    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    graphdef_l, state_l = nnx.split(self.layer)
 
-    per_layer_inputs = None
-    if self.per_layer_embedder is not None and decoder_input_tokens is not None:
-      per_layer_inputs = self.per_layer_embedder(decoder_input_tokens, inputs)
-
-    num_kv_shared = cfg.num_kv_shared_layers
-    import jax
-    import jax.numpy as jnp
-    import maxtext.utils.maxtext_utils as maxtext_utils
-    
-    shared_kv_states: dict[int, tuple[jax.Array, jax.Array]] = {}
-    cache_index_of = kv_cache_slot_map(tuple(self.layer_types), num_kv_shared)
-
-    y = inputs
-    updated_kvs = []
-
-    for lyr in range(self.num_of_layers):
-      layer = getattr(self, f"layers_{lyr}")
-      donor_idx = kv_donor_layer_idx(lyr, tuple(self.layer_types), num_kv_shared)
-      is_donor = is_kv_donor_layer(lyr, tuple(self.layer_types), num_kv_shared)
-
-      shared_key = None
-      shared_value = None
-      if donor_idx is not None:
-        if donor_idx not in shared_kv_states:
-          raise RuntimeError(
-              f"KV-shared layer {lyr} references donor {donor_idx} but no donor K/V have been recorded yet."
-          )
-        shared_key, shared_value = shared_kv_states[donor_idx]
-      
-      ple_slice = per_layer_inputs[..., lyr, :] if per_layer_inputs is not None else None
-      cache_idx = cache_index_of[lyr]
-      kv_c = kv_cache[cache_idx] if kv_cache is not None else None
-
-      graphdef_l, state_l = nnx.split(layer)
-
-      def pure_layer_fn(graphdef_in, state_in, y_in, kv_c_in):
-        l_merged = nnx.merge(graphdef_in, state_in)
-        out = l_merged(
-            y_in,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode,
-            previous_chunk=previous_chunk,
-            slot=slot,
-            bidirectional_mask=bidirectional_mask,
-            kv_cache=kv_c_in,
-            attention_metadata=attention_metadata,
-            per_layer_input=ple_slice,
-            shared_key=shared_key,
-            shared_value=shared_value,
-            extract_donor_kv=False,
-        )
+    def pure_layer_fn(graphdef_in, state_in, y_in, kv_c, ple_in, s_key_in, s_val_in):
+      l_merged = nnx.merge(graphdef_in, state_in)
+      out = l_merged(
+          y_in,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+          bidirectional_mask=bidirectional_mask,
+          kv_cache=kv_c,
+          attention_metadata=attention_metadata,
+          per_layer_input=ple_in,
+          shared_key=s_key_in,
+          shared_value=s_val_in,
+          extract_donor_kv=self.is_donor,
+      )
+      if self.is_donor:
+        new_y, new_kv, donor_kv_out = out
+      else:
         if isinstance(out, tuple):
           new_y = out[0]
           new_kv = out[1] if len(out) > 1 else None
         else:
           new_y = out
           new_kv = None
-
         donor_kv_out = ()
-        if is_donor:
-          donor_k, donor_v = l_merged.compute_shared_kv(y_in, decoder_positions)
-          donor_kv_out = (donor_k, donor_v)
-          
-        return new_y, new_kv, donor_kv_out, nnx.state(l_merged)
+      return new_y, new_kv, donor_kv_out, nnx.state(l_merged)
 
-      global_remat_policy = self.remat_policy_fn
-      offload_names = maxtext_utils.get_save_and_offload_names(cfg)
-      if offload_names[0] or offload_names[1]:
-        save_names, offload_to_device = offload_names
-        global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
+    global_remat_policy = self.remat_policy_fn
+    offload_names = maxtext_utils.get_save_and_offload_names(cfg)
+    if offload_names[0] or offload_names[1]:
+      save_names, offload_to_device = offload_names
+      global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
 
-      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
-      
-      if self.apply_internal_remat and cfg.remat_policy != "none":
-        run_layer = jax.checkpoint(
-            pure_layer_fn,
-            policy=global_remat_policy,
-            prevent_cse=prevent_cse,
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+
+    if self.apply_internal_remat and cfg.remat_policy != "none":
+      run_layer = jax.checkpoint(
+          pure_layer_fn,
+          policy=global_remat_policy,
+          prevent_cse=prevent_cse,
+      )
+    else:
+      run_layer = pure_layer_fn
+
+    from jax.experimental import xla_metadata
+    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+      def scan_body(carry, _):
+        y_carry, kv_carry, state_carry = carry
+        new_y, new_kv, donor_kv_out, new_state = run_layer(
+            graphdef_l, state_carry, y_carry, kv_carry, per_layer_input, shared_key, shared_value
         )
-      else:
-        run_layer = pure_layer_fn
+        return (new_y, new_kv, new_state), donor_kv_out
 
-      from jax.experimental import xla_metadata
-      with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
-        def loop_body(carry, _):
-          y_carry, kv_carry, donor_kv_carry, state_carry = carry
-          new_y, new_kv, donor_kv_out, new_state = run_layer(graphdef_l, state_carry, y_carry, kv_carry)
-          return (new_y, new_kv, donor_kv_out, new_state), None
-        
-        # Wrap the execution in a length=1 scan to preserve checkpoint boundaries
-        dummy_xs = jnp.zeros((1, 1))
-        (new_y, new_kv, donor_kv_out, new_state), _ = jax.lax.scan(
-            loop_body,
-            (y, kv_c, (), state_l),
-            dummy_xs,
-            length=1,
-        )
+      dummy_xs = jnp.zeros((1, 0))
+      (new_y, new_kv, new_state), donor_kv_ys = jax.lax.scan(
+          scan_body,
+          (inputs, kv_cache, state_l),
+          dummy_xs,
+          length=1,
+      )
 
-      if is_donor:
-        shared_kv_states[lyr] = donor_kv_out
+    nnx.update(self.layer, new_state)
 
-      nnx.update(layer, new_state)
-      y = new_y
-      if kv_cache is not None:
-        updated_kvs.append(new_kv)
+    donor_kv = ()
+    if self.is_donor:
+      donor_kv = jax.tree.map(lambda x: x[0], donor_kv_ys)
 
-    if kv_cache is not None:
-      return y, tuple(updated_kvs)
+    return new_y, new_kv, donor_kv
 
-    if cfg.scan_layers:
-      return y, None
-    return y
 
-Gemma4SmallScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Gemma4SmallScannableBlock,
+Gemma4SmallScannableLayerToLinen = nnx_wrappers.to_linen_class(
+    Gemma4SmallScannableLayer,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
