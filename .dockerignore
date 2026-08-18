@@ -1,2 +1,11 @@
 .git
 maxtext_venv
+
+# Local virtualenvs and scratch checkouts. Each contains bin/python as an absolute symlink, which
+# Docker cannot follow out of the build context, and the upload script refuses the build rather
+# than producing an image with a broken cache key. maxtext_venv was already listed; these are the
+# same thing under different names.
+maxtext_xpk_venv
+maxtext_pt_venv
+venv_runs
+maxlens
