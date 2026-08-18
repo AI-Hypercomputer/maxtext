@@ -48,6 +48,71 @@ from maxtext.integration.vllm.weight_converter import (
 )
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 
+import vllm.config.vllm
+import vllm.config.utils as vllm_config_utils
+
+# Monkey-patch VLLM's is_init_field to gracefully handle dynamically added
+# fields (like sharding_config injected by tpu-inference) which would otherwise
+# cause ValueError/AssertionError during vllm_config.with_hf_config replacement.
+_orig_is_init_field = vllm_config_utils.is_init_field
+
+
+def _engine_args_accepts(name):
+  """Whether the installed vLLM's EngineArgs still takes `name`.
+
+  Fields come and go between vLLM releases, and passing one that has been
+  removed is a TypeError rather than something vLLM ignores.
+  """
+  # pylint: disable=import-outside-toplevel
+  import dataclasses
+
+  from vllm.engine.arg_utils import EngineArgs
+
+  return any(field.name == name for field in dataclasses.fields(EngineArgs))
+
+
+def _patched_is_init_field(cls, name):
+  try:
+    return _orig_is_init_field(cls, name)
+  except ValueError:
+    return False
+
+
+vllm_config_utils.is_init_field = _patched_is_init_field
+
+
+_orig_with_hf_config = vllm.config.vllm.VllmConfig.with_hf_config
+
+
+def _patched_with_hf_config(self, *args, **kwargs):
+  """
+  Restore the original data_parallel_size which tpu_platform mutated,
+  so that the new VllmConfig passes the device_indexes length assertion.
+  tpu_inference deletes sharding_config before calling with_hf_config,
+  so we must reverse-engineer the data_parallel_size from device_indexes.
+  """
+  if self.additional_config and "sharding" in self.additional_config:
+    sharding_strategy = self.additional_config["sharding"].get("sharding_strategy", {})
+    device_indexes = sharding_strategy.get("device_indexes")
+    if device_indexes is not None:
+      pc = self.parallel_config
+      tp = sharding_strategy.get("tensor_parallelism") or pc.tensor_parallel_size
+      ep = sharding_strategy.get("expert_parallelism", 1)
+      sp = sharding_strategy.get("sequence_parallelism", 1)
+      attn_dp = sharding_strategy.get("attention_data_parallelism", 1)
+      attn_dp_ep = sharding_strategy.get("attention_data_expert_parallelism", 1)
+      dcp = pc.decode_context_parallel_size
+
+      other_parallelism = tp * ep * sp * attn_dp * attn_dp_ep * dcp
+      if other_parallelism > 0:
+        self.parallel_config.data_parallel_size = len(device_indexes) // other_parallelism
+
+  return _orig_with_hf_config(self, *args, **kwargs)
+
+
+vllm.config.vllm.VllmConfig.with_hf_config = _patched_with_hf_config
+
+
 # Sentinel distinguishing "this model has no entry" from "this model has an
 # entry whose value is None", which means direct-sync-only.
 _NO_RULE_TABLE = object()
@@ -570,6 +635,10 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         "max_logprobs": 1,
         "logprobs_mode": rollout_config.rollout_vllm_logprobs_mode,
     }
+    if _engine_args_accepts("swap_space"):
+      engine_kwargs["swap_space"] = getattr(
+          rollout_config, "rollout_vllm_swap_space_size_gb", maxtext_config.swap_space_vllm_gb
+      )
 
     # Merge additional kwargs like dtype and hf_overrides provided by train_rl.py
     if hasattr(rollout_config, "rollout_vllm_kwargs") and rollout_config.rollout_vllm_kwargs:

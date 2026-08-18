@@ -110,6 +110,24 @@ def decode_with_vllm(config: Config) -> None:
       },
   }
 
+  # vllm_additional_config exists in the config but was never passed through, so keys tpu_inference
+  # reads straight off additional_config -- skip_quantization among them -- had no way to be set.
+  # Merged at the top level so it cannot clobber the maxtext_config and sharding blocks built above.
+  if config.vllm_additional_config:
+    for key, value in dict(config.vllm_additional_config).items():
+      if key in vllm_args["additional_config"]:
+        max_logging.log(f"Ignoring vllm_additional_config[{key!r}]: it would overwrite a generated block.")
+      else:
+        vllm_args["additional_config"][key] = value
+
+  # The worker rebuilds its own MaxTextConfig from inference/vllm.yml, which pins attention to
+  # vllm_rpa, and nothing carried the caller's choice across. Some decoder blocks reject that
+  # outright -- deepseek4 raises "DeepSeek4 decoder block currently only supports dot_product
+  # attention" -- and there was no way to say otherwise. Only forwarded when explicitly set, so
+  # models that are happy on vllm_rpa keep it.
+  if config.attention != "autoselected":
+    vllm_args["additional_config"]["maxtext_config"]["attention"] = config.attention
+
   if config.load_parameters_path:
     vllm_args["additional_config"]["maxtext_config"]["load_parameters_path"] = config.load_parameters_path
   else:
