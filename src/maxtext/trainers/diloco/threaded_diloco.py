@@ -218,7 +218,10 @@ def _fused_unpack_and_apply_scanned_fragment_jit(
           if has_replica_dim and v.ndim > manipulator.param_scan_axis + 1
           else manipulator.param_scan_axis
       )
-      new_leaves[idx] = jax.lax.dynamic_update_slice_in_dim(v, frag, start_idx, axis=axis)
+      updated_v = jax.lax.dynamic_update_slice_in_dim(v, frag, start_idx, axis=axis)
+      if hasattr(v, "sharding") and v.sharding is not None:
+        updated_v = jax.lax.with_sharding_constraint(updated_v, v.sharding)
+      new_leaves[idx] = updated_v
 
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
@@ -241,6 +244,8 @@ def _fused_unpack_and_apply_flat_fragment_jit(
       if idx is None:
         continue
       frag = jnp.reshape(packed_1d[st:en], shape)
+      if hasattr(leaves[idx], "sharding") and leaves[idx].sharding is not None:
+        frag = jax.lax.with_sharding_constraint(frag, leaves[idx].sharding)
       new_leaves[idx] = frag
 
   return jax.tree_util.tree_unflatten(treedef, new_leaves)

@@ -11,7 +11,7 @@ NUM_SLICES=2
 DEVICE_TYPE=v5p-8
 
 # Run configuration
-RUNNAME="dlco-ns-$(date +%d%H%M%S)"
+RUNNAME="${RUNNAME:-dlco-ns-$(date +%d%H%M%S)}"
 DOCKER_IMAGE_BASE="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2026-07-17"
 MY_IMAGE="gcr.io/${PROJECT}/jzuo-runner:${RUNNAME}"
 
