@@ -88,17 +88,20 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 #
 # This lookup is only reached by the legacy Linen decoder bridge below -- the
 # default pure-NNX path finds the bias generically via the `_find_gate_bias`
-# helper above instead (an upstream fix replaced its own hardcoded lookup with
-# that helper, which incidentally also fixed a pre-existing unscanned-mode
-# crash there; see PR history for HY3's onboarding for details).
+# helper defined further below in this file instead (an upstream fix replaced
+# its own hardcoded lookup with that helper, which incidentally also fixed a
+# pre-existing unscanned-mode bug there; see PR history for HY3's onboarding
+# for details).
 #
 # Verified behavior for this Linen-path branch specifically (hy3-tiny,
 # routed_bias_update_rate=0.05): with `scan_layers=true` it updates the bias
-# correctly (this table is what lets Hy3 resolve to the right module name
-# instead of crashing on a name mismatch, same as it always did for
-# DeepSeek); with `scan_layers=false` it silently no-ops, since the
-# Linen-side aux collection this branch depends on (`moe_bias_updates`) is
-# only ever populated when layers are scanned into a single stacked array.
+# correctly (this table is what lets Hy3 resolve to the right module name;
+# without it, `update_state_param` below would silently no-op instead of
+# raising, since a non-matching path just leaves every param unchanged, same
+# as it always did for DeepSeek); with `scan_layers=false` it silently
+# no-ops regardless of this table, since the Linen-side aux collection this
+# branch depends on (`moe_bias_updates`) is only ever populated when layers
+# are scanned into a single stacked array.
 _MOE_BLOCK_ATTR_BY_DECODER_BLOCK = {
     DecoderBlockType.DEEPSEEK: "DeepSeekMoeBlock_0",
     DecoderBlockType.HY3: "Hy3MoeBlock_0",

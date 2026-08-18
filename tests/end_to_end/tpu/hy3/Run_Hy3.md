@@ -172,7 +172,8 @@ python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
     model_name=hy3-295b \
     load_parameters_path=${CONVERTED_ORBAX_UNSCANNED_PATH} \
     scan_layers=false \
-    max_predict_length=256 \
+    max_prefill_predict_length=64 \
+    max_target_length=256 \
     prompt="Hello, who are you?"
 ```
 

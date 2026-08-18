@@ -23,7 +23,8 @@ BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
 # Step 1: Run pre-training (tokamax_gmm / generic MoE path)
 # We test with tiny config to ensure XLA compilation succeeds for the architecture logic.
 python3 -m maxtext.trainers.pre_train.train \
-  ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/models/hy3-tiny.yml \
+  ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
+  model_name=${MODEL_NAME} \
   base_output_directory=${BASE_OUTPUT_PATH} \
   run_name=${RUN_ID} \
   tokenizer_type=huggingface \
@@ -41,7 +42,8 @@ python3 -m maxtext.trainers.pre_train.train \
 
 # Step 2: Run inference decoding using the newly trained checkpoint
 python3 -m maxtext.inference.decode \
-  ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/models/hy3-tiny.yml \
+  ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml \
+  model_name=${MODEL_NAME} \
   base_output_directory=${BASE_OUTPUT_PATH} \
   run_name=${RUN_ID}-decode \
   tokenizer_type=huggingface \
