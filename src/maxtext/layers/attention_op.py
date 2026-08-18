@@ -1986,6 +1986,15 @@ class AttentionOp(nnx.Module):
         sinks,
         indexer_mask,
     ):
+      # Splash prefetches the segment ids into SMEM, and SMEM is 1 MB per core.
+      # This limits the segmented kernel to approximately 524,288 tokens. When
+      # packing is off there is one segment per example, so the segment ids are
+      # constant and the non-segmented kernel gives the same result. Drop the
+      # ids here, before any early return, so every path benefits.
+      if not self.config.packing:
+        decoder_segment_ids_q = None
+        decoder_segment_ids_kv = None
+
       if use_tokamax_ring:
         attention_output = tokamax_ring_attention.call_ring_attention(
             query,
@@ -2055,14 +2064,6 @@ class AttentionOp(nnx.Module):
               seq_dim=2,
               to_contiguous=True,
           )
-
-      # Splash prefetches the segment ids into SMEM, and SMEM is 1 MB per core.
-      # This limits the segmented kernel to approximately 524,288 tokens. When
-      # packing is off there is one segment per example, so the segment ids are
-      # constant and the non-segmented kernel gives the same result. Drop the
-      # ids in that case to remove the limit.
-      if not self.config.packing:
-        decoder_segment_ids_q = None
 
       if decoder_segment_ids_q is not None:
         if cp_size > 1 and load_balanced_context_parallel:
