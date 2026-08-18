@@ -658,9 +658,9 @@ def _run_learner_loop(
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
               if frag_idx == 0:
-                new_params = _fused_unpack_and_apply_flat_fragment_jit(
-                    params, received_tpu_packed, manipulator, frag_metadata_frozen[0]
-                )
+                unpacked_leaves = _unpack_fragment_1d(received_tpu_packed, frag_metadata[0])
+                new_params = manipulator.apply_flat_fragment(params, 0, unpacked_leaves)
+                del unpacked_leaves
               else:
                 layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
                 new_params = _fused_unpack_and_apply_scanned_fragment_jit(
