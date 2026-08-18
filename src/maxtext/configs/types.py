@@ -1781,11 +1781,26 @@ class DilocoParams(BaseModel):
 
   enable_diloco: bool = Field(False, description="Enable Diloco parallelism")
   diloco_sync_period: int = Field(36, description="Diloco sync period.")
+
+  @model_validator(mode="after")
+  def validate_streaming_diloco_params(self) -> "DilocoParams":
+    """Validates streaming DiLoCo parameters."""
+    if self.enable_streaming_diloco:
+      if not self.enable_diloco:
+        raise ValueError("enable_diloco must be True when enable_streaming_diloco is True.")
+      if self.num_diloco_fragments is None:
+        raise ValueError("num_diloco_fragments must be specified when enable_streaming_diloco is True.")
+      if self.num_diloco_fragments < 2:
+        raise ValueError(
+            f"num_diloco_fragments ({self.num_diloco_fragments}) must be at least 2 when enable_streaming_diloco "
+            "is True (1 for non-scanned parameters, at least 1 for scanned layers)."
+        )
+    return self
+
   diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
   diloco_outer_momentum: float = Field(0.9, description="momentum for outer optimizer.")
   dcn_bandwidth_limit: str = Field(
-      "",
-      description="Programmatic DCN egress bandwidth limit (e.g., '28gbit'). Empty means no limit.",
+      "", description="Programmatic DCN egress bandwidth limit per VM (e.g., '28gbit'). Empty means no limit."
   )
   dcn_bandwidth_burst: str = Field("10mb", description="Burst size for Token Bucket Filter (TBF) traffic shaping.")
   dcn_bandwidth_latency: str = Field(
@@ -1793,6 +1808,40 @@ class DilocoParams(BaseModel):
       description="Latency threshold for Token Bucket Filter (TBF) traffic shaping.",
   )
   dcn_bandwidth_interface: str = Field("eth0", description="Network interface to apply bandwidth limits on.")
+
+  # Streaming DiLoCo parameters
+  enable_streaming_diloco: bool = Field(
+      False,
+      description=(
+          "Enable streaming DiLoCo parallelism (https://arxiv.org/abs/2501.18512). Streaming DiLoCo partitions"
+          " model parameters into fragments and pipelines cross-island synchronization one fragment per inner step,"
+          " overlapping inter-cluster communication with accelerator computation."
+      ),
+  )
+  num_diloco_fragments: int | None = Field(
+      None,
+      description=(
+          "Total number of fragments to partition the model layers into (including 1 fragment for non-scanned"
+          " parameters). Required when enable_streaming_diloco is True."
+      ),
+  )
+  use_sequential_layers: bool = Field(False, description="Whether to sync layers sequentially (or interleaved).")
+  num_communication_overlapping_steps: NonNegativeInt = Field(
+      0, description="Steps of communication overlap with computation. \\tau from the paper."
+  )
+  communication_overlapping_alpha: float = Field(
+      0.0,
+      ge=0.0,
+      le=1.0,
+      description=(
+          "Interpolation factor between local and global parameters. alpha=1"
+          " means no communication between islands, alpha=0 means discards any"
+          " updates done in the inner optimizer in the first"
+          " `num_communication_overlapping_steps` steps. alpha=0.5 does a"
+          " uniform average between the local fragment parameters and the"
+          " globally shared one."
+      ),
+  )
 
 
 class Optimizer(BaseModel):
@@ -3828,6 +3877,20 @@ class MaxTextConfig(
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
     self.validate_num_moe_emb_chunks()
+
+    if self.enable_diloco and not self.pure_nnx:
+      raise ValueError("enable_diloco=True requires pure_nnx=True (Linen support for DiLoCo has been removed).")
+
+    if self.enable_streaming_diloco:
+      if not self.scan_layers:
+        raise ValueError("enable_streaming_diloco=True requires scan_layers=True.")
+      if self.num_diloco_fragments is not None and self.num_diloco_fragments > 1:
+        num_transformer_fragments = self.num_diloco_fragments - 1
+        if self.num_decoder_layers % num_transformer_fragments != 0:
+          raise ValueError(
+              f"The number of decoder layers ({self.num_decoder_layers}) must be divisible by "
+              f"(num_diloco_fragments - 1) ({num_transformer_fragments}) when enable_streaming_diloco is True."
+          )
 
     # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
