@@ -233,7 +233,7 @@ def _hybrid_fused_conv1d_gdn_fwd(
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
 ):
-    out, states, tap_out = _run_tokamax_fused_fwd(
+    out, states = _run_tokamax_fused_fwd(
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
         num_k_heads=num_k_heads, num_v_heads=num_v_heads, head_k_dim=head_k_dim, head_v_dim=head_v_dim,
         conv_kernel_size=conv_kernel_size, chunk_size=chunk_size, use_qk_norm_in_gdn=use_qk_norm_in_gdn, compute_dtype=compute_dtype,
@@ -241,7 +241,7 @@ def _hybrid_fused_conv1d_gdn_fwd(
     residuals = (
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state
     )
-    return (out, states, tap_out), residuals
+    return (out, states), residuals
 
 
 def _hybrid_fused_conv1d_gdn_bwd(
@@ -277,7 +277,7 @@ def _hybrid_fused_conv1d_gdn_bwd(
         target_fn,
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
     )
-    d_out, d_states, d_tap = cotangents
+    d_out, d_states = cotangents
     d_conv_state, d_recurrent_state = d_states
     return vjp_fn((d_out, (d_conv_state, d_recurrent_state), d_tap))
 

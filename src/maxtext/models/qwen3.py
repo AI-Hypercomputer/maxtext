@@ -1014,7 +1014,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             compute_dtype=self.config.dtype,
         )
     elif getattr(cfg, "use_gdn_kernel", False):
-      core_attn_out, next_recurrent_state, pure_jax_tap = jax_chunk_gated_delta_rule(
+      core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
           query,
           key,
           value,
@@ -1068,7 +1068,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       core_attn_out, next_recurrent_state = shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg)
     else:
-      core_attn_out, next_recurrent_state, pure_jax_tap = jax_chunk_gated_delta_rule(
+      core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
           query,
           key,
           value,
@@ -1118,13 +1118,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output)
 
-    # Note: pure_jax_tap might be unbound if shard_mapped_delta_rule was used, but benchmark sets scan_layers=False.
-    try:
-      tap = pure_jax_tap
-    except UnboundLocalError:
-      tap = None
-
-    return output, active_cache, tap
+    return output, active_cache
 
   def init_kv_caches(self, batch_size: int):
     """Initializes KVCache dynamically using the traced runtime batch size."""
