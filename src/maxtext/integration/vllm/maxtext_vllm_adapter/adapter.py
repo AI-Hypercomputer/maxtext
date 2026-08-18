@@ -266,7 +266,7 @@ class MaxTextForCausalLM(nnx.Module):
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
       expert_indices = None
-      hidden, kv_caches = self.model(
+      res = self.model(
           decoder_input_tokens=input_ids,
           decoder_positions=input_positions,
           kv_caches=kv_caches,
@@ -274,6 +274,13 @@ class MaxTextForCausalLM(nnx.Module):
           model_mode=self.model_mode,
           **kwargs,
       )
+
+      if isinstance(res, tuple) and len(res) == 3:
+        hidden, kv_caches, expert_indices = res
+      elif isinstance(res, tuple) and len(res) == 4:
+        _, hidden, kv_caches, expert_indices = res
+      else:
+        hidden, kv_caches = res
 
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
       hidden = hidden.reshape((-1, hidden.shape[-1]))
