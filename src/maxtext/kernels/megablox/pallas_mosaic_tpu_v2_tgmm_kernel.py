@@ -221,6 +221,9 @@ def make_tgmm_configs(
   size_lhs_sublane = min(size_lhs_sublane, size_m)
   size_rhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(rhs.dtype)
   size_rhs_sublane = min(size_rhs_sublane, size_m)
+  common_sublane = min(size_lhs_sublane, size_rhs_sublane)
+  size_lhs_sublane = common_sublane
+  size_rhs_sublane = common_sublane
   assert size_lhs_sublane == size_rhs_sublane, (
       f"size_lhs_sublane should be the same as size_rhs_sublane {lhs.dtype=}," f" {rhs.dtype=}"
   )
