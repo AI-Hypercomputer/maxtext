@@ -1003,22 +1003,20 @@ def _run_syncer_loop(
       ]
       max_logging.log(f"Syncer: received all 1D fragments for step {step}")
 
-      # 2. Put 1D buffers onto CPU submeshes
-      learner_frags_cpu = [
-          {
-              dt: jax.device_put(
-                  arr, jax.sharding.NamedSharding(cpu_submeshes[i], jax.sharding.PartitionSpec())
-              )
-              for dt, arr in learner_frags_host[i].items()
-          }
-          for i in range(num_learners)
-      ]
+      # 2. Stack host NumPy arrays directly in host memory (< 0.2 ms)
+      stacked_host = {
+          dt: np.stack([learner_frags_host[i][dt] for i in range(num_learners)], axis=0)
+          for dt in meta
+      }
 
-      # 3. Stack and execute 1D elementwise outer SGD on colocated_cpu_mesh
+      # 3. Put stacked array onto colocated_cpu_mesh and execute 1D elementwise outer SGD
       new_outer_host = {}
       with jax.set_mesh(global_mesh):
         for dt in meta:
-          stacked_1d = jnp.stack([learner_frags_cpu[i][dt] for i in range(num_learners)], axis=0)
+          stacked_1d = jax.device_put(
+              stacked_host[dt],
+              jax.sharding.NamedSharding(global_mesh, jax.sharding.PartitionSpec()),
+          )
           outer_1d = syncer_frag_params_1d[frag_idx][dt]
           trace_1d = syncer_frag_trace_1d[frag_idx][dt]
           new_outer_1d, new_trace_1d = _outer_sgd_1d_jit(
@@ -1061,7 +1059,7 @@ def _run_syncer_loop(
             step=step,
         )
       max_logging.log(f"Syncer: Step {step} sync finished")
-      del learner_frags_host, learner_frags_cpu, new_outer_host
+      del learner_frags_host, stacked_host, new_outer_host
       if step % 25 == 0:
         gc.collect()
   finally:
