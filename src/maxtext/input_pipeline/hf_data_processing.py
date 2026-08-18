@@ -33,10 +33,15 @@ from maxtext.utils import elastic_utils
 
 
 def _get_pad_id(tokenizer):
-  if tokenizer.pad_token_id is not None:
+  """Returns the pad token id from the tokenizer, or -1 if not found."""
+  if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
     pad_id = tokenizer.pad_token_id
-  elif tokenizer.unk_token_id is not None:
+  elif hasattr(tokenizer, "unk_token_id") and tokenizer.unk_token_id is not None:
     pad_id = tokenizer.unk_token_id
+  elif hasattr(tokenizer, "pad_id") and getattr(tokenizer, "pad_id", None) is not None:
+    pad_id = tokenizer.pad_id
+  elif hasattr(tokenizer, "unk_id") and getattr(tokenizer, "unk_id", None) is not None:
+    pad_id = tokenizer.unk_id
   else:
     pad_id = -1
   return pad_id

@@ -80,7 +80,9 @@ class SyntheticDataIterator:
     self.config = config
     data_pspec_shardings = sharding.get_input_data_sharding(config, mesh)
     self.data_generator = jax.jit(
-        SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
+        SyntheticDataIterator.raw_generate_synthetic_data,
+        out_shardings=data_pspec_shardings,
+        static_argnums=1,
     )
 
     tokens = jax.random.randint(
@@ -104,6 +106,7 @@ class SyntheticDataIterator:
     else:
       segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
     self.data = (tokens, batch_positions, segmentation)
+    self.num_diloco_replicas = config.num_diloco_replicas if config.enable_diloco else 0
 
   def reset(self):
     pass  # Synthetic data is stateless; nothing to reset.
@@ -113,10 +116,10 @@ class SyntheticDataIterator:
 
   def __next__(self):
     with self.mesh:
-      return self.data_generator(self.config, self.data)  # pylint: disable=not-callable
+      return self.data_generator(self.data, self.num_diloco_replicas)  # pylint: disable=not-callable
 
   @staticmethod
-  def raw_generate_synthetic_data(config: pyconfig.HyperParameters, data):
+  def raw_generate_synthetic_data(data, num_diloco_replicas):
     """Generates a single batch of synthetic data"""
     tokens, positions, segmentation = data
 
@@ -127,8 +130,8 @@ class SyntheticDataIterator:
     output["targets"] = tokens[:, 1:]
     output["targets_position"] = positions[:, 1:]
     output["targets_segmentation"] = segmentation
-    if config.enable_diloco:
-      output = reshape_first_axis_with_diloco(config.num_diloco_replicas, output)
+    if num_diloco_replicas:
+      output = reshape_first_axis_with_diloco(num_diloco_replicas, output)
     return output
 
 
