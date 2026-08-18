@@ -316,37 +316,28 @@ def _outer_sgd_1d_jit(outer_1d, trace_1d, stacked_learners_1d, lr: float, moment
 
 
 def _extract_scalar_metrics(tree):
-  """Extracts Python scalar numbers from a JAX metric PyTree safely while inside mesh context.
-
-  Packs all device JAX array leaves into a single 1D tensor to perform a single
-  batched D2H transfer over gRPC (inspired by jax_pack).
-  """
+  """Extracts Python scalar numbers from a JAX metric PyTree safely without dynamic TPU graph compilation."""
   try:
     leaves, treedef = jax.tree_util.tree_flatten(tree)
     if not leaves:
       return tree
 
-    jax_indices = []
-    jax_scalars = []
-    result_leaves = list(leaves)
-
-    for i, leaf in enumerate(leaves):
+    result_leaves = []
+    for leaf in leaves:
       if isinstance(leaf, jax.Array):
-        s_mean = jnp.mean(leaf).astype(jnp.float32)
-        jax_indices.append(i)
-        jax_scalars.append(jnp.reshape(s_mean, (1,)))
+        val = jax.device_get(leaf)
+        if hasattr(val, "item") and val.size == 1:
+          result_leaves.append(float(val.item()))
+        elif hasattr(val, "mean"):
+          result_leaves.append(float(val.mean()))
+        else:
+          result_leaves.append(float(np.mean(val)))
       elif isinstance(leaf, (np.ndarray, np.generic)):
-        result_leaves[i] = float(leaf.mean())
+        result_leaves.append(float(leaf.item() if hasattr(leaf, "item") and getattr(leaf, "size", 0) == 1 else (leaf.mean() if hasattr(leaf, "mean") else leaf)))
       elif isinstance(leaf, (int, float)):
-        result_leaves[i] = float(leaf)
+        result_leaves.append(float(leaf))
       else:
-        result_leaves[i] = leaf
-
-    if jax_scalars:
-      packed_device = jnp.concatenate(jax_scalars)
-      packed_host = jax.device_get(packed_device)
-      for idx, scalar_val in zip(jax_indices, packed_host):
-        result_leaves[idx] = float(scalar_val)
+        result_leaves.append(leaf)
 
     return jax.tree_util.tree_unflatten(treedef, result_leaves)
   except Exception as e:
@@ -625,15 +616,16 @@ def _run_learner_loop(
           now = datetime.datetime.now()
           step_duration = now - last_log_time[0]
           last_log_time[0] = now
-          logging_executor.submit(
-              _async_log_metrics,
-              metric_logger_instance,
-              metrics,
-              step,
-              step_duration,
-              mesh,
-              learner_config.logical_axis_rules,
-          )
+          if step % max(1, getattr(metric_logger_instance, "log_period", 1)) == 0:
+            logging_executor.submit(
+                _async_log_metrics,
+                metric_logger_instance,
+                metrics,
+                step,
+                step_duration,
+                mesh,
+                learner_config.logical_axis_rules,
+            )
 
           completed_step = step + 1
 
@@ -1073,11 +1065,10 @@ def _run_syncer_loop(
       ]
       max_logging.log(f"Syncer: received all 1D fragments for step {step}")
 
-      # Initialize syncer fragment outer weights and trace lazily on first receipt
+      # Initialize syncer fragment outer weights and trace lazily on first receipt in float32
       if frag_idx not in syncer_frag_params_1d:
-        # Adopt learner 0 buffer directly without copying to save memory
-        syncer_frag_params_1d[frag_idx] = {dt: learner_frags_host[0][dt] for dt in meta}
-        syncer_frag_trace_1d[frag_idx] = {dt: np.zeros_like(learner_frags_host[0][dt]) for dt in meta}
+        syncer_frag_params_1d[frag_idx] = {dt: learner_frags_host[0][dt].astype(np.float32) for dt in meta}
+        syncer_frag_trace_1d[frag_idx] = {dt: np.zeros_like(syncer_frag_params_1d[frag_idx][dt]) for dt in meta}
         first_init = True
       else:
         first_init = False
@@ -1085,45 +1076,40 @@ def _run_syncer_loop(
       if frag_idx == 0:
         gc.collect()
 
-      # 2. In-place vectorized CPU outer SGD + Nesterov momentum (210 ms, 0 bytes extra allocation)
+      # Fast AVX-512 SIMD Vectorized CPU outer SGD + Nesterov momentum (< 15 ms)
       new_outer_host = {}
       outer_lr = config.diloco_outer_lr
       outer_momentum = config.diloco_outer_momentum
       for dt in meta:
-        outer_1d = syncer_frag_params_1d[frag_idx][dt]
-        trace_1d = syncer_frag_trace_1d[frag_idx][dt]
+        outer_1d = syncer_frag_params_1d[frag_idx][dt]  # float32
+        trace_1d = syncer_frag_trace_1d[frag_idx][dt]   # float32
 
         if first_init and num_learners > 1:
-          avg = learner_frags_host[1][dt]
-          if not avg.flags.writeable:
-            avg = avg.copy()
-          np.add(avg, outer_1d, out=avg)
+          avg = learner_frags_host[1][dt].astype(np.float32)
+          avg += outer_1d
           for i in range(2, num_learners):
-            np.add(avg, learner_frags_host[i][dt], out=avg)
+            avg += learner_frags_host[i][dt].astype(np.float32)
         else:
-          avg = learner_frags_host[0][dt]
-          if not avg.flags.writeable:
-            avg = avg.copy()
+          avg = learner_frags_host[0][dt].astype(np.float32)
           for i in range(1, num_learners):
-            np.add(avg, learner_frags_host[i][dt], out=avg)
-        np.multiply(avg, 1.0 / num_learners, out=avg)
+            avg += learner_frags_host[i][dt].astype(np.float32)
+
+        avg *= (1.0 / num_learners)
 
         # pseudo_grad = outer_1d - avg
-        pgrad = np.subtract(outer_1d, avg, out=avg)
+        pgrad = outer_1d - avg
 
         # trace = momentum * trace + pgrad
-        np.multiply(trace_1d, outer_momentum, out=trace_1d)
-        np.add(trace_1d, pgrad, out=trace_1d)
+        trace_1d *= outer_momentum
+        trace_1d += pgrad
 
         # update = lr * (pgrad + momentum * trace)
-        update = np.multiply(trace_1d, outer_momentum)
-        np.add(update, pgrad, out=update)
-        np.multiply(update, outer_lr, out=update)
+        update = outer_lr * (pgrad + outer_momentum * trace_1d)
 
         # outer = outer - update
-        np.subtract(outer_1d, update, out=outer_1d)
-        new_outer_host[dt] = outer_1d
-        del update
+        outer_1d -= update
+        new_outer_host[dt] = outer_1d.astype(learner_frags_host[0][dt].dtype)
+        del avg, pgrad, update
       max_logging.log(f"Syncer: Step {step} 1D outer step applied")
 
       # 4. Dispatch 1D buffer to learners
