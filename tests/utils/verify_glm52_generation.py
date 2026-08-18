@@ -2,6 +2,7 @@
 """Fast JIT generation verification for GLM-5.2."""
 
 import sys
+import maxtext  # Ensures Flax/JAX compatibility hooks are applied first
 from flax import nnx
 import jax
 from jax.sharding import Mesh
