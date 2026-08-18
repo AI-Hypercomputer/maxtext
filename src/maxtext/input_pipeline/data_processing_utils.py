@@ -143,17 +143,24 @@ def apply_multiprocessing_and_prefetch(dataset, config, grain_worker_count, grai
   if config.grain_use_elastic_iterator:
     # ElasticIterator applies multiprocessing itself.
     return dataset
-  multiprocessing_options = (
-      pick_performance_config(
+  if grain_worker_count == -1:
+    if getattr(config, "colocated_python_data_input", False) or getattr(config, "elastic_enabled", False):
+      # In colocated python / elastic training, avoid pick_performance_config() benchmarking
+      # which stalls workers during slice scale-up. Default to 0 (in-process threads).
+      multiprocessing_options = grain.MultiprocessingOptions(
+          num_workers=0,
+          per_worker_buffer_size=grain_per_worker_buffer_size,
+      )
+    else:
+      multiprocessing_options = pick_performance_config(
           ds=dataset,
           ram_budget_mb=config.grain_ram_budget_mb,
           max_workers=None,
           max_buffer_size=None,
       ).multiprocessing_options
-      if grain_worker_count == -1
-      else grain.MultiprocessingOptions(
-          num_workers=grain_worker_count,
-          per_worker_buffer_size=grain_per_worker_buffer_size,
-      )
-  )
+  else:
+    multiprocessing_options = grain.MultiprocessingOptions(
+        num_workers=grain_worker_count,
+        per_worker_buffer_size=grain_per_worker_buffer_size,
+    )
   return dataset.mp_prefetch(multiprocessing_options)

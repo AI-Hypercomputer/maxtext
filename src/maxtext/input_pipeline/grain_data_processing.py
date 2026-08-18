@@ -26,13 +26,14 @@ from dataclasses import asdict, dataclass
 import jax
 
 import grain.python as grain
-from grain.experimental import ElasticIterator
+from grain.experimental import ElasticIterator, pick_performance_config
 
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import grain_tokenizer
 from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.utils import elastic_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
@@ -466,12 +467,37 @@ def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, 
   When shard_index/shard_count are None, defaults to jax.process_index()/jax.process_count().
   """
   ds = preprocessing_fn(dataset=dataset)
+  s_count = shard_count if shard_count is not None else jax.process_count()
+  s_index = shard_index if shard_index is not None else jax.process_index()
+
+  if getattr(config, "colocated_python_data_input", False) and getattr(config, "elastic_enabled", False):
+    devices_per_host = elastic_utils.get_devices_per_host(config)
+    local_batch_size = int(config.per_device_batch_size * devices_per_host)
+    effective_global_batch_size = max(local_batch_size * s_count, local_batch_size)
+  else:
+    effective_global_batch_size = config.global_batch_size_to_load
+
+  if mp_opts is None:
+    if config.grain_worker_count == -1:
+      try:
+        mp_opts = pick_performance_config(
+            ds=ds,
+            ram_budget_mb=config.grain_ram_budget_mb,
+        ).multiprocessing_options
+      except Exception:  # pylint: disable=broad-except
+        mp_opts = None
+    elif config.grain_worker_count > 0:
+      mp_opts = grain.MultiprocessingOptions(
+          num_workers=config.grain_worker_count,
+          per_worker_buffer_size=config.grain_per_worker_buffer_size,
+      )
+
   return ElasticIterator(
       ds,
-      global_batch_size=config.global_batch_size_to_load,
+      global_batch_size=effective_global_batch_size,
       shard_options=grain.ShardOptions(
-          shard_index=shard_index if shard_index is not None else jax.process_index(),
-          shard_count=shard_count if shard_count is not None else jax.process_count(),
+          shard_index=s_index,
+          shard_count=s_count,
       ),
       read_options=grain.ReadOptions(
           num_threads=config.grain_num_threads,
