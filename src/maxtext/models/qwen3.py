@@ -1168,6 +1168,9 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           matmul_precision=cfg.matmul_precision,
           rngs=rngs,
       )
+    else:
+      self.shared_expert = None
+      self.shared_expert_gate = None
 
   def __call__(self, hidden_states: Array, deterministic: bool) -> tuple[Array, Array | None]:
     """
