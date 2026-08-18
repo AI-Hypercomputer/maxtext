@@ -1215,3 +1215,80 @@ class TrainCompile(parameterized.TestCase):
             "override_model_config=True",
         )
     )
+    
+  @pytest.mark.cpu_only
+  def test_qwen3_5_hybrid_gdn(self):
+    """AOT test for qwen3.5-397b-a17b with Hybrid GDN, Tokamax, and XLA flags."""
+    import os
+    
+    # Temporarily set XLA flags for this compile test
+    original_xla_flags = os.environ.get("LIBTPU_INIT_ARGS")
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        "--xla_tpu_use_tc_device_shape_on_sc=True "
+        "--xla_sc_disable_megacore_partitioning=True "
+        "--xla_tpu_enable_offloading_gather_to_sparsecore=true "
+        "--xla_tpu_enable_sparse_core_collective_offload_all_gather=true "
+        "--xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true "
+        "--xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true "
+        "--xla_tpu_enable_sparse_core_reduce_scatter_v2=true "
+        "--xla_tpu_use_single_sparse_core_for_all_gather_offload=true "
+        "--xla_tpu_enable_concurrent_sparse_core_offloading=true "
+        "--xla_tpu_aggressive_opt_barrier_removal=true "
+        "--xla_tpu_scoped_vmem_limit_kib=65536 "
+        "--xla_tpu_enable_latency_hiding_layer_scheduler=true "
+        "--xla_tpu_enable_sparse_core_collective_aggregator=true"
+    )
+
+    try:
+      compiled_trainstep_file = "/tmp/test_qwen3_5_hybrid_gdn.pickle"
+      train_compile_main(
+          (
+              "",
+              get_test_config_path(),
+              f"compiled_trainstep_file={compiled_trainstep_file}",
+              "compile_topology=tpu7x-256",
+              "compile_topology_num_slices=1",
+              "model_name=qwen3.5-397b-a17b",
+              "allow_split_physical_axes=true",
+              "tokenizer_type=huggingface",
+              "tokenizer_path=assets/tokenizers/qwen3-tokenizer",
+              "dataset_type=synthetic",
+              "megablox=true",
+              "sparse_matmul=true",
+              "use_tokamax_gmm=true",
+              "use_gmm_v2=true",
+              "use_tokamax_splash=true",
+              "use_gdn_kernel=true",
+              "use_hybrid_gdn=true",
+              "use_custom_sort_vjp=true",
+              "use_ragged_sort=true",
+              "ragged_buffer_factor=2.0",
+              "use_multimodal=false",
+              "per_device_batch_size=4.0",
+              "max_target_length=4096",
+              "ici_fsdp_parallelism=-1",
+              "ici_expert_parallelism=4",
+              "ici_pipeline_parallelism=1",
+              "ici_tensor_parallelism=1",
+              "use_ring_of_experts=true",
+              "num_moe_token_chunks=2",
+              "dtype=bfloat16",
+              "mu_dtype=bfloat16",
+              "grad_dtype=bfloat16",
+              "opt_type=adamw",
+              "use_iota_embed=true",
+              "decoder_layer_input=offload",
+              "remat_policy=full",
+              "learning_rate=1e-5",
+              "steps=20",
+              "profiler=xplane",
+              "skip_first_n_steps_for_profiler=10",
+              "profiler_steps=5",
+          )
+      )
+    finally:
+      # Restore original environment
+      if original_xla_flags is not None:
+        os.environ["LIBTPU_INIT_ARGS"] = original_xla_flags
+      else:
+        del os.environ["LIBTPU_INIT_ARGS"]
