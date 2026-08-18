@@ -272,22 +272,15 @@ def wait_for_devices_placed(config, timeout: float = 60.0, poll_interval: float 
   min_slices = config.elastic_min_slice_count if config.elastic_min_slice_count > 0 else 1
 
   while time.time() - start_time < timeout:
-    active_slice_indices = elastic_manager.active_slice_indices
-    if not active_slice_indices or len(active_slice_indices) < min_slices:
-      active_slice_indices = elastic.get_active_slice_indices(elastic_manager.slice_to_devices)
-      elastic_manager.active_slice_indices = active_slice_indices
-
-    if len(active_slice_indices) < min_slices:
-      max_logging.log(f"Active slices ({len(active_slice_indices)}) < min ({min_slices}). Waiting for slices...")
-      time.sleep(poll_interval)
-      continue
-
-    active_devices = [d for d in jax.devices() if d.slice_index in active_slice_indices]
-    if not active_devices:
-      time.sleep(poll_interval)
-      continue
-
     try:
+      # Reuse live_devices helper safely inside try...except
+      active_devices = live_devices(config)
+
+      if len(elastic_manager.active_slice_indices) < min_slices or not active_devices:
+        max_logging.log(f"Active slices ({len(elastic_manager.active_slice_indices)}) < min ({min_slices}). Waiting for slices...")
+        time.sleep(poll_interval)
+        continue
+
       test_val = np.zeros(len(active_devices), dtype=np.float32)
       sharding = jax.sharding.NamedSharding(
           jax.sharding.Mesh(np.array(active_devices), ("d",)),
@@ -296,14 +289,17 @@ def wait_for_devices_placed(config, timeout: float = 60.0, poll_interval: float 
       arr = jax.device_put(test_val, sharding)
       jax.block_until_ready(arr)
       arr.delete()
-      max_logging.log(f"Confirmed {len(active_devices)} devices on slices {active_slice_indices} are placed and ready.")
+      max_logging.log(f"Confirmed {len(active_devices)} devices on slices {elastic_manager.active_slice_indices} are placed and ready.")
       return active_devices
     except Exception as e:
       max_logging.log(f"Waiting for Pathways device placement to stabilize ({e}). Retrying poll...")
-      elastic_manager.active_slice_indices = elastic.get_active_slice_indices(elastic_manager.slice_to_devices)
+      try:
+        elastic_manager.active_slice_indices = elastic.get_active_slice_indices(elastic_manager.slice_to_devices)
+      except Exception:
+        pass
       time.sleep(poll_interval)
 
-  return [d for d in jax.devices() if d.slice_index in elastic_manager.active_slice_indices]
+  return live_devices(config)
 
 
 def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
