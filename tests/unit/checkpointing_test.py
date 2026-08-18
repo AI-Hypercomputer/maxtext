@@ -17,6 +17,7 @@
 import asyncio
 import json
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 from absl.testing import absltest
@@ -320,13 +321,76 @@ class CheckpointMetadataTest(parameterized.TestCase):
     mock_ckptr.metadata.assert_called_once()
 
   @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
+  def test_load_checkpoint_metadata_falls_back_to_the_step_directory(self, mock_checkpointer_cls):
+    """`load_parameters_path` points at the item, but the metadata belongs to the step above it."""
+    mock_ckptr = mock_checkpointer_cls.return_value
+
+    def metadata_for(path):
+      result = mock.MagicMock()
+      result.custom_metadata = {"scan_layers": False} if str(path).endswith("/0") else None
+      return result
+
+    mock_ckptr.metadata.side_effect = metadata_for
+
+    self.assertEqual(checkpointing.load_checkpoint_metadata("/ckpt/0/items"), {"scan_layers": False})
+    self.assertEqual([str(c.args[0]) for c in mock_ckptr.metadata.call_args_list], ["/ckpt/0/items", "/ckpt/0"])
+
+  @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
+  def test_load_checkpoint_metadata_stops_at_the_path_it_was_given(self, mock_checkpointer_cls):
+    """A hit at the given path is used as is; no reason to look at the parent."""
+    mock_ckptr = mock_checkpointer_cls.return_value
+    metadata = mock.MagicMock()
+    metadata.custom_metadata = {"scan_layers": True}
+    mock_ckptr.metadata.return_value = metadata
+
+    self.assertEqual(checkpointing.load_checkpoint_metadata("/ckpt/0"), {"scan_layers": True})
+    mock_ckptr.metadata.assert_called_once()
+
+  @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
   def test_load_checkpoint_metadata_handles_exceptions(self, mock_checkpointer_cls):
     mock_ckptr = mock_checkpointer_cls.return_value
     mock_ckptr.metadata.side_effect = Exception("Checkpoint read error")
 
     loaded_metadata = checkpointing.load_checkpoint_metadata("corrupt/path")
     self.assertEqual(loaded_metadata, {})
-    mock_ckptr.metadata.assert_called_once()
+    # A failed read falls through to the step directory above, which fails the same way.
+    self.assertEqual(mock_ckptr.metadata.call_count, 2)
+
+
+class CheckpointCustomMetadataTest(parameterized.TestCase):
+  """What a checkpoint records about the run that wrote it.
+
+  Loaders read this back to fill in a value the run left at its default, or to reject one that
+  contradicts the checkpoint. Post-training saves through its own manager and calls the same
+  builder, so the two paths cannot drift apart.
+  """
+
+  def _config(self, scan_layers=True, lora_rank=0):
+    lora = SimpleNamespace(
+        lora_rank=lora_rank,
+        lora_alpha=16.0,
+        model_dump=lambda: {"lora_rank": lora_rank, "lora_alpha": 16.0},
+    )
+    return SimpleNamespace(scan_layers=scan_layers, lora=lora)
+
+  @parameterized.parameters(True, False)
+  def test_scan_layers_is_recorded_either_way(self, scan_layers):
+    metadata = checkpointing.checkpoint_custom_metadata(self._config(scan_layers=scan_layers))
+    self.assertIs(metadata["scan_layers"], scan_layers)
+
+  def test_lora_is_recorded_once_there_is_a_rank(self):
+    metadata = checkpointing.checkpoint_custom_metadata(self._config(lora_rank=8))
+    self.assertEqual(metadata["lora"], {"lora_rank": 8, "lora_alpha": 16.0})
+
+  def test_no_lora_key_without_a_rank(self):
+    """A rank of 0 means LoRA is off; recording it would make `sync_lora_metadata` sync a zero."""
+    self.assertNotIn("lora", checkpointing.checkpoint_custom_metadata(self._config(lora_rank=0)))
+
+  def test_no_lora_key_when_the_config_has_no_lora_section(self):
+    self.assertNotIn("lora", checkpointing.checkpoint_custom_metadata(SimpleNamespace(scan_layers=True)))
+
+  def test_no_config_records_nothing(self):
+    self.assertEqual(checkpointing.checkpoint_custom_metadata(None), {})
 
 
 class GrainCheckpointableEquivalenceTest(parameterized.TestCase):

@@ -73,6 +73,47 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
 import tunix.generate.utils as tunix_utils
+from tunix.generate.tokenizer_adapter import TokenizerAdapter
+
+# Monkey-patch TokenizerAdapter to handle MaxText tokenizer properties
+_old_eos_id = TokenizerAdapter.eos_id
+
+
+def _patched_eos_id(self):
+  # pylint: disable=protected-access
+  if hasattr(self._tokenizer, "eos_id") and not callable(self._tokenizer.eos_id):
+    return self._tokenizer.eos_id
+  return _old_eos_id(self)
+
+
+TokenizerAdapter.eos_id = _patched_eos_id
+
+_old_bos_id = TokenizerAdapter.bos_id
+
+
+def _patched_bos_id(self):
+  # pylint: disable=protected-access
+  if hasattr(self._tokenizer, "bos_id") and not callable(self._tokenizer.bos_id):
+    return self._tokenizer.bos_id
+  return _old_bos_id(self)
+
+
+TokenizerAdapter.bos_id = _patched_bos_id
+
+_old_pad_id = TokenizerAdapter.pad_id
+
+
+def _patched_pad_id(self):
+  # pylint: disable=protected-access
+  if hasattr(self._tokenizer, "pad_id") and not callable(self._tokenizer.pad_id):
+    pad_id = self._tokenizer.pad_id
+    if pad_id is None or pad_id < 0:
+      return self.eos_id()
+    return pad_id
+  return _old_pad_id(self)
+
+
+TokenizerAdapter.pad_id = _patched_pad_id
 
 
 @contextlib.contextmanager
@@ -143,6 +184,7 @@ from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout, re
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
+from maxtext.trainers.post_train import checkpointing as post_train_checkpointing
 from maxtext.utils import max_logging, max_utils, model_creation_utils
 
 
@@ -358,7 +400,9 @@ def prepare_datasets(
       )
 
   def _filter_long_prompts(x):
-    tokens = model_tokenizer.tokenize(x["prompts"])
+    # tokenize() is a HuggingFace method. MaxText's own tokenizers only offer encode(), and the
+    # length being checked is the prefill length in token ids anyway.
+    tokens = model_tokenizer.encode(x["prompts"])
     return len(tokens) <= trainer_config.max_prefill_predict_length
 
   train_dataset = train_dataset.filter(_filter_long_prompts)
@@ -513,7 +557,9 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           rollout_micro_batch_size=rollout_micro_batch_size,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
-          checkpoint_root_directory=checkpoint_dir,
+          # Checkpointing is handled by post_train.checkpointing, which writes MaxText's on-disk
+          # layout instead of Tunix's, so Tunix's own manager stays disabled.
+          checkpoint_root_directory=None,
           checkpointing_options=checkpointing_options,
       ),
       rollout_config=base_rollout.RolloutConfig(
@@ -523,7 +569,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           temperature=trainer_config.decode_sampling_temperature,
           top_p=trainer_config.decode_sampling_nucleus_p,
           top_k=trainer_config.decode_sampling_top_k,
-          rollout_vllm_model_version=trainer_config.tokenizer_path,
+          rollout_vllm_model_version=trainer_config.vllm_hf_config_path or trainer_config.tokenizer_path,
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
@@ -539,6 +585,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
               "hf_overrides": trainer_config.vllm_hf_overrides,
               "enable_expert_parallel": sampler_config.enable_expert_parallel,
               "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
+              "trust_remote_code": True,
               # Ensures vLLM model initializes with correct dtype (not float32 default)
               "dtype": trainer_config.weight_dtype.value,
           },
@@ -577,6 +624,8 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
       cluster_config=cluster_config,
       **rl_cluster_kwargs,
   )
+  if checkpoint_dir is not None:
+    post_train_checkpointing.install(rl_cluster.actor_trainer, os.path.join(checkpoint_dir, "actor"), trainer_config)
 
   def make_reward_fn(fn):
     # pragma: no cover
@@ -700,9 +749,14 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
   # adapter (used to synthesize segment_ids that mask pad positions from
   # attention — without this the trainer attends to pad tokens and produces
   # corrupted log-probs).
-  model_tokenizer = AutoTokenizer.from_pretrained(
-      trainer_config.tokenizer_path,
-      token=trainer_config.hf_access_token or None,
+  from maxtext.input_pipeline import tokenizer  # pylint: disable=import-outside-toplevel
+
+  model_tokenizer = tokenizer.build_tokenizer(
+      tokenizer_path=trainer_config.tokenizer_path,
+      tokenizer_type=trainer_config.tokenizer_type,
+      add_bos=False,
+      add_eos=False,
+      hf_access_token=trainer_config.hf_access_token,
   )
   configure_tokenizer_chat_template(model_tokenizer, trainer_config)
 
@@ -711,7 +765,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       sampler_config,
       trainer_devices,
       sampler_devices,
-      tokenizer_pad_id=model_tokenizer.pad_token_id,
+      tokenizer_pad_id=model_tokenizer.pad_id,
   )
 
   if not trainer_config.debug:

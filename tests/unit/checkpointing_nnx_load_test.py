@@ -525,7 +525,7 @@ class TestToCheckpointDict(unittest.TestCase):
     self.assertIn("table", ckpt["nnx_aux"]["model"])  # the custom variable persists here instead
     self.assertNotIn("cache", ckpt["nnx_aux"]["model"])  # caches are recomputed, never stored
 
-    restored = checkpointing._linen_items_to_nnx(ckpt, nnx.eval_shape(lambda: state))  # pylint: disable=protected-access
+    restored = checkpointing.linen_items_to_nnx(ckpt, nnx.eval_shape(lambda: state))
     pure = restored.to_pure_dict()
     self.assertTrue(jnp.array_equal(pure["model"]["table"], model.table.value))
     self.assertIsInstance(pure["model"]["cache"], jax.ShapeDtypeStruct)  # left for the init to fill
@@ -595,11 +595,11 @@ class TestToCheckpointDict(unittest.TestCase):
 
 
 class TestLinenItemsToNnx(unittest.TestCase):
-  """checkpointing._linen_items_to_nnx reshapes restored items into the NNX-layout overlay."""
+  """checkpointing.linen_items_to_nnx reshapes restored items into the NNX-layout overlay."""
 
   def _to_nnx(self, restored):
     """Reshape `restored` against the `_ModelDropout` abstract, as the restore paths do."""
-    state = checkpointing._linen_items_to_nnx(restored, _abstract_dropout_state())  # pylint: disable=protected-access
+    state = checkpointing.linen_items_to_nnx(restored, _abstract_dropout_state())
     return state.to_pure_dict()
 
   def test_materialized_aux_is_kept(self):
@@ -721,6 +721,80 @@ class TestWeightMismatch(unittest.TestCase):
     self.assertNotIn("dropout", want)
     self.assertEqual(have, restored["params"]["params"])
     checkpointing._raise_on_weight_mismatch(want, have)  # pylint: disable=protected-access
+
+
+class TestLoadNnxNativeParams(unittest.TestCase):
+  """Weight-only load of an NNX-native checkpoint -- the layout post-training writes.
+
+  Tunix and the training engine save `nnx.state(model)` under a `model_params` item, so each
+  leaf lands in a `value` box and the tree is the whole checkpoint. DPO and RL train through
+  `TunixMaxTextAdapter`, adding a `base` level on top.
+  """
+
+  def _save(self, directory, weights, wrapper_key=None):
+    """Writes `weights` the way `nnx.state(model)` serializes, under a `model_params` dir."""
+    boxed = jax.tree.map(lambda leaf: {"value": leaf}, weights)
+    path = os.path.join(directory, "model_params")
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(
+        epath.Path(path),
+        {wrapper_key: boxed} if wrapper_key else boxed,
+        force=True,
+    )
+    return path
+
+  def _weights(self):
+    return {
+        "linear": {
+            "kernel": jnp.arange(2, dtype=jnp.float32).reshape(2, 1),
+            "bias": jnp.array([5.0]),
+        }
+    }
+
+  def _restore(self, path):
+    # The real caller hands over an abstract params state, as load_state_if_possible does.
+    params_abstract = nnx.eval_shape(lambda: nnx.split(_Model(nnx.Rngs(0)), nnx.Param, ...)[1])
+    return checkpointing.load_params_from_path(path, params_abstract, 8)
+
+  def test_restores_weights_saved_by_a_bare_model(self):
+    """SFT, distillation and the training engine save the model directly, with no wrapper level."""
+    weights = self._weights()
+    with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
+      restored = self._restore(self._save(d, weights))
+
+    pure = restored.to_pure_dict()
+    self.assertTrue(jnp.array_equal(pure["linear"]["kernel"], weights["linear"]["kernel"]))
+    self.assertTrue(jnp.array_equal(pure["linear"]["bias"], weights["linear"]["bias"]))
+
+  def test_restores_weights_saved_through_the_tunix_adapter(self):
+    """DPO and RL nest the whole tree under `base`; the weights still have to come back."""
+    weights = self._weights()
+    with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
+      restored = self._restore(self._save(d, weights, wrapper_key="base"))
+
+    pure = restored.to_pure_dict()
+    self.assertTrue(jnp.array_equal(pure["linear"]["kernel"], weights["linear"]["kernel"]))
+    self.assertTrue(jnp.array_equal(pure["linear"]["bias"], weights["linear"]["bias"]))
+
+  def test_linen_target_against_an_nnx_checkpoint_raises(self):
+    """This layout only restores into an NNX state, so say so instead of failing inside Orbax."""
+    with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
+      path = self._save(d, self._weights())
+      linen_params = jax.tree.map(jnp.zeros_like, {"params": self._weights()})
+      with self.assertRaises(ValueError) as ctx:
+        checkpointing.load_params_from_path(path, linen_params, 8)
+
+    self.assertIn("NNX", str(ctx.exception))
+
+  def test_weight_missing_from_the_checkpoint_raises(self):
+    """A params-only load has no init state to fall back on, so a gap must not pass silently."""
+    weights = self._weights()
+    del weights["linear"]["bias"]
+    with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
+      path = self._save(d, weights)
+      with self.assertRaises(ValueError) as ctx:
+        self._restore(path)
+
+    self.assertIn("linear/bias", str(ctx.exception))
 
 
 if __name__ == "__main__":
