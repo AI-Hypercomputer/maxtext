@@ -66,6 +66,8 @@ HF_IDS = {
     "qwen3-vl-2b": "Qwen/Qwen3-VL-2B-Instruct",
     "qwen3-vl-4b": "Qwen/Qwen3-VL-4B-Instruct",
     "qwen3-vl-30b-a3b": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    # Llama 3 and 3.1 8B have byte-identical MaxText configs; only the source repo differs.
+    "llama3-8b": "meta-llama/Meta-Llama-3-8B",
     "llama3.1-8b": "meta-llama/Llama-3.1-8B",
     "llama3.1-8b-Instruct": "meta-llama/Llama-3.1-8B-Instruct",
     "llama3.1-70b-Instruct": "meta-llama/Llama-3.1-70B-Instruct",
