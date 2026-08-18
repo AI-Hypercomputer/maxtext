@@ -3000,8 +3000,10 @@ class MaxTextConfig(
       raise ValueError("TPU USP attention does not support sparse indexer masks.")
     if self.attention_type != "global":
       raise ValueError("TPU USP attention is initially supported only for global causal attention.")
-    if self.context_parallel_load_balance:
-      raise ValueError("TPU USP attention does not support context_parallel_load_balance=True.")
+    if self.context_parallel_load_balance and usp_ring_size % 2 != 0:
+      raise ValueError(
+          "TPU USP attention with context_parallel_load_balance=True requires an even ici_context_parallelism."
+      )
     if self.use_ragged_attention:
       raise ValueError("TPU USP attention does not support ragged attention.")
     if self.attention_sink:
