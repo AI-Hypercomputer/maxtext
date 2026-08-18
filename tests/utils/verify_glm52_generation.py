@@ -47,20 +47,35 @@ def main():
       "The biggest planet in the solar system is",
   ]
 
+  gmask_id = tokenizer.convert_tokens_to_ids("[gMASK]")
+  sop_id = tokenizer.convert_tokens_to_ids("<sop>")
+  prefix_ids = []
+  if gmask_id is not None and gmask_id != tokenizer.unk_token_id:
+    prefix_ids.append(gmask_id)
+  if sop_id is not None and sop_id != tokenizer.unk_token_id:
+    prefix_ids.append(sop_id)
+
   tests = []
   for p in user_prompts:
-    # 1. Raw prompt matching golden data (add_special_tokens=False)
-    raw_ids = tokenizer.encode(p, add_special_tokens=False)
-    tests.append((f"[RAW PROMPT] {p}", raw_ids, 20))
+    # 1. Raw prompt prepended with GLM prefix tokens ([gMASK], <sop>)
+    raw_ids = prefix_ids + tokenizer.encode(p, add_special_tokens=False)
+    tests.append((f"[RAW PROMPT] {p}", raw_ids, 30))
 
-    # 2. Chat format (instruction template)
-    chat_text = tokenizer.apply_chat_template(
-        [{"role": "user", "content": p}],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    chat_ids = tokenizer.encode(chat_text, add_special_tokens=False)
-    tests.append((f"[CHAT PROMPT] {p}", chat_ids, 25))
+    # 2. Chat format (tokenize=True preserves exact special token IDs)
+    try:
+      chat_ids = list(tokenizer.apply_chat_template(
+          [{"role": "user", "content": p}],
+          tokenize=True,
+          add_generation_prompt=True,
+      ))
+    except Exception:
+      chat_text = tokenizer.apply_chat_template(
+          [{"role": "user", "content": p}],
+          tokenize=False,
+          add_generation_prompt=True,
+      )
+      chat_ids = tokenizer.encode(chat_text, add_special_tokens=False)
+    tests.append((f"[CHAT PROMPT] {p}", chat_ids, 35))
 
   for title, prompt_ids, gen_tokens in tests:
     generated_ids = list(prompt_ids)
@@ -98,6 +113,8 @@ def main():
       if jax.process_index() == 0:
         token_str = tokenizer.decode([next_token])
         print(token_str, end="", flush=True)
+      if tokenizer.eos_token_id is not None and next_token == tokenizer.eos_token_id:
+        break
 
     if jax.process_index() == 0:
       output_text = tokenizer.decode(generated_ids)
