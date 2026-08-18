@@ -1065,10 +1065,10 @@ def _run_syncer_loop(
       ]
       max_logging.log(f"Syncer: received all 1D fragments for step {step}")
 
-      # Initialize syncer fragment outer weights and trace lazily on first receipt in float32
+      # Initialize syncer fragment outer weights and trace lazily on first receipt in original dtype (BF16)
       if frag_idx not in syncer_frag_params_1d:
-        syncer_frag_params_1d[frag_idx] = {dt: learner_frags_host[0][dt].astype(np.float32) for dt in meta}
-        syncer_frag_trace_1d[frag_idx] = {dt: np.zeros_like(syncer_frag_params_1d[frag_idx][dt]) for dt in meta}
+        syncer_frag_params_1d[frag_idx] = {dt: learner_frags_host[0][dt].copy() for dt in meta}
+        syncer_frag_trace_1d[frag_idx] = {dt: np.zeros_like(learner_frags_host[0][dt]) for dt in meta}
         first_init = True
       else:
         first_init = False
@@ -1076,40 +1076,72 @@ def _run_syncer_loop(
       if frag_idx == 0:
         gc.collect()
 
-      # Fast AVX-512 SIMD Vectorized CPU outer SGD + Nesterov momentum (< 15 ms)
+      # Fast Chunked AVX-512 SIMD Vectorized CPU outer SGD + Nesterov momentum (< 15 ms for scanned, ~700 ms for Fragment 0)
       new_outer_host = {}
       outer_lr = config.diloco_outer_lr
       outer_momentum = config.diloco_outer_momentum
+      chunk_size = 16_000_000  # 32 MB per chunk in BF16, 64 MB in FP32
+      inv_num_learners = 1.0 / num_learners
+
       for dt in meta:
-        outer_1d = syncer_frag_params_1d[frag_idx][dt]  # float32
-        trace_1d = syncer_frag_trace_1d[frag_idx][dt]   # float32
+        outer_1d = syncer_frag_params_1d[frag_idx][dt]
+        trace_1d = syncer_frag_trace_1d[frag_idx][dt]
+        total_len = len(outer_1d)
 
-        if first_init and num_learners > 1:
-          avg = learner_frags_host[1][dt].astype(np.float32)
-          avg += outer_1d
-          for i in range(2, num_learners):
-            avg += learner_frags_host[i][dt].astype(np.float32)
+        if total_len <= chunk_size:
+          out_f = outer_1d.astype(np.float32)
+          tr_f = trace_1d.astype(np.float32)
+
+          if first_init and num_learners > 1:
+            avg_f = learner_frags_host[1][dt].astype(np.float32)
+            avg_f += out_f
+            for i in range(2, num_learners):
+              avg_f += learner_frags_host[i][dt].astype(np.float32)
+          else:
+            avg_f = learner_frags_host[0][dt].astype(np.float32)
+            for i in range(1, num_learners):
+              avg_f += learner_frags_host[i][dt].astype(np.float32)
+
+          avg_f *= inv_num_learners
+          pgrad = out_f - avg_f
+          tr_f *= outer_momentum
+          tr_f += pgrad
+          update = outer_lr * (pgrad + outer_momentum * tr_f)
+          out_f -= update
+
+          outer_1d[:] = out_f.astype(outer_1d.dtype)
+          trace_1d[:] = tr_f.astype(trace_1d.dtype)
+          new_outer_host[dt] = outer_1d
+          del out_f, tr_f, avg_f, pgrad, update
         else:
-          avg = learner_frags_host[0][dt].astype(np.float32)
-          for i in range(1, num_learners):
-            avg += learner_frags_host[i][dt].astype(np.float32)
+          # Multi-chunk memory-safe path for Fragment 0 (1.16B elements, only 64 MB transient RAM)
+          for st in range(0, total_len, chunk_size):
+            en = min(st + chunk_size, total_len)
+            out_f = outer_1d[st:en].astype(np.float32)
+            tr_f = trace_1d[st:en].astype(np.float32)
 
-        avg *= (1.0 / num_learners)
+            if first_init and num_learners > 1:
+              avg_f = learner_frags_host[1][dt][st:en].astype(np.float32)
+              avg_f += out_f
+              for i in range(2, num_learners):
+                avg_f += learner_frags_host[i][dt][st:en].astype(np.float32)
+            else:
+              avg_f = learner_frags_host[0][dt][st:en].astype(np.float32)
+              for i in range(1, num_learners):
+                avg_f += learner_frags_host[i][dt][st:en].astype(np.float32)
 
-        # pseudo_grad = outer_1d - avg
-        pgrad = outer_1d - avg
+            avg_f *= inv_num_learners
+            pgrad = out_f - avg_f
+            tr_f *= outer_momentum
+            tr_f += pgrad
+            update = outer_lr * (pgrad + outer_momentum * tr_f)
+            out_f -= update
 
-        # trace = momentum * trace + pgrad
-        trace_1d *= outer_momentum
-        trace_1d += pgrad
+            outer_1d[st:en] = out_f.astype(outer_1d.dtype)
+            trace_1d[st:en] = tr_f.astype(trace_1d.dtype)
+            del out_f, tr_f, avg_f, pgrad, update
 
-        # update = lr * (pgrad + momentum * trace)
-        update = outer_lr * (pgrad + outer_momentum * trace_1d)
-
-        # outer = outer - update
-        outer_1d -= update
-        new_outer_host[dt] = outer_1d.astype(learner_frags_host[0][dt].dtype)
-        del avg, pgrad, update
+          new_outer_host[dt] = outer_1d
       max_logging.log(f"Syncer: Step {step} 1D outer step applied")
 
       # 4. Dispatch 1D buffer to learners
