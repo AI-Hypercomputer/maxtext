@@ -3,6 +3,7 @@
 
 import sys
 import jax
+from jax.sharding import Mesh
 import jax.numpy as jnp
 import numpy as np
 from transformers import AutoTokenizer
@@ -15,7 +16,8 @@ from maxtext.utils import model_creation_utils
 
 def main():
   cfg = pyconfig.initialize_pydantic(sys.argv)
-  mesh = maxtext_utils.create_device_mesh(cfg)
+  devices_array = maxtext_utils.create_device_mesh(cfg)
+  mesh = Mesh(devices_array, cfg.mesh_axes)
   
   if jax.process_index() == 0:
     print("=== Loading GLM-5.2 Tokenizer ===")
