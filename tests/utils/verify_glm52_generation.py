@@ -1,7 +1,8 @@
 # Copyright 2026 Google LLC
-"""Standalone generation verification for GLM-5.2."""
+"""Fast JIT generation verification for GLM-5.2."""
 
 import sys
+from flax import nnx
 import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -14,21 +15,31 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 
 
+@nnx.jit
+def forward_step(model, tokens, positions, segment_ids):
+  return model(
+      decoder_input_tokens=tokens,
+      decoder_positions=positions,
+      decoder_segment_ids=segment_ids,
+      enable_dropout=False,
+  )
+
+
 def main():
   cfg = pyconfig.initialize_pydantic(sys.argv)
   devices_array = maxtext_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
   
   if jax.process_index() == 0:
-    print("=== Loading GLM-5.2 Tokenizer ===")
+    print("=== Loading GLM-5.2 Tokenizer ===", flush=True)
   tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
 
   if jax.process_index() == 0:
-    print(f"=== Restoring GLM-5.2 (744B) Model from {cfg.load_parameters_path} ===")
+    print(f"=== Restoring GLM-5.2 (744B) Model from {cfg.load_parameters_path} ===", flush=True)
   model = model_creation_utils.from_pretrained(cfg, mesh=mesh, model_mode="train")
 
   if jax.process_index() == 0:
-    print("=== Model restored successfully! Running prompt generation test ===")
+    print("=== Model restored successfully! Running prompt generation test ===", flush=True)
 
   test_prompts = [
       "The capital of France is",
@@ -40,7 +51,10 @@ def main():
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=True)
     generated_ids = list(prompt_ids)
 
-    # Generate 15 tokens greedily
+    if jax.process_index() == 0:
+      print(f"\n[PROMPT]: {prompt!r}\nGenerating: ", end="", flush=True)
+
+    # Generate 15 tokens greedily with JIT
     for step in range(15):
       curr_len = len(generated_ids)
       padded_tokens = np.zeros((cfg.global_batch_size_to_train_on, cfg.max_target_length), dtype=np.int32)
@@ -50,11 +64,11 @@ def main():
       segment_ids = np.repeat(segment_ids, cfg.global_batch_size_to_train_on, axis=0)
       positions = np.repeat(positions, cfg.global_batch_size_to_train_on, axis=0)
 
-      logits = model(
-          decoder_input_tokens=jnp.array(padded_tokens),
-          decoder_positions=jnp.array(positions),
-          decoder_segment_ids=jnp.array(segment_ids),
-          enable_dropout=False,
+      logits = forward_step(
+          model,
+          jnp.array(padded_tokens),
+          jnp.array(positions),
+          jnp.array(segment_ids),
       )
 
       # Gather logits across hosts
@@ -64,11 +78,13 @@ def main():
 
       next_token = int(jnp.argmax(logits[0, curr_len - 1, :]))
       generated_ids.append(next_token)
+      if jax.process_index() == 0:
+        token_str = tokenizer.decode([next_token])
+        print(token_str, end="", flush=True)
 
     if jax.process_index() == 0:
       output_text = tokenizer.decode(generated_ids)
-      print(f"\n[PROMPT]: {prompt!r}")
-      print(f"[GENERATION]: {output_text!r}\n" + "=" * 60)
+      print(f"\n[FULL RESULT]: {output_text!r}\n" + "=" * 60, flush=True)
 
 
 if __name__ == "__main__":
