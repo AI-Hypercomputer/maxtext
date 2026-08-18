@@ -2065,14 +2065,14 @@ class ElasticTraining(BaseModel):
   elastic_snapshot_interval: int = Field(10, description="The interval in steps to save snapshots to host memory.")
   elastic_new_slice_check_period: int = Field(10, description="The interval in seconds to poll for newly joined active slices.")
   elastic_timeout_seconds: int = Field(
-      300,
+      1000,
       description=(
           "The maximum number of seconds to wait for `elastic_minimum_slice_count` slices to become active. If this"
           " timeout is reached during any retry attempt, a `TimeoutError` is raised and training fails."
       ),
   )
   elastic_max_retries: int = Field(
-      10,
+      100,
       description="The maximum number of times to retry training when a slice failure occurs or when scaling up.",
   )
   elastic_min_slice_count: int = Field(
