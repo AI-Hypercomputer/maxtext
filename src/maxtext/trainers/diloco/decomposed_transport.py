@@ -87,19 +87,33 @@ class LearnerTransport:
   ):
     self.manager = manager
     self.learner_idx = learner_idx
-    self._executor = ThreadPoolExecutor(max_workers=1)
+    self._executor = ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix=f"learner_{learner_idx}_d2h"
+    )
+    self.d2h_errors = []
 
   def send_to_syncer_async(self, step: int, fragment_id: int, data: Any):
-    """Asynchronously sends fragment data to syncer."""
+    """Asynchronously pulls TPU buffer to host NumPy and delivers to syncer."""
     def _send():
       try:
-        self.manager.send_to_syncer(self.learner_idx, step, fragment_id, data)
+        if isinstance(data, dict):
+          host_packed = {dt: np.array(arr, copy=True) for dt, arr in data.items()}
+        elif data is not None and hasattr(data, "shape"):
+          host_packed = np.array(data, copy=True)
+        else:
+          host_packed = data
+        self.manager.send_to_syncer(self.learner_idx, step, fragment_id, host_packed)
+        del host_packed, data
       except Exception as e:
-        max_logging.error(f"Learner {self.learner_idx}: async send failed: {e}")
+        max_logging.error(f"Learner {self.learner_idx}: async D2H send failed: {e}")
         max_logging.error(traceback.format_exc())
-        raise e
+        self.d2h_errors.append(e)
 
     self._executor.submit(_send)
+
+  def check_d2h_errors(self):
+    if self.d2h_errors:
+      raise self.d2h_errors[0]
 
   def send_to_syncer(self, step: int, fragment_id: int, data: Any):
     """Synchronously sends fragment data to syncer."""

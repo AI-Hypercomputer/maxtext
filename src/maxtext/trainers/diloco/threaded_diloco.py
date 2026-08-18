@@ -422,10 +422,9 @@ def _run_learner_loop(
     # Synchronized Initialization / Resume
     try:
       if start_step == 0:
-        params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else raw_state.params
-        max_logging.log(f"Learner {learner_idx}: sending init params")
-        transport.send_to_syncer(step=0, fragment_id=-1, data=params)
-        max_logging.log(f"Learner {learner_idx}: sent init params, waiting for syncer ack")
+        max_logging.log(f"Learner {learner_idx}: sending init ack")
+        transport.send_to_syncer(step=0, fragment_id=-1, data=None)
+        max_logging.log(f"Learner {learner_idx}: sent init ack, waiting for syncer ack")
         transport.recv_from_syncer(step=0, fragment_id=-1)
         max_logging.log(f"Learner {learner_idx}: received syncer ack, starting training")
       else:
@@ -464,7 +463,7 @@ def _run_learner_loop(
     frag_metadata = {}
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
       for f in range(num_fragments):
-        sample_frag = _extract_fragment(params_template, manipulator, f)
+        sample_frag = manipulator.get_flat_fragment(params_template, f)
         frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
     max_logging.log(f"Learner {learner_idx}: Built 1D fragment packing metadata for {num_fragments} fragments")
 
@@ -539,21 +538,26 @@ def _run_learner_loop(
               if learner_config.shard_optimizer_over_data and isinstance(model, nn.Module):
                 state = sharding.maybe_shard_with_name(state, state_mesh_shardings, learner_config.shard_mode)
               state, metrics = p_train_step(state, example_batch, *step_rng_args)
+              extracted_metrics = _extract_scalar_metrics(metrics)
 
           max_logging.log(f"Learner {learner_idx}: Step {step} finished")
-          logging_executor.submit(_async_log_metrics, metrics, step)
+          del metrics
+          now = datetime.datetime.now()
+          step_duration = now - last_log_time[0]
+          last_log_time[0] = now
+          logging_executor.submit(metric_logger_instance.buffer_and_write_metrics, extracted_metrics, step, step_duration)
 
           completed_step = step + 1
 
           if completed_step > 0 and completed_step % steps_between_syncs_plus_1 == 0:
+            transport.check_d2h_errors()
             frag_idx = (completed_step % period) // steps_between_syncs_plus_1
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
               frag_data = _extract_fragment(params, manipulator, frag_idx)
               packed_frag_data = _pack_fragment_1d(frag_data, frag_metadata[frag_idx])
-            host_packed = {dt: np.asarray(arr) for dt, arr in packed_frag_data.items()}
-            transport.send_to_syncer_async(completed_step, frag_idx, host_packed)
-            del frag_data, packed_frag_data, host_packed
+            transport.send_to_syncer_async(completed_step, frag_idx, packed_frag_data)
+            del frag_data, packed_frag_data
 
           if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
             if prefetch_error:
@@ -573,10 +577,13 @@ def _run_learner_loop(
               else:
                 state = state.replace(params=new_params)
 
-            del received_tpu_packed, unpacked_leaves
+            del received_tpu_packed, unpacked_leaves, new_params, params
 
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
             checkpointing.maybe_save_checkpoint(checkpoint_manager, state, learner_config, data_iterator, step)
+
+          if step % 25 == 0:
+            gc.collect()
 
           eval_step_count = None
           if learner_config.eval_interval > 0 and step > start_step and (step + 1) % learner_config.eval_interval == 0:
@@ -900,37 +907,12 @@ def _run_syncer_loop(
   cpu_submeshes = partition_mesh_by_diloco_axis(global_mesh, num_learners)
 
   if restored_state is None:  # (1,a) No checkpoint found, start from scratch
-    learner_raw_params = [
-        transport.recv_from_learner(learner_idx=i, step=0, fragment_id=-1)
-        for i in range(num_learners)
-    ]
-    learner_formats = [
-        {jax.tree_util.keystr(kp): v.format for kp, v in jax.tree_util.tree_leaves_with_path(p)}
-        for p in learner_raw_params
-    ]
-    initial_learner_params = [
-        _normalize_to_null_layout(
-            jax.tree_util.tree_map(
-                lambda x, s, submesh=cpu_submeshes[i]: jax.device_put(x, jax.sharding.NamedSharding(submesh, s.spec)),
-                learner_raw_params[i],
-                params_shardings,
-            )
-        )
-        for i in range(num_learners)
-    ]
-    max_logging.log("Syncer: received init params from all learners, stacking across meshes")
-    global_params = stack_across_meshes_pytree(initial_learner_params, global_mesh, "diloco")
+    for i in range(num_learners):
+      transport.recv_from_learner(learner_idx=i, step=0, fragment_id=-1)
+    max_logging.log("Syncer: received init acks from all learners")
     for i in range(num_learners):
       transport.send_to_learner(learner_idx=i, step=0, fragment_id=-1, data=True)
-    with jax.set_mesh(global_mesh):
-      outer_optimizer = optax.sgd(
-          learning_rate=config.diloco_outer_lr,
-          momentum=config.diloco_outer_momentum,
-          nesterov=True,
-      )
-      outer_opt_state = outer_optimizer.init(global_params)
-
-    syncer_state = SyncerState(params=global_params, opt_state=outer_opt_state, step=0)
+    syncer_state = None
     start_step = 0
 
   else:  # loading checkpoints successfully
@@ -956,7 +938,7 @@ def _run_syncer_loop(
       transport.send_to_learner(learner_idx=i, step=start_step, fragment_id=-1, data=local_params)
       max_logging.log(f"Syncer: sent params to Learner {i} at step {start_step}")
 
-  manipulator = FragmentedTreeManipulator.create(syncer_state.params, config)
+  manipulator = FragmentedTreeManipulator.create(abstract_params, config)
   num_fragments = manipulator.num_fragments
 
   steps_between_syncs_plus_1 = int(round(config.diloco_sync_period / num_fragments))
@@ -975,7 +957,7 @@ def _run_syncer_loop(
   # Build 1D packing metadata from abstract_params (instantaneous, 0 memory)
   frag_metadata = {}
   for f in range(num_fragments):
-    sample_frag = _extract_fragment(abstract_params, manipulator, f)
+    sample_frag = manipulator.get_flat_fragment(abstract_params, f)
     frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
 
   syncer_frag_params_1d = {}
@@ -998,8 +980,15 @@ def _run_syncer_loop(
 
       # Initialize syncer fragment outer weights and trace lazily on first receipt
       if frag_idx not in syncer_frag_params_1d:
-        syncer_frag_params_1d[frag_idx] = {dt: learner_frags_host[0][dt].copy() for dt in meta}
+        # Adopt learner 0 buffer directly without copying to save memory
+        syncer_frag_params_1d[frag_idx] = {dt: learner_frags_host[0][dt] for dt in meta}
         syncer_frag_trace_1d[frag_idx] = {dt: np.zeros_like(learner_frags_host[0][dt]) for dt in meta}
+        first_init = True
+      else:
+        first_init = False
+
+      if frag_idx == 0:
+        gc.collect()
 
       # 2. In-place vectorized CPU outer SGD + Nesterov momentum (210 ms, 0 bytes extra allocation)
       new_outer_host = {}
@@ -1009,10 +998,19 @@ def _run_syncer_loop(
         outer_1d = syncer_frag_params_1d[frag_idx][dt]
         trace_1d = syncer_frag_trace_1d[frag_idx][dt]
 
-        # Use learner 0 buffer in-place for average
-        avg = learner_frags_host[0][dt]
-        for i in range(1, num_learners):
-          np.add(avg, learner_frags_host[i][dt], out=avg)
+        if first_init and num_learners > 1:
+          avg = learner_frags_host[1][dt]
+          if not avg.flags.writeable:
+            avg = avg.copy()
+          np.add(avg, outer_1d, out=avg)
+          for i in range(2, num_learners):
+            np.add(avg, learner_frags_host[i][dt], out=avg)
+        else:
+          avg = learner_frags_host[0][dt]
+          if not avg.flags.writeable:
+            avg = avg.copy()
+          for i in range(1, num_learners):
+            np.add(avg, learner_frags_host[i][dt], out=avg)
         np.multiply(avg, 1.0 / num_learners, out=avg)
 
         # pseudo_grad = outer_1d - avg
@@ -1030,6 +1028,7 @@ def _run_syncer_loop(
         # outer = outer - update
         np.subtract(outer_1d, update, out=outer_1d)
         new_outer_host[dt] = outer_1d
+        del update
       max_logging.log(f"Syncer: Step {step} 1D outer step applied")
 
       # 4. Dispatch 1D buffer to learners
@@ -1103,7 +1102,9 @@ def run_threaded_diloco(config, recorder, train_step, eval_step):
   max_logging.log("Creating colocated CPU mesh for syncer")
   colocated_cpu_mesh = colocated_python.colocated_cpu_devices(global_mesh)
 
-  transport_manager = ThreadedTransportManager(num_learners)
+  transport_manager = ThreadedTransportManager(
+      num_learners, maxsize=max(2, int(config.num_communication_overlapping_steps) + 2)
+  )
 
   # Get abstract syncer state on colocated CPU mesh
   max_logging.log("Getting abstract syncer state on colocated CPU mesh")
