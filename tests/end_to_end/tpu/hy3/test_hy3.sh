@@ -2,8 +2,8 @@
 
 # This script tests the Hy3 architecture in MaxText using the hy3-tiny synthetic configuration.
 # Since the real Tencent Hunyuan V3 model is 295B (which is too large for automated CI daily tests),
-# this tests the exact architecture pathways (QKNorm, MLA-like routing, auxiliary-loss-free bias)
-# on a miniature configuration.
+# this tests the exact architecture pathways (GQA with QK-Norm attention, DeepSeek-V3-style
+# aux-loss-free sigmoid+bias MoE routing) on a miniature configuration. Hy3 does not use MLA.
 
 # Flow:
 # 1. Run pre-training with the tiny config for 10 steps.

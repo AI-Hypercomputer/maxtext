@@ -85,16 +85,20 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 # Aux-loss-free load balancing (DeepSeek V3-style sigmoid+bias routing) sows its
 # router-bias update under a module attribute name that differs per model family,
 # since each family names its RoutedAndSharedMoE instance differently.
-# NOTE: as of writing, this update path is a no-op in scanned mode for every family
-# below (nnx_decoders.py's scan application strips nnx.Intermediate state before it
-# reaches here, so `moe_bias_updates` is always None -- see nnx_decoders.py:1089-ish
-# `nnx.filter_state(scanned_state, nnx.Not((nnx.RngState, nnx.Intermediate)))`) and
-# raises AttributeError in unscanned mode (this code assumes the single stacked
-# `moe_layers` attribute scanning produces, which doesn't exist when unscanned --
-# unscanned layers are named `moe_layers_0`, `moe_layers_1`, etc. instead). Both are
-# pre-existing gaps that predate Hy3 and affect DeepSeek V3 too; this table only
-# prevents Hy3 from crashing on a name mismatch on top of that, it does not make
-# the update path functional.
+#
+# This lookup is only reached by the legacy Linen decoder bridge below -- the
+# default pure-NNX path finds the bias generically via the `_find_gate_bias`
+# helper above instead (an upstream fix replaced its own hardcoded lookup with
+# that helper, which incidentally also fixed a pre-existing unscanned-mode
+# crash there; see PR history for HY3's onboarding for details).
+#
+# Verified behavior for this Linen-path branch specifically (hy3-tiny,
+# routed_bias_update_rate=0.05): with `scan_layers=true` it updates the bias
+# correctly (this table is what lets Hy3 resolve to the right module name
+# instead of crashing on a name mismatch, same as it always did for
+# DeepSeek); with `scan_layers=false` it silently no-ops, since the
+# Linen-side aux collection this branch depends on (`moe_bias_updates`) is
+# only ever populated when layers are scanned into a single stacked array.
 _MOE_BLOCK_ATTR_BY_DECODER_BLOCK = {
     DecoderBlockType.DEEPSEEK: "DeepSeekMoeBlock_0",
     DecoderBlockType.HY3: "Hy3MoeBlock_0",
