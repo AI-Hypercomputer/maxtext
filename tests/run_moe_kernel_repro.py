@@ -40,10 +40,13 @@ except ImportError:
 from tests.unit.moe_kernel_repro_test import compare_moe_kernels_on_tpu
 
 
-def run_sweep(dtype):
+import argparse
+
+def run_sweep(dtype, topk: int = 2, num_experts: int = 8):
     dtype_name = "FLOAT32" if dtype == jax.numpy.float32 else "BFLOAT16"
+    routing_type = f"Sparse Top-{topk}/{num_experts}" if topk < num_experts else f"Dense Top-{topk}/{num_experts}"
     print("=" * 80)
-    print(f"STANDALONE MOE KERNEL REPRO: TOKAMAX GMM V2 VS FUSED MOE ({dtype_name})")
+    print(f"STANDALONE MOE KERNEL REPRO: TOKAMAX GMM V2 VS FUSED MOE ({dtype_name}, {routing_type})")
     print("[Local TPU VM] Running directly on locally-attached TPU chips.")
     print("=" * 80)
 
@@ -63,11 +66,11 @@ def run_sweep(dtype):
         }),
     ]
 
-    print("=" * 110)
-    print(f">>> MOE KERNEL SWEEP ({dtype_name}) [Inference = Fused MoE Kernel (tpu-inference)]")
-    print("=" * 110)
-    print(f"{'Configuration':<45} | {'Vs Infer L_inf':<14} | {'Vs Infer MAE':<14} | {'Vs Infer CosSim':<15} | {'Vs Ref L_inf':<14} | {'Vs Ref MAE':<12}")
-    print("-" * 110)
+    print("=" * 125)
+    print(f">>> MOE KERNEL SWEEP ({dtype_name}, {routing_type}) [Inference = Fused MoE Kernel (tpu-inference)]")
+    print("=" * 125)
+    print(f"{'Configuration':<42} | {'Vs Infer L_inf':<14} | {'Vs Infer MAE':<14} | {'Vs Infer CosSim':<15} | {'Vs Ref L_inf':<14} | {'Vs Ref MAE':<12} | {'Routing Parity':<14}")
+    print("-" * 125)
 
     results = []
     res = None
@@ -79,28 +82,29 @@ def run_sweep(dtype):
                 seq_len=512,
                 emb_dim=2048,
                 moe_mlp_dim=512,
-                num_experts=8,
-                num_experts_per_tok=8,
+                num_experts=num_experts,
+                num_experts_per_tok=topk,
                 dtype=dtype,
                 train_moe_kwargs=extra_kwargs,
             )
             m_infer = res["train_vs_infer"]
             m_ref = res["train_vs_ref"]
+            r_parity = res.get("routing_parity", 1.0)
             print(
-                f"{name:<45} | {m_infer['max_err']:<14.2e} | {m_infer['mae']:<14.2e} | "
-                f"{m_infer['cos_sim']:<15.6f} | {m_ref['max_err']:<14.2e} | {m_ref['mae']:<12.2e}"
+                f"{name:<42} | {m_infer['max_err']:<14.2e} | {m_infer['mae']:<14.2e} | "
+                f"{m_infer['cos_sim']:<15.6f} | {m_ref['max_err']:<14.2e} | {m_ref['mae']:<12.2e} | {r_parity * 100:<13.2f}%"
             )
-            results.append((name, m_infer, m_ref))
+            results.append((name, m_infer, m_ref, r_parity))
         except Exception as e:
-            print(f"{name:<45} | FAILED: {e}")
-            results.append((name, None, None, str(e)))
+            print(f"{name:<42} | FAILED: {e}")
+            results.append((name, None, None, 0.0, str(e)))
 
     # Baseline: Fused MoE vs Exact Reference
     infer_vs_ref = None
     if res is not None:
         try:
             infer_vs_ref = res["infer_vs_ref"]
-            print("-" * 110)
+            print("-" * 125)
             print(
                 f"--> INFERENCE Fused MoE vs Exact Ref ({dtype_name}): L_inf={infer_vs_ref['max_err']:.2e}, "
                 f"MAE={infer_vs_ref['mae']:.2e}, CosSim={infer_vs_ref['cos_sim']:.6f}"
@@ -112,10 +116,21 @@ def run_sweep(dtype):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="MoE Kernel Parity Repro Runner")
+    parser.add_argument("--topk", type=int, default=None, help="Top-K experts per token to test (e.g. 2 for sparse, 8 for dense). If omitted, sweeps both 2 and 8.")
+    parser.add_argument("--num_experts", type=int, default=8, help="Total number of experts (default: 8)")
+    args = parser.parse_args()
+
+    topk_list = [args.topk] if args.topk is not None else [2, 8]
+
     all_results = {}
-    for dtype in (jax.numpy.float32, jax.numpy.bfloat16):
-        dtype_name = "float32" if dtype == jax.numpy.float32 else "bfloat16"
-        all_results[dtype_name] = run_sweep(dtype)
+    for topk in topk_list:
+        print("\n" + "#" * 125)
+        print(f"### SWEEPING TOP-{topk}/{args.num_experts} ROUTING ({'SPARSE - REALISTIC FOR RL' if topk < args.num_experts else 'DENSE - KERNEL MATH ONLY'}) ###")
+        print("#" * 125 + "\n")
+        for dtype in (jax.numpy.float32, jax.numpy.bfloat16):
+            dtype_name = "float32" if dtype == jax.numpy.float32 else "bfloat16"
+            all_results[f"{dtype_name}_top{topk}"] = run_sweep(dtype, topk=topk, num_experts=args.num_experts)
     return all_results
 
 
