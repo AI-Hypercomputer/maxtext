@@ -134,6 +134,68 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
+def build_local_sliding_splash_mask(
+    batch: int,
+    decoder_segment_ids: Array | None,
+    segment_positions: Array | None,
+    q_seq_len: int,
+    kv_seq_len: int,
+    sliding_window_size: int | None,
+) -> Array:
+  """Builds the causal sliding mask for the uncompressed COMPRESSED prefix.
+
+  To match the dense path under packing, query positions may reset by segment while key
+  positions remain physical offsets.
+  """
+  if segment_positions is not None:
+    row_ids = segment_positions[:, :, None]
+  else:
+    row_ids = jnp.arange(q_seq_len)[None, :, None]
+  col_ids = jnp.arange(kv_seq_len)[None, None, :]
+  distance = row_ids - col_ids
+  mask = distance >= 0
+  if sliding_window_size is not None:
+    mask &= distance < sliding_window_size
+  mask = jnp.broadcast_to(mask, (batch, q_seq_len, kv_seq_len))
+  if decoder_segment_ids is not None:
+    segment = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+    mask = jnp.logical_and(mask, segment[..., :kv_seq_len])
+  return mask
+
+
+def build_compressed_splash_mask(
+    compressed_mask: Array,
+    decoder_segment_ids: Array | None,
+    segment_positions: Array | None,
+    q_seq_len: int,
+    kv_seq_len: int,
+    sliding_window_size: int | None,
+    precomputed_uncompressed: Array | None = None,
+) -> Array:
+  """Builds the boolean COMPRESSED mask for dynamic splash attention.
+
+  `compressed_mask` may use the additive or boolean representation. The result has shape
+  `[batch, q_seq_len, kv_seq_len]`.
+  """
+  c_len = compressed_mask.shape[-1]
+  s_len = kv_seq_len - c_len
+  b = compressed_mask.shape[0]
+
+  if precomputed_uncompressed is not None:
+    if precomputed_uncompressed.shape != (b, q_seq_len, s_len):
+      raise ValueError(f"hoisted prefix mask shape {precomputed_uncompressed.shape} != expected {(b, q_seq_len, s_len)}")
+    uncompressed = precomputed_uncompressed
+  else:
+    uncompressed = build_local_sliding_splash_mask(
+        b, decoder_segment_ids, segment_positions, q_seq_len, s_len, sliding_window_size
+    )
+  if compressed_mask.dtype == jnp.bool_:
+    compressed_keep = compressed_mask.reshape(b, q_seq_len, c_len)
+  else:
+    compressed_keep = compressed_mask.reshape(b, q_seq_len, c_len) >= DEFAULT_MASK_VALUE * 0.5
+  return jnp.concatenate([uncompressed, compressed_keep], axis=-1)
+
+
 def validate_gpu_flash_attention(sinks: Array | None, record_max_logits: bool) -> None:
   """Helper function to check for unsupported features with flash attention on GPU."""
   if sinks is not None:
@@ -568,7 +630,8 @@ class AttentionOp(nnx.Module):
         raise ValueError("causal_block_size must be positive for block-diffusion attention")
       if self.attention_kernel not in ("autoselected", "dot_product", "flash"):
         raise ValueError("Block-diffusion attention is supported only by dot_product attention and TPU Splash attention.")
-    # Block sizes are only used by TPU splash attention kernels. Exclude non-splash kernels
+    # The opt-in COMPRESSED and LOCAL_SLIDING routes need splash block sizes despite using
+    # attention_kernel="dot_product".
     if self.attention_kernel not in (
         "dot_product",
         "paged",
@@ -576,6 +639,9 @@ class AttentionOp(nnx.Module):
         "vllm_batched_rpa",
         "cudnn_flash_te",
         "cudnn_flash_jax",
+    ) or (
+        self.attention_type in (AttentionType.COMPRESSED, AttentionType.LOCAL_SLIDING)
+        and self.config.compressed_use_dynamic_splash
     ):
       if self.attention_type == AttentionType.LOCAL_SLIDING:
         self.block_q = self.config.local_sa_block_q
@@ -946,6 +1012,8 @@ class AttentionOp(nnx.Module):
       [2] SARATHI: Efficient LLM Inference by Piggybacking Decodes with
           Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
     """
+    if compressed_mask is not None and compressed_mask.dtype == jnp.bool_:
+      raise ValueError("The dense attention path requires an additive compressed_mask.")
     mask = None
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -1346,6 +1414,7 @@ class AttentionOp(nnx.Module):
       indexer_mask: Array | None = None,
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
+      hoisted_prefix_bool_mask: Array | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1386,6 +1455,45 @@ class AttentionOp(nnx.Module):
       if record_max_logits:
         self.max_logits = nnx.Intermediate(local_max)
       return local_out, local_max, local_sum
+
+    # LOCAL_SLIDING has a static splash mask; COMPRESSED needs the dynamic mask from its
+    # compressor. Dense-only mask modifiers must continue through the dot-product path.
+    elif (
+        self.config.compressed_use_dynamic_splash
+        and model_mode == MODEL_MODE_TRAIN
+        and target_hardware == "tpu"
+        and previous_chunk is None
+        and bidirectional_mask is None
+        and (
+            self.attention_type == AttentionType.LOCAL_SLIDING
+            or (self.attention_type == AttentionType.COMPRESSED and compressed_mask is not None)
+        )
+    ):
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        out, max_logits = self.tpu_flash_attention(
+            query,
+            key,
+            value,
+            decoder_segment_ids,
+            self.attn_logits_soft_cap,
+            sinks,
+            model_mode=model_mode,
+            record_max_logits=record_max_logits,
+        )
+        if max_logits is not None:
+          self.max_logits = nnx.Intermediate(max_logits)
+        return out, None, None
+      return self.dynamic_splash_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          segment_positions,
+          compressed_mask,
+          sinks,
+          record_max_logits,
+          hoisted_prefix_bool_mask=hoisted_prefix_bool_mask,
+      )
 
     # 'vllm_rpa' uses the same dot-attention wrapper but routes to the vLLM
     # ragged paged attention kernel in `Attention.__call__`.
@@ -1596,6 +1704,72 @@ class AttentionOp(nnx.Module):
         return ragged_gqa(query, key, value, lengths, block_size=block_size)
 
     return wrap_ragged_attention(query, key, value, lengths, block_size)
+
+  def dynamic_splash_attention(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array | None,
+      segment_positions: Array | None,
+      compressed_mask: Array,
+      sinks: Array | None,
+      record_max_logits: bool = False,
+      hoisted_prefix_bool_mask: Array | None = None,
+  ) -> tuple[Array, None, None]:
+    """Runs COMPRESSED train attention with the tokamax dynamic splash kernel.
+
+    Packing is folded into the boolean mask because no segment ids exist for the compressed
+    KV columns. KV and mask columns are padded to satisfy all splash block sizes.
+    """
+    q_seq_len = query.shape[1]
+    kv_seq_len = key.shape[1]
+
+    if self.mesh.shape.get(self.config.context_sharding, 1) > 1:
+      raise NotImplementedError(
+          "compressed_use_dynamic_splash does not support context parallelism for COMPRESSED "
+          "attention (the dynamic-mask splash path has no load-balanced reorder for the "
+          "compressed kv concat). LOCAL_SLIDING layers take the static splash path and do."
+      )
+    for name, blk in (("block_q", self.block_q), ("block_q_dkv", self.block_q_dkv)):
+      eff = min(blk, q_seq_len)
+      if q_seq_len % eff:
+        raise ValueError(
+            f"compressed_use_dynamic_splash: query length {q_seq_len} must be a multiple of "
+            f"min({name}={blk}, q_len) = {eff}."
+        )
+
+    bool_mask = build_compressed_splash_mask(
+        compressed_mask,
+        decoder_segment_ids,
+        segment_positions,
+        q_seq_len,
+        kv_seq_len,
+        self.sliding_window_size,
+        precomputed_uncompressed=hoisted_prefix_bool_mask,
+    )
+
+    lcm = math.lcm(self.block_kv, self.block_kv_compute, self.block_kv_dkv, self.block_kv_dkv_compute)
+    padded_kv_len = math.ceil(kv_seq_len / lcm) * lcm
+    if padded_kv_len != kv_seq_len:
+      pad = padded_kv_len - kv_seq_len
+      key = jnp.pad(key, ((0, 0), (0, pad), (0, 0), (0, 0)))
+      value = jnp.pad(value, ((0, 0), (0, pad), (0, 0), (0, 0)))
+      bool_mask = jnp.pad(bool_mask, ((0, 0), (0, 0), (0, pad)))
+
+    out, max_logits = self.tpu_flash_attention(
+        query,
+        key,
+        value,
+        decoder_segment_ids=None,
+        attn_logits_soft_cap=self.attn_logits_soft_cap,
+        sinks=sinks,
+        indexer_mask=bool_mask,
+        record_max_logits=record_max_logits,
+    )
+    if max_logits is not None:
+      self.max_logits = nnx.Intermediate(max_logits)
+    return out, None, None
 
   def tpu_flash_attention(
       self,
@@ -2068,8 +2242,9 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_tuple = None
 
       if self.config.use_tokamax_splash:
-        if self.config.use_indexer and indexer_mask is not None:
-          # Construct the splash kernel call with dynamic mask
+        if indexer_mask is not None:
+          # Pallas interpret mode does not propagate input_output_aliases across grid steps, so
+          # dynamic-splash GQA gradients must be checked on TPU.
           def dynamic_mask_splash_kernel(q, k, v, segment, sinks, indexer_mask):
             splash_kernel = tokamax_splash_kernel.make_dynamic_splash_mha(
                 mask=indexer_mask,
@@ -2083,9 +2258,9 @@ class AttentionOp(nnx.Module):
             else:
               return kernel(q, k, v, segment, sinks=sinks), None
 
-          # Iterate over batch dimension for (query, key, value, segment, sinks, mask)
           attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
-          indexer_mask = jnp.isclose(indexer_mask, 0.0)
+          if indexer_mask.dtype != jnp.bool_:
+            indexer_mask = jnp.isclose(indexer_mask, 0.0)
 
           if record_max_logits:
             attention_output, max_logits = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
@@ -2715,6 +2890,7 @@ class AttentionOp(nnx.Module):
       compressed_kv: Optional[Array] = None,
       slot: Optional[int] = None,
       record_max_logits: bool = False,
+      hoisted_prefix_bool_mask: Optional[Array] = None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -2753,6 +2929,7 @@ class AttentionOp(nnx.Module):
         indexer_mask=indexer_mask_prefill,
         compressed_mask=compressed_mask if pass_comp_to_prefill else None,
         record_max_logits=record_max_logits,
+        hoisted_prefix_bool_mask=hoisted_prefix_bool_mask,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
     )

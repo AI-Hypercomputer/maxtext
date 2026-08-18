@@ -37,6 +37,7 @@ from maxtext.common.common_types import (
 )
 
 from maxtext.layers import nnx_wrappers
+from maxtext.layers.attention_op import build_local_sliding_splash_mask
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
@@ -406,6 +407,113 @@ def prime_prefill_cache_state(
       cache.overlap_gate.set_value(overlap_gate_to_write)
 
 
+def use_bool_compressed_masks(config: Any, mesh: Optional[Mesh], model_mode: str) -> bool:
+  """Returns whether compressed masks can remain boolean through attention."""
+  if not (config.splash_bool_masks and config.compressed_use_dynamic_splash):
+    return False
+  if model_mode != MODEL_MODE_TRAIN:
+    return False
+  return mesh is not None and mesh.devices.flat[0].platform == "tpu"
+
+
+def build_compressed_segment_mask(decoder_segment_ids: Array, compress_rate: int, emit_bool: bool = False) -> Array:
+  """Packing segment mask downsampled to the compressed kv columns, additive f32 or bool."""
+  segment_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+  if emit_bool:
+    return segment_mask[:, :, ::compress_rate]
+  segment_mask_additive = jnp.where(segment_mask, 0.0, DEFAULT_MASK_VALUE)
+  return segment_mask_additive[:, :, ::compress_rate]
+
+
+def build_hca_causal_mask(
+    position_ids: Array, compressed_len: int, compress_rate: int, dtype: DType, emit_bool: bool = False
+) -> Array:
+  """HCA causal mask over compressed windows: window w visible iff w < (pos + 1) // compress_rate."""
+  entry_indices = jnp.arange(compressed_len)
+  causal_threshold = (position_ids + 1) // compress_rate
+  future_mask = entry_indices[None, None, None, :] >= jnp.expand_dims(causal_threshold, axis=(1, 3))
+  if emit_bool:
+    return jnp.logical_not(future_mask)
+  return jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0).astype(dtype)
+
+
+def build_csa_indexer_causal(position_ids: Array, compressed_len: int, compress_rate: int) -> Array:
+  """CSA indexer future-window mask, `[batch, q_len, compressed_len]` bool (True = masked)."""
+  causal_threshold = (position_ids + 1) // compress_rate
+  entry_indices = jnp.arange(compressed_len)
+  return entry_indices[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
+
+
+def combine_compressed_and_segment_mask(compressed_mask: Array, compressed_segment_mask: Array) -> Array:
+  """Folds the packing segment mask into a compressed block mask (add if additive, AND if bool)."""
+  segment = jnp.expand_dims(compressed_segment_mask[:, :, : compressed_mask.shape[-1]], axis=1)
+  if compressed_mask.dtype == jnp.bool_:
+    return jnp.logical_and(compressed_mask, segment)
+  return compressed_mask + segment
+
+
+def topk_threshold_membership(index_scores: Array, k: int) -> Array:
+  """Returns a boolean top-k membership mask from the k-th score threshold."""
+  if k <= 0:
+    return jnp.zeros(index_scores.shape, dtype=jnp.bool_)
+  kth_value = jax.lax.top_k(index_scores, k)[0][..., k - 1 :]
+
+  # top_k orders +0.0 above -0.0 and breaks ties within each class by lower index.
+  score_negative = jnp.signbit(index_scores)
+  kth_negative = jnp.signbit(kth_value)
+  ieee_equal = index_scores == kth_value
+  greater = (index_scores > kth_value) | (ieee_equal & kth_negative & (~score_negative))
+  tie = ieee_equal & (score_negative == kth_negative)
+
+  num_greater = jnp.sum(greater.astype(jnp.int32), axis=-1, keepdims=True)
+  tie_rank = jnp.cumsum(tie.astype(jnp.int32), axis=-1)
+  return greater | (tie & (tie_rank <= (k - num_greater)))
+
+
+def build_deepseek4_hoisted_masks(
+    config: Any,
+    mesh: Optional[Mesh],
+    decoder_segment_ids: Optional[Array],
+    decoder_positions: Array,
+    model_mode: str,
+) -> Optional[dict[str, Array]]:
+  """Builds layer-invariant DeepSeek-V4 train masks before the layer scan."""
+  if not config.hoist_static_attention_masks or model_mode != MODEL_MODE_TRAIN:
+    return None
+  if decoder_positions is None:
+    return None
+  batch_size, seq_len = decoder_positions.shape
+  if seq_len <= 1:
+    return None
+
+  emit_bool = use_bool_compressed_masks(config, mesh, model_mode)
+  hoisted = {}
+
+  on_tpu = mesh is not None and mesh.devices.flat[0].platform == "tpu"
+  if config.compressed_use_dynamic_splash and on_tpu:
+    hoisted["prefix_bool"] = build_local_sliding_splash_mask(
+        batch_size, decoder_segment_ids, decoder_positions, seq_len, seq_len, config.sliding_window_size
+    )
+
+  for rate in sorted({int(r) for r in config.compress_ratios if r > 0}):
+    compressed_len = seq_len // rate
+    if compressed_len == 0:
+      continue
+    segment_mask = None
+    if decoder_segment_ids is not None:
+      segment_mask = build_compressed_segment_mask(decoder_segment_ids, rate, emit_bool)
+      hoisted[f"segment_mask_{rate}"] = segment_mask
+    if rate > 4:
+      hca_mask = build_hca_causal_mask(decoder_positions, compressed_len, rate, config.dtype, emit_bool)
+      if segment_mask is not None:
+        hca_mask = combine_compressed_and_segment_mask(hca_mask, segment_mask)
+      hoisted[f"hca_mask_{rate}"] = hca_mask
+    else:
+      hoisted[f"csa_future_mask_{rate}"] = build_csa_indexer_causal(decoder_positions, compressed_len, rate)
+
+  return hoisted or None
+
+
 class BaseDeepseekCompressor(nnx.Module):
   """Shared base class for DeepSeek-V4 long-range attention compressors.
 
@@ -537,7 +645,9 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       position_ids: Array,
       model_mode: str,
       cache: Optional[Any] = None,
-  ) -> Tuple[Array, Array]:
+      emit_bool_mask: bool = False,
+      skip_mask: bool = False,
+  ) -> Tuple[Array, Optional[Array]]:
     """Forward pass for the HCA compressor.
 
     Args:
@@ -546,6 +656,8 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       position_ids: Absolute token positions. Shape: `[batch, seq_len]`.
       model_mode: The execution mode (e.g. train, prefill, or autoregressive).
       cache: Optional KV cache instance used during inference.
+      emit_bool_mask: Return the causal mask boolean (True = attend) instead of additive.
+      skip_mask: Skip mask construction (the caller holds the hoisted equivalent); mask is None.
 
     Returns:
       compressed_kv: The pooled KV tensors. Shape: `[batch, n_windows, 1, head_dim]`.
@@ -579,7 +691,10 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
           mask_ndims=4,
       )
       compressed_kv = jnp.expand_dims(compressed, 2)  # [B, N, 1, D]
-      compressed_mask = jnp.where(is_valid, 0.0, DEFAULT_MASK_VALUE).astype(self.dtype)
+      if emit_bool_mask:
+        compressed_mask = is_valid
+      else:
+        compressed_mask = jnp.where(is_valid, 0.0, DEFAULT_MASK_VALUE).astype(self.dtype)
 
       return compressed_kv, compressed_mask
 
@@ -631,16 +746,19 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
           cache=cache,
       )
 
+    if skip_mask:
+      return compressed_kv, None
+
     # Skip causal mask generation during decoding (seq_len == 1) or if no blocks were pooled
     if seq_len == 1 or compressed_len == 0:
-      compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=self.dtype)
+      mask_dtype = jnp.bool_ if emit_bool_mask else self.dtype
+      compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=mask_dtype)
       return compressed_kv, compressed_mask
 
     # Construct a causal mask preventing early queries from attending to future compressed blocks
-    entry_indices = jnp.arange(compressed_len)
-    causal_threshold = (position_ids + 1) // self.compress_rate
-    future_mask = entry_indices[None, None, None, :] >= jnp.expand_dims(causal_threshold, axis=(1, 3))
-    compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0).astype(self.dtype)
+    compressed_causal_mask = build_hca_causal_mask(
+        position_ids, compressed_len, self.compress_rate, self.dtype, emit_bool_mask
+    )
 
     return compressed_kv, compressed_causal_mask
 
@@ -766,6 +884,7 @@ class DeepseekV4Indexer(nnx.Module):
       attention_mask: Optional[Array] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       cache: Optional[Any] = None,
+      hoisted_masks: Optional[dict[str, Array]] = None,
   ) -> Array:
     """Forward pass for the DeepSeek-V4 Indexer.
 
@@ -773,12 +892,16 @@ class DeepseekV4Indexer(nnx.Module):
       hidden_states: Input token embeddings.
       q_latent: Latent query representation for index score computation.
       position_ids: Absolute token positions.
-      attention_mask: Optional attention mask.
+      attention_mask: Optional packing segment mask over the compressed windows, additive f32 or
+        bool under `splash_bool_masks`.
       model_mode: Execution mode (train, prefill, or autoregressive).
       cache: Optional Indexer KV cache instance for inference.
+      hoisted_masks: Optional `hoist_static_attention_masks` bundle with the precomputed causal mask.
 
     Returns:
-      Top-K selected indices for each query position.
+      `[batch, seq_len, k]` int32 top-k window indices with future selections invalidated to -1,
+      or `[batch, seq_len, n_windows]` bool membership of the same selected set under
+      `indexer_threshold_membership`.
     """
     batch_size, seq_len, _ = hidden_states.shape
     future_mask = None
@@ -854,6 +977,8 @@ class DeepseekV4Indexer(nnx.Module):
         )
 
     if compressed_len == 0:
+      if self.config.indexer_threshold_membership:
+        return jnp.zeros((batch_size, seq_len, 0), dtype=jnp.bool_)
       return jnp.zeros((batch_size, seq_len, min(self.index_topk, compressed_len)), dtype=jnp.int32)
 
     # --- TOP-K ROUTING MATH (Executes in both Prefill and AR) ---
@@ -876,15 +1001,25 @@ class DeepseekV4Indexer(nnx.Module):
 
     # --- ONLY RUN MATHEMATICAL CAUSAL MASK IN PREFILL/TRAIN ---
     if future_mask is None:
-      causal_threshold = (position_ids + 1) // self.compress_rate
-      entry_indices_mask = jnp.arange(compressed_len)
-      future_mask = entry_indices_mask[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
+      hoisted = hoisted_masks or {}
+      future_key = f"csa_future_mask_{self.compress_rate}"
+      if future_key in hoisted:
+        future_mask = hoisted[future_key]
+      else:
+        future_mask = build_csa_indexer_causal(position_ids, compressed_len, self.compress_rate)
 
     # Apply the mask to the scores
     index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
     if attention_mask is not None:
-      index_scores += attention_mask[:, :, :compressed_len]
+      segment_mask = attention_mask[:, :, :compressed_len]
+      if segment_mask.dtype == jnp.bool_:
+        segment_mask = jnp.where(segment_mask, 0.0, DEFAULT_MASK_VALUE)
+      index_scores += segment_mask
+
+    if self.config.indexer_threshold_membership:
+      membership = topk_threshold_membership(index_scores, k)
+      return jnp.logical_and(membership, jnp.logical_not(future_mask))
 
     top_k_indices = jax.lax.top_k(index_scores, k)[1]
     invalid = jnp.take_along_axis(future_mask, top_k_indices, axis=-1)
@@ -959,6 +1094,8 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       model_mode: str = MODEL_MODE_TRAIN,
       cache: Optional[Any] = None,
       indexer_cache: Optional[Any] = None,
+      emit_bool_mask: bool = False,
+      hoisted_masks: Optional[dict[str, Array]] = None,
   ) -> Tuple[Array, Array]:
     """Forward pass for the CSA compressor.
 
@@ -966,10 +1103,12 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       hidden_states: Input token embeddings.
       q_latent: Latent query representation for index score computation.
       position_ids: Absolute token positions.
-      attention_mask: Optional attention mask.
+      attention_mask: Optional attention mask; forwarded to the indexer's scoring.
       model_mode: Execution mode (train, prefill, or autoregressive).
       cache: Optional CSA compressor KV cache instance for inference.
       indexer_cache: Optional Indexer KV cache instance for inference.
+      emit_bool_mask: Return the mask boolean (True = attend) instead of additive.
+      hoisted_masks: Optional `hoist_static_attention_masks` bundle, forwarded to the indexer.
 
     Returns:
       compressed_kv: The pooled KV tensors.
@@ -978,7 +1117,15 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
     batch_size, seq_len, _ = hidden_states.shape
 
     # 1. ALWAYS Run Indexer (It fetches its own history inside AR)
-    top_k_indices = self.indexer(hidden_states, q_latent, position_ids, attention_mask, model_mode, indexer_cache)
+    top_k_indices = self.indexer(
+        hidden_states,
+        q_latent,
+        position_ids,
+        attention_mask,
+        model_mode,
+        indexer_cache,
+        hoisted_masks=hoisted_masks,
+    )
 
     kv = self.kv_proj(hidden_states)
     gate = self.gate_proj(hidden_states)
@@ -1052,7 +1199,18 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
         )
 
     if compressed_len == 0:
-      return compressed_kv, jnp.zeros((batch_size, 1, seq_len, 0), dtype=self.dtype)
+      empty_dtype = jnp.bool_ if emit_bool_mask else self.dtype
+      return compressed_kv, jnp.zeros((batch_size, 1, seq_len, 0), dtype=empty_dtype)
+
+    if self.config.indexer_threshold_membership:
+      if top_k_indices.shape[-1] != compressed_len:
+        raise ValueError(
+            f"indexer membership window count {top_k_indices.shape[-1]} != compressor windows {compressed_len}"
+        )
+      is_selected = jnp.expand_dims(top_k_indices, axis=1)
+      if emit_bool_mask:
+        return compressed_kv, is_selected
+      return compressed_kv, jnp.where(is_selected, 0.0, DEFAULT_MASK_VALUE).astype(self.dtype)
 
     # 3. Apply Dynamic Masking Logic
     k = top_k_indices.shape[-1]
@@ -1065,7 +1223,12 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       is_selected = jnp.any(is_valid_and_in_topk, axis=2)
       is_selected = jnp.expand_dims(is_selected, axis=1)
 
-      compressed_mask = jnp.where(is_selected, 0.0, DEFAULT_MASK_VALUE).astype(self.dtype)
+      if emit_bool_mask:
+        compressed_mask = is_selected
+      else:
+        compressed_mask = jnp.where(is_selected, 0.0, DEFAULT_MASK_VALUE).astype(self.dtype)
+    elif emit_bool_mask:
+      compressed_mask = jnp.zeros((batch_size, 1, seq_len, compressed_len), dtype=jnp.bool_)
     else:
       compressed_mask = jnp.full(
           (batch_size, 1, seq_len, compressed_len),
@@ -1501,20 +1664,30 @@ class CompressedAttention(Attention):
     compressed_kv = None
     compressed_mask = None
     compressed_segment_mask = None
+    hoisted = kwargs.get("hoisted_masks") or {}
+    emit_bool_mask = use_bool_compressed_masks(self.config, self.mesh, model_mode)
 
     if decoder_segment_ids is not None and self.compress_ratio > 0:
-      # Generate the standard segment mask
-      segment_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
-      segment_mask_additive = jnp.where(segment_mask, 0.0, DEFAULT_MASK_VALUE)
-      # Downsample the kv dimension
-      compress_rate = self.compress_ratio
-      compressed_segment_mask = segment_mask_additive[:, :, ::compress_rate]
+      segment_key = f"segment_mask_{self.compress_ratio}"
+      if segment_key in hoisted:
+        compressed_segment_mask = hoisted[segment_key]
+      else:
+        compressed_segment_mask = build_compressed_segment_mask(decoder_segment_ids, self.compress_ratio, emit_bool_mask)
 
     # Route to the appropriate compressor depending on the layer's role in the architecture
+    segment_already_folded = False
     if self.compress_ratio > 4:
-      compressed_kv, compressed_mask = self.hca_compressor(
-          inputs_kv, q_normed, inputs_positions, model_mode, self.compressor_cache
-      )
+      hca_key = f"hca_mask_{self.compress_ratio}"
+      if hca_key in hoisted:
+        compressed_kv, _ = self.hca_compressor(
+            inputs_kv, q_normed, inputs_positions, model_mode, self.compressor_cache, skip_mask=True
+        )
+        compressed_mask = hoisted[hca_key]
+        segment_already_folded = True
+      else:
+        compressed_kv, compressed_mask = self.hca_compressor(
+            inputs_kv, q_normed, inputs_positions, model_mode, self.compressor_cache, emit_bool_mask=emit_bool_mask
+        )
     elif self.compress_ratio == 4:
       compressed_kv, compressed_mask = self.csa_compressor(
           inputs_kv,
@@ -1524,15 +1697,15 @@ class CompressedAttention(Attention):
           model_mode,
           self.compressor_cache,
           self.indexer_cache,
+          emit_bool_mask=emit_bool_mask,
+          hoisted_masks=kwargs.get("hoisted_masks"),
       )
 
     # Apply segment masking to the compressed blocks
-    if compressed_segment_mask is not None and compressed_mask is not None:
+    if compressed_segment_mask is not None and compressed_mask is not None and not segment_already_folded:
       # compressed_segment_mask is [batch, q_len, num_compressed_blocks]
       # compressed_mask is [batch, 1, q_len, num_compressed_blocks]
-      compressed_mask = compressed_mask + jnp.expand_dims(
-          compressed_segment_mask[:, :, : compressed_mask.shape[-1]], axis=1
-      )
+      compressed_mask = combine_compressed_and_segment_mask(compressed_mask, compressed_segment_mask)
 
     # Note: Unlike standard pre-attention concatenation (extending local KV tensors with compressed blocks),
     # compressed_kv is passed separately to attention_op to support custom kernels and decoding caching.
@@ -1558,6 +1731,7 @@ class CompressedAttention(Attention):
         compressed_mask=compressed_mask,
         compressed_kv=compressed_kv,
         cached_values=current_kv_cache,
+        hoisted_prefix_bool_mask=hoisted.get("prefix_bool"),
     )
 
     # Reverse RoPE on Values
