@@ -39,7 +39,7 @@ fi
 # Use Docker BuildKit so we can cache pip packages.
 export DOCKER_BUILDKIT=1
 
-export LOCAL_IMAGE_NAME=maxtext_base_image
+export LOCAL_IMAGE_NAME=mesa_maxtext_base_image_trainrl
 echo "Building docker image: $LOCAL_IMAGE_NAME. This will take a few minutes but the image can be reused as you iterate."
 
 # Set environment variables
