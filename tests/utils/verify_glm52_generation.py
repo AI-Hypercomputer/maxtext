@@ -49,19 +49,18 @@ def main():
 
   tests = []
   for p in user_prompts:
-    # 1. Chat format (recommended for GLM-5.2)
+    # 1. Raw prompt matching golden data (add_special_tokens=False)
+    raw_ids = tokenizer.encode(p, add_special_tokens=False)
+    tests.append((f"[RAW PROMPT] {p}", raw_ids, 20))
+
+    # 2. Chat format (instruction template)
     chat_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": p}],
         tokenize=False,
         add_generation_prompt=True,
     )
     chat_ids = tokenizer.encode(chat_text, add_special_tokens=False)
-    tests.append((f"[CHAT TEMPLATE] {p}", chat_ids, 25))
-
-    # 2. Base completion format with GLM prefix
-    base_text = f"[gMASK]<sop>{p}"
-    base_ids = tokenizer.encode(base_text, add_special_tokens=False)
-    tests.append((f"[RAW COMPLETION] {p}", base_ids, 20))
+    tests.append((f"[CHAT PROMPT] {p}", chat_ids, 25))
 
   for title, prompt_ids, gen_tokens in tests:
     generated_ids = list(prompt_ids)
