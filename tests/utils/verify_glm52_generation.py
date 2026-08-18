@@ -63,11 +63,15 @@ def main():
 
     # 2. Chat format (tokenize=True preserves exact special token IDs)
     try:
-      chat_ids = list(tokenizer.apply_chat_template(
+      chat_res = tokenizer.apply_chat_template(
           [{"role": "user", "content": p}],
           tokenize=True,
           add_generation_prompt=True,
-      ))
+      )
+      if isinstance(chat_res, dict) or hasattr(chat_res, "keys"):
+        chat_ids = [int(x) for x in chat_res["input_ids"]]
+      else:
+        chat_ids = [int(x) for x in chat_res]
     except Exception:
       chat_text = tokenizer.apply_chat_template(
           [{"role": "user", "content": p}],
