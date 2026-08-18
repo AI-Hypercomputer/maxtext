@@ -16,6 +16,16 @@
 
 set -ex
 
+export VLLM_WORKER_MULTIPROC_METHOD='spawn'
+export MODEL_IMPL_TYPE='flax_nnx'
+export GRPC_ENABLE_FORK_SUPPORT='0'
+export JAX_RANDOM_WEIGHTS='1'
+export VLLM_ENABLE_V1_MULTIPROCESSING='0'
+export SKIP_JAX_PRECOMPILE='1'
+export NEW_MODEL_DESIGN='0'
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION='upb'
+export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY='PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'
+
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 use_pathways=${2:-false}
 MODEL_NAME='llama3.1-70b'
@@ -31,7 +41,8 @@ python3 -m maxtext.inference.vllm_decode \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.85 \
+    hbm_utilization_vllm=0.55 \
+    weight_dtype=bfloat16 dtype=bfloat16 \
     prompt='Suggest some famous landmarks in London.' \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
     ici_tensor_parallelism=8
@@ -44,11 +55,16 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     num_batches=2 batch_size=1 num_test_batches=2 \
     model_name=${MODEL_NAME} tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     enable_single_controller=${use_pathways} \
+    use_pathways=${use_pathways} \
+    max_target_length=512 \
     remat_policy=full \
+    weight_dtype=bfloat16 dtype=bfloat16 \
+    hbm_utilization_vllm=0.55 opt_type=sgd \
+    rl.reshard_chunk_size=32 \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
-    rollout_tensor_parallelism=4 \
+    rollout_tensor_parallelism=8 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    vllm_additional_config='{"maxtext_config": {"model_name": "llama3.1-70b", "log_config": "false"}}'
+    vllm_additional_config='{"maxtext_config": {"model_name": "llama3.1-70b", "weight_dtype": "bfloat16", "dtype": "bfloat16", "log_config": "false"}}'
 
 
 # Step 3: Run inference on the checkpoint generated from the previous run
@@ -57,7 +73,8 @@ python3 -m maxtext.inference.vllm_decode \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.6 \
+    hbm_utilization_vllm=0.55 \
+    weight_dtype=bfloat16 dtype=bfloat16 \
     prompt='Suggest some famous landmarks in London.' \
     use_chat_template=True scan_layers=true enable_single_controller=${use_pathways} \
     ici_tensor_parallelism=8

@@ -112,6 +112,7 @@ EXCLUDED_FILES=(
   '^\.github/scripts/'
   '^tools/'
   '\.md$'
+  '^tests/end_to_end/'
 )
 
 # Loop through every changed file
@@ -156,7 +157,7 @@ while IFS= read -r file; do
   fi
 
   # GPU configs/source/test changes
-  if matches_pattern "$file" "src/maxtext/configs/gpu/|src/maxtext/inference/gpu/|tests/end_to_end/gpu/"; then
+  if matches_pattern "$file" "src/maxtext/configs/gpu/|src/maxtext/inference/gpu/"; then
     echo "GPU files changed, enabling GPU tests."
     enable_flags run_tests run_gpu_tests
     matched=true

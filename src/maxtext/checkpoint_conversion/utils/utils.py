@@ -33,6 +33,7 @@ import pathlib
 from etils import epath
 
 import jax
+import jax.numpy as jnp
 from jax import tree
 from jax.experimental import multihost_utils
 from jaxtyping import Array
@@ -879,10 +880,28 @@ def load_orbax_checkpoint(config) -> dict:
   devices = np.array(jax.devices()).reshape((-1,))
   single_device_mesh = jax.sharding.Mesh(devices, ("x",))
 
+  target_dtype = None
+  if getattr(config, "weight_dtype", None):
+    try:
+      target_dtype = jnp.dtype(config.weight_dtype)
+    except Exception:  # pylint: disable=broad-exception-caught
+      target_dtype = None
+
   def create_restore_args(tree_metadata):
     """Create restore args for unsharded restoration."""
     if hasattr(tree_metadata, "shape"):
-      return ocp.ArrayRestoreArgs(sharding=jax.sharding.NamedSharding(single_device_mesh, jax.sharding.PartitionSpec()))
+      leaf_dtype = getattr(tree_metadata, "dtype", None)
+      restore_dtype = None
+      if target_dtype is not None and leaf_dtype is not None:
+        try:
+          if jnp.issubdtype(leaf_dtype, jnp.floating):
+            restore_dtype = target_dtype
+        except Exception:  # pylint: disable=broad-exception-caught
+          restore_dtype = None
+      return ocp.ArrayRestoreArgs(
+          dtype=restore_dtype,
+          sharding=jax.sharding.NamedSharding(single_device_mesh, jax.sharding.PartitionSpec()),
+      )
     elif isinstance(tree_metadata, dict):
       return {k: create_restore_args(v) for k, v in tree_metadata.items()}
     else:
@@ -901,10 +920,10 @@ def load_orbax_checkpoint(config) -> dict:
         checkpoint_tree = {"params": checkpoint_tree["params"]}
         max_logging.log(f"Filtering checkpoint to only load 'params' from {path}")
       else:
-        filtered_tree = {k: v for k, v in checkpoint_tree.items() if k not in ("opt_state", "optimizer")}
+        filtered_tree = {k: v for k, v in checkpoint_tree.items() if k not in ("opt_state", "optimizer", "rngs", "step")}
         if len(filtered_tree) < len(checkpoint_tree):
           checkpoint_tree = filtered_tree
-          max_logging.log(f"Filtering checkpoint to exclude optimizer keys from {path}")
+          max_logging.log(f"Filtering checkpoint to exclude non-param keys from {path}")
 
     restore_args = jax.tree_util.tree_map(
         lambda x: create_restore_args(x) if hasattr(x, "shape") else None,

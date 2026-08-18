@@ -16,6 +16,16 @@
 
 set -ex
 
+export VLLM_WORKER_MULTIPROC_METHOD='spawn'
+export MODEL_IMPL_TYPE='flax_nnx'
+export GRPC_ENABLE_FORK_SUPPORT='0'
+export JAX_RANDOM_WEIGHTS='1'
+export VLLM_ENABLE_V1_MULTIPROCESSING='0'
+export SKIP_JAX_PRECOMPILE='1'
+export NEW_MODEL_DESIGN='0'
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION='upb'
+export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY='PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'
+
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 use_pathways=${2:-false}
 MODEL_NAME='gemma4-26b'
@@ -30,7 +40,8 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.85 \
+    hbm_utilization_vllm=0.55 \
+    weight_dtype=bfloat16 dtype=bfloat16 \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True \
     scan_layers=false \
@@ -67,7 +78,8 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.85 \
+    hbm_utilization_vllm=0.55 \
+    weight_dtype=bfloat16 dtype=bfloat16 \
     prompt='Suggest some famous landmarks in London.' \
     use_chat_template=True \
     scan_layers=false \

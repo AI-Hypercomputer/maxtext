@@ -538,6 +538,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         direct_maxtext_sync=direct_maxtext_sync,
         num_experts=getattr(maxtext_config, "num_experts", 1),
         tensor_parallel_size=rollout_config.tensor_parallel_size,
+        weight_dtype=getattr(maxtext_config, "weight_dtype", None),
     )
 
     self._sampler = MaxTextVllmSampler(

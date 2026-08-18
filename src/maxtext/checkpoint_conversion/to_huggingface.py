@@ -139,8 +139,8 @@ def _get_lora_delta(key, lora_state_dict, lora_scaling):
     a_key, b_key = key[7:] + "_lora_a", key[7:] + "_lora_b"
 
   if a_key in lora_state_dict and b_key in lora_state_dict:
-    data_a = jnp.asarray(lora_state_dict[a_key], dtype=jnp.float32)
-    data_b = jnp.asarray(lora_state_dict[b_key], dtype=jnp.float32)
+    data_a = jnp.asarray(lora_state_dict.pop(a_key), dtype=jnp.float32)
+    data_b = jnp.asarray(lora_state_dict.pop(b_key), dtype=jnp.float32)
 
     is_attention = "attention" in key.lower() or "attn" in key.lower()
 
@@ -545,6 +545,8 @@ def main(argv: Sequence[str]) -> None:
 
   # 4. Extract and transform weights for Linen/NNX-SFT/NNX-RL checkpoints
   maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
+  del checkpoint_dict
+  gc.collect()
 
   # Validate that checkpoint keys match the parameter mapping
   state_keys = {k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict}
