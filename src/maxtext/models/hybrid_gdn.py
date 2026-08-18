@@ -40,7 +40,7 @@ def pure_jax_fused_conv1d_gdn(
     chunk_size: int,
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
-) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array], jax.Array]:
+) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
     """Pure-JAX composite of Conv1D + GDN used during backward pass autodiff."""
     from maxtext.models.qwen3 import jax_chunk_gated_delta_rule
     batch, seq_len, _ = qkv.shape
@@ -95,7 +95,7 @@ def pure_jax_fused_conv1d_gdn(
     if next_recurrent_state is None:
         next_recurrent_state = jnp.zeros((batch, num_v_heads, head_k_dim, head_v_dim), dtype=compute_dtype)
 
-    return core_attn_out.astype(qkv.dtype), (next_conv_state.astype(qkv.dtype), next_recurrent_state.astype(qkv.dtype)), pure_jax_tap
+    return core_attn_out.astype(qkv.dtype), (next_conv_state.astype(qkv.dtype), next_recurrent_state.astype(qkv.dtype))
 
 
 def _run_tokamax_fused_fwd(
@@ -183,7 +183,7 @@ def _run_tokamax_fused_fwd(
     
     # Swap to the expected output shape: (Batch, Chunks, Heads, Tokens, Tokens)
     tap_out = jnp.swapaxes(tap_out, 2, 3).astype(jnp.float32)
-    return core_attn_out.astype(qkv.dtype), (new_conv_state[1:].astype(qkv.dtype), new_recurrent_state[1:].astype(qkv.dtype)), tap_out
+    return core_attn_out.astype(qkv.dtype), (new_conv_state[1:].astype(qkv.dtype), new_recurrent_state[1:].astype(qkv.dtype))
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
@@ -205,7 +205,7 @@ def hybrid_fused_conv1d_gdn(
     chunk_size: int,
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
-) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array], jax.Array]:
+) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
     """Hybrid Fused Conv1D + GDN: Tokamax GDN v3 forward + Custom VJP backward."""
     return _run_tokamax_fused_fwd(
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,

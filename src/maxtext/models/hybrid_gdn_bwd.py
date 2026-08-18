@@ -546,7 +546,7 @@ def hybrid_bwd_fused_conv1d_gdn(
     a_log: jax.Array, dt_bias: jax.Array, conv_state: Optional[jax.Array], recurrent_state: Optional[jax.Array],
     num_k_heads: int, num_v_heads: int, head_k_dim: int, head_v_dim: int,
     conv_kernel_size: int, chunk_size: int, use_qk_norm_in_gdn: bool, compute_dtype: jnp.dtype,
-) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array], jax.Array]:
+) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
     return pure_jax_fused_conv1d_gdn(
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
         num_k_heads=num_k_heads, num_v_heads=num_v_heads, head_k_dim=head_k_dim, head_v_dim=head_v_dim,
@@ -558,13 +558,13 @@ def _hybrid_bwd_fwd(
     num_k_heads, num_v_heads, head_k_dim, head_v_dim,
     conv_kernel_size, chunk_size, use_qk_norm_in_gdn, compute_dtype
 ):
-    out, states, tap_out = pure_jax_fused_conv1d_gdn(
+    out, states = pure_jax_fused_conv1d_gdn(
         qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state,
         num_k_heads=num_k_heads, num_v_heads=num_v_heads, head_k_dim=head_k_dim, head_v_dim=head_v_dim,
         conv_kernel_size=conv_kernel_size, chunk_size=chunk_size, use_qk_norm_in_gdn=use_qk_norm_in_gdn, compute_dtype=compute_dtype,
     )
     residuals = (qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state)
-    return (out, states, tap_out), residuals
+    return (out, states), residuals
 
 def _hybrid_bwd_bwd(
     num_k_heads, num_v_heads, head_k_dim, head_v_dim,
@@ -572,7 +572,7 @@ def _hybrid_bwd_bwd(
     residuals, cotangents
 ):
     (qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state) = residuals
-    d_out, d_states, d_tap = cotangents
+    d_out, d_states = cotangents
     d_conv_state, d_recurrent_state = d_states
 
     batch_size, seq_len, dim_size = qkv.shape
