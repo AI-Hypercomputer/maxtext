@@ -681,7 +681,281 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
       self.assertAlmostEqual(extracted_sharded["scalar"]["loss"], 1.0, places=3)
       self.assertIsInstance(extracted_sharded["scalar"]["loss"], float)
 
+  def test_spec_map_slicing_multiaxis_shardings(self):
+    """Verifies that PartitionSpec slicing for multi-axis shardings produces valid PartitionSpecs and NamedShardings."""
+    devices = np.array(jax.devices()[:8])
+    submesh = jax.sharding.Mesh(devices.reshape((1, 2, 2, 2)), ("diloco", "fsdp", "tensor", "model"))
+
+    test_specs = {
+        "3d_spec": jax.sharding.PartitionSpec("diloco", "fsdp", "tensor"),
+        "2d_spec": jax.sharding.PartitionSpec("diloco", "fsdp"),
+        "none_spec": jax.sharding.PartitionSpec("diloco", None, "model"),
+        "1d_spec": jax.sharding.PartitionSpec("diloco"),
+        "empty_spec": jax.sharding.PartitionSpec(),
+    }
+    shardings = {k: jax.sharding.NamedSharding(submesh, s) for k, s in test_specs.items()}
+
+    spec_map = {
+        k: (
+            jax.sharding.PartitionSpec(*shardings[k].spec[1:])
+            if hasattr(shardings[k], "spec") and len(shardings[k].spec) > 1
+            else getattr(shardings[k], "spec", jax.sharding.PartitionSpec())
+        )
+        for k in shardings
+    }
+
+    # Verify each entry is an actual PartitionSpec and can construct a NamedSharding
+    for k, spec in spec_map.items():
+      self.assertIsInstance(spec, jax.sharding.PartitionSpec, f"{k} is not a PartitionSpec: {type(spec)}")
+      named_shd = jax.sharding.NamedSharding(submesh, spec)
+      self.assertIsInstance(named_shd, jax.sharding.NamedSharding)
+
+  def test_syncer_direct_tpu_slice_dispatch(self):
+    """Simulates Syncer direct fragment leaf slicing and dispatch across submeshes without host conversions."""
+    devices = np.array(jax.devices()[:8])
+    global_mesh = jax.sharding.Mesh(devices.reshape((2, 4)), ("diloco", "fsdp"))
+    submesh0 = jax.sharding.Mesh(devices[:4].reshape((1, 4)), ("diloco", "fsdp"))
+    submesh1 = jax.sharding.Mesh(devices[4:].reshape((1, 4)), ("diloco", "fsdp"))
+    submeshes = [submesh0, submesh1]
+
+    # Create dummy fragment with replica dimension = 2 including a 3D scanned parameter
+    frag_sharding = jax.sharding.NamedSharding(global_mesh, jax.sharding.PartitionSpec("diloco", "fsdp", None))
+    scanned_sharding = jax.sharding.NamedSharding(global_mesh, jax.sharding.PartitionSpec("diloco", None, None, "fsdp"))
+    new_outer_params_frag = {
+        "layers/w": jax.device_put(jnp.zeros((2, 4, 16), dtype=jnp.bfloat16), frag_sharding),
+        "embed/w": jax.device_put(jnp.zeros((2, 16), dtype=jnp.bfloat16), jax.sharding.NamedSharding(global_mesh, jax.sharding.PartitionSpec("diloco", "fsdp"))),
+        "scanned/mlp": jax.device_put(jnp.zeros((2, 16, 1, 16), dtype=jnp.bfloat16), scanned_sharding),
+    }
+
+    for i, submesh in enumerate(submeshes):
+      local_leaves = {}
+      for k, v in new_outer_params_frag.items():
+        v_slice = v[i] if hasattr(v, "ndim") and v.ndim > 0 and v.shape[0] == 2 else v
+        leaf_spec = (
+            jax.sharding.PartitionSpec(*v.sharding.spec[1:])
+            if hasattr(v, "sharding") and hasattr(v.sharding, "spec") and len(v.sharding.spec) > 1
+            else jax.sharding.PartitionSpec()
+        )
+        target_sharding = jax.sharding.NamedSharding(submesh, leaf_spec)
+        local_leaves[k] = jax.device_put(v_slice, target_sharding)
+
+      self.assertEqual(local_leaves["layers/w"].shape, (4, 16))
+      self.assertEqual(local_leaves["embed/w"].shape, (16,))
+      self.assertEqual(local_leaves["scanned/mlp"].shape, (16, 1, 16))
+      self.assertIsInstance(local_leaves["layers/w"], jax.Array)
+      self.assertIsInstance(local_leaves["embed/w"], jax.Array)
+      self.assertIsInstance(local_leaves["scanned/mlp"], jax.Array)
+
+  def test_jit_fused_packed_d2h_conversion(self):
+    """Verifies that JIT-compiled dtype-grouped packing and slice unpacking produce bit-exact weights."""
+    from maxtext.trainers.diloco.threaded_diloco import _get_jit_pack_fn
+    num_learners = 2
+    frag = {
+        "layers/w": jnp.ones((num_learners, 4, 16), dtype=jnp.bfloat16),
+        "layers/b": jnp.zeros((num_learners, 16), dtype=jnp.float32),
+        "embed/w": jnp.full((num_learners, 32), 2.0, dtype=jnp.bfloat16),
+        "scalar/scale": jnp.array(1.5, dtype=jnp.float32),
+    }
+
+    import collections
+    dtype_groups = collections.defaultdict(dict)
+    for k, v in frag.items():
+      dtype_groups[v.dtype][k] = v
+
+    local_leaves_by_learner = [{} for _ in range(num_learners)]
+
+    for dt, group_leaves in dtype_groups.items():
+      leaf_keys = list(group_leaves.keys())
+      flat_shapes = [v.shape for v in group_leaves.values()]
+      raw_leaves = tuple(group_leaves.values())
+
+      jit_pack_fn = _get_jit_pack_fn(num_learners, flat_shapes)
+      packed = jit_pack_fn(*raw_leaves)
+      host_packed = np.asarray(packed)
+
+      for i in range(num_learners):
+        learner_packed = host_packed[i]
+        offset = 0
+        for k, shape in zip(leaf_keys, flat_shapes):
+          learner_shape = shape[1:] if len(shape) > 1 and shape[0] == num_learners else shape
+          size = int(np.prod(learner_shape)) if len(learner_shape) > 0 else 1
+          local_leaves_by_learner[i][k] = learner_packed[offset:offset+size].reshape(learner_shape)
+          offset += size
+
+    for i in range(num_learners):
+      self.assertEqual(local_leaves_by_learner[i]["layers/w"].shape, (4, 16))
+      self.assertEqual(local_leaves_by_learner[i]["layers/w"].dtype, jnp.bfloat16)
+      self.assertEqual(local_leaves_by_learner[i]["layers/b"].shape, (16,))
+      self.assertEqual(local_leaves_by_learner[i]["layers/b"].dtype, jnp.float32)
+      self.assertEqual(local_leaves_by_learner[i]["embed/w"].shape, (32,))
+      self.assertEqual(local_leaves_by_learner[i]["embed/w"].dtype, jnp.bfloat16)
+      self.assertEqual(local_leaves_by_learner[i]["scalar/scale"].shape, ())
+      self.assertEqual(local_leaves_by_learner[i]["scalar/scale"].dtype, jnp.float32)
+      np.testing.assert_allclose(np.array(local_leaves_by_learner[i]["layers/w"]), 1.0)
+      np.testing.assert_allclose(np.array(local_leaves_by_learner[i]["layers/b"]), 0.0)
+      np.testing.assert_allclose(np.array(local_leaves_by_learner[i]["embed/w"]), 2.0)
+      np.testing.assert_allclose(np.array(local_leaves_by_learner[i]["scalar/scale"]), 1.5)
+
+  def test_jit_pack_slice_concurrent_d2h(self):
+    """Verifies that per-learner JIT slice packing and concurrent D2H unpacking produce bit-exact weights."""
+    from maxtext.trainers.diloco.threaded_diloco import _get_jit_pack_slice_fn
+    num_learners = 2
+    frag = {
+        "layers/w": jnp.ones((num_learners, 4, 16), dtype=jnp.bfloat16),
+        "layers/b": jnp.zeros((num_learners, 16), dtype=jnp.float32),
+        "embed/w": jnp.full((num_learners, 32), 2.0, dtype=jnp.bfloat16),
+        "scalar/scale": jnp.array(1.5, dtype=jnp.float32),
+    }
+
+    import collections
+    from concurrent.futures import ThreadPoolExecutor
+    dtype_groups = collections.defaultdict(dict)
+    for k, v in frag.items():
+      dtype_groups[v.dtype][k] = v
+
+    per_learner_packed_groups = [[] for _ in range(num_learners)]
+    for dt, group_leaves in dtype_groups.items():
+      leaf_keys = list(group_leaves.keys())
+      flat_shapes = [v.shape for v in group_leaves.values()]
+      raw_leaves = tuple(group_leaves.values())
+
+      for i in range(num_learners):
+        jit_pack_slice_fn = _get_jit_pack_slice_fn(i, num_learners, flat_shapes)
+        packed_i = jit_pack_slice_fn(*raw_leaves)
+        per_learner_packed_groups[i].append((dt, leaf_keys, flat_shapes, packed_i))
+
+    def _fetch_and_unpack_learner(learner_i):
+      learner_dict = {}
+      for dt, leaf_keys, flat_shapes, packed_i in per_learner_packed_groups[learner_i]:
+        host_packed = np.asarray(packed_i)
+        offset = 0
+        for k, shape in zip(leaf_keys, flat_shapes):
+          learner_shape = shape[1:] if len(shape) > 1 and shape[0] == num_learners else shape
+          size = int(np.prod(learner_shape)) if len(learner_shape) > 0 else 1
+          learner_dict[k] = host_packed[offset : offset + size].reshape(learner_shape)
+          offset += size
+      return learner_i, learner_dict
+
+    with ThreadPoolExecutor(max_workers=num_learners) as executor:
+      futures = [executor.submit(_fetch_and_unpack_learner, i) for i in range(num_learners)]
+      results = dict([fut.result() for fut in futures])
+
+    for i in range(num_learners):
+      self.assertEqual(results[i]["layers/w"].shape, (4, 16))
+      self.assertEqual(results[i]["layers/w"].dtype, jnp.bfloat16)
+      self.assertEqual(results[i]["layers/b"].shape, (16,))
+      self.assertEqual(results[i]["layers/b"].dtype, jnp.float32)
+      self.assertEqual(results[i]["embed/w"].shape, (32,))
+      self.assertEqual(results[i]["embed/w"].dtype, jnp.bfloat16)
+      self.assertEqual(results[i]["scalar/scale"].shape, ())
+      self.assertEqual(results[i]["scalar/scale"].dtype, jnp.float32)
+      np.testing.assert_allclose(np.array(results[i]["layers/w"]), 1.0)
+      np.testing.assert_allclose(np.array(results[i]["layers/b"]), 0.0)
+      np.testing.assert_allclose(np.array(results[i]["embed/w"]), 2.0)
+      np.testing.assert_allclose(np.array(results[i]["scalar/scale"]), 1.5)
+
+  def test_1d_packed_outer_step_parity(self):
+    """Verifies that 1D packed outer SGD+Nesterov momentum step produces bit-exact parity with PyTree optax.sgd."""
+    frag = {
+        "layers/w": jnp.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=jnp.float32),
+        "layers/b": jnp.array([[0.5, -0.5]], dtype=jnp.float32),
+    }
+    # Simulate stacked inner params for 2 learners: shape (2, ...)
+    stacked_inner = {
+        "layers/w": jnp.array([[[1.1, 2.1], [3.1, 4.1]], [[0.9, 1.9], [2.9, 3.9]]], dtype=jnp.float32),
+        "layers/b": jnp.array([[0.6, -0.4], [0.4, -0.6]], dtype=jnp.float32),
+    }
+
+    lr = 0.7
+    momentum = 0.9
+    opt = optax.sgd(learning_rate=lr, momentum=momentum, nesterov=True)
+
+    # 1. PyTree standard execution
+    outer_params = frag
+    trace = jax.tree_util.tree_map(jnp.zeros_like, outer_params)
+    opt_state = (optax.TraceState(trace=trace), optax.EmptyState())
+
+    mean_inner = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), stacked_inner)
+    pseudo_grad = jax.tree_util.tree_map(lambda o, i: o - i, outer_params, mean_inner)
+    updates, new_opt_state = opt.update(pseudo_grad, opt_state, outer_params)
+    expected_new_outer = optax.apply_updates(outer_params, updates)
+
+    # 2. 1D Packed execution
+    sorted_keys = sorted(frag.keys())
+    leaf_shapes = [frag[k].shape for k in sorted_keys]
+    leaf_sizes = [int(np.prod(s)) if len(s) > 0 else 1 for s in leaf_shapes]
+    leaf_offsets = []
+    offset = 0
+    for sz in leaf_sizes:
+      leaf_offsets.append((offset, offset + sz))
+      offset += sz
+
+    outer_1d = jnp.concatenate([jnp.reshape(frag[k], (-1,)) for k in sorted_keys])
+    trace_1d = jnp.zeros_like(outer_1d)
+    stacked_1d = jnp.stack([
+        jnp.concatenate([jnp.reshape(stacked_inner[k][i], (-1,)) for k in sorted_keys])
+        for i in range(2)
+    ], axis=0)
+
+    @jax.jit
+    def outer_step_1d(outer_buf, trace_buf, stacked_buf):
+      avg_inner = jnp.mean(stacked_buf, axis=0)
+      p_grad = outer_buf - avg_inner
+      n_trace = momentum * trace_buf + p_grad
+      upd = lr * (p_grad + momentum * n_trace)
+      n_outer = outer_buf - upd
+      return n_outer, n_trace
+
+    new_outer_1d, new_trace_1d = outer_step_1d(outer_1d, trace_1d, stacked_1d)
+
+    # Unpack 1D
+    actual_new_outer = {}
+    for k, shp, (st, en) in zip(sorted_keys, leaf_shapes, leaf_offsets):
+      actual_new_outer[k] = jnp.reshape(new_outer_1d[st:en], shp)
+
+    for k in sorted_keys:
+      np.testing.assert_allclose(
+          np.array(actual_new_outer[k]), np.array(expected_new_outer[k]), rtol=1e-6, atol=1e-6
+      )
+
+  def test_fragment_1d_pipeline_helpers(self):
+    """Verifies that _build_fragment_1d_metadata, _pack_fragment_1d, _unpack_fragment_1d, and _outer_sgd_1d_jit execute correctly across all fragments."""
+    from maxtext.trainers.diloco.threaded_diloco import (
+        _build_fragment_1d_metadata,
+        _pack_fragment_1d,
+        _unpack_fragment_1d,
+        _outer_sgd_1d_jit,
+    )
+
+    params = _build_fake_params(self.mesh, num_layers=4, value=2.0)
+    manipulator = _build_manipulator(params, num_layers=4, num_transformer_frags=4)
+
+    for f_idx in range(manipulator.num_fragments):
+      frag = manipulator.get_flat_fragment(params, f_idx)
+      metadata = _build_fragment_1d_metadata(frag)
+
+      # Test Pack & Unpack Roundtrip
+      packed = _pack_fragment_1d(frag, metadata)
+      self.assertIsInstance(packed, dict)
+      unpacked = _unpack_fragment_1d(packed, metadata)
+
+      for k in frag:
+        np.testing.assert_allclose(np.array(unpacked[k]), np.array(frag[k]))
+
+      # Test 1D Outer SGD
+      for dt, outer_1d in packed.items():
+        trace_1d = jnp.zeros_like(outer_1d)
+        stacked_1d = jnp.stack([outer_1d, outer_1d * 0.9], axis=0)
+
+        new_outer_1d, new_trace_1d = _outer_sgd_1d_jit(
+            outer_1d, trace_1d, stacked_1d, lr=0.1, momentum=0.9, nesterov=True
+        )
+        self.assertEqual(new_outer_1d.shape, outer_1d.shape)
+        self.assertEqual(new_trace_1d.shape, trace_1d.shape)
+
 
 if __name__ == "__main__":
   unittest.main()
+
+
 

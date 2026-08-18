@@ -17,8 +17,10 @@
 
 import copy
 import datetime
+import collections
 import functools
 import gc
+import queue
 import threading
 import traceback
 from typing import Any
@@ -164,6 +166,62 @@ def _apply_fragment(params, manipulator, frag_idx: int, frag_dict: dict[str, Any
   if frag_idx == 0:
     return manipulator.apply_flat_fragment(params, 0, frag_dict)
   return _apply_scanned_fragment_jit(params, manipulator, jnp.asarray(frag_idx - 1, dtype=jnp.int32), frag_dict)
+
+
+def _build_fragment_1d_metadata(sample_frag_dict):
+  """Computes shapes, sizes, and offsets for 1D packing of a fragment dictionary grouped by dtype."""
+  dtype_groups = collections.defaultdict(list)
+  for k, v in sample_frag_dict.items():
+    dtype_groups[v.dtype].append(k)
+
+  metadata = {}
+  for dt, keys in dtype_groups.items():
+    sorted_keys = sorted(keys)
+    shapes = [sample_frag_dict[k].shape for k in sorted_keys]
+    sizes = [int(np.prod(s)) if len(s) > 0 else 1 for s in shapes]
+    offsets = []
+    offset = 0
+    for sz in sizes:
+      offsets.append((offset, offset + sz))
+      offset += sz
+    metadata[dt] = {
+        "keys": sorted_keys,
+        "shapes": shapes,
+        "sizes": sizes,
+        "offsets": offsets,
+        "total_size": offset,
+    }
+  return metadata
+
+
+def _pack_fragment_1d(frag_dict, metadata):
+  """Packs fragment dictionary leaves into 1D contiguous arrays grouped by dtype."""
+  packed_dict = {}
+  for dt, meta in metadata.items():
+    leaves = [jnp.reshape(frag_dict[k], (-1,)) for k in meta["keys"]]
+    packed_dict[dt] = jnp.concatenate(leaves) if len(leaves) > 1 else leaves[0]
+  return packed_dict
+
+
+def _unpack_fragment_1d(packed_dict, metadata):
+  """Unpacks 1D contiguous arrays into a fragment dictionary."""
+  unpacked = {}
+  for dt, meta in metadata.items():
+    packed_1d = packed_dict[dt]
+    for k, shape, (st, en) in zip(meta["keys"], meta["shapes"], meta["offsets"]):
+      unpacked[k] = jnp.reshape(packed_1d[st:en], shape)
+  return unpacked
+
+
+@functools.partial(jax.jit, static_argnames=("lr", "momentum", "nesterov"))
+def _outer_sgd_1d_jit(outer_1d, trace_1d, stacked_learners_1d, lr: float, momentum: float, nesterov: bool):
+  """Executes 1D elementwise outer SGD with Nesterov momentum on colocated_cpu_mesh."""
+  avg_inner = jnp.mean(stacked_learners_1d, axis=0)
+  pseudo_grad = outer_1d - avg_inner
+  new_trace = momentum * trace_1d + pseudo_grad
+  update = lr * (pseudo_grad + momentum * new_trace if nesterov else new_trace)
+  new_outer = outer_1d - update
+  return new_outer, new_trace
 
 
 def _extract_scalar_metrics(tree):
@@ -402,24 +460,63 @@ def _run_learner_loop(
     )
     metric_logger_instance.write_setup_info_to_tensorboard(params_template)
 
-    # AOT pre-warm extract and apply kernels on TPU mesh and record fragment leaf layouts & shardings
-    fragment_leaf_layouts = {}
-    fragment_leaf_shardings = {}
+    # AOT pre-warm extract and apply kernels on TPU mesh and record fragment 1D metadata
+    frag_metadata = {}
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
-      dummy_frag0 = _extract_fragment(params_template, manipulator, 0)
-      _ = _apply_fragment(params_template, manipulator, 0, dummy_frag0)
-      fragment_leaf_layouts[0] = {
-          k: getattr(getattr(v, "format", None), "layout", None) for k, v in dummy_frag0.items()
-      }
-      fragment_leaf_shardings[0] = {k: getattr(v, "sharding", None) for k, v in dummy_frag0.items()}
+      for f in range(num_fragments):
+        sample_frag = _extract_fragment(params_template, manipulator, f)
+        frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
+    max_logging.log(f"Learner {learner_idx}: Built 1D fragment packing metadata for {num_fragments} fragments")
 
-      dummy_frag1 = _extract_fragment(params_template, manipulator, 1)
-      _ = _apply_fragment(params_template, manipulator, 1, dummy_frag1)
-      fragment_leaf_layouts[1] = {
-          k: getattr(getattr(v, "format", None), "layout", None) for k, v in dummy_frag1.items()
-      }
-      fragment_leaf_shardings[1] = {k: getattr(v, "sharding", None) for k, v in dummy_frag1.items()}
-    max_logging.log(f"Learner {learner_idx}: AOT pre-compiled extract and apply kernels for non-scanned and scanned fragments")
+    logging_executor = ThreadPoolExecutor(max_workers=1)
+
+    last_log_time = [datetime.datetime.now()]
+
+    def _async_log_metrics(raw_metrics, step_num):
+      try:
+        extracted = _extract_scalar_metrics(raw_metrics)
+        now = datetime.datetime.now()
+        step_duration = now - last_log_time[0]
+        last_log_time[0] = now
+        metric_logger_instance.buffer_and_write_metrics(extracted, step_num, step_duration)
+      except Exception as ex:
+        max_logging.error(f"Learner {learner_idx} async metric logging error: {ex}")
+
+    prefetch_queue = queue.Queue(maxsize=2)
+    prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"learner_{learner_idx}_prefetch")
+    prefetch_error = []
+
+    sync_receive_steps = [
+        completed_step
+        for completed_step in range(start_step + 1, learner_config.steps + 1)
+        if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0
+    ]
+
+    def _prefetch_producer():
+      try:
+        for completed_step in sync_receive_steps:
+          sync_step = completed_step - tau
+          frag_idx = ((sync_step) % period) // steps_between_syncs_plus_1
+
+          # 1. Receive host NumPy 1D dictionary from Syncer
+          received_host_packed = transport.recv_from_syncer(sync_step, frag_idx)
+
+          # 2. Asynchronously transfer 1D buffers to TPU submesh HBM
+          default_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+          with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
+            received_tpu_packed = {
+                dt: jax.device_put(arr, default_shd)
+                for dt, arr in received_host_packed.items()
+            }
+
+          # 3. Put pre-transferred TPU 1D buffers into bounded queue
+          prefetch_queue.put((sync_step, frag_idx, received_tpu_packed), timeout=300.0)
+          del received_host_packed
+      except Exception as ex:
+        max_logging.error(f"Learner {learner_idx} prefetch worker failed: {ex}")
+        prefetch_error.append(ex)
+
+    prefetch_executor.submit(_prefetch_producer)
 
     try:
       last_step_completion = datetime.datetime.now()
@@ -443,10 +540,8 @@ def _run_learner_loop(
                 state = sharding.maybe_shard_with_name(state, state_mesh_shardings, learner_config.shard_mode)
               state, metrics = p_train_step(state, example_batch, *step_rng_args)
 
-            metrics = _extract_scalar_metrics(metrics)
-
           max_logging.log(f"Learner {learner_idx}: Step {step} finished")
-          step_time_delta = datetime.datetime.now() - last_step_completion
+          logging_executor.submit(_async_log_metrics, metrics, step)
 
           completed_step = step + 1
 
@@ -455,42 +550,33 @@ def _run_learner_loop(
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
               frag_data = _extract_fragment(params, manipulator, frag_idx)
-              frag_data = jax.block_until_ready(frag_data)
-            transport.send_to_syncer_async(completed_step, frag_idx, frag_data)
+              packed_frag_data = _pack_fragment_1d(frag_data, frag_metadata[frag_idx])
+            host_packed = {dt: np.asarray(arr) for dt, arr in packed_frag_data.items()}
+            transport.send_to_syncer_async(completed_step, frag_idx, host_packed)
+            del frag_data, packed_frag_data, host_packed
 
           if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
-            frag_idx = ((completed_step - tau) % period) // steps_between_syncs_plus_1
-            received_leaves = transport.recv_from_syncer(completed_step - tau, frag_idx)
+            if prefetch_error:
+              raise prefetch_error[0]
+
+            target_sync_step = completed_step - tau
+            sync_step, frag_idx, received_tpu_packed = prefetch_queue.get(timeout=300.0)
+            assert sync_step == target_sync_step, f"Prefetch step mismatch: expected {target_sync_step}, got {sync_step}"
 
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
-              frag_type = 0 if frag_idx == 0 else 1
-              received_leaves_tpu = {}
-              for k, v_cpu in received_leaves.items():
-                target_shd = fragment_leaf_shardings.get(frag_type, {}).get(k)
-                if target_shd is None:
-                  target_shd = flat_params_shardings.get(k)
-                if target_shd is None:
-                  target_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-                elif not isinstance(target_shd, jax.sharding.NamedSharding):
-                  target_shd = jax.sharding.NamedSharding(
-                      mesh, getattr(target_shd, "spec", jax.sharding.PartitionSpec())
-                  )
-                received_leaves_tpu[k] = jax.device_put(v_cpu, target_shd)
-
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-              new_params = _apply_fragment(params, manipulator, frag_idx, received_leaves_tpu)
+              unpacked_leaves = _unpack_fragment_1d(received_tpu_packed, frag_metadata[frag_idx])
+              new_params = _apply_fragment(params, manipulator, frag_idx, unpacked_leaves)
 
               if learner_config.pure_nnx:
                 nnx.update(state.model, new_params)
               else:
                 state = state.replace(params=new_params)
 
-            del received_leaves, received_leaves_tpu
+            del received_tpu_packed, unpacked_leaves
 
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
             checkpointing.maybe_save_checkpoint(checkpoint_manager, state, learner_config, data_iterator, step)
-
-          metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
 
           eval_step_count = None
           if learner_config.eval_interval > 0 and step > start_step and (step + 1) % learner_config.eval_interval == 0:
@@ -533,6 +619,8 @@ def _run_learner_loop(
         pass
       max_logging.log(f"Learner {learner_idx} training stopped: {str(e)}")
     finally:
+      prefetch_executor.shutdown(wait=False)
+      logging_executor.shutdown(wait=True)
       metric_logger_instance.flush_metrics_and_cleanup()
       transport.close()
 
@@ -589,6 +677,53 @@ def _get_apply_outer_step_flat_jit(outer_optimizer):
 
     _FLAT_STEP_JIT_CACHE[opt_key] = _apply_outer_step_flat_jit
   return _FLAT_STEP_JIT_CACHE[opt_key]
+
+
+_PACK_JIT_CACHE = {}
+
+
+def _get_jit_pack_fn(num_learners: int, flat_shapes: list[tuple[int, ...]]):
+  """Returns a JIT-compiled function that packs leaves into a single 2D contiguous buffer."""
+  cache_key = (num_learners, tuple(flat_shapes))
+  if cache_key not in _PACK_JIT_CACHE:
+
+    def _pack_leaves(*leaves):
+      reshaped = []
+      for leaf, shape in zip(leaves, flat_shapes):
+        if len(shape) > 1 and shape[0] == num_learners:
+          reshaped.append(jnp.reshape(leaf, (num_learners, -1)))
+        else:
+          reshaped.append(
+              jnp.broadcast_to(
+                  jnp.reshape(leaf, (-1,)),
+                  (num_learners, int(np.prod(shape)) if len(shape) > 0 else 1),
+              )
+          )
+      return jnp.concatenate(reshaped, axis=1)
+
+    _PACK_JIT_CACHE[cache_key] = jax.jit(_pack_leaves)
+  return _PACK_JIT_CACHE[cache_key]
+
+
+_PER_LEARNER_PACK_JIT_CACHE = {}
+
+
+def _get_jit_pack_slice_fn(learner_idx: int, num_learners: int, flat_shapes: list[tuple[int, ...]]):
+  """Returns a JIT-compiled function that extracts learner_idx slice and concatenates leaves into 1D buffer."""
+  cache_key = (learner_idx, num_learners, tuple(flat_shapes))
+  if cache_key not in _PER_LEARNER_PACK_JIT_CACHE:
+
+    def _pack_slice_leaves(*leaves):
+      sliced = []
+      for leaf, shape in zip(leaves, flat_shapes):
+        if len(shape) > 1 and shape[0] == num_learners:
+          sliced.append(jnp.reshape(leaf[learner_idx], (-1,)))
+        else:
+          sliced.append(jnp.reshape(leaf, (-1,)))
+      return jnp.concatenate(sliced, axis=0)
+
+    _PER_LEARNER_PACK_JIT_CACHE[cache_key] = jax.jit(_pack_slice_leaves)
+  return _PER_LEARNER_PACK_JIT_CACHE[cache_key]
 
 
 # pylint: disable=too-many-positional-arguments,too-many-arguments,unused-argument
@@ -837,108 +972,100 @@ def _run_syncer_loop(
   # steps that syncing is happening
   sync_steps = [step for step in range(start_step + 1, config.steps + 1) if step % steps_between_syncs_plus_1 == 0]
 
-  params_full_sharding = jax.tree_util.tree_map(
-      lambda s: jax.sharding.NamedSharding(global_mesh, s.spec), params_shardings
-  )
+  # Build 1D packing metadata for all fragments on colocated CPU mesh
+  frag_metadata = {}
+  with jax.set_mesh(global_mesh):
+    for f in range(num_fragments):
+      sample_frag = manipulator.get_flat_fragment(syncer_state.params, f, has_replica_dim=False)
+      frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
 
-  compute_grad, apply_outer_step = make_step_fns(
-      global_mesh,
-      flat_params_shardings,
-      None,
-      None,
-      outer_optimizer,
-      abstract_params=syncer_state.params,
-      abstract_opt_state=syncer_state.opt_state,
-      manipulator=manipulator,
-      num_learners=num_learners,
-  )
+  syncer_frag_params_1d = {}
+  syncer_frag_trace_1d = {}
+  with jax.set_mesh(global_mesh):
+    for f in range(num_fragments):
+      meta = frag_metadata[f]
+      flat_frag = manipulator.get_flat_fragment(syncer_state.params, f, has_replica_dim=False)
+      syncer_frag_params_1d[f] = _pack_fragment_1d(flat_frag, meta)
+      syncer_frag_trace_1d[f] = {dt: jnp.zeros_like(v) for dt, v in syncer_frag_params_1d[f].items()}
+  max_logging.log(f"Syncer: Built 1D fragment packing metadata and initialized 1D outer state for {num_fragments} fragments")
 
-  # Start main syncer loop
-  for step in sync_steps:  # e.g. 50, 100, 150... if sync_period=50
-    max_logging.log(f"Syncer: Step {step} sync starting")
-    frag_idx = (step % period) // steps_between_syncs_plus_1
+  try:
+    # Start main syncer loop
+    for step in sync_steps:  # e.g. 50, 100, 150... if sync_period=50
+      max_logging.log(f"Syncer: Step {step} sync starting")
+      frag_idx = (step % period) // steps_between_syncs_plus_1
+      meta = frag_metadata[frag_idx]
 
-    frag_template = manipulator.get_flat_fragment(syncer_state.params, frag_idx, has_replica_dim=True)
-    frag_specs = jax.tree_util.tree_map(
-        lambda s: jax.sharding.PartitionSpec(*s.sharding.spec[1:])
-        if hasattr(s, "sharding") and hasattr(s.sharding, "spec") and len(s.sharding.spec) > 1
-        else jax.sharding.PartitionSpec(),
-        frag_template,
-    )
+      # 1. Receive 1D host NumPy dictionary from each learner
+      learner_frags_host = [
+          transport.recv_from_learner(learner_idx=i, step=step, fragment_id=frag_idx)
+          for i in range(num_learners)
+      ]
+      max_logging.log(f"Syncer: received all 1D fragments for step {step}")
 
-    learner_frags = []
+      # 2. Put 1D buffers onto CPU submeshes
+      learner_frags_cpu = [
+          {
+              dt: jax.device_put(
+                  arr, jax.sharding.NamedSharding(cpu_submeshes[i], jax.sharding.PartitionSpec())
+              )
+              for dt, arr in learner_frags_host[i].items()
+          }
+          for i in range(num_learners)
+      ]
 
-    # receive the fragment of the current step from each learner.
-    for i in range(num_learners):
-      frag_i = transport.recv_from_learner(learner_idx=i, step=step, fragment_id=frag_idx)
-      frag_i_cpu = jax.tree_util.tree_map(
-          lambda x, spec, submesh=cpu_submeshes[i]: jax.device_put(
-              x, jax.sharding.NamedSharding(submesh, spec)
-          ),
-          frag_i,
-          frag_specs,
-      )
-      learner_frags.append(frag_i_cpu)
-    max_logging.log(f"Syncer: received all fragments for step {step}")
+      # 3. Stack and execute 1D elementwise outer SGD on colocated_cpu_mesh
+      new_outer_host = {}
+      with jax.set_mesh(global_mesh):
+        for dt in meta:
+          stacked_1d = jnp.stack([learner_frags_cpu[i][dt] for i in range(num_learners)], axis=0)
+          outer_1d = syncer_frag_params_1d[frag_idx][dt]
+          trace_1d = syncer_frag_trace_1d[frag_idx][dt]
+          new_outer_1d, new_trace_1d = _outer_sgd_1d_jit(
+              outer_1d, trace_1d, stacked_1d, config.diloco_outer_lr, config.diloco_outer_momentum, True
+          )
+          syncer_frag_params_1d[frag_idx][dt] = new_outer_1d
+          syncer_frag_trace_1d[frag_idx][dt] = new_trace_1d
+          new_outer_host[dt] = np.asarray(new_outer_1d)
+      max_logging.log(f"Syncer: Step {step} 1D outer step applied")
 
-    stacked_inner_frag = stack_across_meshes_pytree(learner_frags, global_mesh, "diloco")
-    max_logging.log(f"Syncer: Step {step} stacking done")
+      # 4. Dispatch 1D buffer to learners
+      for i in range(num_learners):
+        transport.send_to_learner(
+            learner_idx=i,
+            step=step,
+            fragment_id=frag_idx,
+            data=new_outer_host,
+        )
 
-    with jax.set_mesh(global_mesh):
-      outer_params_frag = manipulator.get_flat_fragment(syncer_state.params, frag_idx, has_replica_dim=True)
-      trace_frag = manipulator.get_flat_fragment(syncer_state.opt_state[0].trace, frag_idx, has_replica_dim=True)
-      opt_state_frag = (optax.TraceState(trace=trace_frag), optax.EmptyState())
-
-      pseudo_grad_frag = compute_grad(outer_params_frag, stacked_inner_frag, frag_idx=frag_idx)
-      new_outer_params_frag, new_opt_state_frag = apply_outer_step(
-          pseudo_grad_frag, opt_state_frag, outer_params_frag, frag_idx=frag_idx
-      )
-      new_opt_state_trace = new_opt_state_frag[0].trace
-
-      new_params = manipulator.apply_flat_fragment(
-          syncer_state.params, frag_idx, new_outer_params_frag, has_replica_dim=True
-      )
-
-      new_trace = manipulator.apply_flat_fragment(
-          syncer_state.opt_state[0].trace, frag_idx, new_opt_state_trace, has_replica_dim=True
-      )
-
-      new_opt_state = (optax.TraceState(trace=new_trace), syncer_state.opt_state[1])
-
-      syncer_state = syncer_state.replace(params=new_params, opt_state=new_opt_state, step=step)
-    max_logging.log(f"Syncer: Step {step} outer step applied")
-
-    # Send updated fragment leaves directly to each learner's colocated CPU submesh.
-    for i, cpu_submesh in enumerate(cpu_submeshes):
-      target_shardings = {
-          k: jax.sharding.NamedSharding(cpu_submesh, flat_params_shardings[k].spec) for k in new_outer_params_frag
-      }
-      target_shapes = {k: new_outer_params_frag[k].shape[1:] for k in new_outer_params_frag}
-      local_leaves = _slice_global_mesh_to_submesh(
-          new_outer_params_frag,
-          cpu_submesh,
-          i,
-          devices_per_mesh,
-          target_shardings,
-          num_learners=num_learners,
-          target_shapes=target_shapes,
-      )
-      transport.send_to_learner(learner_idx=i, step=step, fragment_id=frag_idx, data=local_leaves)
-
-    # SyncerState is a plain PyTreeNode, not a NNX TrainState — force the Linen save path.
-    syncer_ckpt_config = copy.copy(config)
-    syncer_ckpt_config._flat_config["pure_nnx"] = False
-    checkpointing.maybe_save_checkpoint(
-        checkpoint_manager=checkpoint_manager,
-        state=syncer_state,
-        config=syncer_ckpt_config,
-        data_iterator=None,
-        step=step,
-    )
-    max_logging.log(f"Syncer: Step {step} sync finished")
-    del learner_frags, stacked_inner_frag, outer_params_frag, trace_frag
-    del opt_state_frag, pseudo_grad_frag, new_outer_params_frag, new_opt_state_trace
-    gc.collect()
+      if config.enable_checkpointing and checkpoint_manager is not None and (step % config.checkpoint_period == 0 or step == sync_steps[-1]):
+        full_params = syncer_state.params
+        full_trace = syncer_state.opt_state[0].trace
+        for f in range(num_fragments):
+          unpacked_p = _unpack_fragment_1d(syncer_frag_params_1d[f], frag_metadata[f])
+          unpacked_t = _unpack_fragment_1d(syncer_frag_trace_1d[f], frag_metadata[f])
+          full_params = manipulator.apply_flat_fragment(full_params, f, unpacked_p, has_replica_dim=False)
+          full_trace = manipulator.apply_flat_fragment(full_trace, f, unpacked_t, has_replica_dim=False)
+        syncer_state = syncer_state.replace(
+            params=full_params,
+            opt_state=(optax.TraceState(trace=full_trace), syncer_state.opt_state[1]),
+            step=step,
+        )
+        syncer_ckpt_config = copy.copy(config)
+        syncer_ckpt_config._flat_config["pure_nnx"] = False
+        checkpointing.maybe_save_checkpoint(
+            checkpoint_manager=checkpoint_manager,
+            state=syncer_state,
+            config=syncer_ckpt_config,
+            data_iterator=None,
+            step=step,
+        )
+      max_logging.log(f"Syncer: Step {step} sync finished")
+      del learner_frags_host, learner_frags_cpu, new_outer_host
+      if step % 25 == 0:
+        gc.collect()
+  finally:
+    pass
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
