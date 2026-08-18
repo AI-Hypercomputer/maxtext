@@ -216,6 +216,37 @@ class SyncerComputeTest(unittest.TestCase):
       w = fragf["['layers']['w']"]
       self.assertEqual(w.shape[0], layers_per_frag)
 
+  def test_dynamic_extract_scanned_fragment_matches_static(self):
+    params = _build_fake_params(self.mesh, num_layers=self.NUM_LAYERS)
+    manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
+    for f in range(1, manipulator.num_fragments):
+      static_frag = manipulator.get_flat_fragment(params, f)
+      dyn_frag = manipulator.dynamic_extract_scanned_fragment(params, jnp.int32(f - 1))
+      self.assertEqual(set(static_frag.keys()), set(dyn_frag.keys()))
+      for k in static_frag:
+        np.testing.assert_allclose(
+            np.array(static_frag[k]),
+            np.array(dyn_frag[k]),
+            err_msg=f"Dynamic extract mismatch for fragment {f} key {k}",
+        )
+
+  def test_dynamic_apply_scanned_fragment_matches_static(self):
+    params = _build_fake_params(self.mesh, num_layers=self.NUM_LAYERS, value=1.0)
+    manipulator = _build_manipulator(params, self.NUM_LAYERS, self.NUM_FRAGS)
+    for f in range(1, manipulator.num_fragments):
+      frag = manipulator.get_flat_fragment(params, f)
+      updated_frag = {k: v * 2.0 for k, v in frag.items()}
+      static_restored = manipulator.apply_flat_fragment(params, f, updated_frag)
+      dyn_restored = manipulator.dynamic_apply_scanned_fragment(params, jnp.int32(f - 1), updated_frag)
+      for a, b in zip(jax.tree_util.tree_leaves(static_restored), jax.tree_util.tree_leaves(dyn_restored)):
+        np.testing.assert_allclose(
+            np.array(a),
+            np.array(b),
+            err_msg=f"Dynamic apply mismatch for fragment {f}",
+        )
+
+
+
   # ------------------------------------------------------------------
   # make_step_fns: compute_grad
   # ------------------------------------------------------------------

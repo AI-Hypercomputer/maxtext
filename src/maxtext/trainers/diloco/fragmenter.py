@@ -36,6 +36,8 @@ def _get_tree_mesh(tree):
   return None
 
 
+
+
 class FragmentedTreeManipulator:
   """Partitions and manipulates fragments of a JAX PyTree, supporting scanned layers."""
 
@@ -159,7 +161,7 @@ class FragmentedTreeManipulator:
     leaves = jax.tree_util.tree_leaves(tree)
 
     if len(leaves) == len(self.leaf_keystrs):
-      leaf_indices = self.fragment_to_leaf_indices.get(fragment_idx, [])
+      leaf_indices = sorted(self.fragment_to_leaf_indices.get(fragment_idx, []), key=lambda i: self.leaf_keystrs[i])
       if fragment_idx == 0:
         for idx in leaf_indices:
           flat_frag[self.leaf_keystrs[idx]] = leaves[idx]
@@ -199,7 +201,7 @@ class FragmentedTreeManipulator:
 
     # Defensive fallback if tree has unexpected structure
     kvs = jax.tree_util.tree_flatten_with_path(tree)[0]
-    for keypath, v in kvs:
+    for keypath, v in sorted(kvs, key=lambda kv: jax.tree_util.keystr(kv[0])):
       keystr = jax.tree_util.keystr(keypath)
       is_scanned = self.keypath_to_is_scanned.get(keystr, False)
       if fragment_idx == 0:
@@ -232,6 +234,115 @@ class FragmentedTreeManipulator:
           else:
             flat_frag[keystr] = jnp.take(v, np.array(layer_indices, dtype=np.int32), axis=axis)
     return flat_frag
+
+  def dynamic_extract_scanned_fragment(
+      self, tree, layer_idx: jax.Array, has_replica_dim: bool = False
+  ) -> dict[str, Any]:
+    """Extracts a scanned layer fragment using a dynamic slice in XLA (single JIT for all layer fragments)."""
+    flat_frag = {}
+    leaves = jax.tree_util.tree_leaves(tree)
+    leaf_indices = self.fragment_to_leaf_indices.get(1, [])
+    raw_indices = self.fragment_to_layer_indices.get(1, (0,))
+    if hasattr(raw_indices, "shape"):
+      slice_len = int(raw_indices.shape[0]) if len(raw_indices.shape) > 0 else 1
+    elif isinstance(raw_indices, (list, tuple)):
+      slice_len = len(raw_indices)
+    else:
+      slice_len = 1
+    start_idx = layer_idx * slice_len
+
+    if len(leaves) == len(self.leaf_keystrs):
+      for idx in sorted(leaf_indices, key=lambda i: self.leaf_keystrs[i]):
+        keystr = self.leaf_keystrs[idx]
+        v = leaves[idx]
+        axis = (
+            self.param_scan_axis + 1
+            if has_replica_dim and v.ndim > self.param_scan_axis + 1
+            else self.param_scan_axis
+        )
+        if isinstance(v, jax.ShapeDtypeStruct):
+          new_shape = list(v.shape)
+          new_shape[axis] = slice_len
+          shd = getattr(v, "sharding", None)
+          flat_frag[keystr] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=shd)
+        else:
+          flat_frag[keystr] = jax.lax.dynamic_slice_in_dim(v, start_idx, slice_len, axis=axis)
+      return flat_frag
+
+    kvs = jax.tree_util.tree_flatten_with_path(tree)[0]
+    for keypath, v in sorted(kvs, key=lambda kv: jax.tree_util.keystr(kv[0])):
+      keystr = jax.tree_util.keystr(keypath)
+      if self.keypath_to_is_scanned.get(keystr, False):
+        axis = (
+            self.param_scan_axis + 1
+            if has_replica_dim and v.ndim > self.param_scan_axis + 1
+            else self.param_scan_axis
+        )
+        if isinstance(v, jax.ShapeDtypeStruct):
+          new_shape = list(v.shape)
+          new_shape[axis] = slice_len
+          shd = getattr(v, "sharding", None)
+          flat_frag[keystr] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=shd)
+        else:
+          flat_frag[keystr] = jax.lax.dynamic_slice_in_dim(v, start_idx, slice_len, axis=axis)
+    return flat_frag
+
+  def dynamic_apply_scanned_fragment(
+      self,
+      tree,
+      layer_idx: jax.Array,
+      flat_fragment: dict[str, Any],
+      has_replica_dim: bool = False,
+  ):
+    """Merges a flat scanned fragment back into the parameter PyTree using dynamic slice updates (single JIT)."""
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    new_leaves = list(leaves)
+    raw_indices = self.fragment_to_layer_indices.get(1, (0,))
+    if hasattr(raw_indices, "shape"):
+      slice_len = int(raw_indices.shape[0]) if len(raw_indices.shape) > 0 else 1
+    elif isinstance(raw_indices, (list, tuple)):
+      slice_len = len(raw_indices)
+    else:
+      slice_len = 1
+    start_idx = layer_idx * slice_len
+
+    if len(leaves) == len(self.leaf_keystrs):
+      for keystr in sorted(flat_fragment.keys()):
+        idx = self.keystr_to_leaf_index.get(keystr)
+        if idx is None:
+          continue
+        v = leaves[idx]
+        frag = flat_fragment[keystr]
+        if isinstance(v, jax.ShapeDtypeStruct):
+          new_leaves[idx] = v
+          continue
+        axis = (
+            self.param_scan_axis + 1
+            if has_replica_dim and v.ndim > self.param_scan_axis + 1
+            else self.param_scan_axis
+        )
+        new_leaves[idx] = jax.lax.dynamic_update_slice_in_dim(v, frag, start_idx, axis=axis)
+      return jax.tree_util.tree_unflatten(treedef, new_leaves)
+
+    kvs, treedef = jax.tree_util.tree_flatten_with_path(tree)
+    new_kvs = []
+    for k, v in kvs:
+      keystr = jax.tree_util.keystr(k)
+      if self.keypath_to_is_scanned.get(keystr, False) and keystr in flat_fragment:
+        frag = flat_fragment[keystr]
+        if isinstance(v, jax.ShapeDtypeStruct):
+          new_kvs.append(v)
+        else:
+          axis = (
+              self.param_scan_axis + 1
+              if has_replica_dim and v.ndim > self.param_scan_axis + 1
+              else self.param_scan_axis
+          )
+          new_kvs.append(jax.lax.dynamic_update_slice_in_dim(v, frag, start_idx, axis=axis))
+      else:
+        new_kvs.append(v)
+    return jax.tree_util.tree_unflatten(treedef, new_kvs)
+
 
   def apply_flat_fragment(
       self,
@@ -294,9 +405,17 @@ class FragmentedTreeManipulator:
           if start == 0 and end == v.shape[axis]:
             new_leaves[idx] = frag
           else:
-            slc = [slice(None)] * v.ndim
-            slc[axis] = slice(start, end)
-            new_leaves[idx] = v.at[tuple(slc)].set(frag)
+            parts = []
+            if start > 0:
+              slc_pre = [slice(None)] * v.ndim
+              slc_pre[axis] = slice(0, start)
+              parts.append(v[tuple(slc_pre)])
+            parts.append(frag)
+            if end < v.shape[axis]:
+              slc_post = [slice(None)] * v.ndim
+              slc_post[axis] = slice(end, v.shape[axis])
+              parts.append(v[tuple(slc_post)])
+            new_leaves[idx] = jnp.concatenate(parts, axis=axis)
         else:
           idx_tuple = tuple(
               slice(None) if i != axis else np.array(layer_indices, dtype=np.int32) for i in range(v.ndim)
@@ -342,9 +461,17 @@ class FragmentedTreeManipulator:
               if start == 0 and end == v.shape[axis]:
                 new_kvs.append(frag)
               else:
-                slc = [slice(None)] * v.ndim
-                slc[axis] = slice(start, end)
-                new_kvs.append(v.at[tuple(slc)].set(frag))
+                parts = []
+                if start > 0:
+                  slc_pre = [slice(None)] * v.ndim
+                  slc_pre[axis] = slice(0, start)
+                  parts.append(v[tuple(slc_pre)])
+                parts.append(frag)
+                if end < v.shape[axis]:
+                  slc_post = [slice(None)] * v.ndim
+                  slc_post[axis] = slice(end, v.shape[axis])
+                  parts.append(v[tuple(slc_post)])
+                new_kvs.append(jnp.concatenate(parts, axis=axis))
             else:
               idx_tuple = tuple(
                   slice(None) if i != axis else np.array(layer_indices, dtype=np.int32) for i in range(v.ndim)

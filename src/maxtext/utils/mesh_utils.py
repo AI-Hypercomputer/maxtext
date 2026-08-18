@@ -109,6 +109,9 @@ def _expand_mesh_by_axis(
   return sharding.Mesh(devices, axis_names=axis_names, axis_types=axis_types)
 
 
+_COMPILED_EXPAND_CACHE = {}
+
+
 def _expand_tree_on_mesh(
     tree: Any,
     mesh: sharding.Mesh,
@@ -116,57 +119,72 @@ def _expand_tree_on_mesh(
     out_specs: Any,
     donate: bool = True,
 ) -> Any:
-  """Lowers and compiles expand_dims on a physical submesh using pure NamedSharding."""
-  def _expand_distributed_axis(t):
-    return jax.tree.map(
-        lambda x: jnp.expand_dims(x, axis=axis_index_to_expand)
-        if isinstance(x, jax.Array)
-        else x,
-        t,
-    )
-
-  def _leaf_struct(leaf):
-    if isinstance(leaf, jax.Array):
-      return jax.ShapeDtypeStruct(
-          leaf.shape, leaf.dtype
-      )
-    return leaf
-
-  in_structs = jax.tree.map(_leaf_struct, tree)
-
-  def _leaf_in_sharding(leaf):
-    if isinstance(leaf, jax.Array):
-      return sharding.NamedSharding(
-          mesh=mesh,
-          spec=_get_spec(leaf),
-          memory_kind=leaf.sharding.memory_kind if hasattr(leaf.sharding, "memory_kind") else None,
-      )
-    return leaf
-
-  in_shardings = jax.tree.map(_leaf_in_sharding, tree)
-
-  def _leaf_out_sharding(spec, leaf):
-    if isinstance(leaf, jax.Array):
-      return sharding.NamedSharding(
-          mesh=mesh,
-          spec=spec,
-          memory_kind=leaf.sharding.memory_kind if hasattr(leaf.sharding, "memory_kind") else None,
-      )
-    return leaf
-
-  out_shardings = jax.tree.map(_leaf_out_sharding, out_specs, tree)
-
-  lowered = (
-      jax.jit(
-          _expand_distributed_axis,
-          in_shardings=(in_shardings,),
-          out_shardings=out_shardings,
-          donate_argnums=0 if donate else None,
-      )
-      .trace(in_structs)
-      .lower()
+  """Lowers and compiles expand_dims on a physical submesh using pure NamedSharding (cached)."""
+  treedef = jax.tree.structure(tree)
+  leaves = jax.tree.leaves(tree)
+  leaf_shapes_dtypes = tuple(
+      (getattr(l, "shape", None), getattr(l, "dtype", None), getattr(getattr(l, "sharding", None), "spec", None))
+      for l in leaves
   )
-  compiled = lowered.compile(device_assignment=tuple(mesh.devices.flat))
+  out_spec_leaves = tuple(
+      getattr(s, "spec", s) for s in jax.tree.leaves(out_specs)
+  )
+  cache_key = (treedef, leaf_shapes_dtypes, out_spec_leaves, tuple(mesh.devices.flat), axis_index_to_expand, donate)
+
+  compiled = _COMPILED_EXPAND_CACHE.get(cache_key)
+  if compiled is None:
+    def _expand_distributed_axis(t):
+      return jax.tree.map(
+          lambda x: jnp.expand_dims(x, axis=axis_index_to_expand)
+          if isinstance(x, jax.Array)
+          else x,
+          t,
+      )
+
+    def _leaf_struct(leaf):
+      if isinstance(leaf, jax.Array):
+        return jax.ShapeDtypeStruct(
+            leaf.shape, leaf.dtype
+        )
+      return leaf
+
+    in_structs = jax.tree.map(_leaf_struct, tree)
+
+    def _leaf_in_sharding(leaf):
+      if isinstance(leaf, jax.Array):
+        return sharding.NamedSharding(
+            mesh=mesh,
+            spec=_get_spec(leaf),
+            memory_kind=leaf.sharding.memory_kind if hasattr(leaf.sharding, "memory_kind") else None,
+        )
+      return leaf
+
+    in_shardings = jax.tree.map(_leaf_in_sharding, tree)
+
+    def _leaf_out_sharding(spec, leaf):
+      if isinstance(leaf, jax.Array):
+        return sharding.NamedSharding(
+            mesh=mesh,
+            spec=spec,
+            memory_kind=leaf.sharding.memory_kind if hasattr(leaf.sharding, "memory_kind") else None,
+        )
+      return leaf
+
+    out_shardings = jax.tree.map(_leaf_out_sharding, out_specs, tree)
+
+    lowered = (
+        jax.jit(
+            _expand_distributed_axis,
+            in_shardings=(in_shardings,),
+            out_shardings=out_shardings,
+            donate_argnums=0 if donate else None,
+        )
+        .trace(in_structs)
+        .lower()
+    )
+    compiled = lowered.compile(device_assignment=tuple(mesh.devices.flat))
+    _COMPILED_EXPAND_CACHE[cache_key] = compiled
+
   return compiled(tree)
 
 
