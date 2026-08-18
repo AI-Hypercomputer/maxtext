@@ -972,20 +972,20 @@ def _run_syncer_loop(
   # steps that syncing is happening
   sync_steps = [step for step in range(start_step + 1, config.steps + 1) if step % steps_between_syncs_plus_1 == 0]
 
-  # Build 1D packing metadata for all fragments on colocated CPU mesh
+  # Build 1D packing metadata and unstacked outer parameter state on colocated CPU mesh
   frag_metadata = {}
-  with jax.set_mesh(global_mesh):
-    for f in range(num_fragments):
-      sample_frag = manipulator.get_flat_fragment(syncer_state.params, f, has_replica_dim=False)
-      frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
-
   syncer_frag_params_1d = {}
   syncer_frag_trace_1d = {}
   with jax.set_mesh(global_mesh):
     for f in range(num_fragments):
-      meta = frag_metadata[f]
-      flat_frag = manipulator.get_flat_fragment(syncer_state.params, f, has_replica_dim=False)
-      syncer_frag_params_1d[f] = _pack_fragment_1d(flat_frag, meta)
+      frag_with_replica = manipulator.get_flat_fragment(syncer_state.params, f, has_replica_dim=True)
+      unstacked_frag = {
+          k: (v[0] if hasattr(v, "ndim") and v.ndim > 0 and v.shape[0] == num_learners else v)
+          for k, v in frag_with_replica.items()
+      }
+      meta = _build_fragment_1d_metadata(unstacked_frag)
+      frag_metadata[f] = meta
+      syncer_frag_params_1d[f] = _pack_fragment_1d(unstacked_frag, meta)
       syncer_frag_trace_1d[f] = {dt: jnp.zeros_like(v) for dt, v in syncer_frag_params_1d[f].items()}
   max_logging.log(f"Syncer: Built 1D fragment packing metadata and initialized 1D outer state for {num_fragments} fragments")
 
@@ -1042,8 +1042,18 @@ def _run_syncer_loop(
         for f in range(num_fragments):
           unpacked_p = _unpack_fragment_1d(syncer_frag_params_1d[f], frag_metadata[f])
           unpacked_t = _unpack_fragment_1d(syncer_frag_trace_1d[f], frag_metadata[f])
-          full_params = manipulator.apply_flat_fragment(full_params, f, unpacked_p, has_replica_dim=False)
-          full_trace = manipulator.apply_flat_fragment(full_trace, f, unpacked_t, has_replica_dim=False)
+          target_frag_p = manipulator.get_flat_fragment(full_params, f, has_replica_dim=True)
+          target_frag_t = manipulator.get_flat_fragment(full_trace, f, has_replica_dim=True)
+          stacked_p = {
+              k: (jnp.stack([unpacked_p[k]] * num_learners, axis=0) if hasattr(v, "ndim") and v.ndim > 0 and v.shape[0] == num_learners else unpacked_p[k])
+              for k, v in target_frag_p.items()
+          }
+          stacked_t = {
+              k: (jnp.stack([unpacked_t[k]] * num_learners, axis=0) if hasattr(v, "ndim") and v.ndim > 0 and v.shape[0] == num_learners else unpacked_t[k])
+              for k, v in target_frag_t.items()
+          }
+          full_params = manipulator.apply_flat_fragment(full_params, f, stacked_p, has_replica_dim=True)
+          full_trace = manipulator.apply_flat_fragment(full_trace, f, stacked_t, has_replica_dim=True)
         syncer_state = syncer_state.replace(
             params=full_params,
             opt_state=(optax.TraceState(trace=full_trace), syncer_state.opt_state[1]),
