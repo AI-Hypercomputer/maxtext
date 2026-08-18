@@ -279,7 +279,7 @@ def _hybrid_fused_conv1d_gdn_bwd(
     )
     d_out, d_states = cotangents
     d_conv_state, d_recurrent_state = d_states
-    return vjp_fn((d_out, (d_conv_state, d_recurrent_state), d_tap))
+    return vjp_fn((d_out, (d_conv_state, d_recurrent_state)))
 
 
 hybrid_fused_conv1d_gdn.defvjp(_hybrid_fused_conv1d_gdn_fwd, _hybrid_fused_conv1d_gdn_bwd)
