@@ -1139,7 +1139,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.GEMMA2: [gemma2.Gemma2DecoderLayer],
         DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],
         DecoderBlockType.GEMMA4: get_scannable(gemma4.Gemma4DecoderLayer, gemma4.Gemma4ScannableBlock),
-        DecoderBlockType.GEMMA4_SMALL: get_scannable(gemma4_small.Gemma4SmallDecoderLayer, gemma4_small.Gemma4SmallScannableLayerToLinen),
+        DecoderBlockType.GEMMA4_SMALL: get_scannable(gemma4_small.Gemma4SmallDecoderLayer, gemma4_small.Gemma4SmallScannableLayer),
         DecoderBlockType.GPT3: [gpt3.Gpt3DecoderLayer],
         DecoderBlockType.QWEN2: [qwen2.Qwen2DecoderLayer],
         DecoderBlockType.QWEN3: [qwen3.Qwen3DecoderLayer],
