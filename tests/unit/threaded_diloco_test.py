@@ -953,6 +953,53 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
         self.assertEqual(new_outer_1d.shape, outer_1d.shape)
         self.assertEqual(new_trace_1d.shape, trace_1d.shape)
 
+  def test_fused_unpack_and_apply_jit(self):
+    """Verifies that _fused_unpack_and_apply_scanned_fragment_jit and _fused_unpack_and_apply_flat_fragment_jit correctly update parameters."""
+    from maxtext.trainers.diloco.threaded_diloco import (
+        _build_fragment_1d_metadata,
+        _freeze_metadata,
+        _pack_fragment_1d,
+        _fused_unpack_and_apply_scanned_fragment_jit,
+        _fused_unpack_and_apply_flat_fragment_jit,
+    )
+
+    params = _build_fake_params(self.mesh, num_layers=4, value=1.0)
+    manipulator = _build_manipulator(params, num_layers=4, num_transformer_frags=4)
+
+    # Test Scanned Fragment (frag_idx = 1 -> layer 0)
+    frag_data = manipulator.get_flat_fragment(params, 1)
+    meta = _build_fragment_1d_metadata(frag_data)
+    meta_frozen = _freeze_metadata(meta)
+    packed = _pack_fragment_1d(frag_data, meta)
+    packed_modified = {dt: arr * 5.0 for dt, arr in packed.items()}
+
+    new_params = _fused_unpack_and_apply_scanned_fragment_jit(
+        params, jnp.asarray(0, dtype=jnp.int32), packed_modified, manipulator, meta_frozen
+    )
+    np.testing.assert_allclose(
+        np.array(new_params["layers"]["w"][0]),
+        5.0,
+    )
+    np.testing.assert_allclose(
+        np.array(new_params["layers"]["w"][1]),
+        1.0,
+    )
+
+    # Test Flat Fragment (frag_idx = 0)
+    flat_frag = manipulator.get_flat_fragment(params, 0)
+    flat_meta = _build_fragment_1d_metadata(flat_frag)
+    flat_meta_frozen = _freeze_metadata(flat_meta)
+    flat_packed = _pack_fragment_1d(flat_frag, flat_meta)
+    flat_packed_modified = {dt: arr * 10.0 for dt, arr in flat_packed.items()}
+
+    new_params_flat = _fused_unpack_and_apply_flat_fragment_jit(
+        params, flat_packed_modified, manipulator, flat_meta_frozen
+    )
+    np.testing.assert_allclose(
+        np.array(new_params_flat["embed"]),
+        10.0,
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

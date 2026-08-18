@@ -168,6 +168,92 @@ def _apply_fragment(params, manipulator, frag_idx: int, frag_dict: dict[str, Any
   return _apply_scanned_fragment_jit(params, manipulator, jnp.asarray(frag_idx - 1, dtype=jnp.int32), frag_dict)
 
 
+def _async_log_metrics(
+    metric_logger_instance: metric_logger.MetricLogger,
+    raw_metrics: Any,
+    step: int,
+    step_duration: datetime.timedelta,
+    mesh: jax.sharding.Mesh | None = None,
+    logical_axis_rules: Any = None,
+):
+  """Asynchronously extracts scalars and writes metrics in a background thread."""
+  try:
+    if mesh is not None:
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules or ()):
+        extracted = _extract_scalar_metrics(raw_metrics)
+    else:
+      extracted = _extract_scalar_metrics(raw_metrics)
+    metric_logger_instance.buffer_and_write_metrics(extracted, step, step_duration)
+  except Exception as e:
+    max_logging.error(f"Error in async metric logging for step {step}: {e}")
+
+
+@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
+def _fused_unpack_and_apply_scanned_fragment_jit(
+    params: Any,
+    layer_idx: jax.Array,
+    packed_dict: dict[str, jax.Array],
+    manipulator: Any,
+    metadata_tuple: Any,
+    has_replica_dim: bool = False,
+):
+  """Fuses 1D buffer slicing and dynamic layer update into a single JIT kernel on TPU."""
+  leaves, treedef = jax.tree_util.tree_flatten(params)
+  new_leaves = list(leaves)
+
+  raw_indices = manipulator.fragment_to_layer_indices.get(1, (0,))
+  slice_len = len(raw_indices) if isinstance(raw_indices, (list, tuple)) else 1
+  start_idx = layer_idx * slice_len
+
+  for dt, keys, shapes, offsets in metadata_tuple:
+    packed_1d = packed_dict[dt]
+    for keystr, shape, (st, en) in zip(keys, shapes, offsets):
+      idx = manipulator.keystr_to_leaf_index.get(keystr)
+      if idx is None:
+        continue
+      v = leaves[idx]
+      frag = jnp.reshape(packed_1d[st:en], shape)
+      axis = (
+          manipulator.param_scan_axis + 1
+          if has_replica_dim and v.ndim > manipulator.param_scan_axis + 1
+          else manipulator.param_scan_axis
+      )
+      new_leaves[idx] = jax.lax.dynamic_update_slice_in_dim(v, frag, start_idx, axis=axis)
+
+  return jax.tree_util.tree_unflatten(treedef, new_leaves)
+
+
+@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple"))
+def _fused_unpack_and_apply_flat_fragment_jit(
+    params: Any,
+    packed_dict: dict[str, jax.Array],
+    manipulator: Any,
+    metadata_tuple: Any,
+):
+  """Fuses 1D buffer slicing and static parameter update for Fragment 0 on TPU."""
+  leaves, treedef = jax.tree_util.tree_flatten(params)
+  new_leaves = list(leaves)
+
+  for dt, keys, shapes, offsets in metadata_tuple:
+    packed_1d = packed_dict[dt]
+    for keystr, shape, (st, en) in zip(keys, shapes, offsets):
+      idx = manipulator.keystr_to_leaf_index.get(keystr)
+      if idx is None:
+        continue
+      frag = jnp.reshape(packed_1d[st:en], shape)
+      new_leaves[idx] = frag
+
+  return jax.tree_util.tree_unflatten(treedef, new_leaves)
+
+
+def _freeze_metadata(metadata: dict[Any, Any]):
+  """Converts fragment 1D metadata dict to a hashable tuple suitable for JAX JIT static arguments."""
+  return tuple(
+      (dt, tuple(meta["keys"]), tuple(tuple(s) for s in meta["shapes"]), tuple(tuple(o) for o in meta["offsets"]))
+      for dt, meta in metadata.items()
+  )
+
+
 def _build_fragment_1d_metadata(sample_frag_dict):
   """Computes shapes, sizes, and offsets for 1D packing of a fragment dictionary grouped by dtype."""
   dtype_groups = collections.defaultdict(list)
@@ -465,21 +551,12 @@ def _run_learner_loop(
       for f in range(num_fragments):
         sample_frag = manipulator.get_flat_fragment(params_template, f)
         frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
+    frag_metadata_frozen = {f: _freeze_metadata(m) for f, m in frag_metadata.items()}
     max_logging.log(f"Learner {learner_idx}: Built 1D fragment packing metadata for {num_fragments} fragments")
 
     logging_executor = ThreadPoolExecutor(max_workers=1)
 
     last_log_time = [datetime.datetime.now()]
-
-    def _async_log_metrics(raw_metrics, step_num):
-      try:
-        extracted = _extract_scalar_metrics(raw_metrics)
-        now = datetime.datetime.now()
-        step_duration = now - last_log_time[0]
-        last_log_time[0] = now
-        metric_logger_instance.buffer_and_write_metrics(extracted, step_num, step_duration)
-      except Exception as ex:
-        max_logging.error(f"Learner {learner_idx} async metric logging error: {ex}")
 
     prefetch_queue = queue.Queue(maxsize=2)
     prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"learner_{learner_idx}_prefetch")
@@ -538,14 +615,20 @@ def _run_learner_loop(
               if learner_config.shard_optimizer_over_data and isinstance(model, nn.Module):
                 state = sharding.maybe_shard_with_name(state, state_mesh_shardings, learner_config.shard_mode)
               state, metrics = p_train_step(state, example_batch, *step_rng_args)
-              extracted_metrics = _extract_scalar_metrics(metrics)
 
           max_logging.log(f"Learner {learner_idx}: Step {step} finished")
-          del metrics
           now = datetime.datetime.now()
           step_duration = now - last_log_time[0]
           last_log_time[0] = now
-          logging_executor.submit(metric_logger_instance.buffer_and_write_metrics, extracted_metrics, step, step_duration)
+          logging_executor.submit(
+              _async_log_metrics,
+              metric_logger_instance,
+              metrics,
+              step,
+              step_duration,
+              mesh,
+              learner_config.logical_axis_rules,
+          )
 
           completed_step = step + 1
 
@@ -569,15 +652,22 @@ def _run_learner_loop(
 
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-              unpacked_leaves = _unpack_fragment_1d(received_tpu_packed, frag_metadata[frag_idx])
-              new_params = _apply_fragment(params, manipulator, frag_idx, unpacked_leaves)
+              if frag_idx == 0:
+                new_params = _fused_unpack_and_apply_flat_fragment_jit(
+                    params, received_tpu_packed, manipulator, frag_metadata_frozen[0]
+                )
+              else:
+                layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
+                new_params = _fused_unpack_and_apply_scanned_fragment_jit(
+                    params, layer_idx, received_tpu_packed, manipulator, frag_metadata_frozen[frag_idx]
+                )
 
               if learner_config.pure_nnx:
                 nnx.update(state.model, new_params)
               else:
                 state = state.replace(params=new_params)
 
-            del received_tpu_packed, unpacked_leaves, new_params, params
+            del received_tpu_packed, new_params, params
 
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
             checkpointing.maybe_save_checkpoint(checkpoint_manager, state, learner_config, data_iterator, step)

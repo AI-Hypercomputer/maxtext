@@ -71,6 +71,7 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && 
              model_name=${MODEL_NAME} \
              tokenizer_type=huggingface \
              tokenizer_path=maxtext/assets/tokenizers/qwen3-tokenizer \
+             weight_dtype=bfloat16 \
              per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
              max_target_length=${MAX_TARGET_LENGTH} \
              enable_diloco=true \

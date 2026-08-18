@@ -370,7 +370,14 @@ class FragmentedTreeManipulator:
         for idx in leaf_indices:
           keystr = self.leaf_keystrs[idx]
           if keystr in flat_fragment:
-            new_leaves[idx] = flat_fragment[keystr]
+            frag_val = flat_fragment[keystr]
+            if (
+                hasattr(leaves[idx], "sharding")
+                and leaves[idx].sharding is not None
+                and getattr(frag_val, "sharding", None) != leaves[idx].sharding
+            ):
+              frag_val = jax.device_put(frag_val, leaves[idx].sharding)
+            new_leaves[idx] = frag_val
         return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
       # fragment_idx > 0 (scanned parameters)
@@ -441,7 +448,14 @@ class FragmentedTreeManipulator:
       is_scanned = self.keypath_to_is_scanned.get(keystr, False)
       if fragment_idx == 0:
         if not is_scanned and keystr in flat_fragment:
-          new_kvs.append(flat_fragment[keystr])
+          frag_val = flat_fragment[keystr]
+          if (
+              hasattr(v, "sharding")
+              and v.sharding is not None
+              and getattr(frag_val, "sharding", None) != v.sharding
+          ):
+            frag_val = jax.device_put(frag_val, v.sharding)
+          new_kvs.append(frag_val)
         else:
           new_kvs.append(v)
       else:
