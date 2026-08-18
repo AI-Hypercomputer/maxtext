@@ -28,7 +28,6 @@ Training & Evaluation:
 
 from absl import app
 import jax
-import optax
 from orbax import checkpoint as ocp
 import pathwaysutils
 
@@ -55,6 +54,7 @@ from maxtext.trainers.post_train.dpo import hooks
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.trainers.post_train import checkpointing as post_train_checkpointing
 from maxtext.utils import model_creation_utils
 
 
@@ -94,8 +94,15 @@ def get_tunix_config(mt_config: MaxTextConfig) -> DPOTrainingConfig:
   return DPOTrainingConfig(
       eval_every_n_steps=mt_config.eval_interval,
       max_steps=mt_config.steps,
-      gradient_accumulation_steps=mt_config.gradient_accumulation_steps,
-      checkpoint_root_directory=mt_config.checkpoint_dir,
+      # None rather than 1: Tunix wraps the optimizer in optax.MultiSteps whenever this is set,
+      # and a 1-step wrap buys nothing while giving the optimizer state a shape pre-training
+      # can't resume from. Matches train_sft.
+      gradient_accumulation_steps=(
+          mt_config.gradient_accumulation_steps if mt_config.gradient_accumulation_steps > 1 else None
+      ),
+      # Checkpointing is handled by post_train.checkpointing, which writes MaxText's on-disk
+      # layout instead of Tunix's, so Tunix's own manager stays disabled.
+      checkpoint_root_directory=None,
       checkpointing_options=checkpointing_options,
       metrics_logging_options=metrics_logging_options,
       profiler_options=profiler_options,
@@ -103,8 +110,9 @@ def get_tunix_config(mt_config: MaxTextConfig) -> DPOTrainingConfig:
       lambda_orpo=mt_config.dpo.orpo_lambda,
       beta=mt_config.dpo.dpo_beta,
       label_smoothing=mt_config.dpo.dpo_label_smoothing,
-      max_prompt_length=mt_config.dpo.max_prompt_length,
-      max_response_length=mt_config.max_target_length - mt_config.dpo.max_prompt_length,
+      max_prompt_length=mt_config.dpo.max_prompt_length or (mt_config.max_target_length // 2),
+      max_response_length=mt_config.max_target_length
+      - (mt_config.dpo.max_prompt_length or (mt_config.max_target_length // 2)),
   )
 
 
@@ -129,31 +137,29 @@ def setup_trainer_state(mt_config, goodput_recorder=None, test_only_training_hoo
         tokenizer_pad_id=tok.pad_id,
     )
 
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
 
     if mt_config.gradient_clipping_threshold > 0:
-      optimizer = optax.chain(
-          optax.clip_by_global_norm(max_norm=mt_config.gradient_clipping_threshold),
-          optimizer,
-      )
+      optimizer = optimizers.add_gradient_clipping(optimizer, mt_config.gradient_clipping_threshold)
 
-  # ORPO does not require a reference model.
-  ref_model = nnx.clone(model) if mt_config.dpo.algo == "dpo" else None
+    # ORPO does not require a reference model.
+    ref_model = nnx.clone(model) if mt_config.dpo.algo == "dpo" else None
 
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
-    training_hooks_class = test_only_training_hooks_class or hooks.DPOTrainingHooks
-    training_hooks = training_hooks_class(mt_config, mesh, learning_rate_schedule, goodput_recorder)
-    data_hooks = hooks.DPODataHooks(mt_config, mesh, goodput_recorder)
+    with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
+      training_hooks_class = test_only_training_hooks_class or hooks.DPOTrainingHooks
+      training_hooks = training_hooks_class(mt_config, mesh, learning_rate_schedule, goodput_recorder)
+      data_hooks = hooks.DPODataHooks(mt_config, mesh, goodput_recorder)
 
-    # Provide rules context so logical axes (e.g. 'norm') are translated to mesh axes during maybe_restore
-    with nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+      # Provide rules context so logical axes (e.g. 'norm') are translated to mesh axes during maybe_restore
       trainer = DPOTrainer(
           model=model, ref_model=ref_model, optimizer=optimizer, training_config=tunix_config, tokenizer=None
       )
       trainer.with_training_hooks(training_hooks)
       trainer.with_data_hooks(data_hooks)
+      post_train_checkpointing.install(trainer, mt_config.checkpoint_dir, mt_config)
 
   return trainer, mesh
 

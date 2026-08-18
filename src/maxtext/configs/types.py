@@ -349,6 +349,17 @@ class Checkpointing(BaseModel):
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
   async_checkpointing: bool = Field(True, description="If True, uses an asynchronous checkpointer for performance.")
   checkpoint_period: int = Field(10_000, description="The frequency (in steps) at which to save checkpoints.")
+  post_train_skip_checkpointing: bool = Field(
+      False,
+      description=(
+          "If True, post-training trainers do not install a checkpoint manager and write nothing."
+          " Base weights still load through load_parameters_path. Exists because enable_checkpointing"
+          " cannot express this: it is validated as required whenever load_parameters_path is set,"
+          " so it cannot be turned off by a run that has to load base weights. Setting"
+          " checkpoint_period to 0 is not an alternative either, since step % checkpoint_period is"
+          " evaluated on the shared path and raises ZeroDivisionError."
+      ),
+  )
   max_num_checkpoints_to_keep: int | None = Field(None, description="Maximum number of checkpoints to keep.")
   enable_single_replica_ckpt_restoring: bool = Field(
       False, description="One replica reads and broadcasts the checkpoint."

@@ -104,7 +104,7 @@ class LoraE2ENnxIntegrationTest(unittest.TestCase):
 
     base_ckpt_dir = os.path.join(self.test_dir, base_run_name, "checkpoints", "2")
     self.assertTrue(os.path.exists(base_ckpt_dir), f"Base checkpoint path does not exist: {base_ckpt_dir}")
-    base_ckpt_path = os.path.join(base_ckpt_dir, "model_params")
+    base_ckpt_path = os.path.join(base_ckpt_dir, "items")
 
     lora_config = {"enable_lora": True, "lora_rank": 4}
     if lora_weight_qtype:
@@ -128,7 +128,7 @@ class LoraE2ENnxIntegrationTest(unittest.TestCase):
 
     lora_ckpt_dir = os.path.join(self.test_dir, lora_run_name, "checkpoints", "4")
     self.assertTrue(os.path.exists(lora_ckpt_dir), f"Saved LoRA checkpoint path does not exist: {lora_ckpt_dir}")
-    lora_ckpt_path = os.path.join(lora_ckpt_dir, "model_params")
+    lora_ckpt_path = os.path.join(lora_ckpt_dir, "items")
 
     # Step 3: Resume training under same run name (steps=6)
     config_step3 = _tiny_lora_pyconfig(
