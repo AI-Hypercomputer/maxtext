@@ -28,13 +28,13 @@ from maxtext.utils import max_logging
 class ThreadedTransportManager:
   """Manages in-memory communication between learner threads and the syncer thread."""
 
-  def __init__(self, num_learners: int):
+  def __init__(self, num_learners: int, maxsize: int = 32):
     self.num_learners = num_learners
 
     # Thread-safe FIFO queues for each learner.
     # Stores tuples of (step, fragment_id, data).
-    self._learner_to_syncer_queues = [queue.Queue() for _ in range(num_learners)]
-    self._syncer_to_learner_queues = [queue.Queue() for _ in range(num_learners)]
+    self._learner_to_syncer_queues = [queue.Queue(maxsize=maxsize) for _ in range(num_learners)]
+    self._syncer_to_learner_queues = [queue.Queue(maxsize=maxsize) for _ in range(num_learners)]
 
     # Local buffers for out-of-order storage.
     # Since only the receiving thread (syncer for learner_to_syncer, and respective
@@ -44,7 +44,7 @@ class ThreadedTransportManager:
 
   def send_to_syncer(self, learner_idx: int, step: int, fragment_id: int, data: Any):
     """Learner sends data to the syncer."""
-    self._learner_to_syncer_queues[learner_idx].put((step, fragment_id, data))
+    self._learner_to_syncer_queues[learner_idx].put((step, fragment_id, data), timeout=300.0)
 
   def recv_from_learner(self, learner_idx: int, step: int, fragment_id: int) -> Any:
     """Syncer receives data from a specific learner. Blocks if not available."""
@@ -54,14 +54,14 @@ class ThreadedTransportManager:
       return buffer.pop(key)
 
     while True:
-      rec_step, rec_frag, data = self._learner_to_syncer_queues[learner_idx].get()
+      rec_step, rec_frag, data = self._learner_to_syncer_queues[learner_idx].get(timeout=300.0)
       if rec_step == step and rec_frag == fragment_id:
         return data
       buffer[(rec_step, rec_frag)] = data
 
   def send_to_learner(self, learner_idx: int, step: int, fragment_id: int, data: Any):
     """Syncer sends data to a specific learner."""
-    self._syncer_to_learner_queues[learner_idx].put((step, fragment_id, data))
+    self._syncer_to_learner_queues[learner_idx].put((step, fragment_id, data), timeout=300.0)
 
   def recv_from_syncer(self, learner_idx: int, step: int, fragment_id: int) -> Any:
     """Learner receives data from the syncer. Blocks if not available."""
