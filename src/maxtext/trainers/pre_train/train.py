@@ -1157,10 +1157,19 @@ def train_loop(config, recorder, state=None):
         )
         break  # Initialization succeeded!
       except pathways_manager.ScaleUpSignalError as e:
-        _logger.warning(
-            "Slice scale-up signal caught during initialization: %s. Refreshing slice topology and retrying setup.",
-            e,
-        )
+        if elastic_utils.elastic_snapshot(config):
+          _logger.warning(
+              "Slice scale-up signal caught during initialization: %s. Refreshing slice topology and retrying setup.",
+              e,
+          )
+          if elastic_manager:
+            elastic_manager.active_slice_indices = elastic.get_active_slice_indices(elastic_manager.slice_to_devices)
+        else:
+          _logger.warning(
+              "Slice scale-up signal caught during initialization: %s. Bubbling to elastic_retry for full reconfiguration.",
+              e,
+          )
+          raise
 
   # Throttling is applied only if configured (dcn_bandwidth_limit is set).
   # The default flag value is empty, meaning no throttling is applied by default.

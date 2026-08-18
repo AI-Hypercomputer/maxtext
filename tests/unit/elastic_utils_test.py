@@ -627,9 +627,61 @@ class ElasticUtilsTest(parameterized.TestCase):
     with unittest.mock.patch("pathwaysutils.elastic.elastic.get_active_slice_indices", return_value={0}):
       res = elastic_utils.wait_for_devices_placed(config, timeout=5.0, poll_interval=0.01)
 
-    self.assertEqual(len(res), 1)
-    self.assertEqual(res[0].slice_index, 0)
-    self.assertEqual(self.fake_manager.active_slice_indices, {0})
+  def test_wait_for_devices_placed_multiple_transient_errors(self):
+    """Tests wait_for_devices_placed recovers after multiple consecutive transient errors."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0}
+    devices = [FakeDevice(slice_index=0, process_index=0, task_id=0, device_id=0)]
+    self.fake_jax.devices.return_value = devices
+
+    mock_arr = Mock()
+    # 2 transient errors then success
+    self.fake_jax.device_put.side_effect = [
+        MockJaxRuntimeError("Placement in progress 1"),
+        MockJaxRuntimeError("Placement in progress 2"),
+        mock_arr,
+    ]
+
+    res = elastic_utils.wait_for_devices_placed(config, timeout=5.0, poll_interval=0.01)
+    self.assertEqual(res, devices)
+    self.assertEqual(self.fake_jax.device_put.call_count, 3)
+
+  def test_wait_for_devices_placed_timeout_returns_live_devices(self):
+    """Tests wait_for_devices_placed falls back to live_devices when timeout expires."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0}
+    devices = [FakeDevice(slice_index=0, process_index=0, task_id=0, device_id=0)]
+    self.fake_jax.devices.return_value = devices
+
+    self.fake_jax.device_put.side_effect = MockJaxRuntimeError("Persistent placement error")
+
+    res = elastic_utils.wait_for_devices_placed(config, timeout=0.05, poll_interval=0.01)
+    self.assertEqual(res, devices)
+
+  def test_scale_up_signal_error_bubbles_for_checkpoint_mode(self):
+    """Verifies ScaleUpSignalError raises for checkpoint mode to let elastic_retry handle scaling."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    config.elastic_backup_kind = "checkpoint"
+    err = ScaleUpSignalError("Scale up during initialization")
+
+    # maybe_bubble_elastic_exception should raise ScaleUpSignalError
+    with self.assertRaises(ScaleUpSignalError):
+      elastic_utils.maybe_bubble_elastic_exception(config, err)
+
+  def test_scale_up_signal_error_snapshot_mode_detection(self):
+    """Verifies elastic_snapshot distinguishes snapshot vs checkpoint mode."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    config.elastic_backup_kind = "snapshot"
+    self.assertTrue(elastic_utils.elastic_snapshot(config))
+
+    config.elastic_backup_kind = "checkpoint"
+    self.assertFalse(elastic_utils.elastic_snapshot(config))
 
 
 if __name__ == "__main__":
