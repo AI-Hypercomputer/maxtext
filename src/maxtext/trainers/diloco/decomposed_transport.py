@@ -94,22 +94,21 @@ class LearnerTransport:
 
   def send_to_syncer_async(self, step: int, fragment_id: int, data: Any):
     """Asynchronously pulls TPU buffer to host NumPy and delivers to syncer."""
-    def _send():
+    def _send(payload):
       try:
-        if isinstance(data, dict):
-          host_packed = {dt: np.array(arr, copy=True) for dt, arr in data.items()}
-        elif data is not None and hasattr(data, "shape"):
-          host_packed = np.array(data, copy=True)
+        if isinstance(payload, dict):
+          host_packed = {dt: np.array(arr, copy=True) for dt, arr in payload.items()}
+        elif payload is not None and hasattr(payload, "shape"):
+          host_packed = np.array(payload, copy=True)
         else:
-          host_packed = data
+          host_packed = payload
         self.manager.send_to_syncer(self.learner_idx, step, fragment_id, host_packed)
-        del host_packed, data
       except Exception as e:
         max_logging.error(f"Learner {self.learner_idx}: async D2H send failed: {e}")
         max_logging.error(traceback.format_exc())
         self.d2h_errors.append(e)
 
-    self._executor.submit(_send)
+    self._executor.submit(_send, data)
 
   def check_d2h_errors(self):
     if self.d2h_errors:
