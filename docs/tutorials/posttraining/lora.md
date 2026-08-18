@@ -190,7 +190,7 @@ After completing the fine-tuning process, your LoRA weights are stored in MaxTex
 ```sh
 python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name="${MODEL_NAME?}" \
-    lora.lora_restore_path="${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/checkpoints/<STEPS>/model_params" \
+    lora.lora_restore_path="${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/checkpoints/<STEPS>/items" \
     base_output_directory="${BASE_OUTPUT_DIRECTORY?}/hf_lora_adapter"
 ```
 

@@ -186,7 +186,7 @@ Example (Qwen3-30B-A3B, v6e-8):
 STEP=244
 MODEL=qwen3-30b-a3b
 HF_PATH=Qwen/Qwen3-30B-A3B
-CHECKPOINT=gs://<bucket>/run/checkpoints/actor/${STEP}/model_params
+CHECKPOINT=gs://<bucket>/run/checkpoints/actor/${STEP}/items
 OUTPUT=gs://<bucket>/eval/
 
 python -m maxtext.eval.runner.run \
