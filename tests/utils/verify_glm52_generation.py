@@ -42,22 +42,39 @@ def main():
   if jax.process_index() == 0:
     print("=== Model restored successfully! Running prompt generation test ===", flush=True)
 
-  test_prompts = [
-      "The capital of France is",
-      "In mathematics, 2 + 2 =",
-      "The largest ocean on Earth is the",
+  user_prompts = [
+      "what is the capital of france",
+      "The biggest planet in the solar system is",
   ]
 
-  for prompt in test_prompts:
-    prompt_ids = tokenizer.encode(prompt, add_special_tokens=True)
+  tests = []
+  for p in user_prompts:
+    # 1. Chat format (recommended for GLM-5.2)
+    chat_text = tokenizer.apply_chat_template(
+        [{"role": "user", "content": p}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    chat_ids = tokenizer.encode(chat_text, add_special_tokens=False)
+    tests.append((f"[CHAT TEMPLATE] {p}", chat_ids, 25))
+
+    # 2. Base completion format with GLM prefix
+    base_text = f"[gMASK]<sop>{p}"
+    base_ids = tokenizer.encode(base_text, add_special_tokens=False)
+    tests.append((f"[RAW COMPLETION] {p}", base_ids, 20))
+
+  for title, prompt_ids, gen_tokens in tests:
     generated_ids = list(prompt_ids)
 
     if jax.process_index() == 0:
-      print(f"\n[PROMPT]: {prompt!r}\nGenerating: ", end="", flush=True)
+      prompt_decoded = tokenizer.decode(prompt_ids)
+      print(f"\n{'='*70}\n>>> {title}\n[INPUT TOKENS]: {prompt_decoded!r}\nGenerating ({gen_tokens} tokens): ", end="", flush=True)
 
-    # Generate 15 tokens greedily with JIT
-    for step in range(15):
+    # Autoregressive greedy generation with JIT
+    for step in range(gen_tokens):
       curr_len = len(generated_ids)
+      if curr_len >= cfg.max_target_length:
+        break
       padded_tokens = np.zeros((cfg.global_batch_size_to_train_on, cfg.max_target_length), dtype=np.int32)
       padded_tokens[0, :curr_len] = generated_ids
       positions = np.arange(cfg.max_target_length, dtype=np.int32)[None, :]
@@ -85,8 +102,9 @@ def main():
 
     if jax.process_index() == 0:
       output_text = tokenizer.decode(generated_ids)
-      print(f"\n[FULL RESULT]: {output_text!r}\n" + "=" * 60, flush=True)
+      print(f"\n\n[FULL OUTPUT]:\n{output_text}\n{'='*70}", flush=True)
 
 
 if __name__ == "__main__":
   main()
+
