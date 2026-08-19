@@ -238,10 +238,12 @@ class TestCreateCheckpointManager(unittest.TestCase):
         config.colocated_python_checkpointing,
     )
     from_options.assert_called_once_with(use_colocated_python=True)
-    register_type_handlers.assert_called_once_with(
-        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
-        checkpointing_impl=checkpointing_impl,
-    )
+    self.assertEqual(register_type_handlers.call_count, 1)
+    _, kwargs = register_type_handlers.call_args
+    self.assertEqual(kwargs["use_single_replica_array_handler"], config.enable_single_replica_ckpt_restoring)
+    self.assertIs(kwargs["checkpointing_impl"], checkpointing_impl)
+    self.assertIsNone(kwargs["primary_host"])
+    self.assertIsNone(kwargs["array_metadata_store"]._primary_host)
 
 
 class TestValidateCompletedSteps(unittest.TestCase):

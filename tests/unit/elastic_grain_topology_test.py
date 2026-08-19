@@ -14,17 +14,23 @@
 
 """Unit tests for elastic data loading, dynamic topology transitions, and edge cases."""
 
+import asyncio
+import tempfile
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 from absl.testing import parameterized
+from etils import epath
 import numpy as np
 import jax
 import jax.numpy as jnp
 import grain.python as grain
+from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib
+from orbax.checkpoint._src.multihost import multihost
 
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import grain_data_processing
 from maxtext.utils import elastic_utils
+from maxtext.utils import train_utils
 
 
 class FakeDevice:
@@ -90,6 +96,7 @@ class FakeConfig:
       grain_prefetch_buffer_size=1,
       grain_ram_budget_mb=1024,
       max_target_length=8192,
+      **kwargs,
   ):
     self.elastic_enabled = elastic_enabled
     self.colocated_python_data_input = colocated_python_data_input
@@ -107,10 +114,32 @@ class FakeConfig:
     self.max_target_length = max_target_length
     self.num_target_devices = 256
     self.global_batch_size_to_load = 256
+    for k, v in kwargs.items():
+      setattr(self, k, v)
     self.global_batch_size_to_train_on = 256
     self.micro_batch_size_to_train_on = 256
     self.eval_per_device_batch_size = 1.0
     self.enable_rampup_batch_size = False
+    self.enable_checkpointing = getattr(self, "enable_checkpointing", False)
+    self.checkpoint_dir = getattr(self, "checkpoint_dir", "")
+    self.async_checkpointing = getattr(self, "async_checkpointing", False)
+    self.checkpoint_period = getattr(self, "checkpoint_period", 1000)
+    self.dataset_type = getattr(self, "dataset_type", "grain")
+    self.checkpoint_storage_use_ocdbt = getattr(self, "checkpoint_storage_use_ocdbt", True)
+    self.checkpoint_storage_use_zarr3 = getattr(self, "checkpoint_storage_use_zarr3", True)
+    self.enable_checkpoint_cloud_logger = getattr(self, "enable_checkpoint_cloud_logger", False)
+    self.run_name = getattr(self, "run_name", "test_run")
+    self.enable_single_controller = getattr(self, "enable_single_controller", False)
+    self.colocated_python_checkpointing = getattr(self, "colocated_python_checkpointing", False)
+    self.enable_single_replica_ckpt_restoring = getattr(self, "enable_single_replica_ckpt_restoring", False)
+    self.enable_continuous_checkpointing = getattr(self, "enable_continuous_checkpointing", False)
+    self.enable_multi_tier_checkpointing = getattr(self, "enable_multi_tier_checkpointing", False)
+    self.enable_emergency_checkpoint = getattr(self, "enable_emergency_checkpoint", False)
+    self.max_num_checkpoints_to_keep = getattr(self, "max_num_checkpoints_to_keep", 2)
+    self.checkpoint_storage_concurrent_gb = getattr(self, "checkpoint_storage_concurrent_gb", 100)
+    self.enable_autocheckpoint = getattr(self, "enable_autocheckpoint", False)
+    self.checkpoint_todelete_subdir = getattr(self, "checkpoint_todelete_subdir", None)
+    self.checkpoint_todelete_full_path = getattr(self, "checkpoint_todelete_full_path", None)
 
 
 class ElasticGrainTopologyTest(parameterized.TestCase):
@@ -327,6 +356,51 @@ class ElasticGrainTopologyTest(parameterized.TestCase):
         device_splits = np.split(arr, len(local_devices), axis=0)
         self.assertEqual(len(device_splits), 8)
         self.assertEqual(device_splits[0].shape, (1, config.max_target_length))
+
+  def test_colocated_python_checkpointing_primary_host_none_prevents_timeout(self):
+    """Reproduces the array_metadatas directory creation timeout when Slice 0 (process 0) is down
+
+    and verifies that primary_host=None in array_metadata_store resolves the hang for surviving processes.
+    """
+    config = FakeConfig(
+        enable_checkpointing=True,
+        enable_single_controller=True,
+        colocated_python_checkpointing=True,
+        enable_single_replica_ckpt_restoring=False,
+    )
+    fake_mesh = MagicMock()
+    fake_manager = MagicMock()
+    fake_impl = MagicMock()
+
+    with (
+        patch.object(train_utils.checkpointing, "create_orbax_checkpoint_manager", return_value=fake_manager),
+        patch.object(train_utils.ocp_pathways.CheckpointingImpl, "from_options", return_value=fake_impl),
+        patch.object(train_utils.ocp_pathways, "register_type_handlers") as mock_reg,
+    ):
+      res = train_utils.create_checkpoint_manager(config, fake_mesh, init_state_fn=MagicMock())
+      self.assertIs(res, fake_manager)
+      mock_reg.assert_called_once()
+      _, kwargs = mock_reg.call_args
+      self.assertIsNone(kwargs["primary_host"])
+      self.assertIsNone(kwargs["array_metadata_store"]._primary_host)
+
+    # 1. Reproduce the bug: default Store() with primary_host=0 on process 24
+    async def run_repro():
+      with tempfile.TemporaryDirectory() as tmpdir:
+        store_default = array_metadata_store_lib.Store(write_timeout_secs=1)
+        with patch.object(multihost, "process_index", return_value=24):
+          with self.assertRaises(ValueError) as cm:
+            await store_default._maybe_create_base_dir(epath.Path(tmpdir) / "test_bug")
+          self.assertIn("Timed out waiting for array_metadatas base directory creation", str(cm.exception))
+          self.assertIn("primary_process=0", str(cm.exception))
+
+        # 2. Verify fix: Store(primary_host=None) on process 24 when process 0 is dead
+        store_fixed = array_metadata_store_lib.Store(primary_host=None, write_timeout_secs=1)
+        with patch.object(multihost, "process_index", return_value=24):
+          await store_fixed._maybe_create_base_dir(epath.Path(tmpdir) / "test_fixed")
+          self.assertTrue((epath.Path(tmpdir) / "test_fixed").exists())
+
+    asyncio.run(run_repro())
 
 
 if __name__ == "__main__":

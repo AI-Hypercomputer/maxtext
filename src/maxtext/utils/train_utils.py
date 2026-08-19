@@ -19,6 +19,7 @@ import subprocess
 import jax
 import functools
 import orbax.checkpoint.pathways as ocp_pathways
+from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib
 from functools import partial
 
 from flax import nnx
@@ -109,6 +110,8 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
     ocp_pathways.register_type_handlers(
         use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
         checkpointing_impl=checkpointing_impl,
+        primary_host=None,
+        array_metadata_store=array_metadata_store_lib.Store(primary_host=None),
     )
 
   return checkpoint_manager
@@ -394,7 +397,9 @@ def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, ch
 def validate_train_config(config):
   """Validates the configuration is set correctly for 'train.py'."""
 
-  if config.elastic_enabled and (config.enable_emergency_checkpoint or config.enable_multi_tier_checkpointing):
+  if getattr(config, "elastic_enabled", False) and (
+      getattr(config, "enable_emergency_checkpoint", False) or getattr(config, "enable_multi_tier_checkpointing", False)
+  ):
     raise ValueError(
         "Emergency checkpointing and multi-tier checkpointing are not supported when elasticity is enabled "
         "(elastic_enabled=True). Please disable enable_emergency_checkpoint and enable_multi_tier_checkpointing."
