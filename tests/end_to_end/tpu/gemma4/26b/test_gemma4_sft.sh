@@ -32,6 +32,7 @@ python3 -m maxtext.inference.vllm_decode \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.85 \
     prompt="Suggest some famous landmarks in London." \
+    use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
     prefuse_moe_weights=True ici_tensor_parallelism=4 ici_expert_parallelism=2
 
 # Step 2: Run SFT on the converted checkpoint
