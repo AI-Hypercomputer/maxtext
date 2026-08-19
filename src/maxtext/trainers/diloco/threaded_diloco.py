@@ -651,9 +651,9 @@ def _run_learner_loop(
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
               if frag_idx == 0:
-                unpacked_leaves = _unpack_fragment_1d(received_tpu_packed, frag_metadata[0])
-                new_params = manipulator.apply_flat_fragment(params, 0, unpacked_leaves)
-                del unpacked_leaves
+                new_params = _fused_unpack_and_apply_flat_fragment_jit(
+                    params, received_tpu_packed, manipulator, frag_metadata_frozen[0]
+                )
               else:
                 layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
                 new_params = _fused_unpack_and_apply_scanned_fragment_jit(
@@ -1054,6 +1054,7 @@ def _run_syncer_loop(
 
   # Asynchronous Event-Driven Syncer Pipeline
   syncer_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="syncer_worker")
+  outer_sgd_pool = ThreadPoolExecutor(max_workers=min(32, os.cpu_count() or 16), thread_name_prefix="outer_sgd_chunk")
   fragment_locks = [threading.Lock() for _ in range(num_fragments)]
   pending_learner_fragments = collections.defaultdict(dict)
   pending_lock = threading.Lock()
@@ -1078,7 +1079,7 @@ def _run_syncer_loop(
         if frag_idx == 0:
           gc.collect()
 
-        # Fast Chunked AVX-512 SIMD Vectorized CPU outer SGD + Nesterov momentum (< 15 ms for scanned, ~700 ms for Fragment 0)
+        # Fast Parallel Chunked AVX-512 SIMD Vectorized CPU outer SGD + Nesterov momentum
         new_outer_host = {}
         outer_lr = config.diloco_outer_lr
         outer_momentum = config.diloco_outer_momentum
@@ -1116,9 +1117,9 @@ def _run_syncer_loop(
             new_outer_host[dt] = outer_1d
             del out_f, tr_f, avg_f, pgrad, update
           else:
-            # Multi-chunk memory-safe path for Fragment 0 (1.16B elements, only 64 MB transient RAM)
-            for st in range(0, total_len, chunk_size):
-              en = min(st + chunk_size, total_len)
+            # Multi-chunk parallel memory-safe path for Fragment 0 (distributed across CPU cores)
+            def _process_outer_sgd_chunk(bounds):
+              st, en = bounds
               out_f = outer_1d[st:en].astype(np.float32)
               tr_f = trace_1d[st:en].astype(np.float32)
 
@@ -1141,8 +1142,12 @@ def _run_syncer_loop(
 
               outer_1d[st:en] = out_f.astype(outer_1d.dtype)
               trace_1d[st:en] = tr_f.astype(trace_1d.dtype)
-              del out_f, tr_f, avg_f, pgrad, update
 
+            chunk_ranges = [
+                (st, min(st + chunk_size, total_len))
+                for st in range(0, total_len, chunk_size)
+            ]
+            list(outer_sgd_pool.map(_process_outer_sgd_chunk, chunk_ranges))
             new_outer_host[dt] = outer_1d
         max_logging.log(f"Syncer: Step {step} 1D outer step applied")
 
@@ -1240,6 +1245,7 @@ def _run_syncer_loop(
       raise syncer_exception[0]
 
   finally:
+    outer_sgd_pool.shutdown(wait=True)
     syncer_executor.shutdown(wait=True)
 
   if checkpoint_manager is not None:
