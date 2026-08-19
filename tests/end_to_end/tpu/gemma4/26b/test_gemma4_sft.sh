@@ -25,8 +25,6 @@ BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
-export MALLOC_TRIM_THRESHOLD_=131072
-
 # Step 1: Run inference on the original checkpoint converted from Hugging Face
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \

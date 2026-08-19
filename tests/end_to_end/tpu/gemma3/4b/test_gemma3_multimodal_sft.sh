@@ -17,8 +17,6 @@
 
 set -ex
 
-export MALLOC_TRIM_THRESHOLD_=131072
-
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 use_pathways=${2:-false}
 MODEL_NAME='gemma3-4b'

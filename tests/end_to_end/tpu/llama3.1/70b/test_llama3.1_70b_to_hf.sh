@@ -7,7 +7,6 @@
 # bash test_llama3.1_70b_to_hf.sh $RUN_ID $CHECKPOINT_PATH $USE_MULTIMODAL $SCAN_LAYERS
 
 set -ex
-export MALLOC_TRIM_THRESHOLD_=131072
 export PYTHONUNBUFFERED=1
 
 run_id=$1
