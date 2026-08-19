@@ -64,13 +64,20 @@ def csa_overlap_pooling(
     head_dim: int,
     prior_kv: Optional[Array] = None,
     prior_gate: Optional[Array] = None,
+    is_same_doc: Optional[Array] = None,
 ) -> Tuple[Array, Array, Array]:
-  """Shared utility for Compressed Sparse Attention (CSA) overlap pooling.
+  """Computes overlapping window pooling for Compressed Sparse Attention (CSA).
 
-  Implements the overlapping Ca/Cb pooling logic shared by both the CSA Compressor
-  and the CSA Indexer. It splits the projected states into two halves (Ca and Cb),
-  shifts the first half forward by one window, and concatenates them to form
-  overlapping windows over which softmax gating is applied.
+  DeepSeek-V4 CSA uses a stride-4, window-8 pooling mechanism where each output block
+  aggregates representations over a 2m (8-token) window formed by pairing the trailing
+  m (4) tokens of the previous window (Ca) with the leading m (4) tokens of the current
+  window (Cb).
+
+  Pipeline:
+    1. Split: `[batch, n_windows, compress_rate, 2 * head_dim]` -> 2x `[batch, n_windows, compress_rate, head_dim]`
+    2. Shift: Ca shifted forward by one window (prepending cache prior if available).
+    3. Concat (Ca + Cb): -> `[batch, n_windows, 2 * compress_rate, head_dim]`
+    4. Gating & Sum: -> `[batch, n_windows, head_dim]`
 
   Args:
     chunk_kv: Input KV projection chunks. Shape: `[batch, n_windows, compress_rate, 2 * head_dim]`.
@@ -79,6 +86,10 @@ def csa_overlap_pooling(
     head_dim: Target head dimension.
     prior_kv: Previous window KV prior from cache (optional).
     prior_gate: Previous window gate prior from cache (optional).
+    is_same_doc: Boolean tensor of shape [batch, n_windows] indicating if window i
+      belongs to the same document as previous window i - 1. Without sequence packing,
+      this is always True. With packing, this is False at document boundaries, causing
+      the shifted prior window (Ca) to be masked out to prevent cross-document leakage.
 
   Returns:
     Tuple of (compressed, next_prior_kv, next_prior_gate):
@@ -123,6 +134,11 @@ def csa_overlap_pooling(
   # We prepend the prior window to the current chunks, and drop the last window of Ca
   a_kv_shifted = jnp.concatenate([prior_a_kv, a_kv[:, :-1]], axis=1)
   a_gate_shifted = jnp.concatenate([prior_a_gate, a_gate[:, :-1]], axis=1)
+
+  if is_same_doc is not None:
+    is_same_doc_exp = is_same_doc[:, :, None, None]
+    a_kv_shifted = jnp.where(is_same_doc_exp, a_kv_shifted, 0.0)
+    a_gate_shifted = jnp.where(is_same_doc_exp, a_gate_shifted, -jnp.inf)
 
   # 4. Concatenate shifted Ca and unshifted Cb to form the 2m overlapping window
   # -> [batch, n_windows, 2 * compress_rate, head_dim]
@@ -284,12 +300,15 @@ def compute_csa_prefill_chunk_pooling(
     chunk_kv_reshaped = chunk_kv.reshape((batch_size, n_windows, compress_rate, -1))
     chunk_gate_reshaped = chunk_gate.reshape((batch_size, n_windows, compress_rate, -1)) + position_bias
 
+    block_positions = position_ids[:, :usable:compress_rate]
+    prior_block_positions = jnp.concatenate([block_positions[:, 0:1] - compress_rate, block_positions[:, :-1]], axis=1)
+    is_same_doc = block_positions == (prior_block_positions + compress_rate)
+
     compressed, next_prior_kv, next_prior_gate = csa_overlap_pooling(
-        chunk_kv_reshaped, chunk_gate_reshaped, kv_norm, head_dim, prior_kv, prior_gate
+        chunk_kv_reshaped, chunk_gate_reshaped, kv_norm, head_dim, prior_kv, prior_gate, is_same_doc=is_same_doc
     )
     compressed_len = compressed.shape[1]
-
-    positions = jnp.arange(compressed_len) * compress_rate + position_ids[:, 0:1]
+    positions = position_ids[:, :usable:compress_rate]
     compressed = rotary_emb(compressed, positions, unsqueeze_dim=None)
   else:
     compressed = jnp.zeros((batch_size, 0, head_dim), dtype=dtype)
@@ -584,11 +603,9 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       return compressed_kv, compressed_mask
 
     # --- PREFILL CHUNKING & PRIMING ---
-    # Truncate sequence to the nearest multiple of the compression rate
     usable = (seq_len // self.compress_rate) * self.compress_rate
     chunk_kv = kv[:, :usable]
     chunk_gate = gate[:, :usable]
-    first_window_position = position_ids[:, 0:1]
 
     # Process overlapping windows if there is enough sequence length
     if chunk_kv.shape[1] > 0:
@@ -605,7 +622,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       compressed = self.kv_norm(jnp.sum(chunk_kv * gate_weights, axis=2))
 
       # Calculate positions for the compressed blocks
-      positions = jnp.arange(n_windows) * self.compress_rate + first_window_position
+      positions = position_ids[:, : usable : self.compress_rate]
 
       # Apply Rotary Positional Embeddings to the pooled representations
       # compressed is [batch, n_windows, head_dim]
@@ -637,9 +654,9 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       return compressed_kv, compressed_mask
 
     # Construct a causal mask preventing early queries from attending to future compressed blocks
-    entry_indices = jnp.arange(compressed_len)
-    causal_threshold = (position_ids + 1) // self.compress_rate
-    future_mask = entry_indices[None, None, None, :] >= jnp.expand_dims(causal_threshold, axis=(1, 3))
+    usable_len = compressed_len * self.compress_rate
+    block_positions = position_ids[:, : usable_len : self.compress_rate]
+    future_mask = (block_positions[:, None, None, :] + self.compress_rate) > (position_ids[:, None, :, None] + 1)
     compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0).astype(self.dtype)
 
     return compressed_kv, compressed_causal_mask
@@ -876,18 +893,21 @@ class DeepseekV4Indexer(nnx.Module):
 
     # --- ONLY RUN MATHEMATICAL CAUSAL MASK IN PREFILL/TRAIN ---
     if future_mask is None:
-      causal_threshold = (position_ids + 1) // self.compress_rate
-      entry_indices_mask = jnp.arange(compressed_len)
-      future_mask = entry_indices_mask[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
+      usable_len = compressed_len * self.compress_rate
+      block_positions = position_ids[:, : usable_len : self.compress_rate]
+      future_mask = (block_positions[:, None, :] + self.compress_rate) > (position_ids[:, :, None] + 1)
 
     # Apply the mask to the scores
     index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
+    combined_invalid = future_mask
     if attention_mask is not None:
-      index_scores += attention_mask[:, :, :compressed_len]
+      att_m = attention_mask[:, :, :compressed_len]
+      index_scores += att_m
+      combined_invalid = combined_invalid | (att_m < -100.0)
 
     top_k_indices = jax.lax.top_k(index_scores, k)[1]
-    invalid = jnp.take_along_axis(future_mask, top_k_indices, axis=-1)
+    invalid = jnp.take_along_axis(combined_invalid, top_k_indices, axis=-1)
 
     final_indices = jnp.where(invalid, jnp.full_like(top_k_indices, -1), top_k_indices)
 
@@ -1501,14 +1521,33 @@ class CompressedAttention(Attention):
     compressed_kv = None
     compressed_mask = None
     compressed_segment_mask = None
+    decoder_segment_ids_kv = decoder_segment_ids
+    compressed_segment_ids = None
 
     if decoder_segment_ids is not None and self.compress_ratio > 0:
-      # Generate the standard segment mask
-      segment_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
-      segment_mask_additive = jnp.where(segment_mask, 0.0, DEFAULT_MASK_VALUE)
-      # Downsample the kv dimension
       compress_rate = self.compress_ratio
-      compressed_segment_mask = segment_mask_additive[:, :, ::compress_rate]
+      num_blocks = inputs_kv.shape[1] // compress_rate
+      usable = num_blocks * compress_rate
+      if decoder_segment_ids.shape[1] < usable:
+        pad_seg = usable - decoder_segment_ids.shape[1]
+        last_seg = decoder_segment_ids[:, -1:]
+        pad_block = jnp.repeat(last_seg, pad_seg, axis=1)
+        padded_seg_ids = jnp.concatenate([decoder_segment_ids, pad_block], axis=1)
+      else:
+        padded_seg_ids = decoder_segment_ids[:, :usable]
+
+      chunked_segment_ids = padded_seg_ids.reshape((decoder_segment_ids.shape[0], num_blocks, compress_rate))
+      min_seg = jnp.min(chunked_segment_ids, axis=-1)
+      max_seg = jnp.max(chunked_segment_ids, axis=-1)
+      is_valid_window = min_seg == max_seg
+
+      compressed_segment_ids = jnp.where(is_valid_window, min_seg, -1)
+      decoder_segment_ids_kv = jnp.concatenate([decoder_segment_ids, compressed_segment_ids], axis=1)
+
+      valid_comp_seg = (decoder_segment_ids[:, :, None] == compressed_segment_ids[:, None, :]) & (
+          compressed_segment_ids[:, None, :] >= 0
+      )
+      compressed_segment_mask = jnp.where(valid_comp_seg, 0.0, DEFAULT_MASK_VALUE)
 
     # Route to the appropriate compressor depending on the layer's role in the architecture
     if self.compress_ratio > 4:
@@ -1534,9 +1573,32 @@ class CompressedAttention(Attention):
           compressed_segment_mask[:, :, : compressed_mask.shape[-1]], axis=1
       )
 
-    # Note: Unlike standard pre-attention concatenation (extending local KV tensors with compressed blocks),
-    # compressed_kv is passed separately to attention_op to support custom kernels and decoding caching.
     kv = checkpoint_name(kv, "kv_proj")
+
+    pad_kv_total = 0
+    unpadded_kv = jnp.concatenate([kv, compressed_kv], axis=1) if compressed_kv is not None else kv
+
+    # Pad total KV length to tile size multiple (config.sa_block_kv) for SPMD sequence divisibility and
+    # Tokamax dynamic splash tile boundary alignment. Note: Tokamax kernel inside AttentionOp additionally
+    # sets inner block size as min(block_kv, key_len) during kernel invocation.
+    if self.attention_kernel == "flash":
+      total_kv_len = kv.shape[1] + (compressed_kv.shape[1] if compressed_kv is not None else 0)
+      block_size = self.config.sa_block_kv
+      pad_kv_total = (block_size - (total_kv_len % block_size)) % block_size
+
+      if pad_kv_total > 0:
+        if compressed_kv is not None:
+          # Prepend padding to the compressed blocks so they remain at the end of the sequence
+          compressed_kv = jnp.pad(compressed_kv, ((0, 0), (pad_kv_total, 0), (0, 0), (0, 0)))
+
+          if decoder_segment_ids is not None and compressed_segment_ids is not None:
+            comp_seg_padded = jnp.pad(compressed_segment_ids, ((0, 0), (pad_kv_total, 0)), constant_values=-1)
+            decoder_segment_ids_kv = jnp.concatenate([decoder_segment_ids, comp_seg_padded], axis=1)
+        else:
+          # Fallback: Pad at the end if no compressed blocks exist
+          kv = jnp.pad(kv, ((0, 0), (0, pad_kv_total), (0, 0), (0, 0)))
+          if decoder_segment_ids_kv is not None:
+            decoder_segment_ids_kv = jnp.pad(decoder_segment_ids_kv, ((0, 0), (0, pad_kv_total)), constant_values=-1)
 
     # Prepare the mask shape for the underlying AttentionOp
     if compressed_mask is not None:
@@ -1546,7 +1608,25 @@ class CompressedAttention(Attention):
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
       q = q * self.query_pre_attn_scalar
 
-    # Compute Attention (Now safely passing kv_cache so the kernel doesn't assert!)
+    # Build indexer mask explicitly for tokamax splash kernel
+    indexer_mask = None
+    if self.attention_kernel == "flash" and compressed_mask is not None:
+      indexer_mask = self.attention_op.generate_attention_mask(
+          q,
+          unpadded_kv,
+          decoder_segment_ids,
+          model_mode,
+          compressed_mask=compressed_mask,
+          pad_kv_total=pad_kv_total,
+          decoder_segment_ids_kv=decoder_segment_ids_kv,
+      )
+
+      if indexer_mask is not None:
+        # Extract single KV head and Query-per-KV head group axes [batch, 1, 1, Q, KV] -> [batch, Q, KV]
+        indexer_mask = indexer_mask[:, 0, 0, :, :]
+
+    # Compute Attention
+    # -> [batch, q_length, num_query_heads, head_dim]
     attn_out = self.attention_op(
         q,
         kv,
@@ -1558,6 +1638,8 @@ class CompressedAttention(Attention):
         compressed_mask=compressed_mask,
         compressed_kv=compressed_kv,
         cached_values=current_kv_cache,
+        indexer_mask=indexer_mask,
+        decoder_segment_ids_kv=decoder_segment_ids_kv,
     )
 
     # Reverse RoPE on Values

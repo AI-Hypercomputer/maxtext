@@ -44,6 +44,7 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
 )
 from maxtext.layers.attention_mla import MLA
+from maxtext.layers.attention_compressed import CompressedAttention
 from maxtext.layers import attention_op
 from maxtext.layers.attention_op import (
     AttentionOp,
@@ -4738,6 +4739,309 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     )
     self.assertEqual(mask_none.ndim, 4)
     self.assertEqual(mask_none.shape[-1], kv_len)
+
+
+class CompressedAttentionTest(parameterized.TestCase):
+  """Parity and compilation tests for CompressedAttention (DeepSeek-V4)."""
+
+  def setUp(self):
+    """Setup test dependencies and configuration."""
+    super().setUp()
+    if not is_decoupled():
+      jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+
+  @parameterized.named_parameters(
+      {"testcase_name": "csa_ratio4_dot_product", "compress_ratio": 4, "attention_kernel": "dot_product"},
+      {"testcase_name": "hca_ratio128_dot_product", "compress_ratio": 128, "attention_kernel": "dot_product"},
+  )
+  def test_compressed_attention_run(self, compress_ratio, attention_kernel):
+    self._run_compressed_attention(compress_ratio, attention_kernel)
+
+  @parameterized.named_parameters(
+      {"testcase_name": "csa_ratio4_flash", "compress_ratio": 4, "attention_kernel": "flash"},
+      {"testcase_name": "hca_ratio128_flash", "compress_ratio": 128, "attention_kernel": "flash"},
+  )
+  @pytest.mark.tpu_only
+  def test_compressed_attention_flash(self, compress_ratio, attention_kernel):
+    self._run_compressed_attention(compress_ratio, attention_kernel)
+
+  @parameterized.named_parameters(
+      {"testcase_name": "csa_ratio4", "compress_ratio": 4},
+      {"testcase_name": "hca_ratio128", "compress_ratio": 128},
+  )
+  @pytest.mark.tpu_only
+  def test_compressed_attention_flash_vs_dot_product(self, compress_ratio):
+    """Direct forward-value numerical equivalence between dot_product and flash attention."""
+    out_dot = self._run_compressed_attention(compress_ratio, "dot_product")
+    out_flash = self._run_compressed_attention(compress_ratio, "flash")
+    np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
+
+  def _get_test_config(self, max_target_length, compress_ratio, attention_kernel):
+    """Initializes and returns a MaxTextConfig for document packing tests."""
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test_packing_equivalence",
+        "enable_checkpointing": False,
+        "ici_fsdp_parallelism": 1,
+        "ici_data_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "ici_autoregressive_parallelism": 1,
+        "max_target_length": max_target_length,
+        "max_prefill_predict_length": max_target_length,
+        "attention_type": AttentionType.COMPRESSED.value,
+        "head_dim": 128,
+        "q_lora_rank": 256,
+        "kv_lora_rank": 256,
+        "dtype": "float32",
+        "use_tokamax_splash": True,
+        "o_groups": 2,
+        "o_lora_rank": 256,
+        "compressed_rope_max_timescale": 160000,
+        "rope_max_timescale": 10000,
+        "qk_rope_head_dim": 64,
+        "base_num_kv_heads": 1,
+        "base_num_query_heads": 16,
+    }
+    return pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **config_arguments,
+    )
+
+  def _create_compressed_attention_layer(self, cfg, compress_ratio, attention_kernel):
+    """Instantiates a CompressedAttention layer with test configuration."""
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    return CompressedAttention(
+        config=cfg,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        head_dim=cfg.head_dim,
+        inputs_q_shape=(cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim),
+        inputs_kv_shape=(cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim),
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        mesh=mesh,
+        attention_kernel=attention_kernel,
+        dtype=cfg.dtype,
+        dropout_rate=cfg.dropout_rate,
+        attention_type=AttentionType(cfg.attention_type),
+        q_lora_rank=cfg.q_lora_rank,
+        compress_ratio=compress_ratio,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "csa_dot_product",
+          "compress_ratio": 4,
+          "attention_kernel": "dot_product",
+          "l1": 32,
+          "l2": 32,
+      },
+      {
+          "testcase_name": "csa_flash",
+          "compress_ratio": 4,
+          "attention_kernel": "flash",
+          "l1": 64,
+          "l2": 64,
+      },
+      {
+          "testcase_name": "hca_dot_product",
+          "compress_ratio": 128,
+          "attention_kernel": "dot_product",
+          "l1": 128,
+          "l2": 128,
+      },
+      {
+          "testcase_name": "hca_flash",
+          "compress_ratio": 128,
+          "attention_kernel": "flash",
+          "l1": 256,
+          "l2": 256,
+      },
+  )
+  @pytest.mark.tpu_only
+  def test_packed_vs_unpacked_equivalence(self, compress_ratio, attention_kernel, l1, l2):
+    """Asserts bitwise/numerical equivalence between packed and independent unpacked forward passes."""
+    total_len = l1 + l2
+
+    cfg = self._get_test_config(
+        max_target_length=total_len,
+        compress_ratio=compress_ratio,
+        attention_kernel=attention_kernel,
+    )
+    attn = self._create_compressed_attention_layer(cfg, compress_ratio=compress_ratio, attention_kernel=attention_kernel)
+    batch_size = cfg.global_batch_size_to_train_on
+
+    # Generate distinct random tokens for Document 1 and Document 2
+    key1, key2 = jax.random.split(jax.random.PRNGKey(42))
+    x1 = jax.random.normal(key1, (batch_size, l1, cfg.base_emb_dim))
+    x2 = jax.random.normal(key2, (batch_size, l2, cfg.base_emb_dim))
+
+    pos1 = jnp.broadcast_to(jnp.arange(l1, dtype=jnp.int32)[None, :], (batch_size, l1))
+    pos2 = jnp.broadcast_to(jnp.arange(l2, dtype=jnp.int32)[None, :], (batch_size, l2))
+    seg1 = jnp.ones((batch_size, l1), dtype=jnp.int32)
+    seg2 = jnp.ones((batch_size, l2), dtype=jnp.int32)
+
+    # --- 1. UNPACKED (INDEPENDENT) PASSES ---
+    out1_unpacked, _ = attn(
+        x1,
+        x1,
+        decoder_segment_ids=seg1,
+        inputs_positions=pos1,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    out2_unpacked, _ = attn(
+        x2,
+        x2,
+        decoder_segment_ids=seg2,
+        inputs_positions=pos2,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    expected_unpacked = jnp.concatenate([out1_unpacked, out2_unpacked], axis=1)  # [B, L1 + L2, D]
+
+    # --- 2. PACKED (CONCATENATED) PASS ---
+    x_packed = jnp.concatenate([x1, x2], axis=1)
+    pos_packed = jnp.concatenate([pos1, pos2], axis=1)
+    seg_packed = jnp.concatenate([jnp.full_like(seg1, 1), jnp.full_like(seg2, 2)], axis=1)
+
+    out_packed, _ = attn(
+        x_packed,
+        x_packed,
+        decoder_segment_ids=seg_packed,
+        inputs_positions=pos_packed,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    # --- 3. ASSERT EXACT NUMERICAL EQUIVALENCE ---
+    # Document 1 outputs must match
+    np.testing.assert_allclose(
+        np.array(out_packed[:, :l1, :]),
+        np.array(out1_unpacked),
+        rtol=5e-3,
+        atol=5e-3,
+        err_msg="Document 1 output in packed sequence does not match unpacked execution.",
+    )
+
+    # Document 2 outputs must match
+    np.testing.assert_allclose(
+        np.array(out_packed[:, l1:, :]),
+        np.array(out2_unpacked),
+        rtol=5e-3,
+        atol=5e-3,
+        err_msg="Document 2 output in packed sequence does not match unpacked execution.",
+    )
+
+    # Full concatenated sequence must match
+    np.testing.assert_allclose(
+        np.array(out_packed),
+        np.array(expected_unpacked),
+        rtol=5e-3,
+        atol=5e-3,
+    )
+
+    # --- 4. ADVERSARIAL LEAKAGE CHECK ---
+    # Mutating Document 1 by +1000.0 must have zero effect on Document 2 in the packed pass
+    x_packed_corrupted = x_packed.at[:, :l1, :].set(x_packed[:, :l1, :] + 1000.0)
+    out_packed_corrupted, _ = attn(
+        x_packed_corrupted,
+        x_packed_corrupted,
+        decoder_segment_ids=seg_packed,
+        inputs_positions=pos_packed,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    np.testing.assert_allclose(
+        np.array(out_packed_corrupted[:, l1:, :]),
+        np.array(out2_unpacked),
+        rtol=5e-3,
+        atol=5e-3,
+        err_msg="Adversarial corruption in Doc 1 leaked into Doc 2 in packed sequence.",
+    )
+
+  def _run_compressed_attention(self, compress_ratio, attention_kernel):
+    """Runs CompressedAttention forward pass with specified compression ratio and kernel."""
+    # Setup test config
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test_compressed",
+        "enable_checkpointing": False,
+        "ici_fsdp_parallelism": 1,
+        "ici_data_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "ici_autoregressive_parallelism": 1,
+        "max_target_length": 512,
+        "max_prefill_predict_length": 512,
+        "attention_type": AttentionType.COMPRESSED.value,
+        "head_dim": 128,
+        "q_lora_rank": 256,
+        "kv_lora_rank": 256,
+        "dtype": "float32",
+        "use_tokamax_splash": True,
+        "o_groups": 2,
+        "o_lora_rank": 256,
+        "compressed_rope_max_timescale": 160000,
+        "rope_max_timescale": 10000,
+        "qk_rope_head_dim": 64,
+        "base_num_kv_heads": 1,
+        "base_num_query_heads": 16,
+    }
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **config_arguments,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    batch_size = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    embed_dim = cfg.base_emb_dim
+
+    # Inputs shape: [batch, seq_len, embed_dim]
+    lnx = jax.random.normal(
+        jax.random.PRNGKey(0),
+        shape=(batch_size, seq_len, embed_dim),
+        dtype=jnp.float32,
+    )
+    decoder_positions = jnp.stack([jnp.arange(seq_len, dtype=jnp.int32) for _ in range(batch_size)])
+    decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+    # Instantiate CompressedAttention
+    attn = CompressedAttention(
+        config=cfg,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        head_dim=cfg.head_dim,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        mesh=mesh,
+        attention_kernel=attention_kernel,
+        dtype=cfg.dtype,
+        dropout_rate=cfg.dropout_rate,
+        attention_type=AttentionType(cfg.attention_type),
+        q_lora_rank=cfg.q_lora_rank,
+        compress_ratio=compress_ratio,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+
+    # Run forward pass (train mode)
+    output, _ = attn(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertEqual(output.shape, (batch_size, seq_len, embed_dim))
+    return output
 
 
 class KVHeadShardingTest(parameterized.TestCase):
