@@ -58,7 +58,9 @@ XLA_FLAGS=" \
   --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
   --xla_tpu_enable_3d_reduce_scatter_decomposer=false "
 
-CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && export LIBTPU_INIT_ARGS='${XLA_FLAGS}' && cd /app/src/ && python3 maxtext/trainers/pre_train/train.py \
+TC_CMD="(for iface in \$(ip -o link show | awk -F': ' '{print \$2}' | awk -F'@' '{print \$1}' | grep -E '^eth|^ens'); do tc qdisc replace dev \$iface root tbf rate 10gbit burst 32mbit latency 50ms 2>/dev/null || tc qdisc add dev \$iface root tbf rate 10gbit burst 32mbit latency 50ms 2>/dev/null || true; done; tc qdisc show || true)"
+
+CMD="${TC_CMD} && export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && export LIBTPU_INIT_ARGS='${XLA_FLAGS}' && cd /app/src/ && python3 maxtext/trainers/pre_train/train.py \
              maxtext/configs/base.yml \
              run_name=${RUNNAME} \
              save_config_to_gcs=true \

@@ -27,7 +27,7 @@ DILOCO_COMM_OVERLAP_ALPHA=0.0
 MODEL_NAME="qwen3-8b"
 PER_DEVICE_BATCH_SIZE=8
 MAX_TARGET_LENGTH=2048
-STEPS=160
+STEPS=200
 
 XLA_FLAGS=" \
   --xla_tpu_scoped_vmem_limit_kib=65536 \
@@ -60,7 +60,9 @@ XLA_FLAGS=" \
   --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
   --xla_tpu_enable_3d_reduce_scatter_decomposer=false "
 
-CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && export LIBTPU_INIT_ARGS='${XLA_FLAGS}' && cd /app/src/ && python3 maxtext/trainers/pre_train/train.py \
+TC_CMD="(for iface in \$(ip -o link show | awk -F': ' '{print \$2}' | awk -F'@' '{print \$1}' | grep -E '^eth|^ens'); do tc qdisc replace dev \$iface root tbf rate 10gbit burst 32mbit latency 50ms 2>/dev/null || tc qdisc add dev \$iface root tbf rate 10gbit burst 32mbit latency 50ms 2>/dev/null || true; done; tc qdisc show || true)"
+
+CMD="${TC_CMD} && export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && export LIBTPU_INIT_ARGS='${XLA_FLAGS}' && cd /app/src/ && python3 maxtext/trainers/pre_train/train.py \
              maxtext/configs/base.yml \
              run_name=${RUNNAME} \
              save_config_to_gcs=true \
@@ -81,13 +83,6 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && 
              pure_nnx=true \
              enable_checkpointing=false \
              log_period=20 \
-             profiler=xplane \
-             skip_first_n_steps_for_profiler=100 \
-             profiler_steps=50 \
-             upload_all_profiler_results=true \
-             enable_tpu_profiling_options=true \
-             tpu_num_chips_to_profile_per_task=4 \
-             profile_cleanly=true \
              num_diloco_fragments=${DILOCO_NUM_FRAGMENTS} \
              use_sequential_layers=${DILOCO_USE_SEQUENTIAL_LAYERS} \
              num_communication_overlapping_steps=${DILOCO_NUM_COMM_OVERLAP_STEPS} \
