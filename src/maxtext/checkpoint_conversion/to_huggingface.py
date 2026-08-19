@@ -66,11 +66,12 @@ Example Usage:
     scan_layers=True
 """
 
+import gc
+import os
+import time
+from typing import Sequence
 import jax
 import jax.numpy as jnp
-import os
-from typing import Sequence
-import time
 
 from transformers import AutoTokenizer, AutoProcessor
 
@@ -403,15 +404,21 @@ def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, para
   processed_params_list = []
   lora_scaling = config.lora.lora_alpha / config.lora.lora_rank if config.lora.lora_rank > 0 else 1.0
   for key in MemoryMonitorTqdm(filtered_map_keys, leave=True):
-    weight = [state_dict[subkey] for subkey in key] if isinstance(key, tuple) else state_dict.get(key)
-    if weight is not None and not isinstance(key, tuple):
+    if isinstance(key, tuple):
+      weight = [state_dict.pop(subkey, None) for subkey in key]
+      delta = None
+    else:
       delta = _get_lora_delta(key, state_dict, lora_scaling)
-      if delta is not None:
+      weight = state_dict.pop(key, None)
+      if weight is not None and delta is not None:
         if delta.shape != weight.shape and delta.size == weight.size:
           delta = delta.reshape(weight.shape)
         weight = (jnp.asarray(weight, dtype=jnp.float32) + delta).astype(weight.dtype)
     if weight is not None:
       processed_params_list.extend(process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config))
+      del weight
+      del delta
+      gc.collect()
   return dict(processed_params_list)
 
 

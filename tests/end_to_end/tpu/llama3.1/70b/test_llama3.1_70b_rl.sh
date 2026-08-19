@@ -21,8 +21,7 @@ use_pathways=${2:-false}
 MODEL_NAME='llama3.1-70b'
 
 # Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you have the scanned and unscanned checkpoints stored
-BASE_OUTPUT_DIRECTORY=${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/${MODEL_NAME}}
-OUTPUT_DIR=${GCS_OUTPUT:-${BASE_OUTPUT_DIRECTORY}}
+BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
@@ -39,7 +38,7 @@ python3 -m maxtext.inference.vllm_decode \
 
 # Step 2: Run RL on the converted checkpoint
 python3 -m maxtext.trainers.post_train.rl.train_rl \
-    base_output_directory=${OUTPUT_DIR}/rl \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     run_name=${run_id} rl.loss_algo='grpo' scan_layers=true \
     num_batches=2 batch_size=1 num_test_batches=2 \
@@ -55,7 +54,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 # Step 3: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${OUTPUT_DIR}/rl/${run_id}/checkpoints/actor/2/model_params \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.6 \
