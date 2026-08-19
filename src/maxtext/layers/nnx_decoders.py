@@ -1762,7 +1762,6 @@ class NNXDecoder(nnx.Module):
         )
       elif cfg.scan_layers:
         if self.is_deepseek:
-
           if cfg.engram_layers:
             common_kwargs = {
                 "layer_kwargs": layer_kwargs,
@@ -1921,9 +1920,14 @@ class NNXDecoder(nnx.Module):
 
           graphdef, state = nnx.split(layer)
           if kv_caches is not None:
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5) and cfg.attention not in (
-                "vllm_rpa",
-                "vllm_batched_rpa",
+            if (
+                isinstance(kv_caches, dict)
+                and cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+                and cfg.attention
+                not in (
+                    "vllm_rpa",
+                    "vllm_batched_rpa",
+                )
             ):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_cache = (
@@ -1932,6 +1936,8 @@ class NNXDecoder(nnx.Module):
                 )
               else:
                 kv_cache = None
+            elif isinstance(kv_caches, dict):
+              kv_cache = kv_caches.get(lyr, None)
             else:
               kv_cache = kv_caches[lyr]
           else:
@@ -1962,9 +1968,14 @@ class NNXDecoder(nnx.Module):
             nnx.update(layer, new_state)
 
           if kv_caches is not None and kv_cache is not None:
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5) and cfg.attention not in (
-                "vllm_rpa",
-                "vllm_batched_rpa",
+            if (
+                isinstance(kv_caches, dict)
+                and cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+                and cfg.attention
+                not in (
+                    "vllm_rpa",
+                    "vllm_batched_rpa",
+                )
             ):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_caches["key_cache"][lyr] = kv_cache[0]

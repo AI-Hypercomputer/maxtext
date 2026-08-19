@@ -2405,6 +2405,32 @@ class VLLM(BaseModel):
   )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
+  use_weight_converter: bool = Field(
+      False,
+      description=(
+          "Use an explicit weight converter for trainer->rollout weight sync instead of "
+          "the legacy transfer_state_directly / transfer_state_with_mappings paths."
+      ),
+  )
+  weight_sync_debug: bool = Field(
+      False,
+      description=(
+          "Log the device placement of every operand during trainer->rollout weight "
+          "conversion, and barrier between conversion steps so a device or sharding "
+          "failure names the parameter that caused it. Serializes the sync; use only "
+          "when debugging a weight-sync crash."
+      ),
+  )
+  log_weight_sync_time: bool = Field(
+      False,
+      description=(
+          "Log the wall time of every trainer->rollout weight sync, blocking on the "
+          "rollout state so the number is execution rather than dispatch. Sync 0 is the "
+          "initial load_checkpoint and pays XLA compilation; syncs 1+ reuse those "
+          "executables, so the gap between them is how much of a sync is compilation "
+          "rather than data movement. Adds one barrier per sync."
+      ),
+  )
   vllm_load_format: str = Field(
       "dummy",
       description="Weight load format for vLLM in converter validation. Options:'auto', 'dummy'.",
@@ -4324,17 +4350,20 @@ class RLConfig(
     ModelArchitecture,
     MTP,
     MoBa,
-    # Advanced Architectures, Tuning, and Optimizers
+    MlaAttention,
+    CompressedAttention,
+    AttentionIndexer,
+    SplashAttention,
+    Qwen3Next,
+    MultimodalGeneral,
     Muon,
     FineTuning,
     Distillation,
-    # Datasets and Loading Compatibility
     DatasetGeneral,
     TfdsDataset,
     HfDataset,
     GrainDataset,
     OlmoGrainDataset,
-    # Inference, Checkpointing, and Monitoring
     EmergencyCheckpointing,
     ElasticTraining,
     InferenceServer,
@@ -4343,15 +4372,12 @@ class RLConfig(
     Goodput,
     GcpMonitoring,
     ManagedMLDiagnostics,
-    # Positional Embeddings
     PositionalEmbedding,
     Rope,
     YarnRope,
-    # Mixture of Experts
     MoEGeneral,
     MoEKernels,
     DeepSeekMoE,
-    # General MaxText Configs
     RunInfo,
     Checkpointing,
     OrbaxStorage,
@@ -4359,23 +4385,17 @@ class RLConfig(
     Tokenizer,
     AdamW,
     Optimizer,
+    TrainingLoop,
     Quantization,
-    MultimodalGeneral,
     VisionTower,
     VisionProjector,
     AudioEncoder,
-    MlaAttention,
-    CompressedAttention,
-    AttentionIndexer,
-    SplashAttention,
-    Qwen3Next,
-    # Debugging, Profiling, and Telemetry
-    AOT,
     DevelopmentAndDebugging,
     Profiling,
+    AOT,
     Metrics,
     Tensorboard,
-    # For compatibility with trainer in post_train/rl
+    DerivedValues,
     RL,
     RLCluster,
     RLDataset,
@@ -4383,8 +4403,6 @@ class RLConfig(
     RLReward,
     RLSpecialTokens,
     VLLM,
-    TrainingLoop,
-    DerivedValues,
 ):
   """
   Configuration for Reinforcement Learning in MaxText.
