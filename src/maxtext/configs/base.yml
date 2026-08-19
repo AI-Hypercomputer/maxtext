@@ -457,6 +457,9 @@ o_lora_rank: 0 # Output LoRA rank for Compressed Attention.
 o_groups: 0 # Output groups for Compressed Attention.
 compress_ratios: [] # Per-layer compression ratios (0, 4, 128, etc).
 compressed_rope_max_timescale: 160_000 # If positive, used for Compressed Sparse/Heavy Attention.
+# Route COMPRESSED and LOCAL_SLIDING train attention to tokamax splash on TPU.
+# Requires use_tokamax_splash: true.
+compressed_use_dynamic_splash: false
 
 # QK-Clip (Muon Clip) Configuration
 use_qk_clip: false  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)
