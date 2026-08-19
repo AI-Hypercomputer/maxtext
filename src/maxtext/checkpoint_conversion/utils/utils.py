@@ -33,6 +33,7 @@ import pathlib
 from etils import epath
 
 import jax
+import jax.numpy as jnp
 from jax import tree
 from jax.experimental import multihost_utils
 from jaxtyping import Array
@@ -882,7 +883,20 @@ def load_orbax_checkpoint(config) -> dict:
   def create_restore_args(tree_metadata):
     """Create restore args for unsharded restoration."""
     if hasattr(tree_metadata, "shape"):
-      return ocp.ArrayRestoreArgs(sharding=jax.sharding.NamedSharding(single_device_mesh, jax.sharding.PartitionSpec()))
+      restore_dtype = None
+      if hasattr(tree_metadata, "dtype") and tree_metadata.dtype is not None:
+        try:
+          orig_dtype = jnp.dtype(tree_metadata.dtype)
+          if jnp.issubdtype(orig_dtype, jnp.floating) and getattr(config, "weight_dtype", None) is not None:
+            restore_dtype = jnp.dtype(config.weight_dtype)
+          else:
+            restore_dtype = orig_dtype
+        except (TypeError, ValueError):
+          restore_dtype = None
+      return ocp.ArrayRestoreArgs(
+          sharding=jax.sharding.NamedSharding(single_device_mesh, jax.sharding.PartitionSpec()),
+          dtype=restore_dtype,
+      )
     elif isinstance(tree_metadata, dict):
       return {k: create_restore_args(v) for k, v in tree_metadata.items()}
     else:
