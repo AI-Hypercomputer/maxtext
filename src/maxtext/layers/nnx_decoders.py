@@ -559,21 +559,21 @@ class NNXDecoder(nnx.Module):
     if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
       self.per_layer_embedder = gemma4_small.Gemma4SmallPLE(config=cfg, mesh=mesh, rngs=rngs)
 
-    layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
+    macro_block_ranges = gemma4_small.get_macro_block_ranges(cfg.num_decoder_layers, cfg.model_name)
     policy = self.get_remat_policy()
-    for lyr in range(cfg.num_decoder_layers):
-      layer = gemma4_small.Gemma4SmallScannableLayer(
+    for b_idx, (start_idx, end_idx) in enumerate(macro_block_ranges):
+      block = gemma4_small.Gemma4SmallScannableBlock(
           config=cfg,
           mesh=mesh,
           quant=self.quant,
           model_mode=self.model_mode,
-          attention_type=layer_types[lyr],
-          layer_idx=lyr,
+          start_layer_idx=start_idx,
+          num_of_layers=end_idx - start_idx,
           remat_policy_fn=policy,
           apply_internal_remat=True,
           rngs=rngs,
       )
-      setattr(self, f"layers_{lyr}", layer)
+      setattr(self, f"layers_block_{b_idx}", block)
 
   def _init_scanned_deepseek4(self, rngs):
     """Initializes DeepSeek V4 scanned layers: unrolls prefix hash layers and scans remaining full blocks."""
@@ -1139,7 +1139,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.GEMMA2: [gemma2.Gemma2DecoderLayer],
         DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],
         DecoderBlockType.GEMMA4: get_scannable(gemma4.Gemma4DecoderLayer, gemma4.Gemma4ScannableBlock),
-        DecoderBlockType.GEMMA4_SMALL: get_scannable(gemma4_small.Gemma4SmallDecoderLayer, gemma4_small.Gemma4SmallScannableLayer),
+        DecoderBlockType.GEMMA4_SMALL: get_scannable(gemma4_small.Gemma4SmallDecoderLayer, gemma4_small.Gemma4SmallScannableBlock),
         DecoderBlockType.GPT3: [gpt3.Gpt3DecoderLayer],
         DecoderBlockType.QWEN2: [qwen2.Qwen2DecoderLayer],
         DecoderBlockType.QWEN3: [qwen3.Qwen3DecoderLayer],
@@ -2277,26 +2277,29 @@ class NNXDecoder(nnx.Module):
     cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, num_kv_shared)
 
     if cfg.scan_layers:
-      for lyr in range(cfg.num_decoder_layers):
-        layer = getattr(self, f"layers_{lyr}")
-        donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
-        is_donor = gemma4_small.is_kv_donor_layer(lyr, layer_types, num_kv_shared)
-
-        shared_key = None
-        shared_value = None
-        if donor_idx is not None:
-          if donor_idx not in shared_kv_states:
+      macro_block_ranges = gemma4_small.get_macro_block_ranges(cfg.num_decoder_layers, cfg.model_name)
+      for b_idx, (start_idx, end_idx) in enumerate(macro_block_ranges):
+        block = getattr(self, f"layers_block_{b_idx}")
+        ext_donor_indices = gemma4_small.get_block_external_donor_indices(
+            start_idx, end_idx, layer_types, num_kv_shared
+        )
+        ext_donors = {}
+        for d_idx in ext_donor_indices:
+          if d_idx not in shared_kv_states:
             raise RuntimeError(
-                f"KV-shared layer {lyr} references donor {donor_idx} but no donor K/V "
-                f"have been recorded yet. This indicates the layer iteration order is wrong."
+                f"Macro-block [{start_idx}:{end_idx}] references external donor {d_idx} "
+                f"but no donor K/V have been recorded yet. This indicates the block iteration order is wrong."
             )
-          shared_key, shared_value = shared_kv_states[donor_idx]
+          ext_donors[d_idx] = shared_kv_states[d_idx]
 
-        ple_slice = per_layer_inputs[..., lyr, :] if per_layer_inputs is not None else None
-        cache_idx = cache_index_of[lyr]
-        kv_cache = kv_caches[cache_idx] if kv_caches is not None else None
+        block_ple = per_layer_inputs[..., start_idx:end_idx, :] if per_layer_inputs is not None else None
+        block_kv_caches = (
+            tuple(kv_caches[cache_index_of[lyr]] for lyr in range(start_idx, end_idx))
+            if kv_caches is not None
+            else None
+        )
 
-        new_y, updated_kv_cache, donor_kv_out = layer(
+        new_y, updated_block_kvs, new_donor_kvs = block(
             y,
             decoder_segment_ids,
             decoder_positions,
@@ -2305,18 +2308,21 @@ class NNXDecoder(nnx.Module):
             previous_chunk=previous_chunk,
             slot=slot,
             bidirectional_mask=bidirectional_mask_value,
-            kv_cache=kv_cache,
+            kv_cache=block_kv_caches,
             attention_metadata=attention_metadata,
-            per_layer_input=ple_slice,
-            shared_key=shared_key,
-            shared_value=shared_value,
+            per_layer_input=block_ple,
+            external_donors=ext_donors,
         )
-        y = new_y
-        if is_donor and donor_kv_out:
-          shared_kv_states[lyr] = donor_kv_out
 
-        if kv_caches is not None and updated_kv_cache is not None:
-          kv_caches[cache_idx] = updated_kv_cache
+        y = new_y
+        shared_kv_states.update(new_donor_kvs)
+
+        if kv_caches is not None and updated_block_kvs is not None:
+          for offset, lyr in enumerate(range(start_idx, end_idx)):
+            cache_idx = cache_index_of[lyr]
+            up_kv = updated_block_kvs[offset]
+            if up_kv is not None:
+              kv_caches[cache_idx] = up_kv
     else:
       macro_block_ranges = gemma4_small.get_macro_block_ranges(cfg.num_decoder_layers, cfg.model_name)
       global_remat_policy = self.get_remat_policy()
@@ -2489,6 +2495,7 @@ class NNXDecoder(nnx.Module):
       _append_scanned("scanned_blocks")  # Gemma 4
       _append_scanned("layers")
       _append_unscanned("layers")
+      _append_unscanned("layers_block")
 
       _append_scanned("layers_remainder")  # Gemma 3/4
 

@@ -529,8 +529,8 @@ Gemma4SmallDecoderLayerToLinen = nnx_wrappers.to_linen_class(
 from maxtext.utils import maxtext_utils
 
 
-class Gemma4SmallScannableLayer(nnx.Module):
-  """A scannable wrapper around a single Gemma4SmallDecoderLayer."""
+class Gemma4SmallScannableBlock(nnx.Module):
+  """A pattern-aligned repeatable block of Gemma 4 Small decoder layers."""
 
   def __init__(
       self,
@@ -539,37 +539,51 @@ class Gemma4SmallScannableLayer(nnx.Module):
       model_mode: str,
       rngs: nnx.Rngs,
       quant: None | Quant = None,
-      attention_type: AttentionType = AttentionType.LOCAL_SLIDING,
-      layer_idx: int = 0,
+      start_layer_idx: int = 0,
+      num_of_layers: int = 5,
       remat_policy_fn: Any = None,
       apply_internal_remat: bool = True,
   ):
+    """Initializes the Gemma4SmallScannableBlock.
+
+    Args:
+      config: The Config object with model hyperparameters.
+      mesh: The device mesh for distributed training.
+      model_mode: One of MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, or MODEL_MODE_AUTOREGRESSIVE.
+      rngs: The random number generators for initialization.
+      quant: The quantization configuration.
+      start_layer_idx: Starting decoder layer index for this macro-block.
+      num_of_layers: Number of layers in this macro-block.
+      remat_policy_fn: The resolved rematerialization policy function.
+      apply_internal_remat: When True, the block applies remat and a length-1 scan internally.
+    """
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
     self.quant = quant
-    self.attention_type = attention_type
-    self.layer_idx = layer_idx
+    self.rngs = rngs
+    self.start_layer_idx = start_layer_idx
+    self.num_of_layers = num_of_layers
     self.remat_policy_fn = remat_policy_fn
     self.apply_internal_remat = apply_internal_remat
 
-    self.layer = Gemma4SmallDecoderLayer(
-        config=config,
-        mesh=mesh,
-        model_mode=model_mode,
-        quant=quant,
-        rngs=rngs,
-        attention_type=attention_type,
-        layer_idx=layer_idx,
-    )
-
     num_layers = config.num_decoder_layers
     self.layer_types = build_layer_types(num_layers, config.model_name)
-    self.is_donor = is_kv_donor_layer(layer_idx, self.layer_types, config.num_kv_shared_layers)
-    self.is_shared = is_kv_shared_layer(layer_idx, num_layers, config.num_kv_shared_layers)
+    self.num_kv_shared = config.num_kv_shared_layers
 
-  def compute_shared_kv(self, inputs: jax.Array, decoder_positions: jax.Array) -> tuple[jax.Array, jax.Array]:
-    return self.layer.compute_shared_kv(inputs, decoder_positions)
+    for offset in range(num_of_layers):
+      lyr = start_layer_idx + offset
+      attention_type = self.layer_types[lyr]
+      layer = Gemma4SmallDecoderLayer(
+          config=config,
+          mesh=mesh,
+          model_mode=model_mode,
+          quant=quant,
+          rngs=rngs,
+          attention_type=attention_type,
+          layer_idx=lyr,
+      )
+      setattr(self, f"layers_{offset}", layer)
 
   def __call__(
       self,
@@ -585,43 +599,88 @@ class Gemma4SmallScannableLayer(nnx.Module):
       kv_cache=None,
       attention_metadata=None,
       per_layer_input: jax.Array | None = None,
-      shared_key: jax.Array | None = None,
-      shared_value: jax.Array | None = None,
+      external_donors: dict[int, tuple[jax.Array, jax.Array]] | None = None,
   ):
     cfg = self.config
-    graphdef_l, state_l = nnx.split(self.layer)
+    start_idx = self.start_layer_idx
+    num_of_layers = self.num_of_layers
+    layer_types = self.layer_types
+    num_kv_shared = self.num_kv_shared
 
-    def pure_layer_fn(graphdef_in, state_in, y_in, kv_c, ple_in, s_key_in, s_val_in):
-      l_merged = nnx.merge(graphdef_in, state_in)
-      out = l_merged(
-          y_in,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic=deterministic,
-          model_mode=model_mode,
-          previous_chunk=previous_chunk,
-          page_state=page_state,
-          slot=slot,
-          bidirectional_mask=bidirectional_mask,
-          kv_cache=kv_c,
-          attention_metadata=attention_metadata,
-          per_layer_input=ple_in,
-          shared_key=s_key_in,
-          shared_value=s_val_in,
-          extract_donor_kv=self.is_donor,
-      )
-      if self.is_donor:
-        new_y, new_kv, donor_kv_out = out
-      else:
-        if isinstance(out, tuple):
-          new_y = out[0]
-          new_kv = out[1] if len(out) > 1 else None
+    if num_of_layers == 0:
+      return inputs, (), {}
+
+    layers_tuple = tuple(getattr(self, f"layers_{i}") for i in range(num_of_layers))
+    graphdef_block, state_block = nnx.split(layers_tuple)
+
+    def pure_block_fn(graphdef_in, state_in, y_in, kvs_in, ple_in, ext_donors_in):
+      merged_layers = nnx.merge(graphdef_in, state_in)
+      local_shared = dict(ext_donors_in) if ext_donors_in is not None else {}
+      new_donor_kvs = {}
+      updated_block_kvs = []
+      curr_y = y_in
+
+      for offset, layer in enumerate(merged_layers):
+        lyr = start_idx + offset
+        donor_idx = kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
+        is_donor = is_kv_donor_layer(lyr, layer_types, num_kv_shared)
+
+        shared_key = None
+        shared_value = None
+        if donor_idx is not None:
+          if donor_idx not in local_shared:
+            raise RuntimeError(
+                f"KV-shared layer {lyr} references donor {donor_idx} but no donor K/V "
+                f"have been recorded yet. This indicates the block execution order is wrong."
+            )
+          shared_key, shared_value = local_shared[donor_idx]
+
+        if ple_in is not None:
+          if ple_in.shape[-2] == num_of_layers:
+            ple_slice = ple_in[..., offset, :]
+          else:
+            ple_slice = ple_in[..., lyr, :]
         else:
-          new_y = out
-          new_kv = None
-        donor_kv_out = ()
-      return new_y, new_kv, donor_kv_out, nnx.state(l_merged)
+          ple_slice = None
 
+        kv_c = kvs_in[offset] if kvs_in is not None else None
+
+        out = layer(
+            curr_y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            previous_chunk=previous_chunk,
+            page_state=page_state,
+            slot=slot,
+            bidirectional_mask=bidirectional_mask,
+            kv_cache=kv_c,
+            attention_metadata=attention_metadata,
+            per_layer_input=ple_slice,
+            shared_key=shared_key,
+            shared_value=shared_value,
+            extract_donor_kv=is_donor,
+        )
+
+        if is_donor:
+          curr_y, new_kv, donor_kv_out = out
+          local_shared[lyr] = donor_kv_out
+          new_donor_kvs[lyr] = donor_kv_out
+        else:
+          if isinstance(out, tuple):
+            curr_y = out[0]
+            new_kv = out[1] if len(out) > 1 else None
+          else:
+            curr_y = out
+            new_kv = None
+
+        updated_block_kvs.append(new_kv)
+
+      out_kvs = tuple(updated_block_kvs) if kvs_in is not None else None
+      return curr_y, out_kvs, new_donor_kvs, nnx.state(merged_layers)
+
+    remat_enabled = self.apply_internal_remat and cfg.remat_policy != "none"
     global_remat_policy = self.remat_policy_fn
     offload_names = maxtext_utils.get_save_and_offload_names(cfg)
     if offload_names[0] or offload_names[1]:
@@ -630,42 +689,43 @@ class Gemma4SmallScannableLayer(nnx.Module):
 
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
-    if self.apply_internal_remat and cfg.remat_policy != "none":
-      run_layer = jax.checkpoint(
-          pure_layer_fn,
+    if remat_enabled:
+      run_block = jax.checkpoint(
+          pure_block_fn,
           policy=global_remat_policy,
           prevent_cse=prevent_cse,
       )
     else:
-      run_layer = pure_layer_fn
+      run_block = pure_block_fn
 
     from jax.experimental import xla_metadata
     with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
       def scan_body(carry, _):
-        y_carry, kv_carry, state_carry = carry
-        new_y, new_kv, donor_kv_out, new_state = run_layer(
-            graphdef_l, state_carry, y_carry, kv_carry, per_layer_input, shared_key, shared_value
+        y_carry, kvs_carry, state_carry = carry
+        new_y, up_kvs, new_donors, new_state = run_block(
+            graphdef_block, state_carry, y_carry, kvs_carry, per_layer_input, external_donors
         )
-        return (new_y, new_kv, new_state), donor_kv_out
+        return (new_y, up_kvs, new_state), new_donors
 
       dummy_xs = jnp.zeros((1, 0))
-      (new_y, new_kv, new_state), donor_kv_ys = jax.lax.scan(
+      (new_y, updated_block_kvs, new_state), donor_ys = jax.lax.scan(
           scan_body,
-          (inputs, kv_cache, state_l),
+          (inputs, kv_cache, state_block),
           dummy_xs,
           length=1,
       )
 
-    nnx.update(self.layer, new_state)
+    nnx.update(layers_tuple, new_state)
 
-    donor_kv = ()
-    if self.is_donor:
-      donor_kv = jax.tree.map(lambda x: x[0], donor_kv_ys)
+    new_donor_kvs = jax.tree.map(lambda x: x[0], donor_ys)
 
-    return new_y, new_kv, donor_kv
+    return new_y, updated_block_kvs, new_donor_kvs
 
 
-Gemma4SmallScannableLayerToLinen = nnx_wrappers.to_linen_class(
-    Gemma4SmallScannableLayer,
+Gemma4SmallScannableBlockToLinen = nnx_wrappers.to_linen_class(
+    Gemma4SmallScannableBlock,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
+
+Gemma4SmallScannableLayer = Gemma4SmallScannableBlock
+Gemma4SmallScannableLayerToLinen = Gemma4SmallScannableBlockToLinen
