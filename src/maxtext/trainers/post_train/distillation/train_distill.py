@@ -43,7 +43,6 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
 import re
 import os
@@ -114,7 +113,10 @@ def get_distillation_optimizer(config, max_train_steps):
 
     # Apply Gradient Clipping
     if config.gradient_clipping_threshold > 0:
-      opt = optimizers.add_gradient_clipping(opt, config.gradient_clipping_threshold)
+      opt = optax.chain(
+          optax.clip_by_global_norm(max_norm=config.gradient_clipping_threshold),
+          opt,
+      )
     return opt
 
   # 3. Create Injectable Optimizer
@@ -274,7 +276,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   # Inherits _shard_optimizer from PeftTrainer.
 
-  def _train_step(self, model, optimizer, grad_accumulator, inputs, is_update_step=True, **kwargs):  # pyrefly: ignore[bad-override]
+  def _train_step(self, model, optimizer, inputs, grad_accumulator=None, **kwargs):  # pyrefly: ignore[bad-override]
     """Overrides the main JIT block to natively handle ModelBundle module.
 
     Uses jax.value_and_grad with explicit split/merge to avoid nesting
@@ -786,16 +788,7 @@ def train_distill(
     trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
 
     # 7. Create Iterator Wrappers (Use Utils)
-    # The trainer is managed externally, so Tunix does not enforce max_steps for us. Bound the
-    # batches instead: one training step consumes gradient_accumulation_steps of them, and a
-    # resumed run has already spent some.
-    grad_accum = train_config.get_with_default("gradient_accumulation_steps", 1)
-    iter_steps = getattr(trainer, "_iter_steps", 0)
-    if not isinstance(iter_steps, (int, float, np.integer)):
-      iter_steps = 0
-    batch_budget = max(0, student_config.steps * grad_accum - int(iter_steps))  # pylint: disable=protected-access
-    max_logging.log(f"Distillation will run at most {batch_budget} more batches ({student_config.steps} steps).")
-    train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter, max_batches=batch_budget)
+    train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
 
     eval_iter = None
     if raw_eval_iter is not None:
@@ -807,7 +800,7 @@ def train_distill(
     # 8. Train
     max_logging.log("Starting Distillation Training...")
     # Pass both iterators to the trainer
-    trainer.train(train_iter, eval_iter, cache_nnx_graph=True)
+    trainer.train(train_iter, eval_iter)
 
   if student_config.learn_to_init_mode:
     # If learn_to_init_mode is enabled, generate the final weights and update the model structure

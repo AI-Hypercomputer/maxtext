@@ -1,2 +1,5 @@
 .git
 maxtext_venv
+.venv
+local_logs
+scratch

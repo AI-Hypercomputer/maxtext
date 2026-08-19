@@ -70,7 +70,6 @@ from maxtext.utils import max_utils
 from maxtext.utils import max_logging
 # Placeholder: internal
 from maxtext.utils import maxtext_utils
-from maxtext.trainers.post_train import checkpointing as post_train_checkpointing
 from maxtext.utils import model_creation_utils
 
 
@@ -139,24 +138,26 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
               object.__setattr__(v, "_trace_state", tracers.TraceState())  # pylint: disable=protected-access
 
         out = loss_fn_ref(local_model, **inputs_kw)
-        # Capture updated RNG counters from local_model.
-        rng_state = nnx.state(local_model, nnx.RngState)
+        # Capture updated non-param state (e.g. RNG counters) from local_model.
+        _, _, new_rest = nnx.split(local_model, wrt, ...)
         if has_aux:
           loss, aux = out
-          return loss, (aux, rng_state)
+          return loss, (aux, new_rest)
         else:
-          return out, (None, rng_state)
+          return out, (None, new_rest)
 
       grad_fn = jax.value_and_grad(loss_wrapper, argnums=0, has_aux=True)
-      (out_val, (aux, new_rng_state)), grads = grad_fn(diff_params, rest, **inputs)
+      (out_val, (aux, new_rest)), grads = grad_fn(diff_params, rest, **inputs)
 
-      # Propagate updated RNG state back to model.
+      # Propagate updated non-param state (RNG counters, etc.) back to model.
+      # Fix flax.errors.TraceContextError when returning from jax.value_and_grad
+
       for _, v in nnx.iter_graph(model):
         if isinstance(v, nnx.Variable) and hasattr(v, "_trace_state"):
           if not v._trace_state.is_valid():  # pylint: disable=protected-access
             object.__setattr__(v, "_trace_state", tracers.TraceState())  # pylint: disable=protected-access
 
-      nnx.update(model, new_rng_state)
+      nnx.update(model, new_rest)
 
       # Handle gradient accumulation and conditional/direct optimizer update
       if not _uses_gradient_accumulation:
@@ -233,9 +234,7 @@ def get_tunix_config(mt_config):
       gradient_accumulation_steps=(
           mt_config.gradient_accumulation_steps if mt_config.gradient_accumulation_steps > 1 else None
       ),
-      # Checkpointing is handled by post_train.checkpointing, which writes MaxText's on-disk
-      # layout instead of Tunix's, so Tunix's own manager stays disabled.
-      checkpoint_root_directory=None,
+      checkpoint_root_directory=mt_config.checkpoint_dir,
       checkpointing_options=checkpointing_options,
       metrics_logging_options=metrics_logging_options,
       profiler_options=profiler_options,
@@ -306,7 +305,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
 
     if mt_config.gradient_clipping_threshold > 0:
-      optimizer = optimizers.add_gradient_clipping(optimizer, mt_config.gradient_clipping_threshold)
+      optimizer = optax.chain(
+          optax.clip_by_global_norm(max_norm=mt_config.gradient_clipping_threshold),
+          optimizer,
+      )
 
     with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
       training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
@@ -319,7 +321,6 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
       trainer.with_training_hooks(training_hooks)
       trainer.with_data_hooks(data_hooks)
       trainer = use_maxtext_loss_function(trainer, mt_config)
-      post_train_checkpointing.install(trainer, mt_config.checkpoint_dir, mt_config)
 
   return trainer, mesh
 
@@ -327,10 +328,14 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+    # Disable NNX graph caching for MoE models (where experts > 1) to allow
+    # necessary dynamic metadata synchronization during forward passes (e.g., in jax.lax.scan).
+    enable_nnx_cache = mt_config.num_experts <= 1
+
     trainer.train(
         trainer.data_hooks.train_data_iterator,
         trainer.data_hooks.eval_data_iterator,
-        cache_nnx_graph=True,
+        cache_nnx_graph=enable_nnx_cache,
     )
   return trainer
 

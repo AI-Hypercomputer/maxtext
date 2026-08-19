@@ -943,6 +943,10 @@ def from_pretrained(
 
   with mesh:
     if config.load_parameters_path:
+      load_path = epath.Path(config.load_parameters_path)
+      if (load_path / "model_params").exists():
+        load_path = load_path / "model_params"
+
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
@@ -957,8 +961,8 @@ def from_pretrained(
       # waste memory, we instead restore the params field of the checkpoint (which itself may be a dictionary
       #  containing a key named 'params').
 
-      # Get the structure of checkpoint in `config.load_parameters_path`
-      metadata = ckptr.metadata(config.load_parameters_path)
+      # Get the structure of checkpoint in `load_path`
+      metadata = ckptr.metadata(load_path)
       if metadata is None or metadata.item_metadata is None:
         max_logging.log(
             f"ERROR: No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
@@ -1126,7 +1130,7 @@ def from_pretrained(
       jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
       restored = ckptr.restore(
-          epath.Path(config.load_parameters_path),
+          load_path,
           item=item_to_restore,
           transforms={},
           restore_args=restore_args,
