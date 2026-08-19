@@ -594,42 +594,6 @@ def _run_learner_loop(
 
     last_log_time = [datetime.datetime.now()]
 
-    prefetch_queue = queue.Queue(maxsize=2)
-    prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"learner_{learner_idx}_prefetch")
-    prefetch_error = []
-
-    sync_receive_steps = [
-        completed_step
-        for completed_step in range(start_step + 1, learner_config.steps + 1)
-        if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0
-    ]
-
-    def _prefetch_producer():
-      try:
-        for completed_step in sync_receive_steps:
-          sync_step = completed_step - tau
-          frag_idx = ((sync_step) % period) // steps_between_syncs_plus_1
-
-          # 1. Receive host NumPy 1D dictionary from Syncer
-          received_host_packed = transport.recv_from_syncer(sync_step, frag_idx)
-
-          # 2. Asynchronously transfer 1D buffers to TPU submesh HBM
-          default_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
-            received_tpu_packed = {
-                dt: jax.device_put(arr, default_shd)
-                for dt, arr in received_host_packed.items()
-            }
-
-          # 3. Put pre-transferred TPU 1D buffers into bounded queue
-          prefetch_queue.put((sync_step, frag_idx, received_tpu_packed), timeout=300.0)
-          del received_host_packed
-      except Exception as ex:
-        max_logging.error(f"Learner {learner_idx} prefetch worker failed: {ex}")
-        prefetch_error.append(ex)
-
-    prefetch_executor.submit(_prefetch_producer)
-
     try:
       last_step_completion = datetime.datetime.now()
       for step in range(start_step, learner_config.steps):
@@ -669,8 +633,8 @@ def _run_learner_loop(
 
           completed_step = step + 1
 
+          # 1. Zero-Contention Direct 1D Fragment Extraction & Transport
           if completed_step > 0 and completed_step % steps_between_syncs_plus_1 == 0:
-            transport.check_d2h_errors()
             frag_idx = (completed_step % period) // steps_between_syncs_plus_1
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
@@ -680,18 +644,21 @@ def _run_learner_loop(
                 layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
                 frag_data = manipulator.dynamic_extract_scanned_fragment(params, layer_idx)
               packed_frag_data = _pack_fragment_1d(frag_data, frag_metadata[frag_idx])
-            transport.send_to_syncer_async(completed_step, frag_idx, packed_frag_data)
-            del frag_data, packed_frag_data
+              host_packed = {dt: np.array(arr, copy=True) for dt, arr in packed_frag_data.items()}
+            transport.send_to_syncer(completed_step, frag_idx, host_packed)
+            del frag_data, packed_frag_data, host_packed
 
+          # 2. Zero-Contention Direct 1D Fragment Receive & Fused JIT Apply
           if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
-            if prefetch_error:
-              raise prefetch_error[0]
-
             target_sync_step = completed_step - tau
-            sync_step, frag_idx, received_tpu_packed = prefetch_queue.get(timeout=300.0)
-            assert sync_step == target_sync_step, f"Prefetch step mismatch: expected {target_sync_step}, got {sync_step}"
-
+            sync_step = target_sync_step
+            frag_idx = (sync_step % period) // steps_between_syncs_plus_1
+            received_host_packed = transport.recv_from_syncer(sync_step, frag_idx)
+            default_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
+              received_tpu_packed = {
+                  dt: jax.device_put(arr, default_shd) for dt, arr in received_host_packed.items()
+              }
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
               if frag_idx == 0:
                 new_params = _fused_unpack_and_apply_flat_fragment_jit(
@@ -708,12 +675,12 @@ def _run_learner_loop(
               else:
                 state = state.replace(params=new_params)
 
-            del received_tpu_packed, new_params, params
+            del received_host_packed, received_tpu_packed, new_params, params
 
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
             checkpointing.maybe_save_checkpoint(checkpoint_manager, state, learner_config, data_iterator, step)
 
-          if step % 25 == 0:
+          if step > 0 and step % 100 == 0:
             gc.collect()
 
           eval_step_count = None
