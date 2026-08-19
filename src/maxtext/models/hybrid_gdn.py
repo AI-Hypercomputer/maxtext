@@ -95,8 +95,10 @@ def _pallas_gdn_bwd_kernel(
     k = k.astype(jnp.float32)
     v = v.astype(jnp.float32)
     if use_qk_norm_in_gdn:
-      q = q / (jnp.linalg.norm(q, axis=-1, keepdims=True) + 1e-6)
-      k = k / (jnp.linalg.norm(k, axis=-1, keepdims=True) + 1e-6)
+      from maxtext.layers.normalizations import l2norm
+
+      q = l2norm(q, dim=-1, eps=1e-6)
+      k = l2norm(k, dim=-1, eps=1e-6)
     scale = 1.0 / jnp.sqrt(kq_head_dim)
     q = q * scale
     b_val = b_val.astype(jnp.float32)
