@@ -41,6 +41,8 @@ from maxtext.layers.nnx_decoders import reshape_forced_routed_experts_for_scan
 from maxtext.models import models
 from maxtext.trainers.pre_train import train
 from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
 import pytest
 
@@ -495,24 +497,17 @@ class TrainerRouterReplayTest(unittest.TestCase):
         "forced_routed_experts": forced_experts,
     }
 
-    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
-    init_params_rng, init_dropout_rng = jax.random.split(rng)
-    params = model.init(
-        {"params": init_params_rng, "dropout": init_dropout_rng},
-        inputs,
-        positions,
-        segmentation,
-        enable_dropout=False,
-    )
-
-    loss, aux = train.loss_fn(
-        model,
-        cfg,
-        data_batch,
-        dropout_rng=init_dropout_rng,
-        params=params,
-        is_train=True,
-    )
+    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=rng)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
+      loss, aux = train.loss_fn(
+          model,
+          cfg,
+          data_batch,
+          dropout_rng=None,
+          params=None,
+          is_train=True,
+      )
 
     self.assertIsNotNone(loss)
     self.assertFalse(jnp.isnan(loss), "Loss must not be NaN")
@@ -530,15 +525,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
     segmentation = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
-    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
-    params_rng, dropout_rng = jax.random.split(jax.random.PRNGKey(42))
-    params = model.init(
-        {"params": params_rng, "dropout": dropout_rng},
-        inputs,
-        positions,
-        segmentation,
-        enable_dropout=False,
-    )
+    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=jax.random.PRNGKey(42))
 
     data_batch = {
         "inputs": inputs,
@@ -549,14 +536,16 @@ class TrainerRouterReplayTest(unittest.TestCase):
     }
     if forced_experts is not None:
       data_batch["forced_routed_experts"] = forced_experts
-    loss, _ = train.loss_fn(
-        model,
-        cfg,
-        data_batch,
-        dropout_rng=dropout_rng,
-        params=params,
-        is_train=True,
-    )
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
+      loss, _ = train.loss_fn(
+          model,
+          cfg,
+          data_batch,
+          dropout_rng=None,
+          params=None,
+          is_train=True,
+      )
     return float(loss)
 
   def _assert_routing_is_load_bearing(self, cfg, seq_len, batch_size, forced_a, forced_b, label):
