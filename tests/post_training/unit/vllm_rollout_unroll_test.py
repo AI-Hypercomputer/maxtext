@@ -432,6 +432,7 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
         inhomogeneous_layer_cycle_interval=4,
         swap_space_vllm_gb=2,
         vllm_hf_overrides={"architectures": ["MaxTextForCausalLM"]},
+        rollout_tensor_parallelism=4,
     )
     fake_sampler = mock.MagicMock()
 
