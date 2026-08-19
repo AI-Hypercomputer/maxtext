@@ -59,8 +59,8 @@ def main():
   devices_array = maxtext_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
   
-  temperature = float(getattr(cfg, "decode_temperature", 1.0))
-  top_p = float(getattr(cfg, "decode_top_p", 0.95))
+  temperature = float(getattr(cfg, "decode_sampling_temperature", 1.0))
+  top_p = float(getattr(cfg, "decode_sampling_nucleus_p", 0.95))
 
   if jax.process_index() == 0:
     print("=== Loading GLM-5.2 Tokenizer ===", flush=True)
