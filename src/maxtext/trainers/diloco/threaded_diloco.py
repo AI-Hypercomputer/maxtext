@@ -22,6 +22,7 @@ import functools
 import gc
 import queue
 import threading
+import time
 import traceback
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor
@@ -1051,84 +1052,57 @@ def _run_syncer_loop(
   syncer_frag_trace_1d = {}
   max_logging.log(f"Syncer: Built 1D fragment packing metadata for {num_fragments} fragments")
 
-  try:
-    # Start main syncer loop
-    for step in sync_steps:  # e.g. 50, 100, 150... if sync_period=50
-      max_logging.log(f"Syncer: Step {step} sync starting")
-      frag_idx = (step % period) // steps_between_syncs_plus_1
-      meta = frag_metadata[frag_idx]
+  # Asynchronous Event-Driven Syncer Pipeline
+  syncer_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="syncer_worker")
+  fragment_locks = [threading.Lock() for _ in range(num_fragments)]
+  pending_learner_fragments = collections.defaultdict(dict)
+  pending_lock = threading.Lock()
+  completed_sync_count = [0]
+  expected_sync_count = len(sync_steps)
+  syncer_exception = []
 
-      # 1. Receive 1D host NumPy dictionary from each learner
-      learner_frags_host = [
-          transport.recv_from_learner(learner_idx=i, step=step, fragment_id=frag_idx)
-          for i in range(num_learners)
-      ]
-      max_logging.log(f"Syncer: received all 1D fragments for step {step}")
+  def _async_outer_update_and_dispatch(step, frag_idx, learner_frags_host):
+    nonlocal syncer_state
+    try:
+      with fragment_locks[frag_idx]:
+        meta = frag_metadata[frag_idx]
 
-      # Initialize syncer fragment outer weights and trace lazily on first receipt in original dtype (BF16)
-      if frag_idx not in syncer_frag_params_1d:
-        syncer_frag_params_1d[frag_idx] = {dt: learner_frags_host[0][dt].copy() for dt in meta}
-        syncer_frag_trace_1d[frag_idx] = {dt: np.zeros_like(learner_frags_host[0][dt]) for dt in meta}
-        first_init = True
-      else:
-        first_init = False
-
-      if frag_idx == 0:
-        gc.collect()
-
-      # Fast Chunked AVX-512 SIMD Vectorized CPU outer SGD + Nesterov momentum (< 15 ms for scanned, ~700 ms for Fragment 0)
-      new_outer_host = {}
-      outer_lr = config.diloco_outer_lr
-      outer_momentum = config.diloco_outer_momentum
-      chunk_size = 16_000_000  # 32 MB per chunk in BF16, 64 MB in FP32
-      inv_num_learners = 1.0 / num_learners
-
-      for dt in meta:
-        outer_1d = syncer_frag_params_1d[frag_idx][dt]
-        trace_1d = syncer_frag_trace_1d[frag_idx][dt]
-        total_len = len(outer_1d)
-
-        if total_len <= chunk_size:
-          out_f = outer_1d.astype(np.float32)
-          tr_f = trace_1d.astype(np.float32)
-
-          if first_init and num_learners > 1:
-            avg_f = learner_frags_host[1][dt].astype(np.float32)
-            avg_f += out_f
-            for i in range(2, num_learners):
-              avg_f += learner_frags_host[i][dt].astype(np.float32)
-          else:
-            avg_f = learner_frags_host[0][dt].astype(np.float32)
-            for i in range(1, num_learners):
-              avg_f += learner_frags_host[i][dt].astype(np.float32)
-
-          avg_f *= inv_num_learners
-          pgrad = out_f - avg_f
-          tr_f *= outer_momentum
-          tr_f += pgrad
-          update = outer_lr * (pgrad + outer_momentum * tr_f)
-          out_f -= update
-
-          outer_1d[:] = out_f.astype(outer_1d.dtype)
-          trace_1d[:] = tr_f.astype(trace_1d.dtype)
-          new_outer_host[dt] = outer_1d
-          del out_f, tr_f, avg_f, pgrad, update
+        # Initialize syncer fragment outer weights and trace lazily on first receipt in original dtype (BF16)
+        if frag_idx not in syncer_frag_params_1d:
+          syncer_frag_params_1d[frag_idx] = {dt: learner_frags_host[0][dt].copy() for dt in meta}
+          syncer_frag_trace_1d[frag_idx] = {dt: np.zeros_like(learner_frags_host[0][dt]) for dt in meta}
+          first_init = True
         else:
-          # Multi-chunk memory-safe path for Fragment 0 (1.16B elements, only 64 MB transient RAM)
-          for st in range(0, total_len, chunk_size):
-            en = min(st + chunk_size, total_len)
-            out_f = outer_1d[st:en].astype(np.float32)
-            tr_f = trace_1d[st:en].astype(np.float32)
+          first_init = False
+
+        if frag_idx == 0:
+          gc.collect()
+
+        # Fast Chunked AVX-512 SIMD Vectorized CPU outer SGD + Nesterov momentum (< 15 ms for scanned, ~700 ms for Fragment 0)
+        new_outer_host = {}
+        outer_lr = config.diloco_outer_lr
+        outer_momentum = config.diloco_outer_momentum
+        chunk_size = 16_000_000  # 32 MB per chunk in BF16, 64 MB in FP32
+        inv_num_learners = 1.0 / num_learners
+
+        for dt in meta:
+          outer_1d = syncer_frag_params_1d[frag_idx][dt]
+          trace_1d = syncer_frag_trace_1d[frag_idx][dt]
+          total_len = len(outer_1d)
+
+          if total_len <= chunk_size:
+            out_f = outer_1d.astype(np.float32)
+            tr_f = trace_1d.astype(np.float32)
 
             if first_init and num_learners > 1:
-              avg_f = learner_frags_host[1][dt][st:en].astype(np.float32)
+              avg_f = learner_frags_host[1][dt].astype(np.float32)
               avg_f += out_f
               for i in range(2, num_learners):
-                avg_f += learner_frags_host[i][dt][st:en].astype(np.float32)
+                avg_f += learner_frags_host[i][dt].astype(np.float32)
             else:
-              avg_f = learner_frags_host[0][dt][st:en].astype(np.float32)
+              avg_f = learner_frags_host[0][dt].astype(np.float32)
               for i in range(1, num_learners):
-                avg_f += learner_frags_host[i][dt][st:en].astype(np.float32)
+                avg_f += learner_frags_host[i][dt].astype(np.float32)
 
             avg_f *= inv_num_learners
             pgrad = out_f - avg_f
@@ -1137,65 +1111,136 @@ def _run_syncer_loop(
             update = outer_lr * (pgrad + outer_momentum * tr_f)
             out_f -= update
 
-            outer_1d[st:en] = out_f.astype(outer_1d.dtype)
-            trace_1d[st:en] = tr_f.astype(trace_1d.dtype)
+            outer_1d[:] = out_f.astype(outer_1d.dtype)
+            trace_1d[:] = tr_f.astype(trace_1d.dtype)
+            new_outer_host[dt] = outer_1d
             del out_f, tr_f, avg_f, pgrad, update
+          else:
+            # Multi-chunk memory-safe path for Fragment 0 (1.16B elements, only 64 MB transient RAM)
+            for st in range(0, total_len, chunk_size):
+              en = min(st + chunk_size, total_len)
+              out_f = outer_1d[st:en].astype(np.float32)
+              tr_f = trace_1d[st:en].astype(np.float32)
 
-          new_outer_host[dt] = outer_1d
-      max_logging.log(f"Syncer: Step {step} 1D outer step applied")
+              if first_init and num_learners > 1:
+                avg_f = learner_frags_host[1][dt][st:en].astype(np.float32)
+                avg_f += out_f
+                for i in range(2, num_learners):
+                  avg_f += learner_frags_host[i][dt][st:en].astype(np.float32)
+              else:
+                avg_f = learner_frags_host[0][dt][st:en].astype(np.float32)
+                for i in range(1, num_learners):
+                  avg_f += learner_frags_host[i][dt][st:en].astype(np.float32)
 
-      # 4. Dispatch 1D buffer to learners
-      for i in range(num_learners):
-        transport.send_to_learner(
-            learner_idx=i,
-            step=step,
-            fragment_id=frag_idx,
-            data=new_outer_host,
-        )
+              avg_f *= inv_num_learners
+              pgrad = out_f - avg_f
+              tr_f *= outer_momentum
+              tr_f += pgrad
+              update = outer_lr * (pgrad + outer_momentum * tr_f)
+              out_f -= update
 
-      if config.enable_checkpointing and checkpoint_manager is not None and (step % config.checkpoint_period == 0 or step == sync_steps[-1]):
-        full_params = syncer_state.params
-        full_trace = syncer_state.opt_state[0].trace
-        for f in range(num_fragments):
-          if f in syncer_frag_params_1d:
-            unpacked_p = _unpack_fragment_1d(
-                {dt: jnp.asarray(v) for dt, v in syncer_frag_params_1d[f].items()}, frag_metadata[f]
-            )
-            unpacked_t = _unpack_fragment_1d(
-                {dt: jnp.asarray(v) for dt, v in syncer_frag_trace_1d[f].items()}, frag_metadata[f]
-            )
-            target_frag_p = manipulator.get_flat_fragment(full_params, f, has_replica_dim=True)
-            target_frag_t = manipulator.get_flat_fragment(full_trace, f, has_replica_dim=True)
-            stacked_p = {
-                k: (jnp.stack([unpacked_p[k]] * num_learners, axis=0) if hasattr(v, "ndim") and v.ndim > 0 and v.shape[0] == num_learners else unpacked_p[k])
-                for k, v in target_frag_p.items()
-            }
-            stacked_t = {
-                k: (jnp.stack([unpacked_t[k]] * num_learners, axis=0) if hasattr(v, "ndim") and v.ndim > 0 and v.shape[0] == num_learners else unpacked_t[k])
-                for k, v in target_frag_t.items()
-            }
-            full_params = manipulator.apply_flat_fragment(full_params, f, stacked_p, has_replica_dim=True)
-            full_trace = manipulator.apply_flat_fragment(full_trace, f, stacked_t, has_replica_dim=True)
-        syncer_state = syncer_state.replace(
-            params=full_params,
-            opt_state=(optax.TraceState(trace=full_trace), syncer_state.opt_state[1]),
-            step=step,
-        )
-        syncer_ckpt_config = copy.copy(config)
-        syncer_ckpt_config._flat_config["pure_nnx"] = False
-        checkpointing.maybe_save_checkpoint(
-            checkpoint_manager=checkpoint_manager,
-            state=syncer_state,
-            config=syncer_ckpt_config,
-            data_iterator=None,
-            step=step,
-        )
-      max_logging.log(f"Syncer: Step {step} sync finished")
-      del learner_frags_host, new_outer_host
-      if step % 25 == 0:
+              outer_1d[st:en] = out_f.astype(outer_1d.dtype)
+              trace_1d[st:en] = tr_f.astype(trace_1d.dtype)
+              del out_f, tr_f, avg_f, pgrad, update
+
+            new_outer_host[dt] = outer_1d
+        max_logging.log(f"Syncer: Step {step} 1D outer step applied")
+
+        # 4. Dispatch 1D buffer to learners
+        for i in range(num_learners):
+          transport.send_to_learner(
+              learner_idx=i,
+              step=step,
+              fragment_id=frag_idx,
+              data=new_outer_host,
+          )
+
+        if config.enable_checkpointing and checkpoint_manager is not None and (step % config.checkpoint_period == 0 or step == sync_steps[-1]):
+          full_params = syncer_state.params
+          full_trace = syncer_state.opt_state[0].trace
+          for f in range(num_fragments):
+            if f in syncer_frag_params_1d:
+              unpacked_p = _unpack_fragment_1d(
+                  {dt: jnp.asarray(v) for dt, v in syncer_frag_params_1d[f].items()}, frag_metadata[f]
+              )
+              unpacked_t = _unpack_fragment_1d(
+                  {dt: jnp.asarray(v) for dt, v in syncer_frag_trace_1d[f].items()}, frag_metadata[f]
+              )
+              target_frag_p = manipulator.get_flat_fragment(full_params, f, has_replica_dim=True)
+              target_frag_t = manipulator.get_flat_fragment(full_trace, f, has_replica_dim=True)
+              stacked_p = {
+                  k: (jnp.stack([unpacked_p[k]] * num_learners, axis=0) if hasattr(v, "ndim") and v.ndim > 0 and v.shape[0] == num_learners else unpacked_p[k])
+                  for k, v in target_frag_p.items()
+              }
+              stacked_t = {
+                  k: (jnp.stack([unpacked_t[k]] * num_learners, axis=0) if hasattr(v, "ndim") and v.ndim > 0 and v.shape[0] == num_learners else unpacked_t[k])
+                  for k, v in target_frag_t.items()
+              }
+              full_params = manipulator.apply_flat_fragment(full_params, f, stacked_p, has_replica_dim=True)
+              full_trace = manipulator.apply_flat_fragment(full_trace, f, stacked_t, has_replica_dim=True)
+          syncer_state = syncer_state.replace(
+              params=full_params,
+              opt_state=(optax.TraceState(trace=full_trace), syncer_state.opt_state[1]),
+              step=step,
+          )
+          syncer_ckpt_config = copy.copy(config)
+          syncer_ckpt_config._flat_config["pure_nnx"] = False
+          checkpointing.maybe_save_checkpoint(
+              checkpoint_manager=checkpoint_manager,
+              state=syncer_state,
+              config=syncer_ckpt_config,
+              data_iterator=None,
+              step=step,
+          )
+        max_logging.log(f"Syncer: Step {step} sync finished")
+        del learner_frags_host, new_outer_host
+
+      with pending_lock:
+        completed_sync_count[0] += 1
+
+      if completed_sync_count[0] % 25 == 0:
         gc.collect()
+
+    except Exception as ex:
+      max_logging.error(f"Syncer worker for step {step} frag {frag_idx} failed: {ex}")
+      syncer_exception.append(ex)
+
+  def _ingest_from_learner(learner_idx):
+    while completed_sync_count[0] < expected_sync_count and not syncer_exception:
+      try:
+        rec_step, rec_frag, data = transport.recv_next_from_learner(learner_idx=learner_idx, timeout=0.1)
+      except queue.Empty:
+        continue
+      except Exception as ex:
+        if completed_sync_count[0] < expected_sync_count:
+          syncer_exception.append(ex)
+        break
+
+      with pending_lock:
+        pending_learner_fragments[(rec_step, rec_frag)][learner_idx] = data
+        if len(pending_learner_fragments[(rec_step, rec_frag)]) == num_learners:
+          frags = [pending_learner_fragments[(rec_step, rec_frag)][j] for j in range(num_learners)]
+          del pending_learner_fragments[(rec_step, rec_frag)]
+          max_logging.log(f"Syncer: Step {rec_step} sync starting")
+          max_logging.log(f"Syncer: received all 1D fragments for step {rec_step}")
+          syncer_executor.submit(_async_outer_update_and_dispatch, rec_step, rec_frag, frags)
+
+  try:
+    ingest_threads = [
+        threading.Thread(target=_ingest_from_learner, args=(i,), daemon=True, name=f"syncer_ingest_{i}")
+        for i in range(num_learners)
+    ]
+    for t in ingest_threads:
+      t.start()
+
+    while completed_sync_count[0] < expected_sync_count and not syncer_exception:
+      time.sleep(0.01)
+
+    if syncer_exception:
+      raise syncer_exception[0]
+
   finally:
-    pass
+    syncer_executor.shutdown(wait=True)
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()

@@ -59,6 +59,10 @@ class ThreadedTransportManager:
         return data
       buffer[(rec_step, rec_frag)] = data
 
+  def recv_next_from_learner(self, learner_idx: int, timeout: float = 0.1) -> tuple[int, int, Any]:
+    """Syncer receives the next available (step, fragment_id, data) from a learner without blocking on a specific key."""
+    return self._learner_to_syncer_queues[learner_idx].get(timeout=timeout)
+
   def send_to_learner(self, learner_idx: int, step: int, fragment_id: int, data: Any):
     """Syncer sends data to a specific learner."""
     self._syncer_to_learner_queues[learner_idx].put((step, fragment_id, data), timeout=300.0)
@@ -137,5 +141,8 @@ class SyncerTransport:
 
   def recv_from_learner(self, learner_idx: int, step: int, fragment_id: int) -> Any:
     return self.manager.recv_from_learner(learner_idx, step, fragment_id)
+
+  def recv_next_from_learner(self, learner_idx: int, timeout: float = 0.1) -> tuple[int, int, Any]:
+    return self.manager.recv_next_from_learner(learner_idx, timeout=timeout)
 
 

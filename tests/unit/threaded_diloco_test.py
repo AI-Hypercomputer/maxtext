@@ -39,7 +39,7 @@ from maxtext.trainers.diloco.threaded_diloco import (
     _get_apply_outer_step_flat_jit,
     _extract_scalar_metrics,
 )
-from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager
+from maxtext.trainers.diloco.decomposed_transport import ThreadedTransportManager, SyncerTransport
 from maxtext.trainers.diloco.fragmenter import FragmentedTreeManipulator
 from maxtext.utils.mesh_utils import stack_across_meshes_pytree
 
@@ -999,6 +999,29 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
         np.array(new_params_flat["embed"]),
         10.0,
     )
+
+  def test_async_event_driven_syncer_transport(self):
+    """Verifies that ThreadedTransportManager and SyncerTransport support non-blocking FIFO ingestion."""
+    transport_mgr = ThreadedTransportManager(num_learners=2, maxsize=16)
+    syncer_transport = SyncerTransport(transport_mgr)
+
+    # Learner 0 and Learner 1 send data out of lockstep
+    transport_mgr.send_to_syncer(learner_idx=0, step=1, fragment_id=0, data={"l0_s1": np.ones(5)})
+    transport_mgr.send_to_syncer(learner_idx=1, step=1, fragment_id=0, data={"l1_s1": np.ones(5) * 2})
+    transport_mgr.send_to_syncer(learner_idx=0, step=2, fragment_id=1, data={"l0_s2": np.ones(5) * 3})
+
+    # Syncer receives sequentially without blocking on a specific (step, fragment) key
+    s0, f0, d0 = syncer_transport.recv_next_from_learner(learner_idx=0, timeout=1.0)
+    self.assertEqual((s0, f0), (1, 0))
+    self.assertIn("l0_s1", d0)
+
+    s1, f1, d1 = syncer_transport.recv_next_from_learner(learner_idx=1, timeout=1.0)
+    self.assertEqual((s1, f1), (1, 0))
+    self.assertIn("l1_s1", d1)
+
+    s0_2, f0_2, d0_2 = syncer_transport.recv_next_from_learner(learner_idx=0, timeout=1.0)
+    self.assertEqual((s0_2, f0_2), (2, 1))
+    self.assertIn("l0_s2", d0_2)
 
 
 if __name__ == "__main__":
