@@ -197,7 +197,7 @@ def _fused_unpack_and_apply_scanned_fragment_jit(
     metadata_tuple: Any,
     has_replica_dim: bool = False,
 ):
-  """Fuses 1D buffer slicing and dynamic layer update into a single JIT kernel on TPU."""
+  """Fuses 1D buffer slicing, dynamic layer update, and bucketized embedding update into a single JIT kernel on TPU."""
   leaves, treedef = jax.tree_util.tree_flatten(params)
   new_leaves = list(leaves)
 
@@ -208,45 +208,71 @@ def _fused_unpack_and_apply_scanned_fragment_jit(
   for dt, keys, shapes, offsets in metadata_tuple:
     packed_1d = packed_dict[dt]
     for keystr, shape, (st, en) in zip(keys, shapes, offsets):
-      idx = manipulator.keystr_to_leaf_index.get(keystr)
-      if idx is None:
-        continue
-      v = leaves[idx]
       frag = jnp.reshape(packed_1d[st:en], shape)
-      axis = (
-          manipulator.param_scan_axis + 1
-          if has_replica_dim and v.ndim > manipulator.param_scan_axis + 1
-          else manipulator.param_scan_axis
-      )
-      updated_v = jax.lax.dynamic_update_slice_in_dim(v, frag, start_idx, axis=axis)
-      if hasattr(v, "sharding") and v.sharding is not None:
-        updated_v = jax.lax.with_sharding_constraint(updated_v, v.sharding)
-      new_leaves[idx] = updated_v
+      if keystr.endswith("__bucket_slice"):
+        b_keystr = keystr[:-14]
+        if b_keystr in manipulator.bucketized_leaves_meta:
+          b_axis, chunk_size, rem_size, orig_dim = manipulator.bucketized_leaves_meta[b_keystr]
+          b_idx = manipulator.keystr_to_leaf_index.get(b_keystr)
+          if b_idx is not None:
+            v = leaves[b_idx]
+            b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+            updated_v = jax.lax.dynamic_update_slice_in_dim(v, frag, layer_idx * chunk_size, axis=b_ax)
+            if hasattr(v, "sharding") and v.sharding is not None:
+              updated_v = jax.lax.with_sharding_constraint(updated_v, v.sharding)
+            new_leaves[b_idx] = updated_v
+      else:
+        idx = manipulator.keystr_to_leaf_index.get(keystr)
+        if idx is not None:
+          v = leaves[idx]
+          axis = (
+              manipulator.param_scan_axis + 1
+              if has_replica_dim and v.ndim > manipulator.param_scan_axis + 1
+              else manipulator.param_scan_axis
+          )
+          updated_v = jax.lax.dynamic_update_slice_in_dim(v, frag, start_idx, axis=axis)
+          if hasattr(v, "sharding") and v.sharding is not None:
+            updated_v = jax.lax.with_sharding_constraint(updated_v, v.sharding)
+          new_leaves[idx] = updated_v
 
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
-@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple"))
+@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
 def _fused_unpack_and_apply_flat_fragment_jit(
     params: Any,
     packed_dict: dict[str, jax.Array],
     manipulator: Any,
     metadata_tuple: Any,
+    has_replica_dim: bool = False,
 ):
-  """Fuses 1D buffer slicing and static parameter update for Fragment 0 on TPU."""
+  """Fuses 1D buffer slicing and static parameter update for Fragment 0 (including remainder rows) on TPU."""
   leaves, treedef = jax.tree_util.tree_flatten(params)
   new_leaves = list(leaves)
 
   for dt, keys, shapes, offsets in metadata_tuple:
     packed_1d = packed_dict[dt]
     for keystr, shape, (st, en) in zip(keys, shapes, offsets):
-      idx = manipulator.keystr_to_leaf_index.get(keystr)
-      if idx is None:
-        continue
       frag = jnp.reshape(packed_1d[st:en], shape)
-      if hasattr(leaves[idx], "sharding") and leaves[idx].sharding is not None:
-        frag = jax.lax.with_sharding_constraint(frag, leaves[idx].sharding)
-      new_leaves[idx] = frag
+      if keystr.endswith("__rem"):
+        b_keystr = keystr[:-5]
+        if b_keystr in manipulator.bucketized_leaves_meta:
+          b_axis, chunk_size, rem_size, orig_dim = manipulator.bucketized_leaves_meta[b_keystr]
+          b_idx = manipulator.keystr_to_leaf_index.get(b_keystr)
+          if b_idx is not None:
+            v = leaves[b_idx]
+            b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+            st_pos = manipulator.num_transformer_fragments * chunk_size
+            updated_v = jax.lax.dynamic_update_slice_in_dim(v, frag, jnp.asarray(st_pos, dtype=jnp.int32), axis=b_ax)
+            if hasattr(v, "sharding") and v.sharding is not None:
+              updated_v = jax.lax.with_sharding_constraint(updated_v, v.sharding)
+            new_leaves[b_idx] = updated_v
+      else:
+        idx = manipulator.keystr_to_leaf_index.get(keystr)
+        if idx is not None:
+          if hasattr(leaves[idx], "sharding") and leaves[idx].sharding is not None:
+            frag = jax.lax.with_sharding_constraint(frag, leaves[idx].sharding)
+          new_leaves[idx] = frag
 
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
@@ -547,8 +573,22 @@ def _run_learner_loop(
       for f in range(num_fragments):
         sample_frag = manipulator.get_flat_fragment(params_template, f)
         frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
-    frag_metadata_frozen = {f: _freeze_metadata(m) for f, m in frag_metadata.items()}
-    max_logging.log(f"Learner {learner_idx}: Built 1D fragment packing metadata for {num_fragments} fragments")
+      frag_metadata_frozen = {f: _freeze_metadata(m) for f, m in frag_metadata.items()}
+      # Pre-warm JIT extract & apply kernels on TPU
+      dummy_0_frag = manipulator.get_flat_fragment(params_template, 0)
+      dummy_0_packed = _pack_fragment_1d(dummy_0_frag, frag_metadata[0])
+      _ = _fused_unpack_and_apply_flat_fragment_jit(
+          params_template, dummy_0_packed, manipulator, frag_metadata_frozen[0]
+      )
+      if num_fragments > 1:
+        dummy_layer_idx = jnp.asarray(0, dtype=jnp.int32)
+        dummy_1_frag = manipulator.dynamic_extract_scanned_fragment(params_template, dummy_layer_idx)
+        dummy_1_packed = _pack_fragment_1d(dummy_1_frag, frag_metadata[1])
+        _ = _fused_unpack_and_apply_scanned_fragment_jit(
+            params_template, dummy_layer_idx, dummy_1_packed, manipulator, frag_metadata_frozen[1]
+        )
+      del dummy_0_frag, dummy_0_packed
+    max_logging.log(f"Learner {learner_idx}: Built 1D fragment packing metadata and pre-warmed JIT kernels for {num_fragments} fragments")
 
     logging_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -634,7 +674,11 @@ def _run_learner_loop(
             frag_idx = (completed_step % period) // steps_between_syncs_plus_1
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-              frag_data = _extract_fragment(params, manipulator, frag_idx)
+              if frag_idx == 0:
+                frag_data = manipulator.get_flat_fragment(params, 0)
+              else:
+                layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
+                frag_data = manipulator.dynamic_extract_scanned_fragment(params, layer_idx)
               packed_frag_data = _pack_fragment_1d(frag_data, frag_metadata[frag_idx])
             transport.send_to_syncer_async(completed_step, frag_idx, packed_frag_data)
             del frag_data, packed_frag_data
@@ -649,9 +693,15 @@ def _run_learner_loop(
 
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-              unpacked_leaves = _unpack_fragment_1d(received_tpu_packed, frag_metadata[frag_idx])
-              new_params = manipulator.apply_flat_fragment(params, frag_idx, unpacked_leaves)
-              del unpacked_leaves
+              if frag_idx == 0:
+                new_params = _fused_unpack_and_apply_flat_fragment_jit(
+                    params, received_tpu_packed, manipulator, frag_metadata_frozen[0]
+                )
+              else:
+                layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
+                new_params = _fused_unpack_and_apply_scanned_fragment_jit(
+                    params, layer_idx, received_tpu_packed, manipulator, frag_metadata_frozen[frag_idx]
+                )
 
               if learner_config.pure_nnx:
                 nnx.update(state.model, new_params)
