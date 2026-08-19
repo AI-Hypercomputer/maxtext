@@ -703,6 +703,10 @@ num_slices: -1
 # reducing peak memory usage. This is highly recommended for models with large
 # vocabularies (e.g., Gemma). Set to a value greater than 1 to enable.
 num_vocab_tiling: 1
+# If set to true then all gather the output head weight once before the tiled loss so the backward
+# reuses it instead of re-gathering per chunk. Faster when steps are short enough to expose
+# the gathers; holds the gathered head in memory for the backward.
+vocab_tiling_ag_once: false
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding

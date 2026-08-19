@@ -587,6 +587,10 @@ class LogitsAndLoss(BaseModel):
       1,
       description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
   )
+  vocab_tiling_ag_once: bool = Field(
+      False,
+      description="All gather the output head weight once before the tiled loss so the backward reuses it.",
+  )
 
 
 class Attention(BaseModel):
