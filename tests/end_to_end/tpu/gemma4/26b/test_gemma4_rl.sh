@@ -16,6 +16,8 @@
 
 set -ex
 
+export MALLOC_TRIM_THRESHOLD_=131072
+
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 use_pathways=${2:-false}
 MODEL_NAME='gemma4-26b'
@@ -30,7 +32,7 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.85 \
+    hbm_utilization_vllm=0.6 \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
     prefuse_moe_weights=True ici_tensor_parallelism=4 ici_expert_parallelism=2
@@ -54,7 +56,7 @@ python3 -m maxtext.inference.vllm_decode \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     vllm_additional_config='{"maxtext_config": {"model_name": "gemma4-26b", "log_config": "false", "prefuse_moe_weights": "true"}}' \
-    hbm_utilization_vllm=0.85 \
+    hbm_utilization_vllm=0.6 \
     prompt='Suggest some famous landmarks in London.' \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
     prefuse_moe_weights=True ici_tensor_parallelism=4 ici_expert_parallelism=2

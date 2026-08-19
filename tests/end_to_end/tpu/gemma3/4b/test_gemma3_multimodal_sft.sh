@@ -25,8 +25,8 @@ MODEL_NAME='gemma3-4b'
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 MULTIMODAL_SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned_multimodal/${run_id}/0/items
 
-# Step 1: Install google-jetstream
-python3 -m pip install google-jetstream@https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip --no-deps
+# Step 1: Install google-jetstream and update datasets
+python3 -m pip install google-jetstream@https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip --no-deps "datasets>=3.0.0"
 
 # Step 2: Run inference on the original checkpoint converted from Hugging Face
 python3 -m maxtext.inference.decode \
@@ -61,8 +61,6 @@ python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DI
     scan_layers=true \
     async_checkpointing=False \
     attention=\'dot_product\' \
-    dataset_type=hf hf_path=parquet \
-    hf_train_files=${DATASET_PATH}/hf/chartqa/train-* \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/multimodal/sft \
     load_parameters_path=${MULTIMODAL_SCANNED_CKPT_PATH} \
     dtype=bfloat16 \

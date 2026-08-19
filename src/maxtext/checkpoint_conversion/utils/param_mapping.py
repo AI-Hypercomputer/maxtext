@@ -2518,15 +2518,13 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       # Convert from MaxText's interleaved layout to HF's concatenated layout
       evens = arr[..., ::2]
       odds = arr[..., 1::2]
-      concat_fn = np.concatenate if isinstance(arr, np.ndarray) else jnp.concatenate
-      return concat_fn((evens, odds), axis=arr.ndim - 1)
+      return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
     else:
       # Convert from HF's concatenated layout to MaxText's interleaved layout
       half_dim = arr.shape[-1] // 2
       first_half = arr[..., :half_dim]
       second_half = arr[..., half_dim:]
-      stack_fn = np.stack if isinstance(arr, np.ndarray) else jnp.stack
-      return stack_fn([first_half, second_half], axis=-1).reshape(arr.shape)
+      return jax.numpy.stack([first_half, second_half], axis=-1).reshape(arr.shape)
 
   def reshape_kernel(input_tensor, target_shape):
     if saving_to_hf:
@@ -2600,8 +2598,7 @@ def LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN():
     """
     evens = arr[..., ::2]
     odds = arr[..., 1::2]
-    concat_fn = np.concatenate if isinstance(arr, np.ndarray) else jnp.concatenate
-    return concat_fn((evens, odds), axis=arr.ndim - 1)
+    return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
   def transform_query_kernel(arr):
     """Transforms the query kernel.
