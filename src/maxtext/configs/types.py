@@ -734,6 +734,17 @@ class AttentionIndexer(BaseModel):
           " during ties."
       ),
   )
+  shard_indexer_acts: bool = Field(
+      False, description="Whether to shard CSA indexer score activations over the activation_heads logical axis."
+  )
+  indexer_save_selection: bool = Field(
+      False, description="Whether to save CSA indexer selections as rematerialization residuals."
+  )
+  indexer_sharded_topk: bool = Field(
+      False,
+      description="Whether to shard CSA indexer top-k query rows over the 'indexer_topk_seq' logical axis during "
+      "training and prefill.",
+  )
 
 
 class Llama4Attention(BaseModel):

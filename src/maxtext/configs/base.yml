@@ -443,6 +443,9 @@ indexer_mask_exact_topk: true
 indexer_sparse_training: false
 # Multiplier for the indexer KL divergence loss
 indexer_loss_scaling_factor: 0.0
+shard_indexer_acts: false
+indexer_save_selection: false
+indexer_sharded_topk: false
 
 # MLA parameters
 q_lora_rank: 0
@@ -558,6 +561,7 @@ logical_axis_rules: [
                       ['activation_kv', ['tensor', 'tensor_sequence']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_sequence']],
+                      ['indexer_topk_seq', ['tensor', 'tensor_sequence']],
                       # Attention Weights
                       ['heads', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['q_heads', ['tensor', 'tensor_sequence', 'autoregressive']],

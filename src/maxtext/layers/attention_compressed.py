@@ -43,6 +43,7 @@ from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from maxtext.layers.linears import DenseGeneral, DeepSeekV4GroupedLinear
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.inference.kvcache import KVQuant
 from maxtext.inference import kvcache
 
@@ -668,6 +669,7 @@ class DeepseekV4Indexer(nnx.Module):
       kernel_init: Any = nnx.initializers.normal(stddev=0.02),
       quant: Optional[Quant] = None,
       rngs: Optional[nnx.Rngs] = None,
+      mesh: Optional[Mesh] = None,
   ):
     """Initializes the Indexer for CSA.
 
@@ -678,6 +680,7 @@ class DeepseekV4Indexer(nnx.Module):
       kernel_init: Weight initializer for the indexer projections.
       quant: Optional quantization scheme.
       rngs: Optional random state initialization.
+      mesh: Device mesh for indexer activation sharding.
     """
     self.config = config
     self.compress_rate = compress_ratio
@@ -689,6 +692,8 @@ class DeepseekV4Indexer(nnx.Module):
     self.dtype = config.dtype
     self.weight_dtype = config.weight_dtype
     self.rngs = rngs
+    self.mesh = mesh
+    self.shard_indexer_acts = config.shard_indexer_acts and mesh is not None
 
     self.q_proj = DenseGeneral(
         in_features_shape=config.q_lora_rank,
@@ -757,6 +762,9 @@ class DeepseekV4Indexer(nnx.Module):
     )
 
     self.rotary_emb = rotary_embedding
+
+  def _shard_acts(self, inputs: Array, logical_axes: Tuple) -> Array:
+    return maybe_shard_with_logical(inputs, logical_axes, self.mesh, self.config.shard_mode, rules=None)
 
   def __call__(
       self,
@@ -867,10 +875,20 @@ class DeepseekV4Indexer(nnx.Module):
     q = q.astype(jnp.float32)
     compressed_kv = compressed_kv.astype(jnp.float32)
 
+    shard_acts = self.shard_indexer_acts and model_mode != MODEL_MODE_AUTOREGRESSIVE
+
+    if shard_acts:
+      q = self._shard_acts(q, ("activation_batch", "activation_heads", "activation_length", None))
+      compressed_kv = self._shard_acts(compressed_kv, ("activation_batch", "activation_heads", None, None))
+
     scores = jnp.einsum("bhsd,bhwd->bhsw", q, compressed_kv)
     scores = jax.nn.relu(scores) * self.softmax_scale
+    if shard_acts:
+      scores = self._shard_acts(scores, ("activation_batch", "activation_heads", "activation_length", None))
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
     index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights)
+    if shard_acts:
+      index_scores = self._shard_acts(index_scores, ("activation_batch", "activation_length", None))
 
     k = min(self.index_topk, compressed_len)
 
@@ -880,17 +898,32 @@ class DeepseekV4Indexer(nnx.Module):
       entry_indices_mask = jnp.arange(compressed_len)
       future_mask = entry_indices_mask[None, None, :] >= jnp.expand_dims(causal_threshold, axis=-1)
 
+    segment_mask = attention_mask[:, :, :compressed_len] if attention_mask is not None else None
+    # Autoregressive queries have one row and cannot be partitioned over tensor ranks.
+    shard_topk = self.config.indexer_sharded_topk and self.mesh is not None and model_mode != MODEL_MODE_AUTOREGRESSIVE
+
+    if shard_topk:
+      index_scores = self._shard_acts(index_scores, ("activation_batch", "indexer_topk_seq", None))
+      future_mask = self._shard_acts(future_mask, ("activation_batch", "indexer_topk_seq", None))
+      if segment_mask is not None:
+        segment_mask = self._shard_acts(segment_mask, ("activation_batch", "indexer_topk_seq", None))
+
     # Apply the mask to the scores
     index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
-    if attention_mask is not None:
-      index_scores += attention_mask[:, :, :compressed_len]
+    if segment_mask is not None:
+      index_scores += segment_mask
 
     top_k_indices = jax.lax.top_k(index_scores, k)[1]
     invalid = jnp.take_along_axis(future_mask, top_k_indices, axis=-1)
 
     final_indices = jnp.where(invalid, jnp.full_like(top_k_indices, -1), top_k_indices)
 
+    if shard_topk:
+      # Sparse attention consumes selections in the standard sequence layout.
+      final_indices = self._shard_acts(final_indices, ("activation_batch", "activation_length", None))
+    if self.config.indexer_save_selection:
+      final_indices = checkpoint_name(final_indices, "indexer_selection")
     return final_indices
 
 
@@ -916,6 +949,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
+      mesh: Optional[Mesh] = None,
   ):
     """Initializes the CSA Compressor.
 
@@ -929,6 +963,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       quant: Optional quantization scheme.
       model_mode: The operational mode (e.g., "train", "prefill").
       rngs: An optional Rngs instance for stochastic initializations or dropout.
+      mesh: Device mesh for indexer activation sharding.
     """
     super().__init__(
         config,
@@ -948,6 +983,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
         kernel_init=kernel_init,
         quant=quant,
         rngs=rngs,
+        mesh=mesh,
     )
 
   def __call__(
@@ -1287,6 +1323,7 @@ class CompressedAttention(Attention):
           quant=self.quant,
           model_mode=self.model_mode,
           rngs=self.rngs,
+          mesh=self.mesh,
       )
 
     # Set softmax scaling. DeepSeek-V4 natively uses standard scaling.
