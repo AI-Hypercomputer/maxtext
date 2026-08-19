@@ -1023,6 +1023,86 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
     self.assertEqual((s0_2, f0_2), (2, 1))
     self.assertIn("l0_s2", d0_2)
 
+  def test_bucketized_embedding_fragmentation(self):
+    """Verifies that large 2D non-scanned parameters (e.g. embeddings) are evenly bucketized across transformer fragments."""
+    vocab_size = 1000
+    hidden_dim = 32
+    num_layers = 4
+    num_frags = 5
+    num_transformer_frags = 4
+
+    chunk_size = vocab_size // num_transformer_frags  # 250
+    rem_size = vocab_size % num_transformer_frags     # 0
+
+    params = {
+        "decoder": {
+            "embeddings": {"embedding": jnp.arange(vocab_size * hidden_dim, dtype=jnp.float32).reshape(vocab_size, hidden_dim)},
+            "final_norm": {"scale": jnp.full((hidden_dim,), 2.5, dtype=jnp.float32)},
+        },
+        "layers": {
+            "w": jnp.arange(num_layers * hidden_dim, dtype=jnp.float32).reshape(num_layers, hidden_dim),
+        }
+    }
+
+    leaf_keystrs = [
+        "['decoder']['embeddings']['embedding']",
+        "['decoder']['final_norm']['scale']",
+        "['layers']['w']",
+    ]
+    keypath_to_is_scanned = {
+        leaf_keystrs[0]: False,
+        leaf_keystrs[1]: False,
+        leaf_keystrs[2]: True,
+    }
+    bucketized_leaves_meta = {
+        leaf_keystrs[0]: (0, chunk_size, rem_size, vocab_size)
+    }
+    frag_to_layers = {i: (i - 1,) for i in range(1, 5)}
+
+    manipulator = FragmentedTreeManipulator(
+        keypath_to_is_scanned=keypath_to_is_scanned,
+        fragment_to_layer_indices=frag_to_layers,
+        num_fragments=5,
+        param_scan_axis=0,
+        leaf_keystrs=leaf_keystrs,
+        bucketized_leaves_meta=bucketized_leaves_meta,
+    )
+
+    # 1. Verify extracted keys and shapes for each fragment
+    frag0 = manipulator.get_flat_fragment(params, 0)
+    self.assertIn("['decoder']['final_norm']['scale']", frag0)
+    self.assertNotIn("['layers']['w']", frag0)
+
+    for f in range(1, 5):
+      frag_f = manipulator.get_flat_fragment(params, f)
+      self.assertIn("['layers']['w']", frag_f)
+      self.assertIn(f"['decoder']['embeddings']['embedding']__bucket_{f-1}", frag_f)
+      self.assertEqual(frag_f[f"['decoder']['embeddings']['embedding']__bucket_{f-1}"].shape, (chunk_size, hidden_dim))
+
+    # 2. Verify complete roundtrip parameter reconstruction
+    restored = {
+        "decoder": {
+            "embeddings": {"embedding": jnp.zeros_like(params["decoder"]["embeddings"]["embedding"])},
+            "final_norm": {"scale": jnp.zeros_like(params["decoder"]["final_norm"]["scale"])},
+        },
+        "layers": {
+            "w": jnp.zeros_like(params["layers"]["w"]),
+        }
+    }
+
+    for f in range(5):
+      frag = manipulator.get_flat_fragment(params, f)
+      restored = manipulator.apply_flat_fragment(restored, f, frag)
+
+    for k1 in params:
+      for k2 in params[k1]:
+        orig = params[k1][k2]
+        if isinstance(orig, dict):
+          for k3 in orig:
+            np.testing.assert_allclose(np.array(params[k1][k2][k3]), np.array(restored[k1][k2][k3]))
+        else:
+          np.testing.assert_allclose(np.array(orig), np.array(restored[k1][k2]))
+
 
 if __name__ == "__main__":
   unittest.main()

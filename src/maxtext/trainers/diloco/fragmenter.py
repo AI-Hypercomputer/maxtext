@@ -50,12 +50,15 @@ class FragmentedTreeManipulator:
       keypath_to_layout: dict[str, Any] = None,
       leaf_keystrs: list[str] = None,
       fragment_to_leaf_indices: dict[int, list[int]] = None,
+      bucketized_leaves_meta: dict[str, tuple[int, int, int, int]] = None,
   ):
     self.keypath_to_is_scanned = keypath_to_is_scanned
     self.fragment_to_layer_indices = fragment_to_layer_indices
     self.num_fragments = num_fragments
+    self.num_transformer_fragments = max(1, num_fragments - 1)
     self.param_scan_axis = param_scan_axis
     self.keypath_to_layout = keypath_to_layout or {}
+    self.bucketized_leaves_meta = bucketized_leaves_meta or {}
 
     if leaf_keystrs is not None:
       self.leaf_keystrs = list(leaf_keystrs)
@@ -125,6 +128,19 @@ class FragmentedTreeManipulator:
       keypath_to_is_scanned[keystr] = bool(scanned_regex.search(serialized_path))
       keypath_to_layout[keystr] = getattr(getattr(leaf, "format", None), "layout", None)
 
+    # Detect large non-scanned tensors (e.g. embedding table) to bucketize across fragments
+    bucketized_leaves_meta = {}
+    bucketize_embed = getattr(config, "diloco_bucketize_embedding", True)
+    if bucketize_embed and num_transformer_fragments > 1:
+      for keypath, leaf in kvs:
+        keystr = jax.tree_util.keystr(keypath)
+        if not keypath_to_is_scanned.get(keystr, False) and hasattr(leaf, "shape") and len(leaf.shape) >= 2:
+          orig_dim = leaf.shape[0]
+          if orig_dim >= num_transformer_fragments:
+            chunk_size = orig_dim // num_transformer_fragments
+            rem_size = orig_dim % num_transformer_fragments
+            bucketized_leaves_meta[keystr] = (0, chunk_size, rem_size, orig_dim)
+
     fragment_to_leaf_indices = {}
     for f in range(num_fragments):
       if f == 0:
@@ -144,6 +160,7 @@ class FragmentedTreeManipulator:
         keypath_to_layout=keypath_to_layout,
         leaf_keystrs=leaf_keystrs,
         fragment_to_leaf_indices=fragment_to_leaf_indices,
+        bucketized_leaves_meta=bucketized_leaves_meta,
     )
 
   def get_flat_fragment(
@@ -164,7 +181,22 @@ class FragmentedTreeManipulator:
       leaf_indices = sorted(self.fragment_to_leaf_indices.get(fragment_idx, []), key=lambda i: self.leaf_keystrs[i])
       if fragment_idx == 0:
         for idx in leaf_indices:
-          flat_frag[self.leaf_keystrs[idx]] = leaves[idx]
+          keystr = self.leaf_keystrs[idx]
+          v = leaves[idx]
+          if keystr in self.bucketized_leaves_meta:
+            b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
+            if rem_size > 0:
+              st = self.num_transformer_fragments * chunk_size
+              slc = [slice(None)] * v.ndim
+              slc[b_axis] = slice(st, orig_dim)
+              if isinstance(v, jax.ShapeDtypeStruct):
+                new_shape = list(v.shape)
+                new_shape[b_axis] = rem_size
+                flat_frag[keystr + "__rem"] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=getattr(v, "sharding", None))
+              else:
+                flat_frag[keystr + "__rem"] = v[tuple(slc)]
+          else:
+            flat_frag[keystr] = v
         return flat_frag
 
       # Scanned fragment (fragment_idx > 0)
@@ -197,6 +229,25 @@ class FragmentedTreeManipulator:
           flat_frag[keystr] = v[tuple(slc)]
         else:
           flat_frag[keystr] = jnp.take(v, np.array(layer_indices, dtype=np.int32), axis=axis)
+
+      # Include corresponding bucket slice for large non-scanned leaves
+      sync_id = fragment_idx - 1
+      for keystr, (b_axis, chunk_size, rem_size, orig_dim) in self.bucketized_leaves_meta.items():
+        b_idx = self.keystr_to_leaf_index.get(keystr)
+        if b_idx is not None:
+          v = leaves[b_idx]
+          st = sync_id * chunk_size
+          en = st + chunk_size
+          b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+          if isinstance(v, jax.ShapeDtypeStruct):
+            new_shape = list(v.shape)
+            new_shape[b_ax] = chunk_size
+            flat_frag[keystr + f"__bucket_{sync_id}"] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=getattr(v, "sharding", None))
+          else:
+            slc = [slice(None)] * v.ndim
+            slc[b_ax] = slice(st, en)
+            flat_frag[keystr + f"__bucket_{sync_id}"] = v[tuple(slc)]
+
       return flat_frag
 
     # Defensive fallback if tree has unexpected structure
@@ -206,7 +257,15 @@ class FragmentedTreeManipulator:
       is_scanned = self.keypath_to_is_scanned.get(keystr, False)
       if fragment_idx == 0:
         if not is_scanned:
-          flat_frag[keystr] = v
+          if keystr in self.bucketized_leaves_meta:
+            b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
+            if rem_size > 0:
+              st = self.num_transformer_fragments * chunk_size
+              slc = [slice(None)] * v.ndim
+              slc[b_axis] = slice(st, orig_dim)
+              flat_frag[keystr + "__rem"] = v[tuple(slc)]
+          else:
+            flat_frag[keystr] = v
       else:
         if is_scanned:
           raw_indices = self.fragment_to_layer_indices.get(fragment_idx, (fragment_idx - 1,))
@@ -233,6 +292,15 @@ class FragmentedTreeManipulator:
             flat_frag[keystr] = v[tuple(slc)]
           else:
             flat_frag[keystr] = jnp.take(v, np.array(layer_indices, dtype=np.int32), axis=axis)
+        elif keystr in self.bucketized_leaves_meta:
+          sync_id = fragment_idx - 1
+          b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
+          st = sync_id * chunk_size
+          en = st + chunk_size
+          b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+          slc = [slice(None)] * v.ndim
+          slc[b_ax] = slice(st, en)
+          flat_frag[keystr + f"__bucket_{sync_id}"] = v[tuple(slc)]
     return flat_frag
 
   def dynamic_extract_scanned_fragment(
@@ -267,6 +335,21 @@ class FragmentedTreeManipulator:
           flat_frag[keystr] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=shd)
         else:
           flat_frag[keystr] = jax.lax.dynamic_slice_in_dim(v, start_idx, slice_len, axis=axis)
+
+      # Dynamically extract bucketized leaves
+      for keystr, (b_axis, chunk_size, rem_size, orig_dim) in self.bucketized_leaves_meta.items():
+        b_idx = self.keystr_to_leaf_index.get(keystr)
+        if b_idx is not None:
+          v = leaves[b_idx]
+          b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+          b_start = layer_idx * chunk_size
+          if isinstance(v, jax.ShapeDtypeStruct):
+            new_shape = list(v.shape)
+            new_shape[b_ax] = chunk_size
+            flat_frag[keystr + "__bucket_slice"] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=getattr(v, "sharding", None))
+          else:
+            flat_frag[keystr + "__bucket_slice"] = jax.lax.dynamic_slice_in_dim(v, b_start, chunk_size, axis=b_ax)
+
       return flat_frag
 
     kvs = jax.tree_util.tree_flatten_with_path(tree)[0]
@@ -285,6 +368,11 @@ class FragmentedTreeManipulator:
           flat_frag[keystr] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=shd)
         else:
           flat_frag[keystr] = jax.lax.dynamic_slice_in_dim(v, start_idx, slice_len, axis=axis)
+      elif keystr in self.bucketized_leaves_meta:
+        b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
+        b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+        b_start = layer_idx * chunk_size
+        flat_frag[keystr + "__bucket_slice"] = jax.lax.dynamic_slice_in_dim(v, b_start, chunk_size, axis=b_ax)
     return flat_frag
 
   def dynamic_apply_scanned_fragment(
@@ -308,6 +396,23 @@ class FragmentedTreeManipulator:
 
     if len(leaves) == len(self.leaf_keystrs):
       for keystr in sorted(flat_fragment.keys()):
+        # Check if this is a bucketized slice
+        is_bucket = False
+        for b_keystr, (b_axis, chunk_size, rem_size, orig_dim) in self.bucketized_leaves_meta.items():
+          if keystr.startswith(b_keystr + "__bucket"):
+            b_idx = self.keystr_to_leaf_index.get(b_keystr)
+            if b_idx is not None:
+              v = leaves[b_idx]
+              frag = flat_fragment[keystr]
+              if not isinstance(v, jax.ShapeDtypeStruct):
+                b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+                b_start = layer_idx * chunk_size
+                new_leaves[b_idx] = jax.lax.dynamic_update_slice_in_dim(v, frag, b_start, axis=b_ax)
+              is_bucket = True
+              break
+        if is_bucket:
+          continue
+
         idx = self.keystr_to_leaf_index.get(keystr)
         if idx is None:
           continue
@@ -339,10 +444,23 @@ class FragmentedTreeManipulator:
               else self.param_scan_axis
           )
           new_kvs.append(jax.lax.dynamic_update_slice_in_dim(v, frag, start_idx, axis=axis))
+      elif keystr in self.bucketized_leaves_meta:
+        b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
+        # Look for matching bucket key in flat_fragment
+        found_frag = None
+        for fk, fv in flat_fragment.items():
+          if fk.startswith(keystr + "__bucket"):
+            found_frag = fv
+            break
+        if found_frag is not None and not isinstance(v, jax.ShapeDtypeStruct):
+          b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+          b_start = layer_idx * chunk_size
+          new_kvs.append(jax.lax.dynamic_update_slice_in_dim(v, found_frag, b_start, axis=b_ax))
+        else:
+          new_kvs.append(v)
       else:
         new_kvs.append(v)
     return jax.tree_util.tree_unflatten(treedef, new_kvs)
-
 
   def apply_flat_fragment(
       self,
@@ -369,7 +487,15 @@ class FragmentedTreeManipulator:
       if fragment_idx == 0:
         for idx in leaf_indices:
           keystr = self.leaf_keystrs[idx]
-          if keystr in flat_fragment:
+          if keystr in self.bucketized_leaves_meta:
+            b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
+            rem_key = keystr + "__rem"
+            if rem_key in flat_fragment and rem_size > 0:
+              st = self.num_transformer_fragments * chunk_size
+              slc = [slice(None)] * leaves[idx].ndim
+              slc[b_axis] = slice(st, orig_dim)
+              new_leaves[idx] = leaves[idx].at[tuple(slc)].set(flat_fragment[rem_key])
+          elif keystr in flat_fragment:
             frag_val = flat_fragment[keystr]
             if (
                 hasattr(leaves[idx], "sharding")
@@ -380,7 +506,7 @@ class FragmentedTreeManipulator:
             new_leaves[idx] = frag_val
         return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
-      # fragment_idx > 0 (scanned parameters)
+      # fragment_idx > 0 (scanned parameters + bucketized non-scanned slice)
       raw_indices = self.fragment_to_layer_indices.get(fragment_idx, (fragment_idx - 1,))
       if isinstance(raw_indices, (list, tuple)):
         layer_indices = tuple(int(x) for x in raw_indices)
@@ -429,7 +555,96 @@ class FragmentedTreeManipulator:
           )
           new_leaves[idx] = v.at[idx_tuple].set(frag)
 
+      # Apply bucketized slice for large non-scanned leaves
+      sync_id = fragment_idx - 1
+      for keystr, (b_axis, chunk_size, rem_size, orig_dim) in self.bucketized_leaves_meta.items():
+        bucket_key = keystr + f"__bucket_{sync_id}"
+        if bucket_key in flat_fragment:
+          b_idx = self.keystr_to_leaf_index.get(keystr)
+          if b_idx is not None:
+            v = leaves[b_idx]
+            if not isinstance(v, jax.ShapeDtypeStruct):
+              st = sync_id * chunk_size
+              en = st + chunk_size
+              b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+              slc = [slice(None)] * v.ndim
+              slc[b_ax] = slice(st, en)
+              new_leaves[b_idx] = v.at[tuple(slc)].set(flat_fragment[bucket_key])
+
       return jax.tree_util.tree_unflatten(treedef, new_leaves)
+
+    # Defensive fallback if tree has unexpected structure
+    kvs, treedef = jax.tree_util.tree_flatten_with_path(tree)
+    new_kvs = []
+    raw_indices = self.fragment_to_layer_indices.get(fragment_idx, (fragment_idx - 1,))
+    if isinstance(raw_indices, (list, tuple)):
+      layer_indices = tuple(int(x) for x in raw_indices)
+    else:
+      layer_indices = tuple(int(x) for x in np.asarray(raw_indices, dtype=np.int32).tolist())
+    is_contiguous = len(layer_indices) > 0 and (
+        list(layer_indices) == list(range(layer_indices[0], layer_indices[-1] + 1))
+    )
+
+    for k, v in kvs:
+      keystr = jax.tree_util.keystr(k)
+      is_scanned = self.keypath_to_is_scanned.get(keystr, False)
+      if fragment_idx == 0:
+        if not is_scanned and keystr in flat_fragment:
+          new_kvs.append(flat_fragment[keystr])
+        elif keystr in self.bucketized_leaves_meta and (keystr + "__rem") in flat_fragment:
+          b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
+          st = self.num_transformer_fragments * chunk_size
+          slc = [slice(None)] * v.ndim
+          slc[b_axis] = slice(st, orig_dim)
+          new_kvs.append(v.at[tuple(slc)].set(flat_fragment[keystr + "__rem"]))
+        else:
+          new_kvs.append(v)
+      else:
+        if is_scanned and keystr in flat_fragment:
+          frag = flat_fragment[keystr]
+          axis = (
+              self.param_scan_axis + 1
+              if has_replica_dim and v.ndim > self.param_scan_axis + 1
+              else self.param_scan_axis
+          )
+          if is_contiguous:
+            start = layer_indices[0]
+            end = layer_indices[-1] + 1
+            if start == 0 and end == v.shape[axis]:
+              new_kvs.append(frag)
+            else:
+              parts = []
+              if start > 0:
+                slc_pre = [slice(None)] * v.ndim
+                slc_pre[axis] = slice(0, start)
+                parts.append(v[tuple(slc_pre)])
+              parts.append(frag)
+              if end < v.shape[axis]:
+                slc_post = [slice(None)] * v.ndim
+                slc_post[axis] = slice(end, v.shape[axis])
+                parts.append(v[tuple(slc_post)])
+              new_kvs.append(jnp.concatenate(parts, axis=axis))
+          else:
+            idx_tuple = tuple(
+                slice(None) if i != axis else np.array(layer_indices, dtype=np.int32) for i in range(v.ndim)
+            )
+            new_kvs.append(v.at[idx_tuple].set(frag))
+        elif keystr in self.bucketized_leaves_meta:
+          sync_id = fragment_idx - 1
+          bucket_key = keystr + f"__bucket_{sync_id}"
+          if bucket_key in flat_fragment:
+            b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
+            st = sync_id * chunk_size
+            en = st + chunk_size
+            b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+            slc = [slice(None)] * v.ndim
+            slc[b_ax] = slice(st, en)
+            new_kvs.append(v.at[tuple(slc)].set(flat_fragment[bucket_key]))
+          else:
+            new_kvs.append(v)
+        else:
+          new_kvs.append(v)
+    return jax.tree_util.tree_unflatten(treedef, new_kvs)
 
     # Defensive fallback if tree has unexpected structure
     kvs, treedef = jax.tree_util.tree_flatten_with_path(tree)
