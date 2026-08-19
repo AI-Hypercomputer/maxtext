@@ -277,6 +277,84 @@ def _fused_unpack_and_apply_flat_fragment_jit(
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
+@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
+def _fused_extract_and_pack_scanned_fragment_jit(
+    params: Any,
+    layer_idx: jax.Array,
+    manipulator: Any,
+    metadata_tuple: Any,
+    has_replica_dim: bool = False,
+) -> dict[str, jax.Array]:
+  """Fuses dynamic layer extraction, bucket extraction, and 1D buffer packing into a single JIT kernel on TPU."""
+  leaves, _ = jax.tree_util.tree_flatten(params)
+  raw_indices = manipulator.fragment_to_layer_indices.get(1, (0,))
+  slice_len = len(raw_indices) if isinstance(raw_indices, (list, tuple)) else 1
+  start_idx = layer_idx * slice_len
+
+  packed_dict = {}
+  for dt, keys, shapes, offsets in metadata_tuple:
+    flat_pieces = []
+    for keystr, shape, (st, en) in zip(keys, shapes, offsets):
+      if keystr.endswith("__bucket_slice"):
+        b_keystr = keystr[:-14]
+        if b_keystr in manipulator.bucketized_leaves_meta:
+          b_axis, chunk_size, rem_size, orig_dim = manipulator.bucketized_leaves_meta[b_keystr]
+          b_idx = manipulator.keystr_to_leaf_index.get(b_keystr)
+          if b_idx is not None:
+            v = leaves[b_idx]
+            b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+            frag = jax.lax.dynamic_slice_in_dim(v, layer_idx * chunk_size, shape[b_axis], axis=b_ax)
+            flat_pieces.append(jnp.reshape(frag, (-1,)))
+      else:
+        idx = manipulator.keystr_to_leaf_index.get(keystr)
+        if idx is not None:
+          v = leaves[idx]
+          axis = (
+              manipulator.param_scan_axis + 1
+              if has_replica_dim and v.ndim > manipulator.param_scan_axis + 1
+              else manipulator.param_scan_axis
+          )
+          frag = jax.lax.dynamic_slice_in_dim(v, start_idx, slice_len, axis=axis)
+          flat_pieces.append(jnp.reshape(frag, (-1,)))
+    packed_dict[dt] = jnp.concatenate(flat_pieces, axis=0) if flat_pieces else jnp.array([], dtype=dt)
+
+  return packed_dict
+
+
+@functools.partial(jax.jit, static_argnames=("manipulator", "metadata_tuple", "has_replica_dim"))
+def _fused_extract_and_pack_flat_fragment_jit(
+    params: Any,
+    manipulator: Any,
+    metadata_tuple: Any,
+    has_replica_dim: bool = False,
+) -> dict[str, jax.Array]:
+  """Fuses static non-scanned parameter extraction and 1D buffer packing for Fragment 0 into a single JIT kernel on TPU."""
+  leaves, _ = jax.tree_util.tree_flatten(params)
+  packed_dict = {}
+  for dt, keys, shapes, offsets in metadata_tuple:
+    flat_pieces = []
+    for keystr, shape, (st, en) in zip(keys, shapes, offsets):
+      if keystr.endswith("__rem"):
+        b_keystr = keystr[:-5]
+        if b_keystr in manipulator.bucketized_leaves_meta:
+          b_axis, chunk_size, rem_size, orig_dim = manipulator.bucketized_leaves_meta[b_keystr]
+          b_idx = manipulator.keystr_to_leaf_index.get(b_keystr)
+          if b_idx is not None:
+            v = leaves[b_idx]
+            b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
+            st_pos = manipulator.num_transformer_fragments * chunk_size
+            frag = jax.lax.dynamic_slice_in_dim(v, jnp.asarray(st_pos, dtype=jnp.int32), rem_size, axis=b_ax)
+            flat_pieces.append(jnp.reshape(frag, (-1,)))
+      else:
+        idx = manipulator.keystr_to_leaf_index.get(keystr)
+        if idx is not None:
+          v = leaves[idx]
+          flat_pieces.append(jnp.reshape(v, (-1,)))
+    packed_dict[dt] = jnp.concatenate(flat_pieces, axis=0) if flat_pieces else jnp.array([], dtype=dt)
+
+  return packed_dict
+
+
 def _freeze_metadata(metadata: dict[Any, Any]):
   """Converts fragment 1D metadata dict to a hashable tuple suitable for JAX JIT static arguments."""
   return tuple(
@@ -575,19 +653,22 @@ def _run_learner_loop(
         frag_metadata[f] = _build_fragment_1d_metadata(sample_frag)
       frag_metadata_frozen = {f: _freeze_metadata(m) for f, m in frag_metadata.items()}
       # Pre-warm JIT extract & apply kernels on TPU
-      dummy_0_frag = manipulator.get_flat_fragment(params_template, 0)
-      dummy_0_packed = _pack_fragment_1d(dummy_0_frag, frag_metadata[0])
+      dummy_0_packed = _fused_extract_and_pack_flat_fragment_jit(
+          params_template, manipulator, frag_metadata_frozen[0]
+      )
       _ = _fused_unpack_and_apply_flat_fragment_jit(
           params_template, dummy_0_packed, manipulator, frag_metadata_frozen[0]
       )
       if num_fragments > 1:
         dummy_layer_idx = jnp.asarray(0, dtype=jnp.int32)
-        dummy_1_frag = manipulator.dynamic_extract_scanned_fragment(params_template, dummy_layer_idx)
-        dummy_1_packed = _pack_fragment_1d(dummy_1_frag, frag_metadata[1])
+        dummy_1_packed = _fused_extract_and_pack_scanned_fragment_jit(
+            params_template, dummy_layer_idx, manipulator, frag_metadata_frozen[1]
+        )
         _ = _fused_unpack_and_apply_scanned_fragment_jit(
             params_template, dummy_layer_idx, dummy_1_packed, manipulator, frag_metadata_frozen[1]
         )
-      del dummy_0_frag, dummy_0_packed
+        del dummy_1_packed
+      del dummy_0_packed
     max_logging.log(f"Learner {learner_idx}: Built 1D fragment packing metadata and pre-warmed JIT kernels for {num_fragments} fragments")
 
     logging_executor = ThreadPoolExecutor(max_workers=1)
@@ -676,16 +757,19 @@ def _run_learner_loop(
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
               if frag_idx == 0:
-                frag_data = manipulator.get_flat_fragment(params, 0)
+                packed_frag_data = _fused_extract_and_pack_flat_fragment_jit(
+                    params, manipulator, frag_metadata_frozen[0]
+                )
               else:
                 layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
-                frag_data = manipulator.dynamic_extract_scanned_fragment(params, layer_idx)
-              packed_frag_data = _pack_fragment_1d(frag_data, frag_metadata[frag_idx])
+                packed_frag_data = _fused_extract_and_pack_scanned_fragment_jit(
+                    params, layer_idx, manipulator, frag_metadata_frozen[frag_idx]
+                )
               for dt, arr in packed_frag_data.items():
                 if hasattr(arr, "copy_to_host_async"):
                   arr.copy_to_host_async()
             transport.send_to_syncer_async(completed_step, frag_idx, packed_frag_data)
-            del frag_data, packed_frag_data
+            del packed_frag_data, params
 
           # 2. Overlapped Prefetched 1D Fragment Receive & Fused JIT Apply
           if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
