@@ -46,13 +46,9 @@ def restore_diloco_checkpoint(
       )
   )
   restore_args = ocp.checkpoint_utils.construct_restore_args(diloco_abstract)
-  restored = ocp.args.PyTreeRestore(
-      item=diloco_abstract, restore_args=restore_args, partial_restore=True
-  )
+  restored = ocp.args.PyTreeRestore(item=diloco_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
-  return from_diloco_checkpoint_dict(
-      restored, abstract_nnx_state, config=config
-  )
+  return from_diloco_checkpoint_dict(restored, abstract_nnx_state, config=config)
 
 
 def is_diloco_checkpoint(restored_dict: Any) -> bool:
@@ -103,14 +99,9 @@ def to_diloco_checkpoint_dict(state: Any, config: Any = None) -> dict[str, Any]:
       if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
         new_shape = (num_replicas, *leaf.shape)
         sharding = getattr(leaf, "sharding", None)
-        if (
-            isinstance(sharding, jax.sharding.NamedSharding)
-            and "diloco" in sharding.mesh.axis_names
-        ):
+        if isinstance(sharding, jax.sharding.NamedSharding) and "diloco" in sharding.mesh.axis_names:
           new_spec = jax.sharding.PartitionSpec("diloco", *sharding.spec)
-          sharding = jax.sharding.NamedSharding(
-              mesh=sharding.mesh, spec=new_spec
-          )
+          sharding = jax.sharding.NamedSharding(mesh=sharding.mesh, spec=new_spec)
         if isinstance(leaf, jax.ShapeDtypeStruct):
           return jax.ShapeDtypeStruct(new_shape, leaf.dtype, sharding=sharding)
         return jnp.broadcast_to(leaf, new_shape)
@@ -120,9 +111,7 @@ def to_diloco_checkpoint_dict(state: Any, config: Any = None) -> dict[str, Any]:
 
     if hasattr(state, "model"):
       _, params, _ = nnx.split(state.model, nnx.Param, ...)
-      params = (
-          params.to_pure_dict() if hasattr(params, "to_pure_dict") else params
-      )
+      params = params.to_pure_dict() if hasattr(params, "to_pure_dict") else params
     elif hasattr(state, "params"):
       params = state.params
     else:
@@ -134,9 +123,7 @@ def to_diloco_checkpoint_dict(state: Any, config: Any = None) -> dict[str, Any]:
         nesterov=True,
     )
     outer_opt_state = outer_optimizer.init(params)
-    step = getattr(
-        getattr(state, "optimizer", None), "step", jnp.array(0, dtype=jnp.int32)
-    )
+    step = getattr(getattr(state, "optimizer", None), "step", jnp.array(0, dtype=jnp.int32))
 
   # 1. Inner state: convert per-replica NNX state to Linen checkpoint layout
   if isinstance(inner_state, (nnx.State, train_state_nnx.TrainStateNNX)):
@@ -210,10 +197,7 @@ def from_diloco_checkpoint_dict(
     if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
       new_shape = (num_replicas, *leaf.shape)
       sharding = getattr(leaf, "sharding", None)
-      if (
-          isinstance(sharding, jax.sharding.NamedSharding)
-          and "diloco" in sharding.mesh.axis_names
-      ):
+      if isinstance(sharding, jax.sharding.NamedSharding) and "diloco" in sharding.mesh.axis_names:
         new_spec = jax.sharding.PartitionSpec("diloco", *sharding.spec)
         sharding = jax.sharding.NamedSharding(mesh=sharding.mesh, spec=new_spec)
       if isinstance(leaf, jax.ShapeDtypeStruct):
@@ -227,24 +211,18 @@ def from_diloco_checkpoint_dict(
     if isinstance(abstract_diloco_state, diloco.DiLoCoTrainState):
       abstract_inner = abstract_diloco_state.inner_state
     else:
-      abstract_inner = jax.tree_util.tree_map(
-          _add_diloco_dim, abstract_diloco_state
-      )
+      abstract_inner = jax.tree_util.tree_map(_add_diloco_dim, abstract_diloco_state)
 
     if isinstance(abstract_inner, nnx.Module):
       abstract_inner = nnx.state(abstract_inner)
 
     if isinstance(abstract_inner, (nnx.State, train_state_nnx.TrainStateNNX)):
-      linen_state, aux_state, ephemeral = train_state_nnx.split_for_checkpoint(
-          abstract_inner
-      )
+      linen_state, aux_state, ephemeral = train_state_nnx.split_for_checkpoint(abstract_inner)
       weights = train_state_nnx.from_linen_checkpoint_dict(inner_dict)
       if "model" in weights:
         nnx.replace_by_pure_dict(linen_state, {"model": weights["model"]})
       if "optimizer" in weights:
-        nnx.replace_by_pure_dict(
-            linen_state, {"optimizer": weights["optimizer"]}
-        )
+        nnx.replace_by_pure_dict(linen_state, {"optimizer": weights["optimizer"]})
       nnx_aux = inner_dict.get("nnx_aux")
       if nnx_aux:
         nnx.replace_by_pure_dict(aux_state, nnx_aux)
@@ -283,13 +261,9 @@ def from_diloco_checkpoint_dict(
   if isinstance(abstract_diloco_state, diloco.DiLoCoTrainState):
     abstract_inner = abstract_diloco_state.inner_state
   else:
-    abstract_inner = jax.tree_util.tree_map(
-        _add_diloco_dim, abstract_diloco_state
-    )
+    abstract_inner = jax.tree_util.tree_map(_add_diloco_dim, abstract_diloco_state)
 
-  inner_state = replace_nnx_model_params(
-      abstract_inner, broadcasted_model_params
-  )
+  inner_state = replace_nnx_model_params(abstract_inner, broadcasted_model_params)
 
   outer_optimizer = optax.sgd(
       getattr(config, "diloco_outer_lr", 0.1),
