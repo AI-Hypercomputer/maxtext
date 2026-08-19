@@ -22,7 +22,7 @@ DILOCO_OUTER_LR=0.1
 DILOCO_OUTER_MOMENTUM=0.9
 DILOCO_NUM_FRAGMENTS=37
 DILOCO_USE_SEQUENTIAL_LAYERS=false
-DILOCO_NUM_COMM_OVERLAP_STEPS=16
+DILOCO_NUM_COMM_OVERLAP_STEPS=15
 DILOCO_COMM_OVERLAP_ALPHA=0.0
 MODEL_NAME="qwen3-8b"
 PER_DEVICE_BATCH_SIZE=8
@@ -80,7 +80,7 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && 
              enable_single_controller=true \
              pure_nnx=true \
              enable_checkpointing=false \
-             log_period=1 \
+             log_period=10 \
              num_diloco_fragments=${DILOCO_NUM_FRAGMENTS} \
              use_sequential_layers=${DILOCO_USE_SEQUENTIAL_LAYERS} \
              num_communication_overlapping_steps=${DILOCO_NUM_COMM_OVERLAP_STEPS} \
