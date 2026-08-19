@@ -64,6 +64,15 @@ checkpoint_todelete_subdir: None
 # Full path to move checkpoints to before deletion.
 checkpoint_todelete_full_path: None
 
+# Interval in seconds between iterations in standalone checkpointer benchmark loop
+standalone_checkpointer_per_step_interval: 0.0
+# Whether to execute sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' before restoring a checkpoint in standalone_checkpointer loop
+standalone_checkpointer_drop_page_cache_before_restore: false
+# Whether to also restore checkpoint after saving in each step of standalone_checkpointer loop
+standalone_checkpointer_enable_restore_in_loop: true
+# Whether to start by attempting to load an existing checkpoint in standalone_checkpointer
+standalone_checkpointer_start_from_checkpoint: false
+
 force_unroll: false # during generate_param_only_checkpoint should we unroll the loop?
 
 # checkpointing using orbax has two important parameters: array driver
