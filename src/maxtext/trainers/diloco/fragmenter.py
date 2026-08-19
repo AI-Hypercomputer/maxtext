@@ -242,11 +242,11 @@ class FragmentedTreeManipulator:
           if isinstance(v, jax.ShapeDtypeStruct):
             new_shape = list(v.shape)
             new_shape[b_ax] = chunk_size
-            flat_frag[keystr + f"__bucket_{sync_id}"] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=getattr(v, "sharding", None))
+            flat_frag[keystr + f"__bucket_slice"] = jax.ShapeDtypeStruct(tuple(new_shape), v.dtype, sharding=getattr(v, "sharding", None))
           else:
             slc = [slice(None)] * v.ndim
             slc[b_ax] = slice(st, en)
-            flat_frag[keystr + f"__bucket_{sync_id}"] = v[tuple(slc)]
+            flat_frag[keystr + f"__bucket_slice"] = v[tuple(slc)]
 
       return flat_frag
 
@@ -300,7 +300,7 @@ class FragmentedTreeManipulator:
           b_ax = b_axis + 1 if has_replica_dim and v.ndim > b_axis + 1 else b_axis
           slc = [slice(None)] * v.ndim
           slc[b_ax] = slice(st, en)
-          flat_frag[keystr + f"__bucket_{sync_id}"] = v[tuple(slc)]
+          flat_frag[keystr + f"__bucket_slice"] = v[tuple(slc)]
     return flat_frag
 
   def dynamic_extract_scanned_fragment(
@@ -558,7 +558,7 @@ class FragmentedTreeManipulator:
       # Apply bucketized slice for large non-scanned leaves
       sync_id = fragment_idx - 1
       for keystr, (b_axis, chunk_size, rem_size, orig_dim) in self.bucketized_leaves_meta.items():
-        bucket_key = keystr + f"__bucket_{sync_id}"
+        bucket_key = keystr + "__bucket_slice" if (keystr + "__bucket_slice") in flat_fragment else keystr + f"__bucket_{sync_id}"
         if bucket_key in flat_fragment:
           b_idx = self.keystr_to_leaf_index.get(keystr)
           if b_idx is not None:
@@ -631,7 +631,7 @@ class FragmentedTreeManipulator:
             new_kvs.append(v.at[idx_tuple].set(frag))
         elif keystr in self.bucketized_leaves_meta:
           sync_id = fragment_idx - 1
-          bucket_key = keystr + f"__bucket_{sync_id}"
+          bucket_key = keystr + "__bucket_slice" if (keystr + "__bucket_slice") in flat_fragment else keystr + f"__bucket_{sync_id}"
           if bucket_key in flat_fragment:
             b_axis, chunk_size, rem_size, orig_dim = self.bucketized_leaves_meta[keystr]
             st = sync_id * chunk_size

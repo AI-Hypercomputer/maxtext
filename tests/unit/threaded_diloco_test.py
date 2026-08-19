@@ -1076,8 +1076,9 @@ class LearnerFragmentCopyAndSliceTest(unittest.TestCase):
     for f in range(1, 5):
       frag_f = manipulator.get_flat_fragment(params, f)
       self.assertIn("['layers']['w']", frag_f)
-      self.assertIn(f"['decoder']['embeddings']['embedding']__bucket_{f-1}", frag_f)
-      self.assertEqual(frag_f[f"['decoder']['embeddings']['embedding']__bucket_{f-1}"].shape, (chunk_size, hidden_dim))
+      bucket_key = "['decoder']['embeddings']['embedding']__bucket_slice" if "['decoder']['embeddings']['embedding']__bucket_slice" in frag_f else f"['decoder']['embeddings']['embedding']__bucket_{f-1}"
+      self.assertIn(bucket_key, frag_f)
+      self.assertEqual(frag_f[bucket_key].shape, (chunk_size, hidden_dim))
 
     # 2. Verify complete roundtrip parameter reconstruction
     restored = {

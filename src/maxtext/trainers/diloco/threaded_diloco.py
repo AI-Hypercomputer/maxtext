@@ -20,6 +20,7 @@ import datetime
 import collections
 import functools
 import gc
+import os
 import queue
 import threading
 import time
@@ -150,10 +151,8 @@ def _extract_scanned_fragment_jit(params, manipulator, layer_idx: jax.Array):
 
 
 def _extract_fragment(params, manipulator, frag_idx: int):
-  """Extracts fragment using pure Python for Fragment 0 and 1 single static JIT across all scanned layers."""
-  if frag_idx == 0:
-    return manipulator.get_flat_fragment(params, 0)
-  return _extract_scanned_fragment_jit(params, manipulator, jnp.asarray(frag_idx - 1, dtype=jnp.int32))
+  """Extracts fragment using pure Python for any fragment index."""
+  return manipulator.get_flat_fragment(params, frag_idx)
 
 
 @functools.partial(jax.jit, static_argnames=("manipulator",))
@@ -650,15 +649,9 @@ def _run_learner_loop(
 
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
               params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-              if frag_idx == 0:
-                new_params = _fused_unpack_and_apply_flat_fragment_jit(
-                    params, received_tpu_packed, manipulator, frag_metadata_frozen[0]
-                )
-              else:
-                layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
-                new_params = _fused_unpack_and_apply_scanned_fragment_jit(
-                    params, layer_idx, received_tpu_packed, manipulator, frag_metadata_frozen[frag_idx]
-                )
+              unpacked_leaves = _unpack_fragment_1d(received_tpu_packed, frag_metadata[frag_idx])
+              new_params = manipulator.apply_flat_fragment(params, frag_idx, unpacked_leaves)
+              del unpacked_leaves
 
               if learner_config.pure_nnx:
                 nnx.update(state.model, new_params)
