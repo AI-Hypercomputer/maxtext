@@ -504,6 +504,53 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
 class RoutedMoeTest(parameterized.TestCase):
   """Routed Mixture of Experts test."""
 
+  @parameterized.parameters(False, True)
+  def test_permute_direct_token_gather_matches_repeat_and_sort(self, compute_gradient):
+    inputs = jnp.arange(24, dtype=jnp.float32).reshape(2, 3, 4)
+    selected_experts = jnp.array(
+        [
+            [[3, 1], [0, 2], [1, 3]],
+            [[2, 0], [3, 2], [0, 1]],
+        ],
+        dtype=jnp.int32,
+    )
+    weights = jnp.arange(12, dtype=jnp.float32).reshape(2, 3, 2)
+    gate_logits = jnp.zeros((2, 3, 4), dtype=jnp.float32)
+
+    def permute(x, use_direct_token_gather):
+      routed_moe = SimpleNamespace(
+          config=SimpleNamespace(
+              decoder_block=None,
+              load_balance_loss_weight=0.0,
+              moe_use_direct_token_gather=use_direct_token_gather,
+              num_experts=4,
+              use_ragged_sort=False,
+              use_ring_of_experts=False,
+          ),
+          dtype=jnp.float32,
+          is_hash_routing=False,
+          num_experts=4,
+          num_experts_per_tok=2,
+          get_expert_parallelism_size=lambda: 1,
+          get_topk=lambda *_args, **_kwargs: (weights, selected_experts),
+          should_update_load_balance=lambda: False,
+      )
+      return moe.RoutedMoE.permute(routed_moe, x, gate_logits, gate_logits)
+
+    if compute_gradient:
+      cotangent = jnp.arange(48, dtype=jnp.float32).reshape(12, 4)
+      expected = jax.grad(lambda x: jnp.sum(permute(x, False)[0] * cotangent))(inputs)
+      result = jax.grad(lambda x: jnp.sum(permute(x, True)[0] * cotangent))(inputs)
+      np.testing.assert_array_equal(result, expected)
+    else:
+      expected = permute(inputs, False)
+      result = permute(inputs, True)
+      for actual_value, expected_value in zip(result, expected):
+        if expected_value is None:
+          self.assertIsNone(actual_value)
+        else:
+          np.testing.assert_array_equal(actual_value, expected_value)
+
   def get_expected_output(self, rng, hidden_states, cfg, mesh):
     """Retrieve expected output from Routed Mixture of Experts."""
     model = get_moe_loop(
