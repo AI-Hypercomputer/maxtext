@@ -30,10 +30,10 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.6 \
+    hbm_utilization_vllm=0.85 \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
-    prefuse_moe_weights=True ici_tensor_parallelism=4 ici_expert_parallelism=2
+    prefuse_moe_weights=True ici_tensor_parallelism=8
 
 # Step 2: Run SFT on the converted checkpoint
 python3 -m maxtext.trainers.post_train.sft.train_sft \
@@ -42,7 +42,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     per_device_batch_size=1 run_name=${run_id} \
     steps=2 scan_layers=false \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
-    ici_expert_parallelism=8 \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
 
 # Step 3: Run inference on the checkpoint generated from the previous run
@@ -50,7 +49,7 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.6 \
+    hbm_utilization_vllm=0.85 \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
-    prefuse_moe_weights=True ici_tensor_parallelism=4 ici_expert_parallelism=2
+    prefuse_moe_weights=True ici_tensor_parallelism=8
