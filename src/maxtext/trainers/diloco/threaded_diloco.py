@@ -716,7 +716,7 @@ def _run_learner_loop(
       for step in range(start_step, learner_config.steps):
         max_logging.log(f"Learner {learner_idx}: Step {step} starting")
         try:
-          prof.maybe_activate_profiler(step, None)
+          prof.maybe_activate_profiler(step, state)
         except Exception:
           pass
 
@@ -829,7 +829,7 @@ def _run_learner_loop(
               eval_step_count += 1
 
           try:
-            prof.maybe_deactivate_profiler(step, None)
+            prof.maybe_deactivate_profiler(step, state)
           except Exception:
             pass
           last_step_completion = datetime.datetime.now()

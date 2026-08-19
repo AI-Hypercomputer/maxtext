@@ -84,6 +84,10 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && 
              profiler=xplane \
              skip_first_n_steps_for_profiler=100 \
              profiler_steps=50 \
+             upload_all_profiler_results=true \
+             enable_tpu_profiling_options=true \
+             tpu_num_chips_to_profile_per_task=4 \
+             profile_cleanly=true \
              num_diloco_fragments=${DILOCO_NUM_FRAGMENTS} \
              use_sequential_layers=${DILOCO_USE_SEQUENTIAL_LAYERS} \
              num_communication_overlapping_steps=${DILOCO_NUM_COMM_OVERLAP_STEPS} \
