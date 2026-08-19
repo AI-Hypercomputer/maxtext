@@ -598,6 +598,26 @@ def _run_learner_loop(
     prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"learner_{learner_idx}_prefetch")
     prefetch_error = []
 
+    d2h_pack_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"learner_{learner_idx}_d2h_pack")
+    d2h_pack_error = []
+
+    def _async_extract_and_send(step_val, frag_idx_val, params_snapshot):
+      try:
+        with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
+          if frag_idx_val == 0:
+            frag_data = manipulator.get_flat_fragment(params_snapshot, 0)
+          else:
+            layer_idx = jnp.asarray(frag_idx_val - 1, dtype=jnp.int32)
+            frag_data = manipulator.dynamic_extract_scanned_fragment(params_snapshot, layer_idx)
+          packed_frag_data = _pack_fragment_1d(frag_data, frag_metadata[frag_idx_val])
+          for dt, arr in packed_frag_data.items():
+            if hasattr(arr, "copy_to_host_async"):
+              arr.copy_to_host_async()
+        transport.send_to_syncer_async(step_val, frag_idx_val, packed_frag_data)
+      except Exception as ex:
+        max_logging.error(f"Learner {learner_idx} async extract & send failed: {ex}")
+        d2h_pack_error.append(ex)
+
     sync_receive_steps = [
         completed_step
         for completed_step in range(start_step + 1, learner_config.steps + 1)
@@ -669,23 +689,14 @@ def _run_learner_loop(
 
           completed_step = step + 1
 
-          # 1. Non-Blocking Hardware-Native DMA Extract & Transport
+          # 1. Non-Blocking Hardware-Native DMA Extract & Transport via Background Worker
           if completed_step > 0 and completed_step % steps_between_syncs_plus_1 == 0:
+            if d2h_pack_error:
+              raise d2h_pack_error[0]
             transport.check_d2h_errors()
             frag_idx = (completed_step % period) // steps_between_syncs_plus_1
-            with jax.set_mesh(mesh), nn_partitioning.axis_rules(learner_config.logical_axis_rules):
-              params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
-              if frag_idx == 0:
-                frag_data = manipulator.get_flat_fragment(params, 0)
-              else:
-                layer_idx = jnp.asarray(frag_idx - 1, dtype=jnp.int32)
-                frag_data = manipulator.dynamic_extract_scanned_fragment(params, layer_idx)
-              packed_frag_data = _pack_fragment_1d(frag_data, frag_metadata[frag_idx])
-              for dt, arr in packed_frag_data.items():
-                if hasattr(arr, "copy_to_host_async"):
-                  arr.copy_to_host_async()
-            transport.send_to_syncer_async(completed_step, frag_idx, packed_frag_data)
-            del frag_data, packed_frag_data
+            params = nnx.state(state.model, nnx.Param) if learner_config.pure_nnx else state.params
+            d2h_pack_executor.submit(_async_extract_and_send, completed_step, frag_idx, params)
 
           # 2. Overlapped Prefetched 1D Fragment Receive & Fused JIT Apply
           if completed_step - tau > 0 and (completed_step - tau) % steps_between_syncs_plus_1 == 0:
@@ -762,6 +773,7 @@ def _run_learner_loop(
         pass
       max_logging.log(f"Learner {learner_idx} training stopped: {str(e)}")
     finally:
+      d2h_pack_executor.shutdown(wait=False)
       prefetch_executor.shutdown(wait=False)
       logging_executor.shutdown(wait=True)
       metric_logger_instance.flush_metrics_and_cleanup()
