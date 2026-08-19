@@ -675,7 +675,7 @@ def _run_learner_loop(
 
     last_log_time = [datetime.datetime.now()]
 
-    prefetch_queue = queue.Queue(maxsize=2)
+    prefetch_queue = queue.Queue(maxsize=8)
     prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"learner_{learner_idx}_prefetch")
     prefetch_error = []
 
