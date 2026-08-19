@@ -243,7 +243,7 @@ class TestCreateCheckpointManager(unittest.TestCase):
     self.assertEqual(kwargs["use_single_replica_array_handler"], config.enable_single_replica_ckpt_restoring)
     self.assertIs(kwargs["checkpointing_impl"], checkpointing_impl)
     self.assertIsNone(kwargs["primary_host"])
-    self.assertIsNone(kwargs["array_metadata_store"]._primary_host)
+    self.assertIsNone(kwargs["array_metadata_store"])
 
 
 class TestValidateCompletedSteps(unittest.TestCase):

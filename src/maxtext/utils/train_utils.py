@@ -19,7 +19,6 @@ import subprocess
 import jax
 import functools
 import orbax.checkpoint.pathways as ocp_pathways
-from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib
 from functools import partial
 
 from flax import nnx
@@ -51,6 +50,29 @@ def create_training_optimizer(config, model):
 
 def create_checkpoint_manager(config, mesh, init_state_fn):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
+  # Register colocated Python checkpointing dispatchers BEFORE creating any CheckpointManager
+  # so that PyTreeCheckpointHandler resolves array_metadata_store=None during its initialization.
+  #
+  # Why array_metadata_store=None is used in Pathways:
+  # In Pathways Colocated Python mode (SingleReplicaArrayHandler), array sharding and storage
+  # are managed centrally by the single controller via TensorStore (Zarr3/OCDBT headers such as
+  # zarr.json and the global PyTree _metadata manifest). Therefore, Orbax's per-process
+  # ArrayMetadata files (in array_metadatas/) are redundant. Setting array_metadata_store=None:
+  # 1. Eliminates the 600s timeout waiting for process_index=0 to create the array_metadatas/ directory.
+  # 2. Prevents "ValueError: No ArrayMetadata found for process_index=0" during elastic slice loss/recovery.
+  # 3. Reduces GCS object creation (PUT) and metadata read (GET) overhead during Save Finalize.
+  if getattr(config, "enable_single_controller", False) and getattr(config, "colocated_python_checkpointing", False):
+    max_logging.log("Registering colocated python array handler")
+    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+    )
+    ocp_pathways.register_type_handlers(
+        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
+        checkpointing_impl=checkpointing_impl,
+        primary_host=None,
+        array_metadata_store=None,
+    )
+
   # pass in model for muon
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
@@ -99,19 +121,6 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
-    )
-
-  # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
-  if checkpoint_manager is not None and config.enable_single_controller and config.colocated_python_checkpointing:
-    max_logging.log("Registering colocated python array handler")
-    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
-        use_colocated_python=True,
-    )
-    ocp_pathways.register_type_handlers(
-        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
-        checkpointing_impl=checkpointing_impl,
-        primary_host=None,
-        array_metadata_store=array_metadata_store_lib.Store(primary_host=None),
     )
 
   return checkpoint_manager

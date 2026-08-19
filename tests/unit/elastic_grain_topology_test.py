@@ -382,7 +382,7 @@ class ElasticGrainTopologyTest(parameterized.TestCase):
       mock_reg.assert_called_once()
       _, kwargs = mock_reg.call_args
       self.assertIsNone(kwargs["primary_host"])
-      self.assertIsNone(kwargs["array_metadata_store"]._primary_host)
+      self.assertIsNone(kwargs["array_metadata_store"])
 
     # 1. Reproduce the bug: default Store() with primary_host=0 on process 24
     async def run_repro():

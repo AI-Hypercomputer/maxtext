@@ -149,7 +149,10 @@ class Profiler:
       else:
         max_logging.log("WARNING: gcloud is not installed or not found in the system's PATH. Skipping upload...")
     elif self.mode == "xplane":
-      jax.profiler.stop_trace()
+      try:
+        jax.profiler.stop_trace()
+      except RuntimeError as e:
+        max_logging.log(f"WARNING: profiler stop_trace failed: {e}")
 
   def _set_first_profiler_step(self, skip_steps, start_step):
     return start_step + skip_steps
