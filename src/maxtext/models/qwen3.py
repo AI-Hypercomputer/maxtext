@@ -148,6 +148,7 @@ def naive_jax_chunk_gated_delta_rule(
 
   xs = (query_scan, key_scan, value_scan, k_cumdecay_scan, g_scan, decay_mask_scan)
 
+  @jax.checkpoint
   def scan_body(prev_state, x):
     q_i, k_i, v_i, k_cumdecay_i, g_i, decay_mask_i = x
     last_recurrent_state = prev_state
@@ -303,6 +304,7 @@ def jax_chunk_gated_delta_rule(
 
   xs = (w_scan, u_scan, q_scan, k_scan, g_scan)
 
+  @jax.checkpoint
   def scan_body(h, args):
     w, u, q, k, g = args
     prec = jax.lax.Precision.HIGHEST

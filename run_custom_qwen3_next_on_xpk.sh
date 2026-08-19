@@ -2,7 +2,7 @@
 set -e
 
 # Activate Python virtual environment
-source /home/darisoy_google_com/maxtext_venv/bin/activate
+source ${HOME}/.local/bin/venv/bin/activate
 
 # --- Environment Variables ---
 export PROJECT_ID="tpu-prod-env-one-vm"
@@ -11,24 +11,24 @@ export ZONE="southamerica-west1-a"
 
 # --- Configuration & Automated Image Build ---
 TIMESTAMP=$(date +%m%d%H%M%S)
-export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:darisoy_${TIMESTAMP}"
-export WORKLOAD_NAME="darisoy-qn80b-${TIMESTAMP}"
+export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:dipakg_${TIMESTAMP}"
+export WORKLOAD_NAME="dipakg-qn80b-${TIMESTAMP}"
 export DEVICE_TYPE="v6e-256"
 export NUM_SLICES=1
 export PRIORITY="very-high"
 export MAX_RESTARTS=0
 export NUM_STEPS=15
 export MODEL_NAME="qwen3-next-80b-a3b"
-export BASE_OUTPUT_DIR="gs://darisoy-hlo-dumps/qwen3-next-80b-profiles/run-${TIMESTAMP}"
+export BASE_OUTPUT_DIR="/tmp/"
 
 echo "========================================================================"
-echo "Building and uploading Docker runner image from /home/darisoy_google_com/maxtext"
+echo "Building and uploading Docker runner image from /usr/local/google/home/dipakg/workspace/qwen3_5_maxtext"
 echo "Target Image: ${WORKLOAD_IMAGE}"
 echo "========================================================================"
 
 (
-  cd /home/darisoy_google_com/maxtext && \
-  sudo CLOUD_IMAGE_NAME="${WORKLOAD_IMAGE}" \
+  cd /usr/local/google/home/dipakg/workspace/qwen3_5_maxtext && \
+  CLOUD_IMAGE_NAME="${WORKLOAD_IMAGE}" \
        BASE_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:latest" \
        bash src/dependencies/scripts/docker_upload_runner.sh
 )
@@ -165,17 +165,17 @@ MAXTEXT_ARGS="${MAXTEXT_ARGS_ARRAY[*]}"
 
 # The command to run inside the container
 RUN_COMMAND="set -e && \
-export LIBTPU_INIT_ARGS=\"${XLA_FLAGS}\" && \
+export LIBTPU_INIT_ARGS='${XLA_FLAGS}' && \
 export JAX_PLATFORMS='tpu,cpu' && \
 export ENABLE_PJRT_COMPATIBILITY='true' && \
 export JAX_DISTRIBUTED_INITIALIZE_TIMEOUT=1800 && \
-export PYTHONPATH=/deps:/deps/src:/deps/src/maxtext/src && \
-python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml ${MAXTEXT_ARGS}"
+export PYTHONPATH='/deps/src:\$PYTHONPATH' && \
+python3 -m maxtext.trainers.pre_train.train /deps/src/maxtext/configs/base.yml ${MAXTEXT_ARGS}"
 
 # --- XPK Workload Creation ---
 echo "Creating XPK workload: ${WORKLOAD_NAME} on cluster: ${CLUSTER_NAME}"
 
-PYTHONPATH=/home/darisoy_google_com/xpk/src python3 -m xpk.main workload create \
+PYTHONPATH=/usr/local/google/home/dipakg/workspace/maxtext_temp/xpk/src python3 -m xpk.main workload create \
   --cluster="${CLUSTER_NAME}" \
   --project="${PROJECT_ID}" \
   --zone="${ZONE}" \
