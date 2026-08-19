@@ -13,7 +13,7 @@ export PYTHONUNBUFFERED=1
 run_id=$1
 CKPT_PATH=$2
 USE_MULTIMODAL=${3:-false}
-SCAN_LAYERS=${4:-true}
+SCAN_LAYERS=${4:-false}
 
 MODEL_NAME='llama3.1-70b'
 BASE_OUTPUT_DIRECTORY="gs://runner-maxtext-logs/${MODEL_NAME}"
