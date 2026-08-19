@@ -60,6 +60,13 @@ How MaxText leverages JAX, XLA, and Pallas for efficiency.
 
 Configuring Mixture of Experts (MoE) models.
 :::
+
+:::{grid-item-card} 🌐 DiLoCo & Streaming DiLoCo Theory
+:link: core_concepts/diloco
+:link-type: doc
+
+Bi-level optimization theory, arithmetic intensity analysis, and pipelined communication overlapping.
+:::
 ::::
 
 ```{toctree}
@@ -74,4 +81,5 @@ core_concepts/quantization.md
 core_concepts/tiling.md
 core_concepts/jax_xla_and_pallas.md
 core_concepts/moe_configuration.md
+core_concepts/diloco.md
 ```
