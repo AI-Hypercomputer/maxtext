@@ -2108,11 +2108,38 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_tuple = None
 
       if self.config.use_tokamax_splash:
+        orig_q_len = query.shape[2]
+        orig_kv_len = key.shape[2]
+        padded_q_len = ((orig_q_len + sa_config.block_q - 1) // sa_config.block_q) * sa_config.block_q
+        padded_kv_len = ((orig_kv_len + sa_config.block_kv - 1) // sa_config.block_kv) * sa_config.block_kv
+        pad_q = padded_q_len - orig_q_len
+        pad_kv = padded_kv_len - orig_kv_len
+
+        if pad_q > 0:
+          query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
+          if decoder_segment_ids_tuple is not None:
+            decoder_segment_ids_q = jnp.pad(decoder_segment_ids_tuple.q, ((0, 0), (0, pad_q)), constant_values=-1)
+        else:
+          if decoder_segment_ids_tuple is not None:
+            decoder_segment_ids_q = decoder_segment_ids_tuple.q
+
+        if pad_kv > 0:
+          key = jnp.pad(key, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
+          value = jnp.pad(value, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
+          if decoder_segment_ids_tuple is not None:
+            decoder_segment_ids_kv = jnp.pad(decoder_segment_ids_tuple.kv, ((0, 0), (0, pad_kv)), constant_values=-1)
+        else:
+          if decoder_segment_ids_tuple is not None:
+            decoder_segment_ids_kv = decoder_segment_ids_tuple.kv
+
+        if decoder_segment_ids_tuple is not None:
+          decoder_segment_ids_tuple = tokamax_splash_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
+
+        segment_in_axis = 0 if decoder_segment_ids_tuple is not None else None
+
         if indexer_mask is not None:
           # Convert additive float mask (0.0=attend, negative=masked) to boolean mask for Tokamax splash kernel
           indexer_mask = indexer_mask == 0.0
-          pad_q = mask_shape[0] - indexer_mask.shape[-2]
-          pad_kv = mask_shape[1] - indexer_mask.shape[-1]
           if pad_q > 0 or pad_kv > 0:
             pad_width = [(0, 0)] * (indexer_mask.ndim - 2) + [(0, pad_q), (0, pad_kv)]
             indexer_mask = jnp.pad(
@@ -2136,13 +2163,18 @@ class AttentionOp(nnx.Module):
               return kernel(q, k, v, segment, sinks=sinks), None
 
           # Iterate over batch dimension for (query, key, value, segment, sinks, mask)
-          attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, 0, None, 0))
+          attn_fn = jax.vmap(dynamic_mask_splash_kernel, (0, 0, 0, segment_in_axis, None, 0))
 
           if record_max_logits:
             attention_output, max_logits = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
+            if pad_q > 0:
+              attention_output = attention_output[:, :, :orig_q_len, :]
+              max_logits = max_logits[:, :, :orig_q_len]
             return attention_output, max_logits
           else:
             attention_output, _ = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
+            if pad_q > 0:
+              attention_output = attention_output[:, :, :orig_q_len, :]
             return attention_output, None
         else:
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
@@ -2154,14 +2186,20 @@ class AttentionOp(nnx.Module):
               out, stats = kernel(q, k, v, d, sinks=s, save_residuals=True)
               return out, stats["max_logits"]
 
-            attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(
+            attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, segment_in_axis, None))(
                 query, key, value, decoder_segment_ids_tuple, sinks
             )
+            if pad_q > 0:
+              attention_output = attention_output[:, :, :orig_q_len, :]
+              max_logits = max_logits[:, :, :orig_q_len]
             return attention_output, max_logits
           else:
-            attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
-                query, key, value, decoder_segment_ids_tuple, sinks
-            )
+            attention_output = jax.vmap(
+                lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s),
+                in_axes=(0, 0, 0, segment_in_axis, None),
+            )(query, key, value, decoder_segment_ids_tuple, sinks)
+            if pad_q > 0:
+              attention_output = attention_output[:, :, :orig_q_len, :]
             return attention_output, None
 
       elif self.config.use_jax_splash:
