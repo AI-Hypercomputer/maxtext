@@ -27,7 +27,7 @@ DILOCO_COMM_OVERLAP_ALPHA=0.0
 MODEL_NAME="qwen3-8b"
 PER_DEVICE_BATCH_SIZE=8
 MAX_TARGET_LENGTH=2048
-STEPS=200
+STEPS=160
 
 XLA_FLAGS=" \
   --xla_tpu_scoped_vmem_limit_kib=65536 \
@@ -81,6 +81,9 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && export JAX_NUM_CPU_DEVICES=8 && 
              pure_nnx=true \
              enable_checkpointing=false \
              log_period=20 \
+             profiler=xplane \
+             skip_first_n_steps_for_profiler=100 \
+             profiler_steps=50 \
              num_diloco_fragments=${DILOCO_NUM_FRAGMENTS} \
              use_sequential_layers=${DILOCO_USE_SEQUENTIAL_LAYERS} \
              num_communication_overlapping_steps=${DILOCO_NUM_COMM_OVERLAP_STEPS} \
