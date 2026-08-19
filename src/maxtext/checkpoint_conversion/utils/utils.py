@@ -479,8 +479,12 @@ def save_safetensor_file(
       state_dict = state_dict["model.safetensors"]
 
     if output_dir_final.startswith("gs://"):
+      local_path = os.path.join(local_dir_to_save_to, file_name)
+      numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
+      state_dict.clear()
+      gc.collect()
       cloud_path = os.path.join(output_dir_final, file_name)
-      upload_state_dict_to_gcs(state_dict=state_dict, gs_bucket_path=cloud_path)
+      upload_file_to_gcs(local_file=local_path, gs_bucket_path=cloud_path, remove_local_file_after_upload=True)
     elif output_dir_final.startswith("hf://"):
       max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
       serialized_content = save_flax_to_bytes(state_dict, metadata={"format": "pt"})
@@ -556,21 +560,39 @@ def save_weight_files(
     # 'shards' is actually the single state_dict here
     save_safetensor_file(shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE)
   else:
-    # Save sharded weights in parallel
-    with ThreadPoolExecutor(max_workers=parallel_threads) as executor:
-      shard_items = list(shards.items())
-      futures = [
-          executor.submit(
-              save_safetensor_file,
-              shard_dict,
-              local_dir_to_save_to,
-              output_dir_final,
-              shard_name,
-          )
-          for shard_name, shard_dict in shard_items
-      ]
-      for future in futures:
-        future.result()
+    if output_dir_final.startswith("gs://"):
+
+      def _save_and_upload(shard_name, shard_dict):
+        local_path = os.path.join(local_dir_to_save_to, shard_name)
+        numpy_save_file(shard_dict, local_path, metadata={"format": "pt"})
+        shard_dict.clear()
+        del shard_dict
+        gc.collect()
+        cloud_path = os.path.join(output_dir_final, shard_name)
+        upload_file_to_gcs(local_file=local_path, gs_bucket_path=cloud_path, remove_local_file_after_upload=True)
+
+      with ThreadPoolExecutor(max_workers=parallel_threads) as executor:
+        futures = []
+        for shard_name in list(shards.keys()):
+          shard_dict = shards.pop(shard_name)
+          if "model.safetensors" in shard_dict and isinstance(shard_dict["model.safetensors"], dict):
+            shard_dict = shard_dict["model.safetensors"]
+          shard_dict = {k: v for k, v in shard_dict.items() if v is not None}
+          futures.append(executor.submit(_save_and_upload, shard_name, shard_dict))
+
+        for future in futures:
+          future.result()
+    else:
+      for shard_name in list(shards.keys()):
+        shard_dict = shards.pop(shard_name)
+        save_safetensor_file(
+            shard_dict,
+            local_dir_to_save_to,
+            output_dir_final,
+            shard_name,
+        )
+        shard_dict.clear()
+        gc.collect()
 
     # Save index file
     save_index_file(
@@ -669,6 +691,8 @@ def save_model_files(
     # The actual file saving within save_weight_files is guarded.
     # Unwrap nested dict if needed
     shards, index = shard_checkpoint(weight_arrays)
+    weight_arrays.clear()
+    gc.collect()
     save_weight_files(shards, index, current_save_path, output_dir, parallel_threads, remove_local_copy)
 
   if jax.process_index() == 0:

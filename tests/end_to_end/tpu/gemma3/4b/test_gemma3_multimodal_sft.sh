@@ -25,6 +25,9 @@ MODEL_NAME='gemma3-4b'
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 MULTIMODAL_SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned_multimodal/${run_id}/0/items
 
+# Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
+export DATASET_PATH=${DATASET_PATH:-gs://maxtext-dataset}
+
 # Step 1: Install google-jetstream
 python3 -m pip install google-jetstream@https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip --no-deps
 
@@ -50,6 +53,9 @@ python3 -m maxtext.inference.decode \
     skip_jax_distributed_system=True
 
 # Step 3: Run SFT on the MaxText checkpoint on ChartQA dataset
+if [ -n "${run_id}" ]; then
+  gcloud storage rm --recursive "${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}" || true
+fi
 python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/post_train/sft-vision-chartqa.yml \
     run_name=${run_id} \
     model_name=${MODEL_NAME} \
@@ -60,7 +66,8 @@ python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DI
     scan_layers=true \
     async_checkpointing=False \
     attention=\'dot_product\' \
-    dataset_type=hf hf_path=parquet \
+    dataset_type=hf \
+    hf_path=parquet \
     hf_train_files=${DATASET_PATH}/hf/chartqa/train-* \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/multimodal/sft \
     load_parameters_path=${MULTIMODAL_SCANNED_CKPT_PATH} \
@@ -69,6 +76,7 @@ python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DI
     sharding_tolerance=0.05 \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
+    checkpoint_storage_concurrent_gb=30 \
     enable_single_controller=${use_pathways} \
     grain_worker_count=0
 
