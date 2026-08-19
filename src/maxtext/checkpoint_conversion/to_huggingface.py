@@ -66,11 +66,15 @@ Example Usage:
     scan_layers=True
 """
 
+import ctypes
+import gc
+import os
+import re
+import time
+from typing import Sequence
 import jax
 import jax.numpy as jnp
-import os
-from typing import Sequence
-import time
+import numpy as np
 
 from transformers import AutoTokenizer, AutoProcessor
 
@@ -87,12 +91,21 @@ from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIG
 from maxtext.checkpoint_conversion.utils.utils import (
     validate_and_filter_param_map_keys,
     process_maxtext_param,
-    save_model_files,
     load_orbax_checkpoint,
     detect_and_extract_checkpoint,
     MemoryMonitorTqdm,
     print_peak_memory,
     save_adapter_files,
+    get_local_save_path_manager,
+    upload_file_to_gcs,
+    save_config_file,
+    save_safetensor_file,
+    save_index_file,
+    SAFE_TENSORS_CONFIG_FILE,
+    SAFE_TENSORS_INDEX_FILE,
+    SAFE_TENSORS_WEIGHTS_FILE,
+    DEFAULT_MAX_SHARD_SIZE,
+    _process,
 )
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -403,7 +416,10 @@ def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, para
   processed_params_list = []
   lora_scaling = config.lora.lora_alpha / config.lora.lora_rank if config.lora.lora_rank > 0 else 1.0
   for key in MemoryMonitorTqdm(filtered_map_keys, leave=True):
-    weight = [state_dict[subkey] for subkey in key] if isinstance(key, tuple) else state_dict.get(key)
+    if isinstance(key, tuple):
+      weight = [state_dict.pop(subkey, None) for subkey in key]
+    else:
+      weight = state_dict.pop(key, None)
     if weight is not None and not isinstance(key, tuple):
       delta = _get_lora_delta(key, state_dict, lora_scaling)
       if delta is not None:
@@ -412,7 +428,17 @@ def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, para
         weight = (jnp.asarray(weight, dtype=jnp.float32) + delta).astype(weight.dtype)
     if weight is not None:
       processed_params_list.extend(process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config))
+    del weight
+    _trim_memory()
   return dict(processed_params_list)
+
+
+def _trim_memory():
+  gc.collect()
+  try:
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+  except (OSError, AttributeError):
+    pass
 
 
 def _transform_and_save_weights(
@@ -429,32 +455,224 @@ def _transform_and_save_weights(
     tokenizer,
     processor,
 ):
-  """Orchestrates weight transformation and saving based on conversion mode."""
+  """Orchestrates weight transformation and saving based on conversion mode with streaming safetensors."""
   start = time.time()
+
   if lora_restore_path and not load_parameters_path:
     # Adapter Mode
     transformed_hf_weights, found_hf_modules = _transform_weights_to_adapter(param_map, maxtext_state_dict)
     save_adapter_files(output_directory, transformed_hf_weights, config, found_hf_modules, HF_IDS.get(config.model_name))
     max_logging.log(f"✅ LoRA adapter successfully saved at {output_directory}")
-  else:
-    # Base or Merged Mode
-    transformed_hf_weights = _transform_weights_to_full_model(
-        config, filtered_map_keys, maxtext_state_dict, param_map, hook_fn_map, shape_map
-    )
+    max_logging.log(f"Elapse for transform and save: {(time.time() - start) / 60:.2f} min")
+    return
 
-    if not transformed_hf_weights:
-      raise ValueError("Error: No weights were transformed. Check mappings and parameter paths.")
+  # Base or Merged Mode: Streaming transform & save
+  max_logging.log(f"\n-> Streaming transform and save to {output_directory}...")
 
-    max_logging.log("\nSaving HuggingFace model...")
-    save_model_files(
-        transformed_hf_weights,
-        hf_config_obj,
-        tokenizer,
-        processor,
-        output_directory,
-        parallel_threads=FLAGS.parallel_threads,
-    )
-    max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
+  with get_local_save_path_manager(output_directory) as (current_save_path, is_temp_path):
+    remove_local_copy = is_temp_path
+
+    # Save tokenizer/processor and config.json
+    if jax.process_index() == 0:
+      if processor is not None:
+        max_logging.log(f"    Saving image processor files to {current_save_path}...")
+        processor.save_pretrained(current_save_path)
+      elif tokenizer is not None:
+        max_logging.log(f"    Saving tokenizer files to {current_save_path}...")
+        tokenizer.save_pretrained(current_save_path)
+
+      files_to_upload = [os.path.join(current_save_path, f) for f in os.listdir(current_save_path)]
+      if output_directory.startswith("gs://"):
+        for local_file_path in files_to_upload:
+          if os.path.exists(local_file_path):
+            file_name = os.path.basename(local_file_path)
+            upload_file_to_gcs(
+                local_file_path,
+                os.path.join(output_directory, file_name),
+                remove_local_file_after_upload=remove_local_copy,
+            )
+
+      save_config_file(hf_config_obj, current_save_path, output_directory, SAFE_TENSORS_CONFIG_FILE, remove_local_copy)
+
+    # Precalculate deterministic sharding plan from shape_map
+    dtype_str = getattr(config, "weight_dtype", "bfloat16") or "bfloat16"
+    itemsize = np.dtype(dtype_str).itemsize
+
+    def _natural_key(name):
+      return [int(c) if c.isdigit() else c for c in re.split(r"(\d+)", name)]
+
+    all_target_keys = sorted(shape_map.keys(), key=_natural_key)
+    shards_plan = []
+    current_shard_keys = set()
+    current_shard_size = 0
+    total_size = 0
+
+    for k in all_target_keys:
+      shape = shape_map[k]
+      tensor_bytes = int(np.prod(shape)) * itemsize
+      if (current_shard_size + tensor_bytes > DEFAULT_MAX_SHARD_SIZE) and current_shard_keys:
+        shards_plan.append(current_shard_keys)
+        current_shard_keys = set()
+        current_shard_size = 0
+      current_shard_keys.add(k)
+      current_shard_size += tensor_bytes
+      total_size += tensor_bytes
+
+    if current_shard_keys:
+      shards_plan.append(current_shard_keys)
+
+    num_shards = len(shards_plan)
+    key_to_shard_name = {}
+    shard_name_to_required_keys = {}
+
+    for idx, shard_keys in enumerate(shards_plan, 1):
+      if num_shards == 1:
+        sname = SAFE_TENSORS_WEIGHTS_FILE
+      else:
+        sname = SAFE_TENSORS_WEIGHTS_FILE.replace(".safetensors", f"-{idx:05d}-of-{num_shards:05d}.safetensors")
+      shard_name_to_required_keys[sname] = set(shard_keys)
+      for k in shard_keys:
+        key_to_shard_name[k] = sname
+
+    # Save index file upfront if sharded
+    if num_shards > 1 and jax.process_index() == 0:
+      index_dict = {
+          "metadata": {"total_size": total_size},
+          "weight_map": key_to_shard_name,
+      }
+      save_index_file(index_dict, current_save_path, output_directory, SAFE_TENSORS_INDEX_FILE, remove_local_copy)
+
+    # Streaming transformation and shard flushing
+    buffered_tensors = {}
+    completed_shards = set()
+    lora_scaling = config.lora.lora_alpha / config.lora.lora_rank if config.lora.lora_rank > 0 else 1.0
+
+    # Separate unstacked parameters (e.g. embeddings, norms) and stacked parameters (layer weights)
+    unstacked_keys = []
+    stacked_keys = []
+    for k in filtered_map_keys:
+      target_paths = param_map[k]
+      if target_paths is None:
+        continue
+      if isinstance(target_paths, list) and len(target_paths) > 0 and not isinstance(target_paths, tuple):
+        stacked_keys.append(k)
+      else:
+        unstacked_keys.append(k)
+
+    max_logging.log("\nProcessing unstacked weights...")
+    for key in unstacked_keys:
+      if isinstance(key, tuple):
+        weight = [maxtext_state_dict.pop(subkey, None) for subkey in key]
+      else:
+        weight = maxtext_state_dict.pop(key, None)
+      if weight is not None and not isinstance(key, tuple):
+        delta = _get_lora_delta(key, maxtext_state_dict, lora_scaling)
+        if delta is not None:
+          if delta.shape != weight.shape and delta.size == weight.size:
+            delta = delta.reshape(weight.shape)
+          weight = (jnp.asarray(weight, dtype=jnp.float32) + delta).astype(weight.dtype)
+      if weight is not None:
+        transformed_pairs = process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config)
+        for hf_name, hf_arr in transformed_pairs:
+          buffered_tensors[hf_name] = hf_arr
+
+        # Check and flush any planned shard that is fully ready in buffered_tensors
+        for sname, req_keys in shard_name_to_required_keys.items():
+          if sname not in completed_shards and req_keys.issubset(buffered_tensors.keys()):
+            shard_dict = {k: buffered_tensors.pop(k) for k in req_keys}
+            max_logging.log(f"   Writing completed shard {sname} ({len(shard_dict)} tensors)...")
+            save_safetensor_file(shard_dict, current_save_path, output_directory, sname)
+            del shard_dict
+            _trim_memory()
+            completed_shards.add(sname)
+
+      del weight
+      _trim_memory()
+
+    # Determine total number of layers from the first stacked parameter
+    if stacked_keys:
+      num_layers = len(param_map[stacked_keys[0]])
+      axis_to_slice = config.param_scan_axis if config.scan_layers else 0
+      max_logging.log(f"\nProcessing {num_layers} layers with zero-memory streaming...")
+
+      # Convert stacked tensors in maxtext_state_dict to numpy arrays upfront so slicing never touches JAX/XLA allocator
+      for key in stacked_keys:
+        w = maxtext_state_dict.pop(key, None)
+        if w is not None:
+          if isinstance(w, list):
+            maxtext_state_dict[key] = [np.asarray(x) if not isinstance(x, np.ndarray) else x for x in w]
+          elif not isinstance(w, np.ndarray):
+            maxtext_state_dict[key] = np.asarray(w)
+          del w
+      _trim_memory()
+
+      for layer_idx in MemoryMonitorTqdm(range(num_layers), desc="Streaming layers", leave=True):
+        for key in stacked_keys:
+          hf_path = param_map[key][layer_idx]
+          weight = maxtext_state_dict.get(key)
+          if weight is None:
+            continue
+
+          if isinstance(weight, list):
+            weight_slice = [
+                x.take(layer_idx, axis=axis_to_slice)
+                if isinstance(x, np.ndarray)
+                else np.take(np.asarray(x), layer_idx, axis=axis_to_slice)
+                for x in weight
+            ]
+          else:
+            weight_slice = (
+                weight.take(layer_idx, axis=axis_to_slice)
+                if isinstance(weight, np.ndarray)
+                else np.take(np.asarray(weight), layer_idx, axis=axis_to_slice)
+            )
+
+          layer_output = []
+          _process(
+              hf_path,
+              weight_slice,
+              layer_output,
+              hook_fn_map.get(key),
+              shape_map,
+              save_dtype=config.weight_dtype,
+          )
+          for hf_name, hf_arr in layer_output:
+            buffered_tensors[hf_name] = hf_arr
+
+        # Check and flush any planned shard that is fully ready in buffered_tensors
+        for sname, req_keys in shard_name_to_required_keys.items():
+          if sname not in completed_shards and req_keys.issubset(buffered_tensors.keys()):
+            shard_dict = {k: buffered_tensors.pop(k) for k in req_keys}
+            max_logging.log(f"   Writing completed shard {sname} ({len(shard_dict)} tensors)...")
+            save_safetensor_file(shard_dict, current_save_path, output_directory, sname)
+            del shard_dict
+            _trim_memory()
+            completed_shards.add(sname)
+
+        if "weight_slice" in locals():
+          del weight_slice
+        if "layer_output" in locals():
+          del layer_output
+        _trim_memory()
+
+      # All layers processed: clear state_dict
+      maxtext_state_dict.clear()
+      gc.collect()
+
+    # Final flush for any remaining tensors across all shards
+    for sname, req_keys in shard_name_to_required_keys.items():
+      if sname not in completed_shards:
+        remaining_keys = [k for k in req_keys if k in buffered_tensors]
+        if remaining_keys:
+          shard_dict = {k: buffered_tensors.pop(k) for k in remaining_keys}
+          max_logging.log(f"   Writing final shard {sname} ({len(shard_dict)} tensors)...")
+          save_safetensor_file(shard_dict, current_save_path, output_directory, sname)
+          del shard_dict
+          gc.collect()
+          completed_shards.add(sname)
+
+    if jax.process_index() == 0:
+      max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
 
   max_logging.log(f"Elapse for transform and save: {(time.time() - start) / 60:.2f} min")
 

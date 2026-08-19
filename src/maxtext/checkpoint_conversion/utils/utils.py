@@ -22,7 +22,6 @@ import os
 import tempfile
 import time
 import json
-from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any, Callable, List
 from tqdm import tqdm
@@ -34,13 +33,11 @@ from etils import epath
 
 import jax
 from jax import tree
-from jax.experimental import multihost_utils
 from jaxtyping import Array
 
 from safetensors import safe_open
 from safetensors.numpy import save_file as numpy_save_file
 from safetensors.numpy import save as numpy_save
-from safetensors.flax import save as save_flax_to_bytes
 
 from huggingface_hub import HfApi, repo_exists, snapshot_download
 
@@ -151,33 +148,33 @@ def apply_hook_fns(weight, target_shape, hook_fns):
   return weight
 
 
-def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = None) -> np.ndarray:
+def convert_jax_weight_to_numpy(weight: Any, dtype_str: None | str = None) -> np.ndarray:
   """Converts a JAX array to a NumPy array with the specified dtype, used in to_huggingface.
 
   Args:
-    weight: The input JAX array, potentially sharded across devices.
+    weight: The input JAX array or NumPy array.
     dtype_str: The target NumPy dtype as a string (e.g., 'float32', 'bfloat16').
-      If None, the dtype of the input JAX array is preserved. Defaults to None.
+      If None, the dtype of the input array is preserved. Defaults to None.
 
   Returns:
     A NumPy array containing the data from `weight`, cast to `dtype_str` if provided.
   """
+  if isinstance(weight, np.ndarray):
+    if dtype_str is not None and str(weight.dtype) != dtype_str:
+      return weight.astype(dtype_str)
+    return weight
+
   final_dtype_str = str(weight.dtype) if dtype_str is None else dtype_str
   expected_shape = weight.shape
 
-  if str(weight.dtype) != final_dtype_str:
-    # Cast in JAX before process_allgather to reduce interconnect data transfer and host RAM
-    # usage when downcasting dtypes.
-    weight = weight.astype(final_dtype_str)
-
-  weight = multihost_utils.process_allgather(weight)
-  # Use np.asarray to avoid redundant copies when the gathered buffer can be viewed directly.
   np_array = np.asarray(weight)
+  if str(np_array.dtype) != final_dtype_str:
+    np_array = np_array.astype(final_dtype_str)
   return np_array.reshape(expected_shape)
 
 
 def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map, save_dtype):
-  """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list, used in to_huggingface"""
+  """Applies hooks, converts a slice to NumPy, and appends it to the output list, used in to_huggingface"""
   # --- Case 1: 1-to-N Splitting (hf_path is a tuple) ---
   if isinstance(hf_path, tuple):
     # Perform safety check on the collective tuple key first
@@ -185,7 +182,7 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
       raise ValueError(f"HF path tuple '{hf_path}' not found in hf_shape_map.")
     target_hf_shapes = hf_shape_map[hf_path]
 
-    # Apply hooks (your hook function returns a tuple of sliced JAX arrays)
+    # Apply hooks (your hook function returns a tuple of sliced arrays)
     if current_hook_fns:
       processed_slice = apply_hook_fns(processed_slice, target_hf_shapes, current_hook_fns)
 
@@ -214,36 +211,7 @@ def process_maxtext_param(
     hf_shape_map: dict[str, Any],
     maxtext_config: Any,
 ) -> list[tuple[str, np.ndarray]]:
-  """Processes a single MaxText parameter (or a group of parameters) for conversion, used in to_huggingface.
-
-  This function is responsible for taking a MaxText parameter and transforming
-  it into one or more Hugging Face compatible parameters. It handles various
-  scenarios based on:
-  - the MaxText key form (`atomic_mt_key` or `composite_mt_key`)
-  - the Hugging Face value form (unscanned string, scanned list of strings,
-    unscanned with expert stacking, or scanned with expert stacking).
-
-  Args:
-    maxtext_param_key: The key identifying the MaxText parameter(s). Can be
-      an `atomic_mt_key` (str) or a `composite_mt_key` (tuple of str) mapping
-      to HF parameter(s).
-    maxtext_param_weight: The actual weight(s) of the MaxText parameter(s).
-      This can be a single `jax.Array` for an `atomic_mt_key` or a list of
-      `jax.Array` for a `composite_mt_key`.
-    param_map: A dictionary mapping MaxText parameter keys to their corresponding
-      Hugging Face target path(s).
-    hook_fn_map: A dictionary mapping MaxText parameter keys to transformation
-      functions (hooks) that should be applied to the weights.
-    hf_shape_map: A dictionary mapping Hugging Face parameter paths to their
-      expected shapes.
-    maxtext_config: The MaxText configuration object, used to determine
-      details like `param_scan_axis` and `base_num_decoder_layers`.
-
-  Returns:
-    A list of tuples, where each tuple contains:
-    - hf_path (str): The Hugging Face parameter path.
-    - hf_weight (np.ndarray): The transformed Hugging Face compatible weight.
-  """
+  """Processes a single MaxText parameter (or a group of parameters) for conversion, used in to_huggingface."""
   max_logging.log(f"maxtext param: {maxtext_param_key}")
 
   if maxtext_param_key not in param_map:
@@ -255,10 +223,15 @@ def process_maxtext_param(
   if not hf_target_paths:
     raise ValueError(f"No HF target paths found for MaxText key '{maxtext_param_key}'")
 
-  # If maxtext_param_key is not in hook_fn_map, current_hook_fns is None, indicating identity (no transformation)
-  current_hook_fns = hook_fn_map.get(maxtext_param_key)
+  # Convert to numpy before slicing to eliminate JAX C++ slice buffer caching overhead
+  if isinstance(maxtext_param_weight, list):
+    maxtext_param_weight = [np.asarray(x) if not isinstance(x, np.ndarray) else x for x in maxtext_param_weight]
+  else:
+    maxtext_param_weight = (
+        np.asarray(maxtext_param_weight) if not isinstance(maxtext_param_weight, np.ndarray) else maxtext_param_weight
+    )
 
-  # This list will store tuples of (hf_path, hf_weight)
+  current_hook_fns = hook_fn_map.get(maxtext_param_key)
   output_weights = []
 
   # Case 1: Unscanned
@@ -276,30 +249,19 @@ def process_maxtext_param(
     return output_weights
 
   # Stacked MaxText weight
-  # This handles the 3 remaining cases:
-  # 2. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
-  # 3. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
-  # 4. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
-
   if not isinstance(hf_target_paths[0], list):
-    # Case 2 or 3: The source tensor is stacked on a single axis.
     if maxtext_config.scan_layers:
       max_logging.log("\tscan")
-      # Case 2: Standard scanned layer. Stacked ONLY on the layer axis.
       axis_to_slice = maxtext_config.param_scan_axis
     else:
       max_logging.log("\tunscan moe")
-      # Case 3: Unscanned MoE layer. Stacked ONLY on the expert axis. Assuming expert is axis 0.
       axis_to_slice = 0
 
-    # Iterate through the slices of the MaxText weight along the determined stacking axis.
     for i, hf_path in enumerate(hf_target_paths):
       if isinstance(maxtext_param_weight, list):
-        # Handles `composite_mt_key` mappings where weight is a list of tensors.
-        weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
+        weight_slice = [x.take(i, axis=axis_to_slice) for x in maxtext_param_weight]
       else:
-        # Handles `atomic_mt_key` mappings by slicing the single tensor.
-        weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
+        weight_slice = maxtext_param_weight.take(i, axis=axis_to_slice)
       _process(
           hf_path,
           weight_slice,
@@ -311,13 +273,7 @@ def process_maxtext_param(
 
     return output_weights
 
-  # Case 4: Multi-axis stacked. Two sub-cases (the inverse of _build_multi_axis_stacked_tensor):
-  #   - Scanned MoE: the tensor is stacked on (experts, layers) at the LEADING two axes, so we
-  #     slice axis 0 (experts) then axis 0 again (layers, after the expert axis is removed).
-  #   - Gemma4 nested block scan (scanned_blocks-local_layers): the block's local layers are an
-  #     inner scan nested in the block scan, so the two axes are at (param_scan_axis,
-  #     param_scan_axis + 1) -- outer = blocks, inner = local. We slice param_scan_axis (blocks),
-  #     then param_scan_axis again (local shifts down into that slot once blocks is removed).
+  # Case 4: Multi-axis stacked
   key_str = maxtext_param_key[0] if isinstance(maxtext_param_key, tuple) else maxtext_param_key
   if isinstance(key_str, str) and "scanned_blocks-local_layers" in key_str:
     max_logging.log("\tscan gemma4 local")
@@ -328,21 +284,17 @@ def process_maxtext_param(
     outer_axis_to_slice = 0
     inner_axis_to_slice = 0
 
-  # Outer loop (experts for MoE, blocks for gemma4 local)
   for outer_idx, inner_paths in enumerate(hf_target_paths):
     if isinstance(maxtext_param_weight, list):
-      outer_slice = [
-          jax.lax.index_in_dim(x, outer_idx, axis=outer_axis_to_slice, keepdims=False) for x in maxtext_param_weight
-      ]
+      outer_slice = [x.take(outer_idx, axis=outer_axis_to_slice) for x in maxtext_param_weight]
     else:
-      outer_slice = jax.lax.index_in_dim(maxtext_param_weight, outer_idx, axis=outer_axis_to_slice, keepdims=False)
+      outer_slice = maxtext_param_weight.take(outer_idx, axis=outer_axis_to_slice)
 
-    # Inner loop (layers for MoE, local layers for gemma4)
     for inner_idx, hf_path in enumerate(inner_paths):
       if isinstance(outer_slice, list):
-        inner_slice = [jax.lax.index_in_dim(x, inner_idx, axis=inner_axis_to_slice, keepdims=False) for x in outer_slice]
+        inner_slice = [x.take(inner_idx, axis=inner_axis_to_slice) for x in outer_slice]
       else:
-        inner_slice = jax.lax.index_in_dim(outer_slice, inner_idx, axis=inner_axis_to_slice, keepdims=False)
+        inner_slice = outer_slice.take(inner_idx, axis=inner_axis_to_slice)
 
       _process(
           hf_path,
@@ -472,34 +424,31 @@ def save_safetensor_file(
     output_dir_final: str,
     file_name: str,
 ):
-  """Saves a single safetensor file, from memory to remote when uploading"""
+  """Saves a single safetensor file, streaming to disk and remote."""
   if jax.process_index() == 0:
     state_dict = {k: v for k, v in state_dict.items() if v is not None}
     if "model.safetensors" in state_dict and isinstance(state_dict["model.safetensors"], dict):
       state_dict = state_dict["model.safetensors"]
 
+    local_path = os.path.join(local_dir_to_save_to, file_name)
+    numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
+    max_logging.log(f"   Saved {file_name} locally to {local_path}")
+
     if output_dir_final.startswith("gs://"):
       cloud_path = os.path.join(output_dir_final, file_name)
-      upload_state_dict_to_gcs(state_dict=state_dict, gs_bucket_path=cloud_path)
+      upload_file_to_gcs(local_path, cloud_path, remove_local_file_after_upload=True)
     elif output_dir_final.startswith("hf://"):
-      max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
-      serialized_content = save_flax_to_bytes(state_dict, metadata={"format": "pt"})
-      # Upload in-memory; skip local storage
       repo_id = output_dir_final.lstrip("hf://")
       api = HfApi()
-      with io.BytesIO(serialized_content) as f:
-        api.upload_file(
-            path_or_fileobj=f,
-            path_in_repo=file_name,
-            repo_id=repo_id,
-            repo_type="model",
-        )
+      api.upload_file(
+          path_or_fileobj=local_path,
+          path_in_repo=file_name,
+          repo_id=repo_id,
+          repo_type="model",
+      )
+      if os.path.exists(local_path):
+        os.remove(local_path)
       max_logging.log(f"  Successfully uploaded {file_name} to HF repo: {repo_id}")
-    else:
-      # local storage
-      local_path = os.path.join(local_dir_to_save_to, file_name)
-      numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
-      max_logging.log(f"   Saved {file_name} to {local_path}")
 
 
 def save_index_file(
@@ -540,37 +489,28 @@ def save_index_file(
 
 
 def save_weight_files(
-    shards,
-    index,
+    shards: dict,
+    index: dict | None,
     local_dir_to_save_to: str,
     output_dir_final: str,
-    parallel_threads=4,
     remove_local_copy_after_upload: bool = False,
 ):
-  """Saves weight files and index if needed.
-
-  Requires local system to have at least `parallel_threads * DEFAULT_MAX_SHARD_SIZE`
-  free disk space, as each thread will maintain a local cache of its shard during processing.
-  """
+  """Saves weight files and index if needed."""
   if index is None:
     # 'shards' is actually the single state_dict here
     save_safetensor_file(shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE)
   else:
-    # Save sharded weights in parallel
-    with ThreadPoolExecutor(max_workers=parallel_threads) as executor:
-      shard_items = list(shards.items())
-      futures = [
-          executor.submit(
-              save_safetensor_file,
-              shard_dict,
-              local_dir_to_save_to,
-              output_dir_final,
-              shard_name,
-          )
-          for shard_name, shard_dict in shard_items
-      ]
-      for future in futures:
-        future.result()
+    # Process shards sequentially and immediately release memory per shard
+    for shard_name in list(shards.keys()):
+      shard_dict = shards.pop(shard_name)
+      save_safetensor_file(
+          shard_dict,
+          local_dir_to_save_to,
+          output_dir_final,
+          shard_name,
+      )
+      del shard_dict
+      gc.collect()
 
     # Save index file
     save_index_file(
@@ -608,9 +548,8 @@ def save_model_files(
   """
   Saves model files (config and weights) to the specified directory.
   When uploading to GCS/HF hub,
-          *.safetensors are uploaded from memory to remote, no local storage is used to save disk usage
+          *.safetensors are streamed via temporary disk staging to avoid host RAM spikes
   """
-
   if output_dir.startswith("hf://"):
     create_huggingface_hub_repo_if_not_exist(repo_id=output_dir.lstrip("hf://"), repo_type="model")
     repo_id = output_dir.lstrip("hf://")
@@ -665,11 +604,11 @@ def save_model_files(
       # Save config.json
       save_config_file(config, current_save_path, output_dir, SAFE_TENSORS_CONFIG_FILE, remove_local_copy)
 
-    # Save .safetensors files (sharding can be outside process guard if weights are replicated)
-    # The actual file saving within save_weight_files is guarded.
-    # Unwrap nested dict if needed
+    # Save .safetensors files
     shards, index = shard_checkpoint(weight_arrays)
-    save_weight_files(shards, index, current_save_path, output_dir, parallel_threads, remove_local_copy)
+    del weight_arrays
+    gc.collect()
+    save_weight_files(shards, index, current_save_path, output_dir, remove_local_copy)
 
   if jax.process_index() == 0:
     max_logging.log(f"✅ Model and tokenizer (if provided) successfully processed for {output_dir}")
@@ -703,6 +642,16 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   print(f"✅ Uploaded to {bucket.name}/{blob_name}")
 
 
+_GCS_CLIENT = None
+
+
+def _get_gcs_client():
+  global _GCS_CLIENT
+  if _GCS_CLIENT is None:
+    _GCS_CLIENT = Client()
+  return _GCS_CLIENT
+
+
 def upload_file_to_gcs(local_file: str, gs_bucket_path: str, remove_local_file_after_upload=False):
   """Uploads a single file to Google Cloud Storage.
 
@@ -717,7 +666,7 @@ def upload_file_to_gcs(local_file: str, gs_bucket_path: str, remove_local_file_a
 
   max_logging.log(f"-> Uploading {local_file} to {gs_bucket_path}...")
   # Upload file
-  storage_client = Client()
+  storage_client = _get_gcs_client()
   bucket = storage_client.bucket(bucket_name)
   blob = bucket.blob(blob_name)
   # set large timeout to support large safetensors

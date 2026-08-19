@@ -7,11 +7,13 @@
 # bash test_llama3.1_70b_to_hf.sh $RUN_ID $CHECKPOINT_PATH $USE_MULTIMODAL $SCAN_LAYERS
 
 set -ex
+export MALLOC_TRIM_THRESHOLD_=131072
+export PYTHONUNBUFFERED=1
 
 run_id=$1
 CKPT_PATH=$2
 USE_MULTIMODAL=${3:-false}
-SCAN_LAYERS=${4:-false}
+SCAN_LAYERS=${4:-true}
 
 MODEL_NAME='llama3.1-70b'
 BASE_OUTPUT_DIRECTORY="gs://runner-maxtext-logs/${MODEL_NAME}"
@@ -30,4 +32,5 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=$SCAN_LAYERS \
     weight_dtype=bfloat16 \
-    --parallel_threads=2
+    checkpoint_storage_concurrent_gb=80 \
+    --parallel_threads=1

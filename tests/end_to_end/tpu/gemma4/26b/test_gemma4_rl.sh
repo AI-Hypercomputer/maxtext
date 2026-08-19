@@ -33,16 +33,17 @@ python3 -m maxtext.inference.vllm_decode \
     hbm_utilization_vllm=0.85 \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
-    prefuse_moe_weights=True ici_tensor_parallelism=8
+    prefuse_moe_weights=True ici_tensor_parallelism=4 ici_expert_parallelism=2
 
 # Step 2: Run RL on the converted checkpoint
 python3 -m maxtext.trainers.post_train.rl.train_rl \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     run_name=${run_id} rl.loss_algo='grpo' scan_layers=false \
-    num_batches=2 batch_size=16 num_test_batches=2 \
+    num_batches=2 batch_size=16 train_micro_batch_size=4 rollout_micro_batch_size=8 num_test_batches=2 \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+    ici_expert_parallelism=8 \
     rollout_tensor_parallelism=4 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     vllm_additional_config='{"maxtext_config": {"model_name": "gemma4-26b", "log_config": "false", "prefuse_moe_weights": "true"}}'
@@ -52,7 +53,8 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    vllm_additional_config='{"maxtext_config": {"model_name": "gemma4-26b", "log_config": "false", "prefuse_moe_weights": "true"}}' \
     hbm_utilization_vllm=0.85 \
     prompt='Suggest some famous landmarks in London.' \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
-    prefuse_moe_weights=True ici_tensor_parallelism=8
+    prefuse_moe_weights=True ici_tensor_parallelism=4 ici_expert_parallelism=2

@@ -33,7 +33,7 @@ python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${MULTIMODAL_SCANNED_CKPT_PATH} \
     per_device_batch_size=1 \
-    run_name=${run_id} \
+    run_name=\'${run_id}\' \
     max_prefill_predict_length=272 \
     max_target_length=300 \
     steps=1 \
@@ -50,8 +50,9 @@ python3 -m maxtext.inference.decode \
     skip_jax_distributed_system=True
 
 # Step 3: Run SFT on the MaxText checkpoint on ChartQA dataset
+gcloud storage rm --recursive ${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id} || true
 python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/post_train/sft-vision-chartqa.yml \
-    run_name=${run_id} \
+    run_name=\'${run_id}\' \
     model_name=${MODEL_NAME} \
     per_device_batch_size=1 \
     max_prefill_predict_length=1024 \
@@ -77,7 +78,7 @@ python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 \
-    run_name=${run_id} \
+    run_name=\'${run_id}\' \
     max_prefill_predict_length=272 \
     max_target_length=300 \
     steps=1 \
