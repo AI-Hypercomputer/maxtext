@@ -9,36 +9,21 @@ export PROJECT_ID="tpu-prod-env-one-vm"
 export CLUSTER_NAME="v6e-256-c2b3-b478935789"
 export ZONE="us-central2-b"
 
-# --- Configuration & Automated Image Build ---
+# --- Configuration ---
 TIMESTAMP=$(date +%m%d%H%M%S)
 export WORKLOAD_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:muskansh_${TIMESTAMP}"
 export WORKLOAD_NAME="muskansh-qn80b-${TIMESTAMP}"
 export DEVICE_TYPE="v6e-256"
 export NUM_SLICES=1
 export PRIORITY="very-high"
-export NUM_STEPS=15
 export MAX_RESTARTS=0
+export NUM_STEPS=15
 export MODEL_NAME="qwen3-next-80b-a3b"
 export BASE_OUTPUT_DIR="gs://darisoy-hlo-dumps/qwen3-next-80b-profiles/run-${TIMESTAMP}"
 
 echo "========================================================================"
-echo "Building and uploading Docker runner image from /usr/local/google/home/muskansh/maxtext"
-echo "Target Image: ${WORKLOAD_IMAGE}"
+echo "Using pre-built Docker runner image: ${WORKLOAD_IMAGE}"
 echo "========================================================================"
-
-(
-  cd /usr/local/google/home/muskansh/maxtext && \
-  if ! docker image inspect maxtext_base_image &> /dev/null; then
-    echo "Local image 'maxtext_base_image' not found. Pulling gcr.io/tpu-prod-env-one-vm/param3_21jul:latest and tagging as maxtext_base_image..."
-    docker pull gcr.io/tpu-prod-env-one-vm/param3_21jul:latest
-    docker tag gcr.io/tpu-prod-env-one-vm/param3_21jul:latest maxtext_base_image
-  fi && \
-  CLOUD_IMAGE_NAME="${WORKLOAD_IMAGE}" \
-       BASE_IMAGE="gcr.io/tpu-prod-env-one-vm/param3_21jul:latest" \
-       bash src/dependencies/scripts/docker_upload_runner.sh
-)
-
-echo "Docker image upload complete: ${WORKLOAD_IMAGE}"
 
 # --- XLA Flags ---
 XLA_FLAGS_ARRAY=(
@@ -83,7 +68,6 @@ XLA_FLAGS_ARRAY=(
   "--xla_should_add_loop_invariant_op_in_chain=ENABLED"
   "--xla_max_concurrent_host_send_recv=100"
   "--xla_tpu_scheduler_percent_shared_memory_limit=150"
-  "--xla_tpu_rerun_latency_hiding_scheduler_post_sc_assignment=true"
 )
 export XLA_FLAGS="${XLA_FLAGS_ARRAY[*]}"
 
@@ -92,9 +76,6 @@ MAXTEXT_ARGS_ARRAY=(
   "model_name=${MODEL_NAME}"
   "base_output_directory=${BASE_OUTPUT_DIR}"
   "run_name=param-3"
-  "log_config=false"
-  "debug_sharding=false"
-  "ragged_gather_reduce_fallback=false"
   "dataset_type=synthetic"
   "dataset_name=synthetic"
   "dtype=bfloat16"
@@ -105,11 +86,11 @@ MAXTEXT_ARGS_ARRAY=(
   "use_ragged_sort=True"
   "use_random_routing=True"
   "num_moe_token_chunks=2"
-  "per_device_batch_size=9"
+  "per_device_batch_size=8"
   "opt_type=adamw"
   "max_target_length=2048"
   "ragged_buffer_factor=1.5"
-  "remat_policy=custom"
+  "remat_policy=full"
   "reuse_example_batch=1"
   "decoder_layer_input=device"
   "ici_fsdp_parallelism=-1"
@@ -134,37 +115,38 @@ MAXTEXT_ARGS_ARRAY=(
   "sa_use_fused_bwd_kernel=True"
   "sparse_matmul=True"
   "megablox=True"
-  "wi_tile_fwd_batch_seq=256"
-  "wi_tile_dlhs_batch_seq=256"
-  "wi_tile_drhs_batch_seq=256"
-  "wo_tile_fwd_batch_seq=256"
-  "wo_tile_dlhs_batch_seq=256"
-  "wo_tile_drhs_batch_seq=256"
-  "wi_tile_fwd_embed_dim=512"
-  "wi_tile_fwd_mlp_dim=512"
-  "wi_tile_dlhs_embed_dim=512"
-  "wi_tile_dlhs_mlp_dim=512"
-  "wi_tile_drhs_embed_dim=512"
-  "wi_tile_drhs_mlp_dim=512"
-  "wo_tile_fwd_embed_dim=512"
-  "wo_tile_fwd_mlp_dim=512"
-  "wo_tile_dlhs_embed_dim=512"
-  "wo_tile_dlhs_mlp_dim=512"
-  "wo_tile_drhs_embed_dim=512"
-  "wo_tile_drhs_mlp_dim=512"
+  "wi_tile_fwd_batch_seq=512"
+  "wi_tile_dlhs_batch_seq=512"
+  "wi_tile_drhs_batch_seq=512"
+  "wo_tile_fwd_batch_seq=512"
+  "wo_tile_dlhs_batch_seq=512"
+  "wo_tile_drhs_batch_seq=512"
+  "wi_tile_fwd_embed_dim=3072"
+  "wi_tile_fwd_mlp_dim=1536"
+  "wi_tile_dlhs_embed_dim=3072"
+  "wi_tile_dlhs_mlp_dim=1536"
+  "wi_tile_drhs_embed_dim=3072"
+  "wi_tile_drhs_mlp_dim=1536"
+  "wo_tile_fwd_embed_dim=3072"
+  "wo_tile_fwd_mlp_dim=1536"
+  "wo_tile_dlhs_embed_dim=3072"
+  "wo_tile_dlhs_mlp_dim=1536"
+  "wo_tile_drhs_embed_dim=3072"
+  "wo_tile_drhs_mlp_dim=1536"
   "use_tokamax_gmm=True"
   "use_gmm_v2=True"
   "optimizer_memory_host_offload=False"
   "parameter_memory_host_offload=False"
   "enable_checkpointing=False"
   "async_checkpointing=False"
-  "tokenizer_type=tiktoken"
-  "tokenizer_path=tokenizer_74B/"
+  "tokenizer_type=huggingface"
+  "tokenizer_path=src/maxtext/assets/tokenizers/qwen3-tokenizer"
+  "override_model_config=true"
+  "mhc_expansion_rate=4"
   "use_gdn_kernel=True"
   "use_hybrid_gdn=True"
-  "abort_on_nan_loss=False"
   "profiler=xplane"
-  "profiler_steps=5"
+  "profiler_steps=4"
   "skip_first_n_steps_for_profiler=2"
   "enable_tpu_profiling_options=True"
   "upload_all_profiler_results=False"
@@ -192,12 +174,12 @@ echo "Creating XPK workload: ${WORKLOAD_NAME} on cluster: ${CLUSTER_NAME}"
   --device-type="${DEVICE_TYPE}" \
   --num-slices="${NUM_SLICES}" \
   --docker-image="${WORKLOAD_IMAGE}" \
+  --enable-debug-logs \
   --workload="${WORKLOAD_NAME}" \
   --command="${RUN_COMMAND}"
 
 LOGS_URL="https://console.cloud.google.com/logs/query;query=resource.type%3D%22k8s_container%22%0Aresource.labels.project_id%3D%22${PROJECT_ID}%22%0Aresource.labels.location%3D%22us-central2%22%0Aresource.labels.cluster_name%3D%22${CLUSTER_NAME}%22%0Aresource.labels.namespace_name%3D%22default%22%0Aresource.labels.pod_name%3A%22${WORKLOAD_NAME}-slice-job-0-0-%22%0Aseverity%3E%3DDEFAULT;storageScope=project;duration=P1D?project=${PROJECT_ID}"
 GKE_URL="https://console.cloud.google.com/kubernetes/service/us-central2/${CLUSTER_NAME}/default/${WORKLOAD_NAME}/details?project=${PROJECT_ID}"
-TB_URL="https://tensorboard.corp.google.com/?logdir=${BASE_OUTPUT_DIR}/param-3/tensorboard"
 
 echo "========================================================================"
 echo "📋 Pantheon Cloud Logging (Worker 0 Logs):"
@@ -206,6 +188,4 @@ echo ""
 echo "☸️ GKE Workload Details:"
 echo "${GKE_URL}"
 echo ""
-echo "📊 GCS TensorBoard Link:"
-echo "${TB_URL}"
 echo "========================================================================"
