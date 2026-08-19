@@ -2276,26 +2276,26 @@ class NNXDecoder(nnx.Module):
     
     cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, num_kv_shared)
 
-    for lyr in range(cfg.num_decoder_layers):
-      layer = getattr(self, f"layers_{lyr}")
-      donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
-      is_donor = gemma4_small.is_kv_donor_layer(lyr, layer_types, num_kv_shared)
+    if cfg.scan_layers:
+      for lyr in range(cfg.num_decoder_layers):
+        layer = getattr(self, f"layers_{lyr}")
+        donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
+        is_donor = gemma4_small.is_kv_donor_layer(lyr, layer_types, num_kv_shared)
 
-      shared_key = None
-      shared_value = None
-      if donor_idx is not None:
-        if donor_idx not in shared_kv_states:
-          raise RuntimeError(
-              f"KV-shared layer {lyr} references donor {donor_idx} but no donor K/V "
-              f"have been recorded yet. This indicates the layer iteration order is wrong."
-          )
-        shared_key, shared_value = shared_kv_states[donor_idx]
+        shared_key = None
+        shared_value = None
+        if donor_idx is not None:
+          if donor_idx not in shared_kv_states:
+            raise RuntimeError(
+                f"KV-shared layer {lyr} references donor {donor_idx} but no donor K/V "
+                f"have been recorded yet. This indicates the layer iteration order is wrong."
+            )
+          shared_key, shared_value = shared_kv_states[donor_idx]
 
-      ple_slice = per_layer_inputs[..., lyr, :] if per_layer_inputs is not None else None
-      cache_idx = cache_index_of[lyr]
-      kv_cache = kv_caches[cache_idx] if kv_caches is not None else None
+        ple_slice = per_layer_inputs[..., lyr, :] if per_layer_inputs is not None else None
+        cache_idx = cache_index_of[lyr]
+        kv_cache = kv_caches[cache_idx] if kv_caches is not None else None
 
-      if cfg.scan_layers:
         new_y, updated_kv_cache, donor_kv_out = layer(
             y,
             decoder_segment_ids,
@@ -2311,68 +2311,138 @@ class NNXDecoder(nnx.Module):
             shared_key=shared_key,
             shared_value=shared_value,
         )
-      else:
-        graphdef_l, state_l = nnx.split(layer)
+        y = new_y
+        if is_donor and donor_kv_out:
+          shared_kv_states[lyr] = donor_kv_out
 
-        def pure_layer_fn(graphdef_in, state_in, y_in, kv_c, ple_in, s_key_in, s_val_in):
-          l_merged = nnx.merge(graphdef_in, state_in)
-          out = l_merged(
-              y_in,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic=deterministic,
-              model_mode=model_mode,
-              previous_chunk=previous_chunk,
-              slot=slot,
-              bidirectional_mask=bidirectional_mask_value,
-              kv_cache=kv_c,
-              attention_metadata=attention_metadata,
-              per_layer_input=ple_in,
-              shared_key=s_key_in,
-              shared_value=s_val_in,
-              extract_donor_kv=is_donor,
-          )
-          if is_donor:
-            new_y, new_kv, donor_kv_out = out
-          else:
-            if isinstance(out, tuple):
-              new_y = out[0]
-              new_kv = out[1] if len(out) > 1 else None
+        if kv_caches is not None and updated_kv_cache is not None:
+          kv_caches[cache_idx] = updated_kv_cache
+    else:
+      macro_block_ranges = gemma4_small.get_macro_block_ranges(cfg.num_decoder_layers, cfg.model_name)
+      global_remat_policy = self.get_remat_policy()
+      offload_names = maxtext_utils.get_save_and_offload_names(cfg)
+      if offload_names[0] or offload_names[1]:
+        save_names, offload_to_device = offload_names
+        global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
+
+      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+
+      for start_idx, end_idx in macro_block_ranges:
+        block_layers = tuple(getattr(self, f"layers_{lyr}") for lyr in range(start_idx, end_idx))
+        graphdef_block, state_block = nnx.split(block_layers)
+
+        ext_donor_indices = gemma4_small.get_block_external_donor_indices(
+            start_idx, end_idx, layer_types, num_kv_shared
+        )
+        ext_donors = {}
+        for d_idx in ext_donor_indices:
+          if d_idx not in shared_kv_states:
+            raise RuntimeError(
+                f"Macro-block [{start_idx}:{end_idx}] references external donor {d_idx} "
+                f"but no donor K/V have been recorded yet. This indicates the block iteration order is wrong."
+            )
+          ext_donors[d_idx] = shared_kv_states[d_idx]
+
+        block_ple = per_layer_inputs[..., start_idx:end_idx, :] if per_layer_inputs is not None else None
+        block_kv_caches = (
+            tuple(kv_caches[cache_index_of[lyr]] for lyr in range(start_idx, end_idx))
+            if kv_caches is not None
+            else None
+        )
+
+        def pure_macro_block_fn(
+            graphdef_in,
+            state_in,
+            y_in,
+            block_kvs_in,
+            block_ple_in,
+            ext_donors_in,
+        ):
+          merged_layers = nnx.merge(graphdef_in, state_in)
+          local_shared = dict(ext_donors_in)
+          new_donor_kvs = {}
+          updated_block_kvs = []
+          curr_y = y_in
+
+          for offset, layer in enumerate(merged_layers):
+            lyr = start_idx + offset
+            donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
+            is_donor = gemma4_small.is_kv_donor_layer(lyr, layer_types, num_kv_shared)
+
+            shared_key = None
+            shared_value = None
+            if donor_idx is not None:
+              if donor_idx not in local_shared:
+                raise RuntimeError(
+                    f"KV-shared layer {lyr} references donor {donor_idx} but no donor K/V "
+                    f"have been recorded yet."
+                )
+              shared_key, shared_value = local_shared[donor_idx]
+
+            ple_slice = block_ple_in[..., offset, :] if block_ple_in is not None else None
+            kv_c = block_kvs_in[offset] if block_kvs_in is not None else None
+
+            out = layer(
+                curr_y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic=deterministic,
+                model_mode=model_mode,
+                previous_chunk=previous_chunk,
+                slot=slot,
+                bidirectional_mask=bidirectional_mask_value,
+                kv_cache=kv_c,
+                attention_metadata=attention_metadata,
+                per_layer_input=ple_slice,
+                shared_key=shared_key,
+                shared_value=shared_value,
+                extract_donor_kv=is_donor,
+            )
+
+            if is_donor:
+              curr_y, new_kv, donor_kv_out = out
+              local_shared[lyr] = donor_kv_out
+              new_donor_kvs[lyr] = donor_kv_out
             else:
-              new_y = out
-              new_kv = None
-            donor_kv_out = ()
+              if isinstance(out, tuple):
+                curr_y = out[0]
+                new_kv = out[1] if len(out) > 1 else None
+              else:
+                curr_y = out
+                new_kv = None
 
-          return new_y, new_kv, donor_kv_out, nnx.state(l_merged)
+            updated_block_kvs.append(new_kv)
 
-        global_remat_policy = self.get_remat_policy()
-        offload_names = maxtext_utils.get_save_and_offload_names(cfg)
-        if offload_names[0] or offload_names[1]:
-          save_names, offload_to_device = offload_names
-          global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
-
-        prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+          return curr_y, tuple(updated_block_kvs), new_donor_kvs, nnx.state(merged_layers)
 
         if cfg.remat_policy != "none":
-          run_global_layer = jax.checkpoint(
-              pure_layer_fn,
+          run_macro_block = jax.checkpoint(
+              pure_macro_block_fn,
               policy=global_remat_policy,
               prevent_cse=prevent_cse,
           )
         else:
-          run_global_layer = pure_layer_fn
+          run_macro_block = pure_macro_block_fn
 
-        new_y, updated_kv_cache, donor_kv_out, new_state = run_global_layer(
-            graphdef_l, state_l, y, kv_cache, ple_slice, shared_key, shared_value
+        new_y, updated_block_kvs, new_donor_kvs, new_state = run_macro_block(
+            graphdef_block,
+            state_block,
+            y,
+            block_kv_caches,
+            block_ple,
+            ext_donors,
         )
-        nnx.update(layer, new_state)
 
-      y = new_y
-      if is_donor and donor_kv_out:
-        shared_kv_states[lyr] = donor_kv_out
+        nnx.update(block_layers, new_state)
+        y = new_y
+        shared_kv_states.update(new_donor_kvs)
 
-      if kv_caches is not None and updated_kv_cache is not None:
-        kv_caches[cache_idx] = updated_kv_cache
+        if kv_caches is not None:
+          for offset, lyr in enumerate(range(start_idx, end_idx)):
+            cache_idx = cache_index_of[lyr]
+            up_kv = updated_block_kvs[offset]
+            if up_kv is not None:
+              kv_caches[cache_idx] = up_kv
 
     return y, kv_caches
 

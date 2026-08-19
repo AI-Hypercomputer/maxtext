@@ -145,6 +145,36 @@ def is_kv_donor_layer(
   return False
 
 
+def get_macro_block_ranges(
+    num_layers: int,
+    model_name: str | None = None,
+) -> list[tuple[int, int]]:
+  """Returns the list of (start_idx, end_idx) tuples partitioning layers into pattern-aligned macro-blocks."""
+  pattern = get_attention_pattern(model_name)
+  period = len(pattern)
+  ranges = []
+  for start in range(0, num_layers, period):
+    end = min(start + period, num_layers)
+    ranges.append((start, end))
+  # TODO: Handle partial trailing blocks for irregular layer counts if needed.
+  return ranges
+
+
+def get_block_external_donor_indices(
+    start_idx: int,
+    end_idx: int,
+    layer_types: tuple[AttentionType, ...],
+    num_kv_shared_layers: int,
+) -> list[int]:
+  """Returns the sorted list of external donor layer indices required by the macro-block [start_idx, end_idx)."""
+  external_donors = set()
+  for lyr in range(start_idx, end_idx):
+    donor_idx = kv_donor_layer_idx(lyr, layer_types, num_kv_shared_layers)
+    if donor_idx is not None and (donor_idx < start_idx or donor_idx >= end_idx):
+      external_donors.add(donor_idx)
+  return sorted(list(external_donors))
+
+
 class Gemma4SmallPLE(nnx.Module):
   """Builds the ``[B, S, num_layers, D_ple]`` per-layer-input tensor."""
 
