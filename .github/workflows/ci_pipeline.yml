@@ -86,12 +86,12 @@ jobs:
 
   build_and_upload_maxtext_package:
     name: Build MaxText Package
-    needs: [analyze_code_changes, code_quality_check, docs_build_check]
-    # Run if either tests or notebooks need to run; on PRs, gate on code quality + docs passing
+    needs: [analyze_code_changes, code_quality_check]
+    # Run if either tests or notebooks need to run; on PRs, gate on code quality
     if: |
       always() &&
       (needs.analyze_code_changes.outputs.run_tests == 'true' || needs.analyze_code_changes.outputs.run_notebooks == 'true') &&
-      (github.event_name != 'pull_request' || (needs.code_quality_check.result == 'success' && needs.docs_build_check.result == 'success'))
+      (github.event_name != 'pull_request' || needs.code_quality_check.result == 'success')
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu

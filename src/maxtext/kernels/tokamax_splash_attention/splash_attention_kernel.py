@@ -2094,9 +2094,6 @@ def _make_dynamic_splash_attention(
   if config is None:
     config = SplashConfig.get_default()
 
-  # This is the only mode that supports the dynamic grid.
-  config = dataclasses.replace(config, dq_reduction_steps=3)
-
   def process_mask_shard(mask):
     process_mask_fn = functools.partial(
         mask_info_lib._process_dynamic_mask,

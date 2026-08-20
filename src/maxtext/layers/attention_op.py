@@ -2139,7 +2139,7 @@ class AttentionOp(nnx.Module):
 
         if indexer_mask is not None:
           # Convert additive float mask (0.0=attend, negative=masked) to boolean mask for Tokamax splash kernel
-          indexer_mask = indexer_mask == 0.0
+          indexer_mask = indexer_mask >= DEFAULT_MASK_VALUE * 0.5
           if pad_q > 0 or pad_kv > 0:
             pad_width = [(0, 0)] * (indexer_mask.ndim - 2) + [(0, pad_q), (0, pad_kv)]
             indexer_mask = jnp.pad(

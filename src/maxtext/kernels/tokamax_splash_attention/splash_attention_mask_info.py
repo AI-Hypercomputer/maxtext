@@ -300,74 +300,34 @@ def _process_dynamic_mask(
     raise ValueError(f"{kv_block_size=} should divide {kv_seq_len=}.")
 
   # Tile the last 2 dimensions of the mask into 2D tiles of size `block_shape`.
-  mask_blocks = (
-      mask.reshape(
-          q_blocks_count,
-          q_block_size,
-          kv_blocks_count,
-          kv_block_size,
-      )
-      .swapaxes(-2, -3)
-      .astype(partial_mask_blocks_dtype)
-  )
+  mask_blocks = mask.reshape(
+      q_blocks_count,
+      q_block_size,
+      kv_blocks_count,
+      kv_block_size,
+  ).swapaxes(1, 2)
 
-  any_mask = jnp.any(mask_blocks, axis=(-1, -2)).astype(np.int32)
-  all_mask = jnp.all(mask_blocks, axis=(-1, -2)).astype(np.int32)
-  block_mask = any_mask + all_mask
-
-  block_ids = jnp.arange(block_mask.size, dtype=np.int32).reshape(block_mask.shape)
   if is_dkv:
-    block_mask = block_mask.swapaxes(-1, -2)
-    block_ids = block_ids.swapaxes(-1, -2)
+    mask_blocks = mask_blocks.swapaxes(0, 1)
     mask_blocks = mask_blocks.swapaxes(-1, -2)
 
-  active_mask = block_mask > 0
-  # If an entire row is masked then that output tile won't be visited.
-  # We extend the grid to visit these tiles to initialize them.
-  empty_rows = jnp.all(block_mask == 0, axis=-1)
-  first_col = jnp.arange(block_mask.shape[1]) == 0
-  active_mask |= empty_rows[:, None] & first_col
+  num_blocks = q_blocks_count * kv_blocks_count
+  mask_blocks = mask_blocks.reshape(num_blocks, mask_blocks.shape[-2], mask_blocks.shape[-1])
+  mask_blocks = mask_blocks.astype(partial_mask_blocks_dtype)
 
-  num_active_blocks = active_mask.flatten().sum(keepdims=True)
-  active_indices = jnp.argwhere(active_mask, size=active_mask.size, fill_value=-1)
-  active_rows = active_indices[:, 0].astype(np.int32)
-  active_cols = active_indices[:, 1].astype(np.int32)
-
-  block_mask = block_mask[active_rows, active_cols]
-  mask_next = block_ids.at[active_rows, active_cols].get(wrap_negative_indices=False)
-  mask_next = jnp.where(block_mask == 1, mask_next, 0)
-
-  # Mask out the blocks that aren't active.
-  mask = (jnp.arange(block_mask.size) < num_active_blocks).astype(np.int32)
-  block_mask = block_mask * mask
-
-  # Collapsing because the block ids are linearized.
-  mask_blocks = lax.collapse(mask_blocks, 0, 2)
-
-  def _downcast(array: jax.Array, max_value: int) -> jax.Array:
-    if array.size == 0:
-      return array
-
-    if array.dtype != np.int32:
-      raise ValueError(f"Expected int32 input, but got {array.dtype}.")
-
-    if max_value <= np.iinfo(np.int8).max:
-      return array.astype(np.int8)
-    elif max_value <= np.iinfo(np.int16).max:
-      return array.astype(np.int16)
-    else:
-      return array.astype(np.int32)
-
+  mask_next = jnp.arange(num_blocks, dtype=jnp.int32)
   if downcast_smem_data:
-    block_mask = block_mask.astype(np.int8)  # values are in the range [0, 1, 2]
-    mask_next = _downcast(mask_next, q_blocks_count * kv_blocks_count)
+    if num_blocks <= np.iinfo(np.int8).max:
+      mask_next = mask_next.astype(np.int8)
+    elif num_blocks <= np.iinfo(np.int16).max:
+      mask_next = mask_next.astype(np.int16)
 
   return MaskInfo(
       mask_next=mask_next,
-      active_rows=active_rows,
-      active_cols=active_cols,
-      block_mask=block_mask,
-      num_active_blocks=num_active_blocks,
+      active_rows=None,
+      active_cols=None,
+      block_mask=None,
+      num_active_blocks=None,
       partial_mask_blocks=mask_blocks,
       q_sequence=None,
       kv_sequence=None,
