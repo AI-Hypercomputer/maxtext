@@ -358,6 +358,8 @@ class MegatronSplitDatasetIdTest(unittest.TestCase):
   def test_omits_when_element_has_no_dataset_id(self):
     t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=True)
     self.assertNotIn("dataset_id", t.map(self._element(with_id=False)))
+
+
 class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
   """Unit tests for PadOrTrimToMaxLength image padding behaviors."""
 
