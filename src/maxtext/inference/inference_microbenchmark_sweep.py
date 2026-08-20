@@ -46,10 +46,10 @@ def main():
     - flatten_microbenchmark_results: Whether or not to flatten results. Should
       be true
   """
-  config = pyconfig.initialize(sys.argv)
-  base_run_name = config.run_name
+  base_config = pyconfig.initialize(sys.argv)
+  base_run_name = base_config.run_name
 
-  with open(config.inference_metadata_file, "rt", encoding="utf-8") as json_file:
+  with open(base_config.inference_metadata_file, "rt", encoding="utf-8") as json_file:
     inference_metadata = json.load(json_file)
     print(f"inference_metadata: {inference_metadata}")
 
@@ -78,12 +78,16 @@ def main():
         f"{two_axis_order_product_id}-{prefill_cache_axis_order.replace(',','')}-{ar_cache_axis_order.replace(',','')}"
     )
     run_name = f"{base_run_name}/{run_tag}"
+    tensorboard_dir = os.path.join(base_config.base_output_directory, run_name, "tensorboard", "")
 
-    tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
-    pyconfig._config.keys["prefill_cache_axis_order"] = prefill_cache_axis_order  # pylint: disable=protected-access
-    pyconfig._config.keys["ar_cache_axis_order"] = ar_cache_axis_order  # pylint: disable=protected-access
-    pyconfig._config.keys["tensorboard_dir"] = tensorboard_dir  # pylint: disable=protected-access
-    pyconfig._config.keys["run_name"] = run_name  # pylint: disable=protected-access
+    # Re-initialize configuration per sweep step using valid kwargs overrides
+    config = pyconfig.initialize(
+        sys.argv,
+        prefill_cache_axis_order=prefill_cache_axis_order,
+        ar_cache_axis_order=ar_cache_axis_order,
+        tensorboard_dir=tensorboard_dir,
+        run_name=run_name,
+    )
 
     # Prepare metadata (dimensions) json for XLML
     dimensions_json = {
@@ -114,7 +118,7 @@ def main():
         "run_name": f"{run_name}",
         "run_tag": f"{run_tag}",
         "config_json_string": json.dumps(
-            pyconfig._config.keys,  # pylint: disable=protected-access
+            config.get_keys(),
             default=lambda x: f"<<non-serializable: {type(x).__qualname__}>>",
         ),
     }
