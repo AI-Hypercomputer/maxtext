@@ -98,10 +98,7 @@ def get_functional_train_with_signature(
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"  # pyrefly: ignore[missing-attribute]
-  if config.pure_nnx:
-    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
-  else:
-    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
   donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
@@ -112,10 +109,7 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"  # pyrefly: ignore[missing-attribute]
-  if config.pure_nnx:
-    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch (NNX: no rng)
-  else:
-    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
@@ -264,11 +258,7 @@ def load_compiled(config, partial_train, state, execution_devices):
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
   shaped_batch = get_shaped_batch(config)
-  if config.pure_nnx:
-    shaped_input_args = (state, shaped_batch)
-  else:
-    example_rng = jax.random.PRNGKey(0)
-    shaped_input_args = (state, shaped_batch, example_rng)
+  shaped_input_args = (state, shaped_batch)
   shaped_input_kwargs = {}
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree, execution_devices=execution_devices)
@@ -1864,51 +1854,8 @@ def get_logical_annotations(config, mesh, init_state_fn):
 
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
-  """Get a shaped abstraction of the state (including optimizer)"""
-  if config.pure_nnx:
-    return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
-
-  init_state_partial = init_state_fn
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
-
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-
-  state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
-  if is_training and config.shard_optimizer_over_data:
-    # Add data to sharding for optimizer state
-    state_mesh_shardings = state_mesh_shardings.replace(
-        opt_state=jax.tree.map_with_path(
-            functools.partial(sharding.add_data_to_sharding, mesh),
-            max_utils.unbox_logicallypartioned(abstract_state).opt_state,
-            state_mesh_shardings.opt_state,
-        )
-    )
-  if is_training and config.optimizer_memory_host_offload:
-    opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
-    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
-  if is_training and config.parameter_memory_host_offload:
-    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
-
-    def move(path, x):
-      max_logging.log(f"max_utils.py: Moving {path} to host")
-      return x.with_memory_kind(kind="pinned_host")
-
-    params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
-    state_mesh_shardings = state_mesh_shardings.replace(params=params)
-
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
-
-  unboxed_abstract_sharded_state = max_utils.unbox_logicallypartioned(abstract_sharded_state)
-  # Initialization
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return (
-      unboxed_abstract_sharded_state,
-      state_mesh_annotations,
-      state_mesh_shardings,
-  )
+  """Get a shaped abstraction of the state (including optimizer)."""
+  return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
 
 
 def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=True):

@@ -399,12 +399,8 @@ class MuonDimensionTest(parameterized.TestCase):
     Initializes the specified MaxText model and asserts that the generated
     Muon dimension numbers match the hardcoded reference.
     """
-    is_pure_nnx = model_name in {"deepseek4-284b"}
-    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, pure_nnx=is_pure_nnx)
-    if "params" in expected_output and "params" in actual_output:
-      self.assertEqual(actual_output["params"], expected_output["params"])
-    else:
-      self.assertEqual(actual_output, expected_output)
+    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True)
+    self.assertEqual(actual_output, expected_output)
 
 
 class AdamWMaskTest(parameterized.TestCase):
