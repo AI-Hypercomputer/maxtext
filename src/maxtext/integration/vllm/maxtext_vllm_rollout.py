@@ -449,7 +449,8 @@ class MaxTextVllmSampler(VllmSampler):
       scan_axis: int = 1,
       layer_pattern_length: Optional[int] = None,
   ):
-    super().__init__(tokenizer=tokenizer, config=config, converter=converter)
+    super().__init__(tokenizer=tokenizer, config=config)
+    self._converter = converter
     self._direct_maxtext_sync = direct_maxtext_sync
     self._scan_axis = scan_axis
     self._layer_pattern_length = layer_pattern_length
@@ -460,14 +461,14 @@ class MaxTextVllmSampler(VllmSampler):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
-    if self.converter is None:
+    if self._converter is None:
       if self._direct_maxtext_sync:
         updated_weights = unroll_qwen_scanned_weights(
             updated_weights,
             scan_axis=self._scan_axis,
             pattern_length=self._layer_pattern_length,
         )
-      updated_weights = unroll_gemma_scanned_weights(updated_weights)
+        updated_weights = unroll_gemma_scanned_weights(updated_weights)
     try:
       return super().update_params(updated_weights, filter_types)
     except BaseException:
@@ -652,7 +653,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
 
   def _sync_path_name(self) -> str:
     """Which of the three sync implementations this rollout actually uses."""
-    converter = getattr(self._sampler, "converter", None)
+    converter = getattr(self._sampler, "converter", getattr(self._sampler, "_converter", None))
     if converter is not None:
       return type(converter).__name__
     if getattr(self._sampler, "to_hf_key_mappings", None):
