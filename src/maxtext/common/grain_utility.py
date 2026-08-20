@@ -114,8 +114,11 @@ class GrainCheckpointable_v1(ocp.StatefulCheckpointable):
 
     # RemoteIteratorWrapper handles checkpointing via colocated python
     if isinstance(item, RemoteIteratorWrapper):
-      item.save_state(self._step)
-      return no_op()
+
+      async def _write_remote_wrapper():
+        await asyncio.to_thread(item.save_state, self._step)
+
+      return _write_remote_wrapper()
 
     # ElasticIterator state is a single global scalar shared by all shards,
     # so we write one fixed `process_0.json` from process 0 only. This file
@@ -163,8 +166,11 @@ class GrainCheckpointable_v1(ocp.StatefulCheckpointable):
 
     # In Pathways + colocated_python environment, RemoteIteratorWrapper handles checkpointing
     if isinstance(item, RemoteIteratorWrapper):
-      item.restore_state(self._step)
-      return no_op()
+
+      async def _read_remote_wrapper():
+        await asyncio.to_thread(item.restore_state, self._step)
+
+      return _read_remote_wrapper()
 
     # McJax and Pathways through controller cases
     # ElasticIterator: every process reads the same shared `process_0.json`.
