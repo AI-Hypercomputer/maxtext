@@ -2622,6 +2622,73 @@ class AttentionTest(parameterized.TestCase):
   @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
   @pytest.mark.tpu_only
   @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
+  def test_forward_serve_vllm_fp8_kv_quantizes(self, mock_sharded_ragged_paged_attention):
+    """fp8 KV cache: k/v are quantized to the cache dtype before the RPA kernel.
+
+    The RPA v3 kernel requires kv_cache.dtype == k.dtype == v.dtype, so when the
+    cache is fp8 the k/v handed to it must be fp8 (regression test for the
+    dtype-mismatch crash).
+    """
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_rpa"
+    vllm_config_arguments["chunk_attn_window_size"] = 128
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
+    # fp8 KV cache: the fix must quantize k/v to this dtype before the kernel.
+    mock_kv_cache = [jnp.ones((1,), dtype=jnp.float8_e4m3fn)]
+
+    mock_attention_metadata = mock.Mock()
+    mock_attention_metadata.seq_lens = jnp.array([1] * self.global_batch_size)
+    mock_attention_metadata.block_tables = jnp.array([[0]] * self.global_batch_size)
+    mock_attention_metadata.query_start_loc = jnp.array(list(range(self.global_batch_size)))
+    mock_attention_metadata.request_distribution = jnp.array([self.global_batch_size])
+
+    total_tokens = self.global_batch_size * seq_len
+    mock_output = jnp.ones((total_tokens, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_kv_cache)
+
+    attention_vllm(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        kv_cache=mock_kv_cache,
+        attention_metadata=mock_attention_metadata,
+    )
+
+    # k and v (positional args 2 and 3) must be cast to the fp8 cache dtype.
+    _, called_k, called_v = mock_sharded_ragged_paged_attention.call_args.args[1:4]
+    self.assertEqual(called_k.dtype, jnp.float8_e4m3fn)
+    self.assertEqual(called_v.dtype, jnp.float8_e4m3fn)
+
+  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
+  @pytest.mark.tpu_only
+  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
   def test_forward_serve_vllm_batched_rpa(self, mock_sharded_ragged_paged_attention):
     """Tests the forward_serve_vllm method with mocked batched RPA attention."""
     # Setup config for vLLM Batched RPA
