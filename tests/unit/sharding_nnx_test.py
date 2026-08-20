@@ -30,7 +30,6 @@ import optax
 
 @dataclass
 class _Cfg:
-  pure_nnx: bool = True
   shard_optimizer_over_data: bool = False
 
 
@@ -83,9 +82,9 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
   def setUp(self):
     self.model = _LinearNNX(rngs=nnx.Rngs(0))
 
-  def test_dispatch_from_main_helper_when_pure_nnx(self):
+  def test_dispatch_from_main_helper(self):
     """maybe_update_params_sharding_with_opt should dispatch to the NNX variant."""
-    cfg = _Cfg(pure_nnx=True, shard_optimizer_over_data=False)
+    cfg = _Cfg(shard_optimizer_over_data=False)
     state_mesh_shardings = _build_state_mesh_shardings(self.model, optax.adam(1e-3))
     prev, updated = sharding.maybe_update_params_sharding_with_opt(cfg, state_mesh_shardings)
     # prev is the param-only view (no rngs / non-Param nodes)

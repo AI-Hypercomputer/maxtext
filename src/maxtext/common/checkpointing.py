@@ -867,12 +867,8 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   if step is not None:
     actual_step = int(step)
   else:
-    if config.pure_nnx:
-      # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
-      actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
-    else:
-      # Linen TrainState has .step attribute
-      actual_step = int(state.step) - 1
+    # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
+    actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
 
   # Determine if a checkpoint save should be forced, overriding the usual
   # `config.checkpoint_period` logic.
@@ -952,8 +948,8 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
 
   if config and getattr(config, "enable_diloco", False):
     state = diloco_checkpoint_utils.to_diloco_checkpoint_dict(state, config)
-  elif config and getattr(config, "pure_nnx", False):
-    # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
+  elif config:
+    # Save in the Linen on-disk layout so NNX and Linen checkpoints are interchangeable.
     if isinstance(state, nnx.State):
       state = train_state_nnx.to_checkpoint_dict(state)
 
