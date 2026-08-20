@@ -790,7 +790,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
 
   def _checkpoint_error_handler(err):
     """Handles checkpointing errors, when not in an elastic context."""
-    raise exceptions.StopTraining(f"Checkpointing failed. {str(err)}") from err
+    raise RuntimeError(f"Checkpointing failed. {str(err)}") from err
 
   with checkpoint_exception_guard(config, checkpoint_manager, _checkpoint_error_handler):
     checkpoint_saved = save_checkpoint(

@@ -979,46 +979,69 @@ def recover(
             elastic_manager.active_slice_indices,
         )
       else:
-        if snapshot_mgr.latest is None:
-          raise RuntimeError(
-              "No snapshots available to restore from. Cannot recover."
+        snapshot_loaded = False
+        if snapshot_mgr is not None and snapshot_mgr.latest is not None:
+          try:
+            restored_step = snapshot_mgr.latest.step
+            if isinstance(model, nn.Module):
+              abstract_dict = {
+                  "step": state.step,
+                  "params": state.params,
+                  "opt_state": state.opt_state,
+              }
+              replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+              restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+              restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+              restored_state = state.replace(
+                  step=restored_dict["step"],
+                  params=restored_dict["params"],
+                  opt_state=restored_dict["opt_state"],
+              )
+            else:
+              abstract_dict = {
+                  "model": nnx.to_pure_dict(nnx.state(state.model)),
+                  "optimizer": nnx.to_pure_dict(nnx.state(state.optimizer)),
+              }
+              replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
+              restored_dict = snapshot_mgr.load(replicated_abstract_dict)
+              restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
+              merged = jax.tree.map(
+                  lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
+                  restored_dict,
+                  abstract_dict,
+                  is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+              )
+              m_state = nnx.state(state.model)
+              nnx.replace_by_pure_dict(m_state, merged["model"])
+              nnx.update(state.model, m_state)
+              opt_state = nnx.state(state.optimizer)
+              nnx.replace_by_pure_dict(opt_state, merged["optimizer"])
+              nnx.update(state.optimizer, opt_state)
+              restored_state = state
+
+            snapshot_loaded = True
+          except (RuntimeError, jax.errors.JaxRuntimeError) as e:
+            _logger.warning(
+                "In-memory snapshot recovery failed (%s). Falling back to persistent checkpoint.", e
+            )
+
+        if not snapshot_loaded:
+          if existing_checkpoint_manager is None:
+            raise RuntimeError(
+                "No snapshots or persistent checkpoints available to restore from. Cannot recover."
+            )
+          _logger.info("Restoring from persistent checkpoint...")
+          restored_state, _ = checkpointing.load_state_if_possible(
+              existing_checkpoint_manager,
+              None,
+              config,
+              mesh,
+              state,
           )
-        restored_step = snapshot_mgr.latest.step
-        if isinstance(model, nn.Module):
-          abstract_dict = {
-              "step": state.step,
-              "params": state.params,
-              "opt_state": state.opt_state,
-          }
-          replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
-          restored_dict = snapshot_mgr.load(replicated_abstract_dict)
-          restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
-          restored_state = state.replace(
-              step=restored_dict["step"],
-              params=restored_dict["params"],
-              opt_state=restored_dict["opt_state"],
-          )
-        else:
-          abstract_dict = {
-              "model": nnx.to_pure_dict(nnx.state(state.model)),
-              "optimizer": nnx.to_pure_dict(nnx.state(state.optimizer)),
-          }
-          replicated_abstract_dict = train_utils.replicate_single_device_sharded_arrays(abstract_dict)
-          restored_dict = snapshot_mgr.load(replicated_abstract_dict)
-          restored_dict = train_utils.restore_original_shardings(restored_dict, abstract_dict)
-          merged = jax.tree.map(
-              lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
-              restored_dict,
-              abstract_dict,
-              is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
-          )
-          m_state = nnx.state(state.model)
-          nnx.replace_by_pure_dict(m_state, merged["model"])
-          nnx.update(state.model, m_state)
-          opt_state = nnx.state(state.optimizer)
-          nnx.replace_by_pure_dict(opt_state, merged["optimizer"])
-          nnx.update(state.optimizer, opt_state)
-          restored_state = state
+          if isinstance(model, nn.Module):
+            restored_step = int(restored_state.step)
+          else:
+            restored_step = int(restored_state.optimizer.step.value)
 
         if metric_logger_instance is not None:
           metric_logger_instance.learning_rate_schedule = learning_rate_schedule
@@ -1053,8 +1076,13 @@ def recover(
       )
       break
 
-    except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
-      if isinstance(e, pathways_manager.ScaleUpSignalError) or elastic.is_error_due_to_slice_down(e):
+    except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError, RuntimeError) as e:
+      is_no_replicas_err = isinstance(e, RuntimeError) and "No active replicas found" in str(e)
+      if (
+          isinstance(e, pathways_manager.ScaleUpSignalError)
+          or is_no_replicas_err
+          or elastic.is_error_due_to_slice_down(e)
+      ):
         _logger.warning(
             "Slice state change or error caught during recovery: %s. Retrying recovery.", e
         )
