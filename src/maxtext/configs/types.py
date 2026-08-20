@@ -4302,17 +4302,34 @@ class MaxTextConfig(
         raise ValueError("Only supports <= 1 for now, more workers results in duplicated data")
     elif self.dataset_type == DatasetType.GRAIN:
       use_hf_parquet = self.hf_path and self.grain_file_type == "parquet"
+      use_tfds_tfrecord_train = (
+          self.grain_file_type == "tfrecord" and self.dataset_path and self.dataset_name and self.train_split
+      )
+      use_tfds_tfrecord_eval = (
+          self.grain_file_type == "tfrecord" and self.dataset_path and self.eval_dataset_name and self.eval_split
+      )
 
-      if not self.grain_train_files and not self.grain_train_mixture_config_path and not use_hf_parquet:
+      if (
+          not self.grain_train_files
+          and not self.grain_train_mixture_config_path
+          and not use_hf_parquet
+          and not use_tfds_tfrecord_train
+      ):
         raise ValueError(
             "When dataset_type=grain, set grain_train_files, "
-            "grain_train_mixture_config_path, or use hf_path with grain_file_type=parquet."
+            "grain_train_mixture_config_path, use hf_path with grain_file_type=parquet, or use dataset_path, "
+            "dataset_name, and train_split with grain_file_type=tfrecord."
         )
-      if self.eval_interval > 0 and not self.grain_eval_files and not use_hf_parquet:
-        raise ValueError("Please specify grain_eval_files (or hf_path with parquet) or set eval_interval to <=0.")
+      if self.eval_interval > 0 and not self.grain_eval_files and not use_hf_parquet and not use_tfds_tfrecord_eval:
+        raise ValueError(
+            "Please specify grain_eval_files, use hf_path with grain_file_type=parquet, or use dataset_path, "
+            "eval_dataset_name, and eval_split with grain_file_type=tfrecord; otherwise set eval_interval to <=0."
+        )
     elif self.dataset_type == DatasetType.TFDS:
       logger.warning(
-          "tfds pipeline is deprecated. Use dataset_type=grain, grain_file_type=tfrecord, and provide grain_train_files."
+          "tfds pipeline is deprecated. Use dataset_type=grain and grain_file_type=tfrecord. You can keep the same "
+          "dataset_path, dataset_name, train_split, eval_dataset_name, and eval_split settings to automatically construct "
+          "the file paths. Alternatively, provide grain_train_files or grain_eval_files for custom file paths."
       )
       if self.use_dpo:
         raise ValueError(
