@@ -49,10 +49,10 @@ python3 -m maxtext.trainers.pre_train.train \
     dataset_path=${DATASET_PATH} \
     tokenizer_type="huggingface" \
     load_parameters_path=${SCANNED_CKPT_PATH} \
-    per_device_batch_size=0.25 \
+    per_device_batch_size=1 \
     run_name=${run_id} \
     max_target_length=64 \
-    steps=5 \
+    steps=2 \
     async_checkpointing=false \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
@@ -61,13 +61,15 @@ python3 -m maxtext.trainers.pre_train.train \
     remat_policy=full \
     weight_dtype=bfloat16 \
     dtype=bfloat16 \
+    ici_expert_parallelism=8 \
     opt_type=sgd
+
 
 # Step 3: Run inference on the checkpoint produced by the pre-training run
 python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
     tokenizer_type="huggingface" \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/4/items \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_prefill_predict_length=8 \

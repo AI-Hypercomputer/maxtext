@@ -86,7 +86,10 @@ def csa_overlap_pooling(
     head_dim: Target head dimension.
     prior_kv: Previous window KV prior from cache (optional).
     prior_gate: Previous window gate prior from cache (optional).
-    is_same_doc: Boolean tensor indicating if a window belongs to the same document as its predecessor.
+    is_same_doc: Boolean tensor of shape [batch, n_windows] indicating if window i
+      belongs to the same document as previous window i - 1. Without sequence packing,
+      this is always True. With packing, this is False at document boundaries, causing
+      the shifted prior window (Ca) to be masked out to prevent cross-document leakage.
 
   Returns:
     Tuple of (compressed, next_prior_kv, next_prior_gate):

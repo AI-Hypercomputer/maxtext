@@ -1898,6 +1898,7 @@ class AttentionOp(nnx.Module):
       sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
       block_q = sa_config.block_q
       block_kv = sa_config.block_kv
+
       # Splash requires sequences to be padded to strict block-sized boundaries.
       # If naturally divisible (condition false), it falls back to exact sequence lengths.
       if self.attention_type == AttentionType.COMPRESSED and (

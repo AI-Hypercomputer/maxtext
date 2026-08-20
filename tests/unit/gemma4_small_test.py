@@ -12,12 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for Gemma 4 small (E2B / E4B) layer-pattern helpers."""
+"""Unit tests for Gemma 4 small (E2B / E4B) layer-pattern helpers and rematerialization."""
 
+import os
 import unittest
+from unittest import mock
 
+from flax import nnx
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh
+import numpy as np
+
+from maxtext.common import common_types
 from maxtext.common.common_types import AttentionType
+from maxtext.configs import pyconfig
+from maxtext.layers import embeddings
+from maxtext.layers import nnx_decoders
 from maxtext.models import gemma4_small
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 
 
 L = AttentionType.LOCAL_SLIDING
@@ -130,6 +143,115 @@ class Gemma4SmallKvCacheSlotMapTest(unittest.TestCase):
     layer_types = gemma4_small.build_layer_types(10, None)
     slot_map = gemma4_small.kv_cache_slot_map(layer_types, 0)
     self.assertEqual(slot_map, {i: i for i in range(10)})
+
+
+class Gemma4SmallDecoderRematTest(unittest.TestCase):
+  """Verify that NNXDecoder applies rematerialization per layer for gemma4-small."""
+
+  _BASE_CONFIG_PATH = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+  _NUM_LAYERS = 10
+  _NUM_KV_SHARED = 5  # Last 5 of 10 layers share K/V (1 full period of pattern).
+  _NUM_Q_HEADS = 4
+  _NUM_KV_HEADS = 1
+  _HEAD_DIM = 32
+  _GLOBAL_HEAD_DIM = 64
+  _HIDDEN_SIZE = 128
+  _PLE_DIM = 32
+  _VOCAB = 256
+
+  def _build_jax_config(self, remat_policy="none"):
+    """Builds a small E2B-shaped MaxText config with trimmed dimensions for fast tests."""
+    return pyconfig.initialize(
+        ["", self._BASE_CONFIG_PATH],
+        model_name="gemma4-e2b",
+        remat_policy=remat_policy,
+        scan_layers=False,
+        use_multimodal=False,
+        override_model_config=True,
+        # Override shapes for fast tests:
+        base_num_decoder_layers=self._NUM_LAYERS,
+        base_num_query_heads=self._NUM_Q_HEADS,
+        base_num_kv_heads=self._NUM_KV_HEADS,
+        base_emb_dim=self._HIDDEN_SIZE,
+        base_mlp_dim=4 * self._HIDDEN_SIZE,
+        head_dim=self._HEAD_DIM,
+        global_head_dim=self._GLOBAL_HEAD_DIM,
+        vocab_size=self._VOCAB,
+        vocab_size_per_layer_input=self._VOCAB,
+        hidden_size_per_layer_input=self._PLE_DIM,
+        num_kv_shared_layers=self._NUM_KV_SHARED,
+        max_target_length=64,
+        max_prefill_predict_length=8,
+        attention="dot_product",  # avoid splash on CPU
+        dtype="float32",
+        weight_dtype="float32",
+        float32_qk_product=True,
+        float32_logits=True,
+        matmul_precision="highest",
+        dropout_rate=0.0,
+    )
+
+  def test_gemma4_small_decoder_remat(self):
+    cfg_no_remat = self._build_jax_config(remat_policy="none")
+    cfg_remat = self._build_jax_config(remat_policy="full")
+
+    mesh = Mesh(np.array(jax.devices()), axis_names=("x",))
+    rngs = nnx.Rngs(0)
+
+    decoder_no_remat = nnx_decoders.NNXDecoder(config=cfg_no_remat, mesh=mesh, rngs=rngs)
+    decoder_remat = nnx_decoders.NNXDecoder(config=cfg_remat, mesh=mesh, rngs=rngs)
+    nnx.update(decoder_remat, nnx.state(decoder_no_remat))
+
+    embed = embeddings.Embed(
+        num_embeddings=cfg_no_remat.vocab_size,
+        num_features=cfg_no_remat.emb_dim,
+        dtype=cfg_no_remat.dtype,
+        config=cfg_no_remat,
+        mesh=mesh,
+        rngs=rngs,
+    )
+
+    tokens = jax.random.randint(jax.random.key(1), (2, 8), 0, self._VOCAB)
+    positions = jnp.arange(8)[None, :]
+
+    def loss_fn(model):
+      out, *_ = model(
+          embed,
+          tokens,
+          decoder_positions=positions,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+      )
+      return jnp.sum(out)
+
+    # Spy on _apply_layer_with_remat (which wraps each layer in jax.checkpoint).
+    # When rematerialization is disabled ('none'), layers are called directly
+    # without checkpointing (call count is 0).
+    with mock.patch.object(
+        decoder_no_remat,
+        "_apply_layer_with_remat",
+        wraps=decoder_no_remat._apply_layer_with_remat,  # pylint: disable=protected-access)
+    ) as spy_no_remat:
+      loss_no_remat, grad_no_remat = nnx.value_and_grad(loss_fn)(decoder_no_remat)
+      self.assertEqual(spy_no_remat.call_count, 0)
+
+    # When rematerialization is enabled ('full'), every unscanned decoder layer
+    # must be wrapped in jax.checkpoint via _apply_layer_with_remat once per layer.
+    with mock.patch.object(
+        decoder_remat,
+        "_apply_layer_with_remat",
+        wraps=decoder_remat._apply_layer_with_remat,  # pylint: disable=protected-access)
+    ) as spy_remat:
+      loss_remat, grad_remat = nnx.value_and_grad(loss_fn)(decoder_remat)
+      self.assertEqual(spy_remat.call_count, self._NUM_LAYERS)
+
+    # Rematerialization should not alter outputs or gradients.
+    np.testing.assert_allclose(loss_no_remat, loss_remat, rtol=1e-4, atol=1e-4)
+    jax.tree.map(
+        lambda g1, g2: np.testing.assert_allclose(g1, g2, rtol=1e-4, atol=1e-4),
+        nnx.state(grad_no_remat),
+        nnx.state(grad_remat),
+    )
 
 
 if __name__ == "__main__":

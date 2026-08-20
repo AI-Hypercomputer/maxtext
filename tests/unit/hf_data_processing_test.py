@@ -19,7 +19,9 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import os.path
+from unittest.mock import MagicMock
 
+import datasets
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -125,6 +127,25 @@ class HfDataProcessingTest(unittest.TestCase):
     train_batch2 = get_first_batch(self.train_iter)
     self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
+
+  def test_add_default_prompt_if_missing(self):
+    config = MagicMock(default_prompt="")
+
+    # When prompt column is missing, default_prompt is added
+    ds = datasets.Dataset.from_dict({"image": [b"img"], "captions": ["a cat"]})
+    ds = hf_data_processing.add_default_prompt_if_missing(ds, ["prompt", "captions"], config)
+    self.assertEqual(ds[0]["prompt"], "")
+
+    # When prompt column already exists, existing prompt is preserved
+    ds_with_prompt = datasets.Dataset.from_dict({"prompt": ["Custom prompt"], "captions": ["a cat"]})
+    ds_with_prompt = hf_data_processing.add_default_prompt_if_missing(ds_with_prompt, ["prompt", "captions"], config)
+    self.assertEqual(ds_with_prompt[0]["prompt"], "Custom prompt")
+
+    # When streaming IterableDataset is used, default_prompt is added
+    iterable_ds = ds.to_iterable_dataset()
+    iterable_ds = hf_data_processing.add_default_prompt_if_missing(iterable_ds, ["prompt", "captions"], config)
+    first_item = next(iter(iterable_ds))
+    self.assertEqual(first_item["prompt"], "")
 
 
 class TrainingObjectiveTransformTest(unittest.TestCase):

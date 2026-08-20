@@ -1942,9 +1942,9 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
     """
     if saving_to_hf:
       wi_0, wi_1 = input_tensor
-      wi_0_1 = np.empty(target_shape, dtype=wi_0.dtype)  # pyrefly: ignore[no-matching-overload]
-      wi_0_1[..., ::2] = wi_0
-      wi_0_1[..., 1::2] = wi_1
+      wi_0_1 = jnp.empty(target_shape, dtype=wi_0.dtype)
+      wi_0_1 = wi_0_1.at[..., ::2].set(wi_0)
+      wi_0_1 = wi_0_1.at[..., 1::2].set(wi_1)
       return wi_0_1
     else:
       wi_0_1 = input_tensor

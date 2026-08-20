@@ -703,6 +703,10 @@ num_slices: -1
 # reducing peak memory usage. This is highly recommended for models with large
 # vocabularies (e.g., Gemma). Set to a value greater than 1 to enable.
 num_vocab_tiling: 1
+# If set to true then all gather the output head weight once before the tiled loss so the backward
+# reuses it instead of re-gathering per chunk. Faster when steps are short enough to expose
+# the gathers; holds the gathered head in memory for the backward.
+vocab_tiling_ag_once: false
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
@@ -736,6 +740,7 @@ train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected
 train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
+default_prompt: ''
 packing: true
 num_epoch: 1
 generate_padding_batch_train: false
@@ -810,6 +815,10 @@ grain_ram_budget_mb: 1024 # RAM budget (MB) for auto-tuning worker count. Only u
 grain_num_threads_eval: 16
 grain_prefetch_buffer_size_eval: 500
 grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
+# ArrayRecord index storage: null (reader default), 'in_memory', or 'offloaded'.
+# Do not use 'offloaded' with direct gs:// paths because it can significantly degrade input performance.
+# For Cloud Storage, use a filesystem with metadata caching, such as GCSFUSE.
+grain_index_storage_option: null
 grain_shuffle_buffer_size: 100 # shuffle buffer when using sequential access formats such as Parquet, TFRecord.
 grain_use_elastic_iterator: false # For elastic training, set to this true and packing=false
 # for using pathways
@@ -941,6 +950,14 @@ dcn_bandwidth_burst: "10mb"
 dcn_bandwidth_latency: "50ms"
 # The network interface to apply throttling rules to.
 dcn_bandwidth_interface: "eth0"
+
+# Streaming DiLoCo params
+enable_streaming_diloco: false
+num_diloco_fragments: null
+use_sequential_layers: false
+num_communication_overlapping_steps: 0
+communication_overlapping_alpha: 0.0
+
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
@@ -1338,6 +1355,15 @@ sinkhorn_iterations: 20
 #   the expensive sinkhorn iterations, the downside to this approach is that
 #   it is factorial in k.
 enable_mhc_lite: False
+# Whether to use the Pallas TPU kernel implementation for mHC-lite when running on TPU.
+use_mhc_pallas_kernel: False
+# Block size for forward pass of MHC Pallas kernel.
+mhc_pallas_kernel_fwd_block_size: 256
+# Block size for backward pass of MHC Pallas kernel.
+# The backward pass is more memory intensive, so we were running into OOMs with
+# TPU v7x if we go higher. For TPU v6 (Trillium), there is more VMEM, so 256
+# works and provides better results.
+mhc_pallas_kernel_bwd_block_size: 128
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.

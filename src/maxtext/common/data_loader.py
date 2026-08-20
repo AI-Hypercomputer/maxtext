@@ -23,7 +23,7 @@ from maxtext.common.goodput import (
     GoodputEvent,
     maybe_record_goodput,
 )
-from maxtext.trainers.diloco import diloco
+from maxtext.utils import diloco_sharding
 from maxtext.utils import elastic_utils
 from maxtext.utils import exceptions
 from maxtext.utils.sharding import get_input_data_sharding
@@ -89,7 +89,7 @@ class DataLoader:
     """Loads the next batch with sharding hint."""
     example_batch = self.load_next_batch_pre_sharding()
     if self.config.enable_diloco:
-      example_batch = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
+      example_batch = diloco_sharding.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
     return jax.device_put(example_batch, self.input_data_shardings)
 
   def check_example_batch(self):
@@ -171,7 +171,7 @@ class RampUpDataLoader(DataLoader):
       output = jax.tree.map(_slice, self.batch_buffer)
     self.rampup_active = rampup_manager.update()
     if self.config.enable_diloco:
-      output = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, output)
+      output = diloco_sharding.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, output)
     return jax.device_put(output, self.input_data_shardings)
 
 

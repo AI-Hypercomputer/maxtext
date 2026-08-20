@@ -32,6 +32,7 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ma
 from jax.sharding import AxisType, Mesh, NamedSharding
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
 from maxtext.common.gcloud_stub import is_decoupled
 
 from maxtext.common.common_types import (
@@ -1944,13 +1945,13 @@ class AttentionTest(parameterized.TestCase):
       )
       self.assertLen(hlo_test_utils.collective_lines(hlo_text, "collective-permute"), 0)
 
-  def _usp_test_config(self, packing=False):
+  def _usp_test_config(self, packing=False, context_parallel_load_balance=False):
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
         attention="flash",
         context_parallel_strategy="usp",
-        context_parallel_load_balance=False,
+        context_parallel_load_balance=context_parallel_load_balance,
         ici_context_parallelism=2,
         ici_context_usp_ulysses_parallelism=2,
         use_tokamax_splash=True,
@@ -1960,14 +1961,16 @@ class AttentionTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "usp_2x2", "packing": False},
-      {"testcase_name": "usp_2x2_packed", "packing": True},
+      {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
+      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
+      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
+      {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_usp_context_parallel(self, packing):
+  def test_tpu_flash_attention_usp_context_parallel(self, context_parallel_load_balance, packing):
     """Test equivalence between dot_product and flash attention + USP context parallelism"""
 
-    cfg_cp = self._usp_test_config(packing=packing)
+    cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
     if packing:
@@ -2000,18 +2003,20 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
         msg="Logits from generic dot product and flash attention + USP context parallelism are not close. "
-        f"packing={packing}.",
+        f"context_parallel_load_balance={context_parallel_load_balance}, packing={packing}.",
     )
 
   @parameterized.named_parameters(
-      {"testcase_name": "usp_2x2", "packing": False},
-      {"testcase_name": "usp_2x2_packed", "packing": True},
+      {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
+      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
+      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
+      {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_usp_context_parallel_grad(self, packing):
+  def test_tpu_flash_attention_usp_context_parallel_grad(self, context_parallel_load_balance, packing):
     """Test input-gradient equivalence between dot_product and flash attention + USP context parallelism"""
 
-    cfg_cp = self._usp_test_config(packing=packing)
+    cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
     if packing:
@@ -2033,11 +2038,19 @@ class AttentionTest(parameterized.TestCase):
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
     def usp_loss(lnx):
+      if context_parallel_load_balance:
+        context_parallel_size = cfg_cp.ici_context_parallelism
+        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
+        usp_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
+        usp_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+      else:
+        usp_decoder_segment_ids = decoder_segment_ids
+        usp_decoder_positions = decoder_positions
       output, _ = attention_as_mha_flash_cp(
           lnx,
           lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
+          decoder_segment_ids=usp_decoder_segment_ids,
+          inputs_positions=usp_decoder_positions,
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
@@ -2052,7 +2065,7 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(generic_grad, usp_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
         msg="Input gradients from generic dot product and flash attention + USP context parallelism are not close. "
-        f"packing={packing}.",
+        f"context_parallel_load_balance={context_parallel_load_balance}, packing={packing}.",
     )
 
   @pytest.mark.tpu_only
@@ -4400,6 +4413,107 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
         dtype=dtype,
     )
     return lnx
+
+  @pytest.mark.cpu_only
+  def test_train_path_checks_all_batch_sharding_specs(self):
+    """The non-paged GDN path makes every batch-sharded spec shape-compatible."""
+    lnx = self.get_structured_data(self.cfg.dtype)
+    gdn = Qwen3NextGatedDeltaNet(
+        config=self.cfg,
+        inputs_shape=lnx.shape,
+        mesh=self.mesh,
+        dtype=self.cfg.dtype,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=self.nnx_rng,
+    )
+
+    with mock.patch(
+        "maxtext.models.qwen3.remove_incompatible_mesh_axes_from_partition_spec",
+        wraps=sharding.remove_incompatible_mesh_axes_from_partition_spec,
+    ) as make_compatible:
+      output, _ = gdn(lnx, model_mode=MODEL_MODE_TRAIN)
+
+    self.assertEqual(output.shape, lnx.shape)
+    self.assertEqual(make_compatible.call_count, 4)
+    self.assertEqual([len(call.args[1]) for call in make_compatible.call_args_list], [4, 4, 3, 4])
+    self.assertTrue(all(call.kwargs["dims"] == (0,) for call in make_compatible.call_args_list))
+    self.assertTrue(all(call.kwargs["allow_remove_axes"] for call in make_compatible.call_args_list))
+
+  @pytest.mark.cpu_only
+  @pytest.mark.post_training
+  def test_paged_state_truncates_metadata_to_active_requests(self):
+    """The paged-state bridge trims maximum-size metadata buffers."""
+    gdn_attention = pytest.importorskip("tpu_inference.layers.common.gdn_attention")
+
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path("inference/vllm.yml")],
+        run_name="paged_gdn_metadata_test",
+        enable_checkpointing=False,
+        log_config=False,
+        base_emb_dim=16,
+        gdn_num_value_heads=2,
+        gdn_num_key_heads=2,
+        gdn_key_head_dim=4,
+        gdn_value_head_dim=4,
+        gdn_conv_kernel_dim=4,
+        gdn_chunk_size=4,
+        dtype="float32",
+        weight_dtype="float32",
+        max_prefill_predict_length=2,
+        max_target_length=4,
+        per_device_batch_size=1.0,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    hidden_states = jnp.ones((1, 1, cfg.emb_dim), dtype=cfg.dtype)
+    gdn = Qwen3NextGatedDeltaNet(
+        config=cfg,
+        inputs_shape=hidden_states.shape,
+        mesh=mesh,
+        dtype=cfg.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=nnx.Rngs(params=0, dropout=1),
+    )
+
+    num_blocks = 2
+    key_dim = cfg.gdn_num_key_heads * cfg.gdn_key_head_dim
+    value_dim = cfg.gdn_num_value_heads * cfg.gdn_value_head_dim
+    conv_dim = 2 * key_dim + value_dim
+    conv_state = jnp.zeros((num_blocks, cfg.gdn_conv_kernel_dim - 1, conv_dim), dtype=cfg.dtype)
+    recurrent_state = jnp.zeros(
+        (num_blocks, cfg.gdn_num_value_heads, cfg.gdn_key_head_dim, cfg.gdn_value_head_dim),
+        dtype=cfg.dtype,
+    )
+    attention_metadata = types.SimpleNamespace(
+        padded_num_reqs=1,
+        mamba_state_indices=jnp.array([1, 101, 102], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 101, 201], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
+        seq_lens=jnp.array([1, 101, 102], dtype=jnp.int32),
+    )
+
+    with mock.patch.object(gdn_attention, "run_jax_gdn_attention", autospec=True) as mock_run_gdn:
+      mock_run_gdn.return_value = (
+          (conv_state, recurrent_state),
+          jnp.zeros((hidden_states.shape[1], value_dim), dtype=cfg.dtype),
+      )
+      output, new_cache = gdn(
+          hidden_states,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=(conv_state, recurrent_state),
+          attention_metadata=attention_metadata,
+      )
+
+    mock_run_gdn.assert_called_once()
+    self.assertEqual(len(mock_run_gdn.call_args.args), 18)
+    self.assertEqual(set(mock_run_gdn.call_args.kwargs), {"mesh"})
+    self.assertIs(mock_run_gdn.call_args.kwargs["mesh"], mesh)
+    np.testing.assert_array_equal(mock_run_gdn.call_args.args[9], jnp.array([1], dtype=jnp.int32))
+    np.testing.assert_array_equal(mock_run_gdn.call_args.args[10], jnp.array([0, 1], dtype=jnp.int32))
+    np.testing.assert_array_equal(mock_run_gdn.call_args.args[12], jnp.array([1], dtype=jnp.int32))
+    self.assertEqual(output.shape, hidden_states.shape)
+    self.assertEqual(new_cache[0].shape, conv_state.shape)
+    self.assertEqual(new_cache[1].shape, recurrent_state.shape)
 
   @pytest.mark.tpu_only
   def test_autoregression(self):
