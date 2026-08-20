@@ -34,6 +34,7 @@ shared_experts: 1
 routed_scaling_factor: 2.5
 routed_score_func: "sigmoid"
 routed_bias: true
+float32_gate_logits: true
 norm_topk_prob: true
 decoder_block: "glm5"
 dtype: "bfloat16"
