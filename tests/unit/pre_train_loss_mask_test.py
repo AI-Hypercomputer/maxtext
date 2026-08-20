@@ -20,7 +20,6 @@ from dataclasses import dataclass
 import unittest
 from unittest import mock
 
-from flax import linen as nn
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -84,29 +83,6 @@ class _UniformNnxDecoder(nnx.Module):
     return jnp.zeros((*decoder_input_tokens.shape, self.vocab_size), dtype=jnp.float32)
 
 
-class _UniformLinenDecoder(nn.Module):
-  """Returns uniform logits through the Linen call contract."""
-
-  vocab_size: int
-  mesh: object
-
-  @nn.compact
-  def __call__(
-      self,
-      decoder_input_tokens,
-      decoder_positions,
-      decoder_segment_ids=None,
-      encoder_images=None,
-      encoder_image_masks=None,
-      enable_dropout=False,
-      decoder_target_tokens=None,
-      decoder_target_mask=None,
-  ):
-    del decoder_positions, decoder_segment_ids, encoder_images, encoder_image_masks
-    del enable_dropout, decoder_target_tokens, decoder_target_mask
-    return jnp.zeros((*decoder_input_tokens.shape, self.vocab_size), dtype=jnp.float32)
-
-
 def _make_data(include_loss_mask=True):
   """Builds a batch whose explicit loss mask differs from segmentation."""
   data = {
@@ -123,7 +99,7 @@ def _make_data(include_loss_mask=True):
 
 
 class PreTrainLossMaskTest(unittest.TestCase):
-  """Checks explicit masks in both Linen and NNX loss branches."""
+  """Checks explicit target-loss masking in the pre-training loss."""
 
   def setUp(self):
     super().setUp()
@@ -142,20 +118,6 @@ class PreTrainLossMaskTest(unittest.TestCase):
     self.config.attention_type = "block_diffusion"
     self.config.training_objective = "block_diffusion"
 
-  def _linen_model_and_variables(self, data):
-    """Initializes the test Linen decoder for the supplied batch."""
-    mesh = jax.make_mesh((1, 1, 1, 1), ("data", "fsdp", "expert", "context"))
-    model = _UniformLinenDecoder(vocab_size=self.config.vocab_size, mesh=mesh)
-    variables = model.init(
-        jax.random.key(0),
-        data["inputs"],
-        data["inputs_position"],
-        decoder_segment_ids=data["inputs_segmentation"],
-        decoder_target_tokens=data["targets"],
-        decoder_target_mask=data["targets_segmentation"],
-    )
-    return model, variables
-
   def _assert_explicit_mask_result(self, loss, aux):
     expected_mask = _make_data()["targets_loss_mask"] != 0
     expected_xent = jnp.sum(self.per_token_xent * expected_mask)
@@ -172,27 +134,6 @@ class PreTrainLossMaskTest(unittest.TestCase):
       loss, aux = pre_train.loss_fn(model, self.config, _make_data(), None, None, is_train=True)
 
     self._assert_explicit_mask_result(loss, aux)
-
-  def test_linen_loss_uses_targets_loss_mask(self):
-    self._use_block_diffusion()
-    data = _make_data()
-    model, variables = self._linen_model_and_variables(data)
-    with self._cross_entropy_patch():
-      loss, aux = pre_train.loss_fn(model, self.config, data, jax.random.key(1), variables, is_train=True)
-
-    self._assert_explicit_mask_result(loss, aux)
-
-  def test_linen_causal_loss_skips_diffusion_alignment(self):
-    data = _make_data(include_loss_mask=False)
-    model, variables = self._linen_model_and_variables(data)
-    with self._cross_entropy_patch():
-      loss, aux = pre_train.loss_fn(model, self.config, data, jax.random.key(1), variables, is_train=True)
-
-    expected_mask = data["targets_segmentation"] != 0
-    expected_xent = jnp.sum(self.per_token_xent * expected_mask)
-    self.assertEqual(int(aux["total_weights"]), 7)
-    self.assertAlmostEqual(float(aux["xent_sum"]), float(expected_xent))
-    self.assertAlmostEqual(float(loss), float(expected_xent / 7.0))
 
   def test_causal_fallback_uses_targets_segmentation(self):
     data = _make_data(include_loss_mask=False)
