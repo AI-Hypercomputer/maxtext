@@ -186,6 +186,56 @@ def naive_jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
+@jax.custom_vjp
+def invert_unit_lower_triangular_log_depth(S):
+  """
+  Computes (I + S)^-1 for a strictly lower triangular matrix S
+  using log-depth Newton-Schulz iterations.
+
+  This is highly optimized for TPUs/GPUs and replaces
+  jax.scipy.linalg.solve_triangular for chunkwise linear attention.
+  """
+  chunk_size = S.shape[-1]
+
+  # Ensure S is strictly lower triangular (zero out diagonal and upper half)
+  # This guarantees mathematical correctness and stability
+  S_strict = jnp.tril(S, k=-1)
+
+  # Base identity matrix
+  identity = jnp.eye(chunk_size, dtype=S.dtype)
+
+  # Initial approximation and error term
+  A = identity - S_strict
+  E = jnp.tril(S_strict @ S_strict, k=-1)
+
+  # Log-depth Taylor series exact computation
+  steps = int(math.ceil(math.log2(chunk_size)))
+  for _ in range(steps - 1):
+    # Update inverse and error using batched matmuls
+    A = jnp.tril(A + A @ E)
+    E = jnp.tril(E @ E, k=-1)
+
+  return A
+
+
+@functools.partial(jax.named_call, name="invert_triangular_fwd")
+def _invert_unit_lower_triangular_log_depth_fwd(S):
+  A = invert_unit_lower_triangular_log_depth(S)
+  return A, A
+
+
+@functools.partial(jax.named_call, name="invert_triangular_bwd")
+def _invert_unit_lower_triangular_log_depth_bwd(res, g):
+  A = res
+  grad_S = jnp.tril(-(A.mT @ g @ A.mT), k=-1)
+  return (grad_S,)
+
+
+invert_unit_lower_triangular_log_depth.defvjp(
+    _invert_unit_lower_triangular_log_depth_fwd, _invert_unit_lower_triangular_log_depth_bwd
+)
+
+
 def jax_chunk_gated_delta_rule(
     query: Array,
     key: Array,
@@ -207,89 +257,86 @@ def jax_chunk_gated_delta_rule(
     query = l2norm(query, dim=-1, eps=1e-6)
     key = l2norm(key, dim=-1, eps=1e-6)
 
-  g = g.astype(jnp.float32)
-
   # 2. Cast inputs to the requested compute_dtype (cfg.dtype) to save memory/compute
   query = query.astype(compute_dtype)
   key = key.astype(compute_dtype)
   value = value.astype(compute_dtype)
   beta = beta.astype(compute_dtype)
 
-  # Scale Query (keep in compute_dtype)
-  scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
-  query = query * scale
-
   B, seq_len, H, K_dim = key.shape
   V_dim = value.shape[-1]
 
-  pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
+  pad_len = (chunk_size - seq_len % chunk_size) % chunk_size
+  
   if pad_len > 0:
+    query = jnp.pad(query, ((0, 0), (0, pad_len), (0, 0), (0, 0)))
+    key = jnp.pad(key, ((0, 0), (0, pad_len), (0, 0), (0, 0)))
+    value = jnp.pad(value, ((0, 0), (0, pad_len), (0, 0), (0, 0)))
+    beta = jnp.pad(beta, ((0, 0), (0, pad_len), (0, 0)))
+    g = jnp.pad(g, ((0, 0), (0, pad_len), (0, 0)))
 
-    def pad_fn(x, val=0.0):
-      return jnp.pad(x, ((0, 0), (0, pad_len)) + ((0, 0),) * (x.ndim - 2), constant_values=val)
+  total_sequence_length = seq_len + pad_len
+  num_chunks = total_sequence_length // chunk_size
 
-    query = pad_fn(query)
-    key = pad_fn(key)
-    value = pad_fn(value)
-    g = pad_fn(g)
-    beta = pad_fn(beta)
+  # Reshape Q, K, V into chunks keeping (Batch, Heads) leading.
+  # Dimensions: (Batch, Heads, Num_Chunks, Chunk_Size, Head_Dim)
+  q_c = jnp.swapaxes(query, 1, 2).reshape(B, H, num_chunks, chunk_size, K_dim)
+  k_c = jnp.swapaxes(key, 1, 2).reshape(B, H, num_chunks, chunk_size, K_dim)
+  v_c = jnp.swapaxes(value, 1, 2).reshape(B, H, num_chunks, chunk_size, V_dim)
+  beta_c = jnp.swapaxes(beta, 1, 2).reshape(B, H, num_chunks, chunk_size)
+  g_c = jnp.swapaxes(g, 1, 2).reshape(B, H, num_chunks, chunk_size)
 
-  num_chunks = query.shape[1] // chunk_size
-
-  # Helper: (B, S, H, D) -> (B, N, H, C, D)
-  def to_chunk(x):
-    return x.reshape(B, num_chunks, chunk_size, H, -1).transpose(0, 1, 3, 2, 4)
-
-  # Helper for scalars: (B, S, H) -> (B, N, H, C)
-  def to_chunk_scalar(x):
-    return x.reshape(B, num_chunks, chunk_size, H).transpose(0, 1, 3, 2)
-
-  q_c = to_chunk(query)
-  k_c = to_chunk(key)
-  v_c = to_chunk(value)
-  g_c = to_chunk_scalar(g)
-  beta_c = to_chunk_scalar(beta)
+  # Scale query in-place
+  scale = jax.lax.rsqrt(jnp.array(K_dim, dtype=jnp.float32)).astype(compute_dtype)
+  q_c = q_c * scale
 
   # =========================================================================
   # STAGE 2: INTRA-CHUNK PRE-COMPUTATION (Parallel)
   # =========================================================================
 
-  # Cumulative decay (Must be float32)
-  g_cumsum = jnp.cumsum(g_c, axis=-1)
-  k_beta = k_c * beta_c[..., None]
-
-  # S Matrix Calculation
-  S = jnp.matmul(k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
-  S = S.astype(jnp.float32)
-
-  # Apply mask BEFORE exp to prevent 'inf' gradients
+  g_cumsum = jnp.cumsum(g_c.astype(jnp.float32), axis=-1)
+  
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
-  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
-  g_diff = jnp.where(mask, g_diff, -1e30)
+  
+  tril_mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.bool_), k=-1)
+  g_diff_masked = jnp.where(tril_mask, g_diff, -1e30)
+  decay_mask = jnp.exp(g_diff_masked).astype(jnp.float32)
 
-  S = S * jnp.exp(g_diff)
-  S = jnp.where(mask, S, 0.0)
+  # Fuse beta-scaling and key dot-product into a single jnp.einsum call.
+  prec = jax.lax.Precision.HIGHEST
+  S = jnp.einsum(
+      'b h c i d, b h c j d, b h c i -> b h c i j',
+      k_c,
+      k_c,
+      beta_c,
+      precision=prec
+  ) 
+  
+  # Convert to float32 before decay mask to match baseline precision exactly
+  S = S.astype(jnp.float32) * decay_mask
 
-  # Inversion (A) - Strictly float32
-  identity = jnp.eye(chunk_size, dtype=jnp.float32)
-  identity_broadcasted = jnp.broadcast_to(identity, S.shape)
+  tril_mask_t = jnp.broadcast_to(tril_mask, S.shape)
+  S = jnp.where(tril_mask_t, S, 0.0)
 
-  A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+  # Inversion (A) - Replaces solve_triangular entirely
+  A = invert_unit_lower_triangular_log_depth(S)
 
   # 5. WY Factors
   v_beta = v_c * beta_c[..., None]
-  u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+  u_chunks = jnp.einsum('...cd,...dv->...cv', A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
   u_chunks = u_chunks.astype(compute_dtype)
 
-  k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
-  w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
+  k_beta_g = k_c * beta_c[..., None]
+  k_beta_g = k_beta_g.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
+  w_chunks = jnp.einsum('...cd,...dv->...cv', A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
   w_chunks = w_chunks.astype(compute_dtype)
 
   # =========================================================================
   # STAGE 3: INTER-CHUNK RECURRENCE (Scan)
   # =========================================================================
-  scan_perm_vec = (1, 0, 2, 3, 4)
-  scan_perm_scl = (1, 0, 2, 3)
+  # The layout is now (B, H, C, L_c, D), so to move C to dim 0 we use (2, 0, 1, 3, 4)
+  scan_perm_vec = (2, 0, 1, 3, 4)
+  scan_perm_scl = (2, 0, 1, 3)
 
   w_scan = w_chunks.transpose(scan_perm_vec)
   u_scan = u_chunks.transpose(scan_perm_vec)
