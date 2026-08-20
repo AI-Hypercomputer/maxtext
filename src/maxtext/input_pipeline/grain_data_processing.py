@@ -66,6 +66,14 @@ def construct_hf_dataset_path(hf_path: str, hf_train_files: str | None = None, s
   return full_path
 
 
+def construct_tfds_tfrecord_path(dataset_path: str, dataset_name: str, split: str) -> str:
+  """Constructs a glob for TFRecords in the standard TFDS prepared-data layout."""
+  dataset_dir = dataset_name.strip().strip("/").replace(":", "/")
+  path = f"{dataset_path.strip().rstrip('/')}/{dataset_dir}/*-{split}.tfrecord-*"
+  max_logging.log(f"Automatically constructed Grain TFRecord path from TFDS configuration: {path}")
+  return path
+
+
 def find_data_files(data_file_pattern, hf_access_token=None):
   """Find data files matching the pattern."""
   if data_file_pattern.startswith("gs://"):
@@ -477,8 +485,22 @@ def make_grain_train_iterator(
   pipeline_fn = _get_pipeline_fn(config)
 
   grain_train_files = config.grain_train_files
-  if not grain_train_files and not config.grain_train_mixture_config_path and config.hf_path:
+  if (
+      not grain_train_files
+      and not config.grain_train_mixture_config_path
+      and config.grain_file_type == "parquet"
+      and config.hf_path
+  ):
     grain_train_files = construct_hf_dataset_path(config.hf_path, split="train")
+  elif (
+      not grain_train_files
+      and not config.grain_train_mixture_config_path
+      and config.grain_file_type == "tfrecord"
+      and config.dataset_path
+      and config.dataset_name
+      and config.train_split
+  ):
+    grain_train_files = construct_tfds_tfrecord_path(config.dataset_path, config.dataset_name, config.train_split)
 
   get_ds_fn = functools.partial(
       get_datasets,
@@ -583,9 +605,17 @@ def make_grain_eval_iterator(
   pipeline_fn = _get_pipeline_fn(config)
 
   grain_eval_files = config.grain_eval_files
-  if not grain_eval_files and getattr(config, "hf_path", None):
+  if not grain_eval_files and config.grain_file_type == "parquet" and getattr(config, "hf_path", None):
     split = getattr(config, "hf_eval_split", None) or "validation"
     grain_eval_files = construct_hf_dataset_path(config.hf_path, split=split)
+  elif (
+      not grain_eval_files
+      and config.grain_file_type == "tfrecord"
+      and config.dataset_path
+      and config.eval_dataset_name
+      and config.eval_split
+  ):
+    grain_eval_files = construct_tfds_tfrecord_path(config.dataset_path, config.eval_dataset_name, config.eval_split)
 
   get_ds_fn = functools.partial(
       get_datasets,
