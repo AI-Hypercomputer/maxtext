@@ -57,7 +57,7 @@ python3 -m maxtext.trainers.pre_train.train \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_target_length=1024 \
-    steps=5 \
+    steps=2 \
     weight_dtype=bfloat16 \
     async_checkpointing=false \
     checkpoint_storage_use_zarr3=False \
@@ -70,7 +70,7 @@ python3 -m maxtext.trainers.pre_train.train \
     python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
     tokenizer_type="huggingface" \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/4/items \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_prefill_predict_length=8 \

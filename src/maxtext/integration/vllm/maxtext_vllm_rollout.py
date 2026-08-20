@@ -22,11 +22,14 @@ converters and scanned MaxText-to-MaxText state unrolling. The converters handle
   - Layer-norm and LM-head transposes
 """
 
+import ast
+import contextlib
 import copy
-import gc
+import json
 import logging
 import re
 import time
+import traceback
 from typing import Any, Optional, Tuple
 
 import jax
@@ -34,27 +37,95 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 
-from pathwaysutils.experimental import reshard as _experimental_reshard
 from tunix.generate import mappings
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
 
-from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
-from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
-
-
+from maxtext.integration.vllm.convert_utils import _sharding_summary
+from maxtext.integration.vllm.weight_converter import (
+    WeightConverter,
+    MODEL_TO_CONVERSION_RULES,
+)
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 
+# Sentinel distinguishing "this model has no entry" from "this model has an
+# entry whose value is None", which means direct-sync-only.
+_NO_RULE_TABLE = object()
 
-def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
+
+def _rule_table_for(model_name: str):
+  """Maps a MaxText model name to its torchax rule table.
+
+  Returns `None` for models supported only on the direct path, and
+  `_NO_RULE_TABLE` for models this converter does not handle at all.
+  """
+  if model_name.startswith("qwen3.5-"):
+    return MODEL_TO_CONVERSION_RULES["qwen35_moe"]
+  if model_name == "qwen3-0.6b":
+    return MODEL_TO_CONVERSION_RULES["qwen3"]
+  if model_name.startswith("qwen3-"):
+    return MODEL_TO_CONVERSION_RULES["qwen3_moe"]
+  return _NO_RULE_TABLE
+
+
+def _create_model_converter(
+    model_name: str,
+    config: Any,
+    mesh: jax.sharding.Mesh,
+    use_hf_mapping: bool = False,
+    use_weight_converter: bool = False,
+    debug: bool = False,
+):
   """Instantiate the converter for a MaxText model name."""
-  if model_name.startswith("qwen3.5"):
-    return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
-  elif model_name.startswith("qwen3"):
-    return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
-  elif model_name.startswith("gemma4"):
+  tp = config.rollout_tensor_parallelism
+  if not use_hf_mapping and not use_weight_converter:
+    # Default MaxText-to-MaxText sync uses legacy transfer_state_directly unless explicitly opted in
+    if model_name.startswith("gemma4"):
+      return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+    return None
+
+  rule_table = _rule_table_for(model_name)
+  if rule_table is not _NO_RULE_TABLE:
+    if not use_hf_mapping:
+      # Direct path: vLLM runs the MaxText model itself, so the differences are
+      # purely structural (scanned vs unrolled layers, fused vs split MoE).
+      return WeightConverter(rules=None, config=config, tp=tp, debug=debug)
+    if rule_table is None:
+      raise NotImplementedError(
+          f"{model_name} has no HuggingFace-target conversion rules. It is only "
+          "supported on the direct MaxText-to-MaxText sync path, which requires "
+          "'maxtext_config' in vllm_additional_config so vLLM runs "
+          "MaxTextForCausalLM."
+      )
+    return WeightConverter(rules=rule_table, tp=tp)
+
+  if model_name.startswith("gemma4"):
     return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+
+  # For all other models, return None to fallback to transfer_state_with_mappings()
+
   return None
+
+
+def _as_dict(value: Any) -> dict:
+  """Coerces a config blob to a dict; it arrives as JSON, a repr, or a DictConfig."""
+  if isinstance(value, dict):
+    return value
+  if isinstance(value, str):
+    for parse in (json.loads, ast.literal_eval):
+      try:
+        parsed = parse(value)
+      except (ValueError, SyntaxError):
+        continue
+      if isinstance(parsed, dict):
+        return parsed
+    logging.warning("Could not parse vllm_additional_config: %.120s", value)
+    return {}
+  if type(value).__name__ == "DictConfig":
+    from omegaconf import OmegaConf  # pylint: disable=import-outside-toplevel
+
+    return OmegaConf.to_container(value, resolve=True)
+  return {}
 
 
 def uses_maxtext_vllm_adapter(config: Any) -> bool:
@@ -118,21 +189,25 @@ def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_block
 
 
 def _find_qwen_scanned_layer_idx(key_tuple):
-  """Finds a Qwen heterogeneous scanned block path like `layers.layer_0`."""
+  """Finds a Qwen scanned block path like `layers.layer_0` or `layers.moe_block`."""
   for i in range(len(key_tuple) - 1):
     if key_tuple[i] != "layers" or not isinstance(key_tuple[i + 1], str):
       continue
+    if key_tuple[i + 1].startswith("layers_"):
+      continue
     match = re.fullmatch(r"layer_(\d+)", key_tuple[i + 1])
     if match:
-      return i, int(match.group(1))
-  return -1, -1
+      return i, int(match.group(1)), 2
+    return i, 0, 1
+  return -1, -1, 0
 
 
 def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Optional[int] = None):
-  """Unroll Qwen's heterogeneous scanned blocks for an unscanned MaxText target.
+  """Unroll Qwen's heterogeneous or homogeneous scanned blocks for an unscanned MaxText target.
 
   Qwen 3 Next/3.5 training stores a repeating layer cycle as
   `decoder.layers.layer_{slot}`, with repetitions stacked on `scan_axis`.
+  Qwen 3 base training stores homogeneous layers as `decoder.layers.*` stacked on `scan_axis`.
   The inference model stores every layer as a direct decoder attribute named
   `layers_{global_index}`. Tunix's generic direct-sync mapper cannot bridge
   these two structures and otherwise silently leaves all destination layers at
@@ -159,12 +234,12 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
   slot_indices = set()
   scan_lengths = set()
   for key, value in flat_w.items():
-    container_idx, slot_idx = _find_qwen_scanned_layer_idx(key)
+    container_idx, slot_idx, consumed = _find_qwen_scanned_layer_idx(key)
     if container_idx == -1 or "dropout" in key or "rngs" in key:
       continue
     if not hasattr(value, "shape") or len(value.shape) <= scan_axis:
       raise ValueError(f"Qwen scanned parameter {'.'.join(map(str, key))} has no scan axis {scan_axis}: {value!r}")
-    scanned_keys.append((key, value, container_idx, slot_idx))
+    scanned_keys.append((key, value, container_idx, slot_idx, consumed))
     slot_indices.add(slot_idx)
     scan_lengths.add(value.shape[scan_axis])
 
@@ -184,12 +259,12 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
     raise ValueError(f"Qwen scanned parameters disagree on scan length: {sorted(scan_lengths)}")
 
   scan_length = scan_lengths.pop()
-  scanned_key_paths = {key for key, _, _, _ in scanned_keys}
+  scanned_key_paths = {key for key, _, _, _, _ in scanned_keys}
   new_flat_w = {key: value for key, value in flat_w.items() if key not in scanned_key_paths}
 
-  for key, value, container_idx, slot_idx in scanned_keys:
+  for key, value, container_idx, slot_idx, consumed in scanned_keys:
     prefix = key[:container_idx]
-    suffix = key[container_idx + 2 :]
+    suffix = key[container_idx + consumed :]
     for repetition in range(scan_length):
       global_idx = repetition * pattern_length + slot_idx
       new_key = prefix + (f"layers_{global_idx}",) + suffix
@@ -197,7 +272,7 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
 
   logging.info(
       "MaxTextVllmSampler: unrolled %d Qwen tensor components across %d layers for direct MaxText weight sync.",
-      len(scanned_keys),
+      len(scanned_key_paths),
       scan_length * pattern_length,
   )
   return unflatten_dict(new_flat_w)
@@ -356,12 +431,13 @@ def unroll_gemma_scanned_weights(weights):
 
 
 class MaxTextVllmSampler(VllmSampler):
-  """VllmSampler that delegates weight updates to a MaxText to vLLM converter.
+  """VllmSampler that hands MaxText weights to a converter before the sync.
 
-  When a converter is supplied, update_params bypasses transfer_state_with_mappings
-  entirely and instead runs converter.convert() followed by a direct device_put
-  into the vLLM model-runner state dict. If no converter is supplied the base-class
-  path is used after MaxText's heterogeneous scanned states are unrolled.
+  The weight-sync implementation itself lives in `VllmSampler.update_params`
+  (Tunix), which owns the KV-cache teardown/rebuild and the `state_leaves`
+  refresh that vLLM needs to actually observe new weights. This subclass only
+  supplies the converter and applies scanned-weight pre-unrolls for the
+  legacy / direct-sync paths.
   """
 
   def __init__(
@@ -373,8 +449,7 @@ class MaxTextVllmSampler(VllmSampler):
       scan_axis: int = 1,
       layer_pattern_length: Optional[int] = None,
   ):
-    super().__init__(tokenizer=tokenizer, config=config)
-    self._converter = converter
+    super().__init__(tokenizer=tokenizer, config=config, converter=converter)
     self._direct_maxtext_sync = direct_maxtext_sync
     self._scan_axis = scan_axis
     self._layer_pattern_length = layer_pattern_length
@@ -385,79 +460,28 @@ class MaxTextVllmSampler(VllmSampler):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
-    if self._converter is None:
+    if self.converter is None:
       if self._direct_maxtext_sync:
         updated_weights = unroll_qwen_scanned_weights(
             updated_weights,
             scan_axis=self._scan_axis,
             pattern_length=self._layer_pattern_length,
         )
-        updated_weights = unroll_gemma_scanned_weights(updated_weights)
-        if filter_types is None:
-          validate_direct_sync_layer_coverage(updated_weights, self.transformer_state)
-      super().update_params(updated_weights, filter_types)
-      return None
-
-    del filter_types
-
-    # delete kv_cache
-    if self.llm is not None:
-      self.llm.reset_prefix_cache()
-      self.llm.collective_rpc("delete_kv_cache")  # will free hbm
-    elif self._driver is not None:
-      self._driver.llm_engine.reset_prefix_cache()
-      self._driver.llm_engine.collective_rpc("delete_kv_cache")
-
-    # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
-    gc.collect()
-    jax.effects_barrier()
-
-    logging.info("MaxTextVllmSampler.update_params: starting converter.convert()...")
-    vllm_state = self._converter.convert(updated_weights)
-    jax.block_until_ready(vllm_state)
-
-    logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
-    model_runner_state = self.transformer_state
-
-    logging.info("Weight sync: using pathwaysutils experimental_reshard")
-
-    keys = list(vllm_state.keys())
-    start_time = time.time()
-    for i, key in enumerate(keys):
-      weight = vllm_state.pop(key)  # free immediately to avoid accumulating all weights in RAM
-      weight_array = (
-          weight.value if hasattr(weight, "value") else weight
-      )  # handle both jnp arrays and ShardedDeviceArrays
-      weight_shape_matches = weight_array.shape == model_runner_state[key].shape
-      assert (
-          weight_shape_matches
-      ), f"Shape mismatch for {key}: converter produced {weight_array.shape}, expected {model_runner_state[key].shape}"
-      # logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
-      target_sharding = model_runner_state[key].sharding
-      model_runner_state[key] = _experimental_reshard.reshard(
-          weight_array,
-          target_sharding,
-          donate=True,
-          may_alias=None,
-          cache_resharding_plans=True,
-      )
-      del weight, weight_array  # release TPU buffer before pushing back to device
-      # Periodically flush async ops and GC to prevent host RAM accumulation.
-      if i % 16 == 15:
-        jax.effects_barrier()
-        gc.collect()
-    jax.effects_barrier()
-    gc.collect()
-    end_time = time.time()
-    logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
-
-    # reinitialize kv_cache
-    if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
-    elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
-
-    return None
+      updated_weights = unroll_gemma_scanned_weights(updated_weights)
+    try:
+      return super().update_params(updated_weights, filter_types)
+    except BaseException:
+      # A device-addressability failure here takes the whole Pathways JobSet
+      # down, and the teardown races the normal exception propagation -- the
+      # Python traceback is routinely truncated or lost entirely in the worker
+      # logs. Force it out before re-raising.
+      logging.error("MaxTextVllmSampler.update_params failed:\n%s", traceback.format_exc())
+      for handler in logging.getLogger().handlers:
+        try:
+          handler.flush()
+        except Exception:  # pylint: disable=broad-except
+          pass
+      raise
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
@@ -497,14 +521,36 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     if cache_config_or_size is None:
       cache_config_or_size = rollout_config.kv_cache_size
 
-    # Native vLLM models need explicit MaxText-to-HF conversion. The MaxText
-    # adapter instead has the same tensor layouts as the actor and uses direct
-    # structural sync after scanned layers are unrolled above.
-    direct_maxtext_sync = uses_maxtext_vllm_adapter(maxtext_config)
-    converter = (
-        None
-        if direct_maxtext_sync
-        else _create_model_converter(maxtext_config.model_name, config=maxtext_config, mesh=mesh)
+    vllm_additional_config = _as_dict(
+        getattr(rollout_config, "rollout_vllm_additional_config", None)
+        or getattr(maxtext_config, "vllm_additional_config", None)
+        or {}
+    )
+
+    # The presence of "maxtext_config" is what makes the direct MaxText-to-MaxText
+    # sync legal: it is the key that makes vLLM instantiate MaxTextForCausalLM
+    # rather than its own HuggingFace-shaped model. Deriving this from
+    # rollout_vllm_model_version (always set -- train_rl.py points it at
+    # tokenizer_path) or from string-matching hf_overrides guessed at the same
+    # fact indirectly and got it wrong when either field was reformatted.
+    use_hf = "maxtext_config" not in vllm_additional_config and not uses_maxtext_vllm_adapter(maxtext_config)
+    direct_maxtext_sync = not use_hf
+    use_weight_converter = bool(
+        getattr(maxtext_config, "use_weight_converter", False)
+        or vllm_additional_config.get("use_weight_converter", False)
+    )
+    # Accepted from either spelling, matching use_weight_converter above, so a
+    # debug run can be triggered by editing the same JSON blob.
+    self._weight_sync_debug = bool(
+        getattr(maxtext_config, "weight_sync_debug", False) or vllm_additional_config.get("weight_sync_debug", False)
+    )
+    converter = _create_model_converter(
+        maxtext_config.model_name,
+        config=maxtext_config,
+        mesh=mesh,
+        use_hf_mapping=use_hf,
+        use_weight_converter=use_weight_converter,
+        debug=self._weight_sync_debug,
     )
 
     mapping_config = mappings.MappingConfig.build(
@@ -530,11 +576,12 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
       engine_kwargs.update(rollout_config.rollout_vllm_kwargs)
 
     rollout_additional_config = prepare_direct_sync_additional_config(
-        getattr(rollout_config, "rollout_vllm_additional_config", None),
+        vllm_additional_config,
         direct_maxtext_sync=direct_maxtext_sync,
         num_experts=getattr(maxtext_config, "num_experts", 1),
         tensor_parallel_size=rollout_config.tensor_parallel_size,
     )
+    self._maxtext_config = maxtext_config
 
     self._sampler = MaxTextVllmSampler(
         tokenizer=tokenizer,
@@ -565,6 +612,140 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         layer_pattern_length=getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", None),
     )
 
+    # Counts every weight sync, including the initial one below. See
+    # `_timed_weight_sync` for why sync 0 is the interesting one.
+    self._weight_sync_count = 0
+
     # Initial weight sync: run the converter so vLLM starts with real weights.
+    # Filter to Params: NNX stacks non-parameter state (notably RNG state) on
+    # axis 0 even when parameters use param_scan_axis=1, so an unfiltered state
+    # carries leaves the converter has no target for.
     state = nnx.state(rollout_actor, nnx.Param)
-    self._sampler.load_checkpoint(state)
+    with self._timed_weight_sync("initial load_checkpoint"):
+      self._sampler.load_checkpoint(state)
+
+  def update_params(
+      self,
+      params: Any,
+      filter_types: Optional[Tuple[Any, ...]] = None,
+  ) -> None:
+    """Updates rollout parameters, optionally logging an actor-weight checksum.
+
+    The L2 norm is a full reduction over every actor parameter (~35B for
+    qwen3.5-35b-a3b) and runs on every sync, so it is opt-in rather than
+    always on. Set `log_weight_sync_norm` to re-enable it when debugging
+    whether new weights are actually reaching the rollout.
+    """
+    if getattr(self._maxtext_config, "log_weight_sync_norm", False):
+      param_leaves = [
+          p.value if hasattr(p, "value") else p for p in jax.tree_util.tree_leaves(params) if hasattr(p, "shape")
+      ]
+      if param_leaves:
+        l2_norm = float(jnp.sqrt(sum(jnp.sum(jnp.square(p.astype(jnp.float32))) for p in param_leaves)))
+        logging.info("Weight sync: actor parameter L2 norm = %.6f", l2_norm)
+
+    if getattr(self, "_weight_sync_debug", False):
+      self._log_sync_boundary(params)
+
+    with self._timed_weight_sync("sync_weights"):
+      super().update_params(params, filter_types)
+
+  def _sync_path_name(self) -> str:
+    """Which of the three sync implementations this rollout actually uses."""
+    converter = getattr(self._sampler, "converter", None)
+    if converter is not None:
+      return type(converter).__name__
+    if getattr(self._sampler, "to_hf_key_mappings", None):
+      return "tunix transfer_state_with_mappings"
+    return "tunix transfer_state_directly"
+
+  @contextlib.contextmanager
+  def _timed_weight_sync(self, label: str):
+    """Times one whole weight sync -- convert, reshard and assign.
+
+    Blocks on the rollout state afterwards. JAX dispatch is asynchronous, so
+    without the barrier this measures how long it took to *enqueue* the sync,
+    and enqueue time is exactly what conversion optimizations shrink -- an
+    unblocked number would show a large speedup whether or not one occurred.
+
+    Sync 0 is the initial `load_checkpoint` from `__init__`, which pays XLA
+    compilation for every conversion program. Syncs 1+ reuse those executables.
+    The gap between them is therefore a direct read of how much of a sync is
+    compilation rather than data movement -- a question a single-sync harness
+    like `validate_converter.py` cannot answer at all, since
+    every one of its numbers includes a cold compile.
+
+    Off by default: the barrier removes any overlap between the sync and the
+    training work that follows, so the reported time is slightly pessimistic
+    against real throughput. That is the right trade for an A/B, not for a
+    production run.
+    """
+    index = self._weight_sync_count
+    self._weight_sync_count += 1
+    if not getattr(self._maxtext_config, "log_weight_sync_time", False):
+      yield
+      return
+
+    start = time.perf_counter()
+    try:
+      yield
+      self._block_on_rollout_state(index)
+    except BaseException:
+      # Reporting a duration for a sync that raised would print a
+      # normal-looking timing line next to the traceback and invite someone to
+      # record it as a result.
+      logging.info(
+          "weight_sync_time: sync %d (%s) FAILED after %.4f s (no measurement)",
+          index,
+          label,
+          time.perf_counter() - start,
+      )
+      raise
+    logging.info(
+        "weight_sync_time: sync %d (%s) via %s: %.4f s",
+        index,
+        label,
+        self._sync_path_name(),
+        time.perf_counter() - start,
+    )
+
+  def _block_on_rollout_state(self, index: int) -> None:
+    """Waits for the synced weights to actually land on the rollout devices."""
+    try:
+      jax.block_until_ready(jax.tree_util.tree_leaves(self._sampler.transformer_state))
+    except Exception as exc:  # pylint: disable=broad-except
+      logging.warning(
+          "weight_sync_time: could not block on rollout state (%s); sync %d " "excludes any work still in flight.",
+          exc,
+          index,
+      )
+
+  def _log_sync_boundary(self, params: Any) -> None:
+    """Logs which devices the trainer and rollout trees actually sit on.
+
+    On a split Pathways cluster these must be disjoint halves of the device
+    list (`setup_configs_and_devices` gives the trainer the low ids and the
+    sampler the high ones). Printing both spans at the boundary turns an
+    "ExecuteShard ... device id N is not addressable" panic from a mystery into
+    a question of which side N belongs to.
+    """
+
+    def _first_leaf(tree):
+      for leaf in jax.tree_util.tree_leaves(tree):
+        if hasattr(leaf, "shape") or hasattr(leaf, "value"):
+          return leaf
+      return None
+
+    try:
+      src_leaf = _first_leaf(params)
+      logging.info(
+          "weight_sync_debug: incoming trainer params | %s",
+          _sharding_summary(src_leaf) if src_leaf is not None else "<empty tree>",
+      )
+      tgt_leaf = _first_leaf(self._sampler.transformer_state)
+      logging.info(
+          "weight_sync_debug: rollout target state | %s",
+          _sharding_summary(tgt_leaf) if tgt_leaf is not None else "<empty tree>",
+      )
+    except Exception:  # pylint: disable=broad-except
+      logging.exception("weight_sync_debug: could not summarize sync boundary")

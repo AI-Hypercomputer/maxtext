@@ -16,7 +16,11 @@
 
 # MaxText
 
-[![MaxText Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml/badge.svg)](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml?query=event%3Aschedule)
+[![MaxText Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml/badge.svg?event=schedule)](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml)
+[![PyPI version](https://img.shields.io/pypi/v/maxtext)](https://pypi.org/project/maxtext/)
+
+[**Documentation**](https://maxtext.readthedocs.io/en)
+| [**Release Notes**](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/release_notes.md)
 
 > **_NOTE:_** We recommend customers use the latest [PyPI release](https://pypi.org/project/maxtext/) (see [installation guide](docs/install_maxtext.md)) or corresponding [pre-built container images](docs/tutorials/build_maxtext.md#pre-built-maxtext-docker-images), while the `main` branch is not expected to be production-ready.
 >
@@ -45,6 +49,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 ## 🔥 Latest news 🔥
 
 - [August 5, 2026] DeepSeek V4 Flash (284B) is now supported. See the [user guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/deepseek/Run_DeepSeek.md) for checkpoint conversion and evaluation details.
+- [August 3, 2026] Tokamax GMM v2 is now available for MoE kernel. See the [MoE configuration guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/reference/core_concepts/moe_configuration.md) for details on how to enable it.
 - [July 15, 2026] RL is now supported for Qwen3 30B and GPT-OSS 20B. See the [Qwen3 30B RL tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_qwen3_30b.html) and [GPT-OSS 20B RL tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_gptoss_20b.html) for details.
 - [June 9, 2026] Qwen3.5 35B & 397B is now [supported](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/moe/run_qwen_moe.md).
 - [May 29, 2026] A new eval framework is now available for running lm-eval, evalchemy, and custom benchmarks against MaxText checkpoints. See the [Evaluation guide](https://maxtext.readthedocs.io/en/latest/guides/eval_framework.html) to get started.

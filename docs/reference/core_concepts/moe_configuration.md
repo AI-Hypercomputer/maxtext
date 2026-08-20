@@ -31,7 +31,8 @@ MaxText supports both Dropless and Dropping strategies. Please refer to the deci
 
 Dropless:
 
-- [Tokamax Ragged Dot](https://github.com/openxla/tokamax/tree/main/tokamax/_src/ops/ragged_dot): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=True`.
+- Tokamax Ragged Dot (GMM v2): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=True, use_gmm_v2=True`.
+- [Tokamax Ragged Dot (GMM v1)](https://github.com/openxla/tokamax/tree/main/tokamax/_src/ops/ragged_dot): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=True`.
 - [Megablox](https://github.com/google/maxtext/tree/main/src/maxtext/kernels/megablox): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=False, megablox=True`.
 - [JAX Ragged Dot](https://docs.jax.dev/en/latest/_autosummary/jax.lax.ragged_dot.html): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=False, megablox=False`.
 - Dense Matmul: Enabled by setting `sparse_matmul=False, capacity_factor=-1`.
@@ -141,11 +142,18 @@ For each dimension, you can control:
 
 Implementation Support:
 
-- Megablox/JAX Ragged Dot:
+- JAX Ragged Dot:
 
   - Supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`).
   - Configs are enabled for INT8, FP8, and BF16.
 
-- Tokamax Ragged Dot:
+- Megablox:
 
-  - Supports all 18 configurations. **Note**: Currently enabled for FP8 quantization; BF16 integration is in progress.
+  - Supports all 18 configurations.
+  - Configs are enabled for INT8, FP8, and BF16.
+
+- Tokamax Ragged Dot (Includes two implementations):
+
+  - **GMM v1**: Uses Tokamax's native autotuner; does not accept manual tile sizes from MaxText.
+  - **GMM v2**: Supports all 18 manual tiling configurations.
+  - Enabled for FP8 and BF16.

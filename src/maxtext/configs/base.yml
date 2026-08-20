@@ -703,6 +703,10 @@ num_slices: -1
 # reducing peak memory usage. This is highly recommended for models with large
 # vocabularies (e.g., Gemma). Set to a value greater than 1 to enable.
 num_vocab_tiling: 1
+# If set to true then all gather the output head weight once before the tiled loss so the backward
+# reuses it instead of re-gathering per chunk. Faster when steps are short enough to expose
+# the gathers; holds the gathered head in memory for the backward.
+vocab_tiling_ag_once: false
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
@@ -812,6 +816,10 @@ grain_ram_budget_mb: 1024 # RAM budget (MB) for auto-tuning worker count. Only u
 grain_num_threads_eval: 16
 grain_prefetch_buffer_size_eval: 500
 grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
+# ArrayRecord index storage: null (reader default), 'in_memory', or 'offloaded'.
+# Do not use 'offloaded' with direct gs:// paths because it can significantly degrade input performance.
+# For Cloud Storage, use a filesystem with metadata caching, such as GCSFUSE.
+grain_index_storage_option: null
 grain_shuffle_buffer_size: 100 # shuffle buffer when using sequential access formats such as Parquet, TFRecord.
 grain_use_elastic_iterator: false # For elastic training, set to this true and packing=false
 # Megatron-LM indexed datasets (grain_file_type=mmap or mmap_npy).
@@ -952,6 +960,14 @@ dcn_bandwidth_burst: "10mb"
 dcn_bandwidth_latency: "50ms"
 # The network interface to apply throttling rules to.
 dcn_bandwidth_interface: "eth0"
+
+# Streaming DiLoCo params
+enable_streaming_diloco: false
+num_diloco_fragments: null
+use_sequential_layers: false
+num_communication_overlapping_steps: 0
+communication_overlapping_alpha: 0.0
+
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0

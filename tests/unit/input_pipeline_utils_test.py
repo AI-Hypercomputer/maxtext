@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from maxtext.input_pipeline.input_pipeline_utils import BlockDiffusionCorruption, compute_file_sharding, PadOrTrimToMaxLength
+from maxtext.multimodal import utils as mm_utils
 
 import pytest
 
@@ -357,6 +358,39 @@ class MegatronSplitDatasetIdTest(unittest.TestCase):
   def test_omits_when_element_has_no_dataset_id(self):
     t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=True)
     self.assertNotIn("dataset_id", t.map(self._element(with_id=False)))
+class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
+  """Unit tests for PadOrTrimToMaxLength image padding behaviors."""
+
+  def test_qwen_vision_padding_bypass_and_validation(self):
+    dummy_output = mm_utils.PreprocessorOutput(pixel_values=np.zeros((1, 3, 224, 224)), num_images=1)
+
+    # Registered Qwen vision models bypass image padding
+    for vb in ["qwen3_vl", "qwen3_omni", "qwen3_5"]:
+      transform = PadOrTrimToMaxLength(
+          max_length=128, pad_id=0, config=SimpleNamespace(vision_encoder_block=vb, use_multimodal=True)
+      )
+      self.assertIs(transform._pad_image_and_mask(dummy_output), dummy_output)  # pylint: disable=protected-access
+
+    # Unregistered Qwen model raises ValueError when use_multimodal=True
+    unreg_transform = PadOrTrimToMaxLength(
+        max_length=128,
+        pad_id=0,
+        config=SimpleNamespace(vision_encoder_block="unregistered", model_name="qwen3-future", use_multimodal=True),
+    )
+    with self.assertRaisesRegex(ValueError, "registered in `PadOrTrimToMaxLength`"):
+      unreg_transform._pad_image_and_mask(dummy_output)  # pylint: disable=protected-access
+
+    # Text-only Qwen model (use_multimodal=False) bypasses error and returns preprocessed_image
+    text_transform = PadOrTrimToMaxLength(
+        max_length=128,
+        pad_id=0,
+        config=SimpleNamespace(vision_encoder_block=None, model_name="qwen3-0.6b", use_multimodal=False),
+    )
+    self.assertIs(text_transform._pad_image_and_mask(dummy_output), dummy_output)  # pylint: disable=protected-access
+
+    # None pixel_values raises ValueError
+    with self.assertRaisesRegex(ValueError, "must have pixel_values"):
+      unreg_transform._pad_image_and_mask(mm_utils.PreprocessorOutput(pixel_values=None))  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":

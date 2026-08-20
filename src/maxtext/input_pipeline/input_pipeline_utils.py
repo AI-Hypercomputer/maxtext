@@ -793,8 +793,20 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
-    if self.config.model_name and self.config.model_name.startswith("qwen3-omni"):  # pyrefly: ignore[missing-attribute]
+    vision_block = mm_processor._get_vision_block(self.config)  # pylint: disable=protected-access
+    model_name = getattr(self.config, "model_name", None)
+    if (
+        vision_block is None
+        or not getattr(self.config, "use_multimodal", False)
+        or vision_block in ["qwen3_omni", "qwen3_vl", "qwen3_5"]
+    ):
       return preprocessed_image
+    elif model_name and model_name.startswith("qwen"):
+      raise ValueError(
+          f"Qwen multimodal model '{model_name}' with vision_block '{vision_block}' was not "
+          f"registered in `PadOrTrimToMaxLength`. Qwen models use native dynamic grids and must be "
+          f"registered to bypass image padding."
+      )
 
     # Determine the maximum number of images/masks allowed.
     image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)

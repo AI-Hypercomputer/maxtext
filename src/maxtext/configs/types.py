@@ -587,6 +587,10 @@ class LogitsAndLoss(BaseModel):
       1,
       description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
   )
+  vocab_tiling_ag_once: bool = Field(
+      False,
+      description="All gather the output head weight once before the tiled loss so the backward reuses it.",
+  )
 
 
 class Attention(BaseModel):
@@ -1285,11 +1289,11 @@ class PipelineParallelism(BaseModel):
 class RematAndOffload(BaseModel):
   """Configuration for gradient checkpointing (rematerialization) and offloading."""
 
-  remat_policy: str = Field(
+  remat_policy: str | None = Field(
       RematPolicy.FULL.value,
       description="The rematerialization policy, trading off speed and memory.",
   )
-  remat_policy_for_vit: str = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
+  remat_policy_for_vit: str | None = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
   decoder_layer_input: RematLocation = Field(
       RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
   )
@@ -1493,6 +1497,14 @@ class GrainDataset(BaseModel):
   grain_data_source_max_workers: int = Field(
       16,
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
+  )
+  grain_index_storage_option: None | Literal["in_memory", "offloaded"] = Field(
+      None,
+      description=(
+          "ArrayRecord reader index storage. None uses the ArrayRecord reader default. Do not use 'offloaded' with "
+          "direct gs:// paths because it can significantly degrade input performance. For Cloud Storage, use a "
+          "filesystem with metadata caching, such as GCSFUSE."
+      ),
   )
   grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
 
@@ -1810,11 +1822,26 @@ class DilocoParams(BaseModel):
 
   enable_diloco: bool = Field(False, description="Enable Diloco parallelism")
   diloco_sync_period: int = Field(36, description="Diloco sync period.")
+
+  @model_validator(mode="after")
+  def validate_streaming_diloco_params(self) -> "DilocoParams":
+    """Validates streaming DiLoCo parameters."""
+    if self.enable_streaming_diloco:
+      if not self.enable_diloco:
+        raise ValueError("enable_diloco must be True when enable_streaming_diloco is True.")
+      if self.num_diloco_fragments is None:
+        raise ValueError("num_diloco_fragments must be specified when enable_streaming_diloco is True.")
+      if self.num_diloco_fragments < 2:
+        raise ValueError(
+            f"num_diloco_fragments ({self.num_diloco_fragments}) must be at least 2 when enable_streaming_diloco "
+            "is True (1 for non-scanned parameters, at least 1 for scanned layers)."
+        )
+    return self
+
   diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
   diloco_outer_momentum: float = Field(0.9, description="momentum for outer optimizer.")
   dcn_bandwidth_limit: str = Field(
-      "",
-      description="Programmatic DCN egress bandwidth limit (e.g., '28gbit'). Empty means no limit.",
+      "", description="Programmatic DCN egress bandwidth limit per VM (e.g., '28gbit'). Empty means no limit."
   )
   dcn_bandwidth_burst: str = Field("10mb", description="Burst size for Token Bucket Filter (TBF) traffic shaping.")
   dcn_bandwidth_latency: str = Field(
@@ -1822,6 +1849,40 @@ class DilocoParams(BaseModel):
       description="Latency threshold for Token Bucket Filter (TBF) traffic shaping.",
   )
   dcn_bandwidth_interface: str = Field("eth0", description="Network interface to apply bandwidth limits on.")
+
+  # Streaming DiLoCo parameters
+  enable_streaming_diloco: bool = Field(
+      False,
+      description=(
+          "Enable streaming DiLoCo parallelism (https://arxiv.org/abs/2501.18512). Streaming DiLoCo partitions"
+          " model parameters into fragments and pipelines cross-island synchronization one fragment per inner step,"
+          " overlapping inter-cluster communication with accelerator computation."
+      ),
+  )
+  num_diloco_fragments: int | None = Field(
+      None,
+      description=(
+          "Total number of fragments to partition the model layers into (including 1 fragment for non-scanned"
+          " parameters). Required when enable_streaming_diloco is True."
+      ),
+  )
+  use_sequential_layers: bool = Field(False, description="Whether to sync layers sequentially (or interleaved).")
+  num_communication_overlapping_steps: NonNegativeInt = Field(
+      0, description="Steps of communication overlap with computation. \\tau from the paper."
+  )
+  communication_overlapping_alpha: float = Field(
+      0.0,
+      ge=0.0,
+      le=1.0,
+      description=(
+          "Interpolation factor between local and global parameters. alpha=1"
+          " means no communication between islands, alpha=0 means discards any"
+          " updates done in the inner optimizer in the first"
+          " `num_communication_overlapping_steps` steps. alpha=0.5 does a"
+          " uniform average between the local fragment parameters and the"
+          " globally shared one."
+      ),
+  )
 
 
 class Optimizer(BaseModel):
@@ -2434,6 +2495,32 @@ class VLLM(BaseModel):
   )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
+  use_weight_converter: bool = Field(
+      False,
+      description=(
+          "Use an explicit weight converter for trainer->rollout weight sync instead of "
+          "the legacy transfer_state_directly / transfer_state_with_mappings paths."
+      ),
+  )
+  weight_sync_debug: bool = Field(
+      False,
+      description=(
+          "Log the device placement of every operand during trainer->rollout weight "
+          "conversion, and barrier between conversion steps so a device or sharding "
+          "failure names the parameter that caused it. Serializes the sync; use only "
+          "when debugging a weight-sync crash."
+      ),
+  )
+  log_weight_sync_time: bool = Field(
+      False,
+      description=(
+          "Log the wall time of every trainer->rollout weight sync, blocking on the "
+          "rollout state so the number is execution rather than dispatch. Sync 0 is the "
+          "initial load_checkpoint and pays XLA compilation; syncs 1+ reuse those "
+          "executables, so the gap between them is how much of a sync is compilation "
+          "rather than data movement. Adds one barrier per sync."
+      ),
+  )
   vllm_load_format: str = Field(
       "dummy",
       description="Weight load format for vLLM in converter validation. Options:'auto', 'dummy'.",
@@ -3030,8 +3117,10 @@ class MaxTextConfig(
       raise ValueError("TPU USP attention does not support sparse indexer masks.")
     if self.attention_type != "global":
       raise ValueError("TPU USP attention is initially supported only for global causal attention.")
-    if self.context_parallel_load_balance:
-      raise ValueError("TPU USP attention does not support context_parallel_load_balance=True.")
+    if self.context_parallel_load_balance and usp_ring_size % 2 != 0:
+      raise ValueError(
+          "TPU USP attention with context_parallel_load_balance=True requires an even ici_context_parallelism."
+      )
     if self.use_ragged_attention:
       raise ValueError("TPU USP attention does not support ragged attention.")
     if self.attention_sink:
@@ -3706,8 +3795,17 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
-      raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4:
+      match (self.attention, self.use_tokamax_splash):
+        case ("dot_product", _):
+          pass
+        case ("flash", True):
+          pass
+        case _:
+          raise ValueError(
+              "DeepSeek4 is only supported with `dot_product` attention or `flash` attention "
+              "with `use_tokamax_splash=True`."
+          )
     if self.mla_qk_head_chunk_size > 0:
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(
@@ -3733,7 +3831,7 @@ class MaxTextConfig(
       supports_dot_product = self.attention == "dot_product"
       supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
       if not (supports_dot_product or supports_flash_splash):
-        raise NotImplementedError(
+        raise ValueError(
             "Sparse indexer is only supported with dot_product attention or flash attention with tokamax splash."
         )
       if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
@@ -3856,6 +3954,20 @@ class MaxTextConfig(
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
     self.validate_num_moe_emb_chunks()
+
+    if self.enable_diloco and not self.pure_nnx:
+      raise ValueError("enable_diloco=True requires pure_nnx=True (Linen support for DiLoCo has been removed).")
+
+    if self.enable_streaming_diloco:
+      if not self.scan_layers:
+        raise ValueError("enable_streaming_diloco=True requires scan_layers=True.")
+      if self.num_diloco_fragments is not None and self.num_diloco_fragments > 1:
+        num_transformer_fragments = self.num_diloco_fragments - 1
+        if self.num_decoder_layers % num_transformer_fragments != 0:
+          raise ValueError(
+              f"The number of decoder layers ({self.num_decoder_layers}) must be divisible by "
+              f"(num_diloco_fragments - 1) ({num_transformer_fragments}) when enable_streaming_diloco is True."
+          )
 
     # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
@@ -4354,17 +4466,20 @@ class RLConfig(
     ModelArchitecture,
     MTP,
     MoBa,
-    # Advanced Architectures, Tuning, and Optimizers
+    MlaAttention,
+    CompressedAttention,
+    AttentionIndexer,
+    SplashAttention,
+    Qwen3Next,
+    MultimodalGeneral,
     Muon,
     FineTuning,
     Distillation,
-    # Datasets and Loading Compatibility
     DatasetGeneral,
     TfdsDataset,
     HfDataset,
     GrainDataset,
     OlmoGrainDataset,
-    # Inference, Checkpointing, and Monitoring
     EmergencyCheckpointing,
     ElasticTraining,
     InferenceServer,
@@ -4373,15 +4488,12 @@ class RLConfig(
     Goodput,
     GcpMonitoring,
     ManagedMLDiagnostics,
-    # Positional Embeddings
     PositionalEmbedding,
     Rope,
     YarnRope,
-    # Mixture of Experts
     MoEGeneral,
     MoEKernels,
     DeepSeekMoE,
-    # General MaxText Configs
     RunInfo,
     Checkpointing,
     OrbaxStorage,
@@ -4389,23 +4501,17 @@ class RLConfig(
     Tokenizer,
     AdamW,
     Optimizer,
+    TrainingLoop,
     Quantization,
-    MultimodalGeneral,
     VisionTower,
     VisionProjector,
     AudioEncoder,
-    MlaAttention,
-    CompressedAttention,
-    AttentionIndexer,
-    SplashAttention,
-    Qwen3Next,
-    # Debugging, Profiling, and Telemetry
-    AOT,
     DevelopmentAndDebugging,
     Profiling,
+    AOT,
     Metrics,
     Tensorboard,
-    # For compatibility with trainer in post_train/rl
+    DerivedValues,
     RL,
     RLCluster,
     RLDataset,
@@ -4413,8 +4519,6 @@ class RLConfig(
     RLReward,
     RLSpecialTokens,
     VLLM,
-    TrainingLoop,
-    DerivedValues,
 ):
   """
   Configuration for Reinforcement Learning in MaxText.

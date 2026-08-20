@@ -668,11 +668,13 @@ class VocabTilingNNXTest(unittest.TestCase):
       num_vocab_tiling=4,
       logits_via_embedding=False,
       z_loss_multiplier=1e-4,
+      ici_context_parallelism=1,
+      vocab_tiling_ag_once=False,
   ):
     """Build a pyconfig + matching NNX `Transformer` for the test."""
     cfg = pyconfig.initialize(
         self.base_config,
-        run_name=f"vt_nnx_n{num_vocab_tiling}_emb{logits_via_embedding}_z{z_loss_multiplier}",
+        run_name=f"vt_nnx_n{num_vocab_tiling}_emb{logits_via_embedding}_z{z_loss_multiplier}_cp{ici_context_parallelism}",
         enable_checkpointing=False,
         enable_dropout=False,
         max_target_length=self.seq_len,
@@ -683,6 +685,8 @@ class VocabTilingNNXTest(unittest.TestCase):
         matmul_precision="high",
         num_vocab_tiling=num_vocab_tiling,
         z_loss_multiplier=z_loss_multiplier,
+        ici_context_parallelism=ici_context_parallelism,
+        vocab_tiling_ag_once=vocab_tiling_ag_once,
         pure_nnx=True,
         enable_nnx=True,
         pure_nnx_decoder=True,
@@ -761,9 +765,14 @@ class VocabTilingNNXTest(unittest.TestCase):
     """grad wrapped in jit — see `_vg`."""
     return jax.jit(jax.grad(fn, argnums=argnums))
 
-  def _run_parity(self, *, logits_via_embedding):
+  def _run_parity(self, *, logits_via_embedding, ici_context_parallelism=1, vocab_tiling_ag_once=False):
     """Compare full-vocab xent loss/grads against the tiled custom_vjp path."""
-    cfg, model = self._build_cfg_and_model(num_vocab_tiling=4, logits_via_embedding=logits_via_embedding)
+    cfg, model = self._build_cfg_and_model(
+        num_vocab_tiling=4,
+        logits_via_embedding=logits_via_embedding,
+        ici_context_parallelism=ici_context_parallelism,
+        vocab_tiling_ag_once=vocab_tiling_ag_once,
+    )
     hidden_states, labels, segmentation = self._make_inputs(cfg)
     graphdef, params, rest = self._split_and_axes(cfg, model)
 
@@ -790,6 +799,11 @@ class VocabTilingNNXTest(unittest.TestCase):
   def test_nnx_vocab_tiling_tied_embedding(self):
     """custom_vjp parity when logits share the input embedding table."""
     self._run_parity(logits_via_embedding=True)
+
+  @pytest.mark.tpu_only
+  def test_nnx_vocab_tiling_gradient_context_parallelism(self):
+    """custom_vjp parity when the mesh shards the context axis."""
+    self._run_parity(logits_via_embedding=False, ici_context_parallelism=4, vocab_tiling_ag_once=True)
 
   # ---------- Coverage expansion ----------
 

@@ -26,6 +26,8 @@ from maxtext.utils.sharding import (
     all_gather_over_fsdp,
     create_sharding,
     get_logical_axis_rules,
+    get_physical_spec_without_axes,
+    FSDP_MESH_AXES,
 )
 from maxtext.common.common_types import ShardMode
 from maxtext.utils import max_utils
@@ -350,14 +352,17 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
   # custom_vjp + lax.scan boundary, which fails for tied embeddings.
   graphdef, head_params, other_params, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
 
-  # all gather only the embedding table
-  head_params = all_gather_over_fsdp(
-      head_params,
-      nnx.get_partition_spec(head_params),
-      model.mesh,
-      get_logical_axis_rules(),
-      config.shard_mode,
-  )
+  if config.vocab_tiling_ag_once:
+    # all gather the output head over the embed-sharding axes; doing it before
+    # the custom_vjp lets the backward reuse the gathered table instead of
+    # re-gathering it for every chunk
+    head_physical_spec = get_physical_spec_without_axes(
+        nnx.get_partition_spec(head_params),
+        model.mesh,
+        FSDP_MESH_AXES + ("context", "context_usp_ulysses", "expert"),
+        get_logical_axis_rules(),
+    )
+    head_params = maybe_shard_with_name(head_params, head_physical_spec, shard_mode=config.shard_mode)
 
   def _logits_for_chunk(chunk_head_params, chunk_other_params, chunk_rest, hidden_chunk):
     local_model = nnx.merge(graphdef, chunk_head_params, chunk_other_params, chunk_rest, copy=True)

@@ -20,6 +20,12 @@
 
 MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be installed through pip. Please see our [MaxText Installation Guide](install_maxtext.md) for setup instructions.
 
+## Unreleased
+
+- **DeepSeek V4 Flash**: Added support for DeepSeek V4 Flash (284B). See the [user guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/deepseek/Run_DeepSeek.md) for checkpoint conversion and evaluation details.
+- **Tokamax GMM v2**: Tokamax GMM v2 is now available for MoE computations. See the [MoE configuration guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/reference/core_concepts/moe_configuration.md) to enable it.
+- **Reinforcement Learning (RL) Expansion**: Added RL support for Qwen3 30B and GPT-OSS 20B. See the [Qwen3 30B RL tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_qwen3_30b.html) and [GPT-OSS 20B RL tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_gptoss_20b.html) for recipes.
+
 ## Releases
 
 ### v0.2.3
