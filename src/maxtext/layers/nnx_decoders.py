@@ -1882,8 +1882,13 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
-        elif self.is_qwen3_next and kv_caches is None:
-          y = self._apply_qwen3_next_scanned_blocks(y, layer_args, layer_kwargs)
+        elif self.is_qwen3_next:
+          y = self._apply_qwen3_next_scanned_blocks(
+              y,
+              layer_args,
+              layer_kwargs,
+              kv_caches=kv_caches,
+          )
         else:
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
           if kv_caches is not None:
@@ -2166,25 +2171,36 @@ class NNXDecoder(nnx.Module):
 
     return y
 
-  def _apply_qwen3_next_scanned_blocks(self, y, layer_args, layer_kwargs):
+  def _apply_qwen3_next_scanned_blocks(self, y, layer_args, layer_kwargs, kv_caches=None):
     """Applies the Qwen3-Next scanned blocks.
 
     Qwen3NextScannableBlock rematerializes its own sub-layers (a scan over the
     linear-attention layers plus a trip-count-one scan over the full-attention
     layer), so block-level remat is skipped here to avoid rematerializing twice.
+    This holds for the external-KV-cache path too, hence the regrouping below
+    rather than falling back to the generic (block-rematerialized) branch.
+
+    External (vLLM) caches arrive as a flat list with one entry per decoder
+    layer, but the scan runs over blocks, so they are grouped into per-block
+    tuples before the scan and written back to the flat list afterwards, as in
+    _apply_gemma4_scanned_blocks.
     """
     cfg = self.config
-    scan_length = cfg.num_decoder_layers // cfg.inhomogeneous_layer_cycle_interval
+    block_length = cfg.inhomogeneous_layer_cycle_interval
+    scan_length = cfg.num_decoder_layers // block_length
     if scan_length == 0:
       return y
+    grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
     y, self.layers, _ = self._apply_layers_sequentially(
         self.layers,
         y,
         *layer_args,
         length=scan_length,
+        kv_caches_stacked=grouped_kv_caches,
         skip_block_remat=True,
         **layer_kwargs,
     )
+    maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, block_length, stacked=False)
     return y
 
   def _apply_gemma4_scanned_blocks(

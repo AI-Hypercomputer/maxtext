@@ -51,7 +51,7 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.models import gemma4, gemma4_small
+from maxtext.models import gemma4, gemma4_small, qwen3
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx
@@ -841,6 +841,171 @@ class TestGemma4ScannableBlock(unittest.TestCase):
     )
     np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
     np.testing.assert_array_equal(block.global_layer.received_attention_metadata.value, True)
+
+
+# Qwen3-Next blocks read enough of the config (GatedDeltaNet head dims, MoE sizing)
+# that a SimpleNamespace stand-in is not workable, so these use a real tiny config.
+_QWEN3_NEXT_CONFIG = {
+    "run_name": "qwen3_next_scannable_block_test",
+    "model_name": "qwen3-next-80b-a3b",
+    "max_target_length": 8,
+    "base_emb_dim": 64,
+    "base_num_decoder_layers": 4,
+    "base_num_query_heads": 2,
+    "base_num_kv_heads": 2,
+    "head_dim": 32,
+    "base_mlp_dim": 128,
+    "base_moe_mlp_dim": 32,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "vocab_size": 32,
+    "gdn_num_key_heads": 2,
+    "gdn_num_value_heads": 4,
+    "gdn_key_head_dim": 16,
+    "gdn_value_head_dim": 16,
+    "gdn_chunk_size": 4,
+    "sparse_matmul": True,
+    "megablox": False,
+    "dtype": "float32",
+    "weight_dtype": "float32",
+}
+
+
+class TestQwen3NextScannableBlock(unittest.TestCase):
+  """Tests Qwen3-Next's nested local(scan)/global(length-1 scan) decoder block."""
+
+  def _build(self, **overrides):
+    cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, **overrides})
+    mesh = _make_mesh(cfg)
+    block = qwen3.Qwen3NextScannableBlock(
+        config=cfg,
+        mesh=mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=nnx.Rngs(0),
+    )
+    return cfg, mesh, block
+
+  def _inputs(self, cfg):
+    inputs = jax.random.normal(jax.random.PRNGKey(1), (1, cfg.max_target_length, cfg.emb_dim), dtype=jnp.float32)
+    positions = jnp.arange(cfg.max_target_length)[None, :]
+    segment_ids = jnp.ones((1, cfg.max_target_length), dtype=jnp.int32)
+    return inputs, segment_ids, positions
+
+  def test_block_splits_cycle_into_local_stack_plus_one_global(self):
+    """A block covers one attention period: cycle-1 linear layers and one full-attention layer."""
+    cfg, _, block = self._build()
+    self.assertEqual(block.num_local, cfg.inhomogeneous_layer_cycle_interval - 1)
+    self.assertEqual(block.num_global, 1)
+    self.assertIsNotNone(block.local_layers)
+    self.assertIsNotNone(block.global_layer)
+
+  def test_local_params_are_stacked(self):
+    """The linear-attention layers are stacked along param_scan_axis, not stored per layer."""
+    cfg, _, block = self._build()
+    _, params, _ = nnx.split(block.local_layers, nnx.Param, ...)
+    leaves = [v.value for _, v in params.flat_state()]
+    self.assertTrue(leaves)
+    for leaf in leaves:
+      self.assertEqual(leaf.shape[cfg.param_scan_axis], block.num_local)
+
+  def test_nested_scan_matches_sequential_unroll(self):
+    """Scanning the local layers then the global layer equals applying them one by one."""
+    cfg, _, block = self._build()
+    inputs, segment_ids, positions = self._inputs(cfg)
+
+    scanned = block(inputs, segment_ids, positions, True, MODEL_MODE_TRAIN)
+
+    # Reference: pull each stacked local layer out by index and run it, then the global layer.
+    graphdef, params, rest = nnx.split(block.local_layers, nnx.Param, ...)
+    if cfg.param_scan_axis != 0:
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, cfg.param_scan_axis, 0), params)
+    y = inputs
+    for i in range(block.num_local):
+      layer = nnx.merge(
+          graphdef,
+          jax.tree.map(lambda x, i=i: x[i], params),
+          jax.tree.map(lambda x, i=i: x[i], rest),
+      )
+      y = layer(y, segment_ids, positions, True, MODEL_MODE_TRAIN)[0]
+    expected = block.global_layer(y, segment_ids, positions, True, MODEL_MODE_TRAIN)[0]
+
+    np.testing.assert_allclose(np.asarray(scanned), np.asarray(expected), rtol=1e-5, atol=1e-5)
+
+  def test_external_kv_cache_matches_scanned_path(self):
+    """The external-kv-cache path must match the scanned path and return one cache per sub-layer.
+
+    In TRAIN mode with dot_product attention the caches pass straight through, so
+    the two paths differ only in the loop mechanism (nested scans vs static
+    unroll of the stacked local params) -- any mismatch is a slice/re-stack bug.
+    """
+    cfg, _, block = self._build(matmul_precision="highest")
+    inputs, segment_ids, positions = self._inputs(cfg)
+    call_args = (segment_ids, positions, True, MODEL_MODE_TRAIN)
+
+    y_scanned = block(inputs, *call_args)
+
+    num_layers = block.num_local + block.num_global
+    external_kv = tuple(jnp.full((1, cfg.max_target_length), float(i)) for i in range(num_layers))
+    y_external, updated_kvs = block(inputs, *call_args, kv_cache=external_kv)
+
+    self.assertEqual(len(updated_kvs), num_layers)
+    # Order must stay local[0..n-1] then global, matching the flat per-layer cache list.
+    for i, updated in enumerate(updated_kvs):
+      np.testing.assert_array_equal(np.asarray(updated), np.asarray(external_kv[i]))
+    np.testing.assert_allclose(np.asarray(y_external), np.asarray(y_scanned), rtol=1e-5, atol=1e-5)
+
+  def test_rejects_block_whose_global_layer_is_not_last(self):
+    """The local scan runs before the global layer, so any other ordering must be refused."""
+    with self.assertRaisesRegex(ValueError, "full-attention layer last"):
+      self._build(full_attention_layer_offset=0)
+
+
+class TestNNXDecoderQwen3Next(unittest.TestCase):
+  """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
+
+  def test_decoder_regroups_flat_kv_caches_per_block(self):
+    """A flat per-layer kv cache list must be regrouped per block and written back in order.
+
+    The scan runs over blocks, not layers, so passing the flat list straight
+    through would hand block i only ``kv_caches[i]``. Guards
+    ``_apply_qwen3_next_scanned_blocks``, which must also keep
+    ``skip_block_remat=True`` on this path rather than falling back to the
+    generic (block-rematerialized) branch.
+    """
+    cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": 8, "scan_layers": True})
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        config=cfg,
+        mesh=mesh,
+        rngs=nnx.Rngs(params=0),
+    )
+
+    batch = cfg.global_batch_size_to_train_on
+    seq = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq)[None], (batch, seq))
+
+    # Distinct sentinel per layer: regrouping errors show up as caches landing on
+    # the wrong layer, which the pass-through in TRAIN mode makes visible.
+    kv_caches = [jnp.full((batch, seq), float(i)) for i in range(cfg.num_decoder_layers)]
+    decoder(
+        shared_embedding,
+        ids,
+        decoder_positions=positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+        kv_caches=kv_caches,
+    )
+
+    self.assertEqual(len(kv_caches), cfg.num_decoder_layers)
+    for i, cache in enumerate(kv_caches):
+      np.testing.assert_array_equal(np.asarray(cache), np.full((batch, seq), float(i)))
 
 
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
