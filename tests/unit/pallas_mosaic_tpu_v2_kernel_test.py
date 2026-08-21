@@ -15,6 +15,8 @@
 """Unit tests for Pallas Mosaic TPU v2 kernels."""
 
 import collections
+from unittest import mock
+
 import pytest
 
 from absl.testing import absltest
@@ -25,6 +27,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 from maxtext.kernels.megablox import common
+from maxtext.kernels.megablox import ops as megablox_ops
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_backend
 
@@ -257,6 +260,131 @@ class GmmTest(parameterized.TestCase):
     )
 
     assert_arrays_all_close(actual, expected)
+
+  @parameterized.product(
+      input_dtype=(jnp.bfloat16, jnp.float8_e4m3fn),
+      tile_sizes=((128, 128, 128), (512, 1024, 1024)),
+  )
+  def test_gmm_native_rhs_transpose_matches_swapaxes(self, input_dtype, tile_sizes):
+    """Native transpose_rhs must be bit-exact with a materialized transpose."""
+    num_groups, out_size, in_size, batch_size = 8, 1280, 2048, 4096
+    lhs_key, rhs_key = jax.random.split(jax.random.PRNGKey(2026))
+    lhs = jax.random.normal(lhs_key, (batch_size, in_size), dtype=jnp.bfloat16).astype(input_dtype)
+    rhs = jax.random.normal(
+        rhs_key,
+        (num_groups, out_size, in_size),
+        dtype=jnp.bfloat16,
+    ).astype(input_dtype)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+    tiles = gmm_backend.TileSizes(*tile_sizes)
+
+    out_swap = gmm_backend.gmm_v2(
+        lhs=lhs,
+        rhs=rhs.swapaxes(1, 2),
+        group_sizes=group_sizes,
+        rhs_scale=None,
+        tile_info=tiles,
+        preferred_element_type=jnp.bfloat16,
+        transpose_rhs=False,
+    )
+    out_native = gmm_backend.gmm_v2(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        rhs_scale=None,
+        tile_info=tiles,
+        preferred_element_type=jnp.bfloat16,
+        transpose_rhs=True,
+    )
+
+    self.assertEqual(out_native.shape, (batch_size, out_size))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out_swap))))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out_native))))
+    self.assertTrue(bool(jnp.array_equal(out_swap, out_native)))
+
+  @parameterized.named_parameters(
+      ("int4_materialized", jnp.int4, False),
+      ("int8_native", jnp.int8, True),
+  )
+  def test_dlhs_rhs_transpose_dispatch_by_dtype(self, rhs_dtype, expected_transpose_rhs):
+    """DLHS materializes sub-byte RHS transposes before calling GMM v2."""
+    num_groups, out_size, in_size, batch_size = 16, 1024, 2048, 4096
+    dlhs_dout = jnp.ones((batch_size, in_size), dtype=jnp.bfloat16)
+    rhs = (jnp.arange(num_groups * out_size * in_size).reshape(num_groups, out_size, in_size) % 8).astype(rhs_dtype)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+    expected = jnp.zeros((batch_size, out_size), dtype=jnp.bfloat16)
+    tiling = (256, 512, 256, 512, 1024, 512, 256, 512, 256)
+
+    with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", return_value=expected) as gmm_v2_mock:
+      actual = megablox_ops._dlhs_run_tokamax_v2(  # pylint: disable=protected-access
+          dlhs_dout=dlhs_dout,
+          rhs=rhs,
+          group_sizes=group_sizes,
+          group_offset=None,
+          lhs_dtype=jnp.bfloat16,
+          tiling=tiling,
+          transpose_rhs=False,
+      )
+
+    call_kwargs = gmm_v2_mock.call_args.kwargs
+    expected_rhs = rhs if expected_transpose_rhs else rhs.swapaxes(1, 2)
+    self.assertIs(actual, expected)
+    self.assertEqual(call_kwargs["transpose_rhs"], expected_transpose_rhs)
+    self.assertTrue(bool(jnp.array_equal(call_kwargs["rhs"], expected_rhs)))
+    self.assertEqual(call_kwargs["tile_info"], gmm_backend.TileSizes(512, 1024, 512))
+
+  @parameterized.product(
+      input_dtype=(jnp.bfloat16, jnp.float8_e4m3fn),
+      fuse_act=("silu", "gelu", "swigluoai"),
+  )
+  def test_gmm_fused_activation_with_native_rhs_transpose(self, input_dtype, fuse_act):
+    """Fused activation supports native transposed RHS weights."""
+    num_groups, fused_out_size, in_size, batch_size = 8, 2048, 1024, 4096
+    lhs_key, rhs_key, bias_key = jax.random.split(jax.random.PRNGKey(2026), 3)
+    lhs = jax.random.normal(lhs_key, (batch_size, in_size), dtype=jnp.bfloat16).astype(input_dtype)
+    rhs = jax.random.normal(
+        rhs_key,
+        (num_groups, in_size, fused_out_size),
+        dtype=jnp.bfloat16,
+    ).astype(input_dtype)
+    rhs_scale = jnp.ones((num_groups, 2, 1, fused_out_size), dtype=jnp.float32)
+    rhs_bias = jax.random.normal(
+        bias_key,
+        (num_groups, 1, fused_out_size),
+        dtype=jnp.bfloat16,
+    )
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+    tiles = gmm_backend.TileSizes(512, 1024, 512)
+
+    out_standard = gmm_backend.gmm_v2(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        rhs_scale=rhs_scale,
+        rhs_bias=rhs_bias,
+        tile_info=tiles,
+        preferred_element_type=jnp.bfloat16,
+        maybe_quantize_lhs=False,
+        fuse_act=fuse_act,
+        transpose_rhs=False,
+    )
+    out_transposed = gmm_backend.gmm_v2(
+        lhs=lhs,
+        rhs=rhs.swapaxes(1, 2),
+        group_sizes=group_sizes,
+        rhs_scale=rhs_scale,
+        rhs_bias=rhs_bias,
+        tile_info=tiles,
+        preferred_element_type=jnp.bfloat16,
+        maybe_quantize_lhs=False,
+        fuse_act=fuse_act,
+        transpose_rhs=True,
+    )
+
+    self.assertEqual(out_transposed.shape, (batch_size, fused_out_size // 2))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out_standard))))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out_transposed))))
+    self.assertTrue(bool(jnp.array_equal(out_standard, out_transposed)))
 
   @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
