@@ -234,18 +234,18 @@ class MetricLogger:
     scalars = metrics["scalar"]
     log_parts = [
         f"Completed eval after train step {step}",
-        f"loss={scalars['eval/avg_loss']:.3f}",
-        f"perplexity={scalars['eval/avg_perplexity']:.3f}",
-        f"total_weights={scalars['eval/total_weights']}",
+        f"loss={scalars.get('eval/avg_loss', 0.0):.3f}",
+        f"perplexity={scalars.get('eval/avg_perplexity', 0.0):.3f}",
+        f"total_weights={scalars.get('eval/total_weights', 0)}",
         f"avg_z_loss={scalars.get('eval/avg_z_loss', 0.0):.3f}",
     ]
-    if self.config.num_experts > 1:
+    if self.config.num_experts > 1 and "eval/avg_moe_lb_loss" in scalars:
       log_parts.append(f"avg_moe_lb_loss={scalars['eval/avg_moe_lb_loss']:.3f}")
-    if getattr(self.config, "mtp_num_layers", 0) > 0:
+    if getattr(self.config, "mtp_num_layers", 0) > 0 and "eval/avg_mtp_loss" in scalars:
       log_parts.extend(
           [
               f"avg_mtp_loss={scalars['eval/avg_mtp_loss']:.3f}",
-              f"avg_mtp_acceptance_rate={scalars['eval/avg_mtp_acceptance_rate_percent']:.2f}%",
+              f"avg_mtp_acceptance_rate={scalars.get('eval/avg_mtp_acceptance_rate_percent', 0.0):.2f}%",
           ]
       )
     if "eval/avg_dpo_reward_accuracy" in scalars:

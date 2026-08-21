@@ -27,6 +27,7 @@ import contextlib
 import copy
 import json
 import logging
+import os
 import re
 import time
 import traceback
@@ -582,6 +583,16 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         num_experts=getattr(maxtext_config, "num_experts", 1),
         tensor_parallel_size=rollout_config.tensor_parallel_size,
     )
+    is_mla = getattr(maxtext_config, "q_lora_rank", 0) > 0 or "deepseek" in getattr(maxtext_config, "model_name", "")
+    if is_mla:
+      os.environ["NEW_MODEL_DESIGN"] = "1"
+      rollout_additional_config = (
+          copy.deepcopy(rollout_additional_config) if rollout_additional_config is not None else {}
+      )
+      rollout_additional_config.setdefault("sharding", {}).setdefault("sharding_strategy", {})[
+          "enable_dp_attention"
+      ] = True
+
     self._maxtext_config = maxtext_config
 
     self._sampler = MaxTextVllmSampler(
@@ -600,7 +611,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
             expert_parallel_size=rollout_config.expert_parallel_size,
-            enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
+            enable_dp_attention=True if is_mla else rollout_config.rollout_vllm_enable_dp_attention,
             delete_dst_buffers=rollout_config.rollout_vllm_delete_dst_buffers,
             reshard_chunk_size=rollout_config.rollout_vllm_reshard_chunk_size,
             engine_kwargs=engine_kwargs,
