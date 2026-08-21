@@ -25,7 +25,7 @@ from maxtext.integration.vllm.torchax_converter.base import BaseMaxTextToVLLMCon
 class Qwen35MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
   """Converts MaxText Qwen3.5 (Scanned Block) layout to vLLM execution layout."""
 
-  def convert(self, model_state: dict):
+  def convert(self, model_state: dict, **kwargs):
     """Converts model_state parameters to vLLM format."""
     logging.info("\n%sStarting Qwen 3.5 Conversion (Hybrid MoE)...%s", GREEN, RESET)
     self.vllm_state = {}
