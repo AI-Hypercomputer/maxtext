@@ -63,6 +63,9 @@ set_xla_metadata = xla_metadata.set_xla_metadata
 
 DISPATCH = "dispatch"
 COMBINE = "combine"
+WI_0 = "wi_0"
+WI_1 = "wi_1"
+WO = "wo"
 
 
 @struct.dataclass
@@ -485,6 +488,16 @@ class RoutedMoE(nnx.Module):
       self._expert_parallelism_name = ("context", "expert")
     else:
       self._expert_parallelism_name = "expert"
+
+    if isinstance(self.quant, (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization)):
+      einsum_names = [WI_0, WI_1, WO]
+      if self.config.capacity_factor > 0:
+        einsum_names += [DISPATCH, COMBINE]
+      self.quant_einsums = nnx.Dict(
+          {name: quantizations.create_fp8_einsum(self.quant, self.dtype, self.rngs) for name in einsum_names}
+      )
+    else:
+      self.quant_einsums = None
 
     self.gate = GateLogit(
         in_features_shape=self.moe_expert_input_dim,
@@ -2703,15 +2716,22 @@ class RoutedMoE(nnx.Module):
       return jnp.einsum
 
     if self.quant:
+      op_id = einsum_name if einsum_name is not None else "einsum"
 
-      def aqt_einsum(*args, **kwargs):  # pylint: disable=unused-argument
+      def quant_einsum(*args, **kwargs):  # pylint: disable=unused-argument
         # simply skip kwargs, since aqt einsum doesn't support any kwargs
         # like precision
-        is_aqt = not isinstance(self.quant, quantizations.Fp8Quantization)
-        kw = {"mesh_axes": rhs_mesh_axes} if is_aqt else {"dtype": self.dtype}
-        return self.quant.einsum(**kw)(*args)  # pytype: disable=attribute-error
+        if self.quant_einsums is not None:
+          if op_id not in self.quant_einsums:
+            raise ValueError(
+                f"Einsum name '{op_id}' is not registered in quant_einsums. "
+                f"Available names: {list(self.quant_einsums.keys())}"
+            )
+          return self.quant_einsums[op_id](*args, mutable=["_overwrite_with_gradient"])
+        einsum = self.quant.einsum(mesh_axes=rhs_mesh_axes)  # pytype: disable=attribute-error
+        return quantizations.apply_einsum_in_nnx(self, op_id, einsum, ["aqt"], *args)
 
-      einsum_op = aqt_einsum
+      einsum_op = quant_einsum
     else:
       einsum_op = jnp.einsum
     return einsum_op
@@ -2915,7 +2935,7 @@ class RoutedMoE(nnx.Module):
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes, einsum_name=WI_0)(
             mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -2929,7 +2949,7 @@ class RoutedMoE(nnx.Module):
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes, einsum_name=WI_1)(
             mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -2943,7 +2963,7 @@ class RoutedMoE(nnx.Module):
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
+        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes, einsum_name=WO)(
             mlp_down_einsum,
             layer_multiply,
             wo_kernel,
@@ -2993,7 +3013,7 @@ class RoutedMoE(nnx.Module):
           ),
       )
       with jax.named_scope("wi_0"):
-        layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
+        layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes, einsum_name=WI_0)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -3002,7 +3022,7 @@ class RoutedMoE(nnx.Module):
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
       with jax.named_scope("wi_1"):
-        layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
+        layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes, einsum_name=WI_1)(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
@@ -3013,7 +3033,7 @@ class RoutedMoE(nnx.Module):
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
 
       with jax.named_scope("wo"):
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
+        intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes, einsum_name=WO)(
             "BSEH,EHM -> BSEM",
             layer_multiply,
             wo_kernel,

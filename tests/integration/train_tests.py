@@ -56,6 +56,17 @@ class TrainTests(unittest.TestCase):
       "sharding_tolerance=0.1",
   ]
 
+  # Routes the MoE layer through dense_matmul, which is what runs wherever the megablox and
+  # ragged kernels are unavailable.
+  _moe_model_overrides = [
+      "decoder_block=mixtral",
+      "num_experts=4",
+      "num_experts_per_tok=2",
+      "base_moe_mlp_dim=32",
+      "sparse_matmul=False",
+      "megablox=False",
+  ]
+
   CONFIGS = {
       "base": [  # short test for train.py with TFDS c4
           None,
@@ -135,6 +146,19 @@ class TrainTests(unittest.TestCase):
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
+      "moe": [  # tests a MoE model, to be combined with a quantization
+          None,
+          get_test_config_path(),
+          f"base_output_directory={_base_output_directory}",
+          "run_name=runner_test",
+          "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+      ]
+      + _small_model_overrides
+      + _moe_model_overrides,
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
           get_test_config_path(),
@@ -287,6 +311,26 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_nanoo_fp8(self):
     train_main(TrainTests.CONFIGS["nanoo_fp8"] + ["attention=dot_product"])
+
+  # The quantized MoE tests below carry no hardware marker on purpose. They cover how the
+  # quantized einsums are bound to the MoE layer, which breaks on every backend when it breaks,
+  # and both fp8 flavors are emulated in XLA rather than needing hardware support.
+  @pytest.mark.integration_test
+  def test_moe_int8(self):
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=int8"])
+
+  @pytest.mark.integration_test
+  def test_moe_fp8(self):
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=fp8"])
+
+  @pytest.mark.integration_test
+  def test_moe_nanoo_fp8(self):
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=nanoo_fp8"])
+
+  @pytest.mark.integration_test
+  def test_moe_fp8_token_dropping(self):
+    # capacity_factor > 0 adds the dispatch and combine einsums to the ones above.
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=fp8", "capacity_factor=1.25"])
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.integration_test
