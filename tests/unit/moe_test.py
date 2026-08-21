@@ -33,7 +33,7 @@ from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
-from maxtext.layers.quantizations import Fp8Quantization
+from maxtext.layers.quantizations import configure_quantization, Fp8Quantization
 from maxtext.utils import max_logging, maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
@@ -1686,6 +1686,64 @@ class RoutedMoeTest(parameterized.TestCase):
     relative_norm_diff_threshold = 0.22 if quantization else 0.012
     diff_summary = compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold)
     max_logging.log("\n" + diff_summary)
+
+
+class GetEinsumTest(unittest.TestCase):
+  """Tests for the quantized einsums RoutedMoE.get_einsum hands to dense_matmul."""
+
+  def _make_moe(self, quant):
+    """Builds a RoutedMoE on the dense_matmul path with the given quantization."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="get_einsum_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="float32",
+        megablox=False,
+        sparse_matmul=False,
+        max_target_length=4,
+        per_device_batch_size=1,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    return moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=Mesh(devices_array, cfg.mesh_axes),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=jnp.float32,
+        quant=quant,
+        rngs=nnx.Rngs(0),
+    )
+
+  def test_fp8_einsum_is_bound(self):
+    model = self._make_moe(Fp8Quantization())
+    einsum_fn = model.get_einsum(einsum_name=moe.WI_0)
+    result = einsum_fn("ab,bc->ac", jnp.ones((2, 3)), jnp.ones((3, 4)))
+    self.assertEqual(result.shape, (2, 4))
+
+  def test_aqt_einsum_is_bound(self):
+    quant = configure_quantization(
+        pyconfig.initialize(
+            [None, get_test_config_path()],
+            enable_checkpointing=False,
+            quantization="int8",
+        )
+    )
+    model = self._make_moe(quant)
+    self.assertIsNone(model.quant_einsums)
+    einsum_fn = model.get_einsum(einsum_name=moe.WI_0)
+    result = einsum_fn("ab,bc->ac", jnp.ones((2, 3)), jnp.ones((3, 4)))
+    self.assertEqual(result.shape, (2, 4))
+
+  def test_unregistered_quant_einsum_name_raises(self):
+    model = self._make_moe(Fp8Quantization())
+    einsum_fn = model.get_einsum(einsum_name="not_registered")
+    with self.assertRaises(ValueError) as ctx:
+      einsum_fn("ab,bc->ac", jnp.ones((2, 3)), jnp.ones((3, 4)))
+    self.assertIn("not_registered", str(ctx.exception))
+    self.assertIn("Available names", str(ctx.exception))
 
 
 def make_moe(cfg, mesh):

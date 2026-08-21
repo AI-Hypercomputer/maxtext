@@ -401,6 +401,10 @@ class NANOOFp8Quantization(Quantization):
     """Returns dot_general configured with aqt params."""
     return nn.NANOOFp8DotGeneralOp
 
+  def einsum(self, dtype: DType = jnp.float32):
+    """Returns an einsum using the NANOO (fnuz) fp8 formats of AMD MI300/MI325."""
+    return Fp8Einsum(dtype=dtype, e4m3_dtype=jnp.float8_e4m3fnuz, e5m2_dtype=jnp.float8_e5m2fnuz)
+
 
 def _get_int8_quant_config(config):
   """Get int8 quantization configuration."""
@@ -766,6 +770,59 @@ def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
     return getattr(parent, attr_name)(*args, mutable=["_overwrite_with_gradient"], **kwargs)
   else:
     return linen_module_cls(name=op_id)(*args, **kwargs)
+
+
+def create_fp8_einsum(quant: Quantization, dtype: DType, rngs: nnx.Rngs) -> nnx_wrappers.ToNNX:
+  """Creates an fp8 einsum that an `nnx.Module` can call.
+
+  An fp8 einsum holds its scaling factors and amax histories in Linen variables, which can
+  only be created while the module is bound to a Linen scope. The bridge into NNX therefore
+  has to happen while the parent module is being built; creating the state on the first call
+  instead would grow the module graph inside the scanned layer loop, which NNX rejects.
+
+  The state has a fixed shape, so a canonical pair of operands is enough to materialize it.
+  The returned einsum still accepts operands of any shape.
+
+  Args:
+    quant: The fp8 quantization providing the einsum.
+    dtype: The computation dtype of the einsum.
+    rngs: The `nnx.Rngs` of the parent module.
+  """
+  wrapper = nnx_wrappers.ToNNX(quant.einsum(dtype=dtype), rngs=rngs)  # pytype: disable=attribute-error
+  dummy_operand = jnp.zeros((1, 1), dtype=dtype)
+  wrapper.lazy_init("ab,bc->ac", dummy_operand, dummy_operand)
+  return wrapper
+
+
+def apply_einsum_in_nnx(parent: nnx.Module, op_id: str, einsum, mutable: Sequence[str], *args):
+  """Applies a quantized Linen einsum from within an NNX parent module.
+
+  A Linen module cannot be called unbound, which is all an `nnx.Module` can offer it, so the
+  einsum is bridged into NNX on first use and the bridged instance is reused afterwards.
+  `op_id` must be unique per call site: two call sites sharing an id would also share
+  quantization state. Bridging here rather than while building the parent needs the operands,
+  so it only suits einsums whose state is shaped after them, such as AQT.
+
+  Args:
+    parent: The NNX module hosting the einsum; it must carry an `rngs` attribute.
+    op_id: Stable identifier for the call site.
+    einsum: The einsum returned by a `Quantization`, either a Linen module or a callable.
+    mutable: Variable collections the einsum writes to.
+    *args: Arguments forwarded to the einsum.
+  """
+  linen_einsum = einsum.func if isinstance(einsum, functools.partial) else einsum
+  if not isinstance(linen_einsum, nn.Module):
+    return einsum(*args)
+
+  # The name must not start with an underscore: NNX treats such attributes as static,
+  # which cannot hold the bridged module's variables.
+  attr_name = f"quant_einsum_{op_id}"
+  wrapper = getattr(parent, attr_name, None)
+  if wrapper is None:
+    wrapper = nnx_wrappers.ToNNX(linen_einsum, rngs=parent.rngs)
+    wrapper.lazy_init(*args)
+    setattr(parent, attr_name, wrapper)
+  return wrapper(*args, mutable=list(mutable))
 
 
 class NvidaFp8Provider(qwix.QtProvider):
