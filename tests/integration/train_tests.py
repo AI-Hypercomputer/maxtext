@@ -135,6 +135,24 @@ class TrainTests(unittest.TestCase):
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
+      "moe_sparse": [  # tests a MoE model on the sparse_matmul path, to be combined with a quantization
+          None,
+          get_test_config_path(),
+          f"base_output_directory={_base_output_directory}",
+          "run_name=runner_test",
+          "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+          "decoder_block=mixtral",
+          "num_experts=4",
+          "num_experts_per_tok=2",
+          "base_moe_mlp_dim=32",
+          "sparse_matmul=True",
+          "megablox=False",
+      ]
+      + _small_model_overrides,
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
           get_test_config_path(),
@@ -287,6 +305,16 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_nanoo_fp8(self):
     train_main(TrainTests.CONFIGS["nanoo_fp8"] + ["attention=dot_product"])
+
+  # No hardware marker: the fp8 schemes do not reach the expert matmuls on this path on any
+  # backend, and what is being covered is that the layer still builds and trains.
+  @pytest.mark.integration_test
+  def test_moe_fp8_sparse_matmul(self):
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=fp8"])
+
+  @pytest.mark.integration_test
+  def test_moe_nanoo_fp8_sparse_matmul(self):
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=nanoo_fp8"])
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.integration_test
