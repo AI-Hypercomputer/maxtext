@@ -294,7 +294,9 @@ ModelName = Literal[
     "envy-switch-base",
     "envy-switch-large",
     "envy-switch-xxl",
+    "kimi-k3",
 ]
+
 
 
 class RunInfo(BaseModel):

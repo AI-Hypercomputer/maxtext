@@ -36,7 +36,8 @@ from maxtext.common.common_types import (
     MultimodalInput,
     ShardMode,
 )
-from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
+from maxtext.layers import initializers, kimi_decoder_layer, linears, mhc, normalizations, quantizations
+
 from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -784,7 +785,9 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.KIMI_K3,
       }:
+
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
         layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
@@ -1130,7 +1133,9 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
+        DecoderBlockType.KIMI_K3: [kimi_decoder_layer.KimiDecoderLayer],
     }
+
 
     if cfg.decoder_block not in layer_map:
       raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
@@ -1291,7 +1296,9 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
+        DecoderBlockType.KIMI_K3,
     }:
+
       return functools.partial(
           RMSNorm,
           num_features=num_features,

@@ -14,7 +14,8 @@
 
 """Kimi K3 Decoder Layer in MaxText (NNX)."""
 
-from typing import Optional
+from typing import Any, Optional
+
 
 from flax import nnx
 import jax
@@ -94,7 +95,7 @@ class KimiDecoderLayer(nnx.Module):
     )
 
     # MLP / MoE layer
-    if config.num_experts > 1:
+    if config.num_experts > 1 and layer_idx >= config.first_num_dense_layers:
       self.mlp = RoutedAndSharedMoE(
           config=config,
           mesh=mesh,
@@ -105,6 +106,7 @@ class KimiDecoderLayer(nnx.Module):
           quant=quant,
           rngs=rngs,
       )
+
     else:
       self.mlp = linears.MlpBlock(
           in_features=config.emb_dim,
@@ -123,11 +125,17 @@ class KimiDecoderLayer(nnx.Module):
   def __call__(
       self,
       inputs: jax.Array,
-      *,
-      inputs_positions: Optional[jax.Array] = None,
       segment_ids: Optional[jax.Array] = None,
+      inputs_positions: Optional[jax.Array] = None,
+      deterministic: bool = True,
+      model_mode: str = ctypes.MODEL_MODE_TRAIN,
+      *args,
       initial_kda_state: Optional[jax.Array] = None,
-  ) -> tuple[jax.Array, Optional[jax.Array]]:
+      kv_cache: Optional[Any] = None,
+      **kwargs,
+  ) -> tuple[jax.Array, Optional[Any]]:
+
+
     # 1. Pre-attention norm & Attention
     normed_inputs = self.pre_self_attention_norm(inputs)
 
@@ -151,12 +159,14 @@ class KimiDecoderLayer(nnx.Module):
 
     # 2. Pre-MLP norm & MLP / MoE
     normed_hidden = self.pre_mlp_norm(hidden_states)
-    if self.config.num_experts > 1:
+    if isinstance(self.mlp, RoutedAndSharedMoE):
       mlp_out, _, _ = self.mlp(normed_hidden)
     else:
       mlp_out = self.mlp(normed_hidden)
 
+
     # Residual connection for MLP
     output = hidden_states + mlp_out
 
-    return output, kda_state
+    return output, kv_cache
+

@@ -1936,4 +1936,27 @@ HF_MODEL_CONFIGS = {
     "olmo3-7b": olmo3_7b_config,
     "olmo3-7b-pt": olmo3_7b_config,
     "olmo3-32b": olmo3_32b_config,
+    "kimi-k3": {
+        "model_type": "kimi_k3",
+        "architectures": ["KimiK3ForConditionalGeneration"],
+        "text_config": {
+            "hidden_size": 7168,
+            "num_hidden_layers": 93,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 64,
+            "vocab_size": 163840,
+            "n_routed_experts": 896,
+            "num_experts_per_tok": 16,
+            "n_shared_experts": 2,
+        },
+        "hidden_size": 7168,
+        "num_hidden_layers": 93,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 64,
+        "vocab_size": 163840,
+        "n_routed_experts": 896,
+        "num_experts_per_tok": 16,
+        "n_shared_experts": 2,
+    },
 }
+

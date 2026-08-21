@@ -506,8 +506,9 @@ class RoutedMoE(nnx.Module):
       self._expert_parallelism_name = "expert"
 
     self.gate = GateLogit(
-        in_features_shape=self.moe_expert_input_dim,
+        in_features_shape=self.config.emb_dim,
         out_features_shape=self.num_experts,
+
         mesh=self.mesh,
         model_name=self.config.model_name,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
@@ -3362,6 +3363,8 @@ class RoutedAndSharedMoE(nnx.Module):
           weight_dtype=self.config.weight_dtype,
           rngs=self.rngs,
       )
+
+
     else:
       self.routed_expert_norm = None
 

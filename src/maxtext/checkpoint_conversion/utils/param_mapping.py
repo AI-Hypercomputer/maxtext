@@ -4217,7 +4217,102 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   return mapping
 
 
+def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText parameter keys to HuggingFace parameter keys for Kimi K3."""
+  n_layers = maxtext_config.num_decoder_layers
+  num_experts = config.get("n_routed_experts", 896)
+  first_num_dense_layers = config.get("first_k_dense_replace", maxtext_config.first_num_dense_layers)
+
+
+  mapping = {
+      "params-token_embedder-embedding": "language_model.model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "language_model.model.norm.weight",
+      "params-decoder-logits_dense-kernel": "language_model.lm_head.weight",
+  }
+
+  for i in range(n_layers):
+    mt_layer = f"params-decoder-layers_{i}"
+    # If we are converting a 2-layer minimal model, map layer 1 in MaxText to layer 3 in HF (which is MLA + MoE)
+    hf_layer_idx = 3 if (n_layers == 2 and i == 1) else i
+    hf_layer = f"language_model.model.layers.{hf_layer_idx}"
+
+
+    # Norms
+    mapping[f"{mt_layer}-pre_self_attention_norm-scale"] = f"{hf_layer}.input_layernorm.weight"
+    mapping[f"{mt_layer}-pre_mlp_norm-scale"] = f"{hf_layer}.post_attention_layernorm.weight"
+
+    # KDA attention (layers 0, 1, 2)
+    mapping[f"{mt_layer}-self_attention-q_proj-kernel"] = f"{hf_layer}.self_attn.q_proj.weight"
+    mapping[f"{mt_layer}-self_attention-k_proj-kernel"] = f"{hf_layer}.self_attn.k_proj.weight"
+    mapping[f"{mt_layer}-self_attention-v_proj-kernel"] = f"{hf_layer}.self_attn.v_proj.weight"
+    mapping[f"{mt_layer}-self_attention-f_a_proj-kernel"] = f"{hf_layer}.self_attn.f_a_proj.weight"
+    mapping[f"{mt_layer}-self_attention-f_b_proj-kernel"] = f"{hf_layer}.self_attn.f_b_proj.weight"
+    mapping[f"{mt_layer}-self_attention-q_conv1d-weight"] = f"{hf_layer}.self_attn.q_conv1d.weight"
+    mapping[f"{mt_layer}-self_attention-k_conv1d-weight"] = f"{hf_layer}.self_attn.k_conv1d.weight"
+    mapping[f"{mt_layer}-self_attention-v_conv1d-weight"] = f"{hf_layer}.self_attn.v_conv1d.weight"
+
+    mapping[f"{mt_layer}-self_attention-g_proj-kernel"] = f"{hf_layer}.self_attn.g_proj.weight"
+    mapping[f"{mt_layer}-self_attention-b_proj-kernel"] = f"{hf_layer}.self_attn.b_proj.weight"
+    mapping[f"{mt_layer}-self_attention-A_log"] = f"{hf_layer}.self_attn.A_log"
+    mapping[f"{mt_layer}-self_attention-dt_bias"] = f"{hf_layer}.self_attn.dt_bias"
+    mapping[f"{mt_layer}-self_attention-o_proj-kernel"] = f"{hf_layer}.self_attn.o_proj.weight"
+
+    # MLA attention (layer 3)
+    mapping[f"{mt_layer}-self_attention-query-kernel"] = f"{hf_layer}.self_attn.q_proj.weight"
+    mapping[f"{mt_layer}-self_attention-wkv_a-kernel"] = f"{hf_layer}.self_attn.kv_a_proj_with_mrope.weight"
+    mapping[f"{mt_layer}-self_attention-wkv_b-kernel"] = f"{hf_layer}.self_attn.kv_b_proj.weight"
+    mapping[f"{mt_layer}-self_attention-g_a_proj-kernel"] = f"{hf_layer}.self_attn.g_a_proj.weight"
+    mapping[f"{mt_layer}-self_attention-g_b_proj-kernel"] = f"{hf_layer}.self_attn.g_b_proj.weight"
+    mapping[f"{mt_layer}-self_attention-kv_norm-scale"] = f"{hf_layer}.self_attn.kv_a_norm.weight"
+    mapping[f"{mt_layer}-self_attention-o_norm-scale"] = f"{hf_layer}.self_attn.o_norm.weight"
+    mapping[f"{mt_layer}-self_attention-out-kernel"] = f"{hf_layer}.self_attn.o_proj.weight"
+
+    # MLP / MoE
+    if i < first_num_dense_layers:
+      mapping[f"{mt_layer}-mlp-wi_0-kernel"] = f"{hf_layer}.mlp.gate_proj.weight"
+      mapping[f"{mt_layer}-mlp-wi_1-kernel"] = f"{hf_layer}.mlp.up_proj.weight"
+      mapping[f"{mt_layer}-mlp-wo-kernel"] = f"{hf_layer}.mlp.down_proj.weight"
+    else:
+      # MoE Gate & Norms
+      mapping[f"{mt_layer}-mlp-MoeBlock_0-gate-kernel"] = f"{hf_layer}.block_sparse_moe.gate.weight"
+      mapping[f"{mt_layer}-mlp-MoeBlock_0-gate-bias"] = None
+      mapping[f"{mt_layer}-mlp-routed_expert_norm-scale"] = f"{hf_layer}.block_sparse_moe.routed_expert_norm.weight"
+
+      # MoE Experts (mapped as lists of HF keys for expert stacking)
+      mapping[f"{mt_layer}-mlp-MoeBlock_0-wi_0"] = [
+          f"{hf_layer}.block_sparse_moe.experts.{e}.w1.weight_packed" for e in range(num_experts)
+      ]
+      mapping[f"{mt_layer}-mlp-MoeBlock_0-wi_1"] = [
+          f"{hf_layer}.block_sparse_moe.experts.{e}.w3.weight_packed" for e in range(num_experts)
+      ]
+      mapping[f"{mt_layer}-mlp-MoeBlock_0-wo"] = [
+          f"{hf_layer}.block_sparse_moe.experts.{e}.w2.weight_packed" for e in range(num_experts)
+      ]
+
+
+
+
+
+      # Shared Experts
+      mapping[f"{mt_layer}-mlp-shared_experts-wi_0-kernel"] = f"{hf_layer}.block_sparse_moe.shared_experts.gate_proj.weight"
+      mapping[f"{mt_layer}-mlp-shared_experts-wi_1-kernel"] = f"{hf_layer}.block_sparse_moe.shared_experts.up_proj.weight"
+      mapping[f"{mt_layer}-mlp-shared_experts-wo-kernel"] = f"{hf_layer}.block_sparse_moe.shared_experts.down_proj.weight"
+
+
+
+
+  return mapping
+
+
+def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Transformation hooks for Kimi K3 parameters."""
+  hooks = {}
+  # Add default transpose and dequantization hooks
+  return hooks
+
+
 PARAM_MAPPING = {
+
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4268,11 +4363,159 @@ PARAM_MAPPING = {
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b-pt": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
-# {maxtext model name: {maxtext weight name: bi-directional transform}}
+
+E8M0_TABLE = np.array([2.0**e if e < 128 else np.inf for e in range(-127, 129)], dtype=np.float32)
+E2M1_TABLE = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0], dtype=np.float32)
+
+
+import ml_dtypes
+
+
+class MXFP4DequantizeHook:
+  """Hook to dequantize MXFP4 weight_packed & weight_scale to bfloat16 for a single expert in MaxText.
+  Pads in_features or out_features to 7168 with zeros and caches scales for 100x speedup.
+  """
+
+
+  def __init__(self, hf_scale_key_pattern: str, is_wo: bool = False, num_experts: int = 896):
+    self.hf_scale_key_pattern = hf_scale_key_pattern
+    self.is_wo = is_wo
+    self.num_experts = num_experts
+    self.getter = None
+    self.current_expert_idx = 0
+    self.cached_scales = None
+
+  def set_getter(self, getter):
+    self.getter = getter
+
+  def _ensure_cached(self):
+    if self.cached_scales is None:
+      scales_list = []
+      for e in range(self.num_experts):
+        scale_key = self.hf_scale_key_pattern.format(e=e)
+        scale = self.getter(scale_key)
+        scales_list.append(scale)
+      self.cached_scales = scales_list
+
+  def __call__(self, weight_packed, target_shape=None):
+    if self.getter is None:
+      raise ValueError("Getter not set on MXFP4DequantizeHook!")
+
+    self._ensure_cached()
+    e = self.current_expert_idx
+    self.current_expert_idx = (self.current_expert_idx + 1) % self.num_experts
+
+    out_features, in_bytes = weight_packed.shape
+    in_features = in_bytes * 2
+
+    weight_scale = self.cached_scales[e]
+
+    w_low = weight_packed & 0x0F
+    w_high = (weight_packed >> 4) & 0x0F
+    w_indices = np.stack([w_low, w_high], axis=-1).reshape(out_features, in_features)
+
+    w_fp = E2M1_TABLE[w_indices]
+    scales = E8M0_TABLE[weight_scale.astype(np.int32)]
+    scales = np.repeat(scales, 32, axis=-1)
+
+    w_dequant = w_fp * scales
+    w_transposed = np.transpose(w_dequant, (1, 0))
+
+    if self.is_wo:
+      w_padded = np.pad(w_transposed, ((0, 0), (0, 7168 - 3584)), mode="constant")
+    else:
+      w_padded = np.pad(w_transposed, ((0, 7168 - 3584), (0, 0)), mode="constant")
+
+    return w_padded.astype(ml_dtypes.bfloat16)
+
+
+
+def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Returns hook functions for Kimi K3 weight conversion."""
+  hooks = {}
+  n_layers = maxtext_config.num_decoder_layers
+  first_num_dense_layers = config.get("first_k_dense_replace", maxtext_config.first_num_dense_layers)
+
+  def transpose(x, target_shape=None):
+    return x.T if hasattr(x, "T") else x
+
+  def conv1d_hook(x, target_shape=None):
+    if hasattr(x, "ndim") and x.ndim == 3:
+      return x.squeeze(1).T
+    return x.T if hasattr(x, "T") else x
+
+  def routed_expert_norm_hook(x, target_shape=None):
+    if hasattr(x, "shape") and len(x.shape) == 1 and x.shape[0] < 7168:
+      return np.pad(x, (0, 7168 - x.shape[0]), mode="constant", constant_values=1.0).astype(np.float32)
+    return x
+
+
+  linear_keys = [
+      "self_attention-q_proj-kernel",
+      "self_attention-k_proj-kernel",
+      "self_attention-v_proj-kernel",
+      "self_attention-f_a_proj-kernel",
+      "self_attention-f_b_proj-kernel",
+      "self_attention-g_proj-kernel",
+      "self_attention-b_proj-kernel",
+      "self_attention-o_proj-kernel",
+      "self_attention-query-kernel",
+      "self_attention-wkv_a-kernel",
+      "self_attention-wkv_b-kernel",
+      "self_attention-g_a_proj-kernel",
+      "self_attention-g_b_proj-kernel",
+      "self_attention-out-kernel",
+  ]
+
+  conv1d_keys = [
+      "self_attention-q_conv1d-weight",
+      "self_attention-k_conv1d-weight",
+      "self_attention-v_conv1d-weight",
+  ]
+
+  for i in range(n_layers):
+    mt_layer = f"params-decoder-layers_{i}"
+    hf_layer_idx = 3 if (n_layers == 2 and i == 1) else i
+
+    for k in linear_keys:
+      hooks[f"{mt_layer}-{k}"] = transpose
+    for k in conv1d_keys:
+      hooks[f"{mt_layer}-{k}"] = conv1d_hook
+
+    if i < first_num_dense_layers:
+      hooks[f"{mt_layer}-mlp-wi_0-kernel"] = transpose
+      hooks[f"{mt_layer}-mlp-wi_1-kernel"] = transpose
+      hooks[f"{mt_layer}-mlp-wo-kernel"] = transpose
+    else:
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-gate-kernel"] = transpose
+      hooks[f"{mt_layer}-mlp-routed_expert_norm-scale"] = routed_expert_norm_hook
+      hooks[f"{mt_layer}-mlp-shared_experts-wi_0-kernel"] = transpose
+
+      hooks[f"{mt_layer}-mlp-shared_experts-wi_1-kernel"] = transpose
+      hooks[f"{mt_layer}-mlp-shared_experts-wo-kernel"] = transpose
+
+      # MXFP4 dequantization hooks for MoE experts
+      num_experts = config.get("n_routed_experts", 896)
+      w1_pattern = f"language_model.model.layers.{hf_layer_idx}.block_sparse_moe.experts.{{e}}.w1.weight_scale"
+      w3_pattern = f"language_model.model.layers.{hf_layer_idx}.block_sparse_moe.experts.{{e}}.w3.weight_scale"
+      w2_pattern = f"language_model.model.layers.{hf_layer_idx}.block_sparse_moe.experts.{{e}}.w2.weight_scale"
+
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_0"] = MXFP4DequantizeHook(w1_pattern, is_wo=False, num_experts=num_experts)
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_1"] = MXFP4DequantizeHook(w3_pattern, is_wo=False, num_experts=num_experts)
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-wo"] = MXFP4DequantizeHook(w2_pattern, is_wo=True, num_experts=num_experts)
+
+  hooks["params-decoder-logits_dense-kernel"] = transpose
+  return hooks
+
+
+
 HOOK_FNS = {
+    "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
@@ -4323,7 +4566,9 @@ HOOK_FNS = {
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b-pt": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
+
 
 VLLM_HOOK_FNS = {
     "qwen3": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,

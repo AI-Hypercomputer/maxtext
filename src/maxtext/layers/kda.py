@@ -222,9 +222,10 @@ class KimiDecoupledAttention(nnx.Module):
     )
 
     # Parameters: A_log & dt_bias
-    # A_log is initialized uniformly in [1, 16] and stored as log
-    a_init = jax.random.uniform(rngs.params(), (self.num_heads,), minval=1.0, maxval=16.0)
+    # A_log is initialized uniformly in [1, 16] and stored as log (per head_dim)
+    a_init = jax.random.uniform(rngs.params(), (self.head_dim,), minval=1.0, maxval=16.0)
     self.A_log = nnx.Param(jnp.log(a_init))
+
     self.dt_bias = nnx.Param(jnp.zeros((projection_size,)))
 
     # Output gate projection
@@ -295,8 +296,9 @@ class KimiDecoupledAttention(nnx.Module):
     dt_bias = self.dt_bias[...].reshape(1, 1, self.num_heads, self.head_dim)
 
     # decay = -exp(A_log) * softplus(g_raw + dt_bias) <= 0
-    A_log = self.A_log[...].reshape(1, 1, self.num_heads, 1)
+    A_log = self.A_log[...].reshape(1, 1, 1, self.head_dim)
     decay = -jnp.exp(A_log) * jax.nn.softplus(g_raw + dt_bias)
+
 
 
     if self.gate_lower_bound is not None:
