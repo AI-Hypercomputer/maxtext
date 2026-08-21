@@ -1608,9 +1608,9 @@ class CompressedAttention(Attention):
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
       q = q * self.query_pre_attn_scalar
 
-    # Build indexer mask explicitly for tokamax splash kernel
+    # Build indexer mask explicitly for tokamax splash kernel (CSA dynamic path)
     indexer_mask = None
-    if self.attention_kernel == "flash" and compressed_mask is not None:
+    if self.attention_kernel == "flash" and compressed_mask is not None and self.compress_ratio == 4:
       indexer_mask = self.attention_op.generate_attention_mask(
           q,
           unpadded_kv,
@@ -1640,6 +1640,8 @@ class CompressedAttention(Attention):
         cached_values=current_kv_cache,
         indexer_mask=indexer_mask,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
+        pad_kv_total=pad_kv_total,
+        compress_ratio=self.compress_ratio,
     )
 
     # Reverse RoPE on Values
