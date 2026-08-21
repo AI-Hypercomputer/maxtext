@@ -16,7 +16,10 @@
 
 # pylint: disable=too-many-positional-arguments, unnecessary-lambda-assignment
 
+from __future__ import annotations
+
 from collections.abc import Callable
+
 import dataclasses
 import functools
 from typing import Any, Optional
@@ -27,7 +30,11 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-import qwix.pallas as qpl
+try:
+  import qwix.pallas as qpl
+except ImportError:
+  qpl = None
+
 
 
 def _validate_args(

@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 # Copyright 2023–2026 Google LLC
+
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,8 +30,17 @@ from maxtext.kernels import megablox, sort_activations
 from maxtext.layers import attention_op
 from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
-import qwix.pallas as qpl
-import tokamax
+
+try:
+  import qwix.pallas as qpl
+except ImportError:
+  qpl = None
+
+try:
+  import tokamax
+except ImportError:
+  tokamax = None
+
 
 
 @functools.partial(

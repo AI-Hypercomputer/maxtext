@@ -33,7 +33,11 @@ from flax.nnx import Pytree
 from flax.nnx.rnglib import Rngs
 import jax
 from jax import tree_util as jtu
-import qwix
+try:
+  import qwix
+except ImportError:
+  qwix = None
+
 
 M = tp.TypeVar("M", bound=Module)
 
@@ -444,9 +448,9 @@ def _fix_for_qwix_quantization(module: Module):
           methods,
       )
 
-  # Set the correct weight names. We call QtProvider.process_model_inputs here
-  # to avoid using Qwix internal APIs.
-  qwix.QtProvider.process_model_inputs(None, module, None, None)  # pytype: disable=wrong-arg-types
+  if qwix is not None:
+    qwix.QtProvider.process_model_inputs(None, module, None, None)  # pytype: disable=wrong-arg-types
+
 
 
 class ToLinen(linen.Module):

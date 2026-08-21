@@ -16,6 +16,9 @@
 Test initialization
 """
 
-import pathwaysutils
+try:
+  import pathwaysutils
+  pathwaysutils.initialize()
+except ImportError:
+  pass
 
-pathwaysutils.initialize()

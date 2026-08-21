@@ -553,6 +553,22 @@ class ModelArchitecture(BaseModel):
       description="Whether to apply scale on value normalization (default True).",
   )
 
+  # Kimi K3 & KDA Specific Parameters
+  kda_layers: list[int] = Field(default_factory=list, description="List of 1-indexed layer indices that use KDA (Kimi Decoupled Attention).")
+  full_attn_layers: list[int] = Field(default_factory=list, description="List of 1-indexed layer indices that use Full Attention (MLA).")
+  kda_conv_kernel_size: int = Field(4, description="1D short convolution kernel size for KDA.")
+  kda_use_full_rank_gate: bool = Field(True, description="Whether to use full rank gate in KDA.")
+  kda_gate_lower_bound: float = Field(-5.0, description="Lower bound for KDA gate.")
+  mla_use_output_gate: bool = Field(False, description="Whether to use an output gate in MLA.")
+  activation_situ_beta: float = Field(4.0, description="Beta parameter for SituAndMul activation.")
+  activation_situ_linear_beta: float = Field(25.0, description="Linear beta parameter for SituAndMul activation.")
+  latent_moe_use_norm: bool = Field(False, description="Whether to apply RMSNorm to latent MoE expert hidden states.")
+  routed_expert_hidden_size: int = Field(3584, description="Hidden size for routed experts in Kimi K3 MoE.")
+  topk_method: str = Field("noaux_tc", description="TopK routing method for MoE (e.g. noaux_tc for Kimi K3).")
+
+
+
+
 
 class MTP(BaseModel):
   """Multi-Token Prediction Configs."""
@@ -3901,8 +3917,8 @@ class MaxTextConfig(
           self.base_mlp_dim = self.base_moe_mlp_dim
           _, _, mlp_dim_scale, _ = get_individual_scales(self.global_parameter_scale)
           self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
-        elif self.decoder_block != DecoderBlockType.GEMMA4:
-          # Allow Gemma 4 to keep distinct shared and routed MLP dimensions
+        elif self.decoder_block not in (DecoderBlockType.GEMMA4, DecoderBlockType.KIMI_K3):
+          # Allow Gemma 4 and Kimi K3 to keep distinct shared and routed MLP dimensions
           raise ValueError(
               "For a fully MoE model, base_mlp_dim must equal base_moe_mlp_dim. "
               f"Got base_mlp_dim={self.base_mlp_dim}, base_moe_mlp_dim={self.base_moe_mlp_dim}."

@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 # Copyright 2023–2026 Google LLC
+
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +24,11 @@ import math
 import random
 from typing import Iterable, Optional, Tuple, Union
 
-from aqt.jax.v2 import aqt_tensor as aqt
+try:
+  from aqt.jax.v2 import aqt_tensor as aqt
+except ImportError:
+  aqt = None
+
 from flax import nnx
 from flax import struct
 import jax
@@ -53,10 +60,20 @@ from maxtext.utils.sharding import (
     remove_mesh_axes_from_partition_spec,
 )
 import numpy as np
-import qwix
-from qwix.contrib.sparsity import sparsity_module
-import qwix.pallas as qpl
-import tokamax
+try:
+  import qwix
+  from qwix.contrib.sparsity import sparsity_module
+  import qwix.pallas as qpl
+except ImportError:
+  qwix = None
+  sparsity_module = None
+  qpl = None
+
+try:
+  import tokamax
+except ImportError:
+  tokamax = None
+
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
