@@ -25,6 +25,7 @@ import jax
 import jax.nn
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import xla_metadata
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
@@ -44,7 +45,6 @@ from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers import nnx_scan
-from jax.experimental import xla_metadata
 from maxtext.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate, PositionalEmbedding
 from maxtext.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -1378,14 +1378,13 @@ class Qwen3NextScannableBlock(nnx.Module):
         current_kv = kv_cache[i] if (kv_cache is not None and i < len(kv_cache)) else None
         y, new_kv = self._run_layer(layer, y, layer_kwargs, current_kv)
         updated_kvs.append(new_kv)
-        per_layer_states.append(nnx.state(layer))
+        # Collect only non-Param state: parameters are read-only here, so stacking
+        # them back would allocate a second copy of every layer weight. Non-Param
+        # state is stacked on axis 0, matching nnx_scan.create_scanned_layers.
+        _, _, updated_state = nnx.split(layer, nnx.Param, ...)
+        per_layer_states.append(updated_state)
 
-      stacked_state = jax.tree.map(lambda *xs: jnp.stack(xs), *per_layer_states)
-      if scan_axis != 0:
-        stacked_params, stacked_other = stacked_state.split(nnx.Param, ...)
-        stacked_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), stacked_params)
-        stacked_state = nnx.State.merge(stacked_params, stacked_other)
-      nnx.update(self.local_layers, stacked_state)
+      nnx.update(self.local_layers, jax.tree.map(lambda *xs: jnp.stack(xs), *per_layer_states))
 
     if self.global_layer is not None:
       global_kv = kv_cache[self.num_local] if (kv_cache is not None and self.num_local < len(kv_cache)) else None
