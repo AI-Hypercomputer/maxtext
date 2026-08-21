@@ -480,5 +480,37 @@ class GrainCheckpointableEquivalenceTest(parameterized.TestCase):
     self.assertEqual(iterators_restore_v1[1].state, 20)
 
 
+class CheckpointErrorHandlerTest(parameterized.TestCase):
+  """Tests for checkpoint error handling in maybe_save_checkpoint."""
+
+  def setUp(self):
+    super().setUp()
+    self.mock_manager = mock.MagicMock()
+    self.mock_manager.latest_step.return_value = None
+    self.mock_manager.reached_preemption.return_value = False
+    self.state = mock.Mock()
+
+  def test_error_handler_raises_runtime_error(self):
+    """Unexpected checkpointing errors should raise RuntimeError with original error chained."""
+    config = mock.Mock()
+    config.checkpoint_period = 1
+    config.pure_nnx = True
+    config.enable_diloco = False
+    config.async_checkpointing = False
+    config.enable_continuous_checkpointing = False
+    config.enable_emergency_checkpoint = False
+    config.enable_multi_tier_checkpointing = False
+    config.local_checkpoint_period = 0
+    config.enable_autocheckpoint = False
+    config.elastic_enabled = False
+
+    original_error = RuntimeError("GCS failure")
+    with mock.patch.object(checkpointing, "save_checkpoint", side_effect=original_error):
+      with self.assertRaises(RuntimeError) as cm:
+        checkpointing.maybe_save_checkpoint(self.mock_manager, self.state, config, data_iterator=None, step=1)
+      self.assertIn("Checkpointing failed. GCS failure", str(cm.exception))
+      self.assertIs(cm.exception.__cause__, original_error)
+
+
 if __name__ == "__main__":
   absltest.main()
