@@ -3480,7 +3480,9 @@ class MLATest(attention_test_util.MLATestBase):
           "indexer_topk": 32,
       },
   )
-  @pytest.mark.skip(reason="Indexer with all-gather context parallelism diverges from the dot_product reference; fix tracked in #4947.")
+  @pytest.mark.skip(
+      reason="Indexer with all-gather context parallelism diverges from the dot_product reference; fix tracked in #4947."
+  )
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel_with_indexer(
       self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256
