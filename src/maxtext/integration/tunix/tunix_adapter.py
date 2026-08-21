@@ -81,9 +81,11 @@ class TunixMaxTextAdapter(nnx.Module):
   ):
     super().__init__()
     self.base = base_model
+    hf_config = HF_MODEL_CONFIGS.get(self.base.config.model_name)
+    hf_dict = hf_config.to_dict() if hf_config is not None else {}
     self._vllm_weight_mapping = VllmWeightMapping(
         self.base.config.model_name,
-        HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
+        hf_dict,
         use_standalone_mappings,
     )
     self.use_no_op_mappings = use_no_op_mappings

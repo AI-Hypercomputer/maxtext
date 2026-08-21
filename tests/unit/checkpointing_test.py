@@ -512,5 +512,76 @@ class CheckpointErrorHandlerTest(parameterized.TestCase):
       self.assertIs(cm.exception.__cause__, original_error)
 
 
+class TunixCheckpointConversionTest(parameterized.TestCase):
+  """Unit tests for Tunix on-load checkpoint conversion and PyTree transformation helpers."""
+
+  # pylint: disable=protected-access
+
+  def test_drop_adapter_level_dict(self):
+    """Tests stripping 'base' adapter wrapper from nested dictionaries."""
+    tree = {"base": {"layer_0": {"kernel": jnp.ones((4, 4))}, "layer_1": {"bias": jnp.zeros((4,))}}}
+    stripped = checkpointing._drop_adapter_level(tree)
+    self.assertIn("layer_0", stripped)
+    self.assertIn("layer_1", stripped)
+    self.assertNotIn("base", stripped)
+    self.assertEqual(stripped["layer_0"]["kernel"].shape, (4, 4))
+
+  def test_drop_adapter_level_tuple_and_namedtuple(self):
+    """Tests stripping 'base' adapter wrapper from tuples and namedtuples."""
+    import collections  # pylint: disable=import-outside-toplevel
+
+    OptTuple = collections.namedtuple("OptTuple", ["mu", "nu"])
+    wrapped_namedtuple = OptTuple(
+        mu={"base": {"w": jnp.ones((2, 2))}},
+        nu={"base": {"w": jnp.zeros((2, 2))}},
+    )
+    stripped = checkpointing._drop_adapter_level(wrapped_namedtuple)
+    self.assertIsInstance(stripped, OptTuple)
+    self.assertIn("w", stripped.mu)
+    np.testing.assert_allclose(stripped.mu["w"], np.ones((2, 2)))
+    self.assertIn("w", stripped.nu)
+    np.testing.assert_allclose(stripped.nu["w"], np.zeros((2, 2)))
+
+    wrapped_list = [{"base": {"a": 1}}, {"base": {"b": 2}}]
+    stripped_list = checkpointing._drop_adapter_level(wrapped_list)
+    self.assertEqual(stripped_list, [{"a": 1}, {"b": 2}])
+
+  def test_drop_inject_hyperparams(self):
+    """Tests unwrapping Optax inject_hyperparams state structure."""
+    opt_state = {
+        "count": jnp.zeros(()),
+        "hyperparams": {"learning_rate": 1e-4},
+        "hyperparams_states": {},
+        "inner_state": {"mu": jnp.ones((2, 2)), "nu": jnp.zeros((2, 2))},
+    }
+    unwrapped = checkpointing._drop_inject_hyperparams(opt_state)
+    self.assertNotIn("inner_state", unwrapped)
+    self.assertIn("mu", unwrapped)
+    self.assertIn("nu", unwrapped)
+    np.testing.assert_allclose(unwrapped["mu"], np.ones((2, 2)))
+    np.testing.assert_allclose(unwrapped["nu"], np.zeros((2, 2)))
+
+    # Pass-through if not inject_hyperparams
+    passthrough = {"mu": 123}
+    self.assertEqual(checkpointing._drop_inject_hyperparams(passthrough), passthrough)
+
+  def test_add_adapter_level(self):
+    """Tests wrapping dictionaries and tuples with a 'base' level for restore targeting."""
+    import collections  # pylint: disable=import-outside-toplevel
+
+    tree = {"layer_0": {"kernel": jnp.ones((4, 4))}}
+    wrapped = checkpointing._add_adapter_level(tree)
+    self.assertIn("base", wrapped)
+    self.assertIn("layer_0", wrapped["base"])
+    np.testing.assert_allclose(wrapped["base"]["layer_0"]["kernel"], np.ones((4, 4)))
+
+    OptTuple = collections.namedtuple("OptTuple", ["mu"])
+    named_tree = OptTuple(mu={"w": jnp.ones((2, 2))})
+    wrapped_named = checkpointing._add_adapter_level(named_tree)
+    self.assertIsInstance(wrapped_named, OptTuple)
+    self.assertIn("base", wrapped_named.mu)
+    np.testing.assert_allclose(wrapped_named.mu["base"]["w"], np.ones((2, 2)))
+
+
 if __name__ == "__main__":
   absltest.main()
