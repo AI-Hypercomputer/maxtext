@@ -228,6 +228,9 @@ load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
+enable_moe_dynamic_redundant_experts: false # whether to use MoonEP-style dynamic redundant expert duplication and rebalancing
+moe_redundant_slots_per_rank: 1 # number of prefetch slots (B) per EP rank for dynamic expert duplication
+moe_rebalance_threshold_ratio: 1.15 # load threshold ratio (rank_load / avg_load) to trigger expert duplication
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).
@@ -277,8 +280,9 @@ use_gmm_v2: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
-# when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
+# Enable token activation deduplication in MoE ragged all-to-all communication
+enable_moe_token_activation_dedup: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
@@ -775,6 +779,7 @@ sft_train_on_completion_only: false
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
 dataset_type: tfds
+synthetic_data_distribution: 'uniform'
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.1.0'
