@@ -68,6 +68,9 @@ else:
   except (NameError, AttributeError):
     pass
 
+try:
+  from aqt.jax.v2 import config as aqt_config
+  from aqt.jax.v2 import aqt_tensor
   from aqt.jax.v2.flax import aqt_flax
   from aqt.jax.v2 import tiled_dot_general
   from aqt.jax.v2 import calibration
@@ -78,7 +81,7 @@ except ImportError:
   tiled_dot_general = None
   calibration = None
 
->>>>>>> Stashed changes
+
 from maxtext.layers import nnx_wrappers
 
 from maxtext.configs.types import TeCommGemmOverlapPolicy

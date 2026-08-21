@@ -44,6 +44,34 @@ from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
 
 
+def situ_and_mul(
+    x: jax.Array,
+    beta: float = 4.0,
+    linear_beta: float | None = 25.0,
+) -> jax.Array:
+  """SituAndMul activation function for Kimi K3.
+
+  Splits x along the last dimension into gate and up:
+    gate = x[..., :d]
+    up = x[..., d:]
+  Computes:
+    situ_gate = beta * jnp.tanh(gate / beta) * jax.nn.sigmoid(gate)
+    situ_up = linear_beta * jnp.tanh(up / linear_beta) (if linear_beta is not None else up)
+    return situ_gate * situ_up
+  """
+  d = x.shape[-1] // 2
+  gate = x[..., :d].astype(jnp.float32)
+  up = x[..., d:].astype(jnp.float32)
+
+  situ_gate = beta * jnp.tanh(gate / beta) * jax.nn.sigmoid(gate)
+  if linear_beta is not None:
+    situ_up = linear_beta * jnp.tanh(up / linear_beta)
+  else:
+    situ_up = up
+
+  return (situ_gate * situ_up).astype(x.dtype)
+
+
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
@@ -51,6 +79,9 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   elif fn_or_string == "sqrtsoftplus":
     # Custom activation function used by DeepSeek V4 Top-K MoE router
     return lambda x: jnp.sqrt(jax.nn.softplus(x))
+  elif fn_or_string == "situ":
+    # Custom SituAndMul activation used by Kimi K3
+    return situ_and_mul
   elif isinstance(fn_or_string, str):
     return getattr(nn, fn_or_string)
   elif callable(fn_or_string):
