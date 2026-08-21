@@ -30,6 +30,7 @@ from flax import struct
 from flax.training import train_state
 from grain.experimental import ElasticIterator
 import jax
+import jax.numpy as jnp
 from maxtext.checkpoint_conversion.utils.load_dynamic import load_safetensors_dynamic_state
 from maxtext.common import emergency_checkpointing
 from maxtext.common import grain_utility
@@ -150,7 +151,7 @@ def _raise_on_weight_mismatch(want, have, config=None):
   )
 
 
-def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
+def linen_items_to_nnx(restored_linen, abstract_nnx_state):
   """Reshapes a restored Linen-layout `items` dict into an NNX state.
 
   The inverse of `to_checkpoint_dict`, over the same `split_for_checkpoint` partition. The Linen
@@ -184,7 +185,7 @@ def _load_linen_checkpoint_into_nnx(
   """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
 
   Restores a Linen-shape target that includes `nnx_aux`, then reshapes back via
-  `_linen_items_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
+  `linen_items_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
   present, else keep their fresh init value. A genuinely-missing weight raises.
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
@@ -222,7 +223,7 @@ def _restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   itself is the Linen one, since pure_nnx reads and writes the Linen on-disk layout.
   """
   _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen), config=config)
-  return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
+  return linen_items_to_nnx(restored_linen, abstract_nnx_state)
 
 
 def _abstract_params(abstract_unboxed_pre_state):
@@ -266,6 +267,190 @@ def _resolve_conversion_fn(checkpoint_conversion_fn):
   return fn
 
 
+def _build_tunix_target_tree(disk_meta, want_tree):
+  """Builds a target tree matching Tunix's on-disk metadata, injecting target shapes and shardings."""
+  if isinstance(disk_meta, dict):
+    if "value" in disk_meta and len(disk_meta) == 1:
+      if want_tree is not None:
+        if isinstance(want_tree, dict) and "value" in want_tree:
+          return want_tree
+        return {"value": want_tree}
+      else:
+        leaf = disk_meta["value"]
+        if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+          return {"value": jax.ShapeDtypeStruct(shape=leaf.shape, dtype=leaf.dtype)}
+        return {"value": leaf}
+    res = {}
+    for k, v in disk_meta.items():
+      want_sub = want_tree.get(k) if (want_tree is not None and isinstance(want_tree, dict)) else None
+      res[k] = _build_tunix_target_tree(v, want_sub)
+    return res
+  elif hasattr(disk_meta, "shape") and hasattr(disk_meta, "dtype"):
+    if want_tree is not None:
+      return want_tree
+    return jax.ShapeDtypeStruct(shape=disk_meta.shape, dtype=disk_meta.dtype)
+  return disk_meta
+
+
+def _drop_adapter_level(tree):
+  """Strip the single-key `base` wrapper Tunix adds around adapter-free checkpoints."""
+  if isinstance(tree, dict):
+    if set(tree) == {"base"}:
+      return _drop_adapter_level(tree["base"])
+    return {k: _drop_adapter_level(v) for k, v in tree.items()}
+  if isinstance(tree, list):
+    return [_drop_adapter_level(v) for v in tree]
+  return tree
+
+
+def _drop_inject_hyperparams(opt_state):
+  """Unwrap the `inject_hyperparams` layer Tunix wraps around the optimizer state."""
+  if isinstance(opt_state, dict) and {"count", "hyperparams", "hyperparams_states", "inner_state"}.issubset(
+      opt_state.keys()
+  ):
+    return opt_state["inner_state"]
+  return opt_state
+
+
+def _load_tunix_full_state_from_path(
+    path,
+    abstract_unboxed_pre_state,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt,
+    use_zarr3,
+    maxtext_config=None,
+):
+  """Restore a Tunix-layout full training state (params + optimizer) into MaxText's structure."""
+  is_nnx = isinstance(abstract_unboxed_pre_state, nnx.State)
+  if is_nnx:
+    want_params = nnx.split_state(abstract_unboxed_pre_state.model, nnx.Param, ...)[0].to_pure_dict()
+    want_opt = abstract_unboxed_pre_state.optimizer
+  else:
+    want_params = abstract_unboxed_pre_state.params
+    want_opt = abstract_unboxed_pre_state.opt_state
+
+  ckptr = ocp.Checkpointer(
+      ocp.PyTreeCheckpointHandler(
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
+      )
+  )
+
+  step_path = epath.Path(path)
+  model_params_path = step_path / "model_params" if (step_path / "model_params").exists() else step_path
+  opt_state_path = step_path / "optimizer_state"
+
+  has_base = False
+  has_inject = False
+  has_value_wrapper = True
+  disk_tree = None
+  try:
+    metadata = ckptr.metadata(step_path)
+    item_meta = getattr(metadata, "item_metadata", metadata)
+    if isinstance(item_meta, dict):
+      mp_meta = item_meta.get("model_params", item_meta)
+      disk_tree = getattr(mp_meta, "tree", mp_meta)
+      if isinstance(disk_tree, dict) and "base" in disk_tree:
+        has_base = True
+      opt_meta = item_meta.get("optimizer_state", None)
+      if opt_meta is not None:
+        tree_opt = getattr(opt_meta, "tree", opt_meta)
+        if isinstance(tree_opt, dict) and "inner_state" in tree_opt and "count" in tree_opt:
+          has_inject = True
+    else:
+      disk_tree = item_meta
+      if isinstance(disk_tree, dict) and "base" in disk_tree:
+        has_base = True
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+  if disk_tree is None:
+    try:
+      mp_metadata = ckptr.metadata(model_params_path)
+      disk_tree = getattr(mp_metadata, "item_metadata", mp_metadata)
+      disk_tree = getattr(disk_tree, "tree", disk_tree)
+      if isinstance(disk_tree, dict) and "base" in disk_tree:
+        has_base = True
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+  is_linen_collection = (
+      (not is_nnx) and isinstance(want_params, dict) and "params" in want_params and len(want_params) == 1
+  )
+  inner_want_params = want_params["params"] if is_linen_collection else want_params
+
+  if disk_tree is not None and isinstance(disk_tree, dict):
+    target_disk_tree = disk_tree["base"] if has_base and "base" in disk_tree else disk_tree
+    target_want_params = _build_tunix_target_tree(target_disk_tree, inner_want_params)
+  else:
+    target_want_params = (
+        jax.tree.map(lambda v: {"value": v}, inner_want_params) if has_value_wrapper else inner_want_params
+    )
+
+  target_params = {"base": target_want_params} if has_base else target_want_params
+
+  if has_inject:
+    target_opt = {
+        "count": jnp.zeros((), dtype=jnp.int32),
+        "hyperparams": {},
+        "hyperparams_states": {},
+        "inner_state": want_opt,
+    }
+  else:
+    target_opt = want_opt
+
+  restore_args_params = ocp.checkpoint_utils.construct_restore_args(target_params)
+  restored_params = ckptr.restore(
+      model_params_path,
+      item=target_params,
+      restore_args=restore_args_params,
+  )
+
+  if opt_state_path.exists():
+    restore_args_opt = ocp.checkpoint_utils.construct_restore_args(target_opt)
+    restored_opt = ckptr.restore(
+        opt_state_path,
+        item=target_opt,
+        restore_args=restore_args_opt,
+    )
+  else:
+    restored_opt = want_opt
+
+  if has_base:
+    restored_params = _drop_adapter_level(restored_params)
+    if opt_state_path.exists():
+      restored_opt = _drop_adapter_level(restored_opt)
+
+  if has_inject:
+    restored_opt = _drop_inject_hyperparams(restored_opt)
+
+  if has_value_wrapper:
+    restored_params = train_state_nnx._strip_rng_state(restored_params)
+    restored_params = jax.tree.map(
+        lambda v: v["value"] if isinstance(v, dict) and "value" in v else v,
+        restored_params,
+        is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+    )
+
+  if is_linen_collection:
+    restored_params_collection = {"params": restored_params}
+  else:
+    restored_params_collection = restored_params
+
+  _raise_on_weight_mismatch(want_params, restored_params_collection, config=maxtext_config)
+
+  if is_nnx:
+    nnx.replace_by_pure_dict(abstract_unboxed_pre_state, restored_params)
+    nnx.replace_by_pure_dict(abstract_unboxed_pre_state, {"optimizer": restored_opt})
+    return abstract_unboxed_pre_state
+  else:
+    return abstract_unboxed_pre_state.replace(
+        params=restored_params_collection,
+        opt_state=restored_opt,
+    )
+
+
 def _load_full_state_from_path(
     path,
     abstract_unboxed_pre_state,
@@ -296,6 +481,21 @@ def _load_full_state_from_path(
   Returns:
     The loaded state.
   """
+
+  if source_checkpoint_layout == "orbax":
+    if (epath.Path(path) / "model_params").exists() and (epath.Path(path) / "optimizer_state").exists():
+      max_logging.log(f"Auto-detected Tunix checkpoint layout at {path}")
+      source_checkpoint_layout = "tunix"
+
+  if source_checkpoint_layout == "tunix":
+    return _load_tunix_full_state_from_path(
+        path,
+        abstract_unboxed_pre_state,
+        checkpoint_storage_concurrent_gb,
+        use_ocdbt,
+        use_zarr3,
+        maxtext_config,
+    )
 
   if enable_orbax_v1:
     if source_checkpoint_layout == "orbax":
@@ -661,6 +861,7 @@ def load_state_if_possible(
         checkpoint_storage_concurrent_gb,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
+        maxtext_config=maxtext_config,
     )
     return None, restored_params
   elif load_full_state_from_path != "":
@@ -701,22 +902,134 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
   return orbax_cloud_logger
 
 
+def _nnx_native_wrapper_key(ckptr, path):
+  """Returns the wrapper key an NNX-native checkpoint nests its weights under, if any.
+
+  Post-training wrote DPO and RL checkpoints through `TunixMaxTextAdapter`, whose only child
+  module is `base`, so their weights sit one level deeper. SFT and the training engine save the
+  model directly and do not.
+
+  Args:
+    ckptr: Checkpointer used to read the checkpoint metadata.
+    path: Path to the checkpoint.
+
+  Returns:
+    "base" if the checkpoint nests its weights under it, else None.
+  """
+  tree = ckptr.metadata(epath.Path(path)).item_metadata
+  tree = getattr(tree, "tree", tree)
+  return "base" if tree is not None and "base" in tree else None
+
+
 def load_params_from_path(
     load_parameters_from_path,
     abstract_unboxed_params,
     checkpoint_storage_concurrent_gb,
     use_ocdbt=True,
     use_zarr3=True,
+    maxtext_config=None,
 ):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
 
+  # Check if Tunix Layout (either pointing to step dir or model_params dir)
+  is_tunix = False
+  target_path = None
+  path_obj = epath.Path(load_parameters_from_path)
+  if path_obj.name in ("model_params", "model"):
+    is_tunix = True
+    target_path = path_obj.parent
+  elif (path_obj / "model_params").exists():
+    is_tunix = True
+    target_path = path_obj
+
+  is_nnx = isinstance(abstract_unboxed_params, nnx.State)
+  want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
+
+  if is_tunix:
+    max_logging.log(f"Detected Tunix layout for parameters at {target_path}")
+    model_params_path = target_path / "model_params" if (target_path / "model_params").exists() else target_path
+
+    ckptr = ocp.Checkpointer(
+        ocp.PyTreeCheckpointHandler(
+            restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+            use_ocdbt=use_ocdbt,
+            use_zarr3=use_zarr3,
+        )
+    )
+
+    has_base = False
+    has_value_wrapper = True  # Tunix checkpoints use NNX layout with {"value": Array} per leaf
+    disk_tree = None
+    try:
+      metadata = ckptr.metadata(target_path)
+      item_meta = getattr(metadata, "item_metadata", metadata)
+      if isinstance(item_meta, dict):
+        mp_meta = item_meta.get("model_params", item_meta)
+        disk_tree = getattr(mp_meta, "tree", mp_meta)
+      else:
+        disk_tree = item_meta
+      if isinstance(disk_tree, dict) and "base" in disk_tree:
+        has_base = True
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+    if disk_tree is None:
+      try:
+        mp_metadata = ckptr.metadata(model_params_path)
+        disk_tree = getattr(mp_metadata, "item_metadata", mp_metadata)
+        disk_tree = getattr(disk_tree, "tree", disk_tree)
+        if isinstance(disk_tree, dict) and "base" in disk_tree:
+          has_base = True
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    is_linen_collection = (not is_nnx) and isinstance(want, dict) and "params" in want and len(want) == 1
+    inner_want = want["params"] if is_linen_collection else want
+
+    if disk_tree is not None and isinstance(disk_tree, dict):
+      target_disk_tree = disk_tree["base"] if has_base and "base" in disk_tree else disk_tree
+      target_want = _build_tunix_target_tree(target_disk_tree, inner_want)
+    else:
+      target_want = (
+          jax.tree.map(lambda v: {"value": v}, inner_want) if has_value_wrapper else inner_want
+      )
+
+    target_params = {"base": target_want} if has_base else target_want
+    restore_args = ocp.checkpoint_utils.construct_restore_args(target_params)
+
+    restored_weights = ckptr.restore(
+        model_params_path,
+        item=target_params,
+        restore_args=restore_args,
+    )
+
+    if has_base:
+      restored_weights = _drop_adapter_level(restored_weights)
+
+    if has_value_wrapper:
+      restored_weights = train_state_nnx._strip_rng_state(restored_weights)
+      restored_weights = jax.tree.map(
+          lambda v: v["value"] if isinstance(v, dict) and "value" in v else v,
+          restored_weights,
+          is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+      )
+
+    if is_linen_collection:
+      restored_collection = {"params": restored_weights}
+    else:
+      restored_collection = restored_weights
+
+    _raise_on_weight_mismatch(want, restored_collection, config=maxtext_config)
+    if is_nnx:
+      nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
+      return abstract_unboxed_params
+    return restored_collection
+
   # On disk the weights live at `params/params/...`: an outer key naming the item, and Flax's
   # `params` collection inside it. A Linen TrainState.params is that collection; an NNX params
   # state sits one level below it (bare weights), so wrap it going in and unwrap it coming out.
-  is_nnx = isinstance(abstract_unboxed_params, nnx.State)
-  want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
 
   # Determine the restore key based on the leaf directory name to support native and custom SFT
   restore_key = os.path.basename(load_parameters_from_path)
@@ -743,25 +1056,37 @@ def load_params_from_path(
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint
   # (which itself may be a dictionary containing a key named 'params' or 'model').
-  restore_args = ocp.checkpoint_utils.construct_restore_args(params_collection)
-  restored = ckptr.restore(
-      epath.Path(load_parameters_from_path),
-      item={restore_key: params_collection},
-      transforms={},
-      restore_args={restore_key: restore_args},
-  )
-  restored_collection = restored[restore_key]
-
   if restore_key in ("model_params", "model"):
-    restored_weights = restored_collection
+    wrapper_key = _nnx_native_wrapper_key(ckptr, load_parameters_from_path)
+    # Restore into the NNX state itself rather than a pure dict. Flax registers a Variable as a
+    # pytree holding its array under `value`, matching what `nnx.state(model)` wrote, so save and
+    # restore agree without reshaping either side by hand.
+    item = {wrapper_key: abstract_unboxed_params} if wrapper_key else abstract_unboxed_params
+    restored = ckptr.restore(
+        epath.Path(load_parameters_from_path),
+        item=item,
+        transforms={},
+        restore_args=ocp.checkpoint_utils.construct_restore_args(item),
+    )
+    # No `params` collection in this layout, so the weights are the whole collection.
+    restored_weights = nnx.to_pure_dict(restored[wrapper_key] if wrapper_key else restored)
+    restored_collection = restored_weights
   else:
+    restore_args = ocp.checkpoint_utils.construct_restore_args(params_collection)
+    restored = ckptr.restore(
+        epath.Path(load_parameters_from_path),
+        item={"params": params_collection},
+        transforms={},
+        restore_args={"params": restore_args},
+    )
+    restored_collection = restored["params"]
     restored_weights = restored_collection["params"] if is_nnx else restored_collection
 
   # `transforms={}` lets Orbax return an unmaterialized leaf for a weight the checkpoint lacks,
   # and a stored array at its own shape rather than the target's. Either reaches the model and
   # fails much later without naming the weight, so check here -- the params-only load
   # (load_parameters_path, e.g. SFT) has no init state to fall back on.
-  _raise_on_weight_mismatch(want, restored_weights)
+  _raise_on_weight_mismatch(want, restored_weights, config=maxtext_config)
   if is_nnx:
     nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
     return abstract_unboxed_params
@@ -777,24 +1102,64 @@ def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
 
 
+def checkpoint_custom_metadata(config) -> dict[str, Any]:
+  """Returns the metadata a checkpoint stores alongside its state.
+
+  `verify_and_sync_scan_layers` and `lora_utils.sync_lora_metadata` read these back on load.
+  Post-training saves through its own manager, so it calls this too.
+
+  Args:
+    config: The run's config, or None.
+
+  Returns:
+    The metadata dict, empty if there is no config to read it from.
+  """
+  custom_metadata = {}
+  if config:
+    if hasattr(config, "scan_layers"):
+      custom_metadata["scan_layers"] = config.scan_layers
+    if hasattr(config, "lora") and config.lora and getattr(config.lora, "lora_rank", 0) > 0:
+      custom_metadata["lora"] = config.lora.model_dump()
+  return custom_metadata
+
+
+def _custom_metadata_at(checkpoint_dir: epath.Path) -> dict[str, Any]:
+  """Reads the custom metadata stored at exactly this directory.
+
+  Args:
+    checkpoint_dir: Directory to read.
+
+  Returns:
+    The metadata dict, empty if there is none or the read fails.
+  """
+  try:
+    metadata = ocp.StandardCheckpointer().metadata(checkpoint_dir)
+    return metadata.custom_metadata or {}
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.log(f"Warning: Failed to load checkpoint metadata: {e}")
+    return {}
+
+
 def load_checkpoint_metadata(checkpoint_dir_path: str) -> dict[str, Any]:
   """Loads custom metadata from an Orbax checkpoint.
 
+  The metadata belongs to the step, so it sits at `<step>/` and not at `<step>/items/`. Callers
+  pass `load_parameters_path`, which points at the item, so fall back to the parent directory.
+
   Args:
-    checkpoint_dir_path: Path to the checkpoint directory.
+    checkpoint_dir_path: Path to the checkpoint directory, item level or step level.
 
   Returns:
     A dictionary containing custom metadata, or an empty dictionary if none is
     present or loading fails.
   """
   checkpoint_dir = epath.Path(checkpoint_dir_path)
-  try:
-    ckptr = ocp.StandardCheckpointer()
-    metadata = ckptr.metadata(checkpoint_dir)
-    return metadata.custom_metadata or {}
-  except Exception as e:  # pylint: disable=broad-except
-    max_logging.log(f"Warning: Failed to load checkpoint metadata: {e}")
-    return {}
+  metadata = _custom_metadata_at(checkpoint_dir)
+  if not metadata and checkpoint_dir.parent != checkpoint_dir:
+    metadata = _custom_metadata_at(checkpoint_dir.parent)
+  if not metadata and (checkpoint_dir / "model_params").exists():
+    metadata = _custom_metadata_at(checkpoint_dir / "model_params")
+  return metadata
 
 
 def _uses_local_checkpoint_period(config):
@@ -1030,12 +1395,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
           item=grain_iters_to_save
       )  # pyrefly: ignore[bad-assignment]
 
-  custom_metadata = {}
-  if config:
-    if hasattr(config, "scan_layers"):
-      custom_metadata["scan_layers"] = config.scan_layers
-    if hasattr(config, "lora") and config.lora and getattr(config.lora, "lora_rank", 0) > 0:
-      custom_metadata["lora"] = config.lora.model_dump()
+  custom_metadata = checkpoint_custom_metadata(config)
 
   match (checkpoint_manager, config, data_iterator):
     case (checkpoint_manager, _, _) if isinstance(

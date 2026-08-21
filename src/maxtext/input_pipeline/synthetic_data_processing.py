@@ -73,14 +73,14 @@ def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq
 class SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
 
-  data_generator: Callable[[pyconfig.HyperParameters, tuple[Any, ...]], dict]
+  data_generator: Callable[[tuple[Any, ...]], dict]
 
   def __init__(self, config, mesh):
     self.mesh = mesh
     self.config = config
     data_pspec_shardings = sharding.get_input_data_sharding(config, mesh)
     self.data_generator = jax.jit(
-        SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
+        SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings
     )
 
     tokens = jax.random.randint(
@@ -113,10 +113,10 @@ class SyntheticDataIterator:
 
   def __next__(self):
     with self.mesh:
-      return self.data_generator(self.config, self.data)  # pylint: disable=not-callable
+      return self.data_generator(self.data)  # pylint: disable=not-callable
 
   @staticmethod
-  def raw_generate_synthetic_data(config: pyconfig.HyperParameters, data):
+  def raw_generate_synthetic_data(data):
     """Generates a single batch of synthetic data"""
     tokens, positions, segmentation = data
 

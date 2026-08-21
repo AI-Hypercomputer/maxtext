@@ -109,6 +109,7 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
         grad_accumulator: Any = None,
         inputs: Any = None,
         is_update_step: Any = True,
+        **kwargs: Any,
     ):
       if inputs is None and grad_accumulator is not None:
         # In Tunix versions where train_step only receives (model, optimizer, inputs)
