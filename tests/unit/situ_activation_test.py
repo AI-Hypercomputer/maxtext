@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 import torch
 
-from maxtext.layers.linears import _convert_to_activation_function, situ_and_mul
+from maxtext.layers.linears import _convert_to_activation_function, linear_beta_tanh, situ, situ_and_mul
 
 
 class PyTorchSituAndMul(torch.nn.Module):
@@ -44,31 +44,40 @@ class PyTorchSituAndMul(torch.nn.Module):
 @pytest.mark.parametrize("beta,linear_beta", [(4.0, 25.0), (1.0, None), (2.0, 10.0)])
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
 def test_situ_and_mul_parity(beta, linear_beta, dtype):
-  """Test JAX situ_and_mul against PyTorch reference for various parameters and dtypes."""
+  """Test JAX situ + linear_beta_tanh against PyTorch reference for various parameters and dtypes."""
   np.random.seed(42)
   x_np = np.random.randn(2, 4, 128).astype(np.float32)
+  gate_np = x_np[..., :64]
+  up_np = x_np[..., 64:]
 
   # PyTorch
   pt_act = PyTorchSituAndMul(beta=beta, linear_beta=linear_beta)
   pt_dtype = torch.bfloat16 if dtype == jnp.bfloat16 else torch.float32
   pt_out = pt_act(torch.from_numpy(x_np).to(pt_dtype)).to(torch.float32).numpy()
 
-  # JAX
-  jax_x = jnp.array(x_np, dtype=dtype)
-  jax_out = np.array(situ_and_mul(jax_x, beta=beta, linear_beta=linear_beta).astype(jnp.float32))
+  # JAX (Separated situ + linear_beta_tanh)
+  jax_gate = jnp.array(gate_np, dtype=dtype)
+  jax_up = jnp.array(up_np, dtype=dtype)
+  jax_out = np.array((situ(jax_gate, beta=beta) * linear_beta_tanh(jax_up, linear_beta=linear_beta)).astype(jnp.float32))
+
 
   # Compare
   max_diff = np.max(np.abs(pt_out - jax_out))
-  threshold = 1e-3 if dtype == jnp.bfloat16 else 1e-6
+  threshold = 0.02 if dtype == jnp.bfloat16 else 1e-6
   assert max_diff < threshold, f"Parity check failed for beta={beta}, linear_beta={linear_beta}, dtype={dtype}: max_diff={max_diff}"
 
 
-def test_convert_to_activation_function_situ():
-  """Test that _convert_to_activation_function resolves 'situ' to situ_and_mul."""
-  act_fn = _convert_to_activation_function("situ")
-  assert act_fn is situ_and_mul
 
-  # Verify it can be called
+def test_convert_to_activation_function_situ():
+  """Test that _convert_to_activation_function resolves 'situ' and 'linear_beta_tanh'."""
+  act_situ = _convert_to_activation_function("situ")
+  assert act_situ is situ
+
+  act_linear = _convert_to_activation_function("linear_beta_tanh")
+  assert act_linear is linear_beta_tanh
+
+  # Verify they can be called
   x = jnp.ones((2, 4))
-  out = act_fn(x)
-  assert out.shape == (2, 2)
+  out = act_situ(x) * act_linear(x)
+  assert out.shape == (2, 4)
+

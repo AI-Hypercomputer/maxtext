@@ -41,7 +41,9 @@ from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
+from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -522,8 +524,11 @@ class RoutedMoE(nnx.Module):
         shard_mode=config.shard_mode,
         rngs=self.rngs,
     )
-    rule = qpl.get_current_rule("gmm")
+
+    rule = qpl.get_current_rule("gmm") if qpl is not None else None
     sparsity_rule = None
+
+
     if rule is not None:
       if not isinstance(rule, qwix.QtRule):
         raise ValueError("Expect a QtRule for quantized training.")
@@ -1479,13 +1484,14 @@ class RoutedMoE(nnx.Module):
     def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
       if self.config.quantization and self.config.use_qwix_quantization:
         return group_sizes
-      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
+      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa") or tokamax is None:
         return group_sizes
       else:
         return tokamax.RaggedDotGroupSizes(
             group_sizes,
             inputs.shape[0],
         )
+
 
     def get_quantization_dtypes():
       lhs_quantize_dtype, rhs_quantize_dtype = None, None
@@ -1607,12 +1613,14 @@ class RoutedMoE(nnx.Module):
       return False
 
     def maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec):
-      if isinstance(w0_kernel, aqt.QTensor):
+      if aqt is not None and isinstance(w0_kernel, aqt.QTensor):
+
         w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
-      if isinstance(w1_kernel, aqt.QTensor):
+      if aqt is not None and isinstance(w1_kernel, aqt.QTensor):
         w1_pspec = aqt.partition_spec(w1_pspec, (1,), w1_kernel.dtype, use_bias=False)
-      if isinstance(wo_kernel, aqt.QTensor):
+      if aqt is not None and isinstance(wo_kernel, aqt.QTensor):
         wo_pspec = aqt.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
+
       return w0_pspec, w1_pspec, wo_pspec
 
     allow_batch_replication = self.get_expert_parallelism_size() == 1
@@ -3346,6 +3354,17 @@ class RoutedAndSharedMoE(nnx.Module):
         rngs=self.rngs,
     )
 
+    if getattr(self.config, "latent_moe_use_norm", False):
+      self.routed_expert_norm = RMSNorm(
+          num_features=self.moe_expert_input_dim,
+          epsilon=self.config.normalization_layer_epsilon,
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          rngs=self.rngs,
+      )
+    else:
+      self.routed_expert_norm = None
+
   @property
   def routed_moe(self):
     return self.MoeBlock_0
@@ -3380,12 +3399,16 @@ class RoutedAndSharedMoE(nnx.Module):
         out_sharding=out_sharding,
         input_ids=input_ids,
     )
+    if self.routed_expert_norm is not None:
+      routed_experts = self.routed_expert_norm(routed_experts)
+
     shared_experts = self.shared_experts(
         inputs,
         intermediate_sharding=intermediate_sharding,
         out_sharding=out_sharding,
     )
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
+
 
 
 def get_gate_logit(

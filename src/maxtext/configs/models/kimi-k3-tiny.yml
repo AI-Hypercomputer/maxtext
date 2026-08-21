@@ -45,7 +45,7 @@ v_head_dim: 32
 mla_use_output_gate: true
 
 # Activation
-mlp_activations: ["situ"]
+mlp_activations: ["situ", "linear_beta_tanh"]
 activation_situ_beta: 4.0
 activation_situ_linear_beta: 25.0
 
