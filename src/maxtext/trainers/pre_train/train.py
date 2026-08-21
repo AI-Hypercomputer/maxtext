@@ -23,6 +23,7 @@ import datetime
 import functools
 import os
 import sys
+import time
 import logging
 
 from absl import app
@@ -693,6 +694,7 @@ def save_snapshot(snapshot_mgr, state, step, model):
         "optimizer": nnx.to_pure_dict(opt_state),
     }
   state_dict = train_utils.replicate_single_device_sharded_arrays(state_dict)
+  _logger.info("Saving in-memory snapshot at step %d...", step)
   snapshot_mgr.save(step, state_dict)
 
 
@@ -983,6 +985,7 @@ def recover(
         if snapshot_mgr is not None and snapshot_mgr.latest is not None:
           try:
             restored_step = snapshot_mgr.latest.step
+            _logger.info("Attempting to restore from in-memory snapshot at step %d...", restored_step)
             if isinstance(model, nn.Module):
               abstract_dict = {
                   "step": state.step,
@@ -1020,6 +1023,7 @@ def recover(
               restored_state = state
 
             snapshot_loaded = True
+            _logger.info("Successfully restored in-memory snapshot at step %d!", restored_step)
           except (RuntimeError, jax.errors.JaxRuntimeError) as e:
             _logger.warning(
                 "In-memory snapshot recovery failed (%s). Falling back to persistent checkpoint.", e
@@ -1034,10 +1038,22 @@ def recover(
           restored_state, _ = checkpointing.load_state_if_possible(
               existing_checkpoint_manager,
               None,
-              config,
-              mesh,
+              config.load_parameters_path,
+              config.load_full_state_path,
+              config.checkpoint_storage_concurrent_gb,
               state,
+              config.enable_single_replica_ckpt_restoring,
+              config.dataset_type,
+              use_ocdbt=config.checkpoint_storage_use_ocdbt,
+              use_zarr3=config.checkpoint_storage_use_zarr3,
+              enable_orbax_v1=config.enable_orbax_v1,
+              checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+              source_checkpoint_layout=config.source_checkpoint_layout,
+              expansion_factor_real_data=config.expansion_factor_real_data,
+              maxtext_config=config,
           )
+          if hasattr(restored_state, '__getitem__') and 'items' in restored_state:
+            restored_state = restored_state['items']
           if isinstance(model, nn.Module):
             restored_step = int(restored_state.step)
           else:
@@ -1184,17 +1200,24 @@ def train_loop(config, recorder, state=None):
             init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
         )
         break  # Initialization succeeded!
-      except pathways_manager.ScaleUpSignalError as e:
-        if elastic_utils.elastic_snapshot(config):
+      except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
+        is_scale_up = isinstance(e, pathways_manager.ScaleUpSignalError)
+        is_slice_down = isinstance(e, jax.errors.JaxRuntimeError) and (
+            elastic.is_error_due_to_slice_down(e)
+            or "Connection to IFRT proxy server was terminated" in str(e)
+            or "UNAVAILABLE" in str(e)
+        )
+        if elastic_utils.elastic_snapshot(config) and (is_scale_up or is_slice_down):
           _logger.warning(
-              "Slice scale-up signal caught during initialization: %s. Refreshing slice topology and retrying setup.",
+              "Elastic event or slice failure caught during initialization: %s. Refreshing slice topology and retrying setup.",
               e,
           )
           if elastic_manager:
+            time.sleep(5)
             elastic_manager.active_slice_indices = elastic.get_active_slice_indices(elastic_manager.slice_to_devices)
         else:
           _logger.warning(
-              "Slice scale-up signal caught during initialization: %s. Bubbling to elastic_retry for full reconfiguration.",
+              "Elastic signal or JAX error caught during initialization: %s. Re-raising or bubbling to elastic_retry.",
               e,
           )
           raise
@@ -1478,11 +1501,26 @@ def get_train_func(config, recorder, argv):
 
 
 def main(argv: Sequence[str]) -> None:
-  config, recorder = initialize(argv)
-  record_goodput(recorder, RECORD_JOB_START_TIME)
-  train_func = get_train_func(config, recorder, argv)
-  with maybe_monitor_goodput(config):
-    train_func()
+  attempt = int(os.environ.get("MAXTEXT_STARTUP_ATTEMPT", "1"))
+  max_retries = 10
+  try:
+    config, recorder = initialize(argv)
+    record_goodput(recorder, RECORD_JOB_START_TIME)
+    train_func = get_train_func(config, recorder, argv)
+    with maybe_monitor_goodput(config):
+      train_func()
+  except (jax.errors.JaxRuntimeError, Exception) as e:
+    err_msg = str(e)
+    is_ifrt_error = "IFRT proxy" in err_msg or "RpcHelper" in err_msg or "Connection refused" in err_msg or "Socket closed" in err_msg or "UNAVAILABLE" in err_msg
+    if attempt >= max_retries or not is_ifrt_error:
+      raise
+    logging.warning(
+        f"[!] Startup/compilation attempt {attempt}/{max_retries} failed with IFRT error: {e}. "
+        f"Restarting Python process in 10s..."
+    )
+    time.sleep(10)
+    os.environ["MAXTEXT_STARTUP_ATTEMPT"] = str(attempt + 1)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 if __name__ == "__main__":
