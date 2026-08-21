@@ -486,6 +486,14 @@ class RoutedMoE(nnx.Module):
     else:
       self._expert_parallelism_name = "expert"
 
+    if self.config.sparse_matmul and isinstance(
+        self.quant, (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization)
+    ):
+      max_logging.log(
+          "fp8 quantization does not reach the MoE expert matmuls on the sparse_matmul path; they run"
+          f" in {self.dtype}. Set sparse_matmul=False to quantize them."
+      )
+
     self.gate = GateLogit(
         in_features_shape=self.moe_expert_input_dim,
         out_features_shape=self.num_experts,
@@ -1472,8 +1480,10 @@ class RoutedMoE(nnx.Module):
 
     def get_quantization_dtypes():
       lhs_quantize_dtype, rhs_quantize_dtype = None, None
-      if self.quant is not None:
-        quant_dg = self.quant.quant_dg
+      # Only AQT describes its numerics through a `quant_dg`. The fp8 schemes define no gmm
+      # quantization, so their expert matmuls run unquantized, as with the qwix rule below.
+      quant_dg = getattr(self.quant, "quant_dg", None)
+      if quant_dg is not None:
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
       return lhs_quantize_dtype, rhs_quantize_dtype
