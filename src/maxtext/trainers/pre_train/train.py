@@ -134,6 +134,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
+  # A multimodal model may receive a text-only batch while retaining its vision
+  # parameters in the model and checkpoints. Only pass image inputs when present.
+  encoder_images = data.get("images") if config.use_multimodal else None
+  encoder_image_masks = data.get("image_masks") if config.use_multimodal else None
   if is_block_diffusion:
     targets_loss_mask = (data["targets_loss_mask"] != 0) & (data["targets_segmentation"] != 0)
     target_positions = data.get("targets_position", data["inputs_position"])
