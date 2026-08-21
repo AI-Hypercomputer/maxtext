@@ -491,7 +491,9 @@ class RoutedMoE(nnx.Module):
         out_features_shape=self.num_experts,
         mesh=self.mesh,
         model_name=self.config.model_name,
-        dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
+        dtype=jnp.float32
+        if (self.config.float32_gate_logits or self.config.decoder_block == ctypes.DecoderBlockType.QWEN3)
+        else self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         kernel_init=self.kernel_init,
@@ -750,11 +752,13 @@ class RoutedMoE(nnx.Module):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
     else:
       if self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
-        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1)
 
       # Normalization of router weights (e.g. used by Qwen3, Gemma4).
       if self.config.norm_topk_prob:
-        top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
+        top_k_weights = top_k_weights / top_k_weights.sum(axis=-1, keepdims=True)
+
+      top_k_weights = top_k_weights.astype(self.dtype)
 
       if self.per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
