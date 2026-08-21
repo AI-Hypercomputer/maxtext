@@ -1501,37 +1501,11 @@ def get_train_func(config, recorder, argv):
 
 
 def main(argv: Sequence[str]) -> None:
-  attempt = int(os.environ.get("MAXTEXT_STARTUP_ATTEMPT", "1"))
-  max_retries = 10
-  config = None
-  try:
-    config, recorder = initialize(argv)
-    record_goodput(recorder, RECORD_JOB_START_TIME)
-    train_func = get_train_func(config, recorder, argv)
-    with maybe_monitor_goodput(config):
-      train_func()
-  except (jax.errors.JaxRuntimeError, Exception) as e:
-    is_elastic = True
-    if config is not None:
-      is_elastic = bool(getattr(config, "elastic_enabled", False))
-    else:
-      for arg in argv:
-        if "elastic_enabled=false" in str(arg).lower() or "elastic_enabled=0" in str(arg).lower():
-          is_elastic = False
-          break
-    err_msg = str(e)
-    is_ifrt_error = "IFRT proxy" in err_msg or "RpcHelper" in err_msg or "Connection refused" in err_msg or "Socket closed" in err_msg or "UNAVAILABLE" in err_msg
-    # In non-elastic mode (without elasticity), never swallow interruption errors or restart in-place.
-    # We must raise immediately so the container exits and JobSet restarts the workload.
-    if not is_elastic or attempt >= max_retries or not is_ifrt_error:
-      raise
-    logging.warning(
-        f"[!] Startup/compilation attempt {attempt}/{max_retries} failed with IFRT error: {e}. "
-        f"Restarting Python process in 10s..."
-    )
-    time.sleep(10)
-    os.environ["MAXTEXT_STARTUP_ATTEMPT"] = str(attempt + 1)
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+  config, recorder = initialize(argv)
+  record_goodput(recorder, RECORD_JOB_START_TIME)
+  train_func = get_train_func(config, recorder, argv)
+  with maybe_monitor_goodput(config):
+    train_func()
 
 
 if __name__ == "__main__":
