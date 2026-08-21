@@ -18,6 +18,7 @@
 # 2. If the DAG succeeded, it promotes the Docker images by tagging the artifact with the latest tag.
 
 name: Promote MaxText Docker Image
+run-name: "Triggered by Airflow ${{ github.event.client_payload.test_type }} Tests DAG"
 
 on:
   repository_dispatch:
@@ -39,11 +40,11 @@ jobs:
           DAG_ID: ${{ github.event.client_payload.dag_id }}
           DAG_RUN_ID: ${{ github.event.client_payload.dag_run_id }}
           SHA: ${{ github.event.client_payload.sha }}
-          GITHUB_RUN_ID: ${{ github.event.client_payload.github_run_id }}
+          CALLER_RUN_ID: ${{ github.event.client_payload.github_run_id }}
           TEST_TYPE: ${{ github.event.client_payload.test_type }}
         run: |
           echo "================================"
-          echo "Github Run ID: ${GITHUB_RUN_ID}"
+          echo "Github Run ID: ${CALLER_RUN_ID}"
           echo "DAG ID:        ${DAG_ID}"
           echo "DAG Run ID:    ${DAG_RUN_ID}"
           echo "Commit SHA:    ${SHA}"
@@ -57,16 +58,16 @@ jobs:
             *) echo "DAG ended with unexpected state: ${STATE}"; exit 1 ;;
           esac
 
-          if [ -n "$GITHUB_RUN_ID" ]; then
-            echo "Checking nightly build status for run: $GITHUB_RUN_ID"
-            gh run watch "$GITHUB_RUN_ID" --exit-status --interval 60 --repo "$GITHUB_REPOSITORY"
+          if [ -n "$CALLER_RUN_ID" ]; then
+            echo "Checking nightly build status for run: $CALLER_RUN_ID"
+            gh run watch "$CALLER_RUN_ID" --exit-status --interval 60 --repo "$GITHUB_REPOSITORY"
           else
             echo "Error: No Github Run ID provided. Cannot verify nightly build status."
             exit 1
           fi
 
   tag_docker_image:
-    name: Promote ${{ matrix.image_name }} Docker Image
+    name: Promote ${{ matrix.test_type }} Docker Image
     needs: handle_result
     if: needs.handle_result.result == 'success'
     runs-on: linux-x86-n2-16-buildkit
@@ -76,13 +77,11 @@ jobs:
       matrix:
         include:
           - test_type: pre_training
-            image_name: maxtext_jax_nightly
+            stable_image_name: maxtext_jax_stable
+            nightly_image_name: maxtext_jax_nightly
           - test_type: post_training
-            image_name: maxtext_post_training_nightly
-          - test_type: pre_training
-            image_name: maxtext_jax_stable
-          - test_type: post_training
-            image_name: maxtext_post_training_stable
+            stable_image_name: maxtext_post_training_stable
+            nightly_image_name: maxtext_post_training_nightly
     steps:
       - name: Configure Docker
         if: ${{ github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type }}
@@ -91,15 +90,33 @@ jobs:
         if: ${{ github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type }}
         shell: bash
         env:
-          GITHUB_RUN_ID: ${{ github.event.client_payload.github_run_id }}
+          CALLER_RUN_ID: ${{ github.event.client_payload.github_run_id }}
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
-          IMAGE_NAME: ${{ matrix.image_name }}
+          STABLE_IMAGE_NAME: ${{ matrix.stable_image_name }}
+          NIGHTLY_IMAGE_NAME: ${{ matrix.nightly_image_name }}
         run: |
-          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${IMAGE_NAME}"
+          tag_image() {
+            local img="$1"
+            local tag="$2"
+            echo "Tagging ${img}:${CALLER_RUN_ID} as ${tag}..."
+            gcloud container images add-tag "${img}:${CALLER_RUN_ID}" "${img}:${tag}" --quiet
+          }
 
-          # Add the traceability tag to confirm it passed validation suite
-          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
-            "${SOURCE_IMAGE}:verified-${GITHUB_RUN_ID}" --quiet
+          # 1. Check if stable image exists and tag it
+          STABLE_IMAGE="gcr.io/${PROJECT_NAME}/${STABLE_IMAGE_NAME}"
+          if gcloud container images describe "${STABLE_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
+            echo "Stable image ${STABLE_IMAGE}:${CALLER_RUN_ID} exists. Tagging stable image..."
+            tag_image "${STABLE_IMAGE}" "verified-e2e-${CALLER_RUN_ID}"
+            tag_image "${STABLE_IMAGE}" "latest"
+          else
+            echo "Stable image ${STABLE_IMAGE}:${CALLER_RUN_ID} does not exist. Skipping stable image tagging."
+          fi
 
-          # Add "latest" tag
-          gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" "${SOURCE_IMAGE}:latest" --quiet
+          # 2. Check if nightly image exists and tag it
+          NIGHTLY_IMAGE="gcr.io/${PROJECT_NAME}/${NIGHTLY_IMAGE_NAME}"
+          if gcloud container images describe "${NIGHTLY_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
+            echo "Nightly image ${NIGHTLY_IMAGE}:${CALLER_RUN_ID} exists. Tagging nightly image..."
+            tag_image "${NIGHTLY_IMAGE}" "latest"
+          else
+            echo "Nightly image ${NIGHTLY_IMAGE}:${CALLER_RUN_ID} does not exist. Skipping nightly image tagging."
+          fi
