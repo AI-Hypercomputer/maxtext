@@ -21,6 +21,8 @@ pure_nnx: true
 # Core Architectural Parameters
 base_emb_dim: 7168
 base_num_decoder_layers: 93
+scan_layers: false
+
 base_num_query_heads: 96
 base_num_kv_heads: 96
 head_dim: 128

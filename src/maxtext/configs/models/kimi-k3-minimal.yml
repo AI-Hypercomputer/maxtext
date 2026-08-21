@@ -21,6 +21,11 @@ model_name: "kimi-k3"
 decoder_block: "kimi_k3"
 base_emb_dim: 7168
 base_num_decoder_layers: 2
+scan_layers: false
+attention_type: "mla"
+
+
+
 base_num_query_heads: 64
 base_num_kv_heads: 64
 head_dim: 128

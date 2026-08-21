@@ -1338,7 +1338,14 @@ class NNXDecoder(nnx.Module):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
 
-    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    if callable(shared_embedding):
+      y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    elif isinstance(shared_embedding, dict) and 'embedding' in shared_embedding:
+      y = shared_embedding['embedding'][decoder_input_tokens.astype("int32")]
+    else:
+      y = shared_embedding[decoder_input_tokens.astype("int32")]
+
+
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if multimodal_input is not None:
