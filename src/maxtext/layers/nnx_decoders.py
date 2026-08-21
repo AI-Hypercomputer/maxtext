@@ -437,6 +437,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
+    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -547,6 +548,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
+    elif self.is_qwen3_next:
+      self._init_scanned_qwen3_next(rngs)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -716,6 +719,27 @@ class NNXDecoder(nnx.Module):
         **rem_layer_kwargs,
         rngs=rngs,
     )
+
+  def _init_scanned_qwen3_next(self, rngs):
+    """Initializes scanned Qwen3-Next blocks with per-layer (rather than per-block) remat.
+
+    Mirrors _init_scanned_gemma4: each block covers one period of the hybrid
+    attention pattern and rematerializes its own sub-layers, so the outer apply
+    skips block-level remat.
+    """
+    config = self.config
+    block_length = config.inhomogeneous_layer_cycle_interval
+    scan_length = config.num_decoder_layers // block_length
+    if scan_length > 0:
+      self.layers = self._create_scanned_layers(
+          qwen3.Qwen3NextScannableBlock,
+          length=scan_length,
+          metadata_axis_name="layers",
+          rngs=rngs,
+          num_of_layers=block_length,
+          remat_policy_fn=self.get_remat_policy(),
+          apply_internal_remat=True,
+      )
 
   def _init_scanned_generic(self, decoder_block_classes, rngs):
     """Initializes scanned generic decoder layers."""
@@ -1858,6 +1882,8 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
+        elif self.is_qwen3_next and kv_caches is None:
+          y = self._apply_qwen3_next_scanned_blocks(y, layer_args, layer_kwargs)
         else:
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
           if kv_caches is not None:
@@ -2138,6 +2164,27 @@ class NNXDecoder(nnx.Module):
         for offset, updated_item in enumerate(updated_remainder_kv):
           kv_caches[start_idx + offset] = updated_item
 
+    return y
+
+  def _apply_qwen3_next_scanned_blocks(self, y, layer_args, layer_kwargs):
+    """Applies the Qwen3-Next scanned blocks.
+
+    Qwen3NextScannableBlock rematerializes its own sub-layers (a scan over the
+    linear-attention layers plus a trip-count-one scan over the full-attention
+    layer), so block-level remat is skipped here to avoid rematerializing twice.
+    """
+    cfg = self.config
+    scan_length = cfg.num_decoder_layers // cfg.inhomogeneous_layer_cycle_interval
+    if scan_length == 0:
+      return y
+    y, self.layers, _ = self._apply_layers_sequentially(
+        self.layers,
+        y,
+        *layer_args,
+        length=scan_length,
+        skip_block_remat=True,
+        **layer_kwargs,
+    )
     return y
 
   def _apply_gemma4_scanned_blocks(
