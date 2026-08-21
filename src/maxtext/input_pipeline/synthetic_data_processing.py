@@ -73,14 +73,18 @@ def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq
 class SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
 
-  data_generator: Callable[[pyconfig.HyperParameters, tuple[Any, ...]], dict]
+  data_generator: Callable[[tuple[Any, ...], bool, int], dict]
 
   def __init__(self, config, mesh):
     self.mesh = mesh
     self.config = config
+    self.enable_diloco = bool(getattr(config, "enable_diloco", False))
+    self.num_diloco_replicas = int(getattr(config, "num_diloco_replicas", 1))
     data_pspec_shardings = sharding.get_input_data_sharding(config, mesh)
     self.data_generator = jax.jit(
-        SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
+        SyntheticDataIterator.raw_generate_synthetic_data,
+        out_shardings=data_pspec_shardings,
+        static_argnames=("enable_diloco", "num_diloco_replicas"),
     )
 
     tokens = jax.random.randint(
@@ -113,10 +117,14 @@ class SyntheticDataIterator:
 
   def __next__(self):
     with self.mesh:
-      return self.data_generator(self.config, self.data)  # pylint: disable=not-callable
+      return self.data_generator(  # pylint: disable=not-callable
+          self.data,
+          enable_diloco=self.enable_diloco,
+          num_diloco_replicas=self.num_diloco_replicas,
+      )
 
   @staticmethod
-  def raw_generate_synthetic_data(config: pyconfig.HyperParameters, data):
+  def raw_generate_synthetic_data(data, enable_diloco: bool = False, num_diloco_replicas: int = 1):
     """Generates a single batch of synthetic data"""
     tokens, positions, segmentation = data
 
@@ -127,8 +135,8 @@ class SyntheticDataIterator:
     output["targets"] = tokens[:, 1:]
     output["targets_position"] = positions[:, 1:]
     output["targets_segmentation"] = segmentation
-    if config.enable_diloco:
-      output = reshape_first_axis_with_diloco(config.num_diloco_replicas, output)
+    if enable_diloco:
+      output = reshape_first_axis_with_diloco(num_diloco_replicas, output)
     return output
 
 

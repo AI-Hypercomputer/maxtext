@@ -121,17 +121,54 @@ def _tpu_inference_compat_patches():
       return res * 256
     return res
 
+  import jax._src.array as _jax_array  # pylint: disable=import-outside-toplevel
+
+  orig_make_array = _jax_array.make_array_from_single_device_arrays
+
+  def _compat_make_array(shape, sharding, arrays, dtype=None):
+    if not arrays and dtype is None:
+      dtype = jnp.bfloat16
+    return orig_make_array(shape, sharding, arrays, dtype=dtype)
+
+  _orig_tpu_worker_init_device = None
+  try:
+    import tpu_inference.worker.tpu_worker as _tpu_worker  # pylint: disable=import-outside-toplevel
+
+    _orig_tpu_worker_init_device = _tpu_worker.TPUWorker.init_device
+
+    def _compat_tpu_worker_init_device(self):
+      if not self.devices:
+        sharding_config = self.vllm_config.sharding_config
+        device_indexes = getattr(sharding_config, "device_indexes", None)
+        if device_indexes is not None and len(device_indexes) > 0:
+          all_local_devices = jax.local_devices()
+          device_dict = {device.id: device for device in all_local_devices}
+          self.devices = [device_dict[idx] for idx in device_indexes if idx in device_dict]
+          if not self.devices:
+            self.devices = list(all_local_devices)
+      return _orig_tpu_worker_init_device(self)
+
+    _tpu_worker.TPUWorker.init_device = _compat_tpu_worker_init_device
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
   jax.lax.with_sharding_constraint = _compat_wsc
   tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
   tunix_utils._bulk_align_and_unstack = _compat_bulk  # pylint: disable=protected-access
   tunix_utils._unstack_scanned_param = _compat_unstack  # pylint: disable=protected-access
+  _jax_array.make_array_from_single_device_arrays = _compat_make_array
+  jax.make_array_from_single_device_arrays = _compat_make_array
   try:
     yield
   finally:
+    if _orig_tpu_worker_init_device is not None:
+      _tpu_worker.TPUWorker.init_device = _orig_tpu_worker_init_device
     jax.lax.with_sharding_constraint = orig_wsc
     tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
     tunix_utils._bulk_align_and_unstack = orig_bulk  # pylint: disable=protected-access
     tunix_utils._unstack_scanned_param = orig_unstack  # pylint: disable=protected-access
+    _jax_array.make_array_from_single_device_arrays = orig_make_array
+    jax.make_array_from_single_device_arrays = orig_make_array
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
@@ -695,6 +732,9 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       kwargs,
       config_class=types.RLConfig,
   )
+
+  if getattr(trainer_config, "q_lora_rank", 0) > 0 or "deepseek" in getattr(trainer_config, "model_name", ""):
+    os.environ["NEW_MODEL_DESIGN"] = "1"
 
   # Create model tokenizer first so we can plumb its pad_id into the model
   # adapter (used to synthesize segment_ids that mask pad positions from

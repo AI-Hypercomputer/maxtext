@@ -81,9 +81,16 @@ class TunixMaxTextAdapter(nnx.Module):
   ):
     super().__init__()
     self.base = base_model
+    hf_config = HF_MODEL_CONFIGS.get(self.base.config.model_name)
+    if hf_config is None and "-tiny" in self.base.config.model_name:
+      base_key = self.base.config.model_name.replace("deepseek3-tiny", "deepseek3-671b").replace(
+          "deepseek4-tiny", "deepseek4-284b"
+      )
+      hf_config = HF_MODEL_CONFIGS.get(base_key)
+    hf_dict = hf_config.to_dict() if hf_config is not None else {}
     self._vllm_weight_mapping = VllmWeightMapping(
         self.base.config.model_name,
-        HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
+        hf_dict,
         use_standalone_mappings,
     )
     self.use_no_op_mappings = use_no_op_mappings
