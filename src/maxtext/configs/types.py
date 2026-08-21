@@ -275,6 +275,7 @@ ModelName = Literal[
     "qwen3-vl-4b",
     "qwen3-vl-30b-a3b",
     "qwen3-next-80b-a3b",
+    "qwen3-next-80b-a3b-256e",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-35b-a3b",
@@ -1047,6 +1048,7 @@ class DeepSeekMoE(BaseModel):
 
   first_num_dense_layers: NonNegativeInt = Field(0, description="Number of initial dense layers in the model.")
   shared_experts: NonNegativeInt = Field(0, description="Number of shared experts.")
+  moe_shared_expert_gate: bool = Field(False, description="Whether to use a gate on shared experts.")
   routed_scaling_factor: float = Field(1.0, description="Scaling factor for routing scores.")
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
@@ -1089,6 +1091,14 @@ class Qwen3Next(BaseModel):
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
+  use_gdn_kernel: bool = Field(
+      False,
+      description="Whether to use GDN Pallas kernel.",
+  )
+  use_hybrid_gdn: bool = Field(
+      False,
+      description="Whether to use hybrid GDN v3 Tokamax forward + Custom VJP backward.",
+  )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
 
 
@@ -1116,6 +1126,7 @@ class HardwareAndMesh(BaseModel):
   )
   shard_mode: ShardMode = Field("auto", description="can be either auto or explicit")
   inhomogeneous_layer_cycle_interval: int = Field(1, description="The interval of repeated inhomogeneous layer patterns.")
+  full_attention_layer_offset: int = Field(0, description="Offset for full attention layer.")
   scan_layers: bool = Field(
       True,
       description=(
@@ -1956,6 +1967,10 @@ class Muon(BaseModel):
   muon_consistent_rms: float | None = Field(
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
+  )
+  muon_ns_steps: int = Field(
+      5,
+      description="Number of Newton-Schulz iterations for Muon optimizer.",
   )
 
 
@@ -3912,12 +3927,19 @@ class MaxTextConfig(
       if (
           self.routed_bias
           and self.routed_bias_update_rate > 0.0
-          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
+          and self.decoder_block
+          not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4, DecoderBlockType.QWEN3_NEXT)
       ):
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
-      if not self.pure_nnx and self.routed_bias and self.decoder_block == DecoderBlockType.DEEPSEEK4:
         raise ValueError(
-            "Auxiliary-loss-free routed bias for DeepSeek V4 is only supported in pure NNX mode. "
+            "Loss-free load balancing is only supported for the DeepSeek, DeepSeek4, and Qwen3-Next decoder blocks."
+        )
+      if (
+          not self.pure_nnx
+          and self.routed_bias
+          and self.decoder_block in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.QWEN3_NEXT)
+      ):
+        raise ValueError(
+            "Auxiliary-loss-free routed bias for DeepSeek V4 and Qwen3-Next is only supported in pure NNX mode. "
             "Please set pure_nnx=True or disable routed_bias."
         )
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
@@ -4249,6 +4271,10 @@ class MaxTextConfig(
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_5,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
     ]:

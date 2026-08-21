@@ -19,6 +19,7 @@
 import io
 import contextlib
 import unittest
+import pytest
 from unittest import mock
 
 import jax
@@ -69,9 +70,9 @@ class TestTransformLogic(unittest.TestCase):
   def test_moe_wo_uses_last_two_axes(self):
     self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "wo")), mdn((-2,), (-1,)))
 
-  def test_moe_gate_falls_through_to_standard(self):
-    # 'gate' is inside MoeBlock_0 but not one of (wi_0, wi_1, wo) → standard.
-    self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel")), mdn((0,), (-1,)))
+  def test_moe_gate_is_excluded(self):
+    # 'gate' is excluded from Muon (optimized with standard AdamW).
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "MoeBlock_0", "gate", "kernel")))
 
   # --- 2.2 Self-attention ---
   def test_self_attention_out_projection(self):
@@ -118,6 +119,27 @@ class TestTransformLogic(unittest.TestCase):
     # o_a_proj projects with reduction on in_features_per_group (-2)
     # and output on out_features_per_group (-1)
     self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "o_a_proj")), mdn((-2,), (-1,)))
+
+  # --- 5. Qwen3-Next Specific ---
+  @pytest.mark.tpu_only
+  def test_qwen3_next_moe_routed_experts(self):
+    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_0")), mdn((-2,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wi_1")), mdn((-2,), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "wo")), mdn((-2,), (-1,)))
+
+  @pytest.mark.tpu_only
+  def test_qwen3_next_gdn_projections(self):
+    self.assertEqual(muon_utils.transform_logic(("decoder", "gdn", "in_proj_qkvz")), mdn((0,), (-2, -1)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "gdn", "in_proj_ba")), mdn((0,), (-2, -1)))
+    self.assertEqual(muon_utils.transform_logic(("decoder", "gdn", "out_proj")), mdn((0, -2), (-1,)))
+
+  @pytest.mark.tpu_only
+  def test_qwen3_next_exclusions(self):
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "gdn", "A_log")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "gdn", "dt_bias")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "gdn", "conv1d")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "mlp", "routed_experts", "gate")))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "mlp", "shared_expert_gate")))
 
 
 class TestGetTransformTree(unittest.TestCase):

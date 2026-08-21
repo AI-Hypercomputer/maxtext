@@ -30,6 +30,18 @@ import jax.numpy as jnp
 import qwix.pallas as qpl
 
 
+def _make_shape_dtype_struct(shape, dtype, varying_axes=()):
+  try:
+    manual_axis_type = jax.sharding.ManualAxisType(varying=frozenset(varying_axes))
+    return jax.ShapeDtypeStruct(shape, dtype, manual_axis_type=manual_axis_type)
+  except TypeError:
+    try:
+      manual_axis_type = jax.sharding.ManualAxisType(varying=frozenset(varying_axes))
+      return jax.ShapeDtypeStruct(shape, dtype, manual_type=manual_axis_type)
+    except (TypeError, AttributeError):
+      return jax.ShapeDtypeStruct(shape, dtype)
+
+
 def _validate_args(
     *,
     lhs: jnp.ndarray,
@@ -524,9 +536,7 @@ def gmm(
   }
   call_gmm = qpl.pallas_call(
       kernel,
-      out_shape=jax.ShapeDtypeStruct(
-          (m, n), preferred_element_type, manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes))
-      ),
+      out_shape=_make_shape_dtype_struct((m, n), preferred_element_type, varying_axes),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=[
@@ -783,11 +793,7 @@ def tgmm(
   }
   call_gmm = qpl.pallas_call(
       kernel,
-      out_shape=jax.ShapeDtypeStruct(
-          (num_actual_groups, k, n),
-          preferred_element_type,
-          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes)),
-      ),
+      out_shape=_make_shape_dtype_struct((num_actual_groups, k, n), preferred_element_type, varying_axes),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=[
