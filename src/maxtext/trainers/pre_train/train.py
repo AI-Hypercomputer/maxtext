@@ -1202,11 +1202,7 @@ def train_loop(config, recorder, state=None):
         break  # Initialization succeeded!
       except (jax.errors.JaxRuntimeError, pathways_manager.ScaleUpSignalError) as e:
         is_scale_up = isinstance(e, pathways_manager.ScaleUpSignalError)
-        is_slice_down = isinstance(e, jax.errors.JaxRuntimeError) and (
-            elastic.is_error_due_to_slice_down(e)
-            or "Connection to IFRT proxy server was terminated" in str(e)
-            or "UNAVAILABLE" in str(e)
-        )
+        is_slice_down = isinstance(e, jax.errors.JaxRuntimeError) and elastic.is_error_due_to_slice_down(e)
         if elastic_utils.elastic_snapshot(config) and (is_scale_up or is_slice_down):
           _logger.warning(
               "Elastic event or slice failure caught during initialization: %s. Refreshing slice topology and retrying setup.",
