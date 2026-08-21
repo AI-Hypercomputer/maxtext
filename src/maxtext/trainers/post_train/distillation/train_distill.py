@@ -50,6 +50,7 @@ import pathwaysutils
 from orbax import checkpoint
 
 # MaxText Imports
+# Placeholder: internal
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import input_pipeline_interface
@@ -126,7 +127,9 @@ def get_distillation_optimizer(config, max_train_steps):
   return optimizer
 
 
-def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distillation_utils.DistillationForwardOutput]:
+def create_forward_fn(
+    config: pyconfig.HyperParameters,
+) -> Callable[..., distillation_utils.DistillationForwardOutput]:
   """Creates a forward function closure that binds the specific model configuration.
 
   Args:
@@ -138,7 +141,13 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
   """
 
   def model_forward_fn(
-      model, input_tokens, positions, attention_mask, decoder_segment_ids=None, cache=None, **kwargs
+      model,
+      input_tokens,
+      positions,
+      attention_mask,
+      decoder_segment_ids=None,
+      cache=None,
+      **kwargs,
   ) -> distillation_utils.DistillationForwardOutput:
     """Forward pass wrapper adapted for raw MaxText models."""
     del attention_mask  # Unused
@@ -152,18 +161,35 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         decoder_target_mask=kwargs.get("decoder_target_mask", None),
     )
     out_projection_activations = None
-    if config.distill_beta > 0.0:
-      out_projection_activations = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
-
     moe_lb_loss = None
-    if config.num_experts > 1 and config.load_balance_loss_weight > 0.0:
+
+    if config.distill_beta > 0.0 or (config.num_experts > 1 and config.load_balance_loss_weight > 0.0):
+      if config.distill_beta > 0.0:
+        out_projection_activations = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
+
       intermediate_outputs = nnx.pop(model, nnx.Intermediate)
-      total_moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
-      if total_moe_lb_losses:
-        moe_lb_loss = jnp.mean(jnp.concatenate(total_moe_lb_losses))
+
+      if out_projection_activations is None and config.distill_beta > 0.0:
+        matching = [
+            val
+            for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs)
+            if any("out_projection_activations" in str(getattr(k, "key", getattr(k, "name", str(k)))) for k in path)
+        ]
+        if matching:
+          if len(matching) == 1:
+            out_projection_activations = matching[0]
+          else:
+            out_projection_activations = jnp.stack(matching, axis=0)
+
+      if config.num_experts > 1 and config.load_balance_loss_weight > 0.0:
+        total_moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
+        if total_moe_lb_losses:
+          moe_lb_loss = jnp.mean(jnp.concatenate(total_moe_lb_losses))
 
     retval = distillation_utils.DistillationForwardOutput(
-        logits=logits, out_projection_activations=out_projection_activations, moe_lb_loss=moe_lb_loss
+        logits=logits,
+        out_projection_activations=out_projection_activations,
+        moe_lb_loss=moe_lb_loss,
     )
     return retval
 
@@ -229,7 +255,12 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     # allocating massive optimizer states for the entire ModelBundle (including the frozen teacher) before
     # redefining the trainer optimizer here.
     dummy_optimizer = optax.set_to_zero()
-    super().__init__(model=model, optimizer=dummy_optimizer, training_config=training_config, **kwargs)
+    super().__init__(
+        model=model,
+        optimizer=dummy_optimizer,
+        training_config=training_config,
+        **kwargs,
+    )
 
     self.strategy = strategy
     self.checkpoint_manager: distillation_utils.MaxTextCheckpointManager = None  # pyrefly: ignore[bad-assignment]
@@ -276,7 +307,17 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   # Inherits _shard_optimizer from PeftTrainer.
 
-  def _train_step(self, model, optimizer, inputs, grad_accumulator=None, **kwargs):  # pyrefly: ignore[bad-override]
+  # pylint: disable-next=keyword-arg-before-vararg
+  def _train_step(
+      self,
+      model,
+      optimizer,
+      inputs_or_grad_acc=None,
+      inputs=None,
+      is_update_step=None,
+      *args,
+      **kwargs,
+  ):  # pyrefly: ignore[signature-differs]
     """Overrides the main JIT block to natively handle ModelBundle module.
 
     Uses jax.value_and_grad with explicit split/merge to avoid nesting
@@ -285,6 +326,19 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       ValueError: The graph structure of a node added to cached_partial was
       mutated inside the transformation.
     """
+    if inputs is not None:
+      actual_inputs = inputs
+    elif len(args) == 1:
+      actual_inputs = args[0]
+    elif inputs_or_grad_acc is not None:
+      actual_inputs = inputs_or_grad_acc
+    elif "inputs" in kwargs:
+      actual_inputs = kwargs["inputs"]
+    else:
+      raise TypeError("_train_step requires inputs")
+
+    inputs = actual_inputs
+
     batch = self.gen_model_input_fn(inputs)
     student = model.student_model
     teacher = model.teacher_model
@@ -324,7 +378,10 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           decoder_target_mask=batch.get("targets_segmentation", None),
           cache=None,
       )
-      labels = self.strategy.create_labels(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
+      labels = self.strategy.create_labels(
+          batch["targets"],
+          targets_segmentation=batch.get("targets_segmentation", None),
+      )
       loss, aux = self.strategy.compute_loss(student_output, teacher_output, labels, step=current_step)
       # Capture updated non-param state (e.g. RNG counters) from local_student.
       _, _, new_rest = nnx.split(local_student, self.wrt_filter, ...)
@@ -357,7 +414,10 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         decoder_segment_ids=inputs.get("decoder_segment_ids"),
         cache=None,
     )
-    labels = self.strategy.create_labels(inputs["targets"], targets_segmentation=inputs.get("targets_segmentation", None))
+    labels = self.strategy.create_labels(
+        inputs["targets"],
+        targets_segmentation=inputs.get("targets_segmentation", None),
+    )
     return self.strategy.compute_eval_loss(student_output, labels)
 
   def _log_metrics(self, loss, step=None, additional_metrics=None, **kwargs):
@@ -411,9 +471,6 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     Returns:
       A new MaxTextTrainingInput containing the Teacher's outputs (logits).
     """
-    if hasattr(input_data, "microbatches"):
-      input_data.microbatches = [self._prepare_inputs(mb) for mb in input_data.microbatches]
-      return input_data
 
     # 3. Return extended object so fields are available for Student training step
     # pylint: disable=unexpected-keyword-arg
@@ -642,7 +699,8 @@ def build_training_components(
     )
 
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=student_config.tensorboard_dir, flush_every_n_steps=student_config.log_period
+      log_dir=student_config.tensorboard_dir,
+      flush_every_n_steps=student_config.log_period,
   )
 
   train_config = peft_trainer.TrainingConfig(
@@ -693,7 +751,10 @@ def train_distill(
 
   # Hardware Execution (Safe Context)
   max_logging.log("Applying logical axis rules for model initialization and training...")
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(student_config.logical_axis_rules):
+  with (
+      jax.set_mesh(mesh),
+      nn_partitioning.axis_rules(student_config.logical_axis_rules),
+  ):
     # 2. Load Models
     if is_offline:
       max_logging.log("Offline Distillation: Skipping Teacher Model loading.")
@@ -706,6 +767,27 @@ def train_distill(
 
     # LTI phase needs the student initialization step to know about the teacher configuration
     student_config.get_keys()["teacher_config"] = teacher_config
+
+    # Check if student checkpoints already exist to avoid double loading
+    checkpoint_exists = False
+    if student_config.enable_checkpointing and student_config.checkpoint_dir:
+      try:
+        # Use orbax.checkpoint.utils to find existing steps
+        steps = checkpoint.utils.checkpoint_steps(student_config.checkpoint_dir)
+        if steps:
+          checkpoint_exists = True
+          max_logging.log(f"Found existing student checkpoints steps: {steps}")
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        # Directory might not exist yet, which is fine
+        max_logging.log(f"Checking for existing checkpoints: {e}")
+
+    if checkpoint_exists and student_config.load_parameters_path:
+      max_logging.log(
+          f"Checkpoint found in {student_config.checkpoint_dir}. "
+          f"Overriding load_parameters_path '{student_config.load_parameters_path}' to empty string "
+          "to avoid redundant base parameter loading."
+      )
+      student_config.get_keys()["load_parameters_path"] = ""
 
     max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
     _log_config_details(student_config, "Student")
@@ -781,7 +863,9 @@ def train_distill(
         return inputs_dict
 
       inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
-          logits=batch.top_k_logits, out_projection_activations=None, top_k_indices=batch.top_k_indices
+          logits=batch.top_k_logits,
+          out_projection_activations=None,
+          top_k_indices=batch.top_k_indices,
       )
       return inputs_dict
 
@@ -886,7 +970,6 @@ def main(argv: Sequence[str]) -> None:
     os.environ["LIBTPU_INIT_ARGS"] = (
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
-
   # 1. Parse Global Config to extract Overrides
   global_config = pyconfig.initialize(argv)
   _save_run_manifest(argv, global_config)
@@ -913,11 +996,21 @@ def main(argv: Sequence[str]) -> None:
   # This ensures flags like `num_query_heads=16` passed in CLI don't affect the Teacher.
   teacher_argv = [argv[0], argv[1]]
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
+  try:
+    teacher_config.get_keys()["distill_beta"] = student_config.distill_beta
+  except TypeError:
+    pass
+
+  # Placeholder: eu_bucketing logic
 
   # Batch shape (per_device_batch_size / max_target_length / gradient_accumulation_steps)
   # must be set at the YAML top level — not inside *_overrides — since student and
   # teacher share the input pipeline.
-  for batch_field in ("per_device_batch_size", "max_target_length", "gradient_accumulation_steps"):
+  for batch_field in (
+      "per_device_batch_size",
+      "max_target_length",
+      "gradient_accumulation_steps",
+  ):
     s_val = getattr(student_config, batch_field)
     t_val = getattr(teacher_config, batch_field)
     if s_val != t_val:
@@ -933,4 +1026,5 @@ def main(argv: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
-  app.run(main)
+  # Placeholder: g3_multiprocessing bottom block
+  app.run(main)  # pylint: disable=unreachable
