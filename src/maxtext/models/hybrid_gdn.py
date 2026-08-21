@@ -15,12 +15,14 @@
 """Hybrid Gated Delta Net (GDN) implementations for MaxText using Tokamax GDN v3 forward + Pallas Custom VJP backward."""
 
 import functools
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
+
+from maxtext.layers.normalizations import l2norm
 
 
 def _pallas_gdn_bwd_kernel(
@@ -80,6 +82,12 @@ def _pallas_gdn_bwd_kernel(
     pad_len: int = 8,
     use_qk_norm_in_gdn: bool = False,
 ):
+  """Pallas TPU kernel computing the GDNv3 + causal Conv1D backward pass for one sequence.
+
+  Grid is over the batch: each program replays the chunked forward recurrence from the
+  saved per-chunk states, then walks the chunks in reverse to accumulate the cotangents
+  written to the `d_*_ref` outputs.
+  """
   seq_idx = pl.program_id(0)
 
   d_conv_weight_scratch[...] = jnp.zeros_like(d_conv_weight_scratch)
@@ -316,7 +324,6 @@ def pallas_fused_conv1d_gdn_bwd_computation(
   batch_size, seq_len, dim_size = pre_conv_qkv.shape
   num_chunks = seq_len // chunk_size
 
-  pre_conv_qkv_4d = pre_conv_qkv.reshape(batch_size, num_chunks, chunk_size, dim_size)
   qkv_4d = qkv.reshape(batch_size, num_chunks, chunk_size, dim_size)
   b_4d = b.reshape(batch_size, num_chunks, chunk_size, num_v_heads)
   a_4d = a.reshape(batch_size, num_chunks, chunk_size, num_v_heads)
@@ -447,7 +454,8 @@ def pure_jax_fused_conv1d_gdn(
     compute_dtype: jnp.dtype,
 ) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
   """Pure-JAX composite of Conv1D + GDN used during backward pass autodiff."""
-  from maxtext.models.qwen3 import jax_chunk_gated_delta_rule
+  # Imported lazily: maxtext.models.qwen3 imports this module at toplevel.
+  from maxtext.models.qwen3 import jax_chunk_gated_delta_rule  # pylint: disable=import-outside-toplevel
 
   batch, seq_len, _ = qkv.shape
   key_dim = num_k_heads * head_k_dim
@@ -557,8 +565,6 @@ def _compute_forward_conv_and_states(
   v = qkv_conv[:, :, q_size + k_size :].reshape(batch_size, num_chunks, chunk_size, num_v_heads, head_v_dim)
 
   if use_qk_norm_in_gdn:
-    from maxtext.layers.normalizations import l2norm
-
     q = l2norm(q, dim=-1, eps=1e-6)
     k = l2norm(k, dim=-1, eps=1e-6)
 
@@ -574,8 +580,8 @@ def _compute_forward_conv_and_states(
     init_state = recurrent_state.astype(jnp.float32)
 
   def scan_fn(carry_state, chunk_inputs):
-    q_i, k_i, v_i, b_i, a_i = chunk_inputs
-    q_rep = jnp.repeat(q_i, repeats, axis=2)
+    # The recurrent state does not depend on the queries, so the query chunk is unused here.
+    _, k_i, v_i, b_i, a_i = chunk_inputs
     k_rep = jnp.repeat(k_i, repeats, axis=2)
 
     beta = jax.nn.sigmoid(b_i)
@@ -632,6 +638,11 @@ def _run_tokamax_fused_fwd(
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
 ):
+  """Runs the fused Conv1D + GDNv3 forward via the Tokamax TPU kernel.
+
+  Falls back to `pure_jax_fused_conv1d_gdn` on non-TPU backends. Returns
+  `(out, (conv_state, recurrent_state))`.
+  """
   if jax.default_backend() != "tpu":
     return pure_jax_fused_conv1d_gdn(
         qkv,
@@ -653,6 +664,8 @@ def _run_tokamax_fused_fwd(
         compute_dtype=compute_dtype,
     )
 
+  # Imported lazily: tokamax is an optional, TPU-only dependency.
+  # pylint: disable-next=import-outside-toplevel
   from tokamax._src.ops.experimental.causal_conv1d_gated_delta_rule import wrapper as tokamax_gdn_wrapper
 
   batch_size, seq_len, dim_size = qkv.shape
@@ -772,6 +785,7 @@ def _hybrid_fused_conv1d_gdn_fwd(
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
 ):
+  """Custom-VJP forward rule: returns `((out, states), residuals)` for the backward pass."""
   out, states = _run_tokamax_fused_fwd(
       qkv,
       b,
@@ -837,6 +851,7 @@ def _hybrid_fused_conv1d_gdn_bwd(
     residuals: tuple,
     cotangents: tuple,
 ):
+  """Custom-VJP backward rule: Pallas kernel on TPU, pure-JAX autodiff elsewhere."""
   (
       pre_conv_qkv,
       qkv_conv,

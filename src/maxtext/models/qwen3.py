@@ -821,6 +821,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           recurrent_state = recurrent_state[:batch]
 
     if getattr(cfg, "use_gdn_kernel", False) and getattr(cfg, "use_hybrid_gdn", False):
+      # Imported lazily: hybrid_gdn imports this module for jax_chunk_gated_delta_rule.
+      # pylint: disable-next=import-outside-toplevel
       from maxtext.models.hybrid_gdn import hybrid_fused_conv1d_gdn
 
       conv_state_arg = (
