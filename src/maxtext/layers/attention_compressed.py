@@ -1641,6 +1641,7 @@ class CompressedAttention(Attention):
         indexer_mask=indexer_mask,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
         pad_kv_total=pad_kv_total,
+        compress_ratio=self.compress_ratio,
     )
 
     # Reverse RoPE on Values

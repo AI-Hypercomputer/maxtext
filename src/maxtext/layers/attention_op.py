@@ -232,11 +232,18 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
       pad_kv_total: int = 0,
       sliding_window_size: int | None = None,
       shard_count: int = 1,
+      compress_ratio: int = 0,
   ):
-    compress_ratio = max(1, local_kv_len // max(1, compressed_kv_len))
+    if compress_ratio <= 0:
+      compress_ratio = max(1, local_kv_len // max(1, compressed_kv_len))
     is_power_of_2 = (compress_ratio & (compress_ratio - 1)) == 0
     compress_shift = int(np.log2(compress_ratio)) if is_power_of_2 else None
     comp_start = local_kv_len + pad_kv_total
+    self.local_kv_len = local_kv_len
+    self.compressed_kv_len = compressed_kv_len
+    self.pad_kv_total = pad_kv_total
+    self.sliding_window_size = sliding_window_size
+    self.compress_ratio = compress_ratio
 
     def hca_mask_fn(q_ids, kv_ids):
       if q_ids.size == 0 or kv_ids.size == 0:
@@ -268,10 +275,29 @@ class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=p
   def __eq__(self, other: object):
     if not isinstance(other, type(self)):
       return NotImplemented
-    return self.shape == other.shape and np.array_equal(self.q_sequence, other.q_sequence)
+    return (
+        self.shape == other.shape
+        and self.local_kv_len == other.local_kv_len
+        and self.compressed_kv_len == other.compressed_kv_len
+        and self.pad_kv_total == other.pad_kv_total
+        and self.sliding_window_size == other.sliding_window_size
+        and self.compress_ratio == other.compress_ratio
+        and np.array_equal(self.q_sequence, other.q_sequence)
+    )
 
   def __hash__(self):
-    return hash((type(self), self.shape, self.q_sequence.tobytes() if self.q_sequence is not None else None))
+    return hash(
+        (
+            type(self),
+            self.shape,
+            self.local_kv_len,
+            self.compressed_kv_len,
+            self.pad_kv_total,
+            self.sliding_window_size,
+            self.compress_ratio,
+            self.q_sequence.tobytes() if self.q_sequence is not None else None,
+        )
+    )
 
 
 class BlockCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access,abstract-method
@@ -1427,6 +1453,7 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
+      compress_ratio: int = 0,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1443,9 +1470,9 @@ class AttentionOp(nnx.Module):
       raise ValueError("TPU Tokamax ring attention requires attention_kernel='flash'.")
     if ulysses_attention.is_context_parallel_ulysses_requested(self.config):
       if target_hardware != "tpu":
-        raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
+        raise ValueError("Context parallel Ulysses attention is currently only supported on TPUs.")
       if self.attention_kernel != "flash":
-        raise ValueError("TPU Ulysses attention requires attention_kernel='flash'.")
+        raise ValueError("Context parallel Ulysses attention currently requires flash attention.")
     if usp_attention.is_context_parallel_usp_requested(self.config):
       if target_hardware != "tpu":
         raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
@@ -1523,6 +1550,7 @@ class AttentionOp(nnx.Module):
             record_max_logits=record_max_logits,
             decoder_segment_ids_kv=decoder_segment_ids_kv,
             pad_kv_total=pad_kv_total,
+            compress_ratio=compress_ratio,
         )
         if max_logits is not None:
           self.max_logits = nnx.Intermediate(max_logits)
@@ -1697,6 +1725,7 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Array | None = None,
       pad_kv_total: int = 0,
+      compress_ratio: int = 0,
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
@@ -1923,6 +1952,7 @@ class AttentionOp(nnx.Module):
             compressed_kv_len=compressed_kv_len,
             pad_kv_total=pad_kv_total,
             sliding_window_size=self.sliding_window_size if self.sliding_window_size else None,
+            compress_ratio=compress_ratio,
         )
       elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
         mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
@@ -2858,6 +2888,7 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
+      compress_ratio: int = 0,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -2906,6 +2937,7 @@ class AttentionOp(nnx.Module):
         wv_product_einsum=self.AqtEinsum_1,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
         pad_kv_total=pad_kv_total,
+        compress_ratio=compress_ratio,
     )
 
     if ar_kv_cache is None:
