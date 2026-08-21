@@ -170,7 +170,7 @@ def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = Non
     # usage when downcasting dtypes.
     weight = weight.astype(final_dtype_str)
 
-  weight = multihost_utils.process_allgather(weight, tiled=True)
+  weight = multihost_utils.process_allgather(weight)
   # Use np.asarray to avoid redundant copies when the gathered buffer can be viewed directly.
   np_array = np.asarray(weight)
   return np_array.reshape(expected_shape)
