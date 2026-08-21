@@ -76,6 +76,7 @@ from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
+
 try:
   from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
 except ImportError:

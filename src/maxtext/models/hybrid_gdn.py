@@ -128,15 +128,15 @@ def _pallas_gdn_bwd_kernel(
     v_h = jnp.transpose(v_beta, (1, 0, 2))
 
     # Dual Causal Attention
-    attn = jnp.einsum('hck,hdk->hcd', q_h, k_h)
+    attn = jnp.einsum("hck,hdk->hcd", q_h, k_h)
     attn_causal = attn * G
 
-    out_intra = jnp.einsum('hcd,hdv->hcv', attn_causal, v_h)
+    out_intra = jnp.einsum("hcd,hdv->hcv", attn_causal, v_h)
     out_intra = jnp.transpose(out_intra, (1, 0, 2))
 
     cross_decay = jnp.exp(cumsum_log_g)
     q_scaled = q_rep * cross_decay[:, :, None]
-    out_cross = jnp.einsum('chk,hkv->chv', q_scaled, state_prev)
+    out_cross = jnp.einsum("chk,hkv->chv", q_scaled, state_prev)
 
     out = out_intra + out_cross
 
@@ -144,7 +144,7 @@ def _pallas_gdn_bwd_kernel(
     state_prev_decayed = state_prev * cross_decay[-1, :, None, None]
 
     k_scaled = k_h * state_decay_end[:, :, None]
-    state_new_intra = jnp.einsum('hck,hcv->hkv', k_scaled, v_h)
+    state_new_intra = jnp.einsum("hck,hcv->hkv", k_scaled, v_h)
 
     state_new = state_prev_decayed + state_new_intra
 
@@ -233,13 +233,18 @@ def _pallas_gdn_bwd_kernel(
     v = qkv_val[:, q_size + k_size :].reshape((chunk_size, num_v_heads, v_head_dim))
 
     _, vjp_fn = jax.vjp(chunk_forward, q, k, v, b_val, a_val, a_log_val, dt_bias_val, state_prev_val)
-    d_q, d_k, d_v, d_b_val, d_a_val, d_a_log_val, d_dt_bias_val, d_state_prev = vjp_fn((do_val.astype(jnp.float32), d_state))
+    d_q, d_k, d_v, d_b_val, d_a_val, d_a_log_val, d_dt_bias_val, d_state_prev = vjp_fn(
+        (do_val.astype(jnp.float32), d_state)
+    )
 
-    d_qkv = jnp.concatenate([
-        d_q.reshape(chunk_size, q_size),
-        d_k.reshape(chunk_size, k_size),
-        d_v.reshape(chunk_size, v_size),
-    ], axis=-1)
+    d_qkv = jnp.concatenate(
+        [
+            d_q.reshape(chunk_size, q_size),
+            d_k.reshape(chunk_size, k_size),
+            d_v.reshape(chunk_size, v_size),
+        ],
+        axis=-1,
+    )
 
     d_cw_rows = []
     for k_idx in range(kernel_size):
@@ -553,6 +558,7 @@ def _compute_forward_conv_and_states(
 
   if use_qk_norm_in_gdn:
     from maxtext.layers.normalizations import l2norm
+
     q = l2norm(q, dim=-1, eps=1e-6)
     k = l2norm(k, dim=-1, eps=1e-6)
 
@@ -577,7 +583,7 @@ def _compute_forward_conv_and_states(
     v_beta = v_i * beta[:, :, :, None]
 
     mask_cumsum = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=log_g.dtype))
-    cumsum_log_g = jnp.einsum('cd,bhd->bhc', mask_cumsum, log_g.swapaxes(1, 2)).swapaxes(1, 2)
+    cumsum_log_g = jnp.einsum("cd,bhd->bhc", mask_cumsum, log_g.swapaxes(1, 2)).swapaxes(1, 2)
 
     diff = cumsum_log_g[:, :, None, :] - cumsum_log_g[:, None, :, :]
     mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=diff.dtype))
@@ -589,7 +595,7 @@ def _compute_forward_conv_and_states(
     state_prev_decayed = carry_state * cross_decay[:, -1, :, None, None]
 
     k_scaled = k_rep * state_decay_end[:, :, :, None]
-    state_new_intra = jnp.einsum('bchk,bchv->bhkv', k_scaled, v_beta)
+    state_new_intra = jnp.einsum("bchk,bchv->bhkv", k_scaled, v_beta)
 
     new_state = state_prev_decayed + state_new_intra
     return new_state, carry_state

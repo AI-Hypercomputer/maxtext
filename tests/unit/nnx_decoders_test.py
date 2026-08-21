@@ -803,6 +803,8 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     )
     np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
     np.testing.assert_array_equal(block.global_layer.received_attention_metadata.value, True)
+
+
 class _StatefulGemma4DecoderLayer(nnx.Module):
   """Small stand-in that exposes cache ordering and mutable-state updates."""
 
@@ -1210,7 +1212,6 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
     )
 
 
-
 @pytest.mark.tpu_only
 class TestGemma4SmallNNXDecoder(unittest.TestCase):
   """Unit tests for Gemma4 Small NNXDecoder to improve code coverage."""
@@ -1450,5 +1451,7 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
       )
     finally:
       maxtext_utils_nnx.nnx_add_and_sync_scan_axis = original_add_scan_axis
+
+
 if __name__ == "__main__":
   unittest.main()

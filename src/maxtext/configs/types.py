@@ -3933,7 +3933,11 @@ class MaxTextConfig(
         raise ValueError(
             "Loss-free load balancing is only supported for the DeepSeek, DeepSeek4, and Qwen3-Next decoder blocks."
         )
-      if not self.pure_nnx and self.routed_bias and self.decoder_block in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.QWEN3_NEXT):
+      if (
+          not self.pure_nnx
+          and self.routed_bias
+          and self.decoder_block in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.QWEN3_NEXT)
+      ):
         raise ValueError(
             "Auxiliary-loss-free routed bias for DeepSeek V4 and Qwen3-Next is only supported in pure NNX mode. "
             "Please set pure_nnx=True or disable routed_bias."

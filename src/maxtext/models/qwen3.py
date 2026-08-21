@@ -853,10 +853,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
                 batch_pspec3,  # qkv
                 batch_pspec3,  # b
                 batch_pspec3,  # a
-                none_pspec3,   # conv_weight
-                none_pspec1,   # conv_bias
-                none_pspec1,   # a_log
-                none_pspec1,   # dt_bias
+                none_pspec3,  # conv_weight
+                none_pspec1,  # conv_bias
+                none_pspec1,  # a_log
+                none_pspec1,  # dt_bias
                 batch_pspec3,  # conv_state
                 batch_pspec4,  # recurrent_state
             ),
@@ -1345,8 +1345,12 @@ class Qwen3NextScannableBlock(nnx.Module):
     cycle_interval = cfg.inhomogeneous_layer_cycle_interval
     full_attention_offset = getattr(cfg, "full_attention_layer_offset", 0) % cycle_interval
 
-    self.num_local = sum(1 for i in range(num_of_layers) if (layer_idx_offset + i) % cycle_interval != full_attention_offset)
-    self.num_global = sum(1 for i in range(num_of_layers) if (layer_idx_offset + i) % cycle_interval == full_attention_offset)
+    self.num_local = sum(
+        1 for i in range(num_of_layers) if (layer_idx_offset + i) % cycle_interval != full_attention_offset
+    )
+    self.num_global = sum(
+        1 for i in range(num_of_layers) if (layer_idx_offset + i) % cycle_interval == full_attention_offset
+    )
 
     if self.num_local > 0:
       self.local_layers = nnx_scan.create_scanned_layers(
@@ -1575,7 +1579,9 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # wraps to cycle-1) reproduces the original "last position in the cycle" schedule.
     full_attention_offset = cfg.full_attention_layer_offset % cfg.inhomogeneous_layer_cycle_interval
     if is_full_attention_layer is None:
-      is_full_attention_layer = self.is_dense_layer or self.layer_idx % cfg.inhomogeneous_layer_cycle_interval == full_attention_offset
+      is_full_attention_layer = (
+          self.is_dense_layer or self.layer_idx % cfg.inhomogeneous_layer_cycle_interval == full_attention_offset
+      )
     self.is_full_attention_layer = is_full_attention_layer
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.

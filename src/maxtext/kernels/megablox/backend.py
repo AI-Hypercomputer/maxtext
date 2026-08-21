@@ -42,7 +42,6 @@ def _make_shape_dtype_struct(shape, dtype, varying_axes=()):
       return jax.ShapeDtypeStruct(shape, dtype)
 
 
-
 def _validate_args(
     *,
     lhs: jnp.ndarray,

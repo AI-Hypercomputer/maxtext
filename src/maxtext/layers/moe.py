@@ -54,6 +54,7 @@ from maxtext.utils.sharding import (
 )
 import numpy as np
 import qwix
+
 try:
   from qwix.contrib.sparsity import sparsity_module
 except ImportError:
