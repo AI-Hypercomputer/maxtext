@@ -86,10 +86,8 @@ jobs:
           - name: "Pre-Training"
             image_name: maxtext_jax_stable
             workflow: pre-training
-            additional_image_to_tag: maxtext_jax_nightly
           - name: "Post-Training"
             image_name: maxtext_post_training_stable
-            additional_image_to_tag: maxtext_post_training_nightly
             workflow: post-training
     uses: ./.github/workflows/run_ci_tests.yml
     with:
@@ -97,7 +95,6 @@ jobs:
       image_tag: ${{ github.run_id }}
       device: tpu
       workflow: ${{ matrix.workflow }}
-      additional_image_to_tag: ${{ matrix.additional_image_to_tag != '' && (inputs.image_suffix != '' && format('{0}_{1}', matrix.additional_image_to_tag, inputs.image_suffix) || matrix.additional_image_to_tag) || '' }}
 
   run_e2e_tests:
     name: Run E2E tests
