@@ -255,6 +255,9 @@ def vocab_tiling_linen_loss(
     grad_params = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_params)
     # Cast cotangents back to each primal's dtype; custom_vjp requires dtype match.
     grad_params = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), gathered_params, grad_params)
+    # _bwd_scan_body seeds vjp_fn(1.0), so the scan yields d(total_loss)/d(hidden).
+    # The incoming cotangent must be applied here too, exactly as for grad_params
+    grad_reshaped_hidden_states = grad_reshaped_hidden_states * loss_cotangent
     # Give back sharding constraint
     grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
     return (
@@ -469,7 +472,8 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
     )
     grad_reshaped_hidden_states = _maybe_shard_with_name(grad_reshaped_hidden_states, reshaped_hidden_spec)
     grad_head = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_head)
-    grad_head = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), chunk_head_params, grad_head)
+    grad_head = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), chunk_head_params, grad_head)    
+    grad_reshaped_hidden_states = grad_reshaped_hidden_states * loss_cotangent
     grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
 
     # Return explicit zeros for other_params and rest, not None. With None, JAX builds
