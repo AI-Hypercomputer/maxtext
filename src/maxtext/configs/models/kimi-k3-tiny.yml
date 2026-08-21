@@ -58,7 +58,9 @@ routed_expert_hidden_size: 128
 routed_scaling_factor: 1.0
 routed_score_func: "sigmoid"
 topk_method: "noaux_tc"
+routed_bias: true
 latent_moe_use_norm: true
+
 
 # RoPE & Context
 max_position_embeddings: 4096
