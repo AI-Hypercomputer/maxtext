@@ -18,14 +18,15 @@
 
 # Inference on MaxText
 
-We support inference of MaxText models on vLLM via an [out-of-tree](https://github.com/vllm-project/tpu-inference/blob/main/docs/getting_started/out-of-tree.md) model plugin for vLLM. In this guide we will show how to leverage this for offline inference, online inference and for use in our reinforcement learning (RL) workflows.
+We support inference of MaxText models on vLLM via an [out-of-tree](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/out-of-tree/) model plugin for vLLM. In this guide we will show how to leverage this for offline inference, online inference and for use in our reinforcement learning (RL) workflows.
 
-> **_NOTE:_**
-> The commands in this tutorial assume access to a v6e-8 VM.
+```{note}
+The commands in this tutorial assume access to a v6e-8 TPU VM.
+```
 
-# Installation
+## Installation
 
-Follow the instructions in [install maxtext](../install_maxtext.md) to install MaxText. For this inference tutorial on TPU (which uses vLLM), you must install `maxtext[tpu-post-train]`, as it includes the required adapter plugin. We recommend installing from PyPI to ensure you have the latest stable version of dependencies.
+Follow the instructions to [install MaxText](../install_maxtext.md). For this inference tutorial on TPU (which uses vLLM), you must install `maxtext[tpu-post-train]`, as it includes the required adapter plugin. We recommend installing from PyPI to ensure you have the latest stable version of dependencies.
 
 After finishing the installation, ensure that the MaxText on vLLM adapter plugin has been installed. To do so, run the following command:
 
@@ -50,15 +51,17 @@ If the plugin is not installed, please run the install post training extra depen
 install_tpu_post_train_extra_deps
 ```
 
-# Offline Inference
+## Offline Inference
 
-We include a script for convenient offline inference of MaxText models in `src/maxtext/inference/vllm_decode.py`. This is helpful to ensure correctness of MaxText checkpoints. This script invokes the [`LLM`](https://docs.vllm.ai/en/latest/serving/offline_inference/#offline-inference) API from vLLM.
+We include a script for convenient offline inference of MaxText models in [`src/maxtext/inference/vllm_decode.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/inference/vllm_decode.py). This is helpful to ensure correctness of MaxText checkpoints. This script invokes the [`LLM`](https://docs.vllm.ai/en/latest/serving/offline_inference/#offline-inference) API from vLLM.
 
-> **_NOTE:_**
-> You will need to convert a checkpoint from HuggingFace in order to run the command. Do so first by following the steps in the [convert checkpoint](checkpoint-conversion) tutorial.
+```{note}
+You will need to convert a checkpoint from HuggingFace in order to run the command. Do so first by following the steps in the [convert checkpoint](checkpoint-conversion) tutorial.
+```
 
-> **_NOTE:_**
-> The remainder of this tutorial assumes that the path to the converted MaxText checkpoint is stored in \$CHECKPOINT_PATH.
+```{note}
+The remainder of this tutorial assumes that the path to the converted MaxText checkpoint is stored in `$CHECKPOINT_PATH`.
+```
 
 An example of how to run this script can be found below:
 
@@ -80,7 +83,11 @@ An example of how to run this script can be found below:
 
 In the command above we pass in the `vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}'` argument. This argument tells vLLM to use the MaxText implementation of the target model architecture.
 
-# Online Inference
+### Tunix adapter
+
+[Tunix](https://tunix.readthedocs.io) is a separate layer that bridges MaxText models into RL rollout infrastructure. You can use the `--use_tunix` flag with `maxtext.inference.vllm_decode` to use a Tunix adapter for decoding with vllm.
+
+## Online Inference
 
 We can also run online inference (an inference server) running a MaxText model by using the [`vllm serve`](https://docs.vllm.ai/en/stable/cli/serve/) API. In order to invoke this with a MaxText model, we provide the following additional arguments:
 
@@ -122,13 +129,15 @@ curl http://localhost:8000/v1/completions \
    }'
 ```
 
-# Reinforcement Learning (RL)
+## Reinforcement Learning (RL)
 
-> **_NOTE:_**
-> Please refer to the [reinforcement learning tutorial](./posttraining/rl.md) to get started with reinforcement learning on MaxText.
+```{note}
+Please refer to the [reinforcement learning tutorial](./posttraining/rl.md) to get started with reinforcement learning on MaxText.
+```
 
-> **_NOTE:_**
-> You will need a HuggingFace token to run this command in addition to a MaxText model checkpoint. Please see the following [guide](https://huggingface.co/docs/hub/en/security-tokens) to generate one.
+```{note}
+You will need a HuggingFace token to run this command in addition to a MaxText model checkpoint. Please see the following [guide](https://huggingface.co/docs/hub/en/security-tokens) to generate one.
+```
 
 To use a MaxText model architecture for samplers in reinforcement learning algorithms like GRPO, we can override the vLLM model architecture and pass in MaxText specific config arguments similar to the [online inference](./inference.md#online-inference) use-case. An example of an RL command using the MaxText model for samplers can be found below:
 
