@@ -2210,7 +2210,13 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if num_slices > 1:
+  ring_axis = getattr(config, "mesh_ring_axis", "")
+  if ring_axis and num_slices > 1:
+    raise ValueError("mesh_ring_axis lays out the ICI mesh of one slice; it is not implemented for multi-slice.")
+
+  if ring_axis:
+    mesh = max_utils.create_ring_axis_device_mesh(ici_parallelism, config.mesh_axes, devices, ring_axis)
+  elif num_slices > 1:
     dcn_parallelism = getattr(config, "dcn_parallelism", None)
     if dcn_parallelism is None:
       dcn_map = {

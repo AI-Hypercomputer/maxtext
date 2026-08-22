@@ -18,6 +18,7 @@ import sys
 import time
 import unittest
 from unittest import mock
+import numpy as np
 from flax import linen as nn
 from flax import nnx
 import jax
@@ -133,6 +134,49 @@ class MaxUtilsCustomMesh(unittest.TestCase):
   def test_invalid_strategy(self):
     with self.assertRaises(ValueError):
       max_utils.is_valid_custom_mesh([1, 1, 1, 1, 1, 16, 16, 1], "invalid_strategy")
+
+
+class RingAxisDeviceMeshTest(unittest.TestCase):
+  """Tests ring-axis device mesh creation."""
+
+  class FakeDevice:
+
+    def __init__(self, device_id, coords):
+      self.id = device_id
+      self.coords = coords
+
+  AXES = ["data", "fsdp", "tensor", "expert"]
+  SIZES = [1, 1, 8, 16]
+
+  def _devices(self):
+    return [self.FakeDevice(x * 16 + y, (x, y, 0)) for x in range(8) for y in range(16)]
+
+  def _cyclic_hops(self, group):
+    return [
+        tuple(abs(a - b) for a, b in zip(first.coords, second.coords))
+        for first, second in zip(group, list(group[1:]) + [group[0]])
+    ]
+
+  def test_ring_axis_groups_are_physical_cycles(self):
+    devices = self._devices()
+    mesh = max_utils.create_ring_axis_device_mesh(self.SIZES, self.AXES, devices, "tensor")
+    self.assertEqual(mesh.shape, tuple(self.SIZES))
+    self.assertEqual(sorted(d.id for d in mesh.flatten()), sorted(d.id for d in devices))
+    for tensor_group in mesh.squeeze().T:
+      hops = self._cyclic_hops(tensor_group)
+      self.assertEqual(len(hops), 8)
+      for hop in hops:
+        self.assertEqual(sorted(hop), [0, 0, 1])
+
+  def test_default_mesh_leaves_the_ring_axis_open(self):
+    devices = self._devices()
+    default = np.asarray(devices, dtype=object).reshape(self.SIZES)
+    hops = self._cyclic_hops(default.squeeze()[:, 0])
+    self.assertEqual(sum(sorted(hop) != [0, 0, 1] for hop in hops), 1)
+
+  def test_rejects_odd_ring_axis(self):
+    with self.assertRaises(ValueError):
+      max_utils.create_ring_axis_device_mesh([1, 1, 8, 16], self.AXES, self._devices(), "data")
 
 
 class FillUnspecifiedMeshAxesTest(unittest.TestCase):
