@@ -1,12 +1,15 @@
 # model config for omni-gemma3-qwen3
 # Combines LLM backbone from Qwen 3 4B with Vision features from Gemma 3 4B
 
-# NOTE: model_name is set to "gemma3-4b" so encoders.py loads Gemma 3's Vision Tower without modification.
-# Meanwhile, decoders.py can build Qwen 3 LLM decoder directly from reading `decoder_block: "qwen3"` below.
-model_name: "gemma3-4b"
+# NOTE: vision_encoder_block is set to "gemma3" so encoders.py loads Gemma 3's Vision Tower without modification.
+# Meanwhile, decoders.py builds Qwen 3 LLM decoder directly from reading `decoder_block: "qwen3"` below.
+# base_config is currently a placeholder flag for future SFT runs.
+base_config: "base.yml"
+model_name: "omni-gemma3-qwen3"
 use_multimodal: true
 
-# Multimodal config for vision model (from gemma3-4b.yml)
+# Vision encoder config (from gemma3-4b.yml)
+vision_encoder_block: "gemma3"
 image_size_for_vit: 896
 num_channels_for_vit: 3
 patch_size_for_vit: 14
@@ -15,7 +18,14 @@ hidden_size_for_vit: 1152
 intermediate_size_for_vit: 4304
 num_hidden_layers_for_vit: 27
 num_attention_heads_for_vit: 16
-image_placeholder: <start_of_image>
+image_placeholder: "<image>"
+
+# Vision projector config
+vision_projector_type: "customized_vision_projector"
+vision_connector_hidden_size: 4096
+vision_connector_num_layers: 3
+vision_connector_activation: "gelu"
+vision_connector_use_bias: true
 
 # LLM backbone config (from qwen3-4b.yml)
 base_emb_dim: 2560
@@ -34,6 +44,7 @@ logits_via_embedding: true
 normalize_embedding_logits: false
 enable_dropout: false
 tokenizer_type: "huggingface"
+tokenizer_path: "Qwen/Qwen2.5-7B-Instruct"
 
 # Ensure no pretrained weights or checkpoints are loaded initially
 load_parameters_path: ""

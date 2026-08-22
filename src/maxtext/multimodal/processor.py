@@ -37,6 +37,8 @@ _MODEL_TO_BLOCKS = {
     "qwen3-vl-30b-a3b": ("qwen3_vl", "qwen3_moe"),
     "qwen3.5-35b-a3b": ("qwen3_5", "qwen3_5"),
     "qwen3.5-397b-a17b": ("qwen3_5", "qwen3_5"),
+    # Stitched model
+    "omni-gemma3-qwen3": ("gemma3", "qwen3"),
 }
 
 
@@ -138,8 +140,13 @@ def preprocess_image_for_training(image, config):
 def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | None):
   """Get the increase in total token count after inserting image token placeholders"""
   vision_block = _get_vision_block(config)
+  decoder_block = _get_decoder_block(config)
 
-  if vision_block in ["gemma3"]:
+  if vision_block == "gemma3" and decoder_block == "qwen3":
+    from maxtext.experimental.omni_poc.utils import processor_omni_gemma3_qwen3  # pylint: disable=import-outside-toplevel
+
+    return processor_omni_gemma3_qwen3.get_image_offsets_omni(processor_output)
+  elif vision_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import get_image_offsets_gemma3  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_gemma3(processor_output)
@@ -220,7 +227,13 @@ def reformat_response(response, model_name):
 def prepare_text_for_image_fusion(tokens, config, processor_output=None):
   """Prepare text by adding extra tokens for image fusion based on the model."""
   vision_block = _get_vision_block(config)
-  if vision_block in ["gemma3"]:
+  decoder_block = _get_decoder_block(config)
+
+  if vision_block == "gemma3" and decoder_block == "qwen3":
+    from maxtext.experimental.omni_poc.utils import processor_omni_gemma3_qwen3  # pylint: disable=import-outside-toplevel
+
+    return processor_omni_gemma3_qwen3.add_extra_tokens_for_omni(tokens, config=config, processor_output=processor_output)
+  elif vision_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_gemma3(
@@ -296,7 +309,11 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
 
   decoder_block = _get_decoder_block(config)
 
-  if decoder_block in ["gemma3"]:
+  if vision_block == "gemma3" and decoder_block == "qwen3":
+    from maxtext.experimental.omni_poc.utils import processor_omni_gemma3_qwen3  # pylint: disable=import-outside-toplevel
+
+    bidirectional_mask_vision = decoder_input_tokens == processor_omni_gemma3_qwen3.IMAGE_PAD_ID
+  elif decoder_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import GEMMA_TOKEN_PLACEHOLDER  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = decoder_input_tokens == GEMMA_TOKEN_PLACEHOLDER
