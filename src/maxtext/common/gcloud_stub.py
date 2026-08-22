@@ -127,6 +127,7 @@ def _jetstream_stubs():
 
   class HuggingFaceTokenizer:
     def __init__(self, metadata):
+      import os
       import transformers
       try:
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -136,16 +137,19 @@ def _jetstream_stubs():
         )
       except Exception:
         try:
-          self.tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(
-              metadata.path,
-              token=metadata.access_token or None,
-          )
+          import huggingface_hub
+          from tokenizers import Tokenizer
+          tok_file = metadata.path
+          if not os.path.exists(tok_file):
+            tok_file = huggingface_hub.hf_hub_download(
+                repo_id=metadata.path,
+                filename="tokenizer.json",
+                token=metadata.access_token or None,
+            )
+          self.tokenizer = Tokenizer.from_file(tok_file)
         except Exception:
           from tokenizers import Tokenizer
-          self.tokenizer = Tokenizer.from_pretrained(
-              metadata.path,
-              auth_token=metadata.access_token or None,
-          )
+          self.tokenizer = Tokenizer.from_pretrained(metadata.path)
 
       if getattr(self.tokenizer, "pad_token_id", None) is None:
         if getattr(self.tokenizer, "unk_token_id", None) is not None:
@@ -172,7 +176,12 @@ def _jetstream_stubs():
     def decode(self, token_ids):
       if hasattr(token_ids, "tolist"):
         token_ids = token_ids.tolist()
-      return self.tokenizer.decode(token_ids, skip_special_tokens=True)
+      if hasattr(self.tokenizer, "decode"):
+        try:
+          return self.tokenizer.decode(token_ids, skip_special_tokens=True)
+        except TypeError:
+          return self.tokenizer.decode(token_ids)
+      return ""
 
   config_lib = SimpleNamespace()  # not used directly in decoupled tests
   engine_api = SimpleNamespace(Engine=Engine, ResultTokens=ResultTokens)
