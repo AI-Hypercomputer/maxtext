@@ -674,7 +674,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       is_deepseek = (
           getattr(self.model, "is_deepseek", False)
           or (hasattr(self.model, "decoder") and getattr(self.model.decoder, "is_deepseek", False))
-          or (hasattr(self.config, "decoder_block") and str(self.config.decoder_block).lower() == "deepseek")
+          or (
+              hasattr(self.config, "decoder_block")
+              and str(self.config.decoder_block).lower() in ("deepseek", "glm5")
+          )
       )
       if is_deepseek:
         first_dense = self.config.first_num_dense_layers
