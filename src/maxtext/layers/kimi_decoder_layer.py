@@ -162,11 +162,14 @@ class KimiDecoderLayer(nnx.Module):
     if isinstance(self.mlp, RoutedAndSharedMoE):
       mlp_out, _, _ = self.mlp(normed_hidden)
     else:
-      mlp_out = self.mlp(normed_hidden)
+      mlp_out = self.mlp(normed_hidden, deterministic=deterministic)
+
+
 
 
     # Residual connection for MLP
     output = hidden_states + mlp_out
 
-    return output, kv_cache
+    return output, (kda_state if self.is_kda else kv_cache)
+
 
