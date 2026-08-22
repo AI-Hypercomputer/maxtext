@@ -1132,6 +1132,7 @@ profile_power_events: false # Set to true to enable TPU-specific power/thermal p
 
 log_config: true # Prints the config (after defaults have been set by pyconfig logic)
 debug_sharding: false # Prints model weights sharding info
+debug_tensors: false # Captures intermediate tensors during forward pass using NNX sow
 
 # Checkpoint Structured logging
 enable_checkpoint_cloud_logger: false
