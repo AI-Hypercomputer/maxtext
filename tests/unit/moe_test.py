@@ -1054,6 +1054,42 @@ class RoutedMoeTest(parameterized.TestCase):
       assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
+  def test_shard_embed_moe_on_fsdp(self):
+    if jax.device_count() != 4:
+      self.skipTest("shard_embed_moe_on_fsdp test requires exactly 4 devices")
+
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_block_shard_embed_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=4,
+        ici_fsdp_parallelism=2,
+        shard_embed_moe_on_fsdp=True,
+        max_target_length=128,
+        float32_gate_logits=True,
+    )
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
+      actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+      assert_moe_close(actual_output, expected_output, cfg.dtype)
+
+  @pytest.mark.tpu_only
   def test_megablox_context_parallelism(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
