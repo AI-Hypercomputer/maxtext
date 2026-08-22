@@ -488,6 +488,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       nnx.replace_by_pure_dict(rest_state, rest_dict)
       self._nnx_rest_state = rest_state
       del nnx_model, loaded_rest_state, loaded_rest_dict, rest_dict
+      gc.collect()
 
     self.abstract_params = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
