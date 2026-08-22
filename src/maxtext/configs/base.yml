@@ -443,6 +443,7 @@ indexer_mask_exact_topk: true
 indexer_sparse_training: false
 # Multiplier for the indexer KL divergence loss
 indexer_loss_scaling_factor: 0.0
+shard_indexer_acts: false
 
 # MLA parameters
 q_lora_rank: 0
