@@ -31,6 +31,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
+from maxtext.kernels.ring_ag import ring_all_gather
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
@@ -55,6 +56,41 @@ set_xla_metadata = xla_metadata.set_xla_metadata
 
 DISPATCH = "dispatch"
 COMBINE = "combine"
+
+
+# Distinct barrier-semaphore ids for the in-MoE Pallas ring collectives; must not collide with
+# any other collective_id in flight in the same program.
+_RING_CT_AG_COLLECTIVE_ID = 55  # moe_ring_cotangent_ag: backward combine-cotangent ring all-gather
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3))
+def _ring_ct_reduce_scatter(output, mesh, ep_name, collective_id):
+  """Combine reduce-scatter whose BACKWARD cotangent all-gather runs on the TC ring kernel.
+
+  FORWARD: byte-identical to the stock path -- the plain
+  ``jax.lax.psum_scatter(output, ep_name, scatter_dimension=0, tiled=True)`` (also what a remat
+  recompute re-traces: the primal is the plain collective, so no Pallas DMA ever runs inside a
+  rematted region). BACKWARD: the autodiff transpose of the tiled psum_scatter is a tiled EP
+  all-gather of the combine cotangent; as an XLA collective it can ride the SparseCore
+  collective-offload queue and serialize behind other SC work. Here it runs on the bidirectional
+  store-and-forward TensorCore ring kernel instead (ICI DMAs issued from the TC, where the
+  backward has slack), numerically == ``lax.all_gather`` (pure tiled data move, bit-exact).
+  """
+  return jax.lax.psum_scatter(output, ep_name, scatter_dimension=0, tiled=True)
+
+
+def _ring_ct_rs_fwd(output, mesh, ep_name, collective_id):
+  return _ring_ct_reduce_scatter(output, mesh, ep_name, collective_id), None
+
+
+def _ring_ct_rs_bwd(mesh, ep_name, collective_id, _res, ct):
+  return (ring_all_gather(ct, mesh, (ep_name,), 0, collective_id),)
+
+
+_ring_ct_reduce_scatter.defvjp(_ring_ct_rs_fwd, _ring_ct_rs_bwd)
+
+
+
 
 
 @struct.dataclass
@@ -1598,6 +1634,7 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2=self.config.use_gmm_v2,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
+            bwd_inkernel_quant=getattr(self.config, "moe_bwd_inkernel_quant", False),
         )
       else:
         # jax.lax.ragged_dot
@@ -2358,6 +2395,18 @@ class RoutedMoE(nnx.Module):
         x, routing, route_metadata = route(
             x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids
         )
+        # moe_x_sorted: tag the routed expert input and its small routing/metadata bundle for
+        # the remat policy. With moe_x_sorted=device the backward LOADS these instead of
+        # re-running route() -- removing the rematted dispatch token all-gather and sort from the
+        # backward (the up-projection weight gradient needs the sorted input anyway). The
+        # routing/metadata leaves (indices, group sizes, weights -- tiny) must be saved too, else
+        # the sort re-runs just to reproduce them. Tags are inert under the default
+        # moe_x_sorted=remat.
+        _cn = lambda t: adc.checkpoint_name(t, "moe_x_sorted") if isinstance(t, jax.Array) else t
+        # tree.map so a QArray x (moe_quantize_token_all_gather) gets its qvalue/scale leaves tagged
+        x = jax.tree.map(_cn, x)
+        routing = jax.tree.map(_cn, routing)
+        route_metadata = jax.tree.map(_cn, route_metadata)
 
         if self.config.mlp_bias:
           w0_bias, w1_bias, wo_bias = self.transform_bias(
@@ -2411,12 +2460,20 @@ class RoutedMoE(nnx.Module):
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
             ),
         )
-        output = jax.lax.psum_scatter(
-            output,
-            self._expert_parallelism_name,
-            scatter_dimension=0,
-            tiled=True,
-        )
+        if (
+            getattr(self.config, "moe_ring_cotangent_ag", False)
+            and isinstance(self._expert_parallelism_name, str)
+        ):
+          output = _ring_ct_reduce_scatter(
+              output, self.mesh, self._expert_parallelism_name, _RING_CT_AG_COLLECTIVE_ID
+          )
+        else:
+          output = jax.lax.psum_scatter(
+              output,
+              self._expert_parallelism_name,
+              scatter_dimension=0,
+              tiled=True,
+          )
         return output, routing.lb_loss, routing.bias_updates
 
       if self.get_expert_parallelism_size() > 1:
