@@ -2227,6 +2227,7 @@ class ManagedMLDiagnostics(BaseModel):
   )
   managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
   managed_mldiagnostics_region: str = Field("", description="GCP region for managed mldiagnostics.")
+  managed_mldiagnostics_storage_path: str = Field("", description="Storage path for mldiagnostics (profiles, metrics)")
 
 
 class Goodput(BaseModel):
@@ -3220,7 +3221,8 @@ class MaxTextConfig(
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
       # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
-      self.managed_mldiagnostics_dir = os.path.join(output_dir, "managed-mldiagnostics")
+      telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
+      self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
           None,
