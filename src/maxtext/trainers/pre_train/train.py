@@ -174,13 +174,17 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         model_vars["batch_stats"] = sparsity_state
     else:
       model_vars = params
+    is_video = getattr(config, "video_max_grid_t", None) is not None or "video_grid_thw" in data or (encoder_images is not None and encoder_images.ndim == 5)
     logits, intermediate_outputs = model.apply(
         model_vars,
         data["inputs"],
         data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
-        encoder_images=encoder_images,
-        encoder_image_masks=encoder_image_masks,
+        encoder_images=encoder_images if not is_video else None,
+        encoder_image_masks=encoder_image_masks if not is_video else None,
+        encoder_videos=encoder_images if is_video else None,
+        encoder_video_masks=encoder_image_masks if is_video else None,
+        encoder_video_grid_thw=data.get("video_grid_thw") if config.use_multimodal and is_video else None,
         enable_dropout=config.enable_dropout if is_train else False,
         rngs={"dropout": rng1, "params": aqt_rng},  # pyrefly: ignore[bad-argument-type]
         mutable=mutable_collections,
@@ -234,12 +238,16 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       total_z_loss = jnp.sum(z_loss)
   else:
     # Flax NNX model: forward pass, then pop Intermediates sown during it.
+    is_video = getattr(config, "video_max_grid_t", None) is not None or "video_grid_thw" in data or (encoder_images is not None and encoder_images.ndim == 5)
     logits = model(
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
-        encoder_images=encoder_images,
-        encoder_image_masks=encoder_image_masks,
+        encoder_images=encoder_images if not is_video else None,
+        encoder_image_masks=encoder_image_masks if not is_video else None,
+        encoder_videos=encoder_images if is_video else None,
+        encoder_video_masks=encoder_image_masks if is_video else None,
+        encoder_video_grid_thw=data.get("video_grid_thw") if config.use_multimodal and is_video else None,
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],

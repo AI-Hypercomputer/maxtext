@@ -159,7 +159,16 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     return 0
 
 
-def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_placeholder="<|video|>", num_videos=0):
+def reformat_prompt(
+    prompt,
+    image_placeholder,
+    model_name,
+    num_images,
+    video_placeholder="<|video|>",
+    num_videos=0,
+    num_image_tokens=None,
+    num_video_tokens=None,
+):
   """Reformat prompt for different models."""
   vision_block = _get_vision_block(model_name)
   if vision_block is None:
@@ -188,6 +197,8 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
         num_images=num_images,
         video_placeholder=video_placeholder,
         num_videos=num_videos,
+        num_image_tokens=num_image_tokens,
+        num_video_tokens=num_video_tokens,
     )
   else:
     return prompt
