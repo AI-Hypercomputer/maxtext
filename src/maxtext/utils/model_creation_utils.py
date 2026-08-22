@@ -368,6 +368,50 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
   metadata dict — avoids ordering/count mismatches from flattening two trees with
   different pytree node types (e.g. nnx.State vs plain dict) independently.
   """
+  
+  # Structural Translation from specific framework structures (like Linen) into NNX structures
+  synonyms = {
+      "input_layernorm": "pre_self_attention_layer_norm",
+      "pre_attention_norm": "pre_self_attention_layer_norm",
+      "post_attention_layernorm": "post_self_attention_layer_norm",
+      "post_attention_norm": "post_self_attention_layer_norm",
+      "attention": "self_attention",
+      "feed_forward": "mlp",
+      "ffn": "mlp",
+      "pre_cross_attention_layernorm": "pre_cross_attention_layer_norm",
+      "pre_cross_attention_norm": "pre_cross_attention_layer_norm",
+      "post_cross_attention_layernorm": "post_cross_attention_layer_norm",
+      "post_cross_attention_norm": "post_cross_attention_layer_norm",
+      "pre_ffw_layernorm": "pre_ffw_layer_norm",
+      "pre_ffw_norm": "pre_ffw_layer_norm",
+      "post_ffw_layernorm": "post_ffw_layer_norm",
+      "post_ffw_norm": "post_ffw_layer_norm",
+      "final_layernorm": "decoder_norm",
+      "norm": "decoder_norm",
+      "mlp": "feed_forward",
+      "cross_attention": "cross_attention",
+  }
+  
+  def _translate_metadata_tree(tree):
+    if isinstance(tree, dict) or hasattr(tree, "items"):
+      new_tree = {}
+      for k, v in tree.items():
+        k_str = str(k)
+        new_k = synonyms.get(k_str, k_str)
+        new_tree[new_k] = _translate_metadata_tree(v)
+      
+      layer_key = "layers"
+      if layer_key in new_tree and isinstance(new_tree[layer_key], dict):
+        layers_dict = new_tree.pop(layer_key)
+        for key_idx, val in layers_dict.items():
+          new_tree[f"{layer_key}_{key_idx}"] = val
+      return new_tree
+    elif isinstance(tree, (list, tuple)):
+      return type(tree)(_translate_metadata_tree(x) for x in tree)
+    return tree
+
+  stored_metadata_tree = _translate_metadata_tree(stored_metadata_tree)
+
   replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
   def _key_str(key):
