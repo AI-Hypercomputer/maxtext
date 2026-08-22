@@ -16,6 +16,11 @@
 
 import os
 import unittest
+import pytest
+
+torch = pytest.importorskip("torch")
+safetensors = pytest.importorskip("safetensors")
+
 import jax
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
@@ -24,16 +29,18 @@ from maxtext.layers.nnx_wrappers import ToLinen
 from maxtext.models.models import Transformer
 
 
-
-
 class KimiK3HFLoadingTest(unittest.TestCase):
   """Tests loading a converted Kimi K3 Orbax checkpoint and running a forward pass."""
 
   @classmethod
   def setUpClass(cls):
-    cls.checkpoint_dir = "/Users/jfacevedo/apps/maxtext/scratch/kimi_k3_orbax_checkpoint"
+    cls.checkpoint_dir = os.environ.get(
+        "KIMI_K3_CHECKPOINT_DIR",
+        os.path.abspath("scratch/kimi_k3_orbax_checkpoint"),
+    )
     if not os.path.exists(cls.checkpoint_dir):
       raise unittest.SkipTest(f"Checkpoint directory {cls.checkpoint_dir} does not exist. Run to_maxtext first.")
+
 
   def test_load_checkpoint_and_forward_pass(self):
     config = pyconfig.initialize([

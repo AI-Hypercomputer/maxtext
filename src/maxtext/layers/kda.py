@@ -124,17 +124,22 @@ class ShortConv1D(nnx.Module):
         jax.random.normal(rngs.params(), (kernel_size, features)) * 0.02
     )
 
-  def __call__(self, x: jax.Array) -> jax.Array:
-    """x: [B, T, features] -> [B, T, features]"""
-    # Depthwise 1D conv along sequence dimension T
-    # Pad left by (kernel_size - 1) to maintain causal alignment
-    padded = jnp.pad(x, ((0, 0), (self.kernel_size - 1, 0), (0, 0)))
-    # Padded shape: [B, T + kernel_size - 1, features]
-    # We use jax.lax.conv_general_dilated for depthwise 1D conv:
-    # lhs: [B, features, T_padded], rhs: [features, 1, kernel_size]
-    lhs = jnp.transpose(padded, (0, 2, 1)) # [B, features, T_padded]
-    rhs = jnp.transpose(self.weight[...], (1, 0))[:, None, :] # [features, 1, kernel_size]
+  def __call__(
+      self,
+      x: jax.Array,
+      conv_state: jax.Array | None = None,
+  ) -> tuple[jax.Array, jax.Array]:
+    """x: [B, T, features], conv_state: [B, kernel_size - 1, features] -> [B, T, features], new_conv_state"""
+    B, T, C = x.shape
+    if conv_state is not None:
+      padded = jnp.concatenate([conv_state, x], axis=1)
+    else:
+      padded = jnp.pad(x, ((0, 0), (self.kernel_size - 1, 0), (0, 0)))
 
+    new_conv_state = padded[:, -(self.kernel_size - 1):, :]
+
+    lhs = jnp.transpose(padded, (0, 2, 1))  # [B, features, T_padded]
+    rhs = jnp.transpose(self.weight[...], (1, 0))[:, None, :]  # [features, 1, kernel_size]
 
     out = jax.lax.conv_general_dilated(
         lhs=lhs,
@@ -143,10 +148,11 @@ class ShortConv1D(nnx.Module):
         padding="VALID",
         dimension_numbers=("NCH", "OIH", "NCH"),
         feature_group_count=self.features,
-    ) # [B, features, T]
+    )  # [B, features, T]
 
-    out = jnp.transpose(out, (0, 2, 1)) # [B, T, features]
-    return jax.nn.silu(out)
+    out = jnp.transpose(out, (0, 2, 1))  # [B, T, features]
+    return jax.nn.silu(out), new_conv_state
+
 
 
 class KimiDecoupledAttention(nnx.Module):
@@ -271,15 +277,33 @@ class KimiDecoupledAttention(nnx.Module):
       self,
       hidden_states: jax.Array,
       *,
-      initial_state: jax.Array | None = None,
-  ) -> tuple[jax.Array, jax.Array]:
+      initial_state: Any = None,
+  ) -> tuple[jax.Array, Any]:
     """hidden_states: [B, T, hidden_size] -> [B, T, hidden_size], final_state"""
     B, T, _ = hidden_states.shape
 
-    # 1. Projections & 1D Convolutions
-    q = self.q_conv1d(self.q_proj(hidden_states))
-    k = self.k_conv1d(self.k_proj(hidden_states))
-    v = self.v_conv1d(self.v_proj(hidden_states))
+    # Parse initial state if provided (recurrent state and/or conv states)
+    conv_q_init = None
+    conv_k_init = None
+    conv_v_init = None
+    recurrent_init = None
+
+    if isinstance(initial_state, dict):
+      recurrent_init = initial_state.get("recurrent_state")
+      conv_q_init = initial_state.get("conv_state_q")
+      conv_k_init = initial_state.get("conv_state_k")
+      conv_v_init = initial_state.get("conv_state_v")
+    elif isinstance(initial_state, (tuple, list)) and len(initial_state) == 2:
+      recurrent_init, conv_inits = initial_state
+      if isinstance(conv_inits, (tuple, list)) and len(conv_inits) == 3:
+        conv_q_init, conv_k_init, conv_v_init = conv_inits
+    else:
+      recurrent_init = initial_state
+
+    # 1. Projections & 1D Convolutions with state caching
+    q, q_conv_state = self.q_conv1d(self.q_proj(hidden_states), conv_state=conv_q_init)
+    k, k_conv_state = self.k_conv1d(self.k_proj(hidden_states), conv_state=conv_k_init)
+    v, v_conv_state = self.v_conv1d(self.v_proj(hidden_states), conv_state=conv_v_init)
 
     # 2. Reshape to [B, T, H, D]
     q = q.reshape(B, T, self.num_heads, self.head_dim)
@@ -299,8 +323,6 @@ class KimiDecoupledAttention(nnx.Module):
     A_log = self.A_log[...].reshape(1, 1, 1, self.head_dim)
     decay = -jnp.exp(A_log) * jax.nn.softplus(g_raw + dt_bias)
 
-
-
     if self.gate_lower_bound is not None:
       decay = jnp.maximum(decay, self.gate_lower_bound)
 
@@ -308,14 +330,14 @@ class KimiDecoupledAttention(nnx.Module):
     beta = jax.nn.sigmoid(self.b_proj(hidden_states))
 
     # 5. KDA Recurrent Kernel
-    o, final_state = kda_recurrent_kernel(
+    o, final_recurrent_state = kda_recurrent_kernel(
         q=q,
         k=k,
         v=v,
         g=decay,
         beta=beta,
-        initial_state=initial_state,
-    ) # o: [B, T, H, D]
+        initial_state=recurrent_init,
+    )  # o: [B, T, H, D]
 
     # 6. Output Gate & Norm
     if self.use_full_rank_gate:
@@ -330,4 +352,10 @@ class KimiDecoupledAttention(nnx.Module):
     o = o.reshape(B, T, self.num_heads * self.head_dim)
     o = self.o_proj(o)
 
+    if isinstance(initial_state, (dict, tuple, list)):
+      final_state = (final_recurrent_state, (q_conv_state, k_conv_state, v_conv_state))
+    else:
+      final_state = final_recurrent_state
+
     return o, final_state
+

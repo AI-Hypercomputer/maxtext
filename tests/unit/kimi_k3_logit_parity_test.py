@@ -23,15 +23,18 @@ compared to a PyTorch reference implementation with synchronized parameters.
 import os
 import sys
 import unittest
+import pytest
+
+torch = pytest.importorskip("torch")
+import torch.nn as nn
+import torch.nn.functional as F
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from flax import nnx
 from jax.sharding import Mesh
+
 
 from maxtext.configs import pyconfig
 from maxtext.layers.embeddings import Embed as JaxEmbed

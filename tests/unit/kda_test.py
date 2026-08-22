@@ -14,26 +14,56 @@
 
 """Unit tests for Kimi Decoupled Attention (KDA) in MaxText."""
 
-import importlib.util
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
 from flax import nnx
 
+torch = pytest.importorskip("torch")
+import torch.nn.functional as F
 
 from maxtext.configs import pyconfig
 from maxtext.layers.kda import KimiDecoupledAttention, ShortConv1D, kda_recurrent_kernel
 
-# Load naive.py directly without triggering fla.ops.__init__ (which requires triton)
-spec = importlib.util.spec_from_file_location(
-    "kda_naive",
-    "/Users/jfacevedo/.gemini/jetski/brain/0487c2aa-4e99-434c-b4e2-9147cc01875b/scratch/venv/lib/python3.12/site-packages/fla/ops/kda/naive.py",
-)
-kda_naive = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(kda_naive)
-naive_recurrent_kda = kda_naive.naive_recurrent_kda
+
+def naive_recurrent_kda(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+):
+  """Self-contained PyTorch reference for KDA recurrent attention."""
+  if scale is None:
+    scale = q.shape[-1] ** -0.5
+  q = q * scale
+  B, T, H, K = q.shape
+  V = v.shape[-1]
+  S = torch.zeros(B, H, K, V, dtype=q.dtype, device=q.device) if initial_state is None else initial_state
+  outputs = []
+  for i in range(T):
+    q_i = q[:, i]
+    k_i = k[:, i]
+    v_i = v[:, i]
+    g_i = g[:, i]
+    b_i = beta[:, i]
+
+    S = S * torch.exp(g_i).unsqueeze(-1)
+    k_S = torch.sum(k_i.unsqueeze(-1) * S, dim=-2)
+    v_diff = v_i - k_S
+    bk = b_i.unsqueeze(-1) * k_i
+    S = S + bk.unsqueeze(-1) * v_diff.unsqueeze(-2)
+    o_i = torch.sum(q_i.unsqueeze(-1) * S, dim=-2)
+    outputs.append(o_i)
+
+  o = torch.stack(outputs, dim=1)
+  if output_final_state:
+    return o, S
+  return o
 
 
 def test_short_conv1d_shape_and_causality():
@@ -43,20 +73,44 @@ def test_short_conv1d_shape_and_causality():
 
   # Shape check
   x = jnp.ones((2, 10, 16))
-  out = conv(x)
+  out, state = conv(x)
   assert out.shape == (2, 10, 16)
+  assert state.shape == (2, 3, 16)
 
   # Causality check: changing x at t=5 should not affect out at t=0..4
   x1 = jax.random.normal(jax.random.PRNGKey(0), (1, 10, 16))
   x2 = x1.at[:, 5:, :].add(10.0)
 
-  out1 = conv(x1)
-  out2 = conv(x2)
+  out1, _ = conv(x1)
+  out2, _ = conv(x2)
 
   np.testing.assert_allclose(out1[:, :5, :], out2[:, :5, :], atol=1e-6)
 
 
+def test_short_conv1d_autoregressive_caching():
+  """Test that step-by-step decoding with conv_state matches sequence-level convolution."""
+  rngs = nnx.Rngs(0)
+  conv = ShortConv1D(features=16, kernel_size=4, rngs=rngs)
+  x_seq = jax.random.normal(jax.random.PRNGKey(42), (2, 8, 16))
+
+  # 1. Full sequence forward pass
+  out_seq, final_conv_state = conv(x_seq)
+
+  # 2. Step-by-step autoregressive forward pass
+  step_outputs = []
+  conv_state = None
+  for t in range(8):
+    x_t = x_seq[:, t : t + 1, :]
+    out_t, conv_state = conv(x_t, conv_state=conv_state)
+    step_outputs.append(out_t)
+  out_steps = jnp.concatenate(step_outputs, axis=1)
+
+  np.testing.assert_allclose(out_seq, out_steps, atol=1e-6)
+  np.testing.assert_allclose(final_conv_state, conv_state, atol=1e-6)
+
+
 @pytest.mark.parametrize("T", [1, 16, 64, 128])
+
 def test_kda_recurrent_kernel_parity_with_fla(T):
   """Test kda_recurrent_kernel against fla naive_recurrent_kda."""
   np.random.seed(42)

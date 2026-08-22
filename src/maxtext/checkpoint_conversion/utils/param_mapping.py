@@ -4278,16 +4278,20 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       mapping[f"{mt_layer}-mlp-MoeBlock_0-gate-bias"] = None
       mapping[f"{mt_layer}-mlp-routed_expert_norm-scale"] = f"{hf_layer}.block_sparse_moe.routed_expert_norm.weight"
 
-      # MoE Experts (mapped as lists of HF keys for expert stacking)
+      # MoE Experts (mapped as list of (weight_packed, weight_scale) tuples for stateless dequantization)
       mapping[f"{mt_layer}-mlp-MoeBlock_0-wi_0"] = [
-          f"{hf_layer}.block_sparse_moe.experts.{e}.w1.weight_packed" for e in range(num_experts)
+          (f"{hf_layer}.block_sparse_moe.experts.{e}.w1.weight_packed", f"{hf_layer}.block_sparse_moe.experts.{e}.w1.weight_scale")
+          for e in range(num_experts)
       ]
       mapping[f"{mt_layer}-mlp-MoeBlock_0-wi_1"] = [
-          f"{hf_layer}.block_sparse_moe.experts.{e}.w3.weight_packed" for e in range(num_experts)
+          (f"{hf_layer}.block_sparse_moe.experts.{e}.w3.weight_packed", f"{hf_layer}.block_sparse_moe.experts.{e}.w3.weight_scale")
+          for e in range(num_experts)
       ]
       mapping[f"{mt_layer}-mlp-MoeBlock_0-wo"] = [
-          f"{hf_layer}.block_sparse_moe.experts.{e}.w2.weight_packed" for e in range(num_experts)
+          (f"{hf_layer}.block_sparse_moe.experts.{e}.w2.weight_packed", f"{hf_layer}.block_sparse_moe.experts.{e}.w2.weight_scale")
+          for e in range(num_experts)
       ]
+
 
 
 
@@ -4370,67 +4374,49 @@ PARAM_MAPPING = {
 E8M0_TABLE = np.array([2.0**e if e < 128 else np.inf for e in range(-127, 129)], dtype=np.float32)
 E2M1_TABLE = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0], dtype=np.float32)
 
-
 import ml_dtypes
 
 
-class MXFP4DequantizeHook:
-  """Hook to dequantize MXFP4 weight_packed & weight_scale to bfloat16 for a single expert in MaxText.
-  Pads in_features or out_features to 7168 with zeros and caches scales for 100x speedup.
-  """
+def dequantize_mxfp4_w1_w3(inputs, target_shape=None):
+  """Stateless MXFP4 dequantization for w1 (gate) and w3 (up) projections."""
+  weight_packed, weight_scale = inputs
+  out_features, in_bytes = weight_packed.shape
+  in_features = in_bytes * 2
+
+  w_low = weight_packed & 0x0F
+  w_high = (weight_packed >> 4) & 0x0F
+  w_indices = np.stack([w_low, w_high], axis=-1).reshape(out_features, in_features)
+
+  w_fp = E2M1_TABLE[w_indices]
+  scales = E8M0_TABLE[weight_scale.astype(np.int32)]
+  scales = np.repeat(scales, 32, axis=-1)
+
+  w_dequant = w_fp * scales
+  w_transposed = np.transpose(w_dequant, (1, 0))
+
+  w_padded = np.pad(w_transposed, ((0, 7168 - 3584), (0, 0)), mode="constant")
+  return w_padded.astype(ml_dtypes.bfloat16)
 
 
-  def __init__(self, hf_scale_key_pattern: str, is_wo: bool = False, num_experts: int = 896):
-    self.hf_scale_key_pattern = hf_scale_key_pattern
-    self.is_wo = is_wo
-    self.num_experts = num_experts
-    self.getter = None
-    self.current_expert_idx = 0
-    self.cached_scales = None
+def dequantize_mxfp4_wo(inputs, target_shape=None):
+  """Stateless MXFP4 dequantization for wo (down) projection."""
+  weight_packed, weight_scale = inputs
+  out_features, in_bytes = weight_packed.shape
+  in_features = in_bytes * 2
 
-  def set_getter(self, getter):
-    self.getter = getter
+  w_low = weight_packed & 0x0F
+  w_high = (weight_packed >> 4) & 0x0F
+  w_indices = np.stack([w_low, w_high], axis=-1).reshape(out_features, in_features)
 
-  def _ensure_cached(self):
-    if self.cached_scales is None:
-      scales_list = []
-      for e in range(self.num_experts):
-        scale_key = self.hf_scale_key_pattern.format(e=e)
-        scale = self.getter(scale_key)
-        scales_list.append(scale)
-      self.cached_scales = scales_list
+  w_fp = E2M1_TABLE[w_indices]
+  scales = E8M0_TABLE[weight_scale.astype(np.int32)]
+  scales = np.repeat(scales, 32, axis=-1)
 
-  def __call__(self, weight_packed, target_shape=None):
-    if self.getter is None:
-      raise ValueError("Getter not set on MXFP4DequantizeHook!")
+  w_dequant = w_fp * scales
+  w_transposed = np.transpose(w_dequant, (1, 0))
 
-    self._ensure_cached()
-    e = self.current_expert_idx
-    self.current_expert_idx = (self.current_expert_idx + 1) % self.num_experts
-
-    out_features, in_bytes = weight_packed.shape
-    in_features = in_bytes * 2
-
-    weight_scale = self.cached_scales[e]
-
-    w_low = weight_packed & 0x0F
-    w_high = (weight_packed >> 4) & 0x0F
-    w_indices = np.stack([w_low, w_high], axis=-1).reshape(out_features, in_features)
-
-    w_fp = E2M1_TABLE[w_indices]
-    scales = E8M0_TABLE[weight_scale.astype(np.int32)]
-    scales = np.repeat(scales, 32, axis=-1)
-
-    w_dequant = w_fp * scales
-    w_transposed = np.transpose(w_dequant, (1, 0))
-
-    if self.is_wo:
-      w_padded = np.pad(w_transposed, ((0, 0), (0, 7168 - 3584)), mode="constant")
-    else:
-      w_padded = np.pad(w_transposed, ((0, 7168 - 3584), (0, 0)), mode="constant")
-
-    return w_padded.astype(ml_dtypes.bfloat16)
-
+  w_padded = np.pad(w_transposed, ((0, 0), (0, 7168 - 3584)), mode="constant")
+  return w_padded.astype(ml_dtypes.bfloat16)
 
 
 def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
@@ -4451,7 +4437,6 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     if hasattr(x, "shape") and len(x.shape) == 1 and x.shape[0] < 7168:
       return np.pad(x, (0, 7168 - x.shape[0]), mode="constant", constant_values=1.0).astype(np.float32)
     return x
-
 
   linear_keys = [
       "self_attention-q_proj-kernel",
@@ -4478,7 +4463,6 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
 
   for i in range(n_layers):
     mt_layer = f"params-decoder-layers_{i}"
-    hf_layer_idx = 3 if (n_layers == 2 and i == 1) else i
 
     for k in linear_keys:
       hooks[f"{mt_layer}-{k}"] = transpose
@@ -4493,22 +4477,17 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       hooks[f"{mt_layer}-mlp-MoeBlock_0-gate-kernel"] = transpose
       hooks[f"{mt_layer}-mlp-routed_expert_norm-scale"] = routed_expert_norm_hook
       hooks[f"{mt_layer}-mlp-shared_experts-wi_0-kernel"] = transpose
-
       hooks[f"{mt_layer}-mlp-shared_experts-wi_1-kernel"] = transpose
       hooks[f"{mt_layer}-mlp-shared_experts-wo-kernel"] = transpose
 
-      # MXFP4 dequantization hooks for MoE experts
-      num_experts = config.get("n_routed_experts", 896)
-      w1_pattern = f"language_model.model.layers.{hf_layer_idx}.block_sparse_moe.experts.{{e}}.w1.weight_scale"
-      w3_pattern = f"language_model.model.layers.{hf_layer_idx}.block_sparse_moe.experts.{{e}}.w3.weight_scale"
-      w2_pattern = f"language_model.model.layers.{hf_layer_idx}.block_sparse_moe.experts.{{e}}.w2.weight_scale"
-
-      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_0"] = MXFP4DequantizeHook(w1_pattern, is_wo=False, num_experts=num_experts)
-      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_1"] = MXFP4DequantizeHook(w3_pattern, is_wo=False, num_experts=num_experts)
-      hooks[f"{mt_layer}-mlp-MoeBlock_0-wo"] = MXFP4DequantizeHook(w2_pattern, is_wo=True, num_experts=num_experts)
+      # Stateless MXFP4 dequantization hooks for MoE experts
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_0"] = dequantize_mxfp4_w1_w3
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-wi_1"] = dequantize_mxfp4_w1_w3
+      hooks[f"{mt_layer}-mlp-MoeBlock_0-wo"] = dequantize_mxfp4_wo
 
   hooks["params-decoder-logits_dense-kernel"] = transpose
   return hooks
+
 
 
 

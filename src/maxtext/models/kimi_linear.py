@@ -110,7 +110,7 @@ class KimiLinearModel(nnx.Module):
     # 2. Sequential Decoder Layers
     kda_states = []
     for i, layer in enumerate(self.layers):
-      init_state = initial_kda_states[i] if initial_kda_states is not None else None
+      init_state = initial_kda_states[i] if (initial_kda_states is not None and i < len(initial_kda_states)) else None
       x, kda_state = layer(
           x,
           inputs_positions=inputs_positions,
