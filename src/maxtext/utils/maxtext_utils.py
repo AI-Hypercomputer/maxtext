@@ -745,7 +745,7 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
@@ -1159,7 +1159,14 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.QWEN3_5,
         DecoderBlockType.GEMMA4,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.HY3,
     ):
+      # Hy3 (like DeepSeek) splits layers into a dense prefix
+      # (first_num_dense_layers) and MoE layers with a shared expert. The
+      # generic fallback below has no shared-expert term at all, and applies
+      # one MoE-shaped formula uniformly to every layer -- it can't express
+      # "some layers are dense". Both undercount reported TFLOP/s. Training
+      # itself is unaffected; only MFU reporting is.
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
     elif config.decoder_block == DecoderBlockType.QWEN3_CUSTOM_MOE:
@@ -1253,7 +1260,11 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_deepseek4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops
     )
-  elif config.decoder_block == DecoderBlockType.DEEPSEEK:
+  elif config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
+    # This formula is currently identical to the generic `else` fallback
+    # below -- it's kept as an explicit branch (not a functional fix) so
+    # DeepSeek/Hy3 don't silently start depending on whatever the generic
+    # branch happens to compute if it's changed for some other model later.
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
         * 3
@@ -1323,6 +1334,7 @@ def calculate_tflops_training_per_device(config, log=True):
           DecoderBlockType.LLAMA4,
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.GEMMA4,
+          DecoderBlockType.HY3,
       ):
         shared_flops = (
             calculate_ffn_mamtul_tflops_per_device(config, get_shared_expert_mlp_dim(config)) * config.shared_experts

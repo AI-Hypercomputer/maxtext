@@ -66,6 +66,11 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 - **Variants**: K2 (1T), K2-Thinking (1T), K2.5 (text), K2.6 (text)
 - **Notes**: DeepSeek V3 architecture; MuonClip optimizer
 
+### Hy3
+
+- **Variants**: Hy3 (295B, MoE 21B-A active)
+- **Notes**: GQA; **QK-Norm**; RMSNorm; RoPE; DeepSeek-V3-style aux-loss-free sigmoid+bias routed MoE with 1 shared expert; dense first layer. Multi-Token Prediction (MTP) is **not** onboarded/verified in this initial PR -- MTP weights are left unmapped (randomly initialized on checkpoint conversion) and MTP training logic is omitted; can be addressed in a follow-up.
+
 ## Parallelism building blocks
 
 MaxText supports a wide range of parallelism strategies for scaling training and inference across TPUs and GPUs:
@@ -104,6 +109,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
     [Qwen3.5 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3_5.py)
   - **GPT-OSS**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gpt_oss/run_gpt_oss.md) | [GPT-OSS Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/gpt_oss.py)
   - **Kimi**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md) | [K2 reuses DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/deepseek.py)
+  - **Hy3**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/hy3/Run_Hy3.md) | [Hy3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/hy3.py)
 
 - **Technical Explanations:**
 

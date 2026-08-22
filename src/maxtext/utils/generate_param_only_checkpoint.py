@@ -106,7 +106,7 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
 
     jax.tree_util.tree_map(lambda x: x.delete(), layers)
 
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
     # Unroll dense and MoE layers separately
     unroll_layer_group(config.first_num_dense_layers, layer_name="dense_layers")
     unroll_layer_group(config.num_decoder_layers - config.first_num_dense_layers, layer_name="moe_layers")
@@ -188,7 +188,7 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
     decoder_shardings.pop(layer_name)
     jax.tree_util.tree_map(lambda x: x.delete() if hasattr(x, "delete") else None, layers)
 
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
     unroll_layer_group(config.first_num_dense_layers, layer_name="dense_layers")
     unroll_layer_group(config.num_decoder_layers - config.first_num_dense_layers, layer_name="moe_layers")
   else:
@@ -385,7 +385,7 @@ def _possibly_unroll_lora_params_nnx(config, lora_state, lora_state_annotations,
     del decoder_annotations[layer_name]
     jax.tree_util.tree_map(lambda x: x.delete() if hasattr(x, "delete") else None, layers)
 
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3):
     unroll_layer_group(config.first_num_dense_layers, layer_name="dense_layers")
     unroll_layer_group(config.num_decoder_layers - config.first_num_dense_layers, layer_name="moe_layers")
   else:

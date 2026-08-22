@@ -56,6 +56,7 @@ from maxtext.models import (
     gemma4_small,
     gpt3,
     gpt_oss,
+    hy3,
     llama2,
     llama4,
     mistral,
@@ -432,7 +433,8 @@ class NNXDecoder(nnx.Module):
       )
 
     self.scanned_layers = None
-    self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
+    # DeepSeek and Hy3 both use a two-stack dense/MoE layer split driven by `first_num_dense_layers`.
+    self.is_deepseek = self.config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.HY3)
     self.is_deepseek4 = self.config.decoder_block == DecoderBlockType.DEEPSEEK4
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
@@ -1123,6 +1125,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
+        DecoderBlockType.HY3: [hy3.Hy3DenseLayer, hy3.Hy3MoELayer],
         DecoderBlockType.DEEPSEEK4: get_scannable(deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock),
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
@@ -1276,6 +1279,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.HY3,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
