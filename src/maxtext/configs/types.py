@@ -1116,6 +1116,13 @@ class HardwareAndMesh(BaseModel):
   )
   shard_mode: ShardMode = Field("auto", description="can be either auto or explicit")
   inhomogeneous_layer_cycle_interval: int = Field(1, description="The interval of repeated inhomogeneous layer patterns.")
+  full_attention_layer_offset: int = Field(
+      -1,
+      description=(
+          "Position within each inhomogeneous cycle that holds the full-attention layer, for hybrid stacks such as "
+          "Qwen3-Next. -1 places it last in the cycle."
+      ),
+  )
   scan_layers: bool = Field(
       True,
       description=(

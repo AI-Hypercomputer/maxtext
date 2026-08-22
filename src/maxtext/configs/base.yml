@@ -305,6 +305,9 @@ batch_split_factor: 1 # the factor by which to split the batch. Only used if use
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
 # which can only be scanned together in one large block of inhomogeneous_layer_cycle_interval=4 layers.
 inhomogeneous_layer_cycle_interval: 1
+# Position within each inhomogeneous cycle that holds the full-attention layer, for
+# hybrid stacks such as Qwen3-Next. -1 (the default) puts it last in the cycle.
+full_attention_layer_offset: -1
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.

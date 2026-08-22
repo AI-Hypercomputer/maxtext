@@ -51,6 +51,7 @@ from transformers import AutoModelForCausalLM
 from flax.training import train_state
 from maxtext.common import checkpointing
 from maxtext.common.gcloud_stub import gcs_storage
+from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
 from maxtext.utils import max_logging
 import orbax.checkpoint as ocp
 
@@ -312,47 +313,38 @@ def process_maxtext_param(
 
     return output_weights
 
-  # Case 4: Multi-axis stacked. Two sub-cases (the inverse of _build_multi_axis_stacked_tensor):
-  #   - Scanned MoE: the tensor is stacked on (experts, layers) at the LEADING two axes, so we
-  #     slice axis 0 (experts) then axis 0 again (layers, after the expert axis is removed).
-  #   - Gemma4 nested block scan (scanned_blocks-local_layers): the block's local layers are an
-  #     inner scan nested in the block scan, so the two axes are at (param_scan_axis,
-  #     param_scan_axis + 1) -- outer = blocks, inner = local. We slice param_scan_axis (blocks),
-  #     then param_scan_axis again (local shifts down into that slot once blocks is removed).
+  # Case 4: Multi-axis stacked -- the exact inverse of _build_multi_axis_stacked_tensor.
+  # `stacked_axes` says where the stacked axes sit in the MaxText tensor: leading for
+  # scanned MoE (experts, layers), at (param_scan_axis, param_scan_axis + 1) for a
+  # nested block scan's (blocks, local), or all three for weights that are both.
+  # Slicing removes one axis at a time, so once the first `level` axes are gone the
+  # next one has shifted down to `axes[level] - level`.
   key_str = maxtext_param_key[0] if isinstance(maxtext_param_key, tuple) else maxtext_param_key
-  if isinstance(key_str, str) and "scanned_blocks-local_layers" in key_str:
-    max_logging.log("\tscan gemma4 local")
-    outer_axis_to_slice = maxtext_config.param_scan_axis
-    inner_axis_to_slice = maxtext_config.param_scan_axis
-  else:
-    max_logging.log("\tscan moe")
-    outer_axis_to_slice = 0
-    inner_axis_to_slice = 0
+  depth = nesting_depth(hf_target_paths)
+  axes = stacked_axes(key_str, maxtext_config, depth)
+  max_logging.log("\tscan nested local" if axes != tuple(range(depth)) else "\tscan moe")
 
-  # Outer loop (experts for MoE, blocks for gemma4 local)
-  for outer_idx, inner_paths in enumerate(hf_target_paths):
-    if isinstance(maxtext_param_weight, list):
-      outer_slice = [
-          jax.lax.index_in_dim(x, outer_idx, axis=outer_axis_to_slice, keepdims=False) for x in maxtext_param_weight
-      ]
-    else:
-      outer_slice = jax.lax.index_in_dim(maxtext_param_weight, outer_idx, axis=outer_axis_to_slice, keepdims=False)
-
-    # Inner loop (layers for MoE, local layers for gemma4)
-    for inner_idx, hf_path in enumerate(inner_paths):
-      if isinstance(outer_slice, list):
-        inner_slice = [jax.lax.index_in_dim(x, inner_idx, axis=inner_axis_to_slice, keepdims=False) for x in outer_slice]
-      else:
-        inner_slice = jax.lax.index_in_dim(outer_slice, inner_idx, axis=inner_axis_to_slice, keepdims=False)
-
+  def _emit_slices(weight, hf_paths, level):
+    if level == depth:
       _process(
-          hf_path,
-          inner_slice,
+          hf_paths,
+          weight,
           output_weights,
           current_hook_fns,
           hf_shape_map,
           save_dtype=maxtext_config.weight_dtype,
       )
+      return
+    axis_to_slice = axes[level] - level
+    for idx, sub_paths in enumerate(hf_paths):
+      if isinstance(weight, list):
+        # Handles `composite_mt_key` mappings where weight is a list of tensors.
+        weight_slice = [jax.lax.index_in_dim(x, idx, axis=axis_to_slice, keepdims=False) for x in weight]
+      else:
+        weight_slice = jax.lax.index_in_dim(weight, idx, axis=axis_to_slice, keepdims=False)
+      _emit_slices(weight_slice, sub_paths, level + 1)
+
+  _emit_slices(maxtext_param_weight, hf_target_paths, 0)
 
   return output_weights
 

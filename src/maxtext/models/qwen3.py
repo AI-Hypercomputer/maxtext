@@ -25,6 +25,7 @@ import jax
 import jax.nn
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import xla_metadata
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
@@ -43,6 +44,7 @@ from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
+from maxtext.layers import nnx_scan
 from maxtext.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate, PositionalEmbedding
 from maxtext.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -51,6 +53,7 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 from maxtext.inference import kvcache
 
 
@@ -1194,12 +1197,18 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
 
 
 class Qwen3NextScannableBlock(nnx.Module):
-  """A scannable block of Qwen3-Next decoder layers.
+  """A scannable block of Qwen3-Next decoder layers with hierarchical nested scans.
 
-  This module contains a fixed number of heterogeneous decoder layers that form
-  a repeating pattern, as defined by `config.inhomogeneous_layer_cycle_interval`. It is
-  intended to be the body of an `nn.scan` transformation to construct the full
-  decoder stack efficiently.
+  One block covers a single period of the attention pattern defined by
+  `config.inhomogeneous_layer_cycle_interval`: several linear-attention
+  (GatedDeltaNet) layers plus one full-attention layer. The linear-attention
+  layers are homogeneous, so they are stacked and run through
+  `nnx_scan.apply_scanned_layers`; the lone full-attention layer runs inside a
+  trip-count-one `jax.lax.scan` that acts as an XLA scheduling barrier.
+
+  Nesting the scans this way lets each sub-layer be rematerialized on its own
+  (`apply_internal_remat`) instead of rematerializing the whole block, so only
+  one sub-layer's activations are live at a time.
 
   Attributes:
     config: The model configuration object.
@@ -1208,35 +1217,189 @@ class Qwen3NextScannableBlock(nnx.Module):
     quant: Optional quantization configuration.
   """
 
-  def __init__(self, config: Config, mesh: Mesh, model_mode: str, quant: None | Quant = None, *, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      quant: None | Quant = None,
+      *,
+      num_of_layers: int | None = None,
+      layer_idx_offset: int = 0,
+      remat_policy_fn: Any | None = None,
+      apply_internal_remat: bool = False,
+      rngs: nnx.Rngs,
+  ):
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
     self.quant = quant
     self.rngs = rngs
+    self.remat_policy_fn = remat_policy_fn
+    self.apply_internal_remat = apply_internal_remat
     cfg = self.config
+    if num_of_layers is None:
+      num_of_layers = cfg.inhomogeneous_layer_cycle_interval
+    self.num_of_layers = num_of_layers
+    self.layer_idx_offset = layer_idx_offset
 
-    # Instantiate each layer within the block in __init__
-    for i in range(cfg.inhomogeneous_layer_cycle_interval):
-      layer_rngs = self.rngs.fork()  # Fork RNGs for each layer
-      layer_name = f"layer_{i}"
-      layer = Qwen3NextDecoderLayer(
+    cycle_interval = cfg.inhomogeneous_layer_cycle_interval
+    full_attention_offset = cfg.full_attention_layer_offset % cycle_interval
+
+    positions = [(layer_idx_offset + i) % cycle_interval for i in range(num_of_layers)]
+    self.num_local = sum(1 for p in positions if p != full_attention_offset)
+    self.num_global = sum(1 for p in positions if p == full_attention_offset)
+    if self.num_global > 1:
+      raise ValueError(
+          f"A Qwen3-Next scannable block spans {num_of_layers} layers starting at offset {layer_idx_offset}, which "
+          f"covers {self.num_global} full-attention layers; the block supports at most one."
+      )
+    # The local scan runs before the global layer, so the block only reproduces the
+    # model's layer order when the full-attention layer is last in the period.
+    if self.num_global == 1 and positions[-1] != full_attention_offset:
+      raise ValueError(
+          f"Qwen3-Next scannable block expects the full-attention layer last in the block, but with "
+          f"full_attention_layer_offset={cfg.full_attention_layer_offset} and layer_idx_offset={layer_idx_offset} it "
+          f"lands at block position {positions.index(full_attention_offset)} of {num_of_layers}."
+      )
+
+    if self.num_local > 0:
+      self.local_layers = nnx_scan.create_scanned_layers(
+          lambda layer_rngs: Qwen3NextDecoderLayer(
+              config=self.config,
+              mesh=self.mesh,
+              model_mode=self.model_mode,
+              quant=self.quant,
+              layer_idx=0,
+              is_full_attention_layer=False,
+              rngs=layer_rngs,
+          ),
+          length=self.num_local,
+          param_scan_axis=self.config.param_scan_axis,
+          metadata_axis_name="local_layers",
+          rngs=self.rngs,
+      )
+    else:
+      self.local_layers = None
+
+    if self.num_global > 0:
+      self.global_layer = Qwen3NextDecoderLayer(
           config=self.config,
           mesh=self.mesh,
           quant=self.quant,
           model_mode=self.model_mode,
-          layer_idx=i,
-          rngs=layer_rngs,
+          layer_idx=full_attention_offset,
+          is_full_attention_layer=True,
+          rngs=self.rngs,
       )
-      setattr(self, layer_name, layer)
+    else:
+      self.global_layer = None
+
+  def _run_layer(self, layer, y, layer_kwargs, kv_cache=None):
+    """Invokes one Qwen3NextDecoderLayer, returning (output, updated_kv_cache)."""
+    out = layer(y, **layer_kwargs, kv_cache=kv_cache)
+    return out if isinstance(out, tuple) else (out, None)
+
+  @property
+  def _remat_enabled(self):
+    """Whether the block rematerializes its own layers."""
+    return self.apply_internal_remat and self.config.remat_policy != "none"
+
+  def _scan_local_layers(self, y, layer_kwargs):
+    """Runs the local (linear attention / GatedDeltaNet) layers via a per-layer rematerialized jax.lax.scan."""
+    remat = self._remat_enabled
+    return nnx_scan.apply_scanned_layers(
+        self.local_layers,
+        y,
+        length=self.num_local,
+        param_scan_axis=self.config.param_scan_axis,
+        apply_fn=lambda layer, carry: self._run_layer(layer, carry, layer_kwargs)[0],
+        remat=remat,
+        remat_policy=self.remat_policy_fn if remat else None,
+        prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config) if remat else True,
+    )
+
+  def _scan_global_layer(self, y, layer_kwargs):
+    """Runs the single global-attention layer inside a length-1 jax.lax.scan."""
+    cfg = self.config
+    graphdef_g, intermediate_g, other_g = nnx.split(self.global_layer, nnx.Intermediate, ...)
+    intermediate_xs = jax.tree.map(lambda x: x[None], intermediate_g)
+
+    def run_global_layer(carry, intermediate_slice):
+      hidden_states, other = carry
+      layer = nnx.merge(graphdef_g, intermediate_slice, other)
+      new_hidden_states = self._run_layer(layer, hidden_states, layer_kwargs)[0]
+      _, new_intermediate, new_other = nnx.split(layer, nnx.Intermediate, ...)
+      return (new_hidden_states, new_other), new_intermediate
+
+    global_remat_policy = self.remat_policy_fn
+    offload_names = maxtext_utils.get_save_and_offload_names(cfg)
+    if offload_names[0] or offload_names[1]:
+      save_names, offload_to_device = offload_names
+      global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
+
+    if self._remat_enabled:
+      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
+      run_global_layer = jax.checkpoint(
+          run_global_layer,
+          policy=global_remat_policy,
+          prevent_cse=prevent_cse,
+      )
+
+    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+      (y, final_other), stacked_intermediate = jax.lax.scan(
+          run_global_layer,
+          (y, other_g),
+          intermediate_xs,
+          length=1,
+      )
+
+    intermediate_state = jax.tree.map(lambda x: x[0], stacked_intermediate)
+    nnx.update(self.global_layer, final_other, intermediate_state)
+    return y
+
+  def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs):
+    """Runs the block with externally-supplied per-layer kv caches.
+
+    Inference KV caches are a Python list of per-layer entries, so this path
+    unrolls the local layers statically rather than scanning them.
+    """
+    updated_kvs = []
+    if self.local_layers is not None:
+      graphdef, params, state = nnx.split(self.local_layers, nnx.Param, ...)
+      scan_axis = self.config.param_scan_axis
+      if scan_axis != 0:
+        params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+      per_layer_states = []
+      for i in range(self.num_local):
+        current_params = jax.tree.map(lambda x, i=i: x[i], params)
+        current_state = jax.tree.map(lambda x, i=i: x[i], state)
+        layer = nnx.merge(graphdef, current_params, current_state)
+        current_kv = kv_cache[i] if (kv_cache is not None and i < len(kv_cache)) else None
+        y, new_kv = self._run_layer(layer, y, layer_kwargs, current_kv)
+        updated_kvs.append(new_kv)
+        # Collect only non-Param state: parameters are read-only here, so stacking
+        # them back would allocate a second copy of every layer weight. Non-Param
+        # state is stacked on axis 0, matching nnx_scan.create_scanned_layers.
+        _, _, updated_state = nnx.split(layer, nnx.Param, ...)
+        per_layer_states.append(updated_state)
+
+      nnx.update(self.local_layers, jax.tree.map(lambda *xs: jnp.stack(xs), *per_layer_states))
+
+    if self.global_layer is not None:
+      global_kv = kv_cache[self.num_local] if (kv_cache is not None and self.num_local < len(kv_cache)) else None
+      y, new_kv = self._run_layer(self.global_layer, y, layer_kwargs, global_kv)
+      updated_kvs.append(new_kv)
+
+    return y, tuple(updated_kvs)
 
   def __call__(
       self,
       carry: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
+      decoder_segment_ids: None | jnp.ndarray = None,
+      decoder_positions: None | jnp.ndarray = None,
+      deterministic: bool = False,
+      model_mode: str = "train",
       previous_chunk=None,
       slot: None | int = None,
       kv_cache=None,
@@ -1253,27 +1416,31 @@ class Qwen3NextScannableBlock(nnx.Module):
       value for the scan's `y` collection.
     """
     cfg = self.config
-    x = carry
+    inputs = carry
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
 
-    # Loop over the number of sub-layers that make up one repeating pattern.
-    for i in range(cfg.inhomogeneous_layer_cycle_interval):
-      layer = getattr(self, f"layer_{i}")
-      # The second return value is kv_cache, which we ignore here because
-      # it is not passed as a carry in scannable layers.
-      x, _ = layer(
-          x,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk,
-          slot,
-          kv_cache=kv_cache,
-          attention_metadata=attention_metadata,
-      )
+    layer_kwargs = {
+        "decoder_segment_ids": decoder_segment_ids,
+        "decoder_positions": decoder_positions,
+        "deterministic": deterministic,
+        "model_mode": model_mode,
+        "slot": slot,
+        "previous_chunk": previous_chunk,
+        "attention_metadata": attention_metadata,
+    }
 
-    # The output of the block is the carry for the next scan iteration.
-    return x, None
+    if kv_cache is not None:
+      return self._forward_with_external_kv_cache(inputs, kv_cache, layer_kwargs)
+
+    y = inputs
+    if self.local_layers is not None:
+      y = self._scan_local_layers(y, layer_kwargs)
+    if self.global_layer is not None:
+      y = self._scan_global_layer(y, layer_kwargs)
+
+    if cfg.scan_layers:
+      return y, None
+    return y
 
 
 class Qwen3NextDecoderLayer(nnx.Module):
@@ -1295,7 +1462,15 @@ class Qwen3NextDecoderLayer(nnx.Module):
   """
 
   def __init__(
-      self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      layer_idx: int,
+      quant: None | Quant = None,
+      *,
+      is_full_attention_layer: bool | None = None,
+      rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
@@ -1314,8 +1489,13 @@ class Qwen3NextDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    # Determine the type of attention mechanism for the current layer.
-    is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+    # Determine the type of attention mechanism for the current layer. A scanned block
+    # knows each sub-layer's role up front and passes it explicitly, because inside a
+    # scan the layer's position is not recoverable from layer_idx.
+    if is_full_attention_layer is None:
+      offset = cfg.full_attention_layer_offset % cfg.inhomogeneous_layer_cycle_interval
+      is_full_attention_layer = self.layer_idx % cfg.inhomogeneous_layer_cycle_interval == offset
+    self.is_full_attention_layer = is_full_attention_layer
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
