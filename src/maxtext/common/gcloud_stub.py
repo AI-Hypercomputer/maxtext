@@ -105,6 +105,32 @@ def _jetstream_stubs():
       self.log_prob = log_prob
       self.samples_per_slot = samples_per_slot
 
+    def _tree_flatten(self):
+      children = (self.data, self.tokens_idx, self.valid_idx, self.length_idx, self.log_prob)
+      aux_data = (self.samples_per_slot,)
+      return children, aux_data
+
+    @classmethod
+    def _tree_unflatten(cls, aux_data, children):
+      return cls(
+          data=children[0],
+          tokens_idx=children[1],
+          valid_idx=children[2],
+          length_idx=children[3],
+          log_prob=children[4],
+          samples_per_slot=aux_data[0],
+      )
+
+  try:
+    import jax
+    jax.tree_util.register_pytree_node(
+        ResultTokens,
+        ResultTokens._tree_flatten,
+        ResultTokens._tree_unflatten,
+    )
+  except Exception:
+    pass
+
   class TokenizerParameters:
     def __init__(self, path=None, tokenizer_type=None, access_token=None, use_chat_template=False, extra_ids=0, **kwargs):
       self.path = path
