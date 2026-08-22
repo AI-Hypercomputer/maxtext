@@ -128,29 +128,50 @@ def _jetstream_stubs():
   class HuggingFaceTokenizer:
     def __init__(self, metadata):
       import transformers
-      self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-          metadata.path,
-          token=metadata.access_token or None,
-          trust_remote_code=True,
-      )
+      try:
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+            metadata.path,
+            token=metadata.access_token or None,
+            trust_remote_code=True,
+        )
+      except Exception:
+        try:
+          self.tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(
+              metadata.path,
+              token=metadata.access_token or None,
+          )
+        except Exception:
+          from tokenizers import Tokenizer
+          self.tokenizer = Tokenizer.from_pretrained(
+              metadata.path,
+              auth_token=metadata.access_token or None,
+          )
+
       if getattr(self.tokenizer, "pad_token_id", None) is None:
         if getattr(self.tokenizer, "unk_token_id", None) is not None:
           self.tokenizer.pad_token_id = self.tokenizer.unk_token_id
-        else:
+        elif getattr(self.tokenizer, "eos_token_id", None) is not None:
           self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
     def encode(self, text, is_bos=True, prefill_lengths=None):
       import numpy as np
-      token_ids = self.tokenizer.encode(text, add_special_tokens=False)
-      if is_bos and getattr(self.tokenizer, "bos_token_id", None) is not None:
-        token_ids = [self.tokenizer.bos_token_id] + token_ids
+      if hasattr(self.tokenizer, "encode"):
+        res = self.tokenizer.encode(text)
+        token_ids = res.ids if hasattr(res, "ids") else res
+      else:
+        token_ids = []
+      bos_id = getattr(self.tokenizer, "bos_token_id", None)
+      if is_bos and bos_id is not None:
+        token_ids = [bos_id] + list(token_ids)
       true_length = len(token_ids)
       target_len = prefill_lengths[0] if prefill_lengths else true_length
       pad_id = getattr(self.tokenizer, "pad_token_id", 0) or 0
-      padded = token_ids + [pad_id] * max(0, target_len - true_length)
+      padded = list(token_ids) + [pad_id] * max(0, target_len - true_length)
       return np.array(padded[:target_len], dtype=np.int32), true_length
 
     def decode(self, token_ids):
+      if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
       return self.tokenizer.decode(token_ids, skip_special_tokens=True)
 
   config_lib = SimpleNamespace()  # not used directly in decoupled tests
