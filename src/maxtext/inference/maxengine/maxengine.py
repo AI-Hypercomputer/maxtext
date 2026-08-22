@@ -17,6 +17,7 @@
 from collections import defaultdict
 from typing import Any, Callable
 import functools
+import gc
 import os.path
 import uuid
 import warnings
