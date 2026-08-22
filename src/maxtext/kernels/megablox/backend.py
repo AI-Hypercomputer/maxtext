@@ -16,7 +16,10 @@
 
 # pylint: disable=too-many-positional-arguments, unnecessary-lambda-assignment
 
+from __future__ import annotations
+
 from collections.abc import Callable
+
 import dataclasses
 import functools
 from typing import Any, Optional
@@ -27,7 +30,11 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-import qwix.pallas as qpl
+try:
+  import qwix.pallas as qpl
+except ImportError:
+  qpl = None
+
 
 
 def _validate_args(
@@ -332,7 +339,35 @@ def gmm(
     A 2d, jnp.ndarray with shape [m, n].
   """
 
+  if qpl is None:
+    # Pure JAX fallback for gmm when qpl is not available
+    m = lhs.shape[0]
+    num_groups = rhs.shape[0]
+    ends = jnp.cumsum(group_sizes)
+    starts = ends - group_sizes
+    indices = jnp.arange(m)
+
+    def scan_fn(acc, i):
+      start = starts[i]
+      end = ends[i]
+      mask = (indices >= start) & (indices < end)
+      lhs_i = jnp.where(mask[:, None], lhs, 0.0)
+      rhs_i = rhs[i]
+      if transpose_rhs:
+        out_i = jnp.matmul(lhs_i, rhs_i.T)
+      else:
+        out_i = jnp.matmul(lhs_i, rhs_i)
+      return acc + out_i, None
+
+    out_init = jnp.zeros((m, rhs.shape[1] if transpose_rhs else rhs.shape[2]), dtype=preferred_element_type)
+    out, _ = jax.lax.scan(scan_fn, out_init, jnp.arange(num_groups))
+    if existing_out is not None:
+      out = out + existing_out
+    return out
+
+
   if existing_out is not None:
+
     assert isinstance(existing_out, jax.Array)
     expected_dtype = existing_out.dtype
     if expected_dtype != preferred_element_type:
@@ -507,7 +542,8 @@ def gmm(
     rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
 
   lhs_bytes = _calculate_bytes(lhs)
-  if isinstance(rhs, qpl.QArray):
+  if qpl is not None and isinstance(rhs, qpl.QArray):
+
     rhs_bytes = (k * n) * rhs.qvalue.itemsize  # ignore scale factor as its size marginal.
   else:
     rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs

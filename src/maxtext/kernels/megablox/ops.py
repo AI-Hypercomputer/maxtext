@@ -16,7 +16,10 @@
 
 # pylint: disable=too-many-positional-arguments
 
+from __future__ import annotations
+
 import dataclasses
+
 import functools
 from typing import List, Literal, Tuple
 import jax
@@ -25,9 +28,19 @@ from maxtext.kernels.megablox import backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.layers import quantizations
-import qwix
-import qwix.pallas as qpl
-import tokamax
+
+try:
+  import qwix
+  import qwix.pallas as qpl
+except ImportError:
+  qwix = None
+  qpl = None
+
+try:
+  import tokamax
+except ImportError:
+  tokamax = None
+
 
 
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(

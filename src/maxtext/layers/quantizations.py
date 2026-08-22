@@ -12,55 +12,76 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Quantization library."""
+from __future__ import annotations
 
+from typing import Tuple, Sequence, Callable
+
+from dataclasses import dataclass
 import functools
 import json
-import qwix.pallas as qpl
+
 import re
-from typing import Tuple, Sequence, Callable
-from dataclasses import dataclass
-
-from aqt.jax.v2 import config as aqt_config
-from aqt.jax.v2 import aqt_tensor
-from aqt.jax.v2.flax import aqt_flax
-from aqt.jax.v2 import tiled_dot_general
-from aqt.jax.v2 import calibration
-
-import qwix
-from qwix._src.core import numerics
-from qwix._src.core import dot_general_qt
-from qwix._src.core import sparsity
-
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
-
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 from flax import nnx
-# Support different packaging structures across environments even within
-# the same Qwix version identifier (imports from _src.utils vs _src).
+
 try:
-  from qwix._src.utils import flax_util
+  import qwix.pallas as qpl
+  import qwix
+  from qwix._src.core import numerics
+  from qwix._src.core import dot_general_qt
+  from qwix._src.core import sparsity
+  try:
+    from qwix._src.utils import flax_util
+  except ImportError:
+    from qwix._src import flax_util  # pytype: disable=import-error
 except ImportError:
-  from qwix._src import flax_util  # pytype: disable=import-error
+  qpl = None
+  qwix = None
+  numerics = None
+  dot_general_qt = None
+  sparsity = None
+  flax_util = None
+
+if qwix is None:
+  class _QtProviderStub:
+    pass
+  qwix_QtProvider = _QtProviderStub
+else:
+  qwix_QtProvider = qwix.QtProvider
+  try:
+    _orig_find_param = flax_util.find_param
+
+    def _safe_find_param(x, ptq_array_type=None):
+      try:
+        return _orig_find_param(x, ptq_array_type)
+      except AttributeError as e:
+        if "shape" in str(e):
+          return None
+        raise
+
+    flax_util.find_param = _safe_find_param
+  except (NameError, AttributeError):
+    pass
 
 try:
-  _orig_find_param = flax_util.find_param
+  from aqt.jax.v2 import config as aqt_config
+  from aqt.jax.v2 import aqt_tensor
+  from aqt.jax.v2.flax import aqt_flax
+  from aqt.jax.v2 import tiled_dot_general
+  from aqt.jax.v2 import calibration
+except ImportError:
+  aqt_config = None
+  aqt_tensor = None
+  aqt_flax = None
+  tiled_dot_general = None
+  calibration = None
 
-  def _safe_find_param(x, ptq_array_type=None):
-    try:
-      return _orig_find_param(x, ptq_array_type)
-    except AttributeError as e:
-      if "shape" in str(e):
-        return None
-      raise
 
-  flax_util.find_param = _safe_find_param
-except (NameError, AttributeError):
-  pass
 from maxtext.layers import nnx_wrappers
 
 from maxtext.configs.types import TeCommGemmOverlapPolicy
@@ -145,7 +166,7 @@ class AqtQuantization:
   """Configures AQT quantization github.com/google/aqt."""
 
   quant_dg: aqt_config.DotGeneral
-  quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
+  quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN if aqt_flax is not None else None
   replicate_scale: bool = False
 
   def _get_mixed_precision_cfg(self):
@@ -768,7 +789,7 @@ def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
     return linen_module_cls(name=op_id)(*args, **kwargs)
 
 
-class NvidaFp8Provider(qwix.QtProvider):
+class NvidaFp8Provider(qwix_QtProvider):
   """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
 
   def dot_general(self, *args, **kwargs):
@@ -785,7 +806,7 @@ class NvidaFp8Provider(qwix.QtProvider):
     return _apply_linen_module_in_nnx(nn.Fp8Einsum, op_id, *args, **kwargs)
 
 
-class NANOOFp8Provider(qwix.QtProvider):
+class NANOOFp8Provider(qwix_QtProvider):
 
   def dot_general(self, *args, **kwargs):
     # Here we only check if the rule is None or not.

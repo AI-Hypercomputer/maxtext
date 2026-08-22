@@ -474,10 +474,22 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
+      if key is None:
+        return np.zeros(shape, dtype=np.float32)
       if isinstance(key, (list, tuple)):
         tensors = tuple(getter(k) for k in key)
         return apply_hook_fns(tensors, shape, hook)
-      return apply_hook_fns(getter(key), shape, hook)
+      try:
+        tensor = getter(key)
+      except ValueError as e:
+        if "not found in HF checkpoint index" in str(e):
+          logging.warning("Key %s not found in HF checkpoint index; falling back to zeros with shape %s.", key, shape)
+          return np.zeros(shape, dtype=np.float32)
+        raise e
+
+      return apply_hook_fns(tensor, shape, hook)
+
+
 
     load_fn = partial(
         _loader,
@@ -727,7 +739,7 @@ def convert_lora_to_maxtext_adapter(
     max_logging.log("Warning: You want an Instruct version, so we are using the base model architecture instead.")
     model_key = model_key.replace("-Instruct", "")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
-  hf_config_dict = hf_config_obj.to_dict()
+  hf_config_dict = hf_config_obj.to_dict() if hasattr(hf_config_obj, "to_dict") else hf_config_obj
   param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_dict, config, config.scan_layers)
 
   mt_adapter_tree = {}
@@ -1009,7 +1021,7 @@ def main(
     model_key = config.model_name
     # load config
     hf_config_obj = HF_MODEL_CONFIGS[model_key]
-    hf_config_dict = hf_config_obj.to_dict()
+    hf_config_dict = hf_config_obj.to_dict() if hasattr(hf_config_obj, "to_dict") else hf_config_obj
     # example of param mapping (gemma2, maxtext:huggingface):
     # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
     #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
@@ -1017,7 +1029,11 @@ def main(
     # Example of Hook FN mapping, to perform reshape:
     # f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
     hook_fn_map_mt = HOOK_FNS[model_key](hf_config_dict, config, config.scan_layers, saving_to_hf=False)
+    for h in hook_fn_map_mt.values():
+      if hasattr(h, "set_getter"):
+        h.set_getter(tensor_getter)
     max_logging.log("Parameter mappings and hooks obtained.")
+
 
     maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
 
