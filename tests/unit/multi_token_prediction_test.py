@@ -138,9 +138,13 @@ class _MockDecoderForMTP:
     batch_size, seq_len = input_ids.shape
     return jnp.zeros((batch_size, seq_len, self.config.base_emb_dim), dtype=self.config.dtype)
 
-  def apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode):
+  def apply_output_head(
+      self, _shared_embedding, hidden_state, _deterministic, model_mode, reduce_mhc=False, decoder_norm=None
+  ):
     """Returns a zero tensor with the correct logit shape."""
-    batch_size, seq_len, _ = hidden_state.shape
+    # Use [:2] instead of exactly unpacking 3 items to gracefully handle 4D tensors
+    # (e.g. DeepSeek-V4 MTP [batch, seq_len, mhc_expansion_rate, dim]) without throwing a ValueError.
+    batch_size, seq_len = hidden_state.shape[:2]
     return jnp.zeros((batch_size, seq_len, self.config.vocab_size), dtype=self.config.dtype)
 
 
