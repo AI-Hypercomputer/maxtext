@@ -105,18 +105,57 @@ def _jetstream_stubs():
       self.log_prob = log_prob
       self.samples_per_slot = samples_per_slot
 
-  # Tokenizer placeholders (unused in decoupled tests due to runtime guard).
-  class TokenizerParameters:  # pragma: no cover - placeholder
+  class TokenizerParameters:
+    def __init__(self, path=None, tokenizer_type=None, access_token=None, use_chat_template=False, extra_ids=0, **kwargs):
+      self.path = path
+      self.tokenizer_type = tokenizer_type
+      self.access_token = access_token
+      self.use_chat_template = use_chat_template
+      self.extra_ids = extra_ids
 
-    def __init__(self, *a, **k):
-      pass
+  class TokenizerType:
+    tiktoken = 1
+    sentencepiece = 2
+    huggingface = 3
+    DESCRIPTOR = SimpleNamespace(
+        values_by_name={
+            "tiktoken": SimpleNamespace(number=1),
+            "sentencepiece": SimpleNamespace(number=2),
+            "huggingface": SimpleNamespace(number=3),
+        }
+    )
 
-  class TokenizerType:  # emulate enum descriptor access pattern
-    DESCRIPTOR = SimpleNamespace(values_by_name={})
+  class HuggingFaceTokenizer:
+    def __init__(self, metadata):
+      import transformers
+      self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+          metadata.path,
+          token=metadata.access_token or None,
+          trust_remote_code=True,
+      )
+      if getattr(self.tokenizer, "pad_token_id", None) is None:
+        if getattr(self.tokenizer, "unk_token_id", None) is not None:
+          self.tokenizer.pad_token_id = self.tokenizer.unk_token_id
+        else:
+          self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+    def encode(self, text, is_bos=True, prefill_lengths=None):
+      import numpy as np
+      token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+      if is_bos and getattr(self.tokenizer, "bos_token_id", None) is not None:
+        token_ids = [self.tokenizer.bos_token_id] + token_ids
+      true_length = len(token_ids)
+      target_len = prefill_lengths[0] if prefill_lengths else true_length
+      pad_id = getattr(self.tokenizer, "pad_token_id", 0) or 0
+      padded = token_ids + [pad_id] * max(0, target_len - true_length)
+      return np.array(padded[:target_len], dtype=np.int32), true_length
+
+    def decode(self, token_ids):
+      return self.tokenizer.decode(token_ids, skip_special_tokens=True)
 
   config_lib = SimpleNamespace()  # not used directly in decoupled tests
   engine_api = SimpleNamespace(Engine=Engine, ResultTokens=ResultTokens)
-  token_utils = SimpleNamespace()  # build_tokenizer guarded in MaxEngine when decoupled
+  token_utils = SimpleNamespace(HuggingFaceTokenizer=HuggingFaceTokenizer)
   tokenizer_api = SimpleNamespace()  # placeholder
   token_params_ns = SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType)
 

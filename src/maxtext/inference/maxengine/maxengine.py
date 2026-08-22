@@ -1895,42 +1895,28 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     When DECOUPLE_GCLOUD is FALSE we provide a clear error instead of failing
     cryptically on attribute access.
     """
-    token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
-    engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
-    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
-      raise RuntimeError(
-          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; get_tokenizer is unsupported. "
-          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
-      )
     try:
-      # pyrefly: ignore[missing-attribute]
-      tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[
-          self.config.tokenizer_type
-      ].number  # pyrefly: ignore[missing-attribute]
+      tokenizer_val = getattr(TokenizerType, self.config.tokenizer_type, None)
+      if tokenizer_val is None and hasattr(TokenizerType, "DESCRIPTOR"):
+        tokenizer_val = TokenizerType.DESCRIPTOR.values_by_name[self.config.tokenizer_type].number
       return TokenizerParameters(
-          path=self.config.tokenizer_path,  # pyrefly: ignore[unexpected-keyword]
-          tokenizer_type=tokenizer_type_val,  # pyrefly: ignore[unexpected-keyword]
-          access_token=self.config.hf_access_token,  # pyrefly: ignore[unexpected-keyword]
-          use_chat_template=self.config.use_chat_template,  # pyrefly: ignore[unexpected-keyword]
-          extra_ids=0,  # pyrefly: ignore[unexpected-keyword]
+          path=self.config.tokenizer_path,
+          tokenizer_type=tokenizer_val,
+          access_token=self.config.hf_access_token,
+          use_chat_template=self.config.use_chat_template,
+          extra_ids=0,
       )
     except KeyError as _:
       raise KeyError(f"Unsupported tokenizer type: {self.config.tokenizer_type}") from None
 
   def build_tokenizer(self, metadata: Any):  # return type depends on JetStream
     """Return a tokenizer"""
-    token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
-    engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
-    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
-      raise RuntimeError(
-          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; build_tokenizer is unsupported. "
-          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
-      )
-    if metadata.tokenizer_type == TokenizerType.tiktoken:  # pyrefly: ignore[missing-attribute]
+    tok_type = getattr(metadata, "tokenizer_type", None)
+    if tok_type in (getattr(TokenizerType, "tiktoken", None), "tiktoken"):
       return token_utils.TikToken(metadata)
-    elif metadata.tokenizer_type == TokenizerType.sentencepiece:  # pyrefly: ignore[missing-attribute]
+    elif tok_type in (getattr(TokenizerType, "sentencepiece", None), "sentencepiece"):
       return token_utils.SentencePieceTokenizer(metadata)
-    elif metadata.tokenizer_type == TokenizerType.huggingface:  # pyrefly: ignore[missing-attribute]
+    elif tok_type in (getattr(TokenizerType, "huggingface", None), "huggingface"):
       tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
       if tokenizer_model.tokenizer.pad_token_id is None:
         if tokenizer_model.tokenizer.unk_token_id is not None:
