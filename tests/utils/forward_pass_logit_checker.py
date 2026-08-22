@@ -379,6 +379,12 @@ def main(config, test_args):  # pylint: disable=W0621
     try:
       max_logging.log(f"Loading tokenizer from {path}.")
       tokenizer = AutoTokenizer.from_pretrained(path, token=hf_token, trust_remote_code=test_args.trust_remote_code)
+      # Mistral and Llama tokenizers ship no pad token, and the calls below pass padding=True, which
+      # transformers refuses without one ("Asking to pad but the tokenizer does not have a padding
+      # token"). Prompts are tokenized one at a time here, so nothing is ever actually padded and
+      # borrowing eos changes no result -- it only satisfies the check that rejects the call.
+      if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
       break
     except Exception as e:  # pylint: disable=broad-except,broad-exception-caught
       last_exception = e

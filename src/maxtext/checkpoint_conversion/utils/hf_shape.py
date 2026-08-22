@@ -1300,6 +1300,8 @@ HF_SHAPE = {
     "qwen3-vl-2b": QWEN3_VL_HF_WEIGHTS_TO_SHAPE,
     "qwen3-vl-4b": QWEN3_VL_HF_WEIGHTS_TO_SHAPE,
     "qwen3-vl-30b-a3b": QWEN3_VL_HF_WEIGHTS_TO_SHAPE,
+    # Same weights and shapes as 3.1; see the note beside llama3-8b in hf_model_configs.py.
+    "llama3-8b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-8b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-8b-Instruct": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-70b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
