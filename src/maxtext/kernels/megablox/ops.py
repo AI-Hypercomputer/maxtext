@@ -519,8 +519,16 @@ def _gmm_bwd(
   # 2. Backward Pass Quantization
   if quantization_rule:
     if inkernel_drhs:
-      # the in-kernel tgmm quantizes drhs_dout ITSELF; keep the raw cotangent for the drhs side.
-      dlhs_dout, _ = _bwd_quantize_gradient(dlhs_dout, drhs_dout, quantization_rule)
+      # the in-kernel tgmm quantizes drhs_dout ITSELF; quantize ONLY the dlhs cotangent here
+      # (calling the two-sided helper would emit the dense drhs quantize just to discard it).
+      if quantization_rule.bwd_qtype:
+        dlhs_dout = qpl.quantize(
+            # pyrefly: ignore[bad-argument-type]
+            dlhs_dout,
+            quantization_rule.bwd_qtype,
+            channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+            calibration_method=quantization_rule.bwd_calibration_method,
+        )
       if not isinstance(drhs_dout, qpl.QArray) and drhs_dout.dtype != lhs.dtype:
         # tgmm requires equal operand widths; the in-kernel path reads the RAW cotangent, so
         # carry it at the activation width (halves the kernel's cotangent read bytes vs f32).

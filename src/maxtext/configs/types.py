@@ -897,7 +897,7 @@ class MoEGeneral(BaseModel):
           "dropless (worst-case) ragged buffer sizes."
       ),
   )
-  bwd_quantization_dtype: str = Field(
+  bwd_quantization_dtype: Literal["e5m2", "e4m3"] = Field(
       "e5m2",
       description=(
           "fp8 dtype for the BACKWARD (gradient) quantization in the fp8_full qwix recipe: 'e5m2' "
