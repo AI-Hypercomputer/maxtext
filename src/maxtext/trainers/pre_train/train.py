@@ -66,7 +66,7 @@ from maxtext.common.goodput import (
 )
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
-from maxtext.common.metric_logger import record_activation_metrics
+from maxtext.common.metric_logger import record_activation_metrics, record_moe_routing_metrics
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -737,6 +737,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   }
   if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
+  if getattr(config, "record_moe_routing_metrics", False) and config.num_experts > 1:
+    record_moe_routing_metrics(metrics, intermediate_outputs, config)
 
   if isinstance(model, nn.Module):
     return new_state, metrics

@@ -2269,7 +2269,22 @@ class RoutedMoE(nnx.Module):
             scatter_dimension=0,
             tiled=True,
         )
-        return output, routing.lb_loss, routing.bias_updates
+        expert_counts = None
+        if self.config.record_moe_routing_metrics:
+          flat_selected = jnp.ravel(routing.selected_experts)
+          local_counts = jnp.bincount(
+              flat_selected, length=self.config.num_experts
+          ).astype(jnp.int32)
+          batch_axis = input_partition_pspec[0]
+          if batch_axis:
+            if isinstance(batch_axis, tuple):
+              for ax in batch_axis:
+                if ax and self.mesh.shape.get(ax, 1) > 1:
+                  local_counts = jax.lax.psum(local_counts, axis_name=ax)
+            elif self.mesh.shape.get(batch_axis, 1) > 1:
+              local_counts = jax.lax.psum(local_counts, axis_name=batch_axis)
+          expert_counts = local_counts
+        return output, routing.lb_loss, routing.bias_updates, expert_counts
 
       if self.get_expert_parallelism_size() > 1:
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
@@ -2301,7 +2316,22 @@ class RoutedMoE(nnx.Module):
           group_sizes=routing.group_sizes,
       )
 
-      return output, routing.lb_loss, routing.bias_updates
+      expert_counts = None
+      if self.config.record_moe_routing_metrics:
+        flat_selected = jnp.ravel(routing.selected_experts)
+        local_counts = jnp.bincount(
+            flat_selected, length=self.config.num_experts
+        ).astype(jnp.int32)
+        batch_axis = input_partition_pspec[0]
+        if batch_axis:
+          if isinstance(batch_axis, tuple):
+            for ax in batch_axis:
+              if ax and self.mesh.shape.get(ax, 1) > 1:
+                local_counts = jax.lax.psum(local_counts, axis_name=ax)
+          elif self.mesh.shape.get(batch_axis, 1) > 1:
+            local_counts = jax.lax.psum(local_counts, axis_name=batch_axis)
+        expert_counts = local_counts
+      return output, routing.lb_loss, routing.bias_updates, expert_counts
 
     @functools.partial(
         jax.shard_map,
@@ -2321,8 +2351,9 @@ class RoutedMoE(nnx.Module):
         ),
         out_specs=(
             output_pspec,
-            P(),  # Handle None or replicate the output
-            P(),  # Handle None or replicate the output
+            P(),  # Handle None or replicate the output (lb_loss)
+            P(),  # Handle None or replicate the output (bias_updates)
+            P(),  # Handle None or replicate the output (expert_counts)
         ),
         check_vma=self.config.check_vma,
     )
@@ -2368,7 +2399,7 @@ class RoutedMoE(nnx.Module):
       # load-balance loss / bias updates are averaged across chunks.
       seq_len = x.shape[1]
       chunk = seq_len // n_chunks
-      outs, lb_losses, bias_updates_list = [], [], []
+      outs, lb_losses, bias_updates_list, expert_counts_list = [], [], [], []
       _prev = None
       for c in range(n_chunks):
         sl = slice(c * chunk, (c + 1) * chunk)
@@ -2379,7 +2410,7 @@ class RoutedMoE(nnx.Module):
         # loss stays bit-exact.
         if self.config.moe_chunk_barrier and _prev is not None:
           x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
-        out_c, lb_c, bu_c = _moe_body(
+        out_c, lb_c, bu_c, ec_c = _moe_body(
             x_c,
             logits[:, sl, :],
             None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
@@ -2397,10 +2428,20 @@ class RoutedMoE(nnx.Module):
         outs.append(out_c)
         lb_losses.append(lb_c)
         bias_updates_list.append(bu_c)
+        expert_counts_list.append(ec_c)
       output = jnp.concatenate(outs, axis=1)
       lb_loss = None if lb_losses[0] is None else sum(lb_losses) / n_chunks
-      bias_updates = None if bias_updates_list[0] is None else sum(bias_updates_list) / n_chunks
-      return output, lb_loss, bias_updates
+      bias_updates = (
+          None
+          if bias_updates_list[0] is None
+          else sum(bias_updates_list) / n_chunks
+      )
+      expert_counts = (
+          None
+          if expert_counts_list[0] is None
+          else sum(expert_counts_list)
+      )
+      return output, lb_loss, bias_updates, expert_counts
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
@@ -2450,19 +2491,27 @@ class RoutedMoE(nnx.Module):
     if wo_bias is not None:
       wo_bias = self._maybe_shard_with_pspec(wo_bias, wo_bias_pspec)
 
-    return sparse_matmul_route_and_compute(
-        inputs,
-        gate_logits,
-        pre_bias_logits,
-        w0_kernel,
-        w1_kernel,
-        wo_kernel,
-        w0_bias,
-        w1_bias,
-        wo_bias,
-        input_ids,
-        self.rngs,
+    output, lb_loss, bias_updates, expert_counts = (
+        sparse_matmul_route_and_compute(
+            inputs,
+            gate_logits,
+            pre_bias_logits,
+            w0_kernel,
+            w1_kernel,
+            wo_kernel,
+            w0_bias,
+            w1_bias,
+            wo_bias,
+            input_ids,
+            self.rngs,
+        )
     )
+    if (
+        getattr(self.config, "record_moe_routing_metrics", False)
+        and expert_counts is not None
+    ):
+      self.sow(nnx.Intermediate, "moe_expert_counts", expert_counts)
+    return output, lb_loss, bias_updates
 
   def reshape_and_update_weights(self, weights, indices):
     """reshape and update weights."""

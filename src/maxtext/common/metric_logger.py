@@ -17,6 +17,7 @@
 """Logger that saves metrics to a local file, GCS and TensorBoard."""
 
 import json
+import math
 import os
 import sys
 import queue
@@ -25,6 +26,7 @@ import enum
 import numpy as np
 
 import jax
+import jax.numpy as jnp
 
 from maxtext.utils.globals import EPS
 from maxtext.common.gcloud_stub import mldiagnostics_modules
@@ -81,6 +83,70 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
     per_layer = jax.numpy.concatenate(vals)
     for layer_num in range(config.num_decoder_layers):
       output_metrics["scalar"][f"{label}/layer_{layer_num:03d}"] = per_layer[layer_num]
+
+
+def record_moe_routing_metrics(output_metrics, intermediate_outputs, config):
+  """Adds MoE routing distribution and load imbalance metrics to the metrics dict.
+
+  Extracts 'moe_expert_counts' intermediate arrays across all MoE layers, computes
+  per-layer and model-wide load balancing statistics (Coefficient of Variation,
+  Peak-to-Average ratio, min/max tokens, dead experts, routing entropy), and
+  attaches raw expert counts for TensorBoard histogram logging.
+  """
+  vals = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_expert_counts")
+  if not vals:
+    return
+
+  # Handle both scanned decoders (single stacked array [num_layers, num_experts])
+  # and unscanned decoders (list of [num_experts] arrays).
+  if len(vals) == 1 and vals[0].ndim == 2:
+    per_layer_counts = vals[0]
+  else:
+    per_layer_counts = jnp.stack(vals, axis=0) if vals[0].ndim == 1 else jnp.concatenate(vals, axis=0)
+
+  num_moe_layers = per_layer_counts.shape[0]
+  cvs = []
+  peak_ratios = []
+  total_dead_experts = 0
+
+  if "moe_histograms" not in output_metrics:
+    output_metrics["moe_histograms"] = {}
+
+  for layer_idx in range(num_moe_layers):
+    counts = per_layer_counts[layer_idx].astype(jnp.float32)
+    total_tokens = jnp.sum(counts)
+    num_experts = counts.shape[0]
+    mean_load = total_tokens / num_experts
+    std_load = jnp.std(counts)
+    cv = std_load / (mean_load + EPS)
+    max_tokens = jnp.max(counts)
+    peak_ratio = max_tokens / (mean_load + EPS)
+    dead_experts = jnp.sum(counts == 0)
+
+    # Normalized Entropy in [0, 1]
+    p = counts / (total_tokens + EPS)
+    log_p = jnp.where(p > 0, jnp.log2(p + EPS), 0.0)
+    denom = math.log2(max(num_experts, 2))
+    entropy = -jnp.sum(p * log_p) / (denom + EPS)
+
+    output_metrics["scalar"][f"moe_cv/layer_{layer_idx:03d}"] = cv
+    output_metrics["scalar"][f"moe_peak_ratio/layer_{layer_idx:03d}"] = peak_ratio
+    output_metrics["scalar"][f"moe_dead_experts/layer_{layer_idx:03d}"] = dead_experts.astype(jnp.float32)
+    output_metrics["scalar"][f"moe_entropy/layer_{layer_idx:03d}"] = entropy
+
+    output_metrics["moe_histograms"][f"moe/expert_token_counts/layer_{layer_idx:03d}"] = counts
+
+    cvs.append(cv)
+    peak_ratios.append(peak_ratio)
+    total_dead_experts = total_dead_experts + dead_experts
+
+  if cvs:
+    cv_array = jnp.array(cvs)
+    peak_array = jnp.array(peak_ratios)
+    output_metrics["scalar"]["moe/cv_max"] = jnp.max(cv_array)
+    output_metrics["scalar"]["moe/cv_mean"] = jnp.mean(cv_array)
+    output_metrics["scalar"]["moe/peak_ratio_max"] = jnp.max(peak_array)
+    output_metrics["scalar"]["moe/total_dead_experts"] = total_dead_experts.astype(jnp.float32)
 
 
 class MetadataKey(enum.Enum):
@@ -334,6 +400,9 @@ class MetricLogger:
         self.writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
       for metric_name in metrics.get("scalars", []):
         self.writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+      if hasattr(self.writer, "add_histogram"):
+        for metric_name in metrics.get("moe_histograms", []):
+          self.writer.add_histogram(metric_name, np.array(metrics["moe_histograms"][metric_name]), step)
 
     if metric_type == "train":
       full_log = step % self.config.log_period == 0

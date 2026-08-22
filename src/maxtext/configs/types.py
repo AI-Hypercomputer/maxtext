@@ -888,6 +888,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  record_moe_routing_metrics: bool = Field(
+      False,
+      description="Whether to record and log per-layer expert token routing counts, load imbalance stats, and distributions.",
+  )
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
       description=(
