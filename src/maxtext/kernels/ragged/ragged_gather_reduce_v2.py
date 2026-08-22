@@ -263,25 +263,13 @@ def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
   return 128
 
 
-def _preprocess(
-    valid_rows_mask: jax.Array,
-    reduce_group_size: int,
+def _compute_sorted_by_validity(
+    valid_rows_mask_2d: jax.Array,
     num_row_partitions: int,
-    num_simd_lanes: int,
     row_chunk_size: int,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-  """Sorts valid source rows to the front of each row partition.
-
-  Returns:
-    sorted_by_validity: original row index of each slot after the stable
-      sort, flattened across partitions and padded to ``row_chunk_size``.
-    num_src_rows_per_row_partition: valid row count per partition, padded to
-      ``num_simd_lanes`` so the kernel can load it as a single vector.
-    mask: per output group, whether the group has any valid source row.
-  """
-  row_partition_size = valid_rows_mask.shape[0] // num_row_partitions
-  valid_rows_mask_2d = valid_rows_mask.reshape(num_row_partitions, -1)
-
+) -> jax.Array:
+  """Computes row index permutation sorted by validity for SparseCore tiling."""
+  row_partition_size = valid_rows_mask_2d.shape[1]
   # Stable sort of a boolean key is a stable partition: valid rows keep their
   # relative order and move ahead of the invalid ones.
   sorted_by_validity = jnp.argsort(~valid_rows_mask_2d, descending=False, stable=True, axis=-1)
@@ -294,7 +282,32 @@ def _preprocess(
         ((0, 0), (0, pad_to - row_partition_size)),
         constant_values=0,
     )
-  sorted_by_validity = sorted_by_validity.reshape(-1)
+  return sorted_by_validity.reshape(-1).astype(jnp.int32)
+
+
+def _preprocess(
+    valid_rows_mask: jax.Array,
+    reduce_group_size: int,
+    num_row_partitions: int,
+    num_simd_lanes: int,
+    row_chunk_size: int,
+    precomputed_sorted_by_validity: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Sorts valid source rows to the front of each row partition.
+
+  Returns:
+    sorted_by_validity: original row index of each slot after the stable
+      sort, flattened across partitions and padded to ``row_chunk_size``.
+    num_src_rows_per_row_partition: valid row count per partition, padded to
+      ``num_simd_lanes`` so the kernel can load it as a single vector.
+    mask: per output group, whether the group has any valid source row.
+  """
+  valid_rows_mask_2d = valid_rows_mask.reshape(num_row_partitions, -1)
+
+  if precomputed_sorted_by_validity is not None:
+    sorted_by_validity = precomputed_sorted_by_validity
+  else:
+    sorted_by_validity = _compute_sorted_by_validity(valid_rows_mask_2d, num_row_partitions, row_chunk_size)
 
   num_src_rows_per_row_partition = jnp.pad(
       jnp.sum(valid_rows_mask_2d, axis=-1).astype(jnp.int32),
@@ -623,6 +636,39 @@ def main_kernel(
       ),
   )
 
+def get_sorted_by_validity(
+    hidden_size: int,
+    indices_size: int,
+    valid_rows_mask: jax.Array,
+    reduce_group_size: int,
+) -> jax.Array | None:
+  """Computes sorted_by_validity row index permutation from valid_rows_mask."""
+  if jax.devices()[0].platform != "tpu":
+    return None
+  sc_info = pltpu.get_tpu_info().sparse_core
+  if sc_info is None:
+    return None
+
+  num_simd_lanes = sc_info.num_lanes
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  num_cores = sc_info.num_cores * sc_info.num_subcores
+
+  num_column_partitions = _calculate_num_column_partitions(
+      hidden_size, indices_size, num_cores, num_lanes, num_simd_lanes
+  )
+  num_row_partitions = num_cores // num_column_partitions
+  _, row_chunk_size = _calculate_row_tiling(indices_size, num_simd_lanes, num_row_partitions)
+
+  padded_input_size = _align_to(indices_size, num_row_partitions * reduce_group_size)
+  padded_valid_rows_mask = jnp.pad(
+      valid_rows_mask,
+      (0, padded_input_size - indices_size),
+      constant_values=False,
+  )
+
+  valid_rows_mask_2d = padded_valid_rows_mask.reshape(num_row_partitions, -1)
+  return _compute_sorted_by_validity(valid_rows_mask_2d, num_row_partitions, row_chunk_size)
+
 
 @functools.partial(
     jax.jit,
@@ -644,6 +690,7 @@ def ragged_gather_reduce(
     flops_override: int = -1,
     bytes_accessed_override: int = -1,
     use_single_sparsecore: bool = False,
+    precomputed_sorted_by_validity: jax.Array | None = None,
 ) -> jax.Array:
   """Gathers ``x`` by ``indices``, weights and masks, then reduces by group.
 
@@ -653,6 +700,8 @@ def ragged_gather_reduce(
     topk_weights: 1-D per-row weights, ``(input_size,)``.
     valid_rows_mask: 1-D bool mask of valid gathered rows, ``(input_size,)``.
     reduce_group_size: number of consecutive rows summed into one output row.
+    precomputed_sorted_by_validity: optional pre-computed sorted_by_validity array from
+      ``get_sorted_by_validity``.
 
   Returns:
     Reduced output, ``(input_size // reduce_group_size, hidden_size)``.
@@ -716,6 +765,7 @@ def ragged_gather_reduce(
       num_row_partitions,
       num_simd_lanes,
       row_chunk_size,
+      precomputed_sorted_by_validity=precomputed_sorted_by_validity,
   )
 
   # Step 4: Launch the SparseCore kernel.
