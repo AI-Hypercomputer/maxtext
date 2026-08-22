@@ -884,6 +884,15 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  moe_ring_cotangent_ag: bool = Field(
+      False,
+      description=(
+          "Run the BACKWARD cotangent all-gather of the ring-of-experts combine reduce-scatter on "
+          "a TensorCore Pallas ring kernel instead of the XLA collective (which can serialize on "
+          "the SparseCore collective-offload queue). Forward is unchanged. For performance "
+          "improvement; numerically equal to lax.all_gather."
+      ),
+  )
   moe_quantize_token_all_gather: bool = Field(
       False,
       description="Whether to quantize token activations to FP8 before All-Gather across EP shards in Ring of Experts.",
@@ -1320,6 +1329,15 @@ class RematAndOffload(BaseModel):
   moe_mlpwi_0: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the first part of a gated MoE's output.",
+  )
+  moe_x_sorted: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the routed (post-dispatch, expert-sorted) MoE input plus its small "
+          "routing/metadata bundle. 'device' saves them across the remat boundary so the backward "
+          "does not re-run the dispatch token all-gather and sort; the expert GMMs re-run from the "
+          "saved tensor. Default 'remat' recomputes (existing behavior)."
+      ),
   )
   moe_mlpwi_1: RematLocation = Field(
       RematLocation.REMAT,
@@ -3423,6 +3441,7 @@ class MaxTextConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
@@ -4564,6 +4583,7 @@ class RLConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
