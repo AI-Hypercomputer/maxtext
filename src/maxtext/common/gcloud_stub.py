@@ -105,156 +105,22 @@ def _jetstream_stubs():
       self.log_prob = log_prob
       self.samples_per_slot = samples_per_slot
 
-    def get_result_at_slot(self, slot: int):
-      from types import SimpleNamespace
-      if self.data is not None and self.tokens_idx is not None:
-        if isinstance(self.tokens_idx, tuple) and len(self.tokens_idx) == 2:
-          tokens = self.data[slot, self.tokens_idx[0]:self.tokens_idx[1]]
-        else:
-          tokens = self.data[slot, self.tokens_idx]
-      else:
-        tokens = self.data
+  # Tokenizer placeholders (unused in decoupled tests due to runtime guard).
+  class TokenizerParameters:  # pragma: no cover - placeholder
 
-      if self.data is not None and self.valid_idx is not None:
-        if isinstance(self.valid_idx, tuple) and len(self.valid_idx) == 2:
-          valid = self.data[slot, self.valid_idx[0]:self.valid_idx[1]]
-        else:
-          valid = self.data[slot, self.valid_idx]
-      else:
-        valid = None
+    def __init__(self, *a, **k):
+      pass
 
-      if self.data is not None and self.length_idx is not None:
-        if isinstance(self.length_idx, tuple) and len(self.length_idx) == 2:
-          length = self.data[slot, self.length_idx[0]:self.length_idx[1]]
-        else:
-          length = self.data[slot, self.length_idx]
-      else:
-        length = None
+  class TokenizerType:  # emulate enum descriptor access pattern
+    DESCRIPTOR = SimpleNamespace(values_by_name={})
 
-      log_prob = self.log_prob[slot] if self.log_prob is not None else None
-      return SimpleNamespace(
-          tokens=tokens,
-          valid=valid,
-          length=length,
-          log_prob=log_prob,
-      )
-
-    def _tree_flatten(self):
-      children = (self.data, self.tokens_idx, self.valid_idx, self.length_idx, self.log_prob)
-      aux_data = (self.samples_per_slot,)
-      return children, aux_data
-
-    @classmethod
-    def _tree_unflatten(cls, aux_data, children):
-      return cls(
-          data=children[0],
-          tokens_idx=children[1],
-          valid_idx=children[2],
-          length_idx=children[3],
-          log_prob=children[4],
-          samples_per_slot=aux_data[0],
-      )
-
-  try:
-    import jax
-    jax.tree_util.register_pytree_node(
-        ResultTokens,
-        ResultTokens._tree_flatten,
-        ResultTokens._tree_unflatten,
-    )
-  except Exception:
-    pass
-
-  class TokenizerParameters:
-    def __init__(self, path=None, tokenizer_type=None, access_token=None, use_chat_template=False, extra_ids=0, **kwargs):
-      self.path = path
-      self.tokenizer_type = tokenizer_type
-      self.access_token = access_token
-      self.use_chat_template = use_chat_template
-      self.extra_ids = extra_ids
-
-  class TokenizerType:
-    tiktoken = 1
-    sentencepiece = 2
-    huggingface = 3
-    DESCRIPTOR = SimpleNamespace(
-        values_by_name={
-            "tiktoken": SimpleNamespace(number=1),
-            "sentencepiece": SimpleNamespace(number=2),
-            "huggingface": SimpleNamespace(number=3),
-        }
-    )
-
-  class HuggingFaceTokenizer:
-    def __init__(self, metadata):
-      import os
-      import transformers
-      try:
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-            metadata.path,
-            token=metadata.access_token or None,
-            trust_remote_code=True,
-        )
-      except Exception:
-        try:
-          import huggingface_hub
-          from tokenizers import Tokenizer
-          tok_file = metadata.path
-          if not os.path.exists(tok_file):
-            tok_file = huggingface_hub.hf_hub_download(
-                repo_id=metadata.path,
-                filename="tokenizer.json",
-                token=metadata.access_token or None,
-            )
-          self.tokenizer = Tokenizer.from_file(tok_file)
-        except Exception:
-          from tokenizers import Tokenizer
-          self.tokenizer = Tokenizer.from_pretrained(metadata.path)
-
-      self.pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
-      self.eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
-      self.bos_token_id = getattr(self.tokenizer, "bos_token_id", None)
-      if self.pad_token_id is None and hasattr(self.tokenizer, "token_to_id"):
-        self.eos_token_id = self.tokenizer.token_to_id("<|endoftext|>")
-        self.pad_token_id = self.eos_token_id
-      try:
-        self.tokenizer.pad_token_id = self.pad_token_id
-        self.tokenizer.eos_token_id = self.eos_token_id
-      except Exception:
-        pass
-
-    def encode(self, text, is_bos=True, prefill_lengths=None):
-      import numpy as np
-      if hasattr(self.tokenizer, "encode"):
-        res = self.tokenizer.encode(text)
-        token_ids = res.ids if hasattr(res, "ids") else res
-      else:
-        token_ids = []
-      bos_id = getattr(self.tokenizer, "bos_token_id", None)
-      if is_bos and bos_id is not None:
-        token_ids = [bos_id] + list(token_ids)
-      true_length = len(token_ids)
-      target_len = prefill_lengths[0] if prefill_lengths else true_length
-      pad_id = getattr(self.tokenizer, "pad_token_id", 0) or 0
-      padded = list(token_ids) + [pad_id] * max(0, target_len - true_length)
-      return np.array(padded[:target_len], dtype=np.int32), true_length
-
-    def decode(self, token_ids):
-      if hasattr(token_ids, "tolist"):
-        token_ids = token_ids.tolist()
-      if hasattr(self.tokenizer, "decode"):
-        try:
-          return self.tokenizer.decode(token_ids, skip_special_tokens=True)
-        except TypeError:
-          return self.tokenizer.decode(token_ids)
-      return ""
-
-  config_lib = SimpleNamespace()
+  config_lib = SimpleNamespace()  # not used directly in decoupled tests
   engine_api = SimpleNamespace(Engine=Engine, ResultTokens=ResultTokens)
-  token_utils = SimpleNamespace(HuggingFaceTokenizer=HuggingFaceTokenizer)
-  tokenizer_api = SimpleNamespace()
+  token_utils = SimpleNamespace()  # build_tokenizer guarded in MaxEngine when decoupled
+  tokenizer_api = SimpleNamespace()  # placeholder
   token_params_ns = SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType)
 
+  # Mark these stub namespaces so callers can detect stubbed jetstream components.
   setattr(config_lib, "_IS_STUB", True)
   setattr(engine_api, "_IS_STUB", True)
   setattr(token_utils, "_IS_STUB", True)
