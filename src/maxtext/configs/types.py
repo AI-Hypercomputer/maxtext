@@ -1787,6 +1787,14 @@ class ManifoldConstrainedHyperConnections(BaseModel):
       raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
     return self
 
+  mhc_split_axis_contraction: bool = Field(
+      False,
+      description=(
+          "Whether to contract the mHC rate and embed axes separately instead of flattening them, "
+          "so the activation's TP-sharded embed dim is never all-gathered."
+      ),
+  )
+
 
 class DilocoParams(BaseModel):
   """Diloco Hyperparameters"""

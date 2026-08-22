@@ -106,6 +106,7 @@ class TestMHC(parameterized.TestCase):
       sequence_length=7,
       per_device_batch_size=None,
       dtype=None,
+      mhc_split_axis_contraction=False,
   ):
     """Sets up the common configurations and modules for MHC testing."""
     self.dim = dim
@@ -128,6 +129,7 @@ class TestMHC(parameterized.TestCase):
         "base_emb_dim": self.dim,
         "mhc_expansion_rate": rate,
         "enable_mhc_lite": enable_mhc_lite,
+        "mhc_split_axis_contraction": mhc_split_axis_contraction,
         "use_mhc_pallas_kernel": use_mhc_pallas_kernel,
         "decoder_block": "deepseek",
         "num_experts": 4,
@@ -613,6 +615,58 @@ class TestMHC(parameterized.TestCase):
           rtol=5e-2,
           atol=5e-2,
       )
+
+  @parameterized.named_parameters(("Sinkhorn", False), ("Lite", True))
+  def test_split_axis_contraction_matches_baseline(self, enable_mhc_lite):
+    outputs = {}
+    for split in (False, True):
+      self._setup_mhc(4, enable_mhc_lite=enable_mhc_lite, mhc_split_axis_contraction=split)
+      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
+        norm_scale = jnp.arange(self.config.mhc_expansion_rate * self.dim, dtype=self.config.weight_dtype) / 32 + 0.5
+        module.mhc_norm.scale[...] = jnp.reshape(norm_scale, module.mhc_norm.scale.shape)
+        layer = linears.MlpBlock(
+            config=self.config,
+            mesh=self.mesh,
+            in_features=self.config.emb_dim,
+            intermediate_dim=self.config.moe_mlp_dim,
+            activations=self.config.mlp_activations,
+            intermediate_dropout_rate=self.config.dropout_rate,
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            model_mode=self.config.model_call_mode,
+            rngs=self.rngs,
+        )
+        out, _ = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_DENSE)
+        outputs[split] = np.asarray(out, dtype=np.float32)
+
+    np.testing.assert_allclose(outputs[False], outputs[True], rtol=1e-5, atol=1e-5)
+
+  def test_split_axis_param_layout(self):
+    params = {}
+    for split in (False, True):
+      self._setup_mhc(4, mhc_split_axis_contraction=split)
+      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
+      params[split] = {
+          "norm": np.asarray(module.mhc_norm.scale[...]),
+          "res": np.asarray(module.res_alpha[...]),
+          "pre": np.asarray(module.pre_alpha[...]),
+          "post": np.asarray(module.post_alpha[...]),
+      }
+
+    k, d = self.config.mhc_expansion_rate, self.dim
+    self.assertEqual(params[False]["norm"].shape, (k * d,))
+    self.assertEqual(params[False]["res"].shape, (k * d, k * k))
+    self.assertEqual(params[False]["pre"].shape, (k * d, k))
+    self.assertEqual(params[False]["post"].shape, (k * d, k))
+    self.assertEqual(params[True]["norm"].shape, (k, d))
+    self.assertEqual(params[True]["res"].shape, (k, d, k * k))
+    self.assertEqual(params[True]["pre"].shape, (k, d, k))
+    self.assertEqual(params[True]["post"].shape, (k, d, k))
+
+    for name in ("norm", "res", "pre", "post"):
+      np.testing.assert_array_equal(params[True][name], params[False][name].reshape(params[True][name].shape))
 
 
 def _get_permutation_matrices(k: int) -> jax.Array:
