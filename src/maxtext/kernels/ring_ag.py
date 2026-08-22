@@ -131,14 +131,12 @@ def _kernel(w_ref, o_ref, send_sem, recv_sem, local_sem, *,
   # 1. place our own shard at its tiled slot: chunk index = sum coord_j * strides[j].
   my_chunk = sum(lax.axis_index(axes[j]) * strides[j] for j in range(len(axes)))
   my_start = my_chunk * chunk
-  pltpu.make_async_copy(
+  local_copy = pltpu.make_async_copy(
       w_ref.at[_full_index(w_ref, gather_dim, 0, chunk)],
       o_ref.at[_full_index(o_ref, gather_dim, my_start, chunk)],
-      local_sem).start()
-  pltpu.make_async_copy(
-      w_ref.at[_full_index(w_ref, gather_dim, 0, chunk)],
-      o_ref.at[_full_index(o_ref, gather_dim, my_start, chunk)],
-      local_sem).wait()
+      local_sem)
+  local_copy.start()
+  local_copy.wait()
   # 2. nested rings, innermost axis first (largest k -> smallest stride).
   for k in range(len(axes) - 1, -1, -1):
     _ring_stage(o_ref, all_axes, axes, sizes, strides, k, chunk, gather_dim,
