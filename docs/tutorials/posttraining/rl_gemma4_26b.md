@@ -5,7 +5,7 @@
  you may not use this file except in compliance with the License.
  You may obtain a copy of the License at
 
-       https://www.apache.org/licenses/LICENSE-2.0
+      https://www.apache.org/licenses/LICENSE-2.0
 
  Unless required by applicable law or agreed to in writing, software
  distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,17 +14,17 @@
  limitations under the License.
  -->
 
-# Reinforcement Learning with GPT-OSS 20B on Multi-Host TPUs
+# Reinforcement Learning with gemma4-26b on Multi-Host TPUs
 
 This tutorial provides step-by-step instructions for setting up the environment
-and training the GPT-OSS 20B model on the [GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k) on a GKE cluster with `v5p-64` nodes.
+and training the gemma4-26b (26B-A4B MoE) model with GRPO on the [OpenMathInstruct-2 dataset](https://huggingface.co/datasets/nvidia/OpenMathInstruct-2) on a Cloud TPU v7x (Ironwood) GKE cluster using a `tpu7x-4x4x4` (64-chip) slice.
 
 ## Prerequisites
 
 Before starting, ensure you have:
 
 - Access to a Google Cloud Project with TPU quotas.
-- A Hugging Face account with an access token for downloading models.
+- A Hugging Face account with an access token for downloading models (the `google/gemma-4-26B-A4B` and `google/gemma-4-26B-A4B-it` repositories are gated; request access before proceeding).
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
 - Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
@@ -53,7 +53,7 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 ## Authenticate with Hugging Face
 
-To download the `gpt-oss-20b` model checkpoint from Hugging Face, you need to authenticate using your Hugging Face account credentials. Run the following command and follow the prompts to log in:
+To download the `gemma4-26b` model checkpoint from Hugging Face, you need to authenticate using your Hugging Face account credentials. Run the following command and follow the prompts to log in:
 
 ```bash
 hf auth login
@@ -78,7 +78,19 @@ Refer to [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
-> **Note:** Converting the 20B model requires approximately 40 GB of free disk space to download its safetensors. Please verify you have sufficient space before running the conversion.
+> **Note (Gemma 4 26B specifics):**
+>
+> - Run the conversion with `scan_layers=False` so the resulting unscanned checkpoint matches the `scan_layers=False` setting used for the RL run below.
+> - This RL recipe fine-tunes the **base** model (`google/gemma-4-26B-A4B`), not the instruction-tuned default. Pass `--hf_model_path=google/gemma-4-26B-A4B` explicitly when running `to_maxtext` — otherwise MaxText defaults to `HF_IDS[gemma4-26b]` = `google/gemma-4-26b-a4b-it`.
+
+## Chat Template Configuration
+
+Unlike an instruction-tuned tokenizer, the `google/gemma-4-26B-A4B` base tokenizer does **not** ship with a chat template, so the RL run must supply one explicitly. The [run_gemma4_26b_rl.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/rl/scripts/run_gemma4_26b_rl.sh) script points at two files bundled with the repo (and therefore baked into your Docker image):
+
+- `data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json` — a stripped-down data template that injects only the system prompt and question (no turn markers). This avoids the doubled `<start_of_turn>` delimiters that would occur if the default `gsm8k_rl.json` (which bakes literal Gemma turn markers into the message content) were combined with the tokenizer's Jinja chat template.
+- `chat_template_path=maxtext/examples/chat_templates/gemma-3-27b-chat_template.json` — the Gemma 3 chat template, wrapped in a JSON object with a `chat_template` key. It is applied by the tokenizer as the single source of truth for turn-marker formatting.
+
+Both files are already included under `src/maxtext/examples/chat_templates/`, so no additional setup is required. If you want to customize the prompt formatting, edit these files (or point the config at your own) before building the Docker image.
 
 ## Run RL Workload
 
@@ -94,8 +106,10 @@ export CLOUD_IMAGE_NAME=<IMAGE_NAME>
 export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 
 # Run the RL training script on your cluster
-run_tutorial maxtext/trainers/post_train/rl/scripts/run_gptoss_20b_rl.sh
+run_tutorial maxtext/trainers/post_train/rl/scripts/run_gemma4_26b_rl.sh
 ```
+
+> **Note:** The `run_gemma4_26b_rl.sh` script pins the Pathways component images to specific versions via the xpk `--server-image` and `--proxy-server-image` flags (set through the `PATHWAYS_SERVER_IMAGE` and `PATHWAYS_PROXY_SERVER_IMAGE` variables at the top of the script). The `--server-image` is used for both the Pathways resource-manager server and the workers (the reference config uses the same image for both). Update these variables if you need a different Pathways release.
 
 ### Monitor your workload
 
@@ -133,4 +147,6 @@ For a complete list of collected metrics, see the [Tunix Metrics Documentation](
 
 ## Convert Checkpoint to Hugging Face Format
 
-Refer to [MaxText to Hugging Face](../../guides/checkpointing_solutions/convert_checkpoint.md#maxtext-to-hugging-face) to convert a MaxText checkpoint back to Hugging Face format.
+Refer to [MaxText to Hugging Face](../../guides/checkpointing_solutions/convert_checkpoint.md#maxtext-to-hugging-face) to convert a MaxText checkpoint back to Hugging Face format. You can find an example script to convert the `gemma4-26b` model to Hugging Face format [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma4/26b/test_gemma4_to_hf.sh).
+
+> **Note (Gemma 4 26B specifics):** Because this recipe fine-tunes the **base** model, pass `--hf_model_path=google/gemma-4-26B-A4B` to `to_huggingface` so the exported checkpoint bundles the base tokenizer. Without it, `to_huggingface` sources the tokenizer from `HF_IDS[gemma4-26b]` = `google/gemma-4-26b-a4b-it` (the instruction-tuned model). Also keep `scan_layers=False`, matching the RL run that produced the checkpoint.
