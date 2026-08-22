@@ -1465,15 +1465,14 @@ class Decoder(nn.Module):
           kv_caches, num_full_blocks, block_pattern_len, stack=True
       )
 
+      # Positional order must match Qwen3NextScannableBlock.__call__.
       broadcast_args_spec = [
           (decoder_segment_ids, nn.broadcast),
           (decoder_positions, nn.broadcast),
           (deterministic, nn.broadcast),
           (model_mode, nn.broadcast),
-          (slot, nn.broadcast),
-          (None, nn.broadcast),  # page_state
           (previous_chunk, nn.broadcast),
-          (None, nn.broadcast),  # bidirectional_mask
+          (slot, nn.broadcast),
           (kv_cache_scanned, 0 if kv_caches is not None else nn.broadcast),
           (attention_metadata, nn.broadcast),
       ]
@@ -1506,7 +1505,9 @@ class Decoder(nn.Module):
           num_of_layers=block_pattern_len,
           remat_policy_fn=policy,
           apply_internal_remat=True,
-          name="scanned_blocks",
+          # Keep the Linen parameter path identical to the pure-NNX decoder's
+          # `self.layers`, so a single checkpoint mapping serves both.
+          name="layers",
       )(
           y, *broadcast_args
       )
