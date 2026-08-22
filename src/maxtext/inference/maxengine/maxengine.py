@@ -1918,12 +1918,13 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       return token_utils.SentencePieceTokenizer(metadata)
     elif tok_type in (getattr(TokenizerType, "huggingface", None), "huggingface"):
       tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
-      if tokenizer_model.tokenizer.pad_token_id is None:
-        if tokenizer_model.tokenizer.unk_token_id is not None:
-          tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id
-        else:
-          print(f"Warning: setting pad_token_id to eos_token_id:{tokenizer_model.tokenizer.eos_token_id}")
-          tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.eos_token_id
+      tok = getattr(tokenizer_model, "tokenizer", tokenizer_model)
+      if hasattr(tok, "pad_token_id") and tok.pad_token_id is None:
+        if getattr(tok, "unk_token_id", None) is not None:
+          tok.pad_token_id = tok.unk_token_id
+        elif getattr(tok, "eos_token_id", None) is not None:
+          print(f"Warning: setting pad_token_id to eos_token_id:{tok.eos_token_id}")
+          tok.pad_token_id = tok.eos_token_id
       return tokenizer_model
     else:
       raise ValueError(f"Unsupported tokenizer type: {metadata.tokenizer_type}")

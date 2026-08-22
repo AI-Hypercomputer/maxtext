@@ -151,11 +151,17 @@ def _jetstream_stubs():
           from tokenizers import Tokenizer
           self.tokenizer = Tokenizer.from_pretrained(metadata.path)
 
-      if getattr(self.tokenizer, "pad_token_id", None) is None:
-        if getattr(self.tokenizer, "unk_token_id", None) is not None:
-          self.tokenizer.pad_token_id = self.tokenizer.unk_token_id
-        elif getattr(self.tokenizer, "eos_token_id", None) is not None:
-          self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+      self.pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
+      self.eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+      self.bos_token_id = getattr(self.tokenizer, "bos_token_id", None)
+      if self.pad_token_id is None and hasattr(self.tokenizer, "token_to_id"):
+        self.eos_token_id = self.tokenizer.token_to_id("<|endoftext|>")
+        self.pad_token_id = self.eos_token_id
+      try:
+        self.tokenizer.pad_token_id = self.pad_token_id
+        self.tokenizer.eos_token_id = self.eos_token_id
+      except Exception:
+        pass
 
     def encode(self, text, is_bos=True, prefill_lengths=None):
       import numpy as np
