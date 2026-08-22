@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787359181802,
+  "lastUpdate": 1787373759827,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -14654,6 +14654,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total DECOUPLED Tests Duration",
             "value": 18.808000000000025,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 53,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Daniel Mandragona",
+            "username": "dandragona",
+            "email": "dandragona@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "9edb77f6d2d3a6c077c07ad515eb6daf372f9834",
+          "message": "Refactor MaxText mHC kernel to use emit_pipeline.\n\n- Convert forward coefficient, pre-apply, and post-apply kernels to use `pltpu.emit_pipeline` with `(pltpu.PARALLEL,)` dimension semantics and outer HBM block specifications.\n- Convert backward post-apply, pre-apply, and coefficient kernels to use `pltpu.emit_pipeline`, with `(pltpu.PARALLEL, pltpu.ARBITRARY)` 2D dimension semantics for post-apply and `(pltpu.ARBITRARY,)` sequential reduction semantics for coefficient gradients.\n- Add shared memory space specs and abstract TPU mesh context test helper in `common.py`.\n\nPiperOrigin-RevId: 968857391",
+          "timestamp": "2026-08-22T04:27:55Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/9edb77f6d2d3a6c077c07ad515eb6daf372f9834"
+        },
+        "date": 1787373758873,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 0.014,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 7,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1599.0879999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 64.441,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 11,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 78.671,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 493.20099999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 27,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 2357.718,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 195,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 53.983999999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 21.76000000000002,
             "unit": "sec"
           },
           {
