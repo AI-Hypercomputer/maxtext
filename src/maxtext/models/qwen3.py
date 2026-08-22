@@ -633,7 +633,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # each -- found by diffing XLA buffer assignment between ctx=1 and ctx=2,
       # and the reason the first version of this patch cut GDN memory but still
       # lost overall.
-      _cp_on_qkvz = cfg.ici_context_parallelism > 1 or getattr(cfg, 'ici_context_usp_ulysses_parallelism', 1) > 1
+      _cp_on_qkvz = cfg.ici_context_parallelism > 1 or getattr(cfg, "ici_context_usp_ulysses_parallelism", 1) > 1
       _cp_len_qkvz = LENGTH if _cp_on_qkvz else None
       qkvz_pspec = logical_to_mesh_axes((KV_BATCH, _cp_len_qkvz, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
@@ -906,7 +906,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # sequence via the two-pass affine composition in models/gdn_cp.py.
       # Either context axis can carry the sequence. LENGTH maps to both in the
       # logical rules, so this is correct whichever one is configured.
-      _cp_on = cfg.ici_context_parallelism > 1 or getattr(cfg, 'ici_context_usp_ulysses_parallelism', 1) > 1
+      _cp_on = cfg.ici_context_parallelism > 1 or getattr(cfg, "ici_context_usp_ulysses_parallelism", 1) > 1
       _cp_len = LENGTH if _cp_on else None
       qkv_pspec = logical_to_mesh_axes((KV_BATCH, _cp_len, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       g_beta_pspec = logical_to_mesh_axes((KV_BATCH, _cp_len, KV_HEAD), mesh=self.mesh, rules=logical_rules)
@@ -968,7 +968,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
                 a
                 for a, n in (
                     ("context", cfg.ici_context_parallelism),
-                    ("context_usp_ulysses", getattr(cfg, 'ici_context_usp_ulysses_parallelism', 1)),
+                    ("context_usp_ulysses", getattr(cfg, "ici_context_usp_ulysses_parallelism", 1)),
                 )
                 if n > 1
             )
