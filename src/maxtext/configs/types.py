@@ -952,6 +952,11 @@ class MoEGeneral(BaseModel):
       False,
       description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
   )
+  moe_late_tp_combine: bool = Field(
+      False,
+      description="Use the tensor axis as expert parallelism in the default sparse MoE path, moving "
+      "tensor-axis communication outside expert-expanded activations.",
+  )
   norm_topk_prob: bool = Field(
       False,
       description="Enable top-k probability normalization for router weights (Qwen3-specific).",
