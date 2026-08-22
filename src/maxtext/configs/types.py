@@ -884,6 +884,26 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  moe_bwd_inkernel_quant: bool = Field(
+      False,
+      description=(
+          "Quantize the MoE backward-gmm operands INSIDE the ragged kernels instead of with dense "
+          "XLA-level quantize ops. The dense quantize/amax ops process every row of the ragged "
+          "buffer at its STATIC size (worst-case at ragged_buffer_factor<=0); the in-kernel path "
+          "touches only the valid group_sizes rows/tiles, and no reduction ever reads "
+          "uninitialized buffer tail rows. drhs: tgmm quantizes BOTH operands in-kernel "
+          "(per-gm-tile-per-channel e4m3). Requires use_tokamax_gmm + use_gmm_v2 + an fp8 qwix "
+          "bwd_qtype; falls back to the XLA quantize otherwise. For performance improvement at "
+          "dropless (worst-case) ragged buffer sizes."
+      ),
+  )
+  bwd_quantization_dtype: str = Field(
+      "e5m2",
+      description=(
+          "fp8 dtype for the BACKWARD (gradient) quantization in the fp8_full qwix recipe: 'e5m2' "
+          "(default) or 'e4m3'."
+      ),
+  )
   moe_ring_cotangent_ag: bool = Field(
       False,
       description=(

@@ -1634,6 +1634,7 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2=self.config.use_gmm_v2,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
+            bwd_inkernel_quant=getattr(self.config, "moe_bwd_inkernel_quant", False),
         )
       else:
         # jax.lax.ragged_dot
