@@ -105,6 +105,40 @@ def _jetstream_stubs():
       self.log_prob = log_prob
       self.samples_per_slot = samples_per_slot
 
+    def get_result_at_slot(self, slot: int):
+      from types import SimpleNamespace
+      if self.data is not None and self.tokens_idx is not None:
+        if isinstance(self.tokens_idx, tuple) and len(self.tokens_idx) == 2:
+          tokens = self.data[slot, self.tokens_idx[0]:self.tokens_idx[1]]
+        else:
+          tokens = self.data[slot, self.tokens_idx]
+      else:
+        tokens = self.data
+
+      if self.data is not None and self.valid_idx is not None:
+        if isinstance(self.valid_idx, tuple) and len(self.valid_idx) == 2:
+          valid = self.data[slot, self.valid_idx[0]:self.valid_idx[1]]
+        else:
+          valid = self.data[slot, self.valid_idx]
+      else:
+        valid = None
+
+      if self.data is not None and self.length_idx is not None:
+        if isinstance(self.length_idx, tuple) and len(self.length_idx) == 2:
+          length = self.data[slot, self.length_idx[0]:self.length_idx[1]]
+        else:
+          length = self.data[slot, self.length_idx]
+      else:
+        length = None
+
+      log_prob = self.log_prob[slot] if self.log_prob is not None else None
+      return SimpleNamespace(
+          tokens=tokens,
+          valid=valid,
+          length=length,
+          log_prob=log_prob,
+      )
+
     def _tree_flatten(self):
       children = (self.data, self.tokens_idx, self.valid_idx, self.length_idx, self.log_prob)
       aux_data = (self.samples_per_slot,)
