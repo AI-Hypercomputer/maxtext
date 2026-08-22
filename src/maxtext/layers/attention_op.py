@@ -1868,7 +1868,14 @@ class AttentionOp(nnx.Module):
           AttentionType.FULL,
           AttentionType.BLOCK_DIFFUSION,
       ):
-        mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
+        if self.config.use_tokamax_splash and self.attention_type == AttentionType.GLOBAL:
+          # Tokamax only vectorizes mask processing for its own CausalMask class.
+          # Other mask classes are processed block by block in Python, which is
+          # prohibitively slow at long sequence lengths.
+          mask = tokamax_splash_mask.CausalMask(shape=mask_shape)
+          mask.q_sequence = _load_balanced_q_sequence(mask_shape, cp_size)
+        else:
+          mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
 
       # Apply local masking if local sliding attention is enabled.
       if self.attention_type == AttentionType.LOCAL_SLIDING:
