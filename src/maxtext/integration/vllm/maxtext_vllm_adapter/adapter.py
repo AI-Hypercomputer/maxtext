@@ -60,7 +60,43 @@ def next_power_of_two(x: int) -> int:
   return 1 << (x - 1).bit_length()
 
 
-def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters:
+def _filter_axis_rules_to_mesh(logical_axis_rules, mesh_axis_names):
+  """Drops physical axis names from `logical_axis_rules` that aren't in `mesh_axis_names`.
+
+  `configs/inference/vllm.yml` declares `logical_axis_rules` against a full
+  5-axis scheme (data, attn_dp, model, expert, attn_dp_expert), written for
+  the case where MaxText builds its own mesh from that same config. When
+  running as a `MaxTextForCausalLM` inside vLLM/tpu-inference, the mesh is
+  instead built by tpu-inference from the deployment's actual parallelism
+  (e.g. just `('data', 'model')` for a single-slice, tensor-parallel-only
+  deployment with no attention-data-parallelism or expert-parallelism
+  requested) -- referencing an axis name absent from that mesh raises inside
+  `nnx.eval_shape` before any weight is even touched. Filtering here keeps
+  the surviving axes in their declared order and drops the rest (an empty
+  result means "replicated"), so an axis present in both mesh and rule stays
+  assigned exactly as declared -- only genuinely absent axes are dropped.
+
+  Returns:
+    A tuple `(filtered_rules, changed)`.
+  """
+  mesh_axis_names = set(mesh_axis_names)
+  filtered = []
+  changed = False
+  for logical_name, physical_axes in logical_axis_rules:
+    if isinstance(physical_axes, (list, tuple)):
+      kept = [a for a in physical_axes if a in mesh_axis_names]
+      if len(kept) != len(physical_axes):
+        changed = True
+    elif physical_axes in mesh_axis_names:
+      kept = physical_axes
+    else:
+      kept = []
+      changed = True
+    filtered.append([logical_name, kept])
+  return filtered, changed
+
+
+def generate_maxtext_config(vllm_config: VllmConfig, mesh: Mesh = None) -> pyconfig.HyperParameters:
   """Generates a MaxText configuration from a vLLM configuration.
 
   This function takes a vLLM configuration object and translates relevant
@@ -71,6 +107,9 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   Args:
     vllm_config: The vLLM configuration object containing model and load
       parameters.
+    mesh: The JAX mesh this model will actually run on. When given,
+      `logical_axis_rules` is filtered down to the physical axis names the
+      mesh actually has (see `_filter_axis_rules_to_mesh`).
 
   Returns:
     A `pyconfig.HyperParameters` object configured for MaxText.
@@ -156,6 +195,19 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     )
     overrides["padded_base_moe_mlp_dim"] = padded_hidden_size
 
+  if mesh is not None:
+    default_rules = pyconfig.initialize(argv_list, **overrides).logical_axis_rules
+    filtered_rules, changed = _filter_axis_rules_to_mesh(default_rules, mesh.axis_names)
+    if changed:
+      max_logging.log(
+          f"Mesh axes {mesh.axis_names} don't cover all physical axes vllm.yml's "
+          "logical_axis_rules reference (e.g. attn_dp/expert/attn_dp_expert absent "
+          "for a single-slice, tensor-parallel-only deployment) -- filtering rules "
+          "down to the axes actually present so model construction doesn't "
+          "reference a nonexistent mesh axis."
+      )
+      overrides["logical_axis_rules"] = filtered_rules
+
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
   return maxtext_config
 
@@ -184,7 +236,7 @@ class MaxTextForCausalLM(nnx.Module):
     """
     self.vllm_config = vllm_config
     self.cfg = vllm_config.model_config
-    self.maxtext_config = generate_maxtext_config(vllm_config)
+    self.maxtext_config = generate_maxtext_config(vllm_config, mesh)
 
     # Model configuration
     self.mesh = mesh
