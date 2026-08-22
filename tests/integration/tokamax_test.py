@@ -37,16 +37,18 @@ class Train(parameterized.TestCase):
           "testcase_name": f"{base_name}_ep{ici_expert_parallelism}",
           "quantization": quantization,
           "use_gmm_v2": use_gmm_v2,
+          "use_gmm_v2_tiling_fn": use_gmm_v2_tiling_fn,
           "ici_expert_parallelism": ici_expert_parallelism,
       }
-      for base_name, quantization, use_gmm_v2, ici_expert_parallelism in [
-          ("tokamax_v1_bf16", "", False, 1),
-          ("tokamax_v1_fp8", "fp8", False, 1),  # not quantize gmm
-          ("tokamax_v1_fp8_full", "fp8_full", False, 1),  # quantize gmm
-          ("tokamax_v2_bf16", "", True, 1),
-          ("tokamax_v2_fp8_full", "fp8_full", True, 1),
-          ("tokamax_v2_bf16", "", True, 2),
-          ("tokamax_v2_fp8_full", "fp8_full", True, 2),
+      for base_name, quantization, use_gmm_v2, use_gmm_v2_tiling_fn, ici_expert_parallelism in [
+          ("tokamax_v1_bf16", "", False, False, 1),
+          ("tokamax_v1_fp8", "fp8", False, False, 1),  # not quantize gmm
+          ("tokamax_v1_fp8_full", "fp8_full", False, False, 1),  # quantize gmm
+          ("tokamax_v2_bf16", "", True, False, 1),
+          ("tokamax_v2_bf16_heuristic", "", True, True, 1),
+          ("tokamax_v2_fp8_full", "fp8_full", True, False, 1),
+          ("tokamax_v2_bf16", "", True, False, 2),
+          ("tokamax_v2_fp8_full", "fp8_full", True, False, 2),
       ]
   )
   @pytest.mark.tpu_only
@@ -54,6 +56,7 @@ class Train(parameterized.TestCase):
       self,
       quantization: str,
       use_gmm_v2: bool,
+      use_gmm_v2_tiling_fn: bool,
       ici_expert_parallelism: int,
   ):
     """Smoke train with small config."""
@@ -84,6 +87,7 @@ class Train(parameterized.TestCase):
         "megablox=False",
         "use_tokamax_gmm=True",
         f"use_gmm_v2={use_gmm_v2}",
+        f"use_gmm_v2_tiling_fn={use_gmm_v2_tiling_fn}",
         # tile sizes
         "wi_tile_fwd_batch_seq=128",
         "wi_tile_fwd_embed_dim=128",
