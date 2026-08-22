@@ -119,13 +119,6 @@ def main(argv: Sequence[str]) -> None:
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
-  engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
-  if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
-    raise RuntimeError(
-        "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; decode requires the JetStream tokenizer. "
-        "Unset DECOUPLE_GCLOUD or install JetStream to run decode."
-    )
 
   try:
     # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
