@@ -219,6 +219,177 @@ QWEN3_DIMENSION_NUMBER = {
 }
 
 
+# qwen3 MoE (e.g. qwen3-30b-a3b)
+QWEN3_MOE_DIMENSION_NUMBER = {
+    "params": {
+        "decoder": {
+            "decoder_norm": {"scale": None},
+            "layers": {
+                "moe_block": {
+                    "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+                    "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+                    "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+                    "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+                },
+                "post_self_attention_layer_norm": {"scale": None},
+                "pre_self_attention_layer_norm": {"scale": None},
+                "self_attention": {
+                    "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+                    "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+                    "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+                    "out": {"kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))},
+                    "key_norm": {"scale": None},
+                    "query_norm": {"scale": None},
+                },
+            },
+            "logits_dense": {"kernel": None},
+        },
+        "token_embedder": {"embedding": None},
+    }
+}
+
+
+# qwen3 custom MoE (e.g. qwen3-custom-30b-a3b)
+QWEN3_CUSTOM_MOE_DIMENSION_NUMBER = {
+    "params": {
+        "decoder": {
+            "decoder_norm": {"scale": None},
+            "layers": {
+                "latent_norm": {"scale": None},
+                "layer_up_projection": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+                "moe_block": {
+                    "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+                    "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+                    "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+                    "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+                },
+                "post_self_attention_layer_norm": {"scale": None},
+                "pre_self_attention_layer_norm": {"scale": None},
+                "self_attention": {
+                    "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+                    "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+                    "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+                    "out": {"kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,))},
+                    "key_norm": {"scale": None},
+                    "query_norm": {"scale": None},
+                },
+            },
+            "logits_dense": {"kernel": None},
+        },
+        "token_embedder": {"embedding": None},
+    }
+}
+
+
+# qwen3-next (e.g. qwen3-next-80b-a3b)
+_QWEN3_NEXT_MLP = {
+    "routed_experts": {
+        "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+        "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+        "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+    },
+    "shared_expert": {
+        "wi_0": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "wi_1": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "wo": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    },
+    "shared_expert_gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+}
+
+_QWEN3_NEXT_GDN_ATTENTION = {
+    "A_log": None,
+    "conv1d": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "dt_bias": None,
+    "in_proj_ba": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "in_proj_qkvz": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "norm": {"rms_norm": {"scale": None}},
+    "out_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+}
+
+_QWEN3_NEXT_FULL_ATTENTION = {
+    "attention": {
+        "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+        "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+        "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1))},
+        "out": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "key_norm": {"scale": None},
+        "query_norm": {"scale": None},
+    },
+}
+
+_QWEN3_NEXT_GDN_LAYER = {
+    "attention": _QWEN3_NEXT_GDN_ATTENTION,
+    "input_layernorm": {"scale": None},
+    "mlp": _QWEN3_NEXT_MLP,
+    "post_attention_layernorm": {"scale": None},
+}
+
+_QWEN3_NEXT_FULL_ATTN_LAYER = {
+    "attention": _QWEN3_NEXT_FULL_ATTENTION,
+    "input_layernorm": {"scale": None},
+    "mlp": _QWEN3_NEXT_MLP,
+    "post_attention_layernorm": {"scale": None},
+}
+
+QWEN3_NEXT_DIMENSION_NUMBER = {
+    "params": {
+        "decoder": {
+            "decoder_norm": {"scale": None},
+            "layers": {
+                "layer_0": _QWEN3_NEXT_GDN_LAYER,
+                "layer_1": _QWEN3_NEXT_GDN_LAYER,
+                "layer_2": _QWEN3_NEXT_GDN_LAYER,
+                "layer_3": _QWEN3_NEXT_FULL_ATTN_LAYER,
+            },
+            "logits_dense": {"kernel": None},
+        },
+        "token_embedder": {"embedding": None},
+    }
+}
+
+
+# gpt-oss (e.g. gpt-oss-20b)
+_GPT_OSS_ATTENTION = {
+    "query": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1)), "bias": None},
+    "key": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1)), "bias": None},
+    "value": {"kernel": mdn(reduction_axis=(0,), output_axis=(-2, -1)), "bias": None},
+    "out": {"kernel": mdn(reduction_axis=(0, -2), output_axis=(-1,)), "bias": None},
+    "sinks": None,
+}
+
+_GPT_OSS_MLP = {
+    "gate": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,)), "bias": None},
+    "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+    "wi_0_bias": None,
+    "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+    "wi_1_bias": None,
+    "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+    "wo_bias": None,
+}
+
+_GPT_OSS_LAYER = {
+    "GptOssAttention": _GPT_OSS_ATTENTION,
+    "GptOssMlp": _GPT_OSS_MLP,
+    "post_self_attention_layer_norm": {"scale": None},
+    "pre_self_attention_layer_norm": {"scale": None},
+}
+
+GPT_OSS_DIMENSION_NUMBER = {
+    "params": {
+        "decoder": {
+            "decoder_norm": {"scale": None},
+            "layers": {
+                "layers_0": _GPT_OSS_LAYER,
+                "layers_1": _GPT_OSS_LAYER,
+            },
+            "logits_dense": {"kernel": None},
+        },
+        "token_embedder": {"embedding": None},
+    }
+}
+
+
 # deepseek4 building blocks
 _DEEPSEEK4_MHC_ATTENTION = {
     "mhc_norm": {"scale": None},
@@ -392,6 +563,10 @@ class MuonDimensionTest(parameterized.TestCase):
       ("llama3.3-70b", "llama3.3-70b", LLAMA2_DIMENSION_NUMBER),
       ("gemma3-4b", "gemma3-4b", GEMMA3_DIMENSION_NUMBER),
       ("qwen3-0.6b", "qwen3-0.6b", QWEN3_DIMENSION_NUMBER),
+      ("qwen3-30b-a3b", "qwen3-30b-a3b", QWEN3_MOE_DIMENSION_NUMBER),
+      ("qwen3-custom-30b-a3b", "qwen3-custom-30b-a3b", QWEN3_CUSTOM_MOE_DIMENSION_NUMBER),
+      ("qwen3-next-80b-a3b", "qwen3-next-80b-a3b", QWEN3_NEXT_DIMENSION_NUMBER),
+      ("gpt-oss-20b", "gpt-oss-20b", GPT_OSS_DIMENSION_NUMBER),
   )
   @pytest.mark.tpu_only
   def test_model_integration(self, model_name, expected_output):
@@ -694,6 +869,7 @@ class TestMuonLogic(unittest.TestCase):
     self.assertIsNone(muon_utils.transform_logic(("layer_0", "bias")))
     self.assertIsNone(muon_utils.transform_logic(("layer_0", "scale")))
     self.assertIsNone(muon_utils.transform_logic(("embedding", "kernel")))
+    self.assertIsNone(muon_utils.transform_logic(("layer_0", "attention", "A_log")))
 
   def test_transform_logic_moe(self):
     path = ("layers_0", "MoeBlock_0", "wi_0")
@@ -707,6 +883,18 @@ class TestMuonLogic(unittest.TestCase):
 
     path_q = ("layers_0", "self_attention", "query", "kernel")
     self.assertEqual(muon_utils.transform_logic(path_q), mdn((0,), (-2, -1)))
+
+    path_gpt_out = ("layers_0", "GptOssAttention", "out", "kernel")
+    self.assertEqual(muon_utils.transform_logic(path_gpt_out), mdn((0, -2), (-1,)))
+
+    path_gpt_q = ("layers_0", "GptOssAttention", "query", "kernel")
+    self.assertEqual(muon_utils.transform_logic(path_gpt_q), mdn((0,), (-2, -1)))
+
+    path_qwen3_next_q = ("layers_0", "attention", "attention", "query", "kernel")
+    self.assertEqual(muon_utils.transform_logic(path_qwen3_next_q), mdn((0,), (-2, -1)))
+
+    path_qwen3_next_out = ("layers_0", "attention", "attention", "out", "kernel")
+    self.assertEqual(muon_utils.transform_logic(path_qwen3_next_out), mdn((0,), (-1,)))
 
   def test_get_transform_tree(self):
     fake_tree = {"params": {"layer_0": {"kernel": "leaf", "bias": "leaf"}, "MoeBlock_0": {"wi_0": "leaf"}}}
