@@ -33,6 +33,7 @@ from flax import nnx
 
 from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH, MODEL_MODE_AUTOREGRESSIVE
 from maxtext.common.common_types import KV_BATCH, KV_HEAD
+from maxtext.models import gdn_cp
 from maxtext.utils.sharding import (
     get_logical_axis_rules,
     logical_to_mesh_axes,
@@ -193,6 +194,7 @@ def jax_chunk_gated_delta_rule(
     chunk_size: int = 64,
     initial_state: None | Array = None,
     use_qk_norm_in_gdn: bool = False,
+    cp_axis: None | str = None,
     compute_dtype: jnp.dtype = jnp.bfloat16,
 ) -> tuple[Array, None | Array]:
   """Optimized JAX implementation of Gated Delta Rule."""
@@ -348,7 +350,15 @@ def jax_chunk_gated_delta_rule(
 
     return h_new, o_c
 
-  final_h, o_chunks = lax.scan(scan_body, h_init, xs)
+  if cp_axis is None:
+    final_h, o_chunks = lax.scan(scan_body, h_init, xs)
+  else:
+    # Sequence is sharded over cp_axis, so a sequential scan over chunks is not
+    # available. Fold the local chunks into one affine map, exchange those, then
+    # replay locally from the correct incoming state. See models/gdn_cp.py.
+    A_loc, B_loc = gdn_cp.compose_local(w_scan, u_scan, k_scan, g_scan)
+    h_in, final_h = gdn_cp.incoming_state(A_loc, B_loc, h_init, cp_axis)
+    _, o_chunks = lax.scan(scan_body, h_in, xs)
 
   # =========================================================================
   # STAGE 4: FINALIZATION
@@ -617,7 +627,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     mixed_qkvz = qkvz.reshape(new_shape_qkvz)
     if self.mesh is not None:
       logical_rules = get_logical_axis_rules()
-      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
+      # LENGTH, not None. This with_sharding_constraint told XLA to gather the
+      # full sequence onto every device for the qkvz projection. With ctx=2 at
+      # seq 32,768 that is six live bf16[2, 32768, 16, 512] buffers of 1.07 GB
+      # each -- found by diffing XLA buffer assignment between ctx=1 and ctx=2,
+      # and the reason the first version of this patch cut GDN memory but still
+      # lost overall.
+      _cp_on_qkvz = cfg.ici_context_parallelism > 1 or getattr(cfg, 'ici_context_usp_ulysses_parallelism', 1) > 1
+      _cp_len_qkvz = LENGTH if _cp_on_qkvz else None
+      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, _cp_len_qkvz, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
       # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
       qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
           qkvz_pspec,
@@ -881,8 +899,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           if recurrent_state is not None
           else jnp.zeros((batch, self.num_v_heads, self.head_k_dim, self.head_v_dim), dtype=cfg.dtype)
       )
-      qkv_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
-      g_beta_pspec = logical_to_mesh_axes((KV_BATCH, None, KV_HEAD), mesh=self.mesh, rules=logical_rules)
+      # LENGTH, not None. The sequence axis was hardcoded to replicated, so
+      # ici_context_parallelism could never shard the GDN sequence while still
+      # consuming the context axis from the mesh -- which is why raising ctx
+      # made memory worse instead of better. The scan handles a sharded
+      # sequence via the two-pass affine composition in models/gdn_cp.py.
+      # Either context axis can carry the sequence. LENGTH maps to both in the
+      # logical rules, so this is correct whichever one is configured.
+      _cp_on = cfg.ici_context_parallelism > 1 or getattr(cfg, 'ici_context_usp_ulysses_parallelism', 1) > 1
+      _cp_len = LENGTH if _cp_on else None
+      qkv_pspec = logical_to_mesh_axes((KV_BATCH, _cp_len, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
+      g_beta_pspec = logical_to_mesh_axes((KV_BATCH, _cp_len, KV_HEAD), mesh=self.mesh, rules=logical_rules)
       state_pspec = logical_to_mesh_axes((KV_BATCH, KV_HEAD, None, None), mesh=self.mesh, rules=logical_rules)
       # Keep every shard_map input/output batch spec consistent when replication is required.
       qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
@@ -935,6 +962,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             initial_state=init_h,
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=cfg.dtype,
+            # Whichever context axis is active. all_gather takes a tuple, so
+            # both can be live at once.
+            cp_axis=tuple(
+                a
+                for a, n in (
+                    ("context", cfg.ici_context_parallelism),
+                    ("context_usp_ulysses", getattr(cfg, 'ici_context_usp_ulysses_parallelism', 1)),
+                )
+                if n > 1
+            )
+            or None,
         )
 
       core_attn_out, next_recurrent_state = shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg)
