@@ -1913,6 +1913,11 @@ HF_MODEL_CONFIGS = {
     "qwen3-vl-2b": qwen3_vl_2b_config,
     "qwen3-vl-4b": qwen3_vl_4b_config,
     "qwen3-vl-30b-a3b": qwen3_vl_30b_a3b_config,
+    # Llama 3 and 3.1 8B are the same architecture, and their MaxText configs are identical, so
+    # the same HF config describes both for conversion purposes. It does carry 3.1's
+    # rope_scaling and 131072 context, which only matter to a consumer reading the written
+    # config.json rather than to the weight mapping itself.
+    "llama3-8b": llama31_8b_config,
     "llama3.1-8b": llama31_8b_config,
     "llama3.1-8b-Instruct": llama31_8b_config,
     "llama3.1-70b": llama31_70b_config,
