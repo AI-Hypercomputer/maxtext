@@ -386,7 +386,7 @@ def main(config, test_args):  # pylint: disable=W0621
   if tokenizer is None:
     raise last_exception
 
-  if config.model_name.startswith(("llama3.1", "mixtral")):
+  if config.model_name.startswith(("llama3", "mixtral")):
     tokenizer.pad_token = tokenizer.eos_token
 
   max_logging.log("Initializing MaxText model")

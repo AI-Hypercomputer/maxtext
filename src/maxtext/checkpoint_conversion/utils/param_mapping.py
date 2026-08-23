@@ -2832,10 +2832,18 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     else:
       return input_tensor.transpose().reshape(target_shape)
 
+  # Only LLaMARotaryEmbedding (llama3.1) uses interleaved RoPE; other models keep HF's half-split layout.
+  interleaved_rope = maxtext_config.model_name.startswith("llama3.1") or maxtext_config.rope_type.lower().startswith(
+      "llama3.1"
+  )
+
   # caveat: hook order does affect result
   # to_huggingface
   query_hook_chain = [scale_query_layer, adjust_rope, reshape_kernel]
   key_hook_chain = [adjust_rope, reshape_kernel]
+  if not interleaved_rope:
+    query_hook_chain.remove(adjust_rope)
+    key_hook_chain.remove(adjust_rope)
   # to_maxtext
   if not saving_to_hf:
     query_hook_chain.reverse()
@@ -4620,6 +4628,7 @@ PARAM_MAPPING = {
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "weaver-mini": WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING,
     "weaver-max": WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "llama3-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4682,6 +4691,7 @@ HOOK_FNS = {
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "weaver-mini": WEAVER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "weaver-max": WEAVER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "llama3-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
