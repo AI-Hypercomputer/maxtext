@@ -1944,6 +1944,10 @@ class AttentionOp(nnx.Module):
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
       elif self.attention_type == AttentionType.COMPRESSED and compress_ratio > 4:
+        if use_load_balanced_cp:
+          raise ValueError(
+              "Load-balanced context parallelism is currently not supported for DeepSeek-V4 HCA static attention."
+          )
         local_kv_len = query.shape[2]
         compressed_kv_len = max(0, key.shape[2] - query.shape[2] - pad_kv_total)
         mask = HCAStaticMask(
@@ -2294,9 +2298,9 @@ class AttentionOp(nnx.Module):
 
       return attention_output, None
 
-    # Pad query and segment IDs to mask_shape if sequence length is not aligned to block size
+    # Pad query and segment IDs to mask_shape if sequence length is not aligned to block size for compressed attention
     orig_q_len = query.shape[2]
-    pad_q = mask_shape[0] - query.shape[2]
+    pad_q = mask_shape[0] - query.shape[2] if self.attention_type == AttentionType.COMPRESSED else 0
     if pad_q > 0:
       query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
       if decoder_segment_ids is not None:

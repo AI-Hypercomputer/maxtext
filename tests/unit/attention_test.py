@@ -703,6 +703,59 @@ class HCAStaticMaskTest(unittest.TestCase):
     res = mask[:, :]
     self.assertEqual(res.shape, (128, 128))
 
+  def test_load_balanced_cp_raises_on_hca(self):
+    config = types.SimpleNamespace(
+        context_parallel_strategy="all_gather",
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        sa_block_q=128,
+        sa_block_kv=128,
+        sa_block_kv_compute=128,
+        sa_block_q_dkv=128,
+        sa_block_kv_dkv=128,
+        sa_block_kv_dkv_compute=128,
+        sa_block_q_dq=128,
+        sa_block_kv_dq=128,
+        sa_use_fused_bwd_kernel=True,
+        sa_q_layout="HEAD_DIM_MINOR",
+        sa_k_layout="HEAD_DIM_MINOR",
+        sa_v_layout="HEAD_DIM_MINOR",
+        use_splash_scheduler=False,
+        sa_fuse_reciprocal=False,
+        sa_use_base2_exp=False,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        cost_estimate_flops_fwd=-1,
+        cost_estimate_flops_bwd=-1,
+        dq_reduction_steps=-1,
+    )
+    device = types.SimpleNamespace(platform="tpu")
+    mesh = types.SimpleNamespace(
+        devices=np.asarray([device, device], dtype=object),
+        shape={"context": 2},
+    )
+    op = AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=512,
+        mesh=mesh,
+        attention_kernel="flash",
+        attention_type=AttentionType.COMPRESSED,
+    )
+    query = jnp.zeros((1, 1, 512, 128))
+    key = jnp.zeros((1, 1, 516, 128))
+    with self.assertRaisesRegex(
+        ValueError, "Load-balanced context parallelism is currently not supported for DeepSeek-V4 HCA"
+    ):
+      op.tpu_flash_attention(
+          query,
+          key,
+          key,
+          decoder_segment_ids=None,
+          compress_ratio=128,
+      )
+
 
 class AttentionTypeResolutionTest(unittest.TestCase):
 
