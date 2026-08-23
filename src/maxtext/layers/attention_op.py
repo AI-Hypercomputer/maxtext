@@ -1386,9 +1386,9 @@ class AttentionOp(nnx.Module):
       raise ValueError("TPU Tokamax ring attention requires attention_kernel='flash'.")
     if ulysses_attention.is_context_parallel_ulysses_requested(self.config):
       if target_hardware != "tpu":
-        raise ValueError("Context parallel Ulysses attention is currently only supported on TPUs.")
+        raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
       if self.attention_kernel != "flash":
-        raise ValueError("Context parallel Ulysses attention currently requires flash attention.")
+        raise ValueError("TPU Ulysses attention requires attention_kernel='flash'.")
     if usp_attention.is_context_parallel_usp_requested(self.config):
       if target_hardware != "tpu":
         raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
