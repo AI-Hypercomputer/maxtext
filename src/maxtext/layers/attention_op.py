@@ -260,6 +260,81 @@ class BlockCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable
     )
 
 
+class HCAStaticMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access,abstract-method
+  """Static compile-time mask for DeepSeek-V4 Hybrid Compressed Attention (HCA).
+
+  Defines coarse-block coordinates and deduplicated partial block patterns for
+  Splash Attention without materializing runtime boolean mask arrays in HBM.
+
+  Attributes:
+    shape: (seq_len, aligned_kv_len) tuple.
+    local_kv_len: Unpadded local sequence length.
+    compressed_kv_len: Number of active compressed tokens.
+    pad_kv_total: Prepend tile padding tokens between local and compressed KV.
+    compress_ratio: Compression ratio for HCA (e.g. 128).
+    local_window: Local sliding-window size (e.g. 128).
+  """
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      local_kv_len: Optional[int] = None,
+      compressed_kv_len: Optional[int] = None,
+      pad_kv_total: int = 0,
+      compress_ratio: int = 128,
+      local_window: int = 128,
+      shard_count: int = 1,
+  ):
+    self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
+    self.compressed_kv_len = (
+        compressed_kv_len if compressed_kv_len is not None else max(1, self.local_kv_len // max(1, compress_ratio))
+    )
+    self.pad_kv_total = pad_kv_total
+    self.compress_ratio = compress_ratio
+    self.local_window = local_window
+
+    def hca_mask_function(q_ids, kv_ids):
+      if q_ids.size == 0 or kv_ids.size == 0:
+        return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
+      diff = q_ids - kv_ids
+      local_m = (diff >= 0) & (diff < self.local_window) & (kv_ids < self.local_kv_len)
+      c_idx = kv_ids - self.local_kv_len - self.pad_kv_total
+      ratio = max(1, self.compress_ratio)
+      c_thresh = (q_ids + 1) // ratio
+      comp_m = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < self.compressed_kv_len)
+      return local_m | comp_m
+
+    super().__init__(
+        shape=shape,
+        mask_function=hca_mask_function,
+        shard_count=shard_count,
+    )
+
+  def __eq__(self, other: object):
+    return (
+        isinstance(other, type(self))
+        and self.shape == other.shape
+        and self.local_kv_len == other.local_kv_len
+        and self.compressed_kv_len == other.compressed_kv_len
+        and self.pad_kv_total == other.pad_kv_total
+        and self.compress_ratio == other.compress_ratio
+        and self.local_window == other.local_window
+    )
+
+  def __hash__(self):
+    return hash(
+        (
+            type(self),
+            self.shape,
+            self.local_kv_len,
+            self.compressed_kv_len,
+            self.pad_kv_total,
+            self.compress_ratio,
+            self.local_window,
+        )
+    )
+
+
 def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
   """Generates an explicit boolean mask for chunked causal attention.
 
@@ -1866,6 +1941,7 @@ class AttentionOp(nnx.Module):
             shape=mask_shape,
             local_kv_len=local_kv_len,
             compressed_kv_len=compressed_kv_len,
+            pad_kv_total=pad_kv_total,
             compress_ratio=compress_ratio,
             local_window=self.sliding_window_size if self.sliding_window_size is not None else 128,
         )
@@ -2212,7 +2288,7 @@ class AttentionOp(nnx.Module):
     if pad_q > 0:
       query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
       if decoder_segment_ids is not None:
-        decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)))
+        decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)), constant_values=-1)
 
     query = self._maybe_shard_with_pspec(query, axis_names_q)
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
@@ -3016,72 +3092,3 @@ class LoadBalancedBlockCausalMask(BlockCausalMask):  # pylint: disable=abstract-
         shard_count=shard_count,
     )
     self.q_sequence = _load_balanced_q_sequence(shape, cp_size)
-
-
-class HCAStaticMask(splash_attention_mask._ComputableMask):
-  """Static compile-time mask for DeepSeek-V4 Hybrid Compressed Attention (HCA).
-
-  Defines coarse-block coordinates and deduplicated partial block patterns for
-  Splash Attention without materializing runtime boolean mask arrays in HBM.
-
-  Attributes:
-    shape: (seq_len, aligned_kv_len) tuple.
-    local_kv_len: Unpadded local sequence length.
-    compressed_kv_len: Number of active compressed tokens.
-    compress_ratio: Compression ratio for CSA (e.g. 128).
-    local_window: Local sliding-window size (e.g. 128).
-  """
-
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      local_kv_len: Optional[int] = None,
-      compressed_kv_len: Optional[int] = None,
-      compress_ratio: int = 128,
-      local_window: int = 128,
-      shard_count: int = 1,
-  ):
-    self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
-    self.compressed_kv_len = (
-        compressed_kv_len if compressed_kv_len is not None else max(1, self.local_kv_len // compress_ratio)
-    )
-    self.compress_ratio = compress_ratio
-    self.local_window = local_window
-
-    def hca_mask_function(q_ids, kv_ids):
-      if q_ids.size == 0 or kv_ids.size == 0:
-        return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
-      diff = q_ids - kv_ids
-      local_m = (diff >= 0) & (diff < self.local_window) & (kv_ids < self.local_kv_len)
-      c_idx = kv_ids - self.local_kv_len
-      c_thresh = (q_ids + 1) // self.compress_ratio
-      comp_m = (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < self.compressed_kv_len)
-      return local_m | comp_m
-
-    super().__init__(
-        shape=shape,
-        mask_function=hca_mask_function,
-        shard_count=shard_count,
-    )
-
-  def __eq__(self, other: object):
-    return (
-        isinstance(other, type(self))
-        and self.shape == other.shape
-        and self.local_kv_len == other.local_kv_len
-        and self.compressed_kv_len == other.compressed_kv_len
-        and self.compress_ratio == other.compress_ratio
-        and self.local_window == other.local_window
-    )
-
-  def __hash__(self):
-    return hash(
-        (
-            type(self),
-            self.shape,
-            self.local_kv_len,
-            self.compressed_kv_len,
-            self.compress_ratio,
-            self.local_window,
-        )
-    )
